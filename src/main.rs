@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
-
 use threshold_crypto::{
     PublicKeySet, PublicKeyShare, SecretKeySet, SecretKeyShare, Signature, SignatureShare,
 };
+
+mod actor;
 
 type UserId = usize;
 type NodeId = usize;
