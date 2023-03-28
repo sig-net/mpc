@@ -44,9 +44,9 @@ struct GotSignature {
 #[derive(Message, Clone)]
 #[rtype(result = "Option<NodeMessage>")]
 enum NodeMessage {
-    GotSignature(GotSignature),
-    SignedMsg(SignedMsg),
     NewRequest(Payload),
+    SignedMsg(SignedMsg),
+    GotSignature(GotSignature),
 }
 
 struct NodeActor {
@@ -67,6 +67,15 @@ impl NodeActor {
 
         // You are too late, we have already completed the signature
         if self.completed_task_db.contains_key(&msg.task) {
+            return None;
+        }
+
+        // Check that this is a valid signature share
+        if !self
+            .pk_set
+            .public_key_share(msg.node_id)
+            .verify(&msg.sig_share, &msg.task.payload)
+        {
             return None;
         }
 
@@ -128,9 +137,9 @@ impl Handler<NodeMessage> for NodeActor {
 
     fn handle(&mut self, msg: NodeMessage, _ctx: &mut Context<Self>) -> Self::Result {
         match msg {
-            NodeMessage::GotSignature(msg) => self.handle_got_signature(msg),
-            NodeMessage::SignedMsg(msg) => self.handle_signed_msg(msg),
             NodeMessage::NewRequest(payload) => self.handle_new_request(payload),
+            NodeMessage::SignedMsg(msg) => self.handle_signed_msg(msg),
+            NodeMessage::GotSignature(msg) => self.handle_got_signature(msg),
         }
     }
 }
@@ -144,7 +153,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_trio() -> anyhow::Result<()> {
-        let sk_set = SecretKeySet::random(2, &mut rand::thread_rng());
+        let sk_set = SecretKeySet::random(1, &mut rand::thread_rng());
         let pk_set = sk_set.public_keys();
 
         let nodes = (0..3)
