@@ -22,3 +22,16 @@ The aim of this project is to offer NEAR users the opportunity to restore their 
 - The system consists of N (4+) trusted nodes
 - Each node holds a unique secret key
 - Each action must be signed by N-1 node
+
+## External API
+Endpoint 1: Add Recovery Method
+
+    URL: /add_recovery_method
+    Request parameters: access_token, signature, accountId
+    Response: recovery_public_key
+
+Endpoint 2: Recover Account
+
+    URL: /recover_account
+    Request parameters: access_token, public_key
+    Response: status
