@@ -4,10 +4,10 @@ use bollard::service::{HostConfig, Ipam};
 use bollard::Docker;
 use futures::StreamExt;
 use hyper::{body::HttpBody, Body, Client, Method, Request};
-use mpc_recovery;
 use rand::{distributions::Alphanumeric, Rng};
 use serde_json::json;
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::time::Duration;
 use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare, Signature};
 use tokio::io::AsyncWriteExt;
@@ -16,7 +16,7 @@ use tokio::spawn;
 async fn continuously_print_docker_output(docker: &Docker, id: &str) -> anyhow::Result<()> {
     let AttachContainerResults { mut output, .. } = docker
         .attach_container(
-            &id,
+            id,
             Some(AttachContainerOptions::<String> {
                 stdout: Some(true),
                 stderr: Some(true),
@@ -105,7 +105,7 @@ async fn start_mpc_node(
 
     println!("{ip_address}");
 
-    continuously_print_docker_output(&docker, &id).await?;
+    continuously_print_docker_output(docker, &id).await?;
 
     Ok((
         id,
@@ -189,15 +189,15 @@ async fn test_trio() -> anyhow::Result<()> {
 
         let data = resp.body_mut().data().await.expect("no response body")?;
         let response_body: String = serde_json::from_slice(&data)?;
-        let signature = Signature::from_bytes(&hex::decode(&response_body)?.try_into().map_err(
-            |e: Vec<u8>| {
-                anyhow::anyhow!(
-                    "signature has incorrect length: expected 96 bytes, but got {}",
-                    e.len()
-                )
-            },
-        )?)
-        .map_err(|e| anyhow::anyhow!("malformed signature: {}", e))?;
+        let signature_bytes = hex::decode(response_body)?;
+        let signature_array: [u8; 96] = signature_bytes.as_slice().try_into().map_err(|_e| {
+            anyhow::anyhow!(
+                "signature has incorrect length: expected 96 bytes, but got {}",
+                signature_bytes.len()
+            )
+        })?;
+        let signature = Signature::from_bytes(signature_array)
+            .map_err(|e| anyhow::anyhow!("malformed signature: {}", e))?;
 
         assert!(pk_set.public_key().verify(&signature, payload));
     }
