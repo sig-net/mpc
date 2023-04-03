@@ -15,7 +15,8 @@ pub async fn start(port: u16, node_actor: ActorRef<NodeActor>) {
 
     // run our app with hyper
     // `axum::Server` is a re-export of `hyper::Server`
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    println!("Starting a web server on port {port}");
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
