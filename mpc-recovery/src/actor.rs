@@ -89,15 +89,6 @@ impl Actor for NodeActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        for actor in ractor::pg::get_members(&MPC_RECOVERY_GROUP.to_string()) {
-            let actor_ref = ActorRef::<Self>::from(actor);
-            println!(
-                "Has an actor {:?} {:?} {:?}",
-                actor_ref.get_id(),
-                actor_ref.get_name(),
-                actor_ref.get_cell()
-            )
-        }
         let remote_actors = ractor::pg::get_members(&MPC_RECOVERY_GROUP.to_string())
             .into_iter()
             .filter(|actor| !actor.get_id().is_local())
