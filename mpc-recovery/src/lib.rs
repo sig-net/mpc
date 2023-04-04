@@ -34,9 +34,9 @@ async fn start_node_server(
         None,
         Some(NodeConnectionMode::Transitive),
     );
-    Ok(Actor::spawn(None, server, ())
+    Actor::spawn(None, server, ())
         .await
-        .map_err(|_e| anyhow::anyhow!("failed to start node server"))?)
+        .map_err(|_e| anyhow::anyhow!("failed to start node server"))
 }
 
 async fn start_actor(
@@ -51,11 +51,9 @@ async fn start_actor(
     } else {
         tracing::debug!(public_key = ?pk_set.public_key(), "starting node actor");
     }
-    Ok(
-        Actor::spawn(None, actor::NodeActor, (node_id, pk_set.clone(), sk_share))
-            .await
-            .map_err(|_e| anyhow::anyhow!("failed to start actor"))?,
-    )
+    Actor::spawn(None, actor::NodeActor, (node_id, pk_set.clone(), sk_share))
+        .await
+        .map_err(|_e| anyhow::anyhow!("failed to start actor"))
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(id = node_id))]
