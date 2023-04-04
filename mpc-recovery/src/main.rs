@@ -1,3 +1,5 @@
+mod ouath;
+
 use clap::Parser;
 use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
 
