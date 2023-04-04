@@ -1,29 +1,29 @@
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
-use ractor::{concurrency::Duration, ActorRef};
+use ractor::{concurrency::Duration, rpc::CallResult, ActorRef};
 use serde::Deserialize;
 use std::net::SocketAddr;
 
-use crate::actor::{NodeActor, NodeMessage};
+use crate::{
+    actor::{NodeActor, NodeMessage},
+    NodeId,
+};
 
-pub async fn start(port: u16, node_actor: ActorRef<NodeActor>) {
-    let state = AppState { node_actor };
+#[tracing::instrument(level = "debug", skip(node_actor))]
+pub async fn serve(id: NodeId, port: u16, node_actor: ActorRef<NodeActor>) {
+    let state = AppState { id, node_actor };
 
-    // build our application with a route
     let app = Router::new()
         .route("/submit", post(submit))
         .with_state(state);
 
-    // run our app with hyper
-    // `axum::Server` is a re-export of `hyper::Server`
-    println!("Starting a web server on port {port}");
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    tracing::debug!(?addr, "starting a web server");
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
         .unwrap();
 }
 
-// the input to our `submit` handler
 #[derive(Deserialize)]
 struct SubmitPayload {
     payload: String,
@@ -31,29 +31,45 @@ struct SubmitPayload {
 
 #[derive(Clone)]
 struct AppState {
+    id: NodeId,
     node_actor: ActorRef<NodeActor>,
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
 async fn submit(
     State(state): State<AppState>,
-    // this argument tells axum to parse the request body
-    // as JSON into a `CreateUser` type
     Json(payload): Json<SubmitPayload>,
 ) -> (StatusCode, Json<String>) {
-    let sig_response = state
+    tracing::info!(payload = payload.payload, "submit request");
+
+    match state
         .node_actor
         .call(
             |tx| NodeMessage::NewRequest(payload.payload.bytes().collect(), tx),
             Some(Duration::from_millis(2000)),
         )
         .await
-        .unwrap()
-        .unwrap();
-
-    // this will be converted into a JSON response
-    // with a status code of `201 Created`
-    (
-        StatusCode::OK,
-        Json(hex::encode(sig_response.sig.to_bytes())),
-    )
+    {
+        Ok(call_result) => match call_result {
+            CallResult::Success(sig_response) => (
+                StatusCode::OK,
+                Json(hex::encode(sig_response.sig.to_bytes())),
+            ),
+            CallResult::Timeout => {
+                tracing::error!("failed due to timeout");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json("timeout".to_string()),
+                )
+            }
+            CallResult::SenderError => {
+                tracing::error!("failed due to sender error (did not get a response)");
+                (StatusCode::INTERNAL_SERVER_ERROR, Json("error".to_string()))
+            }
+        },
+        Err(e) => {
+            tracing::error!("failed due to messaging error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json("error".to_string()))
+        }
+    }
 }
