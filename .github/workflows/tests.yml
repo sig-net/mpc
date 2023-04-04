@@ -1,4 +1,4 @@
-name: Test
+name: Unit tests
 on:
   push:
     branches:
@@ -12,37 +12,36 @@ jobs:
     name: Test
     steps:
       - uses: actions/checkout@v3
-      - name: "stable with rustfmt, and wasm32"
+      - name: Install stable toolchain
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: stable
       - uses: Swatinem/rust-cache@v1
-      - run: rustup target add wasm32-unknown-unknown
-      - name: Test
+      - name: Unit tests
         run: cargo test -p mpc-recovery
   lint:
     name: Clippy and fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Install stable toolchain
+      - name: Install stable toolchain with rustfmt and clippy
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v1
-      - name: Test Format
+      - name: Test format
         run: cargo fmt -- --check
-      - run: cargo clippy --tests -- -Dclippy::all
+      - name: Test clippy
+        run: cargo clippy --tests -- -Dclippy::all
   audit:
     name: Audit
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Sources
-        uses: actions/checkout@v3
-      - name: Install Toolchain
+      - uses: actions/checkout@v3
+      - name: Install stable toolchain
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
