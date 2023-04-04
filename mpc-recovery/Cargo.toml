@@ -3,6 +3,10 @@ name = "mpc-recovery"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "mpc-recovery"
+path = "src/main.rs"
+
 # We have encountered issue with linking GMP on ARM macos machines. This is a temporary fix that
 # replaces GMP implementation with num-bigint.
 # [target.'cfg(macos)'.dependencies]
