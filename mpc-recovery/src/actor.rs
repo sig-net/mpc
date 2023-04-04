@@ -7,9 +7,10 @@ use ractor_cluster::RactorClusterMessage;
 use serde::{Deserialize, Serialize};
 use threshold_crypto::{PublicKeySet, SecretKeyShare, Signature, SignatureShare};
 
+use crate::NodeId;
+
 const MPC_RECOVERY_GROUP: &str = "mpc-recovery";
 
-type NodeId = u64;
 type Payload = Vec<u8>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,18 +62,17 @@ pub struct NodeActorState {
 
 #[async_trait::async_trait]
 impl Actor for NodeActor {
-    // An actor has a message type
     type Msg = NodeMessage;
-    // and (optionally) internal state
     type State = NodeActorState;
-    // Startup initialization args
     type Arguments = (NodeId, PublicKeySet, SecretKeyShare);
 
+    #[tracing::instrument(level = "debug", skip_all, fields(id = args.0))]
     async fn pre_start(
         &self,
         myself: ActorRef<Self>,
         args: (NodeId, PublicKeySet, SecretKeyShare),
     ) -> Result<Self::State, ActorProcessingErr> {
+        tracing::debug!(group = MPC_RECOVERY_GROUP, "joining");
         ractor::pg::join(MPC_RECOVERY_GROUP.to_string(), vec![myself.get_cell()]);
         // create the initial state
         Ok(NodeActorState {
@@ -82,7 +82,7 @@ impl Actor for NodeActor {
         })
     }
 
-    // This is our main message handler
+    #[tracing::instrument(level = "debug", skip_all, fields(id = state.id, message))]
     async fn handle(
         &self,
         _myself: ActorRef<Self>,
@@ -94,31 +94,47 @@ impl Actor for NodeActor {
             .filter(|actor| !actor.get_id().is_local())
             .map(ActorRef::<Self>::from)
             .collect::<Vec<_>>();
+        tracing::debug!(
+            remote_actors = ?remote_actors.iter().map(|a| a.get_id()).collect::<Vec<_>>(),
+            "connected to"
+        );
 
         match message {
             NodeMessage::NewRequest(payload, reply) => {
+                tracing::debug!(?payload, "new request");
                 state
                     .handle_new_request(payload, reply, &remote_actors)
                     .await
             }
-            NodeMessage::SignRequest(payload, reply) => state.handle_signed_msg(payload, reply),
+            NodeMessage::SignRequest(payload, reply) => {
+                tracing::debug!(?payload, "sign request");
+                state.handle_signed_msg(payload, reply)
+            }
         };
         Ok(())
     }
 }
 
 impl NodeActorState {
+    fn sign(&self, payload: &[u8]) -> SignResponse {
+        SignResponse {
+            node_id: self.id,
+            sig_share: self.sk_share.sign(payload),
+        }
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
     fn handle_signed_msg(&mut self, payload: Payload, reply: RpcReplyPort<SignResponse>) {
         // TODO: run some check that the msg.task.payload makes sense, fail if not
+        tracing::debug!("approved");
 
-        println!("Got a sign request");
+        let response = self.sign(&payload);
+        tracing::debug!(?response, "replying");
 
-        reply
-            .send(SignResponse {
-                node_id: self.id,
-                sig_share: self.sk_share.sign(payload),
-            })
-            .unwrap();
+        match reply.send(response) {
+            Ok(()) => {}
+            Err(e) => tracing::error!("failed to respond: {}", e),
+        };
     }
 
     async fn handle_new_request(
@@ -128,10 +144,11 @@ impl NodeActorState {
         remote_actors: &Vec<ActorRef<NodeActor>>,
     ) {
         // TODO: run some check that the payload makes sense, fail if not
+        tracing::debug!("approved");
 
         let mut futures = Vec::new();
-        println!("Asking {} nodes", remote_actors.len());
         for actor in remote_actors {
+            tracing::debug!(actor = ?actor.get_id(), "asking actor");
             let future = actor
                 .call(
                     |tx| NodeMessage::SignRequest(payload.clone(), tx),
@@ -149,22 +166,25 @@ impl NodeActorState {
         // create unordered collection of futures
         let futures = futures.into_iter().collect::<FuturesUnordered<_>>();
 
-        // use collection as a stream, await only first *threshold* futures to complete
-        let mut first_t = futures
-            .take(self.pk_set.threshold())
+        let mut responses = futures
             .collect::<Vec<_>>()
             .await
             .into_iter()
             .filter_map(|r| r.ok())
             .collect::<Vec<_>>();
 
-        first_t.push(SignResponse {
-            node_id: self.id,
-            sig_share: self.sk_share.sign(&payload),
-        });
+        let response = self.sign(&payload);
+        tracing::debug!(?response, "adding response from self");
+        responses.push(response);
+
+        tracing::debug!(
+            ?responses,
+            "got {} successful responses total",
+            responses.len()
+        );
 
         let mut sig_shares = Vec::new();
-        for sign_response in &first_t {
+        for sign_response in &responses {
             if self
                 .pk_set
                 .public_key_share(sign_response.node_id)
@@ -172,22 +192,25 @@ impl NodeActorState {
             {
                 sig_shares.push((sign_response.node_id, &sign_response.sig_share));
             } else {
-                println!(
-                    "Node {} sent me an invalid signature >:(",
-                    sign_response.node_id
-                )
+                tracing::error!(?sign_response, "received invalid signature",);
             }
         }
+
+        tracing::debug!(
+            ?sig_shares,
+            "got {} valid signature shares total",
+            sig_shares.len()
+        );
 
         if let Ok(sig) = self
             .pk_set
             .combine_signatures(sig_shares.clone().into_iter())
         {
-            println!("Got full signature: {:?}", sig);
+            tracing::debug!(?sig, "replying with full signature");
             reply.send(SignatureResponse { sig }).unwrap();
         } else {
-            println!(
-                "Expected to get {} shares, but only got {}",
+            tracing::error!(
+                "expected to get at least {} shares, but only got {}",
                 self.pk_set.threshold() + 1,
                 sig_shares.len()
             );

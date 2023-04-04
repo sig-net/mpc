@@ -25,6 +25,10 @@ enum Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // install global collector configured based on RUST_LOG env var.
+    tracing_subscriber::fmt::init();
+    let _span = tracing::trace_span!("cli").entered();
+
     match Cli::parse() {
         Cli::Generate { n, t } => {
             let (pk_set, sk_shares) = mpc_recovery::generate(n, t)?;
@@ -56,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
                 web_port,
                 remote_address,
             )
-            .await;
+            .await?;
         }
     }
 
