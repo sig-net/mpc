@@ -1,6 +1,6 @@
 use bollard::container::{AttachContainerOptions, AttachContainerResults, Config};
 use bollard::network::CreateNetworkOptions;
-use bollard::service::{HostConfig, Ipam};
+use bollard::service::{HostConfig, Ipam, PortBinding};
 use bollard::Docker;
 use futures::StreamExt;
 use hyper::{body::HttpBody, Body, Client, Method, Request};
@@ -55,7 +55,23 @@ async fn start_mpc_node(
 
     let empty = HashMap::<(), ()>::new();
     let mut exposed_ports = HashMap::new();
+    exposed_ports.insert(format!("{actor_port}/tcp"), empty.clone());
     exposed_ports.insert(format!("{web_port}/tcp"), empty);
+    let mut port_bindings = HashMap::new();
+    port_bindings.insert(
+        format!("{actor_port}/tcp"),
+        Some(vec![PortBinding {
+            host_ip: None,
+            host_port: Some(actor_port.to_string()),
+        }]),
+    );
+    port_bindings.insert(
+        format!("{web_port}/tcp"),
+        Some(vec![PortBinding {
+            host_ip: None,
+            host_port: Some(web_port.to_string()),
+        }]),
+    );
 
     let mut cmd = vec![
         "start".to_string(),
@@ -78,8 +94,10 @@ async fn start_mpc_node(
         cmd: Some(cmd),
         host_config: Some(HostConfig {
             network_mode: Some("mpc_recovery_integration_test_network".to_string()),
+            port_bindings: Some(port_bindings),
             ..Default::default()
         }),
+        env: Some(vec!["RUST_LOG=mpc_recovery=DEBUG".to_string()]),
         ..Default::default()
     };
 
@@ -87,6 +105,8 @@ async fn start_mpc_node(
         .create_container::<&str, String>(None, mpc_recovery_config)
         .await?
         .id;
+
+    continuously_print_docker_output(docker, &id).await?;
     docker.start_container::<String>(&id, None).await?;
 
     let network_settings = docker
@@ -103,12 +123,10 @@ async fn start_mpc_node(
         .ip_address
         .unwrap();
 
-    continuously_print_docker_output(docker, &id).await?;
-
     Ok((
         id,
         format!("{ip_address}:{actor_port}"),
-        format!("{ip_address}:{web_port}"),
+        format!("localhost:{web_port}"),
     ))
 }
 
@@ -164,7 +182,8 @@ async fn test_trio() -> anyhow::Result<()> {
         web_ports.push(web_port);
     }
 
-    tokio::time::sleep(Duration::from_millis(10000)).await;
+    // Wait until all nodes initialize
+    tokio::time::sleep(Duration::from_millis(2000)).await;
 
     // TODO: only leader node works for now, other nodes struggling to connect to each other
     // for some reason.
