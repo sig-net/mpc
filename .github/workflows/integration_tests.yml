@@ -21,4 +21,4 @@ jobs:
       - name: Build docker image
         run: docker build . -t near/mpc-recovery
       - name: Test
-        run: cargo test -p integration-tests
+        run: cargo test -p mpc-recovery-integration-tests
