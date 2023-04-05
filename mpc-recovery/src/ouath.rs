@@ -1,53 +1,52 @@
-// use oauth2::basic::BasicClient;
-// use oauth2::reqwest::http_client;
-// use oauth2::{AccessToken, AuthUrl, ClientId, ClientSecret, RedirectUrl, TokenResponse, TokenUrl};
-
 #[async_trait::async_trait]
 pub trait OAuthTokenVerifier {
     async fn verify_token(&self, token: &str) -> Option<&str>;
 }
 
+pub enum SupportedTokenVerifiers {
+    GoogleTokenVerifier,
+    TestTokenVerifier,
+}
+
+/* Universal token verifier */
+pub struct UniversalTokenVerifier {}
+
+#[async_trait::async_trait]
+impl OAuthTokenVerifier for UniversalTokenVerifier {
+    async fn verify_token(&self, token: &str) -> Option<&str> {
+        // TODO: here we assume that verifier type can be determined from the token
+        match get_token_verifier_type(token) {
+            SupportedTokenVerifiers::GoogleTokenVerifier => {
+                return GoogleTokenVerifier {}.verify_token(token).await;
+            }
+            SupportedTokenVerifiers::TestTokenVerifier => {
+                return TestTokenVerifier {}.verify_token(token).await;
+            }
+        }
+    }
+}
+
+fn get_token_verifier_type(token: &str) -> SupportedTokenVerifiers {
+    match token.len() {
+        // TODO: add real token type detection
+        0 => SupportedTokenVerifiers::GoogleTokenVerifier,
+        _ => SupportedTokenVerifiers::TestTokenVerifier,
+    }
+}
+
 /* Google verifier */
-// pub struct GoogleTokenVerifier {}
+pub struct GoogleTokenVerifier {}
 
-// #[async_trait::async_trait]
-// impl OAuthTokenVerifier for GoogleTokenVerifier {
-//     async fn verify_token(&self, token: &str) -> Option<&str> {
-        // let client_secret = ClientSecret::new("".to_owned());
-        // let auth_url = AuthUrl::new("https://accounts.google.com/o/oauth2/auth".to_owned())?;
-        // let token_url = TokenUrl::new("https://accounts.google.com/o/oauth2/token".to_owned())?;
-        // let redirect_url = RedirectUrl::new("http://localhost:8080".to_owned())?;
-        // let client = BasicClient::new(
-        //     self.client_id.clone(),
-        //     Some(client_secret),
-        //     auth_url,
-        //     Some(token_url),
-        // )
-        // .set_redirect_uri(redirect_url);
-
-        // let token = AccessToken::new(token.to_owned());
-        // let token_info_url = "https://www.googleapis.com/oauth2/v3/tokeninfo".parse()?;
-        // let token_info_request =
-        //     client.request::<_, TokenResponse>(http_client, reqwest::Method::GET, token_info_url)
-        //         .unwrap()
-        //         .bearer_auth(token.secret());
-        // let token_info = token_info_request.send()?.json::<serde_json::Value>()?;
-
-        // if let Some(aud) = token_info.get("aud") {
-        //     if let Some(client_id) = aud.as_str() {
-        //         if client_id == self.client_id.secret() {
-        //             if let Some(sub) = token_info.get("sub") {
-        //                 if let Some(account_id) = sub.as_str() {
-        //                     return Ok(account_id.to_owned());
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
-
-        // Err("Invalid token".into())
-    // }
-// }
+#[async_trait::async_trait]
+impl OAuthTokenVerifier for GoogleTokenVerifier {
+    // TODO: replace with real implementation
+    async fn verify_token(&self, token: &str) -> Option<&str> {
+        match token {
+            "validToken" => Some("testAccountId"),
+            _ => None,
+        }
+    }
+}
 
 /* Test verifier */
 pub struct TestTokenVerifier {}
@@ -56,7 +55,7 @@ pub struct TestTokenVerifier {}
 impl OAuthTokenVerifier for TestTokenVerifier {
     async fn verify_token(&self, token: &str) -> Option<&str> {
         match token {
-            "valid" => Some("testAccountId"),
+            "validToken" => Some("testAccountId"),
             _ => None,
         }
     }
@@ -65,15 +64,39 @@ impl OAuthTokenVerifier for TestTokenVerifier {
 #[tokio::test]
 async fn test_verify_token_valid() {
     let verifier = TestTokenVerifier {};
-    let token = "valid";
+    let token = "validToken";
     let account_id = verifier.verify_token(token).await.unwrap();
     assert_eq!(account_id, "testAccountId");
 }
 
 #[tokio::test]
-async fn test_verify_token_invalid() {
+async fn test_verify_token_invalid_with_test_verifier() {
     let verifier = TestTokenVerifier {};
     let token = "invalid";
     let account_id = verifier.verify_token(token).await;
     assert_eq!(account_id, None);
+}
+
+#[tokio::test]
+async fn test_verify_token_valid_with_test_verifier() {
+    let verifier = TestTokenVerifier {};
+    let token = "validToken";
+    let account_id = verifier.verify_token(token).await.unwrap();
+    assert_eq!(account_id, "testAccountId");
+}
+
+#[tokio::test]
+async fn test_verify_token_invalid_with_universal_verifier() {
+    let verifier = UniversalTokenVerifier {};
+    let token = "invalid";
+    let account_id = verifier.verify_token(token).await;
+    assert_eq!(account_id, None);
+}
+
+#[tokio::test]
+async fn test_verify_token_valid_with_universal_verifier() {
+    let verifier = UniversalTokenVerifier {};
+    let token = "validToken";
+    let account_id = verifier.verify_token(token).await.unwrap();
+    assert_eq!(account_id, "testAccountId");
 }

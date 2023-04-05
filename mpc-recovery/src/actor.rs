@@ -7,6 +7,7 @@ use ractor_cluster::RactorClusterMessage;
 use serde::{Deserialize, Serialize};
 use threshold_crypto::{PublicKeySet, SecretKeyShare, Signature, SignatureShare};
 
+use crate::ouath::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::NodeId;
 
 const MPC_RECOVERY_GROUP: &str = "mpc-recovery";
@@ -108,7 +109,7 @@ impl Actor for NodeActor {
             }
             NodeMessage::SignRequest(payload, reply) => {
                 tracing::debug!(?payload, "sign request");
-                state.handle_signed_msg(payload, reply)
+                state.handle_signed_msg(payload, reply).await
             }
         };
         Ok(())
@@ -124,17 +125,27 @@ impl NodeActorState {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    fn handle_signed_msg(&mut self, payload: Payload, reply: RpcReplyPort<SignResponse>) {
-        // TODO: run some check that the msg.task.payload makes sense, fail if not
-        tracing::debug!("approved");
+    async fn handle_signed_msg(&mut self, payload: Payload, reply: RpcReplyPort<SignResponse>) {
+        // TODO: extract access token from payload
+        let access_token = "validToken";
+        let access_token_verifier = UniversalTokenVerifier {};
+        match access_token_verifier.verify_token(access_token).await {
+            Some(client_id) => {
+                tracing::debug!("approved, cleintId: {}", client_id);
 
-        let response = self.sign(&payload);
-        tracing::debug!(?response, "replying");
+                let response = self.sign(&payload);
+                tracing::debug!(?response, "replying");
 
-        match reply.send(response) {
-            Ok(()) => {}
-            Err(e) => tracing::error!("failed to respond: {}", e),
-        };
+                match reply.send(response) {
+                    Ok(()) => {}
+                    Err(e) => tracing::error!("failed to respond: {}", e),
+                };
+            }
+            None => {
+                tracing::error!("failed to verify access token");
+                return;
+            }
+        }
     }
 
     async fn handle_new_request(
@@ -143,77 +154,86 @@ impl NodeActorState {
         reply: RpcReplyPort<SignatureResponse>,
         remote_actors: &Vec<ActorRef<NodeActor>>,
     ) {
-        // TODO: run some check that the payload makes sense, fail if not
-        tracing::debug!("approved");
+        // TODO: extract access token from payload
+        let access_token = "validToken";
+        let access_token_verifier = UniversalTokenVerifier {};
+        match access_token_verifier.verify_token(access_token).await {
+            Some(client_id) => {
+                tracing::debug!("approved, cleintId: {}", client_id);
+                let mut futures = Vec::new();
+                for actor in remote_actors {
+                    tracing::debug!(actor = ?actor.get_id(), "asking actor");
+                    let future = actor
+                        .call(
+                            |tx| NodeMessage::SignRequest(payload.clone(), tx),
+                            Some(Duration::from_millis(2000)),
+                        )
+                        .map(|r| r.map_err(ractor::RactorErr::from))
+                        .map(|r| match r {
+                            Ok(ractor::rpc::CallResult::Success(ok_value)) => Ok(ok_value),
+                            Ok(cr) => Err(ractor::RactorErr::from(cr)),
+                            Err(e) => Err(e),
+                        });
+                    futures.push(future);
+                }
 
-        let mut futures = Vec::new();
-        for actor in remote_actors {
-            tracing::debug!(actor = ?actor.get_id(), "asking actor");
-            let future = actor
-                .call(
-                    |tx| NodeMessage::SignRequest(payload.clone(), tx),
-                    Some(Duration::from_millis(2000)),
-                )
-                .map(|r| r.map_err(ractor::RactorErr::from))
-                .map(|r| match r {
-                    Ok(ractor::rpc::CallResult::Success(ok_value)) => Ok(ok_value),
-                    Ok(cr) => Err(ractor::RactorErr::from(cr)),
-                    Err(e) => Err(e),
-                });
-            futures.push(future);
-        }
+                // create unordered collection of futures
+                let futures = futures.into_iter().collect::<FuturesUnordered<_>>();
 
-        // create unordered collection of futures
-        let futures = futures.into_iter().collect::<FuturesUnordered<_>>();
+                let mut responses = futures
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .filter_map(|r| r.ok())
+                    .collect::<Vec<_>>();
 
-        let mut responses = futures
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .filter_map(|r| r.ok())
-            .collect::<Vec<_>>();
+                let response = self.sign(&payload);
+                tracing::debug!(?response, "adding response from self");
+                responses.push(response);
 
-        let response = self.sign(&payload);
-        tracing::debug!(?response, "adding response from self");
-        responses.push(response);
+                tracing::debug!(
+                    ?responses,
+                    "got {} successful responses total",
+                    responses.len()
+                );
 
-        tracing::debug!(
-            ?responses,
-            "got {} successful responses total",
-            responses.len()
-        );
+                let mut sig_shares = Vec::new();
+                for sign_response in &responses {
+                    if self
+                        .pk_set
+                        .public_key_share(sign_response.node_id)
+                        .verify(&sign_response.sig_share, &payload)
+                    {
+                        sig_shares.push((sign_response.node_id, &sign_response.sig_share));
+                    } else {
+                        tracing::error!(?sign_response, "received invalid signature",);
+                    }
+                }
 
-        let mut sig_shares = Vec::new();
-        for sign_response in &responses {
-            if self
-                .pk_set
-                .public_key_share(sign_response.node_id)
-                .verify(&sign_response.sig_share, &payload)
-            {
-                sig_shares.push((sign_response.node_id, &sign_response.sig_share));
-            } else {
-                tracing::error!(?sign_response, "received invalid signature",);
+                tracing::debug!(
+                    ?sig_shares,
+                    "got {} valid signature shares total",
+                    sig_shares.len()
+                );
+
+                if let Ok(sig) = self
+                    .pk_set
+                    .combine_signatures(sig_shares.clone().into_iter())
+                {
+                    tracing::debug!(?sig, "replying with full signature");
+                    reply.send(SignatureResponse { sig }).unwrap();
+                } else {
+                    tracing::error!(
+                        "expected to get at least {} shares, but only got {}",
+                        self.pk_set.threshold() + 1,
+                        sig_shares.len()
+                    );
+                }
             }
-        }
-
-        tracing::debug!(
-            ?sig_shares,
-            "got {} valid signature shares total",
-            sig_shares.len()
-        );
-
-        if let Ok(sig) = self
-            .pk_set
-            .combine_signatures(sig_shares.clone().into_iter())
-        {
-            tracing::debug!(?sig, "replying with full signature");
-            reply.send(SignatureResponse { sig }).unwrap();
-        } else {
-            tracing::error!(
-                "expected to get at least {} shares, but only got {}",
-                self.pk_set.threshold() + 1,
-                sig_shares.len()
-            );
+            None => {
+                tracing::error!("failed to verify access token");
+                return;
+            }
         }
     }
 }

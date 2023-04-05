@@ -5,6 +5,7 @@ use ractor_cluster::{node::NodeConnectionMode, NodeServer};
 use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare};
 
 mod actor;
+mod ouath;
 mod web;
 
 const COOKIE: &str = "mpc-recovery-cookie";
