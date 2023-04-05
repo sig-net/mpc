@@ -143,7 +143,6 @@ impl NodeActorState {
             }
             None => {
                 tracing::error!("failed to verify access token");
-                return;
             }
         }
     }
@@ -232,7 +231,6 @@ impl NodeActorState {
             }
             None => {
                 tracing::error!("failed to verify access token");
-                return;
             }
         }
     }
