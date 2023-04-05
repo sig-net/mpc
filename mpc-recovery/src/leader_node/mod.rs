@@ -1,7 +1,8 @@
 use crate::msg::{LeaderRequest, LeaderResponse, SigShareRequest, SigShareResponse};
 use crate::NodeId;
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
-use futures::TryFutureExt;
+use futures::stream::FuturesUnordered;
+use hyper::client::ResponseFuture;
 use hyper::{Body, Client, Method, Request};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -50,6 +51,12 @@ struct LeaderState {
     sign_nodes: Vec<String>,
 }
 
+async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareResponse> {
+    let response = response_future.await?;
+    let response_body = hyper::body::to_bytes(response.into_body()).await?;
+    Ok(serde_json::from_slice(&response_body)?)
+}
+
 #[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
 async fn submit(
     State(state): State<LeaderState>,
@@ -66,12 +73,12 @@ async fn submit(
     let payload_json = match serde_json::to_string(&sig_share_request) {
         Ok(payload_json) => payload_json,
         Err(err) => {
-            tracing::error!(?err, "failed to convert payload back to json");
+            tracing::error!(%err, "failed to convert payload back to json");
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(LeaderResponse::Err));
         }
     };
 
-    let mut response_futures = Vec::new();
+    let response_futures = FuturesUnordered::new();
     for sign_node in state.sign_nodes {
         let req = match Request::builder()
             .method(Method::POST)
@@ -81,41 +88,26 @@ async fn submit(
         {
             Ok(req) => req,
             Err(err) => {
-                tracing::error!(?err, "failed to construct a compute request");
+                tracing::error!(%err, "failed to construct a compute request");
                 continue;
             }
         };
 
         let client = Client::new();
-        response_futures.push(
-            client
-                .request(req)
-                .and_then(|r| hyper::body::to_bytes(r.into_body())),
-        );
+        response_futures.push(client.request(req));
     }
-
-    let responses = futures::future::join_all(response_futures).await;
-    tracing::debug!("got {} total responses back", responses.len());
-
-    let successful_responses = responses
-        .into_iter()
-        .filter_map(|r| r.ok())
-        .collect::<Vec<_>>();
-    tracing::debug!("got {} successful responses", successful_responses.len());
 
     let mut sig_shares = BTreeMap::new();
     sig_shares.insert(state.id, state.sk_share.sign(&request.payload));
-    for response in successful_responses {
-        let response: SigShareResponse = match serde_json::from_slice(&response) {
+    for response_future in response_futures {
+        let response = match parse(response_future).await {
             Ok(response) => response,
             Err(err) => {
-                tracing::error!(
-                    ?err,
-                    "failed to parse HTTP response as a valid SigShareResponse"
-                );
+                tracing::error!(%err, "failed to get response");
                 continue;
             }
         };
+
         if state
             .pk_set
             .public_key_share(response.node_id)
@@ -123,6 +115,7 @@ async fn submit(
         {
             match sig_shares.entry(response.node_id) {
                 Entry::Vacant(e) => {
+                    tracing::debug!(?response, "received valid signature share");
                     e.insert(response.sig_share);
                 }
                 Entry::Occupied(e) if e.get() == &response.sig_share => {
@@ -144,7 +137,16 @@ async fn submit(
         } else {
             tracing::error!(?response, "received invalid signature",);
         }
+
+        if sig_shares.len() > state.pk_set.threshold() {
+            tracing::debug!(
+                "received {} valid signature shares, not waiting for the rest",
+                sig_shares.len()
+            );
+            break;
+        }
     }
+
     let sig_shares_num = sig_shares.len();
     tracing::debug!("got {} valid signature shares", sig_shares_num);
 
