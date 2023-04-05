@@ -7,19 +7,34 @@ enum Cli {
         n: usize,
         t: usize,
     },
-    Start {
+    StartLeader {
         /// Node ID
         node_id: u64,
         /// Root public key
+        #[arg(long)]
         pk_set: String,
         /// Secret key share
+        #[arg(long)]
         sk_share: String,
-        /// The actor port for this server
-        actor_port: u16,
         /// The web port for this server
+        #[arg(long)]
         web_port: u16,
-        /// The remote server address to connect to (if Some)
-        remote_address: Option<String>,
+        /// The compute nodes to connect to
+        #[arg(long)]
+        sign_nodes: Vec<String>,
+    },
+    StartSign {
+        /// Node ID
+        node_id: u64,
+        /// Root public key
+        #[arg(long)]
+        pk_set: String,
+        /// Secret key share
+        #[arg(long)]
+        sk_share: String,
+        /// The web port for this server
+        #[arg(long)]
+        web_port: u16,
     },
 }
 
@@ -41,26 +56,28 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
-        Cli::Start {
+        Cli::StartLeader {
             node_id,
             pk_set,
             sk_share,
-            actor_port,
             web_port,
-            remote_address,
+            sign_nodes,
         } => {
             let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
             let sk_share: SecretKeyShare = serde_json::from_str(&sk_share).unwrap();
 
-            mpc_recovery::start(
-                node_id,
-                pk_set,
-                sk_share,
-                actor_port,
-                web_port,
-                remote_address,
-            )
-            .await?;
+            mpc_recovery::run_leader_node(node_id, pk_set, sk_share, web_port, sign_nodes).await;
+        }
+        Cli::StartSign {
+            node_id,
+            pk_set,
+            sk_share,
+            web_port,
+        } => {
+            let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
+            let sk_share: SecretKeyShare = serde_json::from_str(&sk_share).unwrap();
+
+            mpc_recovery::run_sign_node(node_id, pk_set, sk_share, web_port).await;
         }
     }
 
