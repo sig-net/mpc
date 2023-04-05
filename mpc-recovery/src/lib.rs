@@ -1,5 +1,6 @@
 use actix_rt::task::JoinHandle;
 use actor::NodeActor;
+use ouath::UniversalTokenVerifier;
 use ractor::{Actor, ActorRef};
 use ractor_cluster::{node::NodeConnectionMode, NodeServer};
 use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare};
@@ -44,7 +45,7 @@ async fn start_actor(
     node_id: u64,
     pk_set: PublicKeySet,
     sk_share: SecretKeyShare,
-) -> anyhow::Result<(ActorRef<NodeActor>, JoinHandle<()>)> {
+) -> anyhow::Result<(ActorRef<NodeActor<UniversalTokenVerifier>>, JoinHandle<()>)> {
     // Printing shortened hash should be enough for most use cases, but if you enable TRACE level
     // you can see the entire curve details.
     if tracing::level_enabled!(tracing::Level::TRACE) {
@@ -52,9 +53,13 @@ async fn start_actor(
     } else {
         tracing::debug!(public_key = ?pk_set.public_key(), "starting node actor");
     }
-    Actor::spawn(None, actor::NodeActor, (node_id, pk_set.clone(), sk_share))
-        .await
-        .map_err(|_e| anyhow::anyhow!("failed to start actor"))
+    Actor::spawn(
+        None,
+        actor::NodeActor::new(),
+        (node_id, pk_set.clone(), sk_share),
+    )
+    .await
+    .map_err(|_e| anyhow::anyhow!("failed to start actor"))
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(id = node_id))]

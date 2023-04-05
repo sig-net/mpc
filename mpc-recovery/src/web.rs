@@ -5,11 +5,12 @@ use std::net::SocketAddr;
 
 use crate::{
     actor::{NodeActor, NodeMessage},
+    ouath::UniversalTokenVerifier,
     NodeId,
 };
 
 #[tracing::instrument(level = "debug", skip(node_actor))]
-pub async fn serve(id: NodeId, port: u16, node_actor: ActorRef<NodeActor>) {
+pub async fn serve(id: NodeId, port: u16, node_actor: ActorRef<NodeActor<UniversalTokenVerifier>>) {
     let state = AppState { id, node_actor };
 
     let app = Router::new()
@@ -32,7 +33,7 @@ struct SubmitPayload {
 #[derive(Clone)]
 struct AppState {
     id: NodeId,
-    node_actor: ActorRef<NodeActor>,
+    node_actor: ActorRef<NodeActor<UniversalTokenVerifier>>,
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]

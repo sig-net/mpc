@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 use ractor::{
@@ -7,7 +9,7 @@ use ractor_cluster::RactorClusterMessage;
 use serde::{Deserialize, Serialize};
 use threshold_crypto::{PublicKeySet, SecretKeyShare, Signature, SignatureShare};
 
-use crate::ouath::{OAuthTokenVerifier, UniversalTokenVerifier};
+use crate::ouath::OAuthTokenVerifier;
 use crate::NodeId;
 
 const MPC_RECOVERY_GROUP: &str = "mpc-recovery";
@@ -53,18 +55,27 @@ pub enum NodeMessage {
     SignRequest(Payload, RpcReplyPort<SignResponse>),
 }
 
-pub struct NodeActor;
+pub struct NodeActor<O: OAuthTokenVerifier> {
+    el: PhantomData<O>,
+}
 
-pub struct NodeActorState {
+impl<O: OAuthTokenVerifier> NodeActor<O> {
+    pub fn new() -> NodeActor<O> {
+        NodeActor { el: PhantomData }
+    }
+}
+
+pub struct NodeActorState<O: OAuthTokenVerifier> {
     id: NodeId,
     pk_set: PublicKeySet,
     sk_share: SecretKeyShare,
+    el: PhantomData<O>,
 }
 
 #[async_trait::async_trait]
-impl Actor for NodeActor {
+impl<O: OAuthTokenVerifier + Send + Sync + 'static> Actor for NodeActor<O> {
     type Msg = NodeMessage;
-    type State = NodeActorState;
+    type State = NodeActorState<O>;
     type Arguments = (NodeId, PublicKeySet, SecretKeyShare);
 
     #[tracing::instrument(level = "debug", skip_all, fields(id = args.0))]
@@ -80,6 +91,7 @@ impl Actor for NodeActor {
             id: args.0,
             pk_set: args.1,
             sk_share: args.2,
+            el: PhantomData,
         })
     }
 
@@ -116,7 +128,7 @@ impl Actor for NodeActor {
     }
 }
 
-impl NodeActorState {
+impl<O: OAuthTokenVerifier + Send + Sync + 'static> NodeActorState<O> {
     fn sign(&self, payload: &[u8]) -> SignResponse {
         SignResponse {
             node_id: self.id,
@@ -128,8 +140,7 @@ impl NodeActorState {
     async fn handle_signed_msg(&mut self, payload: Payload, reply: RpcReplyPort<SignResponse>) {
         // TODO: extract access token from payload
         let access_token = "validToken";
-        let access_token_verifier = UniversalTokenVerifier {};
-        match access_token_verifier.verify_token(access_token).await {
+        match O::verify_token(access_token).await {
             Some(client_id) => {
                 tracing::debug!("approved, cleintId: {}", client_id);
 
@@ -151,12 +162,11 @@ impl NodeActorState {
         &mut self,
         payload: Payload,
         reply: RpcReplyPort<SignatureResponse>,
-        remote_actors: &Vec<ActorRef<NodeActor>>,
+        remote_actors: &Vec<ActorRef<NodeActor<O>>>,
     ) {
         // TODO: extract access token from payload
         let access_token = "validToken";
-        let access_token_verifier = UniversalTokenVerifier {};
-        match access_token_verifier.verify_token(access_token).await {
+        match O::verify_token(access_token).await {
             Some(client_id) => {
                 tracing::debug!("approved, cleintId: {}", client_id);
                 let mut futures = Vec::new();
