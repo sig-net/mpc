@@ -13,11 +13,7 @@ pub async fn run(id: NodeId, pk_set: PublicKeySet, sk_share: SecretKeyShare, por
         return;
     }
 
-    let state = SignNodeState {
-        id,
-        pk_set,
-        sk_share,
-    };
+    let state = SignNodeState { id, sk_share };
 
     let app = Router::new().route("/sign", post(sign)).with_state(state);
 
@@ -32,7 +28,6 @@ pub async fn run(id: NodeId, pk_set: PublicKeySet, sk_share: SecretKeyShare, por
 #[derive(Clone)]
 struct SignNodeState {
     id: NodeId,
-    pk_set: PublicKeySet,
     sk_share: SecretKeyShare,
 }
 

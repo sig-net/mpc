@@ -11,6 +11,7 @@ pub struct LeaderRequest {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum LeaderResponse {
     Ok {
         #[serde(with = "hex_sig_share")]
@@ -48,15 +49,14 @@ mod hex_sig_share {
     {
         let s = String::deserialize(deserializer)?;
         Signature::from_bytes(
-            &hex::decode(s)
-                .map_err(serde::de::Error::custom)?
-                .try_into()
-                .map_err(|v: Vec<u8>| {
+            <[u8; 96]>::try_from(hex::decode(s).map_err(serde::de::Error::custom)?).map_err(
+                |v: Vec<u8>| {
                     serde::de::Error::custom(format!(
                         "signature has incorrect length: expected 96 bytes, but got {}",
                         v.len()
                     ))
-                })?,
+                },
+            )?,
         )
         .map_err(serde::de::Error::custom)
     }

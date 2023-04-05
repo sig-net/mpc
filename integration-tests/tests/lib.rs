@@ -225,7 +225,7 @@ async fn test_trio() -> anyhow::Result<()> {
     if let LeaderResponse::Ok { signature } = response {
         assert!(pk_set.public_key().verify(&signature, payload));
     } else {
-        assert!(false, "response was not successful");
+        panic!("response was not successful");
     }
 
     Ok(())

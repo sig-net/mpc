@@ -108,8 +108,11 @@ async fn submit(
     for response in successful_responses {
         let response: SigShareResponse = match serde_json::from_slice(&response) {
             Ok(response) => response,
-            Err(e) => {
-                tracing::error!("failed to parse HTTP response as a valid SigShareResponse");
+            Err(err) => {
+                tracing::error!(
+                    ?err,
+                    "failed to parse HTTP response as a valid SigShareResponse"
+                );
                 continue;
             }
         };
