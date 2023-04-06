@@ -3,6 +3,7 @@ use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare};
 mod leader_node;
 pub mod msg;
 mod sign_node;
+mod oauth;
 
 type NodeId = u64;
 
