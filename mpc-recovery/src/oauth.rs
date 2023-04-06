@@ -32,11 +32,11 @@ fn get_token_verifier_type(token: &str) -> SupportedTokenVerifiers {
         0 => {
             tracing::info!("Using GoogleTokenVerifier");
             SupportedTokenVerifiers::GoogleTokenVerifier
-        },
+        }
         _ => {
             tracing::info!("Using TestTokenVerifier");
             SupportedTokenVerifiers::TestTokenVerifier
-        },
+        }
     }
 }
 
@@ -51,7 +51,7 @@ impl OAuthTokenVerifier for GoogleTokenVerifier {
             "validToken" => {
                 tracing::info!("GoogleTokenVerifier: access token is valid");
                 Some("testAccountId")
-            },
+            }
             _ => {
                 tracing::info!("GoogleTokenVerifier: access token verification failed");
                 None
@@ -70,7 +70,7 @@ impl OAuthTokenVerifier for TestTokenVerifier {
             "validToken" => {
                 tracing::info!("TestTokenVerifier: access token is valid");
                 Some("testAccountId")
-            },
+            }
             _ => {
                 tracing::info!("TestTokenVerifier: access token verification failed");
                 None

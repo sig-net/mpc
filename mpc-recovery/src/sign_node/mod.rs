@@ -51,7 +51,7 @@ async fn sign<T: OAuthTokenVerifier>(
                 sig_share: state.sk_share.sign(request.payload),
             };
             (StatusCode::OK, Json(response))
-        },
+        }
         None => {
             tracing::debug!("access token verification failed");
             (StatusCode::UNAUTHORIZED, Json(SigShareResponse::Err))
