@@ -1024,6 +1024,7 @@ dependencies = [
  "hex",
  "hyper",
  "mpc-recovery",
+ "oauth2",
  "portpicker",
  "rand 0.8.5",
  "serde_json",
