@@ -1,4 +1,4 @@
-use anyhow;
+
 use oauth2::basic::BasicClient;
 use oauth2::reqwest::http_client;
 use oauth2::{AuthUrl, ClientId, ClientSecret, Scope, TokenUrl};
@@ -18,7 +18,7 @@ fn test_get_and_verify_google_access_token() -> anyhow::Result<()> {
         Some(TokenUrl::new(GOOGLE_TOKEN_URL.to_string()).expect("Invalid token endpoint URL")),
     );
 
-    let token_result = client
+    let _token_result = client
         .exchange_client_credentials()
         .add_scope(Scope::new("read".to_string()))
         .request(http_client)

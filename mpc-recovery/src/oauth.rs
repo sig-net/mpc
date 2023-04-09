@@ -48,7 +48,7 @@ impl OAuthTokenVerifier for GoogleTokenVerifier {
     // TODO: replace with real implementation
     async fn verify_token(token: &str) -> Option<&str> {
         // Google specs for ID token verification: https://developers.google.com/identity/openid-connect/openid-connect#validatinganidtoken
-        
+
         /*
         Expected steps:
         1. Extract the public key of the authorization server from the OpenID Connect discovery endpoint or other configuration sources.
