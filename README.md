@@ -35,3 +35,12 @@ Endpoint 2: Recover Account
     URL: /recover_account
     Request parameters: access_token, public_key
     Response: status
+
+## OAuth authentication
+We are using OpenID Connect (OIDC) standard to authenticate users (built on top of OAuth 2.0).
+
+Check OIDC s tandard docs [here](https://openid.net/specs/openid-connect-core-1_0.html#IDToken) and Google OIDC docs [here](https://developers.google.com/identity/protocols/oauth2/openid-connect)
+
+There are several ways to get and use the ID token. We are using what is called the [server flow](https://developers.google.com/identity/protocols/oauth2/openid-connect#server-flow).
+    
+Internally, we are identifiying users by their issuer id (iss) and their unique ID (sub) separated by a colon: `<issuer_iss>:<user_sub>`. It means that each recovery method (like GitHub abd Google) is separated from one another even if they have the same email.
