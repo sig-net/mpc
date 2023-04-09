@@ -36,11 +36,12 @@ Endpoint 2: Recover Account
     Request parameters: access_token, public_key
     Response: status
 
-## OAuth authentication
+## OIDC (OAuth 2.0) authentication
 We are using OpenID Connect (OIDC) standard to authenticate users (built on top of OAuth 2.0).
+Check OIDC standard docs [here](https://openid.net/specs/openid-connect-core-1_0.html#IDToken) and Google OIDC docs [here](https://developers.google.com/identity/protocols/oauth2/openid-connect)
 
-Check OIDC s tandard docs [here](https://openid.net/specs/openid-connect-core-1_0.html#IDToken) and Google OIDC docs [here](https://developers.google.com/identity/protocols/oauth2/openid-connect)
+### Client integration
+There are several ways to get and use the ID token. The flow that we are using is called the "server" flow, you can find more info [here](https://developers.google.com/identity/openid-connect/openid-connect#authenticatingtheuser). The system will be able to process any token that is following the core OpenID Connect standard. In order to recieve the ID token from OpenID provider you will need to include the `openid` scope value to the Authorization Request.
 
-There are several ways to get and use the ID token. We are using what is called the [server flow](https://developers.google.com/identity/protocols/oauth2/openid-connect#server-flow).
-    
-Internally, we are identifiying users by their issuer id (iss) and their unique ID (sub) separated by a colon: `<issuer_iss>:<user_sub>`. It means that each recovery method (like GitHub abd Google) is separated from one another even if they have the same email.
+### Server integration
+Internally, we are identifiying users by their issuer id (iss) and their unique ID (sub) retrieved form the ID token and separated by a colon: `<issuer_iss>:<user_sub>`. It means that each recovery method (like GitHub abd Google) is separated from one another even if they have the same email.
