@@ -52,10 +52,15 @@ impl OAuthTokenVerifier for GoogleTokenVerifier {
         /*
         Expected steps:
         1. Extract the public key of the authorization server from the OpenID Connect discovery endpoint or other configuration sources.
+            - https://accounts.google.com/.well-known/openid-configuration
+            - get certs from jwks_uri
         2. Parse the ID token to extract the JWT header, payload, and signature.
         3. Verify the signature of the ID token using the public key of the authorization server.
         4. Check the issuer and audience claims in the ID token to ensure that the token was issued by the expected authorization server and intended for your client application.
+            - check iss (https://accounts.google.com or accounts.google.com)
+            - check aud (shou be equal to app's client ID)
         5. Check the expiration time and signature timestamp to ensure that the token is not expired or used before its time.
+            - check exp
         6. Optionally, you can check other claims in the ID token, such as the nonce or subject claim, to provide additional security checks.
         */
 
