@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 #[async_trait::async_trait]
 pub trait OAuthTokenVerifier {
-    async fn verify_token(token: &str) -> Option<&str>;
+    async fn verify_token(token: &str) -> Result<String, String>;
 }
 
 pub enum SupportedTokenVerifiers {
@@ -22,7 +22,7 @@ pub struct UniversalTokenVerifier {}
 
 #[async_trait::async_trait]
 impl OAuthTokenVerifier for UniversalTokenVerifier {
-    async fn verify_token(token: &str) -> Option<&str> {
+    async fn verify_token(token: &str) -> Result<String, String> {
         // TODO: here we assume that verifier type can be determined from the token
         match get_token_verifier_type(token) {
             SupportedTokenVerifiers::GoogleTokenVerifier => {
@@ -55,32 +55,19 @@ pub struct GoogleTokenVerifier {}
 #[async_trait::async_trait]
 impl OAuthTokenVerifier for GoogleTokenVerifier {
     // Google specs for ID token verification: https://developers.google.com/identity/openid-connect/openid-connect#validatinganidtoken
-    async fn verify_token(token: &str) -> Option<&str> {
-        /*
-        Expected steps:
-        1. Extract the public key of the authorization server from the OpenID Connect discovery endpoint or other configuration sources.
-            - https://accounts.google.com/.well-known/openid-configuration
-            - get certs from jwks_uri
-        2. Parse the ID token to extract the JWT header, payload, and signature.
-        3. Verify the signature of the ID token using the public key of the authorization server.
-        4. Check the issuer and audience claims in the ID token to ensure that the token was issued by the expected authorization server and intended for your client application.
-            - check iss (https://accounts.google.com or accounts.google.com)
-            - check aud (shou be equal to app's client ID)
-        5. Check the expiration time and signature timestamp to ensure that the token is not expired or used before its time.
-            - check exp
-        6. Optionally, you can check other claims in the ID token, such as the nonce or subject claim, to provide additional security checks.
-        */
+    async fn verify_token(token: &str) -> Result<String, String> {
+        // 1. Extract the public key of the authorization server from the OpenID Connect discovery endpoint or other configuration sources.
+        //     - https://accounts.google.com/.well-known/openid-configuration
+        //     - get certs from jwks_uri
+        let public_key = Vec::<u8>::new();
+        
+        const GOOGLE_ISSUER_ID: &str = "https://accounts.google.com"; // TODO: should be an array, google provides two options
+        const GOOGLE_AUDIENCE_ID: &str = "TODO: get audience id from Google (register new project)";
 
-        match token {
-            "validToken" => {
-                tracing::info!("GoogleTokenVerifier: access token is valid");
-                Some("testAccountId")
-            }
-            _ => {
-                tracing::info!("GoogleTokenVerifier: access token verification failed");
-                None
-            }
-        }
+        let claims = validate_jwt(token, &public_key, GOOGLE_ISSUER_ID, GOOGLE_AUDIENCE_ID).expect("Failed to validate JWT");
+        let internal_user_identifier = format!("{}:{}", claims.iss, claims.sub);
+
+        Ok(internal_user_identifier)
     }
 }
 
@@ -89,15 +76,15 @@ pub struct TestTokenVerifier {}
 
 #[async_trait::async_trait]
 impl OAuthTokenVerifier for TestTokenVerifier {
-    async fn verify_token(token: &str) -> Option<&str> {
+    async fn verify_token(token: &str) -> Result<String, String> {
         match token {
             "validToken" => {
                 tracing::info!("TestTokenVerifier: access token is valid");
-                Some("testAccountId")
+                Ok("testAccountId".to_string())
             }
             _ => {
                 tracing::info!("TestTokenVerifier: access token verification failed");
-                None
+                Err("Invalid token".to_string())
             }
         }
     }
@@ -108,7 +95,7 @@ pub struct IdTokenClaims {
     iss: String,
     sub: String,
     aud: String,
-    exp: usize, //TODO: should we delete last two fields? Looks like we do not need them.
+    exp: usize,
 }
 
 pub fn validate_jwt(
@@ -117,6 +104,13 @@ pub fn validate_jwt(
     issuer: &str,
     audience: &str,
 ) -> Result<IdTokenClaims, String> {
+    // 2. Parse the ID token to extract the JWT header, payload, and signature.
+    //    3. Verify the signature of the ID token using the public key of the authorization server.
+    //     4. Check the issuer and audience claims in the ID token to ensure that the token was issued by the expected authorization server and intended for your client application.
+    //         - check iss (https://accounts.google.com or accounts.google.com)
+    //         - check aud (shou be equal to app's client ID)
+    //     5. Check the expiration time and signature timestamp to ensure that the token is not expired or used before its time.
+    //         - check exp
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_issuer(&[issuer]);
     validation.set_audience(&[audience]);
@@ -203,7 +197,7 @@ async fn test_verify_token_valid() {
 async fn test_verify_token_invalid_with_test_verifier() {
     let token = "invalid";
     let account_id = TestTokenVerifier::verify_token(token).await;
-    assert_eq!(account_id, None);
+    assert_eq!(account_id, Err("Invalid token".to_string()));
 }
 
 #[tokio::test]
@@ -217,7 +211,7 @@ async fn test_verify_token_valid_with_test_verifier() {
 async fn test_verify_token_invalid_with_universal_verifier() {
     let token = "invalid";
     let account_id = UniversalTokenVerifier::verify_token(token).await;
-    assert_eq!(account_id, None);
+    assert_eq!(account_id, Err("Invalid token".to_string()));
 }
 
 #[tokio::test]

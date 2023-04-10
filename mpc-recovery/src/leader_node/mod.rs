@@ -68,11 +68,11 @@ async fn submit<T: OAuthTokenVerifier>(
     // TODO: extract access token from payload
     let access_token = "validToken";
     match T::verify_token(access_token).await {
-        Some(_) => {
+        Ok(_) => {
             tracing::info!("access token is valid");
             // continue execution
         }
-        None => {
+        Err(_) => {
             tracing::error!("access token verification failed");
             return (StatusCode::UNAUTHORIZED, Json(LeaderResponse::Err));
         }
