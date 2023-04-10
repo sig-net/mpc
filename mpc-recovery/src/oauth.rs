@@ -1,3 +1,4 @@
+use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use rand8::rngs::OsRng;
 use rsa::{
@@ -120,7 +121,7 @@ pub fn validate_jwt(
     validation.set_issuer(&[issuer]);
     validation.set_audience(&[audience]);
 
-    let decoding_key = DecodingKey::from_rsa_pem(public_key).expect("Failed to decode public key");
+    let decoding_key = DecodingKey::from_rsa_der(public_key);
 
     match decode::<IdTokenClaims>(&token, &decoding_key, &validation) {
         Ok(token_data) => Ok(token_data.claims),
@@ -156,11 +157,11 @@ fn test_validate_jwt() {
         iss: "test_issuer".to_string(),
         sub: "test_subject".to_string(),
         aud: "test_audience".to_string(),
-        exp: 0, //TODO: double check
+        exp: (Utc::now() + Duration::hours(1)).timestamp() as usize,
     };
 
     let token = match encode(
-        &Header::default(),
+        &Header::new(Algorithm::RS256),
         &my_claims,
         &EncodingKey::from_rsa_der(&private_key_der),
     ) {
