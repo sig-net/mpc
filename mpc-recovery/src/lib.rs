@@ -1,4 +1,4 @@
-use threshold_crypto::{ PublicKeySet, SecretKeySet, SecretKeyShare};
+use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare};
 
 mod leader_node;
 pub mod msg;

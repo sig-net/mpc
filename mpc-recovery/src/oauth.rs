@@ -50,9 +50,8 @@ pub struct GoogleTokenVerifier {}
 impl OAuthTokenVerifier for GoogleTokenVerifier {
     // Google specs for ID token verification: https://developers.google.com/identity/openid-connect/openid-connect#validatinganidtoken
     async fn verify_token(token: &str) -> Result<String, String> {
-        // 1. Extract the public key of the authorization server from the OpenID Connect discovery endpoint or other configuration sources.
-        //     - https://accounts.google.com/.well-known/openid-configuration
-        //     - get certs from jwks_uri
+        // TODO: Extract the public key of the authorization server from the OpenID Connect discovery endpoint or other configuration sources. Link: https://accounts.google.com/.well-known/openid-configuration
+        // TODO: get certs from response (jwks_uri)
         let public_key = Vec::<u8>::new();
 
         const GOOGLE_ISSUER_ID: &str = "https://accounts.google.com"; // TODO: should be an array, google provides two options
@@ -107,7 +106,7 @@ pub fn validate_jwt(
 
     let decoding_key = DecodingKey::from_rsa_der(public_key);
 
-    match decode::<IdTokenClaims>(&token, &decoding_key, &validation) {
+    match decode::<IdTokenClaims>(token, &decoding_key, &validation) {
         Ok(token_data) => Ok(token_data.claims),
         Err(e) => Err(format!("Failed to validate the token: {}", e)),
     }
@@ -116,7 +115,7 @@ pub fn validate_jwt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{ Duration, Utc};
+    use chrono::{Duration, Utc};
     use jsonwebtoken::{encode, EncodingKey, Header};
     use rand8::rngs::OsRng;
     use rsa::{
@@ -207,7 +206,7 @@ mod tests {
         let bits: usize = 2048;
         let private_key = RsaPrivateKey::new(&mut rng, bits).expect("failed to generate a key");
         let public_key = RsaPublicKey::from(&private_key);
-    
+
         let private_key_der = private_key
             .to_pkcs1_der()
             .expect("Failed to encode private key")
@@ -218,7 +217,7 @@ mod tests {
             .expect("Failed to encode public key")
             .as_bytes()
             .to_vec();
-    
+
         (private_key_der, public_key_der)
     }
 }
