@@ -169,7 +169,27 @@ fn test_validate_jwt() {
         Err(e) => panic!("Failed to encode token: {}", e),
     };
 
+    // Valid token and claims
     validate_jwt(&token, &public_key_der, &my_claims.iss, &my_claims.aud).unwrap();
+
+    // Invalid public key
+    let (invalid_public_key, _invalid_private_key) = get_rsa_der_key_pair();
+    match validate_jwt(&token, &invalid_public_key, &my_claims.iss, &my_claims.aud) {
+        Ok(_) => panic!("Token validation should fail"),
+        Err(e) => assert_eq!(e, "Failed to validate the token: InvalidSignature"),
+    }
+
+    // Invalid issuer
+    match validate_jwt(&token, &public_key_der, "invalid_issuer", &my_claims.aud) {
+        Ok(_) => panic!("Token validation should fail"),
+        Err(e) => assert_eq!(e, "Failed to validate the token: InvalidIssuer"),
+    }
+
+    // Invalid audience
+    match validate_jwt(&token, &public_key_der, &my_claims.iss, "invalid_audience") {
+        Ok(_) => panic!("Token validation should fail"),
+        Err(e) => assert_eq!(e, "Failed to validate the token: InvalidAudience"),
+    }
 }
 
 #[tokio::test]
