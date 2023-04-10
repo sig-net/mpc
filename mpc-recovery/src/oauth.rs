@@ -1,3 +1,11 @@
+// use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+// use rand::rngs::OsRng;
+// use rsa::{
+//     pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey},
+//     RsaPrivateKey, RsaPublicKey,
+// };
+// use serde::{Deserialize, Serialize};
+
 #[async_trait::async_trait]
 pub trait OAuthTokenVerifier {
     async fn verify_token(token: &str) -> Option<&str>;
@@ -45,10 +53,8 @@ pub struct GoogleTokenVerifier {}
 
 #[async_trait::async_trait]
 impl OAuthTokenVerifier for GoogleTokenVerifier {
-    // TODO: replace with real implementation
+    // Google specs for ID token verification: https://developers.google.com/identity/openid-connect/openid-connect#validatinganidtoken
     async fn verify_token(token: &str) -> Option<&str> {
-        // Google specs for ID token verification: https://developers.google.com/identity/openid-connect/openid-connect#validatinganidtoken
-
         /*
         Expected steps:
         1. Extract the public key of the authorization server from the OpenID Connect discovery endpoint or other configuration sources.
@@ -95,6 +101,73 @@ impl OAuthTokenVerifier for TestTokenVerifier {
         }
     }
 }
+
+// #[derive(Debug, Serialize, Deserialize)]
+// pub struct IdTokenClaims {
+//     iss: String,
+//     sub: String,
+//     aud: String,
+//     exp: usize, //TODO: should we delete last two fields? Looks like we do not need them.
+// }
+
+// pub fn validate_jwt(
+//     token: &str,
+//     public_key: &[u8],
+//     issuer: &str,
+//     audience: &str,
+// ) -> Result<IdTokenClaims, String> {
+//     let mut validation = Validation::new(Algorithm::RS256);
+//     validation.set_issuer(&[issuer]);
+//     validation.set_audience(&[audience]);
+
+//     let decoding_key = DecodingKey::from_rsa_pem(public_key).expect("Failed to decode public key");
+
+//     match decode::<IdTokenClaims>(&token, &decoding_key, &validation) {
+//         Ok(token_data) => Ok(token_data.claims),
+//         Err(e) => Err(format!("Failed to validate the token: {}", e)),
+//     }
+// }
+
+// fn get_rsa_der_key_pair() -> (&'static [u8], &'static [u8]) {
+//     let mut rng = OsRng;
+//     let bits = 2048;
+//     let private_key = RsaPrivateKey::new(&mut &rng, bits).expect("failed to generate a key");
+//     let public_key = RsaPublicKey::from(&private_key);
+
+//     let private_key_der = private_key
+//         .to_pkcs1_der()
+//         .expect("Failed to encode private key")
+//         .as_bytes();
+//     let public_key_der = public_key
+//         .to_pkcs1_der()
+//         .expect("Failed to encode public key")
+//         .as_bytes();
+
+//     (private_key_der, public_key_der)
+// }
+
+// #[test]
+// fn test_validate_jwt() {
+//     let (private_key_der, public_key_der) = get_rsa_der_key_pair();
+
+//     let my_claims = IdTokenClaims {
+//         iss: "test_issuer".to_string(),
+//         sub: "test_subject".to_string(),
+//         aud: "test_audience".to_string(),
+//         exp: 0, //TODO: double check
+//     };
+
+//     let token = match encode(
+//         &Header::default(),
+//         &my_claims,
+//         &EncodingKey::from_rsa_der(private_key_der),
+//     ) {
+//         Ok(t) => t,
+//         Err(e) => panic!("Failed to encode token: {}", e),
+//     };
+
+//     validate_jwt(&token, public_key_der, &my_claims.iss, &my_claims.aud).unwrap();
+// }
 
 #[tokio::test]
 async fn test_verify_token_valid() {
