@@ -27,6 +27,8 @@ hyper = { version = "0.14", features = ["full"] }
 actix-rt = "2.8"
 threshold_crypto = "0.4.0"
 rand = "0.7"
+rand8 = { package = "rand", version = "0.8" }
+rand_core = { version = "0.6.4", default-features = false }
 serde = "1"
 serde_json = "1"
 tokio = { version = "1.0", features = ["full"] }

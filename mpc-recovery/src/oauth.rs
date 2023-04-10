@@ -1,10 +1,10 @@
-// use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-// use rand::rngs::OsRng;
-// use rsa::{
-//     pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey},
-//     RsaPrivateKey, RsaPublicKey,
-// };
-// use serde::{Deserialize, Serialize};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use rand8::rngs::OsRng;
+use rsa::{
+    pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey},
+    RsaPrivateKey, RsaPublicKey,
+};
+use serde::{Deserialize, Serialize};
 
 #[async_trait::async_trait]
 pub trait OAuthTokenVerifier {
@@ -102,72 +102,74 @@ impl OAuthTokenVerifier for TestTokenVerifier {
     }
 }
 
-// #[derive(Debug, Serialize, Deserialize)]
-// pub struct IdTokenClaims {
-//     iss: String,
-//     sub: String,
-//     aud: String,
-//     exp: usize, //TODO: should we delete last two fields? Looks like we do not need them.
-// }
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IdTokenClaims {
+    iss: String,
+    sub: String,
+    aud: String,
+    exp: usize, //TODO: should we delete last two fields? Looks like we do not need them.
+}
 
-// pub fn validate_jwt(
-//     token: &str,
-//     public_key: &[u8],
-//     issuer: &str,
-//     audience: &str,
-// ) -> Result<IdTokenClaims, String> {
-//     let mut validation = Validation::new(Algorithm::RS256);
-//     validation.set_issuer(&[issuer]);
-//     validation.set_audience(&[audience]);
+pub fn validate_jwt(
+    token: &str,
+    public_key: &[u8],
+    issuer: &str,
+    audience: &str,
+) -> Result<IdTokenClaims, String> {
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&[issuer]);
+    validation.set_audience(&[audience]);
 
-//     let decoding_key = DecodingKey::from_rsa_pem(public_key).expect("Failed to decode public key");
+    let decoding_key = DecodingKey::from_rsa_pem(public_key).expect("Failed to decode public key");
 
-//     match decode::<IdTokenClaims>(&token, &decoding_key, &validation) {
-//         Ok(token_data) => Ok(token_data.claims),
-//         Err(e) => Err(format!("Failed to validate the token: {}", e)),
-//     }
-// }
+    match decode::<IdTokenClaims>(&token, &decoding_key, &validation) {
+        Ok(token_data) => Ok(token_data.claims),
+        Err(e) => Err(format!("Failed to validate the token: {}", e)),
+    }
+}
 
-// fn get_rsa_der_key_pair() -> (&'static [u8], &'static [u8]) {
-//     let mut rng = OsRng;
-//     let bits = 2048;
-//     let private_key = RsaPrivateKey::new(&mut &rng, bits).expect("failed to generate a key");
-//     let public_key = RsaPublicKey::from(&private_key);
+fn get_rsa_der_key_pair() -> (Vec<u8>, Vec<u8>) {
+    let mut rng = OsRng;
+    let bits: usize = 2048;
+    let private_key = RsaPrivateKey::new(&mut rng, bits).expect("failed to generate a key");
+    let public_key = RsaPublicKey::from(&private_key);
 
-//     let private_key_der = private_key
-//         .to_pkcs1_der()
-//         .expect("Failed to encode private key")
-//         .as_bytes();
-//     let public_key_der = public_key
-//         .to_pkcs1_der()
-//         .expect("Failed to encode public key")
-//         .as_bytes();
+    let private_key_der = private_key
+        .to_pkcs1_der()
+        .expect("Failed to encode private key")
+        .as_bytes()
+        .to_vec();
+    let public_key_der = public_key
+        .to_pkcs1_der()
+        .expect("Failed to encode public key")
+        .as_bytes()
+        .to_vec();
 
-//     (private_key_der, public_key_der)
-// }
+    (private_key_der, public_key_der)
+}
 
-// #[test]
-// fn test_validate_jwt() {
-//     let (private_key_der, public_key_der) = get_rsa_der_key_pair();
+#[test]
+fn test_validate_jwt() {
+    let (private_key_der, public_key_der) = get_rsa_der_key_pair();
 
-//     let my_claims = IdTokenClaims {
-//         iss: "test_issuer".to_string(),
-//         sub: "test_subject".to_string(),
-//         aud: "test_audience".to_string(),
-//         exp: 0, //TODO: double check
-//     };
+    let my_claims = IdTokenClaims {
+        iss: "test_issuer".to_string(),
+        sub: "test_subject".to_string(),
+        aud: "test_audience".to_string(),
+        exp: 0, //TODO: double check
+    };
 
-//     let token = match encode(
-//         &Header::default(),
-//         &my_claims,
-//         &EncodingKey::from_rsa_der(private_key_der),
-//     ) {
-//         Ok(t) => t,
-//         Err(e) => panic!("Failed to encode token: {}", e),
-//     };
+    let token = match encode(
+        &Header::default(),
+        &my_claims,
+        &EncodingKey::from_rsa_der(&private_key_der),
+    ) {
+        Ok(t) => t,
+        Err(e) => panic!("Failed to encode token: {}", e),
+    };
 
-//     validate_jwt(&token, public_key_der, &my_claims.iss, &my_claims.aud).unwrap();
-// }
+    validate_jwt(&token, &public_key_der, &my_claims.iss, &my_claims.aud).unwrap();
+}
 
 #[tokio::test]
 async fn test_verify_token_valid() {
