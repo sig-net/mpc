@@ -3,7 +3,27 @@ use serde::{Deserialize, Serialize};
 
 #[async_trait::async_trait]
 pub trait OAuthTokenVerifier {
-    async fn verify_token(token: &str) -> Result<String, String>;
+    async fn verify_token(token: &str) -> Result<String, String>; // TODO: replace String error with custom error type
+
+    /// This function validates JWT (OIDC ID token) by checking the signature received
+    /// from the issuer, issuer, audience, and expiration time.
+    fn validate_jwt(
+        token: &str,
+        public_key: &[u8],
+        issuer: &str,
+        audience: &str,
+    ) -> Result<IdTokenClaims, String> {
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_issuer(&[issuer]);
+        validation.set_audience(&[audience]);
+
+        let decoding_key = DecodingKey::from_rsa_der(public_key);
+
+        match decode::<IdTokenClaims>(token, &decoding_key, &validation) {
+            Ok(token_data) => Ok(token_data.claims),
+            Err(e) => Err(format!("Failed to validate the token: {}", e)),
+        }
+    }
 }
 
 pub enum SupportedTokenVerifiers {
@@ -57,7 +77,7 @@ impl OAuthTokenVerifier for GoogleTokenVerifier {
         const GOOGLE_ISSUER_ID: &str = "https://accounts.google.com"; // TODO: should be an array, google provides two options
         const GOOGLE_AUDIENCE_ID: &str = "TODO: get audience id from Google (register new project)";
 
-        let claims = validate_jwt(token, &public_key, GOOGLE_ISSUER_ID, GOOGLE_AUDIENCE_ID)
+        let claims = Self::validate_jwt(token, &public_key, GOOGLE_ISSUER_ID, GOOGLE_AUDIENCE_ID)
             .expect("Failed to validate JWT");
         let internal_user_identifier = format!("{}:{}", claims.iss, claims.sub);
 
@@ -73,11 +93,11 @@ impl OAuthTokenVerifier for TestTokenVerifier {
     async fn verify_token(token: &str) -> Result<String, String> {
         match token {
             "validToken" => {
-                tracing::info!("TestTokenVerifier: access token is valid");
+                tracing::info!("target: test-token-verifier, access token is valid");
                 Ok("testAccountId".to_string())
             }
             _ => {
-                tracing::info!("TestTokenVerifier: access token verification failed");
+                tracing::info!("target: test-token-verifier, access token verification failed");
                 Err("Invalid token".to_string())
             }
         }
@@ -90,26 +110,6 @@ pub struct IdTokenClaims {
     sub: String,
     aud: String,
     exp: usize,
-}
-
-/// This function validates JWT (OIDC ID token) by checking the signature received
-/// from the issuer, issuer, audience, and expiration time.
-pub fn validate_jwt(
-    token: &str,
-    public_key: &[u8],
-    issuer: &str,
-    audience: &str,
-) -> Result<IdTokenClaims, String> {
-    let mut validation = Validation::new(Algorithm::RS256);
-    validation.set_issuer(&[issuer]);
-    validation.set_audience(&[audience]);
-
-    let decoding_key = DecodingKey::from_rsa_der(public_key);
-
-    match decode::<IdTokenClaims>(token, &decoding_key, &validation) {
-        Ok(token_data) => Ok(token_data.claims),
-        Err(e) => Err(format!("Failed to validate the token: {}", e)),
-    }
 }
 
 #[cfg(test)]
@@ -144,23 +144,23 @@ mod tests {
         };
 
         // Valid token and claims
-        validate_jwt(&token, &public_key_der, &my_claims.iss, &my_claims.aud).unwrap();
+        GoogleTokenVerifier::validate_jwt(&token, &public_key_der, &my_claims.iss, &my_claims.aud).unwrap();
 
         // Invalid public key
         let (invalid_public_key, _invalid_private_key) = get_rsa_der_key_pair();
-        match validate_jwt(&token, &invalid_public_key, &my_claims.iss, &my_claims.aud) {
+        match GoogleTokenVerifier::validate_jwt(&token, &invalid_public_key, &my_claims.iss, &my_claims.aud) {
             Ok(_) => panic!("Token validation should fail"),
             Err(e) => assert_eq!(e, "Failed to validate the token: InvalidSignature"),
         }
 
         // Invalid issuer
-        match validate_jwt(&token, &public_key_der, "invalid_issuer", &my_claims.aud) {
+        match GoogleTokenVerifier::validate_jwt(&token, &public_key_der, "invalid_issuer", &my_claims.aud) {
             Ok(_) => panic!("Token validation should fail"),
             Err(e) => assert_eq!(e, "Failed to validate the token: InvalidIssuer"),
         }
 
         // Invalid audience
-        match validate_jwt(&token, &public_key_der, &my_claims.iss, "invalid_audience") {
+        match GoogleTokenVerifier::validate_jwt(&token, &public_key_der, &my_claims.iss, "invalid_audience") {
             Ok(_) => panic!("Token validation should fail"),
             Err(e) => assert_eq!(e, "Failed to validate the token: InvalidAudience"),
         }
