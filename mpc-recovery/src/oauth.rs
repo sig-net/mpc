@@ -93,11 +93,11 @@ impl OAuthTokenVerifier for TestTokenVerifier {
     async fn verify_token(token: &str) -> Result<String, String> {
         match token {
             "validToken" => {
-                tracing::info!("target: test-token-verifier, access token is valid");
+                tracing::info!(target: "test-token-verifier", "access token is valid");
                 Ok("testAccountId".to_string())
             }
             _ => {
-                tracing::info!("target: test-token-verifier, access token verification failed");
+                tracing::info!(target: "test-token-verifier", "access token verification failed");
                 Err("Invalid token".to_string())
             }
         }
