@@ -18,6 +18,8 @@ jobs:
           profile: minimal
           toolchain: stable
       - uses: Swatinem/rust-cache@v1
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v1
       - name: Build docker image
         run: docker build . -t near/mpc-recovery
       - name: Test
