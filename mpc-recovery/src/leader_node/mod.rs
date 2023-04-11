@@ -1,4 +1,5 @@
 use crate::msg::{LeaderRequest, LeaderResponse, SigShareRequest, SigShareResponse};
+use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::NodeId;
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use futures::stream::FuturesUnordered;
@@ -32,7 +33,7 @@ pub async fn run(
     };
 
     let app = Router::new()
-        .route("/submit", post(submit))
+        .route("/submit", post(submit::<UniversalTokenVerifier>))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -58,14 +59,24 @@ async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareRespon
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
-async fn submit(
+async fn submit<T: OAuthTokenVerifier>(
     State(state): State<LeaderState>,
     Json(request): Json<LeaderRequest>,
 ) -> (StatusCode, Json<LeaderResponse>) {
     tracing::info!(payload = request.payload, "submit request");
 
-    // TODO: run some check that the payload makes sense, fail if not
-    tracing::debug!("approved");
+    // TODO: extract access token from payload
+    let access_token = "validToken";
+    match T::verify_token(access_token).await {
+        Ok(_) => {
+            tracing::info!("access token is valid");
+            // continue execution
+        }
+        Err(_) => {
+            tracing::error!("access token verification failed");
+            return (StatusCode::UNAUTHORIZED, Json(LeaderResponse::Err));
+        }
+    }
 
     let sig_share_request = SigShareRequest {
         payload: request.payload.clone(),
@@ -100,42 +111,48 @@ async fn submit(
     let mut sig_shares = BTreeMap::new();
     sig_shares.insert(state.id, state.sk_share.sign(&request.payload));
     for response_future in response_futures {
-        let response = match parse(response_future).await {
-            Ok(response) => response,
+        let (node_id, sig_share) = match parse(response_future).await {
+            Ok(response) => match response {
+                SigShareResponse::Ok { node_id, sig_share } => (node_id, sig_share),
+                SigShareResponse::Err => {
+                    tracing::error!("Received an error response");
+                    continue;
+                }
+            },
             Err(err) => {
-                tracing::error!(%err, "failed to get response");
+                tracing::error!(%err, "Failed to get response");
                 continue;
             }
         };
 
         if state
             .pk_set
-            .public_key_share(response.node_id)
-            .verify(&response.sig_share, &request.payload)
+            .public_key_share(node_id)
+            .verify(&sig_share, &request.payload)
         {
-            match sig_shares.entry(response.node_id) {
+            match sig_shares.entry(node_id) {
                 Entry::Vacant(e) => {
-                    tracing::debug!(?response, "received valid signature share");
-                    e.insert(response.sig_share);
+                    tracing::debug!(?sig_share, "received valid signature share");
+                    e.insert(sig_share);
                 }
-                Entry::Occupied(e) if e.get() == &response.sig_share => {
+                Entry::Occupied(e) if e.get() == &sig_share => {
                     tracing::error!(
-                        node_id = response.node_id,
+                        node_id,
                         sig_share = ?e.get(),
                         "received a duplicate share"
                     );
                 }
                 Entry::Occupied(e) => {
                     tracing::error!(
-                        node_id = response.node_id,
+                        node_id = node_id,
                         sig_share_1 = ?e.get(),
-                        sig_share_2 = ?response.sig_share,
+                        sig_share_2 = ?sig_share,
                         "received two different valid shares for the same node (should be impossible)"
                     );
                 }
             }
         } else {
-            tracing::error!(?response, "received invalid signature",);
+            tracing::error!("received invalid signature",);
         }
 
         if sig_shares.len() > state.pk_set.threshold() {

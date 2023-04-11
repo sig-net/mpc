@@ -26,9 +26,13 @@ pub struct SigShareRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct SigShareResponse {
-    pub node_id: NodeId,
-    pub sig_share: SignatureShare,
+#[allow(clippy::large_enum_variant)]
+pub enum SigShareResponse {
+    Ok {
+        node_id: NodeId,
+        sig_share: SignatureShare,
+    },
+    Err,
 }
 
 mod hex_sig_share {
