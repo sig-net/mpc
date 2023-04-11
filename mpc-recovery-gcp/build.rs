@@ -26,6 +26,7 @@ fn main() {
 
     tonic_build::configure()
         .out_dir("gen/protos")
+        .protoc_arg("--experimental_allow_proto3_optional")
         .compile(&proto_files, &["googleapis"])
         .unwrap();
 }
