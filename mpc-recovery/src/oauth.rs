@@ -1,8 +1,8 @@
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use reqwest::StatusCode;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[async_trait::async_trait]
 pub trait OAuthTokenVerifier {
@@ -134,7 +134,7 @@ fn get_google_public_key() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let config: OpenIdConfig = serde_json::from_str(&body)?;
     let jwks_uri = config.jwks_uri;
     let response = client
-        .get(&jwks_uri)
+        .get(jwks_uri)
         .header(ACCEPT, "application/json")
         .header(CONTENT_TYPE, "application/json")
         .send()?;
@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn test_get_google_public_key() {
         let pk = get_google_public_key().unwrap();
-        assert!(pk.len() > 0);
+        assert!(!pk.is_empty());
     }
 
     #[test]
