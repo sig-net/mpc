@@ -1,7 +1,7 @@
-mod oauth;
-
 use clap::Parser;
 use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
+
+mod gcp;
 
 #[derive(Parser, Debug)]
 enum Cli {
@@ -11,33 +11,42 @@ enum Cli {
     },
     StartLeader {
         /// Node ID
+        #[arg(long, env("MPC_RECOVERY_NODE_ID"))]
         node_id: u64,
         /// Root public key
-        #[arg(long)]
+        #[arg(long, env("MPC_RECOVERY_PK_SET"))]
         pk_set: String,
-        /// Secret key share
-        #[arg(long)]
-        sk_share: String,
+        /// Secret key share, will be pulled from GCP Secret Manager if omitted
+        #[arg(long, env("MPC_RECOVERY_SK_SHARE"))]
+        sk_share: Option<String>,
         /// The web port for this server
-        #[arg(long)]
+        #[arg(long, env("MPC_RECOVERY_WEB_PORT"))]
         web_port: u16,
         /// The compute nodes to connect to
-        #[arg(long)]
+        #[arg(long, env("MPC_RECOVERY_SIGN_NODES"))]
         sign_nodes: Vec<String>,
     },
     StartSign {
         /// Node ID
+        #[arg(long, env("MPC_RECOVERY_NODE_ID"))]
         node_id: u64,
         /// Root public key
-        #[arg(long)]
+        #[arg(long, env("MPC_RECOVERY_PK_SET"))]
         pk_set: String,
-        /// Secret key share
-        #[arg(long)]
-        sk_share: String,
+        /// Secret key share, will be pulled from GCP Secret Manager if omitted
+        #[arg(long, env("MPC_RECOVERY_SK_SHARE"))]
+        sk_share: Option<String>,
         /// The web port for this server
-        #[arg(long)]
+        #[arg(long, env("MPC_RECOVERY_WEB_PORT"))]
         web_port: u16,
     },
+}
+
+async fn load_sh_skare(node_id: u64, sk_share_arg: Option<String>) -> anyhow::Result<String> {
+    match sk_share_arg {
+        Some(sk_share) => Ok(sk_share),
+        None => Ok(std::str::from_utf8(&gcp::load_secret_share(node_id).await?)?.to_string()),
+    }
 }
 
 #[tokio::main]
@@ -65,6 +74,8 @@ async fn main() -> anyhow::Result<()> {
             web_port,
             sign_nodes,
         } => {
+            let sk_share = load_sh_skare(node_id, sk_share).await?;
+
             let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
             let sk_share: SecretKeyShare = serde_json::from_str(&sk_share).unwrap();
 
@@ -76,6 +87,8 @@ async fn main() -> anyhow::Result<()> {
             sk_share,
             web_port,
         } => {
+            let sk_share = load_sh_skare(node_id, sk_share).await?;
+
             let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
             let sk_share: SecretKeyShare = serde_json::from_str(&sk_share).unwrap();
 
