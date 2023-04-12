@@ -48,7 +48,13 @@ Internally, we are identifiying users by their issuer id (iss) and their unique 
 
 ### Contribute
 In order to build the project, you will need to execute next commands:
+
 ```BASH
 git submodule update --init --recursive
 docker build . -t near/mpc-recovery
+```
+
+Run tests with:
+```
+cargo test -p mpc-recovery-integration-tests
 ```
