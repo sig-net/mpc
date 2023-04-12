@@ -115,6 +115,7 @@ async fn start_mpc_leader_node(
 
     let mut cmd = vec![
         "start-leader".to_string(),
+        "--node-id".to_string(),
         node_id.to_string(),
         "--pk-set".to_string(),
         serde_json::to_string(&pk_set)?,
@@ -143,6 +144,7 @@ async fn start_mpc_sign_node(
 
     let cmd = vec![
         "start-sign".to_string(),
+        "--node-id".to_string(),
         node_id.to_string(),
         "--pk-set".to_string(),
         serde_json::to_string(&pk_set)?,

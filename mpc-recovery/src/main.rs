@@ -11,43 +11,39 @@ enum Cli {
     },
     StartLeader {
         /// Node ID
+        #[arg(long, env("MPC_RECOVERY_NODE_ID"))]
         node_id: u64,
         /// Root public key
-        #[arg(long)]
-        pk_set: Option<String>,
-        /// Secret key share
-        #[arg(long)]
+        #[arg(long, env("MPC_RECOVERY_PK_SET"))]
+        pk_set: String,
+        /// Secret key share, will be pulled from GCP Secret Manager if omitted
+        #[arg(long, env("MPC_RECOVERY_SK_SHARE"))]
         sk_share: Option<String>,
         /// The web port for this server
-        #[arg(long)]
+        #[arg(long, env("MPC_RECOVERY_WEB_PORT"))]
         web_port: u16,
         /// The compute nodes to connect to
-        #[arg(long)]
+        #[arg(long, env("MPC_RECOVERY_SIGN_NODES"))]
         sign_nodes: Vec<String>,
     },
     StartSign {
         /// Node ID
+        #[arg(long, env("MPC_RECOVERY_NODE_ID"))]
         node_id: u64,
         /// Root public key
-        #[arg(long)]
-        pk_set: Option<String>,
-        /// Secret key share
-        #[arg(long)]
+        #[arg(long, env("MPC_RECOVERY_PK_SET"))]
+        pk_set: String,
+        /// Secret key share, will be pulled from GCP Secret Manager if omitted
+        #[arg(long, env("MPC_RECOVERY_SK_SHARE"))]
         sk_share: Option<String>,
         /// The web port for this server
-        #[arg(long)]
+        #[arg(long, env("MPC_RECOVERY_WEB_PORT"))]
         web_port: u16,
     },
 }
 
-fn load_pk_set(pk_set_arg: Option<String>) -> anyhow::Result<String> {
-    pk_set_arg
-        .or_else(|| std::env::var("MPC_RECOVERY_PK_SET").ok())
-        .ok_or_else(|| anyhow::anyhow!("Please provide public key set by either passing a CLI argument '--pk-set' or env var 'MPC_RECOVERY_PK_SET'"))
-}
-
 async fn load_sh_skare(node_id: u64, sk_share_arg: Option<String>) -> anyhow::Result<String> {
-    match sk_share_arg.or_else(|| std::env::var("MPC_RECOVERY_SK_SHARE").ok()) {
+    match sk_share_arg {
         Some(sk_share) => Ok(sk_share),
         None => Ok(std::str::from_utf8(&gcp::load_secret_share(node_id).await?)?.to_string()),
     }
@@ -78,7 +74,6 @@ async fn main() -> anyhow::Result<()> {
             web_port,
             sign_nodes,
         } => {
-            let pk_set = load_pk_set(pk_set)?;
             let sk_share = load_sh_skare(node_id, sk_share).await?;
 
             let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
@@ -92,7 +87,6 @@ async fn main() -> anyhow::Result<()> {
             sk_share,
             web_port,
         } => {
-            let pk_set = load_pk_set(pk_set)?;
             let sk_share = load_sh_skare(node_id, sk_share).await?;
 
             let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
