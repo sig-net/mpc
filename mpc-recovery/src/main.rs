@@ -42,12 +42,12 @@ enum Cli {
 
 fn load_pk_set(pk_set_arg: Option<String>) -> anyhow::Result<String> {
     pk_set_arg
-        .or(std::env::var("MPC_RECOVERY_PK_SET").ok())
+        .or_else(|| std::env::var("MPC_RECOVERY_PK_SET").ok())
         .ok_or_else(|| anyhow::anyhow!("Please provide public key set by either passing a CLI argument '--pk-set' or env var 'MPC_RECOVERY_PK_SET'"))
 }
 
 async fn load_sh_skare(node_id: u64, sk_share_arg: Option<String>) -> anyhow::Result<String> {
-    match sk_share_arg.or(std::env::var("MPC_RECOVERY_SK_SHARE").ok()) {
+    match sk_share_arg.or_else(|| std::env::var("MPC_RECOVERY_SK_SHARE").ok()) {
         Some(sk_share) => Ok(sk_share),
         None => Ok(std::str::from_utf8(&gcp::load_secret_share(node_id).await?)?.to_string()),
     }

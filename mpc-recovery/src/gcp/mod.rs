@@ -14,7 +14,7 @@ mod auth;
 
 const DOMAIN_NAME: &str = "secretmanager.googleapis.com";
 const ENDPOINT: &str = "https://secretmanager.googleapis.com";
-const SCOPES: [&'static str; 1] = ["https://www.googleapis.com/auth/cloud-platform"];
+const SCOPES: [&str; 1] = ["https://www.googleapis.com/auth/cloud-platform"];
 const TLS_CERTS: &[u8] = include_bytes!("../../roots.pem");
 
 pub async fn load_secret_share(node_id: u64) -> anyhow::Result<Vec<u8>> {
@@ -43,8 +43,7 @@ pub async fn load_secret_share(node_id: u64) -> anyhow::Result<Vec<u8>> {
     let request = Request::new(AccessSecretVersionRequest {
         name: format!(
             "projects/pagoda-discovery-platform-dev/secrets/mpc-recovery-secret-share-{node_id}/versions/latest"
-        )
-        .into(),
+        ),
     });
 
     let response = client.access_secret_version(request).await?;

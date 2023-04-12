@@ -93,7 +93,7 @@ impl TokenManager {
                 let token = jsonwebtoken::encode(
                     &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
                     &claims,
-                    &jsonwebtoken::EncodingKey::from_rsa_pem(&self.creds.private_key.as_bytes())?,
+                    &jsonwebtoken::EncodingKey::from_rsa_pem(self.creds.private_key.as_bytes())?,
                 )?;
                 let form = format!(
                     "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion={}",
