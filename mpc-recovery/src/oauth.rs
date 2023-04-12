@@ -1,5 +1,8 @@
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use reqwest::StatusCode;
 
 #[async_trait::async_trait]
 pub trait OAuthTokenVerifier {
@@ -70,9 +73,7 @@ pub struct GoogleTokenVerifier {}
 impl OAuthTokenVerifier for GoogleTokenVerifier {
     // Google specs for ID token verification: https://developers.google.com/identity/openid-connect/openid-connect#validatinganidtoken
     async fn verify_token(token: &str) -> Result<String, String> {
-        // TODO: Extract the public key of the authorization server from the OpenID Connect discovery endpoint or other configuration sources. Link: https://accounts.google.com/.well-known/openid-configuration
-        // TODO: get certs from response (jwks_uri)
-        let public_key = Vec::<u8>::new();
+        let public_key = get_google_public_key().expect("Failed to get Google public key");
 
         const GOOGLE_ISSUER_ID: &str = "https://accounts.google.com"; // TODO: should be an array, google provides two options
         const GOOGLE_AUDIENCE_ID: &str = "TODO: get audience id from Google (register new project)";
@@ -112,6 +113,40 @@ pub struct IdTokenClaims {
     exp: usize,
 }
 
+#[derive(Serialize, Deserialize)]
+struct OpenIdConfig {
+    jwks_uri: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Jwks {
+    keys: Vec<Value>,
+}
+
+fn get_google_public_key() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let open_id_config_url = "https://accounts.google.com/.well-known/openid-configuration";
+    let client = reqwest::blocking::Client::new();
+    let response = client.get(open_id_config_url).send()?;
+    if response.status() != StatusCode::OK {
+        return Err(format!("Failed to get OpenID config: {}", response.status()).into());
+    }
+    let body = response.text()?;
+    let config: OpenIdConfig = serde_json::from_str(&body)?;
+    let jwks_uri = config.jwks_uri;
+    let response = client
+        .get(&jwks_uri)
+        .header(ACCEPT, "application/json")
+        .header(CONTENT_TYPE, "application/json")
+        .send()?;
+    if response.status() != StatusCode::OK {
+        return Err(format!("Failed to get JWK set: {}", response.status()).into());
+    }
+    let body = response.text()?;
+    let jwks: Jwks = serde_json::from_str(&body)?;
+    let public_key = jwks.keys[0]["n"].as_str().unwrap();
+    Ok(public_key.as_bytes().to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,6 +157,12 @@ mod tests {
         pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey},
         RsaPrivateKey, RsaPublicKey,
     };
+
+    #[test]
+    fn test_get_google_public_key() {
+        let pk = get_google_public_key().unwrap();
+        assert!(pk.len() > 0);
+    }
 
     #[test]
     fn test_validate_jwt() {
