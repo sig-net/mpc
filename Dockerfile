@@ -1,4 +1,4 @@
-FROM rust:latest
+FROM rust:latest as builder
 WORKDIR /usr/src/app
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive \
@@ -11,7 +11,9 @@ RUN sed -i 's#mpc-recovery-gcp = { path = "../mpc-recovery-gcp" }##' Cargo.toml
 RUN cargo build --release
 COPY . .
 RUN cargo build --release
-RUN mv /usr/src/app/target/release/mpc-recovery /usr/local/bin/mpc-recovery
+
+FROM debian:buster-slim as runtime
+COPY --from=builder /usr/src/app/target/release/mpc-recovery /usr/local/bin/mpc-recovery
 WORKDIR /usr/local/bin
 
 ENTRYPOINT [ "mpc-recovery" ]
