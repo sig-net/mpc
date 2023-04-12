@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "mpc-recovery",
+    "mpc-recovery-gcp",
     "integration-tests",
 ]
