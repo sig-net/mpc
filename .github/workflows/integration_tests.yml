@@ -29,6 +29,7 @@ jobs:
         with:
           context: .
           tags: near/mpc-recovery:latest
+          load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Test
