@@ -10,8 +10,8 @@ RUN sed -i 's#src/main.rs#dummy.rs#' Cargo.toml
 RUN sed -i 's#mpc-recovery-gcp = { path = "../mpc-recovery-gcp" }##' Cargo.toml
 RUN cargo build --release
 COPY . .
-RUN cargo install --path mpc-recovery/
-RUN mv /usr/local/cargo/bin/mpc-recovery /usr/local/bin/mpc-recovery
+RUN cargo build --release
+RUN mv /usr/src/app/target/release/mpc-recovery /usr/local/bin/mpc-recovery
 WORKDIR /usr/local/bin
 
 ENTRYPOINT [ "mpc-recovery" ]
