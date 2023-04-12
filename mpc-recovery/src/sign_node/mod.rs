@@ -44,7 +44,7 @@ async fn sign<T: OAuthTokenVerifier>(
     // TODO: extract access token from payload
     let access_token = "validToken";
     match T::verify_token(access_token).await {
-        Some(_) => {
+        Ok(_) => {
             tracing::debug!("access token is valid");
             let response = SigShareResponse::Ok {
                 node_id: state.id,
@@ -52,7 +52,7 @@ async fn sign<T: OAuthTokenVerifier>(
             };
             (StatusCode::OK, Json(response))
         }
-        None => {
+        Err(_) => {
             tracing::debug!("access token verification failed");
             (StatusCode::UNAUTHORIZED, Json(SigShareResponse::Err))
         }
