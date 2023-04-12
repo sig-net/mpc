@@ -10,7 +10,7 @@ RUN sed -i 's#src/main.rs#dummy.rs#' Cargo.toml
 RUN sed -i 's#mpc-recovery-gcp = { path = "../mpc-recovery-gcp" }##' Cargo.toml
 RUN cargo build --release
 COPY . .
-RUN cargo build --release
+RUN cargo build --release --package mpc-recovery
 
 FROM debian:buster-slim as runtime
 COPY --from=builder /usr/src/app/target/release/mpc-recovery /usr/local/bin/mpc-recovery
