@@ -4,6 +4,7 @@ mod leader_node;
 pub mod msg;
 mod oauth;
 mod sign_node;
+mod transaction;
 
 type NodeId = u64;
 
