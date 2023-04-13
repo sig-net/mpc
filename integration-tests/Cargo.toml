@@ -7,6 +7,7 @@ publish = false
 [dev-dependencies]
 anyhow = "1.0"
 bollard = "0.14"
+ed25519-dalek = "1"
 futures = "0.3"
 hex = "0.4"
 hyper = { version = "0.14", features = ["full"] }

@@ -2,6 +2,7 @@ use bollard::container::{AttachContainerOptions, AttachContainerResults, Config}
 use bollard::network::CreateNetworkOptions;
 use bollard::service::{HostConfig, Ipam, PortBinding};
 use bollard::Docker;
+use ed25519_dalek::SecretKey;
 use futures::StreamExt;
 use hyper::{Body, Client, Method, Request};
 use mpc_recovery::msg::LeaderResponse;
@@ -110,6 +111,7 @@ async fn start_mpc_leader_node(
     pk_set: &PublicKeySet,
     sk_share: &SecretKeyShare,
     sign_nodes: Vec<String>,
+    root_secret_key: &SecretKey,
 ) -> anyhow::Result<String> {
     let web_port = portpicker::pick_unused_port().expect("no free ports");
 
@@ -123,6 +125,8 @@ async fn start_mpc_leader_node(
         serde_json::to_string(&SerdeSecret(sk_share))?,
         "--web-port".to_string(),
         web_port.to_string(),
+        "--root-secret-key".to_string(),
+        hex::encode(root_secret_key),
     ];
     for sign_node in sign_nodes {
         cmd.push("--sign-nodes".to_string());
@@ -194,14 +198,22 @@ async fn test_trio() -> anyhow::Result<()> {
 
     // This test creates 4 sk shares with a threshold of 2 (i.e. minimum 3 required to sign),
     // but only instantiates 3 nodes.
-    let (pk_set, sk_shares) = mpc_recovery::generate(4, 3)?;
+    let (pk_set, sk_shares, root_secret_key) = mpc_recovery::generate(4, 3)?;
 
     let mut sign_nodes = Vec::new();
     for i in 2..=3 {
         let addr = start_mpc_sign_node(&docker, i as u64, &pk_set, &sk_shares[i - 1]).await?;
         sign_nodes.push(addr);
     }
-    let leader_node = start_mpc_leader_node(&docker, 1, &pk_set, &sk_shares[0], sign_nodes).await?;
+    let leader_node = start_mpc_leader_node(
+        &docker,
+        1,
+        &pk_set,
+        &sk_shares[0],
+        sign_nodes,
+        &root_secret_key,
+    )
+    .await?;
 
     // Wait until all nodes initialize
     tokio::time::sleep(Duration::from_millis(2000)).await;
