@@ -68,7 +68,11 @@ pub fn new_add_fa_key_transaction(
     }
 }
 
-pub fn sign_transaction(transaction: Transaction, signer_id: AccountId, signer_sk: SecretKey) -> SignedTransaction {
-    let signer = InMemorySigner::from_secret_key(signer_id.clone(), signer_sk);
-    return transaction.sign(&signer);  
+pub fn sign_transaction(
+    transaction: Transaction,
+    signer_id: AccountId,
+    signer_sk: SecretKey,
+) -> SignedTransaction {
+    let signer = InMemorySigner::from_secret_key(signer_id, signer_sk);
+    transaction.sign(&signer)
 }
