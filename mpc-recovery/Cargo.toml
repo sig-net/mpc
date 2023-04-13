@@ -23,6 +23,7 @@ async-trait = "0.1"
 axum = "0.6"
 chrono = "0.4.24"
 clap = { version = "4.2", features = ["derive", "env"] }
+ed25519-dalek = "1"
 futures = "0.3"
 hex = "0.4"
 hyper = { version = "0.14", features = ["full"] }

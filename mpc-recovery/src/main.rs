@@ -1,4 +1,5 @@
 use clap::Parser;
+use ed25519_dalek::SecretKey;
 use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
 
 mod gcp;
@@ -25,6 +26,9 @@ enum Cli {
         /// The compute nodes to connect to
         #[arg(long, env("MPC_RECOVERY_SIGN_NODES"))]
         sign_nodes: Vec<String>,
+        /// TEMPORARY - Root ed25519 secret key
+        #[arg(long, env("MPC_RECOVERY_ROOT_SECRET_KEY"))]
+        root_secret_key: String,
     },
     StartSign {
         /// Node ID
@@ -57,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
 
     match Cli::parse() {
         Cli::Generate { n, t } => {
-            let (pk_set, sk_shares) = mpc_recovery::generate(n, t)?;
+            let (pk_set, sk_shares, root_secret_key) = mpc_recovery::generate(n, t)?;
             println!("Public key set: {}", serde_json::to_string(&pk_set)?);
             for (i, sk_share) in sk_shares.iter().enumerate() {
                 println!(
@@ -66,6 +70,8 @@ async fn main() -> anyhow::Result<()> {
                     serde_json::to_string(&SerdeSecret(sk_share))?
                 );
             }
+
+            println!("Root private key: {}", hex::encode(root_secret_key));
         }
         Cli::StartLeader {
             node_id,
@@ -73,13 +79,23 @@ async fn main() -> anyhow::Result<()> {
             sk_share,
             web_port,
             sign_nodes,
+            root_secret_key,
         } => {
             let sk_share = load_sh_skare(node_id, sk_share).await?;
 
             let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
             let sk_share: SecretKeyShare = serde_json::from_str(&sk_share).unwrap();
+            let root_secret_key = SecretKey::from_bytes(&hex::decode(root_secret_key)?)?;
 
-            mpc_recovery::run_leader_node(node_id, pk_set, sk_share, web_port, sign_nodes).await;
+            mpc_recovery::run_leader_node(
+                node_id,
+                pk_set,
+                sk_share,
+                web_port,
+                sign_nodes,
+                root_secret_key,
+            )
+            .await;
         }
         Cli::StartSign {
             node_id,
