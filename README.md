@@ -59,6 +59,7 @@ docker build . -t near/mpc-recovery
 
 Run tests with:
 ```
+cargo test -p mpc-recovery
 cargo test -p mpc-recovery-integration-tests
 ```
 You will need to re-build the Docker image each time you made a code change and want to run the integration tests.
