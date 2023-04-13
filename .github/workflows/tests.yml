@@ -21,7 +21,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@v1
       - name: Install Protoc
-        uses: arduino/setup-protoc@v1
+        uses: arduino/setup-protoc@v1.1.2
       - name: Compile
         run: cargo check
       - name: Test format
