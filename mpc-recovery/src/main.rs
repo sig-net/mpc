@@ -1,6 +1,5 @@
 use clap::Parser;
 use ed25519_dalek::SecretKey;
-use rand::rngs::OsRng;
 use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
 
 mod gcp;
@@ -62,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
 
     match Cli::parse() {
         Cli::Generate { n, t } => {
-            let (pk_set, sk_shares) = mpc_recovery::generate(n, t)?;
+            let (pk_set, sk_shares, root_secret_key) = mpc_recovery::generate(n, t)?;
             println!("Public key set: {}", serde_json::to_string(&pk_set)?);
             for (i, sk_share) in sk_shares.iter().enumerate() {
                 println!(
@@ -72,8 +71,6 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
 
-            let mut csprng = OsRng {};
-            let root_secret_key = SecretKey::generate(&mut csprng);
             println!("Root private key: {}", hex::encode(root_secret_key));
         }
         Cli::StartLeader {
