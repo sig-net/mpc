@@ -47,10 +47,13 @@ There are several ways to get and use the ID token. The flow that we are using i
 Internally, we are identifiying users by their issuer id (iss) and their unique ID (sub) retrieved form the ID token and separated by a colon: `<issuer_iss>:<user_sub>`. It means that each recovery method (like GitHub abd Google) is separated from one another even if they have the same email.
 
 ### Contribute
-In order to build the project, you will need to execute next commands:
+
+In order to build the project, you will need to have `protoc` installed and execute next commands:
 
 ```BASH
+# init submodules
 git submodule update --init --recursive
+# build the Docker image
 docker build . -t near/mpc-recovery
 ```
 
@@ -58,3 +61,4 @@ Run tests with:
 ```
 cargo test -p mpc-recovery-integration-tests
 ```
+You will need to re-build the Docker image each time you made a code change and want to run the integration tests.
