@@ -1,6 +1,6 @@
 use crate::msg::{
-    LeaderRequest, LeaderResponse, NewAccountRequest, NewAccountResponse, AddKeyRequest,
-    AddKeyResponse, SigShareRequest, SigShareResponse,
+    AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
+    NewAccountResponse, SigShareRequest, SigShareResponse,
 };
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::transaction::{
@@ -98,33 +98,42 @@ async fn new_account<T: OAuthTokenVerifier>(
 
     match T::verify_token(&request.id_token).await {
         Ok(_) => {
+            tracing::info!("access token is valid");
+
             // This is the account that is doing the function calls to creates new accounts.
-            // TODO: the private key from this acc should be stored in GCP Secret Manager
+            // TODO: Create such an account for testnet and mainnet
+            // TODO: Store this account secret key in GCP Secret Manager
             let account_creator_id: AccountId = "account_creator.testnet".parse().unwrap();
             let account_creator_sk: SecretKey = "secret_key".parse().unwrap();
             let account_creator_pk: PublicKey = "public_key".parse().unwrap();
 
-            tracing::info!("access token is valid");
             // Get nonce and recent block hash
-            let nonce = 0; // TODO: get real nonce
-            let block_hash: CryptoHash = "".parse().unwrap(); // TODO: get real block hash
-                                                              // Create/generate a public key for the new user
-            let new_user_pk: PublicKey = "".parse().unwrap(); // TODO: generate real user pk
-                                                              // Create a transaction to create a new account
+            // TODO: get real nonce and block hash
+            let nonce = 0;
+            let block_hash: CryptoHash = "".parse().unwrap();
+
+            // Create/generate a public key for for this user
+            // TODO: use key derivation or other techniques to generate a key
+            let mpc_recovery_user_pk: PublicKey = "".parse().unwrap();
+
+            // Create a transaction to create new NEAR account
             let new_user_account_id: AccountId = request.account_id.clone().parse().unwrap();
             let create_acc_tx = new_create_account_transaction(
                 new_user_account_id,
-                new_user_pk,
+                mpc_recovery_user_pk,
                 account_creator_id.clone(),
                 account_creator_pk,
                 nonce,
                 block_hash,
                 crate::transaction::NetworkType::Testnet,
             );
+
             // Sign the transaction
             let _signed_create_acc_tx =
                 sign_transaction(create_acc_tx, account_creator_id, account_creator_sk);
+
             //TODO: Send transaction to the relayer
+
             (StatusCode::OK, Json(NewAccountResponse::Ok))
         }
         Err(_) => {
@@ -153,26 +162,33 @@ async fn add_key<T: OAuthTokenVerifier>(
     match T::verify_token(&request.id_token).await {
         Ok(_) => {
             tracing::info!("access token is valid");
-            // Get nonce and recent block hash
-            let nonce = 0; // TODO: get real nonce
-            let block_hash: CryptoHash = "".parse().unwrap(); // TODO: get real block hash
-                                                              // Create/generate a public key for the new user
-            let new_user_pk: PublicKey = request.public_key.clone().parse().unwrap();
-            let user_recovery_pk: PublicKey = "pk".parse().unwrap(); // TODO: generate real user pk
-                                                                     // Create a transaction to create a new account
+            // TODO: Get nonce and recent block hash
+            let nonce = 0;
+            let block_hash: CryptoHash = "".parse().unwrap();
+
+            // Create/generate a public key for for this user
+            // TODO: use key derivation or other techniques to generate a key
+            let mpc_recovery_user_pk: PublicKey = "".parse().unwrap();
+
+            // Create a transaction to create a new account
             let user_account_id: AccountId = request.account_id.parse().unwrap();
+            let new_user_pk: PublicKey = request.public_key.clone().parse().unwrap();
             let add_key_tx = new_add_fa_key_transaction(
                 user_account_id.clone(),
-                user_recovery_pk,
+                mpc_recovery_user_pk,
                 new_user_pk,
                 nonce,
                 block_hash,
             );
+
             // Sign the transaction
-            let user_reocvery_sk: SecretKey = "".parse().unwrap(); // TODO: get real user recovery sk
+            // TODO: use key derivation or other techniques to generate a key
+            let mpc_recovery_user_sk: SecretKey = "".parse().unwrap();
             let _signed_add_key_tx =
-                sign_transaction(add_key_tx, user_account_id, user_reocvery_sk);
+                sign_transaction(add_key_tx, user_account_id, mpc_recovery_user_sk);
+
             //TODO: Send transaction to the relayer
+
             (StatusCode::OK, Json(AddKeyResponse::Ok))
         }
         Err(_) => {
