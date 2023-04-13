@@ -4,19 +4,16 @@ use serde::{Deserialize, Serialize};
 use threshold_crypto::{Signature, SignatureShare};
 
 #[derive(Serialize, Deserialize)]
-pub struct AddRecoveryMethodRequest {
-    pub access_token: String,
+pub struct NewAccountRequest {
     pub account_id: String,
+    pub id_token: String,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-pub enum AddRecoveryMethodResponse {
-    Ok {
-        #[serde(with = "hex_public_key")]
-        public_key: PublicKey,
-    },
+pub enum NewAccountResponse {
+    Ok,
     Err {
         msg: String,
     },
@@ -24,9 +21,10 @@ pub enum AddRecoveryMethodResponse {
 
 #[derive(Serialize, Deserialize)]
 pub struct RecoverAccountRequest {
-    pub access_token: String,
+    pub account_id: String,
     #[serde(with = "hex_public_key")]
     pub public_key: PublicKey,
+    pub id_token: String,
 }
 
 #[derive(Serialize, Deserialize)]

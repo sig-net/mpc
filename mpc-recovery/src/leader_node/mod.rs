@@ -1,5 +1,5 @@
 use crate::msg::{
-    AddRecoveryMethodRequest, AddRecoveryMethodResponse, LeaderRequest, LeaderResponse,
+    NewAccountRequest, NewAccountResponse, LeaderRequest, LeaderResponse,
     RecoverAccountRequest, RecoverAccountResponse, SigShareRequest, SigShareResponse,
 };
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
@@ -42,8 +42,8 @@ pub async fn run(
     let app = Router::new()
         .route("/submit", post(submit::<UniversalTokenVerifier>))
         .route(
-            "/add_recovery_method",
-            post(add_recovery_method::<UniversalTokenVerifier>),
+            "/new_account",
+            post(new_account::<UniversalTokenVerifier>),
         )
         .route(
             "/recover_account",
@@ -87,30 +87,29 @@ async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareRespon
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
-async fn add_recovery_method<T: OAuthTokenVerifier>(
+async fn new_account<T: OAuthTokenVerifier>(
     State(state): State<LeaderState>,
-    Json(request): Json<AddRecoveryMethodRequest>,
-) -> (StatusCode, Json<AddRecoveryMethodResponse>) {
+    Json(request): Json<NewAccountRequest>,
+) -> (StatusCode, Json<NewAccountResponse>) {
     tracing::info!(
-        access_token = format!("{:.5}...", request.access_token),
+        access_token = format!("{:.5}...", request.id_token),
         "new request"
     );
 
-    match T::verify_token(&request.access_token).await {
+    match T::verify_token(&request.id_token).await {
         Ok(_) => {
+            // TODO: create and send create acc transaction here
             tracing::info!("access token is valid");
             (
                 StatusCode::OK,
-                Json(AddRecoveryMethodResponse::Ok {
-                    public_key: (&state.root_secret_key).into(),
-                }),
+                Json(NewAccountResponse::Ok),
             )
         }
         Err(_) => {
             tracing::error!("access token verification failed");
             (
                 StatusCode::UNAUTHORIZED,
-                Json(AddRecoveryMethodResponse::Err {
+                Json(NewAccountResponse::Err {
                     msg: "access token verification failed".into(),
                 }),
             )
@@ -124,15 +123,15 @@ async fn recover_account<T: OAuthTokenVerifier>(
     Json(request): Json<RecoverAccountRequest>,
 ) -> (StatusCode, Json<RecoverAccountResponse>) {
     tracing::info!(
-        access_token = format!("{:.5}...", request.access_token),
+        access_token = format!("{:.5}...", request.id_token),
         public_key = hex::encode(request.public_key),
         "new request"
     );
 
-    match T::verify_token(&request.access_token).await {
+    match T::verify_token(&request.id_token).await {
         Ok(_) => {
             tracing::info!("access token is valid");
-            // TODO: create and submit a transaction
+            // TODO: create and submit add key transaction
             (StatusCode::OK, Json(RecoverAccountResponse::Ok))
         }
         Err(_) => {
