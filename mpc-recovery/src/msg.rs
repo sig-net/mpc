@@ -1,5 +1,4 @@
 use crate::NodeId;
-use ed25519_dalek::PublicKey;
 use serde::{Deserialize, Serialize};
 use threshold_crypto::{Signature, SignatureShare};
 
@@ -14,23 +13,20 @@ pub struct NewAccountRequest {
 #[serde(rename_all = "snake_case")]
 pub enum NewAccountResponse {
     Ok,
-    Err {
-        msg: String,
-    },
+    Err { msg: String },
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct RecoverAccountRequest {
+pub struct AddKeyRequest {
     pub account_id: String,
-    #[serde(with = "hex_public_key")]
-    pub public_key: PublicKey,
+    pub public_key: String,
     pub id_token: String,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-pub enum RecoverAccountResponse {
+pub enum AddKeyResponse {
     Ok,
     Err { msg: String },
 }
@@ -98,24 +94,3 @@ mod hex_sig_share {
     }
 }
 
-mod hex_public_key {
-    use ed25519_dalek::PublicKey;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(sig_share: &PublicKey, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let s = hex::encode(sig_share.to_bytes());
-        serializer.serialize_str(&s)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<PublicKey, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        PublicKey::from_bytes(&hex::decode(s).map_err(serde::de::Error::custom)?)
-            .map_err(serde::de::Error::custom)
-    }
-}

@@ -9,7 +9,7 @@ use near_primitives::types::{AccountId, Nonce};
 use serde_json::json;
 
 pub enum NetworkType {
-    Mainnet,
+    _Mainnet,
     Testnet,
 }
 
@@ -27,7 +27,7 @@ pub fn new_create_account_transaction(
         public_key: signer_pk,
         nonce,
         receiver_id: match network_type {
-            NetworkType::Mainnet => "near".parse().unwrap(),
+            NetworkType::_Mainnet => "near".parse().unwrap(),
             NetworkType::Testnet => "testnet".parse().unwrap(),
         },
         block_hash,
