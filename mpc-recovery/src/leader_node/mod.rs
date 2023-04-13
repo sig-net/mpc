@@ -71,7 +71,7 @@ struct LeaderState {
 impl Clone for LeaderState {
     fn clone(&self) -> Self {
         Self {
-            id: self.id.clone(),
+            id: self.id,
             pk_set: self.pk_set.clone(),
             sk_share: self.sk_share.clone(),
             sign_nodes: self.sign_nodes.clone(),
@@ -125,7 +125,7 @@ async fn recover_account<T: OAuthTokenVerifier>(
 ) -> (StatusCode, Json<RecoverAccountResponse>) {
     tracing::info!(
         access_token = format!("{:.5}...", request.access_token),
-        public_key = hex::encode(&request.public_key),
+        public_key = hex::encode(request.public_key),
         "new request"
     );
 
