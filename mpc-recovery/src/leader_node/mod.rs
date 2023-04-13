@@ -1,7 +1,11 @@
-use crate::msg::{LeaderRequest, LeaderResponse, SigShareRequest, SigShareResponse};
+use crate::msg::{
+    AddRecoveryMethodRequest, AddRecoveryMethodResponse, LeaderRequest, LeaderResponse,
+    RecoverAccountRequest, RecoverAccountResponse, SigShareRequest, SigShareResponse,
+};
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::NodeId;
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use ed25519_dalek::SecretKey;
 use futures::stream::FuturesUnordered;
 use hyper::client::ResponseFuture;
 use hyper::{Body, Client, Method, Request};
@@ -10,13 +14,15 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use threshold_crypto::{PublicKeySet, SecretKeyShare};
 
-#[tracing::instrument(level = "debug", skip(pk_set, sk_share, sign_nodes))]
+#[tracing::instrument(level = "debug", skip(pk_set, sk_share, sign_nodes, root_secret_key))]
 pub async fn run(
     id: NodeId,
     pk_set: PublicKeySet,
     sk_share: SecretKeyShare,
     port: u16,
     sign_nodes: Vec<String>,
+    // TODO: temporary solution
+    root_secret_key: SecretKey,
 ) {
     tracing::debug!(?sign_nodes, "running a leader node");
 
@@ -30,10 +36,19 @@ pub async fn run(
         pk_set,
         sk_share,
         sign_nodes,
+        root_secret_key,
     };
 
     let app = Router::new()
         .route("/submit", post(submit::<UniversalTokenVerifier>))
+        .route(
+            "/add_recovery_method",
+            post(add_recovery_method::<UniversalTokenVerifier>),
+        )
+        .route(
+            "/recover_account",
+            post(recover_account::<UniversalTokenVerifier>),
+        )
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -44,18 +59,92 @@ pub async fn run(
         .unwrap();
 }
 
-#[derive(Clone)]
 struct LeaderState {
     id: NodeId,
     pk_set: PublicKeySet,
     sk_share: SecretKeyShare,
     sign_nodes: Vec<String>,
+    // TODO: temporary solution
+    root_secret_key: SecretKey,
+}
+
+impl Clone for LeaderState {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            pk_set: self.pk_set.clone(),
+            sk_share: self.sk_share.clone(),
+            sign_nodes: self.sign_nodes.clone(),
+            root_secret_key: SecretKey::from_bytes(self.root_secret_key.as_bytes()).unwrap(),
+        }
+    }
 }
 
 async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareResponse> {
     let response = response_future.await?;
     let response_body = hyper::body::to_bytes(response.into_body()).await?;
     Ok(serde_json::from_slice(&response_body)?)
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
+async fn add_recovery_method<T: OAuthTokenVerifier>(
+    State(state): State<LeaderState>,
+    Json(request): Json<AddRecoveryMethodRequest>,
+) -> (StatusCode, Json<AddRecoveryMethodResponse>) {
+    tracing::info!(
+        access_token = format!("{:.5}...", request.access_token),
+        "new request"
+    );
+
+    match T::verify_token(&request.access_token).await {
+        Ok(_) => {
+            tracing::info!("access token is valid");
+            (
+                StatusCode::OK,
+                Json(AddRecoveryMethodResponse::Ok {
+                    public_key: (&state.root_secret_key).into(),
+                }),
+            )
+        }
+        Err(_) => {
+            tracing::error!("access token verification failed");
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(AddRecoveryMethodResponse::Err {
+                    msg: "access token verification failed".into(),
+                }),
+            )
+        }
+    }
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
+async fn recover_account<T: OAuthTokenVerifier>(
+    State(state): State<LeaderState>,
+    Json(request): Json<RecoverAccountRequest>,
+) -> (StatusCode, Json<RecoverAccountResponse>) {
+    tracing::info!(
+        access_token = format!("{:.5}...", request.access_token),
+        public_key = hex::encode(&request.public_key),
+        "new request"
+    );
+
+    match T::verify_token(&request.access_token).await {
+        Ok(_) => {
+            tracing::info!("access token is valid");
+            // TODO: create and submit a transaction
+            (StatusCode::OK, Json(RecoverAccountResponse::Ok))
+        }
+        Err(_) => {
+            tracing::error!("access token verification failed");
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(RecoverAccountResponse::Err {
+                    msg: "access token verification failed".into(),
+                }),
+            )
+        }
+    }
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
