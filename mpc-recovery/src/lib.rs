@@ -2,6 +2,7 @@ use ed25519_dalek::SecretKey;
 use rand::rngs::OsRng;
 use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare};
 
+pub(crate) mod client;
 mod leader_node;
 pub mod msg;
 mod oauth;
