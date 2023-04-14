@@ -85,7 +85,7 @@ impl OAuthTokenVerifier for PagodaFirebaseTokenVerifier {
 
         let claims = Self::validate_jwt(
             token,
-            &public_key.as_bytes(),
+            public_key.as_bytes(),
             &pagoda_firebase_issuer_id,
             &pagoda_firebase_audience_id,
         )
