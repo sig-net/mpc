@@ -124,10 +124,10 @@ async fn process_new_account(
     );
 
     // Sign the transaction
-    let _signed_create_acc_tx =
+    let signed_create_acc_tx =
         sign_transaction(create_acc_tx, account_creator_id, account_creator_sk);
 
-    //TODO: Send transaction to the relayer
+    state.client.send_tx(signed_create_acc_tx).await?;
 
     Ok((StatusCode::OK, Json(NewAccountResponse::Ok)))
 }
@@ -200,9 +200,9 @@ async fn process_add_key(
     // Sign the transaction
     // TODO: use key derivation or other techniques to generate a key
     let mpc_recovery_user_sk: SecretKey = "".parse().unwrap();
-    let _signed_add_key_tx = sign_transaction(add_key_tx, user_account_id, mpc_recovery_user_sk);
+    let signed_add_key_tx = sign_transaction(add_key_tx, user_account_id, mpc_recovery_user_sk);
 
-    //TODO: Send transaction to the relayer
+    state.client.send_tx(signed_add_key_tx).await?;
 
     Ok((StatusCode::OK, Json(AddKeyResponse::Ok)))
 }
