@@ -4,5 +4,6 @@
 .gitattributes
 
 target/
+!target/cache
 Dockerfile
 .dockerignore
