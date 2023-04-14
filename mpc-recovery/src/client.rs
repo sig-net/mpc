@@ -1,8 +1,9 @@
-use near_jsonrpc_client::{methods, JsonRpcClient};
+use near_jsonrpc_client::{methods, JsonRpcClient, MethodCallResult};
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_primitives::hash::CryptoHash;
+use near_primitives::transaction::SignedTransaction;
 use near_primitives::types::{AccountId, Finality};
-use near_primitives::views::{AccessKeyView, QueryRequest};
+use near_primitives::views::{AccessKeyView, FinalExecutionOutcomeView, QueryRequest};
 
 #[derive(Clone)]
 pub struct NearRpcClient {
@@ -41,6 +42,35 @@ impl NearRpcClient {
         }
     }
 
+    async fn query_broadcast_tx(
+        &self,
+        method: &methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest,
+    ) -> MethodCallResult<
+        FinalExecutionOutcomeView,
+        near_jsonrpc_primitives::types::transactions::RpcTransactionError,
+    > {
+        let result = self.rpc_client.call(method).await;
+        match &result {
+            Ok(response) => {
+                tracing::debug!(
+                    target: "client",
+                    "Submitting transaction with actions {:?} succeeded with status {:?}",
+                    method.signed_transaction.transaction.actions,
+                    response.status
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    target: "client",
+                    "Calling RPC method {:?} resulted in error {:?}",
+                    method,
+                    error
+                );
+            }
+        };
+        result
+    }
+
     pub async fn access_key_nonce(
         &self,
         account_id: AccountId,
@@ -58,6 +88,19 @@ impl NearRpcClient {
             })
             .await?;
         Ok(block_view.header.hash)
+    }
+
+    pub async fn send_tx(
+        &self,
+        signed_transaction: SignedTransaction,
+    ) -> anyhow::Result<FinalExecutionOutcomeView> {
+        let result = self
+            .query_broadcast_tx(&methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
+                signed_transaction,
+            })
+            .await?;
+
+        Ok(result)
     }
 }
 
