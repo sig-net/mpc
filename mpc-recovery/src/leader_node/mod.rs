@@ -1,14 +1,19 @@
+use crate::client::NearRpcClient;
 use crate::msg::{
-    AddRecoveryMethodRequest, AddRecoveryMethodResponse, LeaderRequest, LeaderResponse,
-    RecoverAccountRequest, RecoverAccountResponse, SigShareRequest, SigShareResponse,
+    AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
+    NewAccountResponse, SigShareRequest, SigShareResponse,
 };
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
+use crate::transaction::{
+    new_add_fa_key_transaction, new_create_account_transaction, sign_transaction,
+};
 use crate::NodeId;
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
-use ed25519_dalek::SecretKey;
 use futures::stream::FuturesUnordered;
 use hyper::client::ResponseFuture;
 use hyper::{Body, Client, Method, Request};
+use near_crypto::{PublicKey, SecretKey};
+use near_primitives::types::AccountId;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -22,7 +27,7 @@ pub async fn run(
     port: u16,
     sign_nodes: Vec<String>,
     // TODO: temporary solution
-    root_secret_key: SecretKey,
+    root_secret_key: ed25519_dalek::SecretKey,
 ) {
     tracing::debug!(?sign_nodes, "running a leader node");
 
@@ -36,19 +41,14 @@ pub async fn run(
         pk_set,
         sk_share,
         sign_nodes,
+        client: NearRpcClient::testnet(),
         root_secret_key,
     };
 
     let app = Router::new()
         .route("/submit", post(submit::<UniversalTokenVerifier>))
-        .route(
-            "/add_recovery_method",
-            post(add_recovery_method::<UniversalTokenVerifier>),
-        )
-        .route(
-            "/recover_account",
-            post(recover_account::<UniversalTokenVerifier>),
-        )
+        .route("/new_account", post(new_account::<UniversalTokenVerifier>))
+        .route("/add_key", post(add_key::<UniversalTokenVerifier>))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -64,8 +64,9 @@ struct LeaderState {
     pk_set: PublicKeySet,
     sk_share: SecretKeyShare,
     sign_nodes: Vec<String>,
+    client: NearRpcClient,
     // TODO: temporary solution
-    root_secret_key: SecretKey,
+    root_secret_key: ed25519_dalek::SecretKey,
 }
 
 impl Clone for LeaderState {
@@ -75,7 +76,9 @@ impl Clone for LeaderState {
             pk_set: self.pk_set.clone(),
             sk_share: self.sk_share.clone(),
             sign_nodes: self.sign_nodes.clone(),
-            root_secret_key: SecretKey::from_bytes(self.root_secret_key.as_bytes()).unwrap(),
+            client: self.client.clone(),
+            root_secret_key: ed25519_dalek::SecretKey::from_bytes(self.root_secret_key.as_bytes())
+                .unwrap(),
         }
     }
 }
@@ -86,31 +89,80 @@ async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareRespon
     Ok(serde_json::from_slice(&response_body)?)
 }
 
-#[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
-async fn add_recovery_method<T: OAuthTokenVerifier>(
+async fn process_new_account(
+    state: &LeaderState,
+    request: &NewAccountRequest,
+) -> anyhow::Result<(StatusCode, Json<NewAccountResponse>)> {
+    // This is the account that is doing the function calls to creates new accounts.
+    // TODO: Create such an account for testnet and mainnet
+    // TODO: Store this account secret key in GCP Secret Manager
+    let account_creator_id: AccountId = "account_creator.testnet".parse().unwrap();
+    let account_creator_sk: SecretKey = "secret_key".parse().unwrap();
+    let account_creator_pk: PublicKey = "public_key".parse().unwrap();
+
+    // Get nonce and recent block hash
+    let nonce = state
+        .client
+        .access_key_nonce(account_creator_id.clone(), account_creator_pk.clone())
+        .await?;
+    let block_hash = state.client.latest_block_hash().await?;
+
+    // Create/generate a public key for for this user
+    // TODO: use key derivation or other techniques to generate a key
+    let mpc_recovery_user_pk: PublicKey = "".parse().unwrap();
+
+    // Create a transaction to create new NEAR account
+    let new_user_account_id: AccountId = request.account_id.clone().parse().unwrap();
+    let create_acc_tx = new_create_account_transaction(
+        new_user_account_id,
+        mpc_recovery_user_pk,
+        account_creator_id.clone(),
+        account_creator_pk,
+        nonce,
+        block_hash,
+        crate::transaction::NetworkType::Testnet,
+    );
+
+    // Sign the transaction
+    let signed_create_acc_tx =
+        sign_transaction(create_acc_tx, account_creator_id, account_creator_sk);
+
+    state.client.send_tx(signed_create_acc_tx).await?;
+
+    Ok((StatusCode::OK, Json(NewAccountResponse::Ok)))
+}
+
+#[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
+async fn new_account<T: OAuthTokenVerifier>(
     State(state): State<LeaderState>,
-    Json(request): Json<AddRecoveryMethodRequest>,
-) -> (StatusCode, Json<AddRecoveryMethodResponse>) {
+    Json(request): Json<NewAccountRequest>,
+) -> (StatusCode, Json<NewAccountResponse>) {
     tracing::info!(
-        access_token = format!("{:.5}...", request.access_token),
+        access_token = format!("{:.5}...", request.id_token),
         "new request"
     );
 
-    match T::verify_token(&request.access_token).await {
+    match T::verify_token(&request.id_token).await {
         Ok(_) => {
             tracing::info!("access token is valid");
-            (
-                StatusCode::OK,
-                Json(AddRecoveryMethodResponse::Ok {
-                    public_key: (&state.root_secret_key).into(),
-                }),
-            )
+            match process_new_account(&state, &request).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(err = ?e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(NewAccountResponse::Err {
+                            msg: "internal error".to_string(),
+                        }),
+                    )
+                }
+            }
         }
         Err(_) => {
             tracing::error!("access token verification failed");
             (
                 StatusCode::UNAUTHORIZED,
-                Json(AddRecoveryMethodResponse::Err {
+                Json(NewAccountResponse::Err {
                     msg: "access token verification failed".into(),
                 }),
             )
@@ -118,28 +170,75 @@ async fn add_recovery_method<T: OAuthTokenVerifier>(
     }
 }
 
-#[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
-async fn recover_account<T: OAuthTokenVerifier>(
+async fn process_add_key(
+    state: &LeaderState,
+    request: &AddKeyRequest,
+) -> anyhow::Result<(StatusCode, Json<AddKeyResponse>)> {
+    let user_account_id: AccountId = request.account_id.parse().unwrap();
+
+    // Create/generate a public key for for this user
+    // TODO: use key derivation or other techniques to generate a key
+    let mpc_recovery_user_pk: PublicKey = "".parse().unwrap();
+
+    // Get nonce and recent block hash
+    let nonce = state
+        .client
+        .access_key_nonce(user_account_id.clone(), mpc_recovery_user_pk.clone())
+        .await?;
+    let block_hash = state.client.latest_block_hash().await?;
+
+    // Create a transaction to create a new account
+    let new_user_pk: PublicKey = request.public_key.clone().parse().unwrap();
+    let add_key_tx = new_add_fa_key_transaction(
+        user_account_id.clone(),
+        mpc_recovery_user_pk,
+        new_user_pk,
+        nonce,
+        block_hash,
+    );
+
+    // Sign the transaction
+    // TODO: use key derivation or other techniques to generate a key
+    let mpc_recovery_user_sk: SecretKey = "".parse().unwrap();
+    let signed_add_key_tx = sign_transaction(add_key_tx, user_account_id, mpc_recovery_user_sk);
+
+    state.client.send_tx(signed_add_key_tx).await?;
+
+    Ok((StatusCode::OK, Json(AddKeyResponse::Ok)))
+}
+
+#[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
+async fn add_key<T: OAuthTokenVerifier>(
     State(state): State<LeaderState>,
-    Json(request): Json<RecoverAccountRequest>,
-) -> (StatusCode, Json<RecoverAccountResponse>) {
+    Json(request): Json<AddKeyRequest>,
+) -> (StatusCode, Json<AddKeyResponse>) {
     tracing::info!(
-        access_token = format!("{:.5}...", request.access_token),
-        public_key = hex::encode(request.public_key),
+        access_token = format!("{:.5}...", request.id_token),
+        public_key = hex::encode(request.public_key.clone()),
         "new request"
     );
 
-    match T::verify_token(&request.access_token).await {
+    match T::verify_token(&request.id_token).await {
         Ok(_) => {
             tracing::info!("access token is valid");
-            // TODO: create and submit a transaction
-            (StatusCode::OK, Json(RecoverAccountResponse::Ok))
+            match process_add_key(&state, &request).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(err = ?e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(AddKeyResponse::Err {
+                            msg: "internal error".to_string(),
+                        }),
+                    )
+                }
+            }
         }
         Err(_) => {
             tracing::error!("access token verification failed");
             (
                 StatusCode::UNAUTHORIZED,
-                Json(RecoverAccountResponse::Err {
+                Json(AddKeyResponse::Err {
                     msg: "access token verification failed".into(),
                 }),
             )
