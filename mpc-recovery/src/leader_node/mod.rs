@@ -10,7 +10,7 @@ use crate::transaction::{
     new_add_fa_key_transaction, new_create_account_transaction, sign_transaction,
 };
 use crate::NodeId;
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{http::StatusCode, routing::post, Extension, Json, Router};
 use futures::stream::FuturesUnordered;
 use hyper::client::ResponseFuture;
 use hyper::{Body, Client, Method, Request};
@@ -51,7 +51,7 @@ pub async fn run(
         .route("/submit", post(submit::<UniversalTokenVerifier>))
         .route("/new_account", post(new_account::<UniversalTokenVerifier>))
         .route("/add_key", post(add_key::<UniversalTokenVerifier>))
-        .with_state(state);
+        .layer(Extension(state));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::debug!(?addr, "starting http server");
@@ -135,7 +135,7 @@ async fn process_new_account(
 
 #[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
 async fn new_account<T: OAuthTokenVerifier>(
-    State(state): State<LeaderState>,
+    Extension(state): Extension<LeaderState>,
     Json(request): Json<NewAccountRequest>,
 ) -> (StatusCode, Json<NewAccountResponse>) {
     tracing::info!(
@@ -212,7 +212,7 @@ async fn process_add_key(
 
 #[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
 async fn add_key<T: OAuthTokenVerifier>(
-    State(state): State<LeaderState>,
+    Extension(state): Extension<LeaderState>,
     Json(request): Json<AddKeyRequest>,
 ) -> (StatusCode, Json<AddKeyResponse>) {
     tracing::info!(
@@ -251,7 +251,7 @@ async fn add_key<T: OAuthTokenVerifier>(
 
 #[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
 async fn submit<T: OAuthTokenVerifier>(
-    State(state): State<LeaderState>,
+    Extension(state): Extension<LeaderState>,
     Json(request): Json<LeaderRequest>,
 ) -> (StatusCode, Json<LeaderResponse>) {
     tracing::info!(payload = request.payload, "submit request");
