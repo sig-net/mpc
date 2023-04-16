@@ -42,7 +42,7 @@ tokio = { version = "1.0", features = ["full"] }
 tonic = { version = "0.9", features = ["tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-near-jsonrpc-client = "0.4.1"
-near-jsonrpc-primitives = "0.15.0"
-near-primitives = "0.15.0"
-near-crypto = "0.15.0"
+near-jsonrpc-client = "0.5.1"
+near-jsonrpc-primitives = "0.16.1"
+near-primitives = "0.16.1"
+near-crypto = "0.16.1"
