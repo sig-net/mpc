@@ -13,42 +13,7 @@ pub enum NetworkType {
     Testnet,
 }
 
-pub fn new_create_account_signed_delegate_action(
-    signer_id: AccountId,
-    signer_sk: SecretKey,
-    signer_pk: PublicKey,
-    new_account_id: AccountId,
-    new_account_pk: PublicKey,
-    network_type: NetworkType,
-    nonce: Nonce,
-    current_block_height: u64,
-) -> SignedDelegateAction {
-    let delegate_action = get_create_account_delegate_action(
-        signer_id.clone(),
-        signer_pk,
-        new_account_id,
-        new_account_pk,
-        network_type,
-        nonce,
-        current_block_height + 100,
-    );
-    get_signed_delegated_action(delegate_action, signer_id, signer_sk)
-}
-
-pub fn new_add_key_signed_delegate_action(
-    sender_id: AccountId,
-    new_public_key: PublicKey,
-    secret_key: SecretKey,
-    nonce: Nonce,
-    current_block_height: u64,
-) -> SignedDelegateAction {
-    let max_block_height: u64 = current_block_height + 100;
-    let delegate_action =
-        get_add_key_delegate_action(sender_id.clone(), new_public_key, nonce, max_block_height);
-    get_signed_delegated_action(delegate_action, sender_id, secret_key)
-}
-
-fn get_create_account_delegate_action(
+pub fn get_create_account_delegate_action(
     signer_id: AccountId,
     signer_pk: PublicKey,
     new_account_id: AccountId,
@@ -84,7 +49,7 @@ fn get_create_account_delegate_action(
     }
 }
 
-fn get_add_key_delegate_action(
+pub fn get_add_key_delegate_action(
     sender_id: AccountId,
     public_key: PublicKey,
     nonce: Nonce,
@@ -110,7 +75,7 @@ fn get_add_key_delegate_action(
     }
 }
 
-fn get_signed_delegated_action(
+pub fn get_signed_delegated_action(
     delegate_action: DelegateAction,
     signer_id: AccountId,
     signer_sk: SecretKey,

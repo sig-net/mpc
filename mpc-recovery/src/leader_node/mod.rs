@@ -7,7 +7,7 @@ use crate::msg::{
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::primitives::InternalAccountId;
 use crate::transaction::{
-    new_add_key_signed_delegate_action, new_create_account_signed_delegate_action,
+    get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
 };
 use crate::NodeId;
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
@@ -115,16 +115,17 @@ async fn process_new_account(
     let new_user_account_id: AccountId = request.account_id.clone().parse().unwrap();
     let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
 
-    let _signed_delegate_action = new_create_account_signed_delegate_action(
-        account_creator_id,
-        account_creator_sk,
+    let delegate_action = get_create_account_delegate_action(
+        account_creator_id.clone(),
         account_creator_pk,
         new_user_account_id,
         get_user_recovery_pk(internal_user_id),
         crate::transaction::NetworkType::Testnet,
         nonce,
-        block_height,
+        block_height + 100,
     );
+    let _signed_delegate_action =
+        get_signed_delegated_action(delegate_action, account_creator_id, account_creator_sk);
 
     // Send the transaction to the relayer
     // TODO: currently client doesn't support sending delegated actions to the relayer,
@@ -192,12 +193,18 @@ async fn process_add_key(
     // Create a transaction to create a new account
     let new_user_pk: PublicKey = request.public_key.clone().parse().unwrap();
 
-    let _signed_delegate_action = new_add_key_signed_delegate_action(
-        user_account_id,
+    let max_block_height: u64 = block_height + 100;
+
+    let delegate_action = get_add_key_delegate_action(
+        user_account_id.clone(),
         new_user_pk,
-        get_user_recovery_sk(internal_user_id.clone()),
         nonce,
-        block_height,
+        max_block_height,
+    );
+    let _signed_delegate_action = get_signed_delegated_action(
+        delegate_action,
+        user_account_id,
+        get_user_recovery_sk(internal_user_id.clone()),
     );
 
     // Send the transaction to the relayer
