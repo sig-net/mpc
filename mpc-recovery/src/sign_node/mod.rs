@@ -1,7 +1,7 @@
 use crate::msg::{SigShareRequest, SigShareResponse};
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::NodeId;
-use axum::{http::StatusCode, routing::post, Json, Router, Extension};
+use axum::{http::StatusCode, routing::post, Extension, Json, Router};
 use std::net::SocketAddr;
 use threshold_crypto::{PublicKeySet, SecretKeyShare};
 
