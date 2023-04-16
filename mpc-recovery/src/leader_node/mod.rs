@@ -1,9 +1,11 @@
 use crate::client::NearRpcClient;
+use crate::key_recovery::{get_user_recovery_pk, get_user_recovery_sk};
 use crate::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
     NewAccountResponse, SigShareRequest, SigShareResponse,
 };
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
+use crate::primitives::InternalAccountId;
 use crate::transaction::{
     new_add_fa_key_transaction, new_create_account_transaction, sign_transaction,
 };
@@ -94,11 +96,13 @@ async fn process_new_account(
     request: &NewAccountRequest,
 ) -> anyhow::Result<(StatusCode, Json<NewAccountResponse>)> {
     // This is the account that is doing the function calls to creates new accounts.
-    // TODO: Create such an account for testnet and mainnet
+    // TODO: Create such an account for testnet and mainnet in a secure way
     // TODO: Store this account secret key in GCP Secret Manager
-    let account_creator_id: AccountId = "account_creator.testnet".parse().unwrap();
-    let account_creator_sk: SecretKey = "secret_key".parse().unwrap();
-    let account_creator_pk: PublicKey = "public_key".parse().unwrap();
+    let account_creator_id: AccountId = "tmp_acount_creator.serhii.testnet".parse().unwrap();
+    let account_creator_sk: SecretKey = "ed25519:5pFJN3czPAHFWHZYjD4oTtnJE7PshLMeTkSU7CmWkvLaQWchCLgXGF1wwcJmh2AQChGH85EwcL5VW7tUavcAZDSG".parse().unwrap();
+    let account_creator_pk: PublicKey = "ed25519:3BUQYE4ZfQ6A94CqCtAbdLURxo4eHv2L8JjC2KiXXdFn"
+        .parse()
+        .unwrap();
 
     // Get nonce and recent block hash
     let nonce = state
@@ -107,15 +111,12 @@ async fn process_new_account(
         .await?;
     let block_hash = state.client.latest_block_hash().await?;
 
-    // Create/generate a public key for for this user
-    // TODO: use key derivation or other techniques to generate a key
-    let mpc_recovery_user_pk: PublicKey = "".parse().unwrap();
-
     // Create a transaction to create new NEAR account
     let new_user_account_id: AccountId = request.account_id.clone().parse().unwrap();
+    let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
     let create_acc_tx = new_create_account_transaction(
         new_user_account_id,
-        mpc_recovery_user_pk,
+        get_user_recovery_pk(internal_user_id),
         account_creator_id.clone(),
         account_creator_pk,
         nonce,
@@ -175,15 +176,15 @@ async fn process_add_key(
     request: &AddKeyRequest,
 ) -> anyhow::Result<(StatusCode, Json<AddKeyResponse>)> {
     let user_account_id: AccountId = request.account_id.parse().unwrap();
-
-    // Create/generate a public key for for this user
-    // TODO: use key derivation or other techniques to generate a key
-    let mpc_recovery_user_pk: PublicKey = "".parse().unwrap();
+    let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
 
     // Get nonce and recent block hash
     let nonce = state
         .client
-        .access_key_nonce(user_account_id.clone(), mpc_recovery_user_pk.clone())
+        .access_key_nonce(
+            user_account_id.clone(),
+            get_user_recovery_pk(internal_user_id.clone()).clone(),
+        )
         .await?;
     let block_hash = state.client.latest_block_hash().await?;
 
@@ -191,16 +192,18 @@ async fn process_add_key(
     let new_user_pk: PublicKey = request.public_key.clone().parse().unwrap();
     let add_key_tx = new_add_fa_key_transaction(
         user_account_id.clone(),
-        mpc_recovery_user_pk,
+        get_user_recovery_pk(internal_user_id.clone()),
         new_user_pk,
         nonce,
         block_hash,
     );
 
     // Sign the transaction
-    // TODO: use key derivation or other techniques to generate a key
-    let mpc_recovery_user_sk: SecretKey = "".parse().unwrap();
-    let signed_add_key_tx = sign_transaction(add_key_tx, user_account_id, mpc_recovery_user_sk);
+    let signed_add_key_tx = sign_transaction(
+        add_key_tx,
+        user_account_id,
+        get_user_recovery_sk(internal_user_id),
+    );
 
     state.client.send_tx(signed_add_key_tx).await?;
 
