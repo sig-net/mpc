@@ -2,7 +2,7 @@ use near_jsonrpc_client::{methods, JsonRpcClient, MethodCallResult};
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_primitives::hash::CryptoHash;
 use near_primitives::transaction::SignedTransaction;
-use near_primitives::types::{AccountId, Finality};
+use near_primitives::types::{AccountId, BlockHeight, Finality};
 use near_primitives::views::{AccessKeyView, FinalExecutionOutcomeView, QueryRequest};
 
 #[derive(Clone)]
@@ -42,7 +42,8 @@ impl NearRpcClient {
         }
     }
 
-    async fn query_broadcast_tx(
+    // TODO: delete this function if we will use reqest to communicate with the relayer
+    async fn _query_broadcast_tx(
         &self,
         method: &methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest,
     ) -> MethodCallResult<
@@ -80,22 +81,23 @@ impl NearRpcClient {
         Ok(key.0.nonce)
     }
 
-    pub async fn latest_block_hash(&self) -> anyhow::Result<CryptoHash> {
+    pub async fn latest_block_height(&self) -> anyhow::Result<BlockHeight> {
         let block_view = self
             .rpc_client
             .call(&methods::block::RpcBlockRequest {
                 block_reference: Finality::Final.into(),
             })
             .await?;
-        Ok(block_view.header.hash)
+        Ok(block_view.header.height)
     }
 
-    pub async fn send_tx(
+    // TODO: delete this function if we will use reqest to communicate with the relayer
+    pub async fn _send_tx(
         &self,
         signed_transaction: SignedTransaction,
     ) -> anyhow::Result<FinalExecutionOutcomeView> {
         let result = self
-            .query_broadcast_tx(&methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
+            ._query_broadcast_tx(&methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
                 signed_transaction,
             })
             .await?;
@@ -111,9 +113,9 @@ mod tests {
     #[tokio::test]
     async fn test_latest_block() -> anyhow::Result<()> {
         let testnet = NearRpcClient::testnet();
-        let block_hash = testnet.latest_block_hash().await?;
+        let block_height = testnet.latest_block_height().await?;
 
-        assert!(block_hash.0.len() == 32);
+        assert!(block_height > 0);
         Ok(())
     }
 

@@ -1,10 +1,10 @@
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use near_primitives::account::{AccessKey, AccessKeyPermission};
-use near_primitives::hash::CryptoHash;
-use near_primitives::transaction::{
-    Action, AddKeyAction, FunctionCallAction, SignedTransaction, Transaction,
-};
+use near_primitives::transaction::{Action, AddKeyAction, FunctionCallAction};
 use near_primitives::types::{AccountId, Nonce};
+
+use near_primitives::delegate_action::{DelegateAction, NonDelegateAction, SignedDelegateAction};
+use near_primitives::signable_message::{SignableMessage, SignableMessageType};
 
 use serde_json::json;
 
@@ -13,66 +13,115 @@ pub enum NetworkType {
     Testnet,
 }
 
-pub fn new_create_account_transaction(
+pub fn new_create_account_signed_delegate_action(
+    signer_id: AccountId,
+    signer_sk: SecretKey,
+    signer_pk: PublicKey,
     new_account_id: AccountId,
-    user_pk: PublicKey,
+    new_account_pk: PublicKey,
+    network_type: NetworkType,
+    nonce: Nonce,
+    current_block_height: u64,
+) -> SignedDelegateAction {
+    let delegate_action = get_create_account_delegate_action(
+        signer_id.clone(),
+        signer_pk,
+        new_account_id,
+        new_account_pk,
+        network_type,
+        nonce,
+        current_block_height + 100,
+    );
+    get_signed_delegated_action(delegate_action, signer_id, signer_sk)
+}
+
+pub fn new_add_key_signed_delegate_action(
+    sender_id: AccountId,
+    new_public_key: PublicKey,
+    secret_key: SecretKey,
+    nonce: Nonce,
+    current_block_height: u64,
+) -> SignedDelegateAction {
+    let max_block_height: u64 = current_block_height + 100;
+    let delegate_action =
+        get_add_key_delegate_action(sender_id.clone(), new_public_key, nonce, max_block_height);
+    get_signed_delegated_action(delegate_action, sender_id, secret_key)
+}
+
+fn get_create_account_delegate_action(
     signer_id: AccountId,
     signer_pk: PublicKey,
-    nonce: Nonce,
-    block_hash: CryptoHash,
+    new_account_id: AccountId,
+    new_account_pk: PublicKey,
     network_type: NetworkType,
-) -> Transaction {
-    Transaction {
-        signer_id,
-        public_key: signer_pk,
-        nonce,
+    nonce: Nonce,
+    max_block_height: u64,
+) -> DelegateAction {
+    let create_acc_action = Action::FunctionCall(FunctionCallAction {
+        method_name: "create_account".to_string(),
+        args: json!({
+            "new_account_id": new_account_id,
+            "new_public_key": new_account_pk.to_string(),
+        })
+        .to_string()
+        .into_bytes(),
+        gas: 300_000_000_000_000,
+        deposit: 0,
+    });
+
+    let delegate_create_acc_action = NonDelegateAction::try_from(create_acc_action).unwrap();
+
+    DelegateAction {
+        sender_id: signer_id,
         receiver_id: match network_type {
             NetworkType::_Mainnet => "near".parse().unwrap(),
             NetworkType::Testnet => "testnet".parse().unwrap(),
         },
-        block_hash,
-        actions: vec![Action::FunctionCall(FunctionCallAction {
-            method_name: "create_account".to_string(),
-            args: json!({
-                "new_account_id": new_account_id,
-                "new_public_key": user_pk.to_string(),
-            })
-            .to_string()
-            .into_bytes(),
-            gas: 300_000_000_000_000,
-            deposit: 0,
-        })],
-    }
-}
-
-pub fn new_add_fa_key_transaction(
-    account_id: AccountId,
-    existing_pk: PublicKey,
-    new_pk: PublicKey,
-    nonce: Nonce,
-    block_hash: CryptoHash,
-) -> Transaction {
-    Transaction {
-        signer_id: account_id.clone(),
-        public_key: existing_pk,
+        actions: vec![delegate_create_acc_action],
         nonce,
-        receiver_id: account_id,
-        block_hash,
-        actions: vec![Action::AddKey(AddKeyAction {
-            public_key: new_pk,
-            access_key: AccessKey {
-                nonce: 0,
-                permission: AccessKeyPermission::FullAccess,
-            },
-        })],
+        max_block_height,
+        public_key: signer_pk,
     }
 }
 
-pub fn sign_transaction(
-    transaction: Transaction,
+fn get_add_key_delegate_action(
+    sender_id: AccountId,
+    public_key: PublicKey,
+    nonce: Nonce,
+    max_block_height: u64,
+) -> DelegateAction {
+    let add_key_action = Action::AddKey(AddKeyAction {
+        public_key: public_key.clone(),
+        access_key: AccessKey {
+            nonce: 0,
+            permission: AccessKeyPermission::FullAccess,
+        },
+    });
+
+    let delegate_add_key_action = NonDelegateAction::try_from(add_key_action).unwrap();
+
+    DelegateAction {
+        sender_id: sender_id.clone(),
+        receiver_id: sender_id,
+        actions: vec![delegate_add_key_action],
+        nonce,
+        max_block_height,
+        public_key,
+    }
+}
+
+fn get_signed_delegated_action(
+    delegate_action: DelegateAction,
     signer_id: AccountId,
     signer_sk: SecretKey,
-) -> SignedTransaction {
+) -> SignedDelegateAction {
     let signer = InMemorySigner::from_secret_key(signer_id, signer_sk);
-    transaction.sign(&signer)
+    let signable_message =
+        SignableMessage::new(&delegate_action, SignableMessageType::DelegateAction);
+    let signature = signable_message.sign(&signer);
+
+    SignedDelegateAction {
+        delegate_action,
+        signature,
+    }
 }

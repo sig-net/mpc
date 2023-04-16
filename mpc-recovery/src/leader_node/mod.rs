@@ -7,7 +7,7 @@ use crate::msg::{
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::primitives::InternalAccountId;
 use crate::transaction::{
-    new_add_fa_key_transaction, new_create_account_transaction, sign_transaction,
+    new_add_key_signed_delegate_action, new_create_account_signed_delegate_action,
 };
 use crate::NodeId;
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
@@ -109,26 +109,27 @@ async fn process_new_account(
         .client
         .access_key_nonce(account_creator_id.clone(), account_creator_pk.clone())
         .await?;
-    let block_hash = state.client.latest_block_hash().await?;
+    let block_height = state.client.latest_block_height().await?;
 
     // Create a transaction to create new NEAR account
     let new_user_account_id: AccountId = request.account_id.clone().parse().unwrap();
     let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
-    let create_acc_tx = new_create_account_transaction(
+
+    let _signed_delegate_action = new_create_account_signed_delegate_action(
+        account_creator_id,
+        account_creator_sk,
+        account_creator_pk,
         new_user_account_id,
         get_user_recovery_pk(internal_user_id),
-        account_creator_id.clone(),
-        account_creator_pk,
-        nonce,
-        block_hash,
         crate::transaction::NetworkType::Testnet,
+        nonce,
+        block_height,
     );
 
-    // Sign the transaction
-    let signed_create_acc_tx =
-        sign_transaction(create_acc_tx, account_creator_id, account_creator_sk);
-
-    state.client.send_tx(signed_create_acc_tx).await?;
+    // Send the transaction to the relayer
+    // TODO: currently client doesn't support sending delegated actions to the relayer,
+    // use request directly or add support to the client
+    // state.client.send_tx(signed_create_acc_tx).await?;
 
     Ok((StatusCode::OK, Json(NewAccountResponse::Ok)))
 }
@@ -186,26 +187,23 @@ async fn process_add_key(
             get_user_recovery_pk(internal_user_id.clone()).clone(),
         )
         .await?;
-    let block_hash = state.client.latest_block_hash().await?;
+    let block_height = state.client.latest_block_height().await?;
 
     // Create a transaction to create a new account
     let new_user_pk: PublicKey = request.public_key.clone().parse().unwrap();
-    let add_key_tx = new_add_fa_key_transaction(
-        user_account_id.clone(),
-        get_user_recovery_pk(internal_user_id.clone()),
-        new_user_pk,
-        nonce,
-        block_hash,
-    );
 
-    // Sign the transaction
-    let signed_add_key_tx = sign_transaction(
-        add_key_tx,
+    let _signed_delegate_action = new_add_key_signed_delegate_action(
         user_account_id,
-        get_user_recovery_sk(internal_user_id),
+        new_user_pk,
+        get_user_recovery_sk(internal_user_id.clone()),
+        nonce,
+        block_height,
     );
 
-    state.client.send_tx(signed_add_key_tx).await?;
+    // Send the transaction to the relayer
+    // TODO: currently client doesn't support sending delegated actions to the relayer,
+    // use request directly or add support to the client
+    // state.client.send_tx(signed_add_key_tx).await?;
 
     Ok((StatusCode::OK, Json(AddKeyResponse::Ok)))
 }
