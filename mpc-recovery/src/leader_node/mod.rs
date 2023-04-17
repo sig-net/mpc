@@ -118,7 +118,7 @@ async fn process_new_account(
     let delegate_action = get_create_account_delegate_action(
         account_creator_id.clone(),
         account_creator_pk,
-        new_user_account_id,
+        new_user_account_id.clone(),
         get_user_recovery_pk(internal_user_id),
         crate::transaction::NetworkType::Testnet,
         nonce,
@@ -126,6 +126,11 @@ async fn process_new_account(
     );
     let signed_delegate_action =
         get_signed_delegated_action(delegate_action, account_creator_id, account_creator_sk);
+
+    state
+        .client
+        .register_account_with_relayer(new_user_account_id)
+        .await?;
 
     state
         .client

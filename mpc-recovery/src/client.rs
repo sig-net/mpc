@@ -5,8 +5,9 @@ use near_primitives::delegate_action::SignedDelegateAction;
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::{AccountId, BlockHeight, Finality};
 use near_primitives::views::{AccessKeyView, QueryRequest};
+use serde_json::json;
 
-const RELAYER_URI: &str = "http://34.70.226.83:3030/send_meta_tx";
+const RELAYER_URI: &str = "http://34.70.226.83:3030";
 
 #[derive(Clone)]
 pub struct NearRpcClient {
@@ -64,6 +65,44 @@ impl NearRpcClient {
         Ok(block_view.header.height)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(account_id))]
+    pub async fn register_account_with_relayer(&self, account_id: AccountId) -> anyhow::Result<()> {
+        let json_payload = json!({
+            "account_id": account_id.to_string(),
+            "allowance": 20000000000000u64
+        })
+        .to_string();
+
+        tracing::debug!(
+            "constructed json payload, {} bytes total",
+            json_payload.len()
+        );
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("{}/register_account", RELAYER_URI))
+            .header("content-type", "application/json")
+            .body(Body::from(json_payload))
+            .unwrap();
+
+        tracing::debug!("constructed http request to {RELAYER_URI}");
+        let client = Client::new();
+        let response = client.request(request).await?;
+
+        if response.status().is_success() {
+            let response_body = hyper::body::to_bytes(response.into_body()).await?;
+            tracing::debug!("success: {}", std::str::from_utf8(&response_body)?)
+        } else {
+            let response_body = hyper::body::to_bytes(response.into_body()).await?;
+            anyhow::bail!(
+                "transaction failed: {}",
+                std::str::from_utf8(&response_body)?
+            )
+        }
+
+        Ok(())
+    }
+
     #[tracing::instrument(level = "debug", skip_all, fields(receiver_id = signed_delegate_action.delegate_action.receiver_id.to_string()))]
     pub async fn send_tx_via_relayer(
         &self,
@@ -78,7 +117,7 @@ impl NearRpcClient {
 
         let request = Request::builder()
             .method(Method::POST)
-            .uri(RELAYER_URI)
+            .uri(format!("{}/send_meta_tx", RELAYER_URI))
             .header("content-type", "application/json")
             .body(Body::from(json_payload))
             .unwrap();
