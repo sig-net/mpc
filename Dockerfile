@@ -13,7 +13,8 @@ COPY . .
 RUN cargo build --release --package mpc-recovery
 
 FROM debian:buster-slim as runtime
-RUN apt-get update && apt-get install --assume-yes libssl-dev
+RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates
+RUN update-ca-certificates
 COPY --from=builder /usr/src/app/target/release/mpc-recovery /usr/local/bin/mpc-recovery
 WORKDIR /usr/local/bin
 
