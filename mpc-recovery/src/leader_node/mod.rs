@@ -155,7 +155,7 @@ async fn new_account<T: OAuthTokenVerifier>(
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(NewAccountResponse::Err {
-                            msg: format!("falsed to process new account: {}", e),
+                            msg: format!("failed to process new account: {}", e),
                         }),
                     )
                 }
