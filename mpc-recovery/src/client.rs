@@ -1,9 +1,12 @@
-use near_jsonrpc_client::{methods, JsonRpcClient, MethodCallResult};
+use hyper::{Body, Client, Method, Request};
+use near_jsonrpc_client::{methods, JsonRpcClient};
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
+use near_primitives::delegate_action::SignedDelegateAction;
 use near_primitives::hash::CryptoHash;
-use near_primitives::transaction::SignedTransaction;
 use near_primitives::types::{AccountId, BlockHeight, Finality};
-use near_primitives::views::{AccessKeyView, FinalExecutionOutcomeView, QueryRequest};
+use near_primitives::views::{AccessKeyView, QueryRequest};
+
+const RELAYER_URI: &str = "http://34.70.226.83:3030/send_meta_tx";
 
 #[derive(Clone)]
 pub struct NearRpcClient {
@@ -42,36 +45,6 @@ impl NearRpcClient {
         }
     }
 
-    // TODO: delete this function if we will use reqest to communicate with the relayer
-    async fn _query_broadcast_tx(
-        &self,
-        method: &methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest,
-    ) -> MethodCallResult<
-        FinalExecutionOutcomeView,
-        near_jsonrpc_primitives::types::transactions::RpcTransactionError,
-    > {
-        let result = self.rpc_client.call(method).await;
-        match &result {
-            Ok(response) => {
-                tracing::debug!(
-                    target: "client",
-                    "Submitting transaction with actions {:?} succeeded with status {:?}",
-                    method.signed_transaction.transaction.actions,
-                    response.status
-                );
-            }
-            Err(error) => {
-                tracing::error!(
-                    target: "client",
-                    "Calling RPC method {:?} resulted in error {:?}",
-                    method,
-                    error
-                );
-            }
-        };
-        result
-    }
-
     pub async fn access_key_nonce(
         &self,
         account_id: AccountId,
@@ -91,18 +64,41 @@ impl NearRpcClient {
         Ok(block_view.header.height)
     }
 
-    // TODO: delete this function if we will use reqest to communicate with the relayer
-    pub async fn _send_tx(
+    #[tracing::instrument(level = "debug", skip_all, fields(receiver_id = signed_delegate_action.delegate_action.receiver_id.to_string()))]
+    pub async fn send_tx_via_relayer(
         &self,
-        signed_transaction: SignedTransaction,
-    ) -> anyhow::Result<FinalExecutionOutcomeView> {
-        let result = self
-            ._query_broadcast_tx(&methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
-                signed_transaction,
-            })
-            .await?;
+        signed_delegate_action: SignedDelegateAction,
+    ) -> anyhow::Result<()> {
+        let json_payload = serde_json::to_vec(&signed_delegate_action)?;
 
-        Ok(result)
+        tracing::debug!(
+            "constructed json payload, {} bytes total",
+            json_payload.len()
+        );
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(RELAYER_URI)
+            .header("content-type", "application/json")
+            .body(Body::from(json_payload))
+            .unwrap();
+
+        tracing::debug!("constructed http request to {RELAYER_URI}");
+        let client = Client::new();
+        let response = client.request(request).await?;
+
+        if response.status().is_success() {
+            let response_body = hyper::body::to_bytes(response.into_body()).await?;
+            tracing::debug!("success: {}", std::str::from_utf8(&response_body)?)
+        } else {
+            let response_body = hyper::body::to_bytes(response.into_body()).await?;
+            anyhow::bail!(
+                "transaction failed: {}",
+                std::str::from_utf8(&response_body)?
+            )
+        }
+
+        Ok(())
     }
 }
 

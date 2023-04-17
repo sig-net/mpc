@@ -124,13 +124,13 @@ async fn process_new_account(
         nonce,
         block_height + 100,
     );
-    let _signed_delegate_action =
+    let signed_delegate_action =
         get_signed_delegated_action(delegate_action, account_creator_id, account_creator_sk);
 
-    // Send the transaction to the relayer
-    // TODO: currently client doesn't support sending delegated actions to the relayer,
-    // use request directly or add support to the client
-    // state.client.send_tx(signed_create_acc_tx).await?;
+    state
+        .client
+        .send_tx_via_relayer(signed_delegate_action)
+        .await?;
 
     Ok((StatusCode::OK, Json(NewAccountResponse::Ok)))
 }
@@ -201,16 +201,16 @@ async fn process_add_key(
         nonce,
         max_block_height,
     );
-    let _signed_delegate_action = get_signed_delegated_action(
+    let signed_delegate_action = get_signed_delegated_action(
         delegate_action,
         user_account_id,
         get_user_recovery_sk(internal_user_id.clone()),
     );
 
-    // Send the transaction to the relayer
-    // TODO: currently client doesn't support sending delegated actions to the relayer,
-    // use request directly or add support to the client
-    // state.client.send_tx(signed_add_key_tx).await?;
+    state
+        .client
+        .send_tx_via_relayer(signed_delegate_action)
+        .await?;
 
     Ok((StatusCode::OK, Json(AddKeyResponse::Ok)))
 }
