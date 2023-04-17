@@ -4,8 +4,6 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive \
     apt-get install --no-install-recommends --assume-yes \
     protobuf-compiler libprotobuf-dev
-RUN apt-get update && apt-get install -y ca-certificates
-RUN update-ca-certificates
 RUN echo "fn main() {}" > dummy.rs
 COPY mpc-recovery/Cargo.toml Cargo.toml
 RUN sed -i 's#src/main.rs#dummy.rs#' Cargo.toml
