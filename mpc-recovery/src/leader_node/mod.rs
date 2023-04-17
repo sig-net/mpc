@@ -155,18 +155,18 @@ async fn new_account<T: OAuthTokenVerifier>(
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(NewAccountResponse::Err {
-                            msg: "internal error".to_string(),
+                            msg: format!("falsed to process new account: {}", e),
                         }),
                     )
                 }
             }
         }
-        Err(_) => {
+        Err(e) => {
             tracing::error!("access token verification failed");
             (
                 StatusCode::UNAUTHORIZED,
                 Json(NewAccountResponse::Err {
-                    msg: "access token verification failed".into(),
+                    msg: format!("access token verification failed: {}", e),
                 }),
             )
         }

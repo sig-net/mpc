@@ -52,13 +52,13 @@ impl OAuthTokenVerifier for UniversalTokenVerifier {
 }
 
 fn get_token_verifier_type(token: &str) -> SupportedTokenVerifiers {
-    match token.len() {
-        // TODO: add real token type detection
-        0 => {
+    match token.len() > 30 {
+        // TODO: add real token type detection, now the system can be bypassed by passing a short token
+        true => {
             tracing::info!("Using PagodaFirebaseTokenVerifier");
             SupportedTokenVerifiers::PagodaFirebaseTokenVerifier
         }
-        _ => {
+        false => {
             tracing::info!("Using TestTokenVerifier");
             SupportedTokenVerifiers::TestTokenVerifier
         }
