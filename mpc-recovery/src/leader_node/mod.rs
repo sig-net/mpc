@@ -1,5 +1,5 @@
 use crate::client::NearRpcClient;
-use crate::key_recovery::get_user_recovery_pk;
+use crate::key_recovery::{get_user_recovery_pk, get_user_recovery_sk};
 use crate::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
     NewAccountResponse, SigShareRequest, SigShareResponse,
@@ -209,8 +209,8 @@ async fn process_add_key(
     let max_block_height: u64 = block_height + 100;
 
     let delegate_action = get_add_key_delegate_action(
-        state.account_creator_id.clone(),
-        state.account_creator_sk.public_key(),
+        user_account_id.clone(),
+        get_user_recovery_pk(internal_user_id.clone()),
         user_account_id.clone(),
         new_user_pk,
         nonce,
@@ -218,8 +218,8 @@ async fn process_add_key(
     );
     let signed_delegate_action = get_signed_delegated_action(
         delegate_action,
-        state.account_creator_id.clone(),
-        state.account_creator_sk.clone(),
+        user_account_id,
+        get_user_recovery_sk(internal_user_id),
     );
 
     state
