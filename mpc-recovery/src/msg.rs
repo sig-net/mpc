@@ -4,9 +4,9 @@ use threshold_crypto::{Signature, SignatureShare};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NewAccountRequest {
-    pub account_id: String,
     pub public_key: String,
-    pub id_token: String,
+    pub near_account_id: String,
+    pub oidc_token: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -19,9 +19,9 @@ pub enum NewAccountResponse {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AddKeyRequest {
-    pub account_id: String,
+    pub near_account_id: String,
     pub public_key: String,
-    pub id_token: String,
+    pub oidc_token: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -3,7 +3,8 @@ use bollard::Docker;
 // use docker::{redis::Redis, relayer::Relayer};
 use futures::future::BoxFuture;
 use mpc_recovery::msg::{
-    AddKeyRequest, LeaderRequest, LeaderResponse, NewAccountRequest, NewAccountResponse, AddKeyResponse,
+    AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
+    NewAccountResponse,
 };
 use rand::{distributions::Alphanumeric, Rng};
 use std::time::Duration;
@@ -155,8 +156,8 @@ async fn test_basic_action() -> anyhow::Result<()> {
             let (status_code, new_acc_response) = ctx
                 .leader_node
                 .new_account(NewAccountRequest {
-                    account_id: account_id.clone(),
-                    id_token: id_token.clone(),
+                    near_account_id: account_id.clone(),
+                    oidc_token: id_token.clone(),
                     public_key: user_public_key,
                 })
                 .await?;
@@ -174,8 +175,8 @@ async fn test_basic_action() -> anyhow::Result<()> {
             let (status_code2, add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
-                    account_id: account_id.clone(),
-                    id_token: id_token.clone(),
+                    near_account_id: account_id.clone(),
+                    oidc_token: id_token.clone(),
                     public_key: new_user_public_key,
                 })
                 .await?;
