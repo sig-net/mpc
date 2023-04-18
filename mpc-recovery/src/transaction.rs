@@ -20,6 +20,7 @@ pub struct CreateAccountOptions {
     pub full_access_keys: Option<Vec<PublicKey>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn get_create_account_delegate_action(
     signer_id: AccountId,
     signer_pk: PublicKey,
