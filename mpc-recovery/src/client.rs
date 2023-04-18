@@ -7,17 +7,17 @@ use near_primitives::types::{AccountId, BlockHeight, Finality};
 use near_primitives::views::{AccessKeyView, QueryRequest};
 use serde_json::json;
 
-const RELAYER_URI: &str = "http://34.70.226.83:3030";
-
 #[derive(Clone)]
 pub struct NearRpcClient {
     rpc_client: JsonRpcClient,
+    relayer_url: String,
 }
 
 impl NearRpcClient {
-    pub fn testnet() -> Self {
+    pub fn connect(near_rpc: &str, relayer_url: String) -> Self {
         Self {
-            rpc_client: JsonRpcClient::connect("https://rpc.testnet.near.org"),
+            rpc_client: JsonRpcClient::connect(near_rpc),
+            relayer_url,
         }
     }
 
@@ -69,7 +69,7 @@ impl NearRpcClient {
     pub async fn register_account_with_relayer(&self, account_id: AccountId) -> anyhow::Result<()> {
         let json_payload = json!({
             "account_id": account_id.to_string(),
-            "allowance": 20000000000000u64
+            "allowance": 300000000000000u64
         })
         .to_string();
 
@@ -80,12 +80,12 @@ impl NearRpcClient {
 
         let request = Request::builder()
             .method(Method::POST)
-            .uri(format!("{}/register_account", RELAYER_URI))
+            .uri(format!("{}/register_account", self.relayer_url))
             .header("content-type", "application/json")
             .body(Body::from(json_payload))
             .unwrap();
 
-        tracing::debug!("constructed http request to {RELAYER_URI}");
+        tracing::debug!("constructed http request to {}", self.relayer_url);
         let client = Client::new();
         let response = client.request(request).await?;
 
@@ -117,12 +117,12 @@ impl NearRpcClient {
 
         let request = Request::builder()
             .method(Method::POST)
-            .uri(format!("{}/send_meta_tx", RELAYER_URI))
+            .uri(format!("{}/send_meta_tx", self.relayer_url))
             .header("content-type", "application/json")
             .body(Body::from(json_payload))
             .unwrap();
 
-        tracing::debug!("constructed http request to {RELAYER_URI}");
+        tracing::debug!("constructed http request to {}", self.relayer_url);
         let client = Client::new();
         let response = client.request(request).await?;
 
@@ -145,9 +145,12 @@ impl NearRpcClient {
 mod tests {
     use super::*;
 
+    const RELAYER_URI: &str = "http://34.70.226.83:3030";
+
     #[tokio::test]
     async fn test_latest_block() -> anyhow::Result<()> {
-        let testnet = NearRpcClient::testnet();
+        let testnet =
+            NearRpcClient::connect("https://rpc.testnet.near.org", RELAYER_URI.to_string());
         let block_height = testnet.latest_block_height().await?;
 
         assert!(block_height > 0);
@@ -156,7 +159,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_access_key() -> anyhow::Result<()> {
-        let testnet = NearRpcClient::testnet();
+        let testnet =
+            NearRpcClient::connect("https://rpc.testnet.near.org", RELAYER_URI.to_string());
         let nonce = testnet
             .access_key_nonce(
                 "dev-1636354824855-78504059330123".parse()?,

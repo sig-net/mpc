@@ -4,17 +4,21 @@ use bollard::{
     service::{HostConfig, Ipam, PortBinding},
     Docker,
 };
-use ed25519_dalek::SecretKey;
 use futures::StreamExt;
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use mpc_recovery::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
     NewAccountResponse,
 };
+use near_crypto::SecretKey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
 use tokio::io::AsyncWriteExt;
+use workspaces::AccountId;
+
+pub mod redis;
+pub mod relayer;
 
 async fn continuously_print_docker_output(docker: &Docker, id: &str) -> anyhow::Result<()> {
     let AttachContainerResults { mut output, .. } = docker
@@ -75,7 +79,7 @@ async fn start_mpc_node(
         exposed_ports: Some(exposed_ports),
         cmd: Some(cmd),
         host_config: Some(HostConfig {
-            network_mode: Some("mpc_recovery_integration_test_network".to_string()),
+            network_mode: Some(network.to_string()),
             port_bindings: Some(port_bindings),
             ..Default::default()
         }),
@@ -147,7 +151,10 @@ impl LeaderNode {
         pk_set: &PublicKeySet,
         sk_share: &SecretKeyShare,
         sign_nodes: Vec<String>,
-        root_secret_key: &SecretKey,
+        near_rpc: &str,
+        relayer_url: &str,
+        account_creator_id: &AccountId,
+        account_creator_sk: &SecretKey,
     ) -> anyhow::Result<LeaderNode> {
         create_network(docker, network).await?;
         let web_port = portpicker::pick_unused_port().expect("no free ports");
@@ -162,8 +169,14 @@ impl LeaderNode {
             serde_json::to_string(&SerdeSecret(sk_share))?,
             "--web-port".to_string(),
             web_port.to_string(),
-            "--root-secret-key".to_string(),
-            hex::encode(root_secret_key),
+            "--near-rpc".to_string(),
+            near_rpc.to_string(),
+            "--relayer-url".to_string(),
+            relayer_url.to_string(),
+            "--account-creator-id".to_string(),
+            account_creator_id.to_string(),
+            "--account-creator-sk".to_string(),
+            account_creator_sk.to_string(),
         ];
         for sign_node in sign_nodes {
             cmd.push("--sign-nodes".to_string());

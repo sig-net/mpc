@@ -21,15 +21,21 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use threshold_crypto::{PublicKeySet, SecretKeyShare};
 
-#[tracing::instrument(level = "debug", skip(pk_set, sk_share, sign_nodes, root_secret_key))]
+#[tracing::instrument(
+    level = "debug",
+    skip(pk_set, sk_share, sign_nodes, account_creator_sk)
+)]
 pub async fn run(
     id: NodeId,
     pk_set: PublicKeySet,
     sk_share: SecretKeyShare,
     port: u16,
     sign_nodes: Vec<String>,
+    near_rpc: String,
+    relayer_url: String,
+    account_creator_id: AccountId,
     // TODO: temporary solution
-    root_secret_key: ed25519_dalek::SecretKey,
+    account_creator_sk: SecretKey,
 ) {
     tracing::debug!(?sign_nodes, "running a leader node");
 
@@ -38,13 +44,20 @@ pub async fn run(
         return;
     }
 
+    let client = NearRpcClient::connect(&near_rpc, relayer_url);
+    client
+        .register_account_with_relayer(account_creator_id.clone())
+        .await
+        .unwrap();
+
     let state = LeaderState {
         id,
         pk_set,
         sk_share,
         sign_nodes,
-        client: NearRpcClient::testnet(),
-        root_secret_key,
+        client,
+        account_creator_id,
+        account_creator_sk,
     };
 
     let app = Router::new()
@@ -61,28 +74,16 @@ pub async fn run(
         .unwrap();
 }
 
+#[derive(Clone)]
 struct LeaderState {
     id: NodeId,
     pk_set: PublicKeySet,
     sk_share: SecretKeyShare,
     sign_nodes: Vec<String>,
     client: NearRpcClient,
+    account_creator_id: AccountId,
     // TODO: temporary solution
-    root_secret_key: ed25519_dalek::SecretKey,
-}
-
-impl Clone for LeaderState {
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id,
-            pk_set: self.pk_set.clone(),
-            sk_share: self.sk_share.clone(),
-            sign_nodes: self.sign_nodes.clone(),
-            client: self.client.clone(),
-            root_secret_key: ed25519_dalek::SecretKey::from_bytes(self.root_secret_key.as_bytes())
-                .unwrap(),
-        }
-    }
+    account_creator_sk: SecretKey,
 }
 
 async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareResponse> {
@@ -95,19 +96,13 @@ async fn process_new_account(
     state: &LeaderState,
     request: &NewAccountRequest,
 ) -> anyhow::Result<(StatusCode, Json<NewAccountResponse>)> {
-    // This is the account that is doing the function calls to creates new accounts.
-    // TODO: Create such an account for testnet and mainnet in a secure way
-    // TODO: Store this account secret key in GCP Secret Manager
-    let account_creator_id: AccountId = "tmp_acount_creator.serhii.testnet".parse().unwrap();
-    let account_creator_sk: SecretKey = "ed25519:5pFJN3czPAHFWHZYjD4oTtnJE7PshLMeTkSU7CmWkvLaQWchCLgXGF1wwcJmh2AQChGH85EwcL5VW7tUavcAZDSG".parse().unwrap();
-    let account_creator_pk: PublicKey = "ed25519:3BUQYE4ZfQ6A94CqCtAbdLURxo4eHv2L8JjC2KiXXdFn"
-        .parse()
-        .unwrap();
-
     // Get nonce and recent block hash
     let nonce = state
         .client
-        .access_key_nonce(account_creator_id.clone(), account_creator_pk.clone())
+        .access_key_nonce(
+            state.account_creator_id.clone(),
+            state.account_creator_sk.public_key(),
+        )
         .await?;
     let block_height = state.client.latest_block_height().await?;
 
@@ -116,16 +111,19 @@ async fn process_new_account(
     let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
 
     let delegate_action = get_create_account_delegate_action(
-        account_creator_id.clone(),
-        account_creator_pk,
+        state.account_creator_id.clone(),
+        state.account_creator_sk.public_key(),
         new_user_account_id.clone(),
         get_user_recovery_pk(internal_user_id),
         crate::transaction::NetworkType::Testnet,
-        nonce,
+        nonce + 1,
         block_height + 100,
     );
-    let signed_delegate_action =
-        get_signed_delegated_action(delegate_action, account_creator_id, account_creator_sk);
+    let signed_delegate_action = get_signed_delegated_action(
+        delegate_action,
+        state.account_creator_id.clone(),
+        state.account_creator_sk.clone(),
+    );
 
     state
         .client
@@ -182,8 +180,8 @@ async fn process_add_key(
     state: &LeaderState,
     request: &AddKeyRequest,
 ) -> anyhow::Result<(StatusCode, Json<AddKeyResponse>)> {
-    let user_account_id: AccountId = request.account_id.parse().unwrap();
-    let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
+    let user_account_id: AccountId = request.account_id.parse()?;
+    let internal_user_id: InternalAccountId = "tmp".parse()?; // TODO:get real user id from ID token
 
     // Get nonce and recent block hash
     let nonce = state
@@ -196,11 +194,13 @@ async fn process_add_key(
     let block_height = state.client.latest_block_height().await?;
 
     // Create a transaction to create a new account
-    let new_user_pk: PublicKey = request.public_key.clone().parse().unwrap();
+    let new_user_pk: PublicKey = request.public_key.clone().parse()?;
 
     let max_block_height: u64 = block_height + 100;
 
     let delegate_action = get_add_key_delegate_action(
+        state.account_creator_id.clone(),
+        state.account_creator_sk.public_key(),
         user_account_id.clone(),
         new_user_pk,
         nonce,
@@ -208,8 +208,8 @@ async fn process_add_key(
     );
     let signed_delegate_action = get_signed_delegated_action(
         delegate_action,
-        user_account_id,
-        get_user_recovery_sk(internal_user_id.clone()),
+        state.account_creator_id.clone(),
+        state.account_creator_sk.clone(),
     );
 
     state
