@@ -4,7 +4,7 @@ use crate::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
     NewAccountResponse, SigShareRequest, SigShareResponse,
 };
-use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
+use crate::oauth::{IdTokenClaims, OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::primitives::InternalAccountId;
 use crate::transaction::{
     get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
@@ -105,6 +105,7 @@ async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareRespon
 async fn process_new_account(
     state: &LeaderState,
     request: &NewAccountRequest,
+    internal_acc_id: InternalAccountId,
 ) -> anyhow::Result<(StatusCode, Json<NewAccountResponse>)> {
     // Get nonce and recent block hash
     let nonce = state
@@ -118,13 +119,12 @@ async fn process_new_account(
 
     // Create a transaction to create new NEAR account
     let new_user_account_id: AccountId = request.account_id.clone().parse().unwrap();
-    let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
 
     let delegate_action = get_create_account_delegate_action(
         state.account_creator_id.clone(),
         state.account_creator_sk.public_key(),
         new_user_account_id.clone(),
-        get_user_recovery_pk(internal_user_id),
+        get_user_recovery_pk(internal_acc_id),
         crate::transaction::NetworkType::Testnet,
         nonce + 1,
         block_height + 100,
@@ -148,6 +148,10 @@ async fn process_new_account(
     Ok((StatusCode::OK, Json(NewAccountResponse::Ok)))
 }
 
+pub fn get_internal_account_id(claims: IdTokenClaims) -> InternalAccountId {
+    format!("{}:{}", claims.iss, claims.sub)
+}
+
 #[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
 async fn new_account<T: OAuthTokenVerifier>(
     Extension(state): Extension<LeaderState>,
@@ -159,9 +163,9 @@ async fn new_account<T: OAuthTokenVerifier>(
     );
 
     match T::verify_token(&request.id_token).await {
-        Ok(_) => {
+        Ok(claims) => {
             tracing::info!("access token is valid");
-            match process_new_account(&state, &request).await {
+            match process_new_account(&state, &request, get_internal_account_id(claims)).await {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::error!(err = ?e);
@@ -189,16 +193,16 @@ async fn new_account<T: OAuthTokenVerifier>(
 async fn process_add_key(
     state: &LeaderState,
     request: &AddKeyRequest,
+    internal_acc_id: InternalAccountId,
 ) -> anyhow::Result<(StatusCode, Json<AddKeyResponse>)> {
     let user_account_id: AccountId = request.account_id.parse()?;
-    let internal_user_id: InternalAccountId = "tmp".parse()?; // TODO:get real user id from ID token
 
     // Get nonce and recent block hash
     let nonce = state
         .client
         .access_key_nonce(
             user_account_id.clone(),
-            get_user_recovery_pk(internal_user_id.clone()).clone(),
+            get_user_recovery_pk(internal_acc_id.clone()).clone(),
         )
         .await?;
     let block_height = state.client.latest_block_height().await?;
@@ -210,7 +214,7 @@ async fn process_add_key(
 
     let delegate_action = get_add_key_delegate_action(
         user_account_id.clone(),
-        get_user_recovery_pk(internal_user_id.clone()),
+        get_user_recovery_pk(internal_acc_id.clone()),
         new_public_key,
         nonce,
         max_block_height,
@@ -218,7 +222,7 @@ async fn process_add_key(
     let signed_delegate_action = get_signed_delegated_action(
         delegate_action,
         user_account_id,
-        get_user_recovery_sk(internal_user_id),
+        get_user_recovery_sk(internal_acc_id),
     );
 
     state
@@ -241,9 +245,9 @@ async fn add_key<T: OAuthTokenVerifier>(
     );
 
     match T::verify_token(&request.id_token).await {
-        Ok(_) => {
+        Ok(claims) => {
             tracing::info!("access token is valid");
-            match process_add_key(&state, &request).await {
+            match process_add_key(&state, &request, get_internal_account_id(claims)).await {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::error!(err = ?e);
