@@ -11,14 +11,17 @@ use mpc_recovery::msg::{
     NewAccountResponse,
 };
 use near_crypto::SecretKey;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Mutex};
 use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
 use tokio::io::AsyncWriteExt;
 use workspaces::AccountId;
 
 // pub mod redis;
 // pub mod relayer;
+
+static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 
 async fn continuously_print_docker_output(docker: &Docker, id: &str) -> anyhow::Result<()> {
     let AttachContainerResults { mut output, .. } = docker
@@ -113,6 +116,7 @@ async fn start_mpc_node(
 }
 
 async fn create_network(docker: &Docker, network: &str) -> anyhow::Result<()> {
+    let _lock = &NETWORK_MUTEX.lock().unwrap();
     let list = docker.list_networks::<&str>(None).await?;
     if list.iter().any(|n| n.name == Some(network.to_string())) {
         return Ok(());
