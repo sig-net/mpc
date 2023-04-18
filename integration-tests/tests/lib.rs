@@ -148,34 +148,21 @@ async fn test_basic_action() -> anyhow::Result<()> {
                 .collect();
             let account_id = format!("mpc-recovery-{}.testnet", account_id.to_lowercase());
 
+            let user_public_key =
+                near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
+                    .public_key()
+                    .to_string();
+
             let (status_code, new_acc_response) = ctx
                 .leader_node
                 .new_account(NewAccountRequest {
                     account_id: account_id.clone(),
                     id_token: id_token.clone(),
+                    public_key: user_public_key,
                 })
                 .await?;
             assert_eq!(status_code, 200);
             assert!(matches!(new_acc_response, NewAccountResponse::Ok));
-
-            // Wait until tx finalizes
-            tokio::time::sleep(Duration::from_millis(2000)).await;
-
-            // Add key to the created account
-            let public_key = near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
-                .public_key()
-                .to_string();
-
-            let (status_code, add_key_response) = ctx
-                .leader_node
-                .add_key(AddKeyRequest {
-                    account_id,
-                    id_token,
-                    public_key,
-                })
-                .await?;
-            assert_eq!(status_code, 200);
-            assert!(matches!(add_key_response, AddKeyResponse::Ok));
 
             tokio::time::sleep(Duration::from_millis(120000)).await;
 
