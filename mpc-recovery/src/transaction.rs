@@ -58,7 +58,7 @@ pub fn get_add_key_delegate_action(
     max_block_height: u64,
 ) -> DelegateAction {
     let add_key_action = Action::AddKey(AddKeyAction {
-        public_key: public_key.clone(),
+        public_key,
         access_key: AccessKey {
             nonce: 0,
             permission: AccessKeyPermission::FullAccess,

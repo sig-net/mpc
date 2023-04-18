@@ -1,6 +1,6 @@
 use crate::docker::{LeaderNode, SignNode};
 use bollard::Docker;
-use docker::{redis::Redis, relayer::Relayer};
+// use docker::{redis::Redis, relayer::Relayer};
 use futures::future::BoxFuture;
 use mpc_recovery::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
@@ -9,7 +9,7 @@ use mpc_recovery::msg::{
 use rand::{distributions::Alphanumeric, Rng};
 use std::time::Duration;
 use threshold_crypto::PublicKeySet;
-use workspaces::{network::Sandbox, AccountId, Worker};
+use workspaces::AccountId;
 
 mod docker;
 
@@ -20,20 +20,20 @@ struct TestContext<'a> {
     pk_set: &'a PublicKeySet,
 }
 
-async fn create_account(
-    worker: &Worker<Sandbox>,
-) -> anyhow::Result<(AccountId, near_crypto::SecretKey)> {
-    let (account_id, account_sk) = worker.dev_generate().await;
-    worker
-        .create_tla(account_id.clone(), account_sk.clone())
-        .await?
-        .into_result()?;
+// async fn create_account(
+//     worker: &Worker<Sandbox>,
+// ) -> anyhow::Result<(AccountId, near_crypto::SecretKey)> {
+//     let (account_id, account_sk) = worker.dev_generate().await;
+//     worker
+//         .create_tla(account_id.clone(), account_sk.clone())
+//         .await?
+//         .into_result()?;
 
-    let account_sk: near_crypto::SecretKey =
-        serde_json::from_str(&serde_json::to_string(&account_sk)?)?;
+//     let account_sk: near_crypto::SecretKey =
+//         serde_json::from_str(&serde_json::to_string(&account_sk)?)?;
 
-    Ok((account_id, account_sk))
-}
+//     Ok((account_id, account_sk))
+// }
 
 async fn with_nodes<F>(shares: usize, threshold: usize, nodes: usize, f: F) -> anyhow::Result<()>
 where
@@ -75,7 +75,7 @@ where
         &pk_set,
         &sk_shares[0],
         sign_nodes.iter().map(|n| n.address.clone()).collect(),
-        &near_rpc,
+        near_rpc,
         // &relayer.address,
         "http://34.70.226.83:3030",
         &creator_account_id,
@@ -176,6 +176,8 @@ async fn test_basic_action() -> anyhow::Result<()> {
                 .await?;
             assert_eq!(status_code, 200);
             assert!(matches!(add_key_response, AddKeyResponse::Ok));
+
+            tokio::time::sleep(Duration::from_millis(120000)).await;
 
             Ok(())
         })

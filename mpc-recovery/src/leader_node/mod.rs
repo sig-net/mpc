@@ -1,5 +1,5 @@
 use crate::client::NearRpcClient;
-use crate::key_recovery::{get_user_recovery_pk, get_user_recovery_sk};
+use crate::key_recovery::get_user_recovery_pk;
 use crate::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
     NewAccountResponse, SigShareRequest, SigShareResponse,
@@ -21,22 +21,32 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use threshold_crypto::{PublicKeySet, SecretKeyShare};
 
-#[tracing::instrument(
-    level = "debug",
-    skip(pk_set, sk_share, sign_nodes, account_creator_sk)
-)]
-pub async fn run(
-    id: NodeId,
-    pk_set: PublicKeySet,
-    sk_share: SecretKeyShare,
-    port: u16,
-    sign_nodes: Vec<String>,
-    near_rpc: String,
-    relayer_url: String,
-    account_creator_id: AccountId,
+pub struct Config {
+    pub id: NodeId,
+    pub pk_set: PublicKeySet,
+    pub sk_share: SecretKeyShare,
+    pub port: u16,
+    pub sign_nodes: Vec<String>,
+    pub near_rpc: String,
+    pub relayer_url: String,
+    pub account_creator_id: AccountId,
     // TODO: temporary solution
-    account_creator_sk: SecretKey,
-) {
+    pub account_creator_sk: SecretKey,
+}
+
+pub async fn run(config: Config) {
+    let Config {
+        id,
+        pk_set,
+        sk_share,
+        port,
+        sign_nodes,
+        near_rpc,
+        relayer_url,
+        account_creator_id,
+        account_creator_sk,
+    } = config;
+    let _span = tracing::debug_span!("run", id, port);
     tracing::debug!(?sign_nodes, "running a leader node");
 
     if pk_set.public_key_share(id) != sk_share.public_key_share() {

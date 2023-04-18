@@ -17,8 +17,8 @@ use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
 use tokio::io::AsyncWriteExt;
 use workspaces::AccountId;
 
-pub mod redis;
-pub mod relayer;
+// pub mod redis;
+// pub mod relayer;
 
 async fn continuously_print_docker_output(docker: &Docker, id: &str) -> anyhow::Result<()> {
     let AttachContainerResults { mut output, .. } = docker
@@ -144,6 +144,7 @@ pub struct LeaderNode {
 }
 
 impl LeaderNode {
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         docker: &Docker,
         network: &str,

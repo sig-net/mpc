@@ -12,6 +12,7 @@ mod transaction;
 type NodeId = u64;
 
 pub use leader_node::run as run_leader_node;
+pub use leader_node::Config as LeaderConfig;
 pub use sign_node::run as run_sign_node;
 
 #[tracing::instrument(level = "debug", skip_all, fields(n = n, threshold = t))]

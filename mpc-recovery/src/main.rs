@@ -1,4 +1,5 @@
 use clap::Parser;
+use mpc_recovery::LeaderConfig;
 use near_primitives::types::AccountId;
 use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
 
@@ -104,19 +105,19 @@ async fn main() -> anyhow::Result<()> {
             let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
             let sk_share: SecretKeyShare = serde_json::from_str(&sk_share).unwrap();
 
-            mpc_recovery::run_leader_node(
-                node_id,
+            mpc_recovery::run_leader_node(LeaderConfig {
+                id: node_id,
                 pk_set,
                 sk_share,
-                web_port,
+                port: web_port,
                 sign_nodes,
                 near_rpc,
                 relayer_url,
                 // TODO: Create such an account for testnet and mainnet in a secure way
                 account_creator_id,
                 // TODO: Load this account secret key from GCP Secret Manager
-                account_creator_sk.parse()?,
-            )
+                account_creator_sk: account_creator_sk.parse()?,
+            })
             .await;
         }
         Cli::StartSign {
