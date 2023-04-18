@@ -6,6 +6,7 @@ use near_primitives::types::{AccountId, Nonce};
 use near_primitives::delegate_action::{DelegateAction, NonDelegateAction, SignedDelegateAction};
 use near_primitives::signable_message::{SignableMessage, SignableMessageType};
 
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub enum NetworkType {
@@ -13,20 +14,30 @@ pub enum NetworkType {
     Testnet,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct CreateAccountOptions {
+    // Note: original structure contains other unrelated fields
+    pub full_access_keys: Option<Vec<PublicKey>>,
+}
+
 pub fn get_create_account_delegate_action(
     signer_id: AccountId,
     signer_pk: PublicKey,
     new_account_id: AccountId,
-    new_account_pk: PublicKey,
+    new_account_recovery_pk: PublicKey,
+    new_account_user_pk: PublicKey,
     network_type: NetworkType,
     nonce: Nonce,
     max_block_height: u64,
 ) -> DelegateAction {
+    let create_acc_options = CreateAccountOptions {
+        full_access_keys: Some(vec![new_account_user_pk, new_account_recovery_pk]),
+    };
     let create_acc_action = Action::FunctionCall(FunctionCallAction {
         method_name: "create_account".to_string(),
         args: json!({
             "new_account_id": new_account_id,
-            "new_public_key": new_account_pk.to_string(),
+            "options": create_acc_options,
         })
         .to_string()
         .into_bytes(),

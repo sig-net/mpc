@@ -119,12 +119,14 @@ async fn process_new_account(
 
     // Create a transaction to create new NEAR account
     let new_user_account_id: AccountId = request.account_id.clone().parse().unwrap();
+    let new_user_account_pk: PublicKey = request.public_key.clone().parse().unwrap();
 
     let delegate_action = get_create_account_delegate_action(
         state.account_creator_id.clone(),
         state.account_creator_sk.public_key(),
         new_user_account_id.clone(),
         get_user_recovery_pk(internal_acc_id),
+        new_user_account_pk,
         crate::transaction::NetworkType::Testnet,
         nonce + 1,
         block_height + 100,

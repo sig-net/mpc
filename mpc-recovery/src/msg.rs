@@ -5,6 +5,7 @@ use threshold_crypto::{Signature, SignatureShare};
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NewAccountRequest {
     pub account_id: String,
+    pub public_key: String,
     pub id_token: String,
 }
 

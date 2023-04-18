@@ -3,8 +3,7 @@ use bollard::Docker;
 // use docker::{redis::Redis, relayer::Relayer};
 use futures::future::BoxFuture;
 use mpc_recovery::msg::{
-    AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
-    NewAccountResponse,
+    AddKeyRequest, LeaderRequest, LeaderResponse, NewAccountRequest, NewAccountResponse, AddKeyResponse,
 };
 use rand::{distributions::Alphanumeric, Rng};
 use std::time::Duration;
@@ -141,40 +140,47 @@ async fn test_basic_action() -> anyhow::Result<()> {
             // TODO: write a test with real token
             // "validToken" should triger test token verifyer and return success
             let id_token = "validToken".to_string();
-            let account_id: String = rand::thread_rng()
+            let account_id_rand: String = rand::thread_rng()
                 .sample_iter(&Alphanumeric)
                 .take(10)
                 .map(char::from)
                 .collect();
-            let account_id = format!("mpc-recovery-{}.testnet", account_id.to_lowercase());
+            let account_id = format!("mpc-recovery-{}.testnet", account_id_rand.to_lowercase());
+
+            let user_public_key =
+                near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
+                    .public_key()
+                    .to_string();
 
             let (status_code, new_acc_response) = ctx
                 .leader_node
                 .new_account(NewAccountRequest {
                     account_id: account_id.clone(),
                     id_token: id_token.clone(),
+                    public_key: user_public_key,
                 })
                 .await?;
             assert_eq!(status_code, 200);
+
             assert!(matches!(new_acc_response, NewAccountResponse::Ok));
 
-            // Wait until tx finalizes
-            tokio::time::sleep(Duration::from_millis(2000)).await;
+            tokio::time::sleep(Duration::from_millis(20000)).await;
 
-            // Add key to the created account
-            let public_key = near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
-                .public_key()
-                .to_string();
+            let new_user_public_key =
+                near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
+                    .public_key()
+                    .to_string();
 
-            let (status_code, add_key_response) = ctx
+            let (status_code2, add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
-                    account_id,
-                    id_token,
-                    public_key,
+                    account_id: account_id.clone(),
+                    id_token: id_token.clone(),
+                    public_key: new_user_public_key,
                 })
                 .await?;
-            assert_eq!(status_code, 200);
+
+            assert_eq!(status_code2, 200);
             assert!(matches!(add_key_response, AddKeyResponse::Ok));
 
             tokio::time::sleep(Duration::from_millis(120000)).await;
