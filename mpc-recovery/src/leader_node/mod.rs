@@ -204,15 +204,14 @@ async fn process_add_key(
     let block_height = state.client.latest_block_height().await?;
 
     // Create a transaction to create a new account
-    let new_user_pk: PublicKey = request.public_key.clone().parse()?;
+    let new_public_key: PublicKey = request.public_key.clone().parse()?;
 
     let max_block_height: u64 = block_height + 100;
 
     let delegate_action = get_add_key_delegate_action(
         user_account_id.clone(),
         get_user_recovery_pk(internal_user_id.clone()),
-        user_account_id.clone(),
-        new_user_pk,
+        new_public_key,
         nonce,
         max_block_height,
     );

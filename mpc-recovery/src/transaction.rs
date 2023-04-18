@@ -50,15 +50,14 @@ pub fn get_create_account_delegate_action(
 }
 
 pub fn get_add_key_delegate_action(
-    signer_id: AccountId,
+    account_id: AccountId,
     signer_pk: PublicKey,
-    receiver_id: AccountId,
-    public_key: PublicKey,
+    new_public_key: PublicKey,
     nonce: Nonce,
     max_block_height: u64,
 ) -> DelegateAction {
     let add_key_action = Action::AddKey(AddKeyAction {
-        public_key,
+        public_key: new_public_key,
         access_key: AccessKey {
             nonce: 0,
             permission: AccessKeyPermission::FullAccess,
@@ -68,8 +67,8 @@ pub fn get_add_key_delegate_action(
     let delegate_add_key_action = NonDelegateAction::try_from(add_key_action).unwrap();
 
     DelegateAction {
-        sender_id: signer_id,
-        receiver_id,
+        sender_id: account_id.clone(),
+        receiver_id: account_id,
         actions: vec![delegate_add_key_action],
         nonce,
         max_block_height,
