@@ -2,13 +2,14 @@ use crate::NodeId;
 use serde::{Deserialize, Serialize};
 use threshold_crypto::{Signature, SignatureShare};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct NewAccountRequest {
+    pub public_key: String,
     pub near_account_id: String,
     pub oidc_token: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum NewAccountResponse {
@@ -16,14 +17,14 @@ pub enum NewAccountResponse {
     Err { msg: String },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct AddKeyRequest {
     pub near_account_id: String,
     pub public_key: String,
     pub oidc_token: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum AddKeyResponse {
@@ -31,12 +32,12 @@ pub enum AddKeyResponse {
     Err { msg: String },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct LeaderRequest {
     pub payload: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]

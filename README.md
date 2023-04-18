@@ -6,7 +6,7 @@ The aim of this project is to offer NEAR users the opportunity to create and res
 - Each node holds a unique secret key
 - Each action must be signed by N-1 node
 
-Currently everything is signed by a single node with a single public key.
+Currently everything is signed by a single node with a single private key.
 
 ## External API
 
@@ -17,13 +17,16 @@ The recovery service is currently hosted at <https://mpc-recovery-7tk2cmmtcq-ue.
     URL: /new_account
     Request parameters: {
         near_account_id: String,
-        oidc_token: String
+        oidc_token: String,
+        public_key: String
     }
     Response: Ok / {"Err": String}
 
 This creates an account with the name in `near_account_id`. If this name is already taken then this operation will fail with no action having been taken.
 
 This service will send a `create_account` message to the relayer from `tmp_acount_creator.serhii.testnet` creating from the request field `near_account_id`. If this operation is successful the near.org relayer will make an allowance for the created account.
+
+Newly created NEAR account will have two full access keys. One that was provided by the user, and the recovery one that is controlled by the MPC system.
 
 
 ### Recover Account
