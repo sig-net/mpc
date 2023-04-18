@@ -52,13 +52,13 @@ impl OAuthTokenVerifier for UniversalTokenVerifier {
 }
 
 fn get_token_verifier_type(token: &str) -> SupportedTokenVerifiers {
-    match token.len() {
-        // TODO: add real token type detection
-        0 => {
+    match token.len() > 30 {
+        // TODO: add real token type detection, now the system can be bypassed by passing a short token
+        true => {
             tracing::info!("Using PagodaFirebaseTokenVerifier");
             SupportedTokenVerifiers::PagodaFirebaseTokenVerifier
         }
-        _ => {
+        false => {
             tracing::info!("Using TestTokenVerifier");
             SupportedTokenVerifiers::TestTokenVerifier
         }
@@ -76,8 +76,8 @@ impl OAuthTokenVerifier for PagodaFirebaseTokenVerifier {
     async fn verify_token(token: &str) -> Result<String, String> {
         let public_key = get_pagoda_firebase_public_key().expect("Failed to get Google public key");
 
-        // tmp project from Philip: pagoda-fast-auth-441fe
-        let pagoda_firebase_audience_id: String = "pagoda-onboarding-dev".to_string();
+        // this is a tmp Project ID, the real one is: pagoda-onboarding-dev
+        let pagoda_firebase_audience_id: String = "pagoda-fast-auth-441fe".to_string();
         let pagoda_firebase_issuer_id: String = format!(
             "https://securetoken.google.com/{}",
             pagoda_firebase_audience_id

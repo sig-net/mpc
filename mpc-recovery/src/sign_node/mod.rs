@@ -1,7 +1,7 @@
 use crate::msg::{SigShareRequest, SigShareResponse};
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::NodeId;
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{http::StatusCode, routing::post, Extension, Json, Router};
 use std::net::SocketAddr;
 use threshold_crypto::{PublicKeySet, SecretKeyShare};
 
@@ -18,7 +18,7 @@ pub async fn run(id: NodeId, pk_set: PublicKeySet, sk_share: SecretKeyShare, por
 
     let app = Router::new()
         .route("/sign", post(sign::<UniversalTokenVerifier>))
-        .with_state(state);
+        .layer(Extension(state));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::debug!(?addr, "starting http server");
@@ -36,7 +36,7 @@ struct SignNodeState {
 
 #[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
 async fn sign<T: OAuthTokenVerifier>(
-    State(state): State<SignNodeState>,
+    Extension(state): Extension<SignNodeState>,
     Json(request): Json<SigShareRequest>,
 ) -> (StatusCode, Json<SigShareResponse>) {
     tracing::info!(payload = request.payload, "sign request");

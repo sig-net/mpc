@@ -1,14 +1,16 @@
 use crate::client::NearRpcClient;
+use crate::key_recovery::{get_user_recovery_pk, get_user_recovery_sk};
 use crate::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
     NewAccountResponse, SigShareRequest, SigShareResponse,
 };
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
+use crate::primitives::InternalAccountId;
 use crate::transaction::{
-    new_add_fa_key_transaction, new_create_account_transaction, sign_transaction,
+    get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
 };
 use crate::NodeId;
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{http::StatusCode, routing::post, Extension, Json, Router};
 use futures::stream::FuturesUnordered;
 use hyper::client::ResponseFuture;
 use hyper::{Body, Client, Method, Request};
@@ -49,7 +51,7 @@ pub async fn run(
         .route("/submit", post(submit::<UniversalTokenVerifier>))
         .route("/new_account", post(new_account::<UniversalTokenVerifier>))
         .route("/add_key", post(add_key::<UniversalTokenVerifier>))
-        .with_state(state);
+        .layer(Extension(state));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::debug!(?addr, "starting http server");
@@ -94,47 +96,53 @@ async fn process_new_account(
     request: &NewAccountRequest,
 ) -> anyhow::Result<(StatusCode, Json<NewAccountResponse>)> {
     // This is the account that is doing the function calls to creates new accounts.
-    // TODO: Create such an account for testnet and mainnet
+    // TODO: Create such an account for testnet and mainnet in a secure way
     // TODO: Store this account secret key in GCP Secret Manager
-    let account_creator_id: AccountId = "account_creator.testnet".parse().unwrap();
-    let account_creator_sk: SecretKey = "secret_key".parse().unwrap();
-    let account_creator_pk: PublicKey = "public_key".parse().unwrap();
+    let account_creator_id: AccountId = "tmp_acount_creator.serhii.testnet".parse().unwrap();
+    let account_creator_sk: SecretKey = "ed25519:5pFJN3czPAHFWHZYjD4oTtnJE7PshLMeTkSU7CmWkvLaQWchCLgXGF1wwcJmh2AQChGH85EwcL5VW7tUavcAZDSG".parse().unwrap();
+    let account_creator_pk: PublicKey = "ed25519:3BUQYE4ZfQ6A94CqCtAbdLURxo4eHv2L8JjC2KiXXdFn"
+        .parse()
+        .unwrap();
 
     // Get nonce and recent block hash
     let nonce = state
         .client
         .access_key_nonce(account_creator_id.clone(), account_creator_pk.clone())
         .await?;
-    let block_hash = state.client.latest_block_hash().await?;
-
-    // Create/generate a public key for for this user
-    // TODO: use key derivation or other techniques to generate a key
-    let mpc_recovery_user_pk: PublicKey = "".parse().unwrap();
+    let block_height = state.client.latest_block_height().await?;
 
     // Create a transaction to create new NEAR account
     let new_user_account_id: AccountId = request.account_id.clone().parse().unwrap();
-    let create_acc_tx = new_create_account_transaction(
-        new_user_account_id,
-        mpc_recovery_user_pk,
+    let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
+
+    let delegate_action = get_create_account_delegate_action(
         account_creator_id.clone(),
         account_creator_pk,
-        nonce,
-        block_hash,
+        new_user_account_id.clone(),
+        get_user_recovery_pk(internal_user_id),
         crate::transaction::NetworkType::Testnet,
+        nonce,
+        block_height + 100,
     );
+    let signed_delegate_action =
+        get_signed_delegated_action(delegate_action, account_creator_id, account_creator_sk);
 
-    // Sign the transaction
-    let signed_create_acc_tx =
-        sign_transaction(create_acc_tx, account_creator_id, account_creator_sk);
+    state
+        .client
+        .register_account_with_relayer(new_user_account_id)
+        .await?;
 
-    state.client.send_tx(signed_create_acc_tx).await?;
+    state
+        .client
+        .send_tx_via_relayer(signed_delegate_action)
+        .await?;
 
     Ok((StatusCode::OK, Json(NewAccountResponse::Ok)))
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
 async fn new_account<T: OAuthTokenVerifier>(
-    State(state): State<LeaderState>,
+    Extension(state): Extension<LeaderState>,
     Json(request): Json<NewAccountRequest>,
 ) -> (StatusCode, Json<NewAccountResponse>) {
     tracing::info!(
@@ -152,18 +160,18 @@ async fn new_account<T: OAuthTokenVerifier>(
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(NewAccountResponse::Err {
-                            msg: "internal error".to_string(),
+                            msg: format!("failed to process new account: {}", e),
                         }),
                     )
                 }
             }
         }
-        Err(_) => {
+        Err(e) => {
             tracing::error!("access token verification failed");
             (
                 StatusCode::UNAUTHORIZED,
                 Json(NewAccountResponse::Err {
-                    msg: "access token verification failed".into(),
+                    msg: format!("access token verification failed: {}", e),
                 }),
             )
         }
@@ -175,41 +183,46 @@ async fn process_add_key(
     request: &AddKeyRequest,
 ) -> anyhow::Result<(StatusCode, Json<AddKeyResponse>)> {
     let user_account_id: AccountId = request.account_id.parse().unwrap();
-
-    // Create/generate a public key for for this user
-    // TODO: use key derivation or other techniques to generate a key
-    let mpc_recovery_user_pk: PublicKey = "".parse().unwrap();
+    let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
 
     // Get nonce and recent block hash
     let nonce = state
         .client
-        .access_key_nonce(user_account_id.clone(), mpc_recovery_user_pk.clone())
+        .access_key_nonce(
+            user_account_id.clone(),
+            get_user_recovery_pk(internal_user_id.clone()).clone(),
+        )
         .await?;
-    let block_hash = state.client.latest_block_hash().await?;
+    let block_height = state.client.latest_block_height().await?;
 
     // Create a transaction to create a new account
     let new_user_pk: PublicKey = request.public_key.clone().parse().unwrap();
-    let add_key_tx = new_add_fa_key_transaction(
+
+    let max_block_height: u64 = block_height + 100;
+
+    let delegate_action = get_add_key_delegate_action(
         user_account_id.clone(),
-        mpc_recovery_user_pk,
         new_user_pk,
         nonce,
-        block_hash,
+        max_block_height,
+    );
+    let signed_delegate_action = get_signed_delegated_action(
+        delegate_action,
+        user_account_id,
+        get_user_recovery_sk(internal_user_id.clone()),
     );
 
-    // Sign the transaction
-    // TODO: use key derivation or other techniques to generate a key
-    let mpc_recovery_user_sk: SecretKey = "".parse().unwrap();
-    let signed_add_key_tx = sign_transaction(add_key_tx, user_account_id, mpc_recovery_user_sk);
-
-    state.client.send_tx(signed_add_key_tx).await?;
+    state
+        .client
+        .send_tx_via_relayer(signed_delegate_action)
+        .await?;
 
     Ok((StatusCode::OK, Json(AddKeyResponse::Ok)))
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
 async fn add_key<T: OAuthTokenVerifier>(
-    State(state): State<LeaderState>,
+    Extension(state): Extension<LeaderState>,
     Json(request): Json<AddKeyRequest>,
 ) -> (StatusCode, Json<AddKeyResponse>) {
     tracing::info!(
@@ -248,7 +261,7 @@ async fn add_key<T: OAuthTokenVerifier>(
 
 #[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
 async fn submit<T: OAuthTokenVerifier>(
-    State(state): State<LeaderState>,
+    Extension(state): Extension<LeaderState>,
     Json(request): Json<LeaderRequest>,
 ) -> (StatusCode, Json<LeaderResponse>) {
     tracing::info!(payload = request.payload, "submit request");

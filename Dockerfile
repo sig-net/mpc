@@ -19,7 +19,8 @@ COPY --from=builder /usr/local/cargo/registry/cache /usr/local/cargo/registry/ca
 COPY --from=builder /usr/local/cargo/registry/index /usr/local/cargo/registry/index
 
 FROM debian:buster-slim as runtime
-RUN apt-get update && apt-get install --assume-yes libssl-dev
+RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates
+RUN update-ca-certificates
 COPY --from=builder /usr/src/app/target/release/mpc-recovery /usr/local/bin/mpc-recovery
 WORKDIR /usr/local/bin
 
