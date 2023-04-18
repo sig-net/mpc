@@ -8,12 +8,12 @@ use near_primitives::views::{AccessKeyView, QueryRequest};
 use serde_json::json;
 
 #[derive(Clone)]
-pub struct NearRpcClient {
+pub struct NearRpcAndRelayerClient {
     rpc_client: JsonRpcClient,
     relayer_url: String,
 }
 
-impl NearRpcClient {
+impl NearRpcAndRelayerClient {
     pub fn connect(near_rpc: &str, relayer_url: String) -> Self {
         Self {
             rpc_client: JsonRpcClient::connect(near_rpc),
@@ -146,11 +146,12 @@ mod tests {
     use super::*;
 
     const RELAYER_URI: &str = "http://34.70.226.83:3030";
+    const TESTNET_URL: &str = "https://rpc.testnet.near.org";
 
     #[tokio::test]
     async fn test_latest_block() -> anyhow::Result<()> {
         let testnet =
-            NearRpcClient::connect("https://rpc.testnet.near.org", RELAYER_URI.to_string());
+            NearRpcAndRelayerClient::connect(TESTNET_URL, RELAYER_URI.to_string());
         let block_height = testnet.latest_block_height().await?;
 
         assert!(block_height > 0);
@@ -160,7 +161,7 @@ mod tests {
     #[tokio::test]
     async fn test_access_key() -> anyhow::Result<()> {
         let testnet =
-            NearRpcClient::connect("https://rpc.testnet.near.org", RELAYER_URI.to_string());
+            NearRpcAndRelayerClient::connect(TESTNET_URL, RELAYER_URI.to_string());
         let nonce = testnet
             .access_key_nonce(
                 "dev-1636354824855-78504059330123".parse()?,

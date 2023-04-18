@@ -1,4 +1,4 @@
-use crate::client::NearRpcClient;
+use crate::client::NearRpcAndRelayerClient;
 use crate::key_recovery::{get_user_recovery_pk, get_user_recovery_sk};
 use crate::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
@@ -54,7 +54,7 @@ pub async fn run(config: Config) {
         return;
     }
 
-    let client = NearRpcClient::connect(&near_rpc, relayer_url);
+    let client = NearRpcAndRelayerClient::connect(&near_rpc, relayer_url);
     client
         .register_account_with_relayer(account_creator_id.clone())
         .await
@@ -90,7 +90,7 @@ struct LeaderState {
     pk_set: PublicKeySet,
     sk_share: SecretKeyShare,
     sign_nodes: Vec<String>,
-    client: NearRpcClient,
+    client: NearRpcAndRelayerClient,
     account_creator_id: AccountId,
     // TODO: temporary solution
     account_creator_sk: SecretKey,
