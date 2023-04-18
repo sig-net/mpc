@@ -112,7 +112,7 @@ async fn process_new_account(
     let block_height = state.client.latest_block_height().await?;
 
     // Create a transaction to create new NEAR account
-    let new_user_account_id: AccountId = request.account_id.clone().parse().unwrap();
+    let new_user_account_id: AccountId = request.near_account_id.clone().parse().unwrap();
     let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
 
     let delegate_action = get_create_account_delegate_action(
@@ -146,11 +146,11 @@ async fn new_account<T: OAuthTokenVerifier>(
     Json(request): Json<NewAccountRequest>,
 ) -> (StatusCode, Json<NewAccountResponse>) {
     tracing::info!(
-        access_token = format!("{:.5}...", request.id_token),
+        access_token = format!("{:.5}...", request.oidc_token),
         "new request"
     );
 
-    match T::verify_token(&request.id_token).await {
+    match T::verify_token(&request.oidc_token).await {
         Ok(_) => {
             tracing::info!("access token is valid");
             match process_new_account(&state, &request).await {
@@ -182,7 +182,7 @@ async fn process_add_key(
     state: &LeaderState,
     request: &AddKeyRequest,
 ) -> anyhow::Result<(StatusCode, Json<AddKeyResponse>)> {
-    let user_account_id: AccountId = request.account_id.parse().unwrap();
+    let user_account_id: AccountId = request.near_account_id.parse().unwrap();
     let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
 
     // Get nonce and recent block hash
@@ -226,12 +226,12 @@ async fn add_key<T: OAuthTokenVerifier>(
     Json(request): Json<AddKeyRequest>,
 ) -> (StatusCode, Json<AddKeyResponse>) {
     tracing::info!(
-        access_token = format!("{:.5}...", request.id_token),
+        access_token = format!("{:.5}...", request.oidc_token),
         public_key = hex::encode(request.public_key.clone()),
         "new request"
     );
 
-    match T::verify_token(&request.id_token).await {
+    match T::verify_token(&request.oidc_token).await {
         Ok(_) => {
             tracing::info!("access token is valid");
             match process_add_key(&state, &request).await {
