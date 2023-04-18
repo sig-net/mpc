@@ -40,6 +40,12 @@ git submodule update --init --recursive
 docker build . -t near/mpc-recovery
 ```
 
+alternatively if you have [nix](https://nixos.org/) and [direnv](https://direnv.net/) installed, you can set up a development environment by running:
+
+``` BASH
+direnv allow
+```
+
 Run tests with:
 ```
 cargo test -p mpc-recovery
