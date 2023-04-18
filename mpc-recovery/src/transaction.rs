@@ -26,19 +26,16 @@ pub fn get_create_account_delegate_action(
     signer_pk: PublicKey,
     new_account_id: AccountId,
     new_account_recovery_pk: PublicKey,
-    new_account_user_pk: PublicKey,
+    _new_account_user_pk: PublicKey,
     network_type: NetworkType,
     nonce: Nonce,
     max_block_height: u64,
 ) -> DelegateAction {
-    let create_acc_options = CreateAccountOptions {
-        full_access_keys: Some(vec![new_account_user_pk, new_account_recovery_pk]),
-    };
     let create_acc_action = Action::FunctionCall(FunctionCallAction {
         method_name: "create_account".to_string(),
         args: json!({
             "new_account_id": new_account_id,
-            "options": create_acc_options,
+            "new_public_key": new_account_recovery_pk.to_string(),
         })
         .to_string()
         .into_bytes(),

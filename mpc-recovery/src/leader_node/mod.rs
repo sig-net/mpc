@@ -218,7 +218,7 @@ async fn process_add_key(
         user_account_id.clone(),
         get_user_recovery_pk(internal_acc_id.clone()),
         new_public_key,
-        nonce,
+        nonce + 1,
         max_block_height,
     );
     let signed_delegate_action = get_signed_delegated_action(
