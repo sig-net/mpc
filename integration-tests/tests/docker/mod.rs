@@ -4,7 +4,7 @@ use bollard::{
     service::{HostConfig, Ipam, PortBinding},
     Docker,
 };
-use futures::StreamExt;
+use futures::{lock::Mutex, StreamExt};
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use mpc_recovery::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
@@ -13,7 +13,7 @@ use mpc_recovery::msg::{
 use near_crypto::SecretKey;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Mutex};
+use std::collections::HashMap;
 use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
 use tokio::io::AsyncWriteExt;
 use workspaces::AccountId;
@@ -116,7 +116,7 @@ async fn start_mpc_node(
 }
 
 async fn create_network(docker: &Docker, network: &str) -> anyhow::Result<()> {
-    let _lock = &NETWORK_MUTEX.lock().unwrap();
+    let _lock = &NETWORK_MUTEX.lock().await;
     let list = docker.list_networks::<&str>(None).await?;
     if list.iter().any(|n| n.name == Some(network.to_string())) {
         return Ok(());
