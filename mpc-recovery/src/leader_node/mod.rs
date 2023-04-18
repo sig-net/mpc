@@ -4,7 +4,7 @@ use crate::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
     NewAccountResponse, SigShareRequest, SigShareResponse,
 };
-use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier, IdTokenClaims};
+use crate::oauth::{IdTokenClaims, OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::primitives::InternalAccountId;
 use crate::transaction::{
     get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
@@ -149,7 +149,7 @@ async fn process_new_account(
 }
 
 pub fn get_internal_account_id(claims: IdTokenClaims) -> InternalAccountId {
-    return format!("{}:{}", claims.iss, claims.sub);
+    format!("{}:{}", claims.iss, claims.sub)
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(id = state.id))]

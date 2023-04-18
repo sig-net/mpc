@@ -150,8 +150,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_latest_block() -> anyhow::Result<()> {
-        let testnet =
-            NearRpcAndRelayerClient::connect(TESTNET_URL, RELAYER_URI.to_string());
+        let testnet = NearRpcAndRelayerClient::connect(TESTNET_URL, RELAYER_URI.to_string());
         let block_height = testnet.latest_block_height().await?;
 
         assert!(block_height > 0);
@@ -160,8 +159,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_access_key() -> anyhow::Result<()> {
-        let testnet =
-            NearRpcAndRelayerClient::connect(TESTNET_URL, RELAYER_URI.to_string());
+        let testnet = NearRpcAndRelayerClient::connect(TESTNET_URL, RELAYER_URI.to_string());
         let nonce = testnet
             .access_key_nonce(
                 "dev-1636354824855-78504059330123".parse()?,
