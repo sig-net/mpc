@@ -2037,6 +2037,7 @@ dependencies = [
  "hyper",
  "mpc-recovery",
  "near-crypto 0.16.1",
+ "once_cell",
  "portpicker",
  "rand 0.8.5",
  "serde",
