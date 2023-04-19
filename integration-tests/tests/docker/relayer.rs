@@ -23,6 +23,7 @@ impl Relayer {
         relayer_account_sk: &SecretKey,
         creator_account_id: &AccountId,
     ) -> anyhow::Result<Relayer> {
+        super::create_network(docker, network).await?;
         let web_port = portpicker::pick_unused_port().expect("no free ports");
 
         let mut exposed_ports = HashMap::new();

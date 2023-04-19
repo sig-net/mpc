@@ -14,6 +14,7 @@ pub struct Redis {
 
 impl Redis {
     pub async fn start(docker: &Docker, network: &str) -> anyhow::Result<Redis> {
+        super::create_network(docker, network).await?;
         docker
             .create_image(
                 Some(CreateImageOptions {
