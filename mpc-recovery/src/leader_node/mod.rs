@@ -10,7 +10,6 @@ use crate::transaction::{
     get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
 };
 use crate::NodeId;
-use axum::http::HeaderValue;
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
 use futures::stream::FuturesUnordered;
 use hyper::client::ResponseFuture;
@@ -72,17 +71,11 @@ pub async fn run(config: Config) {
         account_creator_sk,
     };
 
+    //TODO: now secure, allow only for testnet, whitelist for mainnet
     let cors_layer = tower_http::cors::CorsLayer::new()
-        .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap()) //TODO: now secure, allow only for testnet
-        .allow_origin(
-            "https://near-discovery-asq5uacgk-near-developer-console.vercel.app/"
-                .parse::<HeaderValue>()
-                .unwrap(),
-        )
-        .allow_origin("https://alpha.near.org/".parse::<HeaderValue>().unwrap())
-        .allow_origin("https://near.org/".parse::<HeaderValue>().unwrap())
-        .allow_methods([Method::POST])
-        .allow_headers(Any); // TODO: doublecheck what can be allowed here
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
     let app = Router::new()
         .route("/submit", post(submit::<UniversalTokenVerifier>))
