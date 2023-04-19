@@ -101,10 +101,10 @@ where
     })
     .await;
 
-    // drop(leader_node);
-    // drop(sign_nodes);
-    // drop(relayer);
-    // drop(redis);
+    drop(leader_node);
+    drop(sign_nodes);
+    drop(relayer);
+    drop(redis);
 
     // Wait until all docker containers are destroyed.
     // See `Drop` impl for `LeaderNode` and `SignNode` for more info.
