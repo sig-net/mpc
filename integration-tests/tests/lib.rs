@@ -184,7 +184,6 @@ async fn test_basic_action() -> anyhow::Result<()> {
 
             // Check that account exists and it has the requested public key
             let access_keys = ctx.worker.view_access_keys(&account_id).await?;
-            println!("ACCESS KEYS: {:?}", access_keys);
             assert!(access_keys
                 .iter()
                 .any(|ak| ak.public_key.to_string() == user_public_key));
