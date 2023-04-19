@@ -30,7 +30,7 @@ pub fn get_create_account_delegate_action(
     network_type: NetworkType,
     nonce: Nonce,
     max_block_height: u64,
-) -> DelegateAction {
+) -> anyhow::Result<DelegateAction> {
     let create_acc_options = CreateAccountOptions {
         full_access_keys: Some(vec![new_account_user_pk, new_account_recovery_pk]),
     };
@@ -46,9 +46,9 @@ pub fn get_create_account_delegate_action(
         deposit: 0,
     });
 
-    let delegate_create_acc_action = NonDelegateAction::try_from(create_acc_action).unwrap();
+    let delegate_create_acc_action = NonDelegateAction::try_from(create_acc_action)?;
 
-    DelegateAction {
+    let delegate_action = DelegateAction {
         sender_id: signer_id,
         receiver_id: match network_type {
             NetworkType::_Mainnet => "near".parse().unwrap(),
@@ -58,7 +58,9 @@ pub fn get_create_account_delegate_action(
         nonce,
         max_block_height,
         public_key: signer_pk,
-    }
+    };
+
+    Ok(delegate_action)
 }
 
 pub fn get_add_key_delegate_action(
@@ -67,7 +69,7 @@ pub fn get_add_key_delegate_action(
     new_public_key: PublicKey,
     nonce: Nonce,
     max_block_height: u64,
-) -> DelegateAction {
+) -> anyhow::Result<DelegateAction> {
     let add_key_action = Action::AddKey(AddKeyAction {
         public_key: new_public_key,
         access_key: AccessKey {
@@ -76,16 +78,18 @@ pub fn get_add_key_delegate_action(
         },
     });
 
-    let delegate_add_key_action = NonDelegateAction::try_from(add_key_action).unwrap();
+    let delegate_add_key_action = NonDelegateAction::try_from(add_key_action)?;
 
-    DelegateAction {
+    let delegate_action = DelegateAction {
         sender_id: account_id.clone(),
         receiver_id: account_id,
         actions: vec![delegate_add_key_action],
         nonce,
         max_block_height,
         public_key: signer_pk,
-    }
+    };
+
+    Ok(delegate_action)
 }
 
 pub fn get_signed_delegated_action(
