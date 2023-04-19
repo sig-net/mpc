@@ -9,11 +9,6 @@ use near_primitives::signable_message::{SignableMessage, SignableMessageType};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-pub enum NetworkType {
-    _Mainnet,
-    Testnet,
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct CreateAccountOptions {
     // Note: original structure contains other unrelated fields
@@ -27,7 +22,7 @@ pub fn get_create_account_delegate_action(
     new_account_id: AccountId,
     new_account_recovery_pk: PublicKey,
     new_account_user_pk: PublicKey,
-    network_type: NetworkType,
+    near_root_account: AccountId,
     nonce: Nonce,
     max_block_height: u64,
 ) -> anyhow::Result<DelegateAction> {
@@ -50,10 +45,7 @@ pub fn get_create_account_delegate_action(
 
     let delegate_action = DelegateAction {
         sender_id: signer_id,
-        receiver_id: match network_type {
-            NetworkType::_Mainnet => "near".parse().unwrap(),
-            NetworkType::Testnet => "testnet".parse().unwrap(),
-        },
+        receiver_id: near_root_account,
         actions: vec![delegate_create_acc_action],
         nonce,
         max_block_height,

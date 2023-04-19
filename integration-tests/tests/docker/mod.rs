@@ -18,8 +18,8 @@ use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
 use tokio::io::AsyncWriteExt;
 use workspaces::AccountId;
 
-// pub mod redis;
-// pub mod relayer;
+pub mod redis;
+pub mod relayer;
 
 static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 
@@ -158,6 +158,7 @@ impl LeaderNode {
         sign_nodes: Vec<String>,
         near_rpc: &str,
         relayer_url: &str,
+        near_root_account: &AccountId,
         account_creator_id: &AccountId,
         account_creator_sk: &SecretKey,
     ) -> anyhow::Result<LeaderNode> {
@@ -178,6 +179,8 @@ impl LeaderNode {
             near_rpc.to_string(),
             "--relayer-url".to_string(),
             relayer_url.to_string(),
+            "--near-root-account".to_string(),
+            near_root_account.to_string(),
             "--account-creator-id".to_string(),
             account_creator_id.to_string(),
             "--account-creator-sk".to_string(),
