@@ -1,10 +1,10 @@
-use crate::client::NearRpcClient;
+use crate::client::NearRpcAndRelayerClient;
 use crate::key_recovery::{get_user_recovery_pk, get_user_recovery_sk};
 use crate::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
     NewAccountResponse, SigShareRequest, SigShareResponse,
 };
-use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
+use crate::oauth::{IdTokenClaims, OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::primitives::InternalAccountId;
 use crate::transaction::{
     get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
@@ -20,17 +20,34 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use threshold_crypto::{PublicKeySet, SecretKeyShare};
+use tower_http::cors::Any;
 
-#[tracing::instrument(level = "debug", skip(pk_set, sk_share, sign_nodes, root_secret_key))]
-pub async fn run(
-    id: NodeId,
-    pk_set: PublicKeySet,
-    sk_share: SecretKeyShare,
-    port: u16,
-    sign_nodes: Vec<String>,
+pub struct Config {
+    pub id: NodeId,
+    pub pk_set: PublicKeySet,
+    pub sk_share: SecretKeyShare,
+    pub port: u16,
+    pub sign_nodes: Vec<String>,
+    pub near_rpc: String,
+    pub relayer_url: String,
+    pub account_creator_id: AccountId,
     // TODO: temporary solution
-    root_secret_key: ed25519_dalek::SecretKey,
-) {
+    pub account_creator_sk: SecretKey,
+}
+
+pub async fn run(config: Config) {
+    let Config {
+        id,
+        pk_set,
+        sk_share,
+        port,
+        sign_nodes,
+        near_rpc,
+        relayer_url,
+        account_creator_id,
+        account_creator_sk,
+    } = config;
+    let _span = tracing::debug_span!("run", id, port);
     tracing::debug!(?sign_nodes, "running a leader node");
 
     if pk_set.public_key_share(id) != sk_share.public_key_share() {
@@ -38,20 +55,34 @@ pub async fn run(
         return;
     }
 
+    let client = NearRpcAndRelayerClient::connect(&near_rpc, relayer_url);
+    client
+        .register_account_with_relayer(account_creator_id.clone())
+        .await
+        .unwrap();
+
     let state = LeaderState {
         id,
         pk_set,
         sk_share,
         sign_nodes,
-        client: NearRpcClient::testnet(),
-        root_secret_key,
+        client,
+        account_creator_id,
+        account_creator_sk,
     };
+
+    //TODO: now secure, allow only for testnet, whitelist for mainnet
+    let cors_layer = tower_http::cors::CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
     let app = Router::new()
         .route("/submit", post(submit::<UniversalTokenVerifier>))
         .route("/new_account", post(new_account::<UniversalTokenVerifier>))
         .route("/add_key", post(add_key::<UniversalTokenVerifier>))
-        .layer(Extension(state));
+        .layer(Extension(state))
+        .layer(cors_layer);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::debug!(?addr, "starting http server");
@@ -61,28 +92,16 @@ pub async fn run(
         .unwrap();
 }
 
+#[derive(Clone)]
 struct LeaderState {
     id: NodeId,
     pk_set: PublicKeySet,
     sk_share: SecretKeyShare,
     sign_nodes: Vec<String>,
-    client: NearRpcClient,
+    client: NearRpcAndRelayerClient,
+    account_creator_id: AccountId,
     // TODO: temporary solution
-    root_secret_key: ed25519_dalek::SecretKey,
-}
-
-impl Clone for LeaderState {
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id,
-            pk_set: self.pk_set.clone(),
-            sk_share: self.sk_share.clone(),
-            sign_nodes: self.sign_nodes.clone(),
-            client: self.client.clone(),
-            root_secret_key: ed25519_dalek::SecretKey::from_bytes(self.root_secret_key.as_bytes())
-                .unwrap(),
-        }
-    }
+    account_creator_sk: SecretKey,
 }
 
 async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareResponse> {
@@ -94,38 +113,37 @@ async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareRespon
 async fn process_new_account(
     state: &LeaderState,
     request: &NewAccountRequest,
+    internal_acc_id: InternalAccountId,
 ) -> anyhow::Result<(StatusCode, Json<NewAccountResponse>)> {
-    // This is the account that is doing the function calls to creates new accounts.
-    // TODO: Create such an account for testnet and mainnet in a secure way
-    // TODO: Store this account secret key in GCP Secret Manager
-    let account_creator_id: AccountId = "tmp_acount_creator.serhii.testnet".parse().unwrap();
-    let account_creator_sk: SecretKey = "ed25519:5pFJN3czPAHFWHZYjD4oTtnJE7PshLMeTkSU7CmWkvLaQWchCLgXGF1wwcJmh2AQChGH85EwcL5VW7tUavcAZDSG".parse().unwrap();
-    let account_creator_pk: PublicKey = "ed25519:3BUQYE4ZfQ6A94CqCtAbdLURxo4eHv2L8JjC2KiXXdFn"
-        .parse()
-        .unwrap();
-
     // Get nonce and recent block hash
     let nonce = state
         .client
-        .access_key_nonce(account_creator_id.clone(), account_creator_pk.clone())
+        .access_key_nonce(
+            state.account_creator_id.clone(),
+            state.account_creator_sk.public_key(),
+        )
         .await?;
     let block_height = state.client.latest_block_height().await?;
 
     // Create a transaction to create new NEAR account
-    let new_user_account_id: AccountId = request.account_id.clone().parse().unwrap();
-    let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
+    let new_user_account_pk: PublicKey = request.public_key.clone().parse()?;
+    let new_user_account_id: AccountId = request.near_account_id.clone().parse()?;
 
     let delegate_action = get_create_account_delegate_action(
-        account_creator_id.clone(),
-        account_creator_pk,
+        state.account_creator_id.clone(),
+        state.account_creator_sk.public_key(),
         new_user_account_id.clone(),
-        get_user_recovery_pk(internal_user_id),
+        get_user_recovery_pk(internal_acc_id),
+        new_user_account_pk,
         crate::transaction::NetworkType::Testnet,
-        nonce,
+        nonce + 1,
         block_height + 100,
+    )?;
+    let signed_delegate_action = get_signed_delegated_action(
+        delegate_action,
+        state.account_creator_id.clone(),
+        state.account_creator_sk.clone(),
     );
-    let signed_delegate_action =
-        get_signed_delegated_action(delegate_action, account_creator_id, account_creator_sk);
 
     state
         .client
@@ -140,20 +158,24 @@ async fn process_new_account(
     Ok((StatusCode::OK, Json(NewAccountResponse::Ok)))
 }
 
+pub fn get_internal_account_id(claims: IdTokenClaims) -> InternalAccountId {
+    format!("{}:{}", claims.iss, claims.sub)
+}
+
 #[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
 async fn new_account<T: OAuthTokenVerifier>(
     Extension(state): Extension<LeaderState>,
     Json(request): Json<NewAccountRequest>,
 ) -> (StatusCode, Json<NewAccountResponse>) {
     tracing::info!(
-        access_token = format!("{:.5}...", request.id_token),
+        access_token = format!("{:.5}...", request.oidc_token),
         "new request"
     );
 
-    match T::verify_token(&request.id_token).await {
-        Ok(_) => {
+    match T::verify_token(&request.oidc_token).await {
+        Ok(claims) => {
             tracing::info!("access token is valid");
-            match process_new_account(&state, &request).await {
+            match process_new_account(&state, &request, get_internal_account_id(claims)).await {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::error!(err = ?e);
@@ -181,35 +203,36 @@ async fn new_account<T: OAuthTokenVerifier>(
 async fn process_add_key(
     state: &LeaderState,
     request: &AddKeyRequest,
+    internal_acc_id: InternalAccountId,
 ) -> anyhow::Result<(StatusCode, Json<AddKeyResponse>)> {
-    let user_account_id: AccountId = request.account_id.parse().unwrap();
-    let internal_user_id: InternalAccountId = "tmp".parse().unwrap(); // TODO:get real user id from ID token
+    let user_account_id: AccountId = request.near_account_id.parse()?;
 
     // Get nonce and recent block hash
     let nonce = state
         .client
         .access_key_nonce(
             user_account_id.clone(),
-            get_user_recovery_pk(internal_user_id.clone()).clone(),
+            get_user_recovery_pk(internal_acc_id.clone()).clone(),
         )
         .await?;
     let block_height = state.client.latest_block_height().await?;
 
     // Create a transaction to create a new account
-    let new_user_pk: PublicKey = request.public_key.clone().parse().unwrap();
+    let new_public_key: PublicKey = request.public_key.clone().parse()?;
 
     let max_block_height: u64 = block_height + 100;
 
     let delegate_action = get_add_key_delegate_action(
         user_account_id.clone(),
-        new_user_pk,
-        nonce,
+        get_user_recovery_pk(internal_acc_id.clone()),
+        new_public_key,
+        nonce + 1,
         max_block_height,
-    );
+    )?;
     let signed_delegate_action = get_signed_delegated_action(
         delegate_action,
         user_account_id,
-        get_user_recovery_sk(internal_user_id.clone()),
+        get_user_recovery_sk(internal_acc_id),
     );
 
     state
@@ -226,15 +249,15 @@ async fn add_key<T: OAuthTokenVerifier>(
     Json(request): Json<AddKeyRequest>,
 ) -> (StatusCode, Json<AddKeyResponse>) {
     tracing::info!(
-        access_token = format!("{:.5}...", request.id_token),
+        access_token = format!("{:.5}...", request.oidc_token),
         public_key = hex::encode(request.public_key.clone()),
         "new request"
     );
 
-    match T::verify_token(&request.id_token).await {
-        Ok(_) => {
+    match T::verify_token(&request.oidc_token).await {
+        Ok(claims) => {
             tracing::info!("access token is valid");
-            match process_add_key(&state, &request).await {
+            match process_add_key(&state, &request, get_internal_account_id(claims)).await {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::error!(err = ?e);

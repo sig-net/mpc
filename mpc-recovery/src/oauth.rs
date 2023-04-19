@@ -1,3 +1,4 @@
+use chrono::Utc;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -5,7 +6,7 @@ use std::collections::HashMap;
 
 #[async_trait::async_trait]
 pub trait OAuthTokenVerifier {
-    async fn verify_token(token: &str) -> Result<String, String>; // TODO: replace String error with custom error type
+    async fn verify_token(token: &str) -> Result<IdTokenClaims, String>; // TODO: replace String error with custom error type
 
     /// This function validates JWT (OIDC ID token) by checking the signature received
     /// from the issuer, issuer, audience, and expiration time.
@@ -14,17 +15,16 @@ pub trait OAuthTokenVerifier {
         public_key: &[u8],
         issuer: &str,
         audience: &str,
-    ) -> Result<IdTokenClaims, String> {
+    ) -> anyhow::Result<IdTokenClaims> {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[issuer]);
         validation.set_audience(&[audience]);
 
-        let decoding_key = DecodingKey::from_rsa_pem(public_key).unwrap();
+        let decoding_key = DecodingKey::from_rsa_pem(public_key)?;
 
-        match decode::<IdTokenClaims>(token, &decoding_key, &validation) {
-            Ok(token_data) => Ok(token_data.claims),
-            Err(e) => Err(format!("Failed to validate the token: {}", e)),
-        }
+        let claims =
+            decode::<IdTokenClaims>(token, &decoding_key, &validation).map(|t| t.claims)?;
+        Ok(claims)
     }
 }
 
@@ -38,7 +38,7 @@ pub struct UniversalTokenVerifier {}
 
 #[async_trait::async_trait]
 impl OAuthTokenVerifier for UniversalTokenVerifier {
-    async fn verify_token(token: &str) -> Result<String, String> {
+    async fn verify_token(token: &str) -> Result<IdTokenClaims, String> {
         // TODO: here we assume that verifier type can be determined from the token
         match get_token_verifier_type(token) {
             SupportedTokenVerifiers::PagodaFirebaseTokenVerifier => {
@@ -73,7 +73,7 @@ impl OAuthTokenVerifier for PagodaFirebaseTokenVerifier {
     // Specs for ID token verification:
     // Google: https://developers.google.com/identity/openid-connect/openid-connect#validatinganidtoken
     // Firebase: https://firebase.google.com/docs/auth/admin/verify-id-tokens#verify_id_tokens_using_a_third-party_jwt_library
-    async fn verify_token(token: &str) -> Result<String, String> {
+    async fn verify_token(token: &str) -> Result<IdTokenClaims, String> {
         let public_key = get_pagoda_firebase_public_key().expect("Failed to get Google public key");
 
         // this is a tmp Project ID, the real one is: pagoda-onboarding-dev
@@ -90,9 +90,8 @@ impl OAuthTokenVerifier for PagodaFirebaseTokenVerifier {
             &pagoda_firebase_audience_id,
         )
         .expect("Failed to validate JWT");
-        let internal_user_identifier = format!("{}:{}", claims.iss, claims.sub);
 
-        Ok(internal_user_identifier)
+        Ok(claims)
     }
 }
 
@@ -101,11 +100,11 @@ pub struct TestTokenVerifier {}
 
 #[async_trait::async_trait]
 impl OAuthTokenVerifier for TestTokenVerifier {
-    async fn verify_token(token: &str) -> Result<String, String> {
+    async fn verify_token(token: &str) -> Result<IdTokenClaims, String> {
         match token {
             "validToken" => {
                 tracing::info!(target: "test-token-verifier", "access token is valid");
-                Ok("testAccountId".to_string())
+                Ok(get_test_claims())
             }
             _ => {
                 tracing::info!(target: "test-token-verifier", "access token verification failed");
@@ -117,10 +116,10 @@ impl OAuthTokenVerifier for TestTokenVerifier {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IdTokenClaims {
-    iss: String,
-    sub: String,
-    aud: String,
-    exp: usize,
+    pub iss: String,
+    pub sub: String,
+    pub aud: String,
+    pub exp: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -144,6 +143,15 @@ fn get_pagoda_firebase_public_key() -> Result<String, reqwest::Error> {
     Ok(key)
 }
 
+fn get_test_claims() -> IdTokenClaims {
+    IdTokenClaims {
+        iss: "test_issuer".to_string(),
+        sub: "test_subject".to_string(),
+        aud: "test_audience".to_string(),
+        exp: Utc::now().timestamp() as usize + 3600,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +162,13 @@ mod tests {
         pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey},
         RsaPrivateKey, RsaPublicKey,
     };
+
+    pub fn compare_claims(claims1: IdTokenClaims, claims2: IdTokenClaims) -> bool {
+        claims1.iss == claims2.iss
+            && claims1.sub == claims2.sub
+            && claims1.aud == claims2.aud
+            && claims1.exp == claims2.exp
+    }
 
     #[test]
     fn test_get_pagoda_firebase_public_key() {
@@ -199,7 +214,7 @@ mod tests {
             &my_claims.aud,
         ) {
             Ok(_) => panic!("Token validation should fail"),
-            Err(e) => assert_eq!(e, "Failed to validate the token: InvalidSignature"),
+            Err(e) => assert_eq!(e.to_string(), "InvalidSignature"),
         }
 
         // Invalid issuer
@@ -210,7 +225,7 @@ mod tests {
             &my_claims.aud,
         ) {
             Ok(_) => panic!("Token validation should fail"),
-            Err(e) => assert_eq!(e, "Failed to validate the token: InvalidIssuer"),
+            Err(e) => assert_eq!(e.to_string(), "InvalidIssuer"),
         }
 
         // Invalid audience
@@ -221,43 +236,52 @@ mod tests {
             "invalid_audience",
         ) {
             Ok(_) => panic!("Token validation should fail"),
-            Err(e) => assert_eq!(e, "Failed to validate the token: InvalidAudience"),
+            Err(e) => assert_eq!(e.to_string(), "InvalidAudience"),
         }
     }
 
     #[tokio::test]
     async fn test_verify_token_valid() {
         let token = "validToken";
-        let account_id = TestTokenVerifier::verify_token(token).await.unwrap();
-        assert_eq!(account_id, "testAccountId");
+        let claims = TestTokenVerifier::verify_token(token).await.unwrap();
+        let test_claims = get_test_claims();
+        assert!(compare_claims(claims, test_claims));
     }
 
     #[tokio::test]
     async fn test_verify_token_invalid_with_test_verifier() {
         let token = "invalid";
-        let account_id = TestTokenVerifier::verify_token(token).await;
-        assert_eq!(account_id, Err("Invalid token".to_string()));
+        let result = TestTokenVerifier::verify_token(token).await;
+        match result {
+            Ok(_) => panic!("Token verification should fail"),
+            Err(e) => assert_eq!(e, "Invalid token"),
+        }
     }
 
     #[tokio::test]
     async fn test_verify_token_valid_with_test_verifier() {
         let token = "validToken";
-        let account_id = TestTokenVerifier::verify_token(token).await.unwrap();
-        assert_eq!(account_id, "testAccountId");
+        let claims = TestTokenVerifier::verify_token(token).await.unwrap();
+        let test_claims = get_test_claims();
+        assert!(compare_claims(claims, test_claims));
     }
 
     #[tokio::test]
     async fn test_verify_token_invalid_with_universal_verifier() {
         let token = "invalid";
-        let account_id = UniversalTokenVerifier::verify_token(token).await;
-        assert_eq!(account_id, Err("Invalid token".to_string()));
+        let result = UniversalTokenVerifier::verify_token(token).await;
+        match result {
+            Ok(_) => panic!("Token verification should fail"),
+            Err(e) => assert_eq!(e, "Invalid token"),
+        }
     }
 
     #[tokio::test]
     async fn test_verify_token_valid_with_universal_verifier() {
         let token = "validToken";
-        let account_id = UniversalTokenVerifier::verify_token(token).await.unwrap();
-        assert_eq!(account_id, "testAccountId");
+        let claims = UniversalTokenVerifier::verify_token(token).await.unwrap();
+        let test_claims = get_test_claims();
+        assert!(compare_claims(claims, test_claims));
     }
 
     pub fn get_rsa_pem_key_pair() -> (Vec<u8>, Vec<u8>) {

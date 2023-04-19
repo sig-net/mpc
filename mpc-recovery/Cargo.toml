@@ -46,3 +46,4 @@ near-jsonrpc-client = "0.5.1"
 near-jsonrpc-primitives = "0.16.1"
 near-primitives = "0.16.1"
 near-crypto = "0.16.1"
+tower-http = { version = "0.4.0", features = ["cors"] }
