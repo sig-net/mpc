@@ -41,6 +41,9 @@ enum Cli {
             default_value("http://34.70.226.83:3030")
         )]
         relayer_url: String,
+        /// NEAR root account that has linkdrop contract deployed on it
+        #[arg(long, env("MPC_RECOVERY_NEAR_ROOT_ACCOUNT"), default_value("testnet"))]
+        near_root_account: String,
         /// Account creator ID
         #[arg(long, env("MPC_RECOVERY_ACCOUNT_ID"))]
         account_creator_id: AccountId,
@@ -97,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
             sign_nodes,
             near_rpc,
             relayer_url,
+            near_root_account,
             account_creator_id,
             account_creator_sk,
         } => {
@@ -113,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
                 sign_nodes,
                 near_rpc,
                 relayer_url,
+                near_root_account,
                 // TODO: Create such an account for testnet and mainnet in a secure way
                 account_creator_id,
                 // TODO: Load this account secret key from GCP Secret Manager

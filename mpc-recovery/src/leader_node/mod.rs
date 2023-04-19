@@ -29,6 +29,7 @@ pub struct Config {
     pub sign_nodes: Vec<String>,
     pub near_rpc: String,
     pub relayer_url: String,
+    pub near_root_account: String,
     pub account_creator_id: AccountId,
     // TODO: temporary solution
     pub account_creator_sk: SecretKey,
@@ -43,6 +44,7 @@ pub async fn run(config: Config) {
         sign_nodes,
         near_rpc,
         relayer_url,
+        near_root_account,
         account_creator_id,
         account_creator_sk,
     } = config;
@@ -66,6 +68,7 @@ pub async fn run(config: Config) {
         sk_share,
         sign_nodes,
         client,
+        near_root_account: near_root_account.parse().unwrap(),
         account_creator_id,
         account_creator_sk,
     };
@@ -91,6 +94,7 @@ struct LeaderState {
     sk_share: SecretKeyShare,
     sign_nodes: Vec<String>,
     client: NearRpcAndRelayerClient,
+    near_root_account: AccountId,
     account_creator_id: AccountId,
     // TODO: temporary solution
     account_creator_sk: SecretKey,
@@ -127,7 +131,7 @@ async fn process_new_account(
         new_user_account_id.clone(),
         get_user_recovery_pk(internal_acc_id),
         new_user_account_pk,
-        crate::transaction::NetworkType::Testnet,
+        state.near_root_account.clone(),
         nonce + 1,
         block_height + 100,
     );

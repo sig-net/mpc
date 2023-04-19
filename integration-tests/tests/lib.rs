@@ -1,6 +1,6 @@
 use crate::docker::{LeaderNode, SignNode};
 use bollard::Docker;
-// use docker::{redis::Redis, relayer::Relayer};
+use docker::{redis::Redis, relayer::Relayer};
 use futures::future::BoxFuture;
 use mpc_recovery::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
@@ -9,7 +9,7 @@ use mpc_recovery::msg::{
 use rand::{distributions::Alphanumeric, Rng};
 use std::time::Duration;
 use threshold_crypto::PublicKeySet;
-use workspaces::AccountId;
+use workspaces::{network::Sandbox, AccountId, Worker};
 
 mod docker;
 
@@ -18,22 +18,23 @@ const NETWORK: &str = "mpc_recovery_integration_test_network";
 struct TestContext<'a> {
     leader_node: &'a LeaderNode,
     pk_set: &'a PublicKeySet,
+    worker: &'a Worker<Sandbox>,
 }
 
-// async fn create_account(
-//     worker: &Worker<Sandbox>,
-// ) -> anyhow::Result<(AccountId, near_crypto::SecretKey)> {
-//     let (account_id, account_sk) = worker.dev_generate().await;
-//     worker
-//         .create_tla(account_id.clone(), account_sk.clone())
-//         .await?
-//         .into_result()?;
+async fn create_account(
+    worker: &Worker<Sandbox>,
+) -> anyhow::Result<(AccountId, near_crypto::SecretKey)> {
+    let (account_id, account_sk) = worker.dev_generate().await;
+    worker
+        .create_tla(account_id.clone(), account_sk.clone())
+        .await?
+        .into_result()?;
 
-//     let account_sk: near_crypto::SecretKey =
-//         serde_json::from_str(&serde_json::to_string(&account_sk)?)?;
+    let account_sk: near_crypto::SecretKey =
+        serde_json::from_str(&serde_json::to_string(&account_sk)?)?;
 
-//     Ok((account_id, account_sk))
-// }
+    Ok((account_id, account_sk))
+}
 
 async fn with_nodes<F>(shares: usize, threshold: usize, nodes: usize, f: F) -> anyhow::Result<()>
 where
@@ -42,26 +43,33 @@ where
     let docker = Docker::connect_with_local_defaults()?;
 
     let (pk_set, sk_shares) = mpc_recovery::generate(shares, threshold)?;
-    // TODO: return once sandbox+workspaces are updated to support meta txs
-    // let worker = workspaces::sandbox().await?;
-    // let (relayer_account_id, relayer_account_sk) = create_account(&worker).await?;
-    // let (creator_account_id, creator_account_sk) = create_account(&worker).await?;
+    let worker = workspaces::sandbox().await?;
+    let near_root_account = worker.root_account()?;
+    near_root_account
+        .deploy(include_bytes!("../linkdrop.wasm"))
+        .await?
+        .into_result()?;
+    near_root_account
+        .call(near_root_account.id(), "new")
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    let (relayer_account_id, relayer_account_sk) = create_account(&worker).await?;
+    let (creator_account_id, creator_account_sk) = create_account(&worker).await?;
 
-    // let near_rpc = format!("http://172.17.0.1:{}", worker.rpc_port());
-    // let redis = Redis::start(&docker, NETWORK).await?;
-    // let relayer = Relayer::start(
-    //     &docker,
-    //     NETWORK,
-    //     &near_rpc,
-    //     &redis.hostname,
-    //     &relayer_account_id,
-    //     &relayer_account_sk,
-    //     &creator_account_id,
-    // )
-    // .await?;
-    let near_rpc = "https://rpc.testnet.near.org";
-    let creator_account_id: AccountId = "tmp_acount_creator.serhii.testnet".parse().unwrap();
-    let creator_account_sk: near_crypto::SecretKey = "ed25519:5pFJN3czPAHFWHZYjD4oTtnJE7PshLMeTkSU7CmWkvLaQWchCLgXGF1wwcJmh2AQChGH85EwcL5VW7tUavcAZDSG".parse().unwrap();
+    let near_rpc = format!("http://172.17.0.1:{}", worker.rpc_port());
+    let redis = Redis::start(&docker, NETWORK).await?;
+    let relayer = Relayer::start(
+        &docker,
+        NETWORK,
+        &near_rpc,
+        &redis.hostname,
+        &relayer_account_id,
+        &relayer_account_sk,
+        &creator_account_id,
+    )
+    .await?;
 
     let mut sign_nodes = Vec::new();
     for i in 2..=nodes {
@@ -75,9 +83,9 @@ where
         &pk_set,
         &sk_shares[0],
         sign_nodes.iter().map(|n| n.address.clone()).collect(),
-        near_rpc,
-        // &relayer.address,
-        "http://34.70.226.83:3030",
+        &near_rpc,
+        &relayer.address,
+        near_root_account.id(),
         &creator_account_id,
         &creator_account_sk,
     )
@@ -89,11 +97,12 @@ where
     let result = f(TestContext {
         leader_node: &leader_node,
         pk_set: &pk_set,
+        worker: &worker,
     })
     .await;
 
-    drop(leader_node);
-    drop(sign_nodes);
+    // drop(leader_node);
+    // drop(sign_nodes);
     // drop(relayer);
     // drop(redis);
 
@@ -146,7 +155,13 @@ async fn test_basic_action() -> anyhow::Result<()> {
                 .take(10)
                 .map(char::from)
                 .collect();
-            let account_id = format!("mpc-recovery-{}.testnet", account_id_rand.to_lowercase());
+            let account_id: AccountId = format!(
+                "mpc-recovery-{}.{}",
+                account_id_rand.to_lowercase(),
+                ctx.worker.root_account()?.id()
+            )
+            .parse()
+            .unwrap();
 
             let user_public_key =
                 near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
@@ -156,16 +171,23 @@ async fn test_basic_action() -> anyhow::Result<()> {
             let (status_code, new_acc_response) = ctx
                 .leader_node
                 .new_account(NewAccountRequest {
-                    near_account_id: account_id.clone(),
+                    near_account_id: account_id.to_string(),
                     oidc_token: id_token.clone(),
-                    public_key: user_public_key,
+                    public_key: user_public_key.clone(),
                 })
-                .await?;
+                .await
+                .unwrap();
             assert_eq!(status_code, 200);
-
             assert!(matches!(new_acc_response, NewAccountResponse::Ok));
 
-            tokio::time::sleep(Duration::from_millis(20000)).await;
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            // Check that account exists and it has the requested public key
+            let access_keys = ctx.worker.view_access_keys(&account_id).await?;
+            println!("ACCESS KEYS: {:?}", access_keys);
+            assert!(access_keys
+                .iter()
+                .any(|ak| ak.public_key.to_string() == user_public_key));
 
             let new_user_public_key =
                 near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
@@ -175,7 +197,7 @@ async fn test_basic_action() -> anyhow::Result<()> {
             let (status_code2, add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
-                    near_account_id: account_id.clone(),
+                    near_account_id: account_id.to_string(),
                     oidc_token: id_token.clone(),
                     public_key: new_user_public_key,
                 })
@@ -184,7 +206,7 @@ async fn test_basic_action() -> anyhow::Result<()> {
             assert_eq!(status_code2, 200);
             assert!(matches!(add_key_response, AddKeyResponse::Ok));
 
-            tokio::time::sleep(Duration::from_millis(120000)).await;
+            tokio::time::sleep(Duration::from_millis(2000)).await;
 
             Ok(())
         })
