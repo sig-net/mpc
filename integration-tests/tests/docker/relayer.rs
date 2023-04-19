@@ -56,8 +56,8 @@ impl Relayer {
                 format!("RELAYER_RPC_URL={}", near_rpc),
                 format!("RELAYER_ACCOUNT_ID={}", relayer_account_id),
                 format!("REDIS_HOST={}", redis_hostname),
-                format!("PUBLIC_KEY={}", relayer_account_sk.public_key().to_string()),
-                format!("PRIVATE_KEY={}", relayer_account_sk.to_string()),
+                format!("PUBLIC_KEY={}", relayer_account_sk.public_key()),
+                format!("PRIVATE_KEY={}", relayer_account_sk),
                 format!("RELAYER_WHITELISTED_CONTRACT={}", creator_account_id),
             ]),
             ..Default::default()
