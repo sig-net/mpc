@@ -1,8 +1,10 @@
 use bollard::{
     container::{Config, RemoveContainerOptions},
+    image::CreateImageOptions,
     service::HostConfig,
     Docker,
 };
+use futures::TryStreamExt;
 
 pub struct Redis {
     docker: Docker,
@@ -12,6 +14,18 @@ pub struct Redis {
 
 impl Redis {
     pub async fn start(docker: &Docker, network: &str) -> anyhow::Result<Redis> {
+        docker
+            .create_image(
+                Some(CreateImageOptions {
+                    from_image: "redis:latest",
+                    ..Default::default()
+                }),
+                None,
+                None,
+            )
+            .try_collect::<Vec<_>>()
+            .await?;
+
         let relayer_config = Config {
             image: Some("redis:latest".to_string()),
             tty: Some(true),

@@ -198,7 +198,7 @@ async fn test_basic_action() -> anyhow::Result<()> {
                 .add_key(AddKeyRequest {
                     near_account_id: account_id.to_string(),
                     oidc_token: id_token.clone(),
-                    public_key: new_user_public_key,
+                    public_key: new_user_public_key.clone(),
                 })
                 .await?;
 
@@ -206,6 +206,12 @@ async fn test_basic_action() -> anyhow::Result<()> {
             assert!(matches!(add_key_response, AddKeyResponse::Ok));
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            // Check that account has the requested public key
+            let access_keys = ctx.worker.view_access_keys(&account_id).await?;
+            assert!(access_keys
+                .iter()
+                .any(|ak| ak.public_key.to_string() == new_user_public_key));
 
             Ok(())
         })

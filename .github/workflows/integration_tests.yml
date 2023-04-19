@@ -15,6 +15,12 @@ jobs:
       - uses: actions/checkout@v3
         with:
           submodules: 'true'
+      - uses: actions/checkout@v3
+        repository: 'https://github.com/near/pagoda-relayer-rs-fastauth'
+        ref: 'daniyar/custom-entrypoint'
+        path: 'relayer'
+      - name: Build Relayer Image
+        run: docker build relayer/ -t pagoda-relayer-rs-fastauth
       - name: Install stable toolchain
         uses: actions-rs/toolchain@v1
         with:
