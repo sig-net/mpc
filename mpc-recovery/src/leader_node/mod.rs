@@ -118,8 +118,8 @@ async fn process_new_account(
     let block_height = state.client.latest_block_height().await?;
 
     // Create a transaction to create new NEAR account
-    let new_user_account_pk: PublicKey = request.public_key.clone().parse().unwrap();
-    let new_user_account_id: AccountId = request.near_account_id.clone().parse().unwrap();
+    let new_user_account_pk: PublicKey = request.public_key.clone().parse()?;
+    let new_user_account_id: AccountId = request.near_account_id.clone().parse()?;
 
     let delegate_action = get_create_account_delegate_action(
         state.account_creator_id.clone(),
@@ -130,7 +130,7 @@ async fn process_new_account(
         crate::transaction::NetworkType::Testnet,
         nonce + 1,
         block_height + 100,
-    );
+    )?;
     let signed_delegate_action = get_signed_delegated_action(
         delegate_action,
         state.account_creator_id.clone(),
@@ -197,7 +197,7 @@ async fn process_add_key(
     request: &AddKeyRequest,
     internal_acc_id: InternalAccountId,
 ) -> anyhow::Result<(StatusCode, Json<AddKeyResponse>)> {
-    let user_account_id: AccountId = request.near_account_id.parse().unwrap();
+    let user_account_id: AccountId = request.near_account_id.parse()?;
 
     // Get nonce and recent block hash
     let nonce = state
@@ -220,7 +220,7 @@ async fn process_add_key(
         new_public_key,
         nonce + 1,
         max_block_height,
-    );
+    )?;
     let signed_delegate_action = get_signed_delegated_action(
         delegate_action,
         user_account_id,

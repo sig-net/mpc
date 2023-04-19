@@ -15,17 +15,16 @@ pub trait OAuthTokenVerifier {
         public_key: &[u8],
         issuer: &str,
         audience: &str,
-    ) -> Result<IdTokenClaims, String> {
+    ) -> anyhow::Result<IdTokenClaims> {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[issuer]);
         validation.set_audience(&[audience]);
 
-        let decoding_key = DecodingKey::from_rsa_pem(public_key).unwrap();
+        let decoding_key = DecodingKey::from_rsa_pem(public_key)?;
 
-        match decode::<IdTokenClaims>(token, &decoding_key, &validation) {
-            Ok(token_data) => Ok(token_data.claims),
-            Err(e) => Err(format!("Failed to validate the token: {}", e)),
-        }
+        let claims =
+            decode::<IdTokenClaims>(token, &decoding_key, &validation).map(|t| t.claims)?;
+        Ok(claims)
     }
 }
 
@@ -215,7 +214,7 @@ mod tests {
             &my_claims.aud,
         ) {
             Ok(_) => panic!("Token validation should fail"),
-            Err(e) => assert_eq!(e, "Failed to validate the token: InvalidSignature"),
+            Err(e) => assert_eq!(e.to_string(), "InvalidSignature"),
         }
 
         // Invalid issuer
@@ -226,7 +225,7 @@ mod tests {
             &my_claims.aud,
         ) {
             Ok(_) => panic!("Token validation should fail"),
-            Err(e) => assert_eq!(e, "Failed to validate the token: InvalidIssuer"),
+            Err(e) => assert_eq!(e.to_string(), "InvalidIssuer"),
         }
 
         // Invalid audience
@@ -237,7 +236,7 @@ mod tests {
             "invalid_audience",
         ) {
             Ok(_) => panic!("Token validation should fail"),
-            Err(e) => assert_eq!(e, "Failed to validate the token: InvalidAudience"),
+            Err(e) => assert_eq!(e.to_string(), "InvalidAudience"),
         }
     }
 
