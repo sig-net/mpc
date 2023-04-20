@@ -14,6 +14,10 @@ use workspaces::{network::Sandbox, AccountId, Worker};
 mod docker;
 
 const NETWORK: &str = "mpc_recovery_integration_test_network";
+#[cfg(target_os = "linux")]
+const HOST_MACHINE_FROM_DOCKER: &str = "172.17.0.1";
+#[cfg(target_os = "macos")]
+const HOST_MACHINE_FROM_DOCKER: &str = "docker.for.mac.localhost";
 
 struct TestContext<'a> {
     leader_node: &'a LeaderNode,
@@ -58,7 +62,7 @@ where
     let (relayer_account_id, relayer_account_sk) = create_account(&worker).await?;
     let (creator_account_id, creator_account_sk) = create_account(&worker).await?;
 
-    let near_rpc = format!("http://172.17.0.1:{}", worker.rpc_port());
+    let near_rpc = format!("http://{HOST_MACHINE_FROM_DOCKER}:{}", worker.rpc_port());
     let redis = Redis::start(&docker, NETWORK).await?;
     let relayer = Relayer::start(
         &docker,
