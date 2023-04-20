@@ -24,7 +24,6 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use threshold_crypto::{PublicKeySet, SecretKeyShare};
-use tower_http::cors::Any;
 
 pub struct Config {
     pub id: NodeId,
@@ -89,11 +88,8 @@ pub async fn run(config: Config) {
         account_creator_sk,
     };
 
-    //TODO: now secure, allow only for testnet, whitelist for mainnet
-    let cors_layer = tower_http::cors::CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    //TODO: not secure, allow only for testnet, whitelist endpoint etc. for mainnet
+    let cors_layer = tower_http::cors::CorsLayer::permissive();
 
     let app = Router::new()
         .route("/submit", post(submit::<UniversalTokenVerifier>))
