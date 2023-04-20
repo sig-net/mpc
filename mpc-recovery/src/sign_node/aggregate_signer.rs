@@ -7,14 +7,86 @@ use curv::cryptographic_primitives::commitments::{
 };
 use curv::elliptic::curves::{Ed25519, Point, Scalar};
 use curv::BigInt;
-use ed25519_dalek::{Sha512, Signature};
+use ed25519_dalek::{Sha512, Signature, SignatureError, Verifier};
 use multi_party_eddsa::protocols;
 use multi_party_eddsa::protocols::aggsig::{self, KeyAgg, SignSecondMsg};
+use multi_party_eddsa::protocols::ExpandedKeyPair;
 
 pub struct SigningState {
     committed: HashMap<AggrCommitment, Committed>,
     revealed: HashMap<Reveal, Revealed>,
     node_info: NodeInfo,
+}
+
+#[test]
+fn aggregate_signatures() {
+    pub fn verify_dalek(
+        pk: &Point<Ed25519>,
+        sig: &protocols::Signature,
+        msg: &[u8],
+    ) -> Result<(), SignatureError> {
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes[..32].copy_from_slice(&*sig.R.to_bytes(true));
+        sig_bytes[32..].copy_from_slice(&sig.s.to_bytes());
+
+        let dalek_pub = ed25519_dalek::PublicKey::from_bytes(&*pk.to_bytes(true)).unwrap();
+        let dalek_sig = ed25519_dalek::Signature::from_bytes(&sig_bytes).unwrap();
+
+        dalek_pub.verify(msg, &dalek_sig)
+    }
+    // Generate node keys and signing keys
+    let ks = || (ExpandedKeyPair::create(), ExpandedKeyPair::create());
+    let (n1, k1) = ks();
+    let (n2, k2) = ks();
+    let (n3, k3) = ks();
+
+    let nodes_public_keys = vec![
+        n1.public_key.clone(),
+        n2.public_key.clone(),
+        n3.public_key.clone(),
+    ];
+
+    // Set up nodes with that config
+    let s = |n| {
+        SigningState::new(NodeInfo {
+            nodes_public_keys: nodes_public_keys.clone(),
+            our_index: n,
+        })
+    };
+    let mut s1 = s(0);
+    let mut s2 = s(1);
+    let mut s3 = s(2);
+
+    let message = b"message in a bottle".to_vec();
+
+    let commitments = vec![
+        s1.get_commitment(&k1, &n1, message.clone()),
+        s2.get_commitment(&k2, &n2, message.clone()),
+        s3.get_commitment(&k3, &n3, message.clone()),
+    ];
+
+    let reveals = vec![
+        s1.get_reveal(commitments.clone()).unwrap(),
+        s2.get_reveal(commitments.clone()).unwrap(),
+        s3.get_reveal(commitments.clone()).unwrap(),
+    ];
+
+    let sig_shares = vec![
+        s1.get_signature_share(reveals.clone()).unwrap(),
+        s2.get_signature_share(reveals.clone()).unwrap(),
+        s3.get_signature_share(reveals.clone()).unwrap(),
+    ];
+
+    let signing_keys: Vec<_> = commitments
+        .iter()
+        .map(|c| c.signing_public_key.clone())
+        .collect();
+    let aggrigate_key = KeyAgg::key_aggregation_n(&signing_keys, 0);
+
+    println!("{:?}", aggrigate_key);
+
+    let signature = aggsig::add_signature_parts(&sig_shares);
+    verify_dalek(&aggrigate_key.apk, &signature, &message).unwrap();
 }
 
 impl SigningState {
@@ -107,6 +179,7 @@ pub struct Reveal(pub SignSecondMsg);
 
 impl Hash for Reveal {
     fn hash<H: Hasher>(&self, hasher: &mut H) {
+        // TODO fix collision risk
         let SignSecondMsg { R, blind_factor } = self.0.clone();
         R.to_bytes(false).hash(hasher);
         AggrCommitment(blind_factor).hash(hasher)
@@ -209,22 +282,28 @@ impl NodeInfo {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SignedCommitment {
     commitment: AggrCommitment,
     /// This is the public key we're currently signing with,
     /// not the node public key that generated the signature
     signing_public_key: Point<Ed25519>,
+    /// This is signed with the node public key
     signed: Signature,
 }
 
 impl SignedCommitment {
     pub fn create(
-        commit: BigInt,
+        committment: BigInt,
         node_key_pair: &protocols::ExpandedKeyPair,
         signing_public_key: &Point<Ed25519>,
     ) -> Self {
-        todo!()
+        // TODO actually create this signature
+        SignedCommitment {
+            commitment: AggrCommitment(committment),
+            signing_public_key: signing_public_key.clone(),
+            signed: Signature::from_bytes(&[0; 64]).unwrap(),
+        }
     }
 
     // TODO Fix error prone API, the keys are different
@@ -232,7 +311,8 @@ impl SignedCommitment {
         &self,
         public_key: &Point<Ed25519>,
     ) -> Result<(AggrCommitment, Point<Ed25519>), String> {
-        todo!()
+        // TODO actually check this signature
+        Ok((self.commitment.clone(), self.signing_public_key.clone()))
     }
 }
 
@@ -245,7 +325,7 @@ pub fn check_commitment(
         &r_to_test.y_coord().unwrap(),
         blind_factor,
     );
-    if computed_comm == comm {
+    if computed_comm != comm {
         // TODO check this is safe to share in case of error
         // Should be because everything is provided by the caller I think
         Err(format!(
