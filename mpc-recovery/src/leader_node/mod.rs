@@ -192,8 +192,10 @@ async fn new_account<T: OAuthTokenVerifier>(
     Json(request): Json<NewAccountRequest>,
 ) -> (StatusCode, Json<NewAccountResponse>) {
     tracing::info!(
-        access_token = format!("{:.5}...", request.oidc_token),
-        "new request"
+        near_account_id = hex::encode(request.near_account_id.clone()),
+        public_key = hex::encode(request.public_key.clone()),
+        iodc_token = format!("{:.5}...", request.oidc_token),
+        "new_account request"
     );
 
     match T::verify_token(&request.oidc_token).await {
@@ -290,9 +292,10 @@ async fn add_key<T: OAuthTokenVerifier>(
     Json(request): Json<AddKeyRequest>,
 ) -> (StatusCode, Json<AddKeyResponse>) {
     tracing::info!(
-        access_token = format!("{:.5}...", request.oidc_token),
+        near_account_id = hex::encode(request.near_account_id.clone()),
         public_key = hex::encode(request.public_key.clone()),
-        "new request"
+        iodc_token = format!("{:.5}...", request.oidc_token),
+        "add_key request"
     );
 
     match T::verify_token(&request.oidc_token).await {
