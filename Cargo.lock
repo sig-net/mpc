@@ -1998,6 +1998,7 @@ dependencies = [
  "rsa",
  "serde",
  "serde_json",
+ "thiserror",
  "threshold_crypto",
  "tokio",
  "tonic 0.9.1",

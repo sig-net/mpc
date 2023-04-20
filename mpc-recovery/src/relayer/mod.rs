@@ -1,12 +1,16 @@
+pub mod error;
 pub mod msg;
 
 use hyper::{Body, Client, Method, Request};
+use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
+use near_jsonrpc_client::methods::query::RpcQueryError;
 use near_jsonrpc_client::{methods, JsonRpcClient};
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::{AccountId, BlockHeight, Finality};
 use near_primitives::views::{AccessKeyView, QueryRequest};
 
+use self::error::RelayerError;
 use self::msg::{RegisterAccountRequest, SendMetaTxRequest, SendMetaTxResponse};
 
 #[derive(Clone)]
@@ -27,7 +31,7 @@ impl NearRpcAndRelayerClient {
         &self,
         account_id: AccountId,
         public_key: near_crypto::PublicKey,
-    ) -> anyhow::Result<(AccessKeyView, CryptoHash)> {
+    ) -> Result<(AccessKeyView, CryptoHash), RelayerError> {
         let query_resp = self
             .rpc_client
             .call(&methods::query::RpcQueryRequest {
@@ -38,13 +42,24 @@ impl NearRpcAndRelayerClient {
                 },
             })
             .await
-            .map_err(|e| anyhow::anyhow!("failed to query access key {}", e))?;
+            .map_err(|e| match e {
+                JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+                    RpcQueryError::UnknownAccount {
+                        requested_account_id,
+                        ..
+                    },
+                )) => RelayerError::UnknownAccount(requested_account_id),
+                JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+                    RpcQueryError::UnknownAccessKey { public_key, .. },
+                )) => RelayerError::UnknownAccessKey(public_key),
+                _ => anyhow::anyhow!(e).into(),
+            })?;
 
         match query_resp.kind {
             QueryResponseKind::AccessKey(access_key) => Ok((access_key, query_resp.block_hash)),
-            _ => Err(anyhow::anyhow!(
-                "query returned invalid data while querying access key"
-            )),
+            _ => {
+                Err(anyhow::anyhow!("query returned invalid data while querying access key").into())
+            }
         }
     }
 
@@ -52,7 +67,7 @@ impl NearRpcAndRelayerClient {
         &self,
         account_id: AccountId,
         public_key: near_crypto::PublicKey,
-    ) -> anyhow::Result<u64> {
+    ) -> Result<u64, RelayerError> {
         let key = self.access_key(account_id, public_key).await?;
         Ok(key.0.nonce)
     }

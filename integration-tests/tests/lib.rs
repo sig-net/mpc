@@ -1,21 +1,17 @@
+mod docker;
+mod mpc;
+
 use crate::docker::{LeaderNode, SignNode};
 use bollard::Docker;
 use docker::{redis::Redis, relayer::Relayer};
 use futures::future::BoxFuture;
-use mpc_recovery::msg::{
-    AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
-    NewAccountResponse,
-};
-use rand::{distributions::Alphanumeric, Rng};
 use std::time::Duration;
 use threshold_crypto::PublicKeySet;
 use workspaces::{network::Sandbox, AccountId, Worker};
 
-mod docker;
-
 const NETWORK: &str = "mpc_recovery_integration_test_network";
 
-struct TestContext<'a> {
+pub struct TestContext<'a> {
     leader_node: &'a LeaderNode,
     pk_set: &'a PublicKeySet,
     worker: &'a Worker<Sandbox>,
@@ -113,108 +109,96 @@ where
     result
 }
 
-#[tokio::test]
-async fn test_trio() -> anyhow::Result<()> {
-    with_nodes(4, 3, 3, |ctx| {
-        Box::pin(async move {
-            let payload: String = rand::thread_rng()
-                .sample_iter(&Alphanumeric)
-                .take(10)
-                .map(char::from)
-                .collect();
-            let (status_code, response) = ctx
-                .leader_node
-                .submit(LeaderRequest {
-                    payload: payload.clone(),
-                })
-                .await?;
+mod account {
+    use rand::{distributions::Alphanumeric, Rng};
+    use workspaces::{network::Sandbox, AccountId, Worker};
 
-            assert_eq!(status_code, 200);
-            if let LeaderResponse::Ok { signature } = response {
-                assert!(ctx.pk_set.public_key().verify(&signature, payload));
-            } else {
-                panic!("response was not successful");
-            }
+    pub fn random(worker: &Worker<Sandbox>) -> anyhow::Result<AccountId> {
+        let account_id_rand: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+        Ok(format!(
+            "mpc-recovery-{}.{}",
+            account_id_rand.to_lowercase(),
+            worker.root_account()?.id()
+        )
+        .parse()?)
+    }
 
-            Ok(())
-        })
-    })
-    .await
+    pub fn malformed() -> String {
+        let random: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+        format!("malformed-account-{}-!@#$%", random.to_lowercase())
+    }
 }
 
-#[tokio::test]
-async fn test_basic_action() -> anyhow::Result<()> {
-    with_nodes(4, 3, 3, |ctx| {
-        Box::pin(async move {
-            // Create new account
-            // TODO: write a test with real token
-            // "validToken" should triger test token verifyer and return success
-            let id_token = "validToken".to_string();
-            let account_id_rand: String = rand::thread_rng()
-                .sample_iter(&Alphanumeric)
-                .take(10)
-                .map(char::from)
-                .collect();
-            let account_id: AccountId = format!(
-                "mpc-recovery-{}.{}",
-                account_id_rand.to_lowercase(),
-                ctx.worker.root_account()?.id()
-            )
-            .parse()
-            .unwrap();
+mod key {
+    use rand::{distributions::Alphanumeric, Rng};
 
-            let user_public_key =
-                near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
-                    .public_key()
-                    .to_string();
+    pub fn random() -> String {
+        near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
+            .public_key()
+            .to_string()
+    }
 
-            let (status_code, new_acc_response) = ctx
-                .leader_node
-                .new_account(NewAccountRequest {
-                    near_account_id: account_id.to_string(),
-                    oidc_token: id_token.clone(),
-                    public_key: user_public_key.clone(),
-                })
-                .await
-                .unwrap();
-            assert_eq!(status_code, 200);
-            assert!(matches!(new_acc_response, NewAccountResponse::Ok));
+    pub fn malformed() -> String {
+        let random: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+        format!("malformed-key-{}-!@#$%", random.to_lowercase())
+    }
+}
 
-            tokio::time::sleep(Duration::from_millis(2000)).await;
+mod token {
+    pub fn valid() -> String {
+        "validToken".to_string()
+    }
 
-            // Check that account exists and it has the requested public key
-            let access_keys = ctx.worker.view_access_keys(&account_id).await?;
-            assert!(access_keys
-                .iter()
-                .any(|ak| ak.public_key.to_string() == user_public_key));
+    pub fn invalid() -> String {
+        "invalidToken".to_string()
+    }
+}
 
-            let new_user_public_key =
-                near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
-                    .public_key()
-                    .to_string();
+mod check {
+    use crate::TestContext;
+    use workspaces::AccountId;
 
-            let (status_code2, add_key_response) = ctx
-                .leader_node
-                .add_key(AddKeyRequest {
-                    near_account_id: account_id.to_string(),
-                    oidc_token: id_token.clone(),
-                    public_key: new_user_public_key.clone(),
-                })
-                .await?;
+    pub async fn access_key_exists<'a>(
+        ctx: &TestContext<'a>,
+        account_id: &AccountId,
+        public_key: &str,
+    ) -> anyhow::Result<()> {
+        let access_keys = ctx.worker.view_access_keys(&account_id).await?;
 
-            assert_eq!(status_code2, 200);
-            assert!(matches!(add_key_response, AddKeyResponse::Ok));
-
-            tokio::time::sleep(Duration::from_millis(2000)).await;
-
-            // Check that account has the requested public key
-            let access_keys = ctx.worker.view_access_keys(&account_id).await?;
-            assert!(access_keys
-                .iter()
-                .any(|ak| ak.public_key.to_string() == new_user_public_key));
-
+        if access_keys
+            .iter()
+            .any(|ak| ak.public_key.to_string() == public_key)
+        {
             Ok(())
-        })
-    })
-    .await
+        } else {
+            Err(anyhow::anyhow!(
+                "could not find access key {public_key} on account {account_id}"
+            ))
+        }
+    }
+
+    pub async fn no_account<'a>(
+        ctx: &TestContext<'a>,
+        account_id: &AccountId,
+    ) -> anyhow::Result<()> {
+        if let Err(_) = ctx.worker.view_account(account_id).await {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "expected account {account_id} to not exist, but it does"
+            ))
+        }
+    }
 }
