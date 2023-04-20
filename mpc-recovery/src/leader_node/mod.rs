@@ -126,9 +126,11 @@ async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareRespon
 }
 
 async fn process_new_account(
-    state: &LeaderState,
-    request: &NewAccountRequest,
+    new_user_account_id: AccountId,
+    new_user_account_pk: PublicKey,
     internal_acc_id: InternalAccountId,
+    oidc_token: String,
+    state: &LeaderState,
 ) -> anyhow::Result<(StatusCode, Json<NewAccountResponse>)> {
     // Get nonce and recent block hash
     let nonce = state
@@ -140,10 +142,7 @@ async fn process_new_account(
         .await?;
     let block_height = state.client.latest_block_height().await?;
 
-    // Create a transaction to create new NEAR account
-    let new_user_account_pk: PublicKey = request.public_key.clone().parse()?;
-    let new_user_account_id: AccountId = request.near_account_id.clone().parse()?;
-
+    // Create a delegate action to create new NEAR account
     let delegate_action = get_create_account_delegate_action(
         state.account_creator_id.clone(),
         state.account_creator_sk.public_key(),
@@ -154,21 +153,25 @@ async fn process_new_account(
         nonce + 1,
         block_height + 100,
     )?;
+
+    // Sign with creator account private key
     let signed_delegate_action = get_signed_delegated_action(
         delegate_action,
         state.account_creator_id.clone(),
         state.account_creator_sk.clone(),
     );
 
+    // Register account in the relayer
     state
         .client
         .register_account(RegisterAccountRequest {
             account_id: new_user_account_id,
             allowance: 300_000_000_000_000,
-            oauth_token: request.oidc_token.clone(),
+            oauth_token: oidc_token,
         })
         .await?;
 
+    // Send delegate action to relayer
     let response = state.client.send_meta_tx(signed_delegate_action).await?;
 
     // TODO: Probably need to check more fields
@@ -198,28 +201,62 @@ async fn new_account<T: OAuthTokenVerifier>(
         "new_account request"
     );
 
-    match T::verify_token(&request.oidc_token).await {
-        Ok(claims) => {
-            tracing::info!("access token is valid");
-            match process_new_account(&state, &request, get_internal_account_id(claims)).await {
-                Ok(result) => result,
-                Err(e) => {
-                    tracing::error!(err = ?e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(NewAccountResponse::Err {
-                            msg: format!("failed to process new account: {}", e),
-                        }),
-                    )
-                }
-            }
-        }
+    let new_user_account_pk: PublicKey = match request.public_key.clone().parse() {
+        Ok(pk) => pk,
         Err(e) => {
-            tracing::error!("access token verification failed");
-            (
+            tracing::error!(err = ?e, "failed to parse public_key");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(NewAccountResponse::Err {
+                    msg: format!("Bad public_key: {}", e),
+                }),
+            );
+        }
+    };
+    let new_user_account_id: AccountId = match request.near_account_id.clone().parse() {
+        Ok(acc_id) => acc_id,
+        Err(e) => {
+            tracing::error!(err = ?e, "failed to parse near_account_id");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(NewAccountResponse::Err {
+                    msg: format!("Bad near_account_id: {}", e),
+                }),
+            );
+        }
+    };
+    // TODO: we are sending whole oidc token to relayer, but probbaly it should only be internal acc id
+    let oidc_token: String = request.oidc_token.clone();
+    let oidc_token_claims: IdTokenClaims = match T::verify_token(&oidc_token).await {
+        Ok(claims) => claims,
+        Err(e) => {
+            tracing::error!(err = ?e, "failed to verify oidc token");
+            return (
                 StatusCode::UNAUTHORIZED,
                 Json(NewAccountResponse::Err {
-                    msg: format!("access token verification failed: {}", e),
+                    msg: format!("Failed to verify oidc token: {}", e),
+                }),
+            );
+        }
+    };
+    let internal_account_id: InternalAccountId = get_internal_account_id(oidc_token_claims);
+
+    match process_new_account(
+        new_user_account_id,
+        new_user_account_pk,
+        internal_account_id,
+        oidc_token,
+        &state,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!(err = ?e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(NewAccountResponse::Err {
+                    msg: format!("Failed to process new account: {}", e),
                 }),
             )
         }
