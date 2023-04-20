@@ -5,6 +5,8 @@ use axum::{http::StatusCode, routing::post, Extension, Json, Router};
 use std::net::SocketAddr;
 use threshold_crypto::{PublicKeySet, SecretKeyShare};
 
+pub mod aggregate_signer;
+
 #[tracing::instrument(level = "debug", skip(pk_set, sk_share))]
 pub async fn run(id: NodeId, pk_set: PublicKeySet, sk_share: SecretKeyShare, port: u16) {
     tracing::debug!("running a sign node");
