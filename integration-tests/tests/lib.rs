@@ -175,7 +175,7 @@ mod check {
         account_id: &AccountId,
         public_key: &str,
     ) -> anyhow::Result<()> {
-        let access_keys = ctx.worker.view_access_keys(&account_id).await?;
+        let access_keys = ctx.worker.view_access_keys(account_id).await?;
 
         if access_keys
             .iter()
@@ -193,7 +193,7 @@ mod check {
         ctx: &TestContext<'a>,
         account_id: &AccountId,
     ) -> anyhow::Result<()> {
-        if let Err(_) = ctx.worker.view_account(account_id).await {
+        if ctx.worker.view_account(account_id).await.is_err() {
             Ok(())
         } else {
             Err(anyhow::anyhow!(
