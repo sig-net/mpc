@@ -121,7 +121,7 @@ impl NearRpcAndRelayerClient {
         cache_key: &(AccountId, PublicKey),
         err_str: &str,
     ) {
-        nar::invalidate_nonce_if_tx_failed(&self.cached_nonces, cache_key, &err_str).await;
+        nar::invalidate_nonce_if_tx_failed(&self.cached_nonces, cache_key, err_str).await;
     }
 }
 
