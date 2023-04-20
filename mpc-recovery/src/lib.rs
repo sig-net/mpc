@@ -1,11 +1,11 @@
 use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare};
 
-pub(crate) mod client;
 mod key_recovery;
 mod leader_node;
 pub mod msg;
 mod oauth;
 mod primitives;
+mod relayer;
 mod sign_node;
 mod transaction;
 

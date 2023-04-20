@@ -1,4 +1,3 @@
-use crate::client::NearRpcAndRelayerClient;
 use crate::key_recovery::{get_user_recovery_pk, get_user_recovery_sk};
 use crate::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
@@ -6,6 +5,8 @@ use crate::msg::{
 };
 use crate::oauth::{IdTokenClaims, OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::primitives::InternalAccountId;
+use crate::relayer::msg::RegisterAccountRequest;
+use crate::relayer::NearRpcAndRelayerClient;
 use crate::transaction::{
     get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
 };
@@ -16,6 +17,7 @@ use hyper::client::ResponseFuture;
 use hyper::{Body, Client, Method, Request};
 use near_crypto::{PublicKey, SecretKey};
 use near_primitives::types::AccountId;
+use near_primitives::views::FinalExecutionStatus;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -59,7 +61,12 @@ pub async fn run(config: Config) {
 
     let client = NearRpcAndRelayerClient::connect(&near_rpc, relayer_url);
     client
-        .register_account_with_relayer(account_creator_id.clone())
+        .register_account(RegisterAccountRequest {
+            account_id: account_creator_id.clone(),
+            allowance: 300_000_000_000_000,
+            // FIXME: We don't have a token for ourselves, but are still forced to allocate allowance
+            oauth_token: "".to_string(),
+        })
         .await
         .unwrap();
 
@@ -151,15 +158,24 @@ async fn process_new_account(
 
     state
         .client
-        .register_account_with_relayer(new_user_account_id)
+        .register_account(RegisterAccountRequest {
+            account_id: new_user_account_id,
+            allowance: 300_000_000_000_000,
+            oauth_token: request.oidc_token.clone(),
+        })
         .await?;
 
-    state
-        .client
-        .send_tx_via_relayer(signed_delegate_action)
-        .await?;
+    let response = state.client.send_meta_tx(signed_delegate_action).await?;
 
-    Ok((StatusCode::OK, Json(NewAccountResponse::Ok)))
+    // TODO: Probably need to check more fields
+    if matches!(response.status, FinalExecutionStatus::SuccessValue(_)) {
+        Ok((StatusCode::OK, Json(NewAccountResponse::Ok)))
+    } else {
+        Err(anyhow::anyhow!(
+            "transaction failed with {:?}",
+            response.status
+        ))
+    }
 }
 
 pub fn get_internal_account_id(claims: IdTokenClaims) -> InternalAccountId {
@@ -239,10 +255,7 @@ async fn process_add_key(
         get_user_recovery_sk(internal_acc_id),
     );
 
-    state
-        .client
-        .send_tx_via_relayer(signed_delegate_action)
-        .await?;
+    state.client.send_meta_tx(signed_delegate_action).await?;
 
     Ok((StatusCode::OK, Json(AddKeyResponse::Ok)))
 }
