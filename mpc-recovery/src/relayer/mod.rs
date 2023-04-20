@@ -53,7 +53,7 @@ impl NearRpcAndRelayerClient {
 
     #[allow(dead_code)]
     pub async fn latest_block_height(&self) -> anyhow::Result<BlockHeight> {
-        nar::latest_block_height(&self.rpc_client).await
+        Ok(nar::latest_block_height(&self.rpc_client).await?)
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(account_id = request.account_id.to_string()))]

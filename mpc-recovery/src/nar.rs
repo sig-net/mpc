@@ -38,7 +38,7 @@ pub(crate) async fn access_key(
     rpc_client: &JsonRpcClient,
     account_id: AccountId,
     public_key: near_crypto::PublicKey,
-) -> anyhow::Result<(AccessKeyView, CryptoHash, BlockHeight)> {
+) -> Result<(AccessKeyView, CryptoHash, BlockHeight), RelayerError> {
     let query_resp = rpc_client
         .call(&methods::query::RpcQueryRequest {
             block_reference: Finality::None.into(),
@@ -65,16 +65,14 @@ pub(crate) async fn access_key(
         QueryResponseKind::AccessKey(access_key) => {
             Ok((access_key, query_resp.block_hash, query_resp.block_height))
         }
-        _ => Err(anyhow::anyhow!(
-            "query returned invalid data while querying access key"
-        )),
+        _ => Err(anyhow::anyhow!("query returned invalid data while querying access key").into()),
     }
 }
 
 async fn cached_nonce(
     nonce: &AtomicU64,
     rpc_client: &JsonRpcClient,
-) -> anyhow::Result<(CryptoHash, BlockHeight, Nonce)> {
+) -> Result<(CryptoHash, BlockHeight, Nonce), RelayerError> {
     let nonce = nonce.fetch_add(1, Ordering::SeqCst);
 
     // Fetch latest block_hash since the previous one is now invalid for new transactions:
@@ -89,7 +87,7 @@ pub(crate) async fn fetch_tx_nonce(
     cached_nonces: &CachedAccessKeyNonces,
     rpc_client: &JsonRpcClient,
     cache_key: &(AccountId, near_crypto::PublicKey),
-) -> anyhow::Result<(CryptoHash, BlockHeight, Nonce)> {
+) -> Result<(CryptoHash, BlockHeight, Nonce), RelayerError> {
     let nonces = cached_nonces.read().await;
     if let Some(nonce) = nonces.get(cache_key) {
         cached_nonce(nonce, rpc_client).await
@@ -119,16 +117,6 @@ pub(crate) async fn invalidate_nonce_if_tx_failed(
     err_str: &str,
 ) {
     // InvalidNonce, cached nonce is potentially very far behind, so invalidate it.
-    // if let Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
-    //     RpcTransactionError::InvalidTransaction {
-    //         context: InvalidTxError::InvalidNonce { .. },
-    //         ..
-    //     },
-    // ))) = &result
-    // {
-    //     let mut nonces = cached_nonces.write().await;
-    //     nonces.remove(cache_key);
-    // }
     if err_str.contains("InvalidNonce")
         || err_str.contains("must be larger than nonce of the used access key")
     {
@@ -137,15 +125,16 @@ pub(crate) async fn invalidate_nonce_if_tx_failed(
     }
 }
 
-pub async fn latest_block(rpc_client: &JsonRpcClient) -> anyhow::Result<BlockView> {
-    Ok(rpc_client
+pub async fn latest_block(rpc_client: &JsonRpcClient) -> Result<BlockView, RelayerError> {
+    rpc_client
         .call(&methods::block::RpcBlockRequest {
             block_reference: Finality::Final.into(),
         })
-        .await?)
+        .await
+        .map_err(|err| anyhow::anyhow!(err).into())
 }
 
-pub async fn latest_block_height(rpc_client: &JsonRpcClient) -> anyhow::Result<BlockHeight> {
+pub async fn latest_block_height(rpc_client: &JsonRpcClient) -> Result<BlockHeight, RelayerError> {
     let block_view = latest_block(rpc_client).await?;
     Ok(block_view.header.height)
 }
