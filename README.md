@@ -54,24 +54,44 @@ Internally, we are identifying users by their issuer id (iss) and their unique I
 
 ### Contribute
 
-In order to build the project, you will need to have `protoc` installed and execute next commands:
+In order to build the project, you will need to have `protoc` installed and execute the following:
 
 ```BASH
 # init submodules
 git submodule update --init --recursive
-# build the Docker image
-docker build . -t near/mpc-recovery
 ```
 
 alternatively if you have [nix](https://nixos.org/) and [direnv](https://direnv.net/) installed, you can set up a development environment by running:
 
-``` BASH
+```BASH
 direnv allow
 ```
 
-Run tests with:
-```
+Run unit tests with:
+```BASH
 cargo test -p mpc-recovery
+```
+
+#### Integration tests
+
+Running integration tests requires you to have relayer docker image present on your machine:
+
+```BASH
+# TODO: upstream these changes
+git clone -b daniyar/custom-entrypoint git@github.com:near/pagoda-relayer-rs-fastauth.git
+docker build pagoda-relayer-rs-fastauth -t pagoda-relayer-rs-fastauth
+```
+
+Now, build mpc-recovery from this repository:
+
+```BASH
+docker build . -t near/mpc-recovery
+```
+
+**Note**. You will need to re-build the Docker image each time you make a code change and want to run the integration tests.
+
+Finally, run the integration tests:
+
+```BASH
 cargo test -p mpc-recovery-integration-tests
 ```
-If you are using docker you will need to re-build the Docker image each time you made a code change and want to run the integration tests.
