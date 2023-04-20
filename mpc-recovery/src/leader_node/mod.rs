@@ -19,6 +19,7 @@ use hyper::{Body, Client, Method, Request};
 use near_crypto::{PublicKey, SecretKey};
 use near_primitives::types::AccountId;
 use near_primitives::views::FinalExecutionStatus;
+use rand::{distributions::Alphanumeric, Rng};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -61,12 +62,18 @@ pub async fn run(config: Config) {
     }
 
     let client = NearRpcAndRelayerClient::connect(&near_rpc, relayer_url);
+    // FIXME: We don't have a token for ourselves, but are still forced to allocate allowance.
+    // Using randomly generated tokens ensures the uniqueness of tokens on the relayer side.
+    let fake_oauth_token: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(16)
+        .map(char::from)
+        .collect();
     client
         .register_account(RegisterAccountRequest {
             account_id: account_creator_id.clone(),
             allowance: 300_000_000_000_000,
-            // FIXME: We don't have a token for ourselves, but are still forced to allocate allowance
-            oauth_token: "".to_string(),
+            oauth_token: fake_oauth_token,
         })
         .await
         .unwrap();
