@@ -5,6 +5,7 @@ use crate::msg::{
 };
 use crate::oauth::{IdTokenClaims, OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::primitives::InternalAccountId;
+use crate::relayer::error::RelayerError;
 use crate::relayer::msg::RegisterAccountRequest;
 use crate::relayer::NearRpcAndRelayerClient;
 use crate::transaction::{
@@ -235,13 +236,33 @@ async fn process_add_key(
     let user_account_id: AccountId = request.near_account_id.parse()?;
 
     // Get nonce and recent block hash
-    let nonce = state
+    let nonce = match state
         .client
         .access_key_nonce(
             user_account_id.clone(),
             get_user_recovery_pk(internal_acc_id.clone()).clone(),
         )
-        .await?;
+        .await
+    {
+        Ok(nonce) => nonce,
+        Err(RelayerError::UnknownAccount(account_id)) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(AddKeyResponse::Err {
+                    msg: format!("account {account_id} does not exist"),
+                }),
+            ))
+        }
+        Err(RelayerError::UnknownAccessKey(public_key)) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(AddKeyResponse::Err {
+                    msg: format!("public key {public_key} does not exist"),
+                }),
+            ))
+        }
+        Err(RelayerError::Other(e)) => return Err(e),
+    };
     let block_height = state.client.latest_block_height().await?;
 
     // Create a transaction to create a new account
