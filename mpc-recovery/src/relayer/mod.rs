@@ -1,11 +1,13 @@
+pub mod msg;
+
 use hyper::{Body, Client, Method, Request};
 use near_jsonrpc_client::{methods, JsonRpcClient};
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
-use near_primitives::delegate_action::SignedDelegateAction;
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::{AccountId, BlockHeight, Finality};
 use near_primitives::views::{AccessKeyView, QueryRequest};
-use serde_json::json;
+
+use self::msg::{RegisterAccountRequest, SendMetaTxRequest, SendMetaTxResponse};
 
 #[derive(Clone)]
 pub struct NearRpcAndRelayerClient {
@@ -65,24 +67,13 @@ impl NearRpcAndRelayerClient {
         Ok(block_view.header.height)
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(account_id))]
-    pub async fn register_account_with_relayer(&self, account_id: AccountId) -> anyhow::Result<()> {
-        let json_payload = json!({
-            "account_id": account_id.to_string(),
-            "allowance": 300000000000000u64
-        })
-        .to_string();
-
-        tracing::debug!(
-            "constructed json payload, {} bytes total",
-            json_payload.len()
-        );
-
+    #[tracing::instrument(level = "debug", skip_all, fields(account_id = request.account_id.to_string()))]
+    pub async fn register_account(&self, request: RegisterAccountRequest) -> anyhow::Result<()> {
         let request = Request::builder()
             .method(Method::POST)
             .uri(format!("{}/register_account", self.relayer_url))
             .header("content-type", "application/json")
-            .body(Body::from(json_payload))
+            .body(Body::from(serde_json::to_vec(&request)?))
             .unwrap();
 
         tracing::debug!("constructed http request to {}", self.relayer_url);
@@ -91,35 +82,27 @@ impl NearRpcAndRelayerClient {
 
         if response.status().is_success() {
             let response_body = hyper::body::to_bytes(response.into_body()).await?;
-            tracing::debug!("success: {}", std::str::from_utf8(&response_body)?)
+            tracing::debug!("success: {}", std::str::from_utf8(&response_body)?);
+            Ok(())
         } else {
             let response_body = hyper::body::to_bytes(response.into_body()).await?;
-            anyhow::bail!(
-                "transaction failed: {}",
+            Err(anyhow::anyhow!(
+                "fail: {}",
                 std::str::from_utf8(&response_body)?
-            )
+            ))
         }
-
-        Ok(())
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(receiver_id = signed_delegate_action.delegate_action.receiver_id.to_string()))]
-    pub async fn send_tx_via_relayer(
+    #[tracing::instrument(level = "debug", skip_all, fields(receiver_id = request.delegate_action.receiver_id.to_string()))]
+    pub async fn send_meta_tx(
         &self,
-        signed_delegate_action: SignedDelegateAction,
-    ) -> anyhow::Result<()> {
-        let json_payload = serde_json::to_vec(&signed_delegate_action)?;
-
-        tracing::debug!(
-            "constructed json payload, {} bytes total",
-            json_payload.len()
-        );
-
+        request: SendMetaTxRequest,
+    ) -> anyhow::Result<SendMetaTxResponse> {
         let request = Request::builder()
             .method(Method::POST)
             .uri(format!("{}/send_meta_tx", self.relayer_url))
             .header("content-type", "application/json")
-            .body(Body::from(json_payload))
+            .body(Body::from(serde_json::to_vec(&request)?))
             .unwrap();
 
         tracing::debug!("constructed http request to {}", self.relayer_url);
@@ -128,16 +111,18 @@ impl NearRpcAndRelayerClient {
 
         if response.status().is_success() {
             let response_body = hyper::body::to_bytes(response.into_body()).await?;
-            tracing::debug!("success: {}", std::str::from_utf8(&response_body)?)
+            tracing::debug!("body: {}", std::str::from_utf8(&response_body)?);
+            let response: SendMetaTxResponse = serde_json::from_slice(&response_body)?;
+            tracing::debug!("success: {:?}", response);
+
+            Ok(response)
         } else {
             let response_body = hyper::body::to_bytes(response.into_body()).await?;
-            anyhow::bail!(
-                "transaction failed: {}",
+            Err(anyhow::anyhow!(
+                "fail: {}",
                 std::str::from_utf8(&response_body)?
-            )
+            ))
         }
-
-        Ok(())
     }
 }
 

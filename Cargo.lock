@@ -4854,7 +4854,7 @@ dependencies = [
 [[package]]
 name = "workspaces"
 version = "0.7.0"
-source = "git+https://github.com/near/workspaces-rs?branch=daniyar/bump-sandbox#4647669a9d1f4c42817f7ce6dd3afb8f88e51bf0"
+source = "git+https://github.com/near/workspaces-rs?branch=main#b24cf3cb409bae898275de08d318551941ba5414"
 dependencies = [
  "async-process",
  "async-trait",
