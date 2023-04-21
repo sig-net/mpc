@@ -38,6 +38,12 @@ pub enum AddKeyResponse {
     Err { msg: String },
 }
 
+impl AddKeyResponse {
+    pub fn err(msg: String) -> Self {
+        AddKeyResponse::Err { msg }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LeaderRequest {
     pub payload: String,

@@ -212,22 +212,38 @@ fn get_internal_account_id(claims: IdTokenClaims) -> InternalAccountId {
 }
 
 mod response {
+    use crate::msg::AddKeyResponse;
     use crate::msg::NewAccountResponse;
     use axum::Json;
     use hyper::StatusCode;
 
-    pub fn bad_request(msg: String) -> (StatusCode, Json<NewAccountResponse>) {
+    pub fn new_acc_bad_request(msg: String) -> (StatusCode, Json<NewAccountResponse>) {
         (StatusCode::BAD_REQUEST, Json(NewAccountResponse::err(msg)))
     }
 
-    pub fn unauthorized(msg: String) -> (StatusCode, Json<NewAccountResponse>) {
+    pub fn new_acc_unauthorized(msg: String) -> (StatusCode, Json<NewAccountResponse>) {
         (StatusCode::UNAUTHORIZED, Json(NewAccountResponse::err(msg)))
     }
 
-    pub fn internal_error(msg: String) -> (StatusCode, Json<NewAccountResponse>) {
+    pub fn new_acc_internal_error(msg: String) -> (StatusCode, Json<NewAccountResponse>) {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(NewAccountResponse::err(msg)),
+        )
+    }
+
+    pub fn add_key_bad_request(msg: String) -> (StatusCode, Json<AddKeyResponse>) {
+        (StatusCode::BAD_REQUEST, Json(AddKeyResponse::err(msg)))
+    }
+
+    pub fn add_key_unauthorized(msg: String) -> (StatusCode, Json<AddKeyResponse>) {
+        (StatusCode::UNAUTHORIZED, Json(AddKeyResponse::err(msg)))
+    }
+
+    pub fn add_key_internal_error(msg: String) -> (StatusCode, Json<AddKeyResponse>) {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AddKeyResponse::err(msg)),
         )
     }
 }
@@ -248,64 +264,68 @@ async fn new_account<T: OAuthTokenVerifier>(
         Ok(response) => (StatusCode::OK, Json(response)),
         Err(ref e @ NewAccountError::MalformedPublicKey(ref pk, _)) => {
             tracing::error!(err = ?e);
-            response::bad_request(format!("bad public_key: {}", pk))
+            response::new_acc_bad_request(format!("bad public_key: {}", pk))
         }
         Err(ref e @ NewAccountError::MalformedAccountId(ref account_id, _)) => {
             tracing::error!(err = ?e);
-            response::bad_request(format!("bad near_account_id: {}", account_id))
+            response::new_acc_bad_request(format!("bad near_account_id: {}", account_id))
         }
         Err(ref e @ NewAccountError::OidcVerificationFailed(ref err_msg)) => {
             tracing::error!(err = ?e);
-            response::unauthorized(format!("failed to verify oidc token: {}", err_msg))
+            response::new_acc_unauthorized(format!("failed to verify oidc token: {}", err_msg))
         }
         Err(e) => {
             tracing::error!(err = ?e);
-            response::internal_error(format!("failed to process new account: {}", e))
+            response::new_acc_internal_error(format!("failed to process new account: {}", e))
         }
     }
 }
 
-async fn process_add_key(
-    state: &LeaderState,
-    request: &AddKeyRequest,
-    internal_acc_id: InternalAccountId,
-) -> anyhow::Result<(StatusCode, Json<AddKeyResponse>)> {
-    let user_account_id: AccountId = request.near_account_id.parse()?;
+#[derive(thiserror::Error, Debug)]
+enum AddKeyError {
+    #[error("malformed account id: {0}")]
+    MalformedAccountId(String, ParseAccountError),
+    #[error("malformed public key {0}: {1}")]
+    MalformedPublicKey(String, ParseKeyError),
+    #[error("failed to verify oidc token: {0}")]
+    OidcVerificationFailed(String),
+    #[error("relayer error: {0}")]
+    RelayerError(#[from] RelayerError),
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
+}
+
+async fn process_add_key<T: OAuthTokenVerifier>(
+    state: LeaderState,
+    request: AddKeyRequest,
+) -> anyhow::Result<AddKeyResponse, AddKeyError> {
+    let oidc_token_claims = T::verify_token(&request.oidc_token)
+        .await
+        .map_err(AddKeyError::OidcVerificationFailed)?;
+
+    let user_account_id: AccountId = request
+        .near_account_id
+        .parse()
+        .map_err(|e| AddKeyError::MalformedAccountId(request.near_account_id, e))?;
 
     // Get nonce and recent block hash
-    let nonce = match state
+    let nonce = state
         .client
         .access_key_nonce(
-            user_account_id.clone(),
-            get_user_recovery_pk(internal_acc_id.clone()).clone(),
+            state.account_creator_id.clone(),
+            state.account_creator_sk.public_key(),
         )
-        .await
-    {
-        Ok(nonce) => nonce,
-        Err(RelayerError::UnknownAccount(account_id)) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(AddKeyResponse::Err {
-                    msg: format!("account {account_id} does not exist"),
-                }),
-            ))
-        }
-        Err(RelayerError::UnknownAccessKey(public_key)) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(AddKeyResponse::Err {
-                    msg: format!("public key {public_key} does not exist"),
-                }),
-            ))
-        }
-        Err(RelayerError::Other(e)) => return Err(e),
-    };
+        .await?;
     let block_height = state.client.latest_block_height().await?;
 
-    // Create a transaction to create a new account
-    let new_public_key: PublicKey = request.public_key.clone().parse()?;
+    let new_public_key: PublicKey = request
+        .public_key
+        .parse()
+        .map_err(|e| AddKeyError::MalformedPublicKey(request.public_key, e))?;
 
     let max_block_height: u64 = block_height + 100;
+
+    let internal_acc_id = get_internal_account_id(oidc_token_claims);
 
     let delegate_action = get_add_key_delegate_action(
         user_account_id.clone(),
@@ -320,9 +340,14 @@ async fn process_add_key(
         get_user_recovery_sk(internal_acc_id),
     );
 
-    state.client.send_meta_tx(signed_delegate_action).await?;
+    let response = state.client.send_meta_tx(signed_delegate_action).await?;
 
-    Ok((StatusCode::OK, Json(AddKeyResponse::Ok)))
+    // TODO: Probably need to check more fields
+    if matches!(response.status, FinalExecutionStatus::SuccessValue(_)) {
+        Ok(AddKeyResponse::Ok)
+    } else {
+        Err(anyhow::anyhow!("transaction failed with {:?}", response.status).into())
+    }
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
@@ -337,30 +362,23 @@ async fn add_key<T: OAuthTokenVerifier>(
         "add_key request"
     );
 
-    match T::verify_token(&request.oidc_token).await {
-        Ok(claims) => {
-            tracing::info!("access token is valid");
-            match process_add_key(&state, &request, get_internal_account_id(claims)).await {
-                Ok(result) => result,
-                Err(e) => {
-                    tracing::error!(err = ?e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(AddKeyResponse::Err {
-                            msg: "internal error".to_string(),
-                        }),
-                    )
-                }
-            }
+    match process_add_key::<T>(state, request).await {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(ref e @ AddKeyError::MalformedPublicKey(ref pk, _)) => {
+            tracing::error!(err = ?e);
+            response::add_key_bad_request(format!("bad public_key: {}", pk))
         }
-        Err(_) => {
-            tracing::error!("access token verification failed");
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(AddKeyResponse::Err {
-                    msg: "access token verification failed".into(),
-                }),
-            )
+        Err(ref e @ AddKeyError::MalformedAccountId(ref account_id, _)) => {
+            tracing::error!(err = ?e);
+            response::add_key_bad_request(format!("bad near_account_id: {}", account_id))
+        }
+        Err(ref e @ AddKeyError::OidcVerificationFailed(ref err_msg)) => {
+            tracing::error!(err = ?e);
+            response::add_key_unauthorized(format!("failed to verify oidc token: {}", err_msg))
+        }
+        Err(e) => {
+            tracing::error!(err = ?e);
+            response::add_key_internal_error(format!("failed to process new account: {}", e))
         }
     }
 }
