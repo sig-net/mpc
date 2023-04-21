@@ -23,6 +23,8 @@
             with pkgs; [
               darwin.apple_sdk.frameworks.Security
               protobuf
+              curl
+              gmp
             ];
         };
       });
