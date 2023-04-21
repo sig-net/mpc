@@ -267,7 +267,7 @@ impl Revealed {
         let ephemeral_key = self.committed.ephemeral_key;
 
         let partial_sig = aggsig::partial_sign(
-            &ephemeral_key,
+            &ephemeral_key.r,
             &self.committed.our_key,
             &key_agg.hash,
             &r_tot,

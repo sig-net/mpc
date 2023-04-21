@@ -52,3 +52,4 @@ tower-http = { version = "0.4.0", features = ["cors"] }
 yup-oauth2 = "8"
 multi-party-eddsa = { path = "../../multi-party-eddsa/"}
 curv = { package = "curv-kzen", version = "0.9", default-features = false }
+ed25519-dalek = "1.0.1"
