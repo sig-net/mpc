@@ -58,6 +58,7 @@ async fn test_invalid_token() -> anyhow::Result<()> {
                     public_key: new_user_public_key.clone(),
                 })
                 .await?;
+
             assert_eq!(status_code, 200);
             assert!(matches!(add_key_response, AddKeyResponse::Ok));
 
@@ -117,7 +118,7 @@ async fn test_malformed_account_id() -> anyhow::Result<()> {
                     public_key: new_user_public_key.clone(),
                 })
                 .await?;
-            assert_eq!(status_code, 500);
+            assert_eq!(status_code, 400);
             assert!(matches!(add_key_response, AddKeyResponse::Err { .. }));
 
             // Check that the service is still available
@@ -178,8 +179,6 @@ async fn test_malformed_public_key() -> anyhow::Result<()> {
 
             check::access_key_exists(&ctx, &account_id, &user_public_key).await?;
 
-            let new_user_public_key = key::random();
-
             let (status_code, add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
@@ -188,10 +187,12 @@ async fn test_malformed_public_key() -> anyhow::Result<()> {
                     public_key: malformed_public_key.clone(),
                 })
                 .await?;
-            assert_eq!(status_code, 500);
+            assert_eq!(status_code, 400);
             assert!(matches!(add_key_response, AddKeyResponse::Err { .. }));
 
             // Check that the service is still available
+            let new_user_public_key = key::random();
+
             let (status_code, add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
@@ -200,7 +201,9 @@ async fn test_malformed_public_key() -> anyhow::Result<()> {
                     public_key: new_user_public_key.clone(),
                 })
                 .await?;
+
             assert_eq!(status_code, 200);
+
             assert!(matches!(add_key_response, AddKeyResponse::Ok));
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
@@ -229,7 +232,7 @@ async fn test_add_key_to_non_existing_account() -> anyhow::Result<()> {
                 })
                 .await?;
 
-            assert_eq!(status_code, 400);
+            assert_eq!(status_code, 500);
             assert!(matches!(add_key_response, AddKeyResponse::Err { .. }));
 
             tokio::time::sleep(Duration::from_millis(2000)).await;

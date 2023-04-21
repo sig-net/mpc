@@ -133,7 +133,7 @@ enum NewAccountError {
     #[error("malformed public key {0}: {1}")]
     MalformedPublicKey(String, ParseKeyError),
     #[error("failed to verify oidc token: {0}")]
-    OidcVerificationFailed(String),
+    OidcVerificationFailed(anyhow::Error),
     #[error("relayer error: {0}")]
     RelayerError(#[from] RelayerError),
     #[error("{0}")]
@@ -288,7 +288,7 @@ enum AddKeyError {
     #[error("malformed public key {0}: {1}")]
     MalformedPublicKey(String, ParseKeyError),
     #[error("failed to verify oidc token: {0}")]
-    OidcVerificationFailed(String),
+    OidcVerificationFailed(anyhow::Error),
     #[error("relayer error: {0}")]
     RelayerError(#[from] RelayerError),
     #[error("{0}")]
@@ -308,13 +308,14 @@ async fn process_add_key<T: OAuthTokenVerifier>(
         .parse()
         .map_err(|e| AddKeyError::MalformedAccountId(request.near_account_id, e))?;
 
+    let internal_acc_id = get_internal_account_id(oidc_token_claims);
+
+    let user_recovery_pk = get_user_recovery_pk(internal_acc_id.clone());
+
     // Get nonce and recent block hash
     let nonce = state
         .client
-        .access_key_nonce(
-            state.account_creator_id.clone(),
-            state.account_creator_sk.public_key(),
-        )
+        .access_key_nonce(user_account_id.clone(), user_recovery_pk.clone())
         .await?;
     let block_height = state.client.latest_block_height().await?;
 
@@ -325,11 +326,9 @@ async fn process_add_key<T: OAuthTokenVerifier>(
 
     let max_block_height: u64 = block_height + 100;
 
-    let internal_acc_id = get_internal_account_id(oidc_token_claims);
-
     let delegate_action = get_add_key_delegate_action(
         user_account_id.clone(),
-        get_user_recovery_pk(internal_acc_id.clone()),
+        user_recovery_pk,
         new_public_key,
         nonce + 1,
         max_block_height,
