@@ -1,4 +1,5 @@
 use clap::Parser;
+use gcp::GcpService;
 use mpc_recovery::LeaderConfig;
 use near_primitives::types::AccountId;
 use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
@@ -49,7 +50,7 @@ enum Cli {
         account_creator_id: AccountId,
         /// TEMPORARY - Account creator ed25519 secret key
         #[arg(long, env("MPC_RECOVERY_ACCOUNT_CREATOR_SK"))]
-        account_creator_sk: String,
+        account_creator_sk: Option<String>,
     },
     StartSign {
         /// Node ID
@@ -67,10 +68,35 @@ enum Cli {
     },
 }
 
-async fn load_sh_skare(node_id: u64, sk_share_arg: Option<String>) -> anyhow::Result<String> {
+async fn load_sh_skare(
+    gcp_service: &GcpService,
+    node_id: u64,
+    sk_share_arg: Option<String>,
+) -> anyhow::Result<String> {
     match sk_share_arg {
         Some(sk_share) => Ok(sk_share),
-        None => Ok(std::str::from_utf8(&gcp::load_secret_share(node_id).await?)?.to_string()),
+        None => {
+            let name = format!(
+                "projects/pagoda-discovery-platform-dev/secrets/mpc-recovery-secret-share-{node_id}/versions/latest"
+            );
+            Ok(std::str::from_utf8(&gcp_service.load_secret(name).await?)?.to_string())
+        }
+    }
+}
+
+async fn load_account_creator_sk(
+    gcp_service: &GcpService,
+    node_id: u64,
+    account_creator_sk_arg: Option<String>,
+) -> anyhow::Result<String> {
+    match account_creator_sk_arg {
+        Some(account_creator_sk) => Ok(account_creator_sk),
+        None => {
+            let name = format!(
+                "projects/pagoda-discovery-platform-dev/secrets/mpc-recovery-account-creator-sk-{node_id}/versions/latest"
+            );
+            Ok(std::str::from_utf8(&gcp_service.load_secret(name).await?)?.to_string())
+        }
     }
 }
 
@@ -104,10 +130,14 @@ async fn main() -> anyhow::Result<()> {
             account_creator_id,
             account_creator_sk,
         } => {
-            let sk_share = load_sh_skare(node_id, sk_share).await?;
+            let gcp_service = GcpService::new().await?;
+            let sk_share = load_sh_skare(&gcp_service, node_id, sk_share).await?;
+            let account_creator_sk =
+                load_account_creator_sk(&gcp_service, node_id, account_creator_sk).await?;
 
-            let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
-            let sk_share: SecretKeyShare = serde_json::from_str(&sk_share).unwrap();
+            let pk_set: PublicKeySet = serde_json::from_str(&pk_set)?;
+            let sk_share: SecretKeyShare = serde_json::from_str(&sk_share)?;
+            let account_creator_sk = account_creator_sk.parse()?;
 
             mpc_recovery::run_leader_node(LeaderConfig {
                 id: node_id,
@@ -120,8 +150,7 @@ async fn main() -> anyhow::Result<()> {
                 near_root_account,
                 // TODO: Create such an account for testnet and mainnet in a secure way
                 account_creator_id,
-                // TODO: Load this account secret key from GCP Secret Manager
-                account_creator_sk: account_creator_sk.parse()?,
+                account_creator_sk,
             })
             .await;
         }
@@ -131,7 +160,8 @@ async fn main() -> anyhow::Result<()> {
             sk_share,
             web_port,
         } => {
-            let sk_share = load_sh_skare(node_id, sk_share).await?;
+            let gcp_service = GcpService::new().await?;
+            let sk_share = load_sh_skare(&gcp_service, node_id, sk_share).await?;
 
             let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
             let sk_share: SecretKeyShare = serde_json::from_str(&sk_share).unwrap();
