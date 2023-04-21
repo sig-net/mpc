@@ -86,7 +86,7 @@ async fn test_malformed_account_id() -> anyhow::Result<()> {
                     public_key: user_public_key.clone(),
                 })
                 .await?;
-            assert_eq!(status_code, 500);
+            assert_eq!(status_code, 400);
             assert!(matches!(new_acc_response, NewAccountResponse::Err { .. }));
 
             let account_id = account::random(ctx.worker)?;
@@ -157,7 +157,7 @@ async fn test_malformed_public_key() -> anyhow::Result<()> {
                     public_key: malformed_public_key.clone(),
                 })
                 .await?;
-            assert_eq!(status_code, 500);
+            assert_eq!(status_code, 400);
             assert!(matches!(new_acc_response, NewAccountResponse::Err { .. }));
 
             let user_public_key = key::random();
