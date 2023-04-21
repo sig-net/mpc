@@ -1,4 +1,3 @@
-use chrono::Utc;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,9 +27,9 @@ pub trait OAuthTokenVerifier {
     }
 }
 
+#[non_exhaustive]
 pub enum SupportedTokenVerifiers {
     PagodaFirebaseTokenVerifier,
-    TestTokenVerifier,
 }
 
 /* Universal token verifier */
@@ -41,28 +40,20 @@ impl OAuthTokenVerifier for UniversalTokenVerifier {
     async fn verify_token(token: &str) -> Result<IdTokenClaims, String> {
         // TODO: here we assume that verifier type can be determined from the token
         match get_token_verifier_type(token) {
-            SupportedTokenVerifiers::PagodaFirebaseTokenVerifier => {
+            Some(SupportedTokenVerifiers::PagodaFirebaseTokenVerifier) => {
                 return PagodaFirebaseTokenVerifier::verify_token(token).await;
             }
-            SupportedTokenVerifiers::TestTokenVerifier => {
-                return TestTokenVerifier::verify_token(token).await;
-            }
+            None => Err("Invalid token".to_string()),
         }
     }
 }
 
-fn get_token_verifier_type(token: &str) -> SupportedTokenVerifiers {
-    match token.len() > 30 {
-        // TODO: add real token type detection, now the system can be bypassed by passing a short token
-        true => {
-            tracing::info!("Using PagodaFirebaseTokenVerifier");
-            SupportedTokenVerifiers::PagodaFirebaseTokenVerifier
-        }
-        false => {
-            tracing::info!("Using TestTokenVerifier");
-            SupportedTokenVerifiers::TestTokenVerifier
-        }
-    }
+fn get_token_verifier_type(token: &str) -> Option<SupportedTokenVerifiers> {
+    // TODO: add real token type detection
+    (token.len() > 30).then(|| {
+        tracing::info!("Using PagodaFirebaseTokenVerifier");
+        SupportedTokenVerifiers::PagodaFirebaseTokenVerifier
+    })
 }
 
 /* Pagoda/Firebase verifier */
@@ -95,25 +86,6 @@ impl OAuthTokenVerifier for PagodaFirebaseTokenVerifier {
     }
 }
 
-/* Test verifier */
-pub struct TestTokenVerifier {}
-
-#[async_trait::async_trait]
-impl OAuthTokenVerifier for TestTokenVerifier {
-    async fn verify_token(token: &str) -> Result<IdTokenClaims, String> {
-        match token {
-            "validToken" => {
-                tracing::info!(target: "test-token-verifier", "access token is valid");
-                Ok(get_test_claims())
-            }
-            _ => {
-                tracing::info!(target: "test-token-verifier", "access token verification failed");
-                Err("Invalid token".to_string())
-            }
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IdTokenClaims {
     pub iss: String,
@@ -143,15 +115,6 @@ fn get_pagoda_firebase_public_key() -> Result<String, reqwest::Error> {
     Ok(key)
 }
 
-fn get_test_claims() -> IdTokenClaims {
-    IdTokenClaims {
-        iss: "test_issuer".to_string(),
-        sub: "test_subject".to_string(),
-        aud: "test_audience".to_string(),
-        exp: Utc::now().timestamp() as usize + 3600,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,13 +125,6 @@ mod tests {
         pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey},
         RsaPrivateKey, RsaPublicKey,
     };
-
-    pub fn compare_claims(claims1: IdTokenClaims, claims2: IdTokenClaims) -> bool {
-        claims1.iss == claims2.iss
-            && claims1.sub == claims2.sub
-            && claims1.aud == claims2.aud
-            && claims1.exp == claims2.exp
-    }
 
     #[test]
     fn test_get_pagoda_firebase_public_key() {
@@ -241,32 +197,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verify_token_valid() {
-        let token = "validToken";
-        let claims = TestTokenVerifier::verify_token(token).await.unwrap();
-        let test_claims = get_test_claims();
-        assert!(compare_claims(claims, test_claims));
-    }
-
-    #[tokio::test]
-    async fn test_verify_token_invalid_with_test_verifier() {
-        let token = "invalid";
-        let result = TestTokenVerifier::verify_token(token).await;
-        match result {
-            Ok(_) => panic!("Token verification should fail"),
-            Err(e) => assert_eq!(e, "Invalid token"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_verify_token_valid_with_test_verifier() {
-        let token = "validToken";
-        let claims = TestTokenVerifier::verify_token(token).await.unwrap();
-        let test_claims = get_test_claims();
-        assert!(compare_claims(claims, test_claims));
-    }
-
-    #[tokio::test]
     async fn test_verify_token_invalid_with_universal_verifier() {
         let token = "invalid";
         let result = UniversalTokenVerifier::verify_token(token).await;
@@ -274,14 +204,6 @@ mod tests {
             Ok(_) => panic!("Token verification should fail"),
             Err(e) => assert_eq!(e, "Invalid token"),
         }
-    }
-
-    #[tokio::test]
-    async fn test_verify_token_valid_with_universal_verifier() {
-        let token = "validToken";
-        let claims = UniversalTokenVerifier::verify_token(token).await.unwrap();
-        let test_claims = get_test_claims();
-        assert!(compare_claims(claims, test_claims));
     }
 
     pub fn get_rsa_pem_key_pair() -> (Vec<u8>, Vec<u8>) {
