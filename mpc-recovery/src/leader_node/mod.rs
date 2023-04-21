@@ -11,7 +11,7 @@ use crate::relayer::NearRpcAndRelayerClient;
 use crate::transaction::{
     get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
 };
-use crate::NodeId;
+use crate::{nar, NodeId};
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
 use futures::stream::FuturesUnordered;
 use hyper::client::ResponseFuture;
@@ -139,11 +139,11 @@ enum NewAccountError {
     #[error("{0}")]
     Other(#[from] anyhow::Error),
 }
-
 async fn process_new_account<T: OAuthTokenVerifier>(
-    request: NewAccountRequest,
     state: LeaderState,
+    request: NewAccountRequest,
 ) -> Result<NewAccountResponse, NewAccountError> {
+    // Create a transaction to create new NEAR account
     let new_user_account_pk: PublicKey = request
         .public_key
         .parse()
@@ -155,56 +155,68 @@ async fn process_new_account<T: OAuthTokenVerifier>(
     let oidc_token_claims = T::verify_token(&request.oidc_token)
         .await
         .map_err(NewAccountError::OidcVerificationFailed)?;
-    let internal_account_id = get_internal_account_id(oidc_token_claims);
+    let internal_acc_id = get_internal_account_id(oidc_token_claims);
 
-    // Get nonce and recent block hash
-    let nonce = state
-        .client
-        .access_key_nonce(
-            state.account_creator_id.clone(),
-            state.account_creator_sk.public_key(),
-        )
-        .await?;
-    let block_height = state.client.latest_block_height().await?;
-
-    // Create a delegate action to create new NEAR account
-    let delegate_action = get_create_account_delegate_action(
-        state.account_creator_id.clone(),
-        state.account_creator_sk.public_key(),
-        new_user_account_id.clone(),
-        get_user_recovery_pk(internal_account_id),
-        new_user_account_pk,
-        state.near_root_account.clone(),
-        nonce + 1,
-        block_height + 100,
-    )?;
-
-    // Sign with creator account private key
-    let signed_delegate_action = get_signed_delegated_action(
-        delegate_action,
-        state.account_creator_id.clone(),
-        state.account_creator_sk.clone(),
-    );
-
-    // Register account in the relayer
     state
         .client
         .register_account(RegisterAccountRequest {
-            account_id: new_user_account_id,
+            account_id: new_user_account_id.clone(),
             allowance: 300_000_000_000_000,
             oauth_token: request.oidc_token,
         })
         .await?;
 
-    // Send delegate action to relayer
-    let response = state.client.send_meta_tx(signed_delegate_action).await?;
+    nar::retry(|| async {
+        // Get nonce and recent block hash
+        let (_hash, block_height, nonce) = state
+            .client
+            .access_key(
+                state.account_creator_id.clone(),
+                state.account_creator_sk.public_key(),
+            )
+            .await?;
 
-    // TODO: Probably need to check more fields
-    if matches!(response.status, FinalExecutionStatus::SuccessValue(_)) {
-        Ok(NewAccountResponse::Ok)
-    } else {
-        Err(anyhow::anyhow!("transaction failed with {:?}", response.status).into())
-    }
+        let delegate_action = get_create_account_delegate_action(
+            state.account_creator_id.clone(),
+            state.account_creator_sk.public_key(),
+            new_user_account_id.clone(),
+            get_user_recovery_pk(internal_acc_id.clone()),
+            new_user_account_pk.clone(),
+            state.near_root_account.clone(),
+            nonce,
+            block_height + 100,
+        )?;
+        let signed_delegate_action = get_signed_delegated_action(
+            delegate_action,
+            state.account_creator_id.clone(),
+            state.account_creator_sk.clone(),
+        );
+
+        // Send delegate action to relayer
+        let result = state.client.send_meta_tx(signed_delegate_action).await;
+        if let Err(err) = &result {
+            let err_str = format!("{:?}", err);
+            state
+                .client
+                .invalidate_cache_if_tx_failed(
+                    &(
+                        state.account_creator_id.clone(),
+                        state.account_creator_sk.public_key(),
+                    ),
+                    &err_str,
+                )
+                .await;
+        }
+        let response = result?;
+
+        // TODO: Probably need to check more fields
+        if matches!(response.status, FinalExecutionStatus::SuccessValue(_)) {
+            Ok(NewAccountResponse::Ok)
+        } else {
+            Err(anyhow::anyhow!("transaction failed with {:?}", response.status).into())
+        }
+    })
+    .await
 }
 
 fn get_internal_account_id(claims: IdTokenClaims) -> InternalAccountId {
@@ -260,7 +272,7 @@ async fn new_account<T: OAuthTokenVerifier>(
         "new_account request"
     );
 
-    match process_new_account::<T>(request, state).await {
+    match process_new_account::<T>(state, request).await {
         Ok(response) => (StatusCode::OK, Json(response)),
         Err(ref e @ NewAccountError::MalformedPublicKey(ref pk, _)) => {
             tracing::error!(err = ?e);
@@ -298,55 +310,69 @@ enum AddKeyError {
 async fn process_add_key<T: OAuthTokenVerifier>(
     state: LeaderState,
     request: AddKeyRequest,
-) -> anyhow::Result<AddKeyResponse, AddKeyError> {
+) -> Result<AddKeyResponse, AddKeyError> {
     let oidc_token_claims = T::verify_token(&request.oidc_token)
         .await
         .map_err(AddKeyError::OidcVerificationFailed)?;
-
+    let internal_acc_id = get_internal_account_id(oidc_token_claims);
     let user_account_id: AccountId = request
         .near_account_id
         .parse()
         .map_err(|e| AddKeyError::MalformedAccountId(request.near_account_id, e))?;
-
-    let internal_acc_id = get_internal_account_id(oidc_token_claims);
-
     let user_recovery_pk = get_user_recovery_pk(internal_acc_id.clone());
-
-    // Get nonce and recent block hash
-    let nonce = state
-        .client
-        .access_key_nonce(user_account_id.clone(), user_recovery_pk.clone())
-        .await?;
-    let block_height = state.client.latest_block_height().await?;
-
+    let user_recovery_sk = get_user_recovery_sk(internal_acc_id);
     let new_public_key: PublicKey = request
         .public_key
         .parse()
         .map_err(|e| AddKeyError::MalformedPublicKey(request.public_key, e))?;
 
-    let max_block_height: u64 = block_height + 100;
+    nar::retry(|| async {
+        // Get nonce and recent block hash
+        let (_hash, block_height, nonce) = state
+            .client
+            .access_key(user_account_id.clone(), user_recovery_pk.clone())
+            .await?;
 
-    let delegate_action = get_add_key_delegate_action(
-        user_account_id.clone(),
-        user_recovery_pk,
-        new_public_key,
-        nonce + 1,
-        max_block_height,
-    )?;
-    let signed_delegate_action = get_signed_delegated_action(
-        delegate_action,
-        user_account_id,
-        get_user_recovery_sk(internal_acc_id),
-    );
+        // Create a transaction to create a new account
+        let max_block_height: u64 = block_height + 100;
+        let delegate_action = get_add_key_delegate_action(
+            user_account_id.clone(),
+            user_recovery_pk.clone(),
+            new_public_key.clone(),
+            nonce,
+            max_block_height,
+        )?;
+        let signed_delegate_action = get_signed_delegated_action(
+            delegate_action,
+            user_account_id.clone(),
+            user_recovery_sk.clone(),
+        );
 
-    let response = state.client.send_meta_tx(signed_delegate_action).await?;
+        let resp = state.client.send_meta_tx(signed_delegate_action).await;
+        if let Err(err) = resp {
+            let err_str = format!("{:?}", err);
+            state
+                .client
+                .invalidate_cache_if_tx_failed(
+                    &(
+                        state.account_creator_id.clone(),
+                        state.account_creator_sk.public_key(),
+                    ),
+                    &err_str,
+                )
+                .await;
+            return Err(err.into());
+        }
+        let resp = resp?;
 
-    // TODO: Probably need to check more fields
-    if matches!(response.status, FinalExecutionStatus::SuccessValue(_)) {
-        Ok(AddKeyResponse::Ok)
-    } else {
-        Err(anyhow::anyhow!("transaction failed with {:?}", response.status).into())
-    }
+        // TODO: Probably need to check more fields
+        if matches!(resp.status, FinalExecutionStatus::SuccessValue(_)) {
+            Ok(AddKeyResponse::Ok)
+        } else {
+            Err(anyhow::anyhow!("transaction failed with {:?}", resp.status).into())
+        }
+    })
+    .await
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
@@ -355,8 +381,8 @@ async fn add_key<T: OAuthTokenVerifier>(
     Json(request): Json<AddKeyRequest>,
 ) -> (StatusCode, Json<AddKeyResponse>) {
     tracing::info!(
-        near_account_id = hex::encode(request.near_account_id.clone()),
-        public_key = hex::encode(request.public_key.clone()),
+        near_account_id = hex::encode(&request.near_account_id),
+        public_key = hex::encode(&request.public_key),
         iodc_token = format!("{:.5}...", request.oidc_token),
         "add_key request"
     );

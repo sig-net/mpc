@@ -2018,6 +2018,7 @@ dependencies = [
  "thiserror",
  "threshold_crypto",
  "tokio",
+ "tokio-retry",
  "tonic 0.9.2",
  "tower-http 0.4.0",
  "tracing",
