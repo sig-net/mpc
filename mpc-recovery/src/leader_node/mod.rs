@@ -152,7 +152,6 @@ async fn process_new_account(
                 state.account_creator_sk.public_key(),
             )
             .await?;
-        // let block_height = state.client.latest_block_height().await?;
 
         let delegate_action = get_create_account_delegate_action(
             state.account_creator_id.clone(),
@@ -162,7 +161,6 @@ async fn process_new_account(
             new_user_account_pk.clone(),
             state.near_root_account.clone(),
             nonce,
-            // nonce + 1,
             block_height + 100,
         )?;
         let signed_delegate_action = get_signed_delegated_action(

@@ -51,11 +51,6 @@ impl NearRpcAndRelayerClient {
         .await
     }
 
-    #[allow(dead_code)]
-    pub async fn latest_block_height(&self) -> anyhow::Result<BlockHeight> {
-        Ok(nar::latest_block_height(&self.rpc_client).await?)
-    }
-
     #[tracing::instrument(level = "debug", skip_all, fields(account_id = request.account_id.to_string()))]
     pub async fn register_account(&self, request: RegisterAccountRequest) -> anyhow::Result<()> {
         let request = Request::builder()
@@ -133,24 +128,17 @@ mod tests {
     const TESTNET_URL: &str = "https://rpc.testnet.near.org";
 
     #[tokio::test]
-    async fn test_latest_block() -> anyhow::Result<()> {
-        let testnet = NearRpcAndRelayerClient::connect(TESTNET_URL, RELAYER_URI.to_string());
-        let block_height = testnet.latest_block_height().await?;
-
-        assert!(block_height > 0);
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_access_key() -> anyhow::Result<()> {
         let testnet = NearRpcAndRelayerClient::connect(TESTNET_URL, RELAYER_URI.to_string());
-        let (_, _, nonce) = testnet
+        let (block_hash, block_height, nonce) = testnet
             .access_key_nonce(
                 "dev-1636354824855-78504059330123".parse()?,
                 "ed25519:8n5HXTibTDtXKAnEUPFUXXJoKqa5A1c2vWXt6LbRAcGn".parse()?,
             )
             .await?;
 
+        assert_eq!(block_hash.0.len(), 32);
+        assert!(block_height > 0);
         // Assuming no one will use this account ever again
         assert_eq!(nonce, 70526114000003);
         Ok(())

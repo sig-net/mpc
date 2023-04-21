@@ -133,8 +133,3 @@ pub async fn latest_block(rpc_client: &JsonRpcClient) -> Result<BlockView, Relay
         .await
         .map_err(|err| anyhow::anyhow!(err).into())
 }
-
-pub async fn latest_block_height(rpc_client: &JsonRpcClient) -> Result<BlockHeight, RelayerError> {
-    let block_view = latest_block(rpc_client).await?;
-    Ok(block_view.header.height)
-}
