@@ -5,8 +5,10 @@ RUN apt-get update \
     apt-get install --no-install-recommends --assume-yes \
     protobuf-compiler libprotobuf-dev
 COPY . .
-COPY ./targe[t]/cach[e]/us[r]/ /usr/
-RUN rm -rf ./target/cache
+RUN if [ -f ./target/docker-cache.tgz ]; then \
+        tar xzC / -f ./target/docker-cache.tgz \
+        && rm -rf ./target/docker-cache.tgz; \
+    fi
 RUN CARGO_INCREMENTAL=0 cargo build --release --package mpc-recovery
 
 FROM scratch as export-artifacts
