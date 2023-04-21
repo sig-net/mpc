@@ -147,7 +147,7 @@ async fn process_new_account(
         // Get nonce and recent block hash
         let (_hash, block_height, nonce) = state
             .client
-            .access_key_nonce(
+            .access_key(
                 state.account_creator_id.clone(),
                 state.account_creator_sk.public_key(),
             )
@@ -252,7 +252,7 @@ async fn process_add_key(
         // Get nonce and recent block hash
         let (_hash, block_height, nonce) = match state
             .client
-            .access_key_nonce(
+            .access_key(
                 user_account_id.clone(),
                 get_user_recovery_pk(internal_acc_id.clone()),
             )

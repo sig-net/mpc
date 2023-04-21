@@ -38,7 +38,7 @@ impl NearRpcAndRelayerClient {
         }
     }
 
-    pub async fn access_key_nonce(
+    pub async fn access_key(
         &self,
         account_id: AccountId,
         public_key: PublicKey,
@@ -131,7 +131,7 @@ mod tests {
     async fn test_access_key() -> anyhow::Result<()> {
         let testnet = NearRpcAndRelayerClient::connect(TESTNET_URL, RELAYER_URI.to_string());
         let (block_hash, block_height, nonce) = testnet
-            .access_key_nonce(
+            .access_key(
                 "dev-1636354824855-78504059330123".parse()?,
                 "ed25519:8n5HXTibTDtXKAnEUPFUXXJoKqa5A1c2vWXt6LbRAcGn".parse()?,
             )
