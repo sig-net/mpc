@@ -11,6 +11,8 @@ use ed25519_dalek::{Sha512, Signature, SignatureError, Verifier};
 use multi_party_eddsa::protocols;
 use multi_party_eddsa::protocols::aggsig::{self, KeyAgg, SignSecondMsg};
 use multi_party_eddsa::protocols::ExpandedKeyPair;
+use rand8::rngs::OsRng;
+use rand8::{thread_rng, Rng};
 
 pub struct SigningState {
     committed: HashMap<AggrCommitment, Committed>,
@@ -34,6 +36,7 @@ fn aggregate_signatures() {
 
         dalek_pub.verify(msg, &dalek_sig)
     }
+
     // Generate node keys and signing keys
     let ks = || (ExpandedKeyPair::create(), ExpandedKeyPair::create());
     let (n1, k1) = ks();
@@ -83,8 +86,6 @@ fn aggregate_signatures() {
         .collect();
     let aggrigate_key = KeyAgg::key_aggregation_n(&signing_keys, 0);
 
-    println!("{:?}", aggrigate_key);
-
     let signature = aggsig::add_signature_parts(&sig_shares);
     verify_dalek(&aggrigate_key.apk, &signature, &message).unwrap();
 }
@@ -104,7 +105,20 @@ impl SigningState {
         node_key: &protocols::ExpandedKeyPair,
         message: Vec<u8>,
     ) -> SignedCommitment {
-        let (commitment, state) = Committed::commit(our_key, node_key, message);
+        // We use OSRng on it's own instead of thread_random() for commit padding and OsRng
+        self.get_commitment_with_rng(our_key, node_key, message, &mut OsRng)
+    }
+
+    /// This is for deterministic testing, don't use it in prod
+    /// The whole signing process is deterministic if a deterministic rng is used
+    pub(crate) fn get_commitment_with_rng(
+        &mut self,
+        our_key: &protocols::ExpandedKeyPair,
+        node_key: &protocols::ExpandedKeyPair,
+        message: Vec<u8>,
+        rng: &mut impl Rng,
+    ) -> SignedCommitment {
+        let (commitment, state) = Committed::commit(our_key, node_key, message, rng);
         self.committed.insert(commitment.commitment.clone(), state);
         commitment
     }
@@ -193,10 +207,11 @@ impl Committed {
         our_key: &protocols::ExpandedKeyPair,
         node_key: &protocols::ExpandedKeyPair,
         message: Vec<u8>,
+        rng: &mut impl Rng,
     ) -> (SignedCommitment, Self) {
         let (ephemeral_key, commit, our_signature) =
             // TODO this uses threadrandom which is bad, but it uses it for something superfluous which is less bad?
-            aggsig::create_ephemeral_key_and_commit(our_key, &message);
+            aggsig::create_ephemeral_key_and_commit_rng(our_key, &message, rng);
         let s = Committed {
             ephemeral_key,
             our_signature,
@@ -243,11 +258,13 @@ impl Revealed {
         for (commit, partial_sig) in self.commitments.iter().zip(signature_parts.iter()) {
             check_commitment(&partial_sig.R, &partial_sig.blind_factor, &commit.0)?;
         }
-        let r_tot = aggsig::get_R_tot(&self.signing_public_keys);
+        // TODO less copying
+        let rs: Vec<_> = signature_parts.iter().map(|s| s.R.clone()).collect();
+        let r_tot = aggsig::get_R_tot(&rs);
 
         let key_agg = KeyAgg::key_aggregation_n(&self.signing_public_keys, node_info.our_index);
 
-        let ephemeral_key = self.committed.ephemeral_key.r;
+        let ephemeral_key = self.committed.ephemeral_key;
 
         let partial_sig = aggsig::partial_sign(
             &ephemeral_key,
@@ -257,14 +274,15 @@ impl Revealed {
             &key_agg.apk,
             &self.committed.message,
         );
+
         Ok(partial_sig)
     }
 }
 
 // Stores info about the other nodes we're interacting with
 pub struct NodeInfo {
-    nodes_public_keys: Vec<Point<Ed25519>>,
-    our_index: usize,
+    pub nodes_public_keys: Vec<Point<Ed25519>>,
+    pub our_index: usize,
 }
 
 type PublicKey = Point<Ed25519>;
@@ -284,12 +302,12 @@ impl NodeInfo {
 
 #[derive(Debug, Clone)]
 pub struct SignedCommitment {
-    commitment: AggrCommitment,
+    pub commitment: AggrCommitment,
     /// This is the public key we're currently signing with,
     /// not the node public key that generated the signature
-    signing_public_key: Point<Ed25519>,
+    pub signing_public_key: Point<Ed25519>,
     /// This is signed with the node public key
-    signed: Signature,
+    pub signed: Signature,
 }
 
 impl SignedCommitment {
