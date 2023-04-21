@@ -13,11 +13,11 @@ use multi_party_eddsa::protocols::aggsig::{self, KeyAgg, SignSecondMsg};
 use multi_party_eddsa::protocols::ExpandedKeyPair;
 use rand8::rngs::OsRng;
 use rand8::{thread_rng, Rng};
+use serde::{Deserialize, Serialize};
 
 pub struct SigningState {
     committed: HashMap<AggrCommitment, Committed>,
     revealed: HashMap<Reveal, Revealed>,
-    node_info: NodeInfo,
 }
 
 #[test]
@@ -49,16 +49,15 @@ fn aggregate_signatures() {
         n3.public_key.clone(),
     ];
 
-    // Set up nodes with that config
-    let s = |n| {
-        SigningState::new(NodeInfo {
-            nodes_public_keys: nodes_public_keys.clone(),
-            our_index: n,
-        })
+    let ni = |n| NodeInfo {
+        nodes_public_keys: nodes_public_keys.clone(),
+        our_index: n,
     };
-    let mut s1 = s(0);
-    let mut s2 = s(1);
-    let mut s3 = s(2);
+
+    // Set up nodes with that config
+    let mut s1 = SigningState::new();
+    let mut s2 = SigningState::new();
+    let mut s3 = SigningState::new();
 
     let message = b"message in a bottle".to_vec();
 
@@ -69,15 +68,15 @@ fn aggregate_signatures() {
     ];
 
     let reveals = vec![
-        s1.get_reveal(commitments.clone()).unwrap(),
-        s2.get_reveal(commitments.clone()).unwrap(),
-        s3.get_reveal(commitments.clone()).unwrap(),
+        s1.get_reveal(ni(0), commitments.clone()).unwrap(),
+        s2.get_reveal(ni(1), commitments.clone()).unwrap(),
+        s3.get_reveal(ni(2), commitments.clone()).unwrap(),
     ];
 
     let sig_shares = vec![
-        s1.get_signature_share(reveals.clone()).unwrap(),
-        s2.get_signature_share(reveals.clone()).unwrap(),
-        s3.get_signature_share(reveals.clone()).unwrap(),
+        s1.get_signature_share(ni(0), reveals.clone()).unwrap(),
+        s2.get_signature_share(ni(1), reveals.clone()).unwrap(),
+        s3.get_signature_share(ni(2), reveals.clone()).unwrap(),
     ];
 
     let signing_keys: Vec<_> = commitments
@@ -91,11 +90,10 @@ fn aggregate_signatures() {
 }
 
 impl SigningState {
-    pub fn new(node_info: NodeInfo) -> Self {
+    pub fn new() -> Self {
         SigningState {
             committed: HashMap::new(),
             revealed: HashMap::new(),
-            node_info,
         }
     }
 
@@ -125,10 +123,11 @@ impl SigningState {
 
     pub fn get_reveal(
         &mut self,
+        node_info: NodeInfo,
         recieved_commitments: Vec<SignedCommitment>,
     ) -> Result<Reveal, String> {
         // TODO Factor this out
-        let i = self.node_info.our_index;
+        let i = node_info.our_index;
         let our_c = recieved_commitments.get(i).ok_or(format!(
             "This is node index {}, but you only gave us {} commitments",
             i,
@@ -140,7 +139,7 @@ impl SigningState {
             .remove(&our_c.commitment)
             .ok_or(format!("Committment {:?} not found", &our_c.commitment))?;
 
-        let (reveal, state) = state.reveal(&self.node_info, recieved_commitments)?;
+        let (reveal, state) = state.reveal(&node_info, recieved_commitments)?;
         let reveal = Reveal(reveal);
         self.revealed.insert(reveal.clone(), state);
         Ok(reveal)
@@ -148,9 +147,10 @@ impl SigningState {
 
     pub fn get_signature_share(
         &mut self,
+        node_info: NodeInfo,
         signature_parts: Vec<Reveal>,
     ) -> Result<protocols::Signature, String> {
-        let i = self.node_info.our_index;
+        let i = node_info.our_index;
         let our_r = signature_parts.get(i).ok_or(format!(
             "This is node index {}, but you only gave us {} reveals",
             i,
@@ -164,13 +164,14 @@ impl SigningState {
 
         let signature_parts = signature_parts.into_iter().map(|s| s.0).collect();
 
-        state.combine(signature_parts, &self.node_info)
+        state.combine(signature_parts, &node_info)
     }
 }
 
 /// This represents the signers view of a single signed transaction
 /// We use an minor extention of aggregate signatures to do this.
 /// This extension creates a "node key" in addition to the signing keys which allows the key to verify that the information they recieves actually comes from a signer
+#[derive(Clone)]
 pub struct Committed {
     ephemeral_key: aggsig::EphemeralKey,
     our_signature: aggsig::SignSecondMsg,
@@ -179,7 +180,7 @@ pub struct Committed {
 }
 
 // TOOD Make this fixed size hash
-#[derive(Eq, PartialEq, Clone, Debug)]
+#[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct AggrCommitment(pub BigInt);
 
 impl Hash for AggrCommitment {
@@ -188,7 +189,7 @@ impl Hash for AggrCommitment {
     }
 }
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub struct Reveal(pub SignSecondMsg);
 
 impl Hash for Reveal {
@@ -242,6 +243,7 @@ impl Committed {
     }
 }
 
+#[derive(Clone)]
 pub struct Revealed {
     commitments: Vec<AggrCommitment>,
     signing_public_keys: Vec<Point<Ed25519>>,
@@ -280,6 +282,7 @@ impl Revealed {
 }
 
 // Stores info about the other nodes we're interacting with
+#[derive(Clone)]
 pub struct NodeInfo {
     pub nodes_public_keys: Vec<Point<Ed25519>>,
     pub our_index: usize,
@@ -300,7 +303,7 @@ impl NodeInfo {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedCommitment {
     pub commitment: AggrCommitment,
     /// This is the public key we're currently signing with,

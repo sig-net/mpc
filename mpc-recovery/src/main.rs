@@ -1,6 +1,8 @@
 use clap::Parser;
+use curv::elliptic::curves::{Ed25519, Point};
 use gcp::GcpService;
 use mpc_recovery::LeaderConfig;
+use multi_party_eddsa::protocols::ExpandedKeyPair;
 use near_primitives::types::AccountId;
 use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
 
@@ -175,8 +177,10 @@ async fn main() -> anyhow::Result<()> {
             let gcp_service = GcpService::new().await?;
             let sk_share = load_sh_skare(&gcp_service, node_id, sk_share).await?;
 
-            let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
-            let sk_share: SecretKeyShare = serde_json::from_str(&sk_share).unwrap();
+            // TODO put these in a better defined format
+            let pk_set: Vec<Point<Ed25519>> = serde_json::from_str(&pk_set).unwrap();
+            // TODO Import just the private key and derive the rest
+            let sk_share: ExpandedKeyPair = serde_json::from_str(&sk_share).unwrap();
 
             mpc_recovery::run_sign_node(node_id, pk_set, sk_share, web_port).await;
         }

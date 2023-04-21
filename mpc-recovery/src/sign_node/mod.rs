@@ -1,31 +1,50 @@
+use self::aggregate_signer::{NodeInfo, Reveal, SignedCommitment, SigningState};
 use crate::msg::{SigShareRequest, SigShareResponse};
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::NodeId;
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
+use curv::elliptic::curves::{Ed25519, Point};
+use multi_party_eddsa::protocols::{self, ExpandedKeyPair};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use threshold_crypto::{PublicKeySet, SecretKeyShare};
+use tokio::sync::RwLock;
 
 pub mod aggregate_signer;
 
-#[tracing::instrument(level = "debug", skip(pk_set, sk_share))]
-pub async fn run(id: NodeId, pk_set: PublicKeySet, sk_share: SecretKeyShare, port: u16) {
+#[tracing::instrument(level = "debug", skip(node_key))]
+pub async fn run(
+    our_index: NodeId,
+    nodes_public_keys: Vec<Point<Ed25519>>,
+    node_key: ExpandedKeyPair,
+    port: u16,
+) {
     tracing::debug!("running a sign node");
+    let our_index = usize::try_from(our_index).expect("This index is way to big");
 
-    if pk_set.public_key_share(id) != sk_share.public_key_share() {
+    if nodes_public_keys.get(our_index) != Some(&node_key.public_key) {
         tracing::error!("provided secret share does not match the node id");
         return;
     }
 
     let pagoda_firebase_audience_id = "pagoda-firebase-audience-id".to_string();
 
+    let signing_state = Arc::new(RwLock::new(SigningState::new()));
+
     let state = SignNodeState {
-        id,
-        sk_share,
+        node_key,
+        signing_state,
         pagoda_firebase_audience_id,
+        node_info: NodeInfo {
+            nodes_public_keys,
+            our_index,
+        },
     };
 
     let app = Router::new()
-        .route("/sign", post(sign::<UniversalTokenVerifier>))
+        .route("/commit", post(commit::<UniversalTokenVerifier>))
+        .route("/reveal", post(reveal))
+        .route("/signature_share", post(signature_share))
         .layer(Extension(state));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -38,16 +57,17 @@ pub async fn run(id: NodeId, pk_set: PublicKeySet, sk_share: SecretKeyShare, por
 
 #[derive(Clone)]
 struct SignNodeState {
-    id: NodeId,
-    sk_share: SecretKeyShare,
     pagoda_firebase_audience_id: String,
+    node_key: ExpandedKeyPair,
+    signing_state: Arc<RwLock<SigningState>>,
+    node_info: NodeInfo,
 }
 
-#[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
-async fn sign<T: OAuthTokenVerifier>(
+#[tracing::instrument(level = "debug", skip_all, fields(id = state.node_info.our_index))]
+async fn commit<T: OAuthTokenVerifier>(
     Extension(state): Extension<SignNodeState>,
     Json(request): Json<SigShareRequest>,
-) -> (StatusCode, Json<SigShareResponse>) {
+) -> (StatusCode, Json<Result<SignedCommitment, ()>>) {
     tracing::info!(payload = request.payload, "sign request");
 
     // TODO: extract access token from payload
@@ -55,15 +75,51 @@ async fn sign<T: OAuthTokenVerifier>(
     match T::verify_token(access_token, &state.pagoda_firebase_audience_id).await {
         Ok(_) => {
             tracing::debug!("access token is valid");
-            let response = SigShareResponse::Ok {
-                node_id: state.id,
-                sig_share: state.sk_share.sign(request.payload),
-            };
-            (StatusCode::OK, Json(response))
+
+            // TODO use seperate signing and node keys + key derivation
+            let response = state.signing_state.write().await.get_commitment(
+                &state.node_key,
+                &state.node_key,
+                // TODO Restrict this payload
+                request.payload.into_bytes(),
+            );
+            (StatusCode::OK, Json(Ok(response)))
         }
         Err(_) => {
             tracing::debug!("access token verification failed");
-            (StatusCode::UNAUTHORIZED, Json(SigShareResponse::Err))
+            (StatusCode::UNAUTHORIZED, Json(Err(())))
         }
+    }
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(id = state.node_info.our_index))]
+async fn reveal(
+    Extension(state): Extension<SignNodeState>,
+    Json(request): Json<Vec<SignedCommitment>>,
+) -> (StatusCode, Json<Result<Reveal, String>>) {
+    match state
+        .signing_state
+        .write()
+        .await
+        .get_reveal(state.node_info, request)
+    {
+        Ok(r) => (StatusCode::OK, Json(Ok(r))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(Err(e))),
+    }
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(id = state.node_info.our_index))]
+async fn signature_share(
+    Extension(state): Extension<SignNodeState>,
+    Json(request): Json<Vec<Reveal>>,
+) -> (StatusCode, Json<Result<protocols::Signature, String>>) {
+    match state
+        .signing_state
+        .write()
+        .await
+        .get_signature_share(state.node_info, request)
+    {
+        Ok(r) => (StatusCode::OK, Json(Ok(r))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(Err(e))),
     }
 }
