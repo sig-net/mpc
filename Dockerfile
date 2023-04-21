@@ -6,7 +6,7 @@ RUN apt-get update \
     protobuf-compiler libprotobuf-dev
 COPY . .
 RUN if [ -f ./target/docker-cache.tgz ]; then \
-        tar xzC / -f ./target/docker-cache.tgz \
+        tar -xzC / -f ./target/docker-cache.tgz \
         && rm -rf ./target/docker-cache.tgz; \
     fi
 RUN CARGO_INCREMENTAL=0 cargo build --release --package mpc-recovery
