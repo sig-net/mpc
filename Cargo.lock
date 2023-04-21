@@ -2023,7 +2023,6 @@ name = "mpc-recovery-integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum 0.5.17",
  "bollard",
  "ed25519-dalek",
  "futures",
