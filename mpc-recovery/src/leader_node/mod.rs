@@ -154,7 +154,7 @@ async fn process_new_account<T: OAuthTokenVerifier>(
         .map_err(|e| NewAccountError::MalformedAccountId(request.near_account_id, e))?;
     let oidc_token_claims = T::verify_token(&request.oidc_token)
         .await
-        .map_err(|e| NewAccountError::OidcVerificationFailed(e))?;
+        .map_err(NewAccountError::OidcVerificationFailed)?;
     let internal_account_id = get_internal_account_id(oidc_token_claims);
 
     // Get nonce and recent block hash
