@@ -303,16 +303,26 @@ enum AddKeyError {
     OidcVerificationFailed(anyhow::Error),
     #[error("relayer error: {0}")]
     RelayerError(#[from] RelayerError),
+    #[error("failed to find associated account id for pk: {0}")]
+    AccountNotFound(String),
     #[error("{0}")]
     Other(#[from] anyhow::Error),
 }
 
-fn get_acc_id_from_pk(public_key: PublicKey) -> Result<String, anyhow::Error> {
-    let url = format!("https://api.kitwallet.app/publicKey/{}/accounts", public_key.to_string());
+fn get_acc_id_from_pk(public_key: PublicKey) -> Result<AccountId, anyhow::Error> {
+    let url = format!(
+        "https://api.kitwallet.app/publicKey/{}/accounts",
+        public_key.to_string()
+    );
     let client = reqwest::blocking::Client::new();
     let response = client.get(&url).send()?.text()?;
     let accounts: Vec<String> = serde_json::from_str(&response)?;
-    Ok(accounts.first().cloned().unwrap_or_default())
+    Ok(accounts
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .parse()
+        .unwrap())
 }
 
 async fn process_add_key<T: OAuthTokenVerifier>(
@@ -323,16 +333,25 @@ async fn process_add_key<T: OAuthTokenVerifier>(
         .await
         .map_err(AddKeyError::OidcVerificationFailed)?;
     let internal_acc_id = get_internal_account_id(oidc_token_claims);
-    let user_account_id: AccountId = request
-        .near_account_id
-        .parse()
-        .map_err(|e| AddKeyError::MalformedAccountId(request.near_account_id, e))?;
     let user_recovery_pk = get_user_recovery_pk(internal_acc_id.clone());
     let user_recovery_sk = get_user_recovery_sk(internal_acc_id);
     let new_public_key: PublicKey = request
         .public_key
         .parse()
         .map_err(|e| AddKeyError::MalformedPublicKey(request.public_key, e))?;
+
+    let user_account_id: AccountId = match &request.near_account_id {
+        Some(near_account_id) => near_account_id
+            .parse()
+            .map_err(|e| AddKeyError::MalformedAccountId(request.near_account_id.unwrap(), e))?,
+        None => match get_acc_id_from_pk(user_recovery_pk.clone()) {
+            Ok(near_account_id) => near_account_id,
+            Err(e) => {
+                tracing::error!(err = ?e);
+                return Err(AddKeyError::AccountNotFound(e.to_string()));
+            }
+        },
+    };
 
     nar::retry(|| async {
         // Get nonce and recent block hash
@@ -389,7 +408,10 @@ async fn add_key<T: OAuthTokenVerifier>(
     Json(request): Json<AddKeyRequest>,
 ) -> (StatusCode, Json<AddKeyResponse>) {
     tracing::info!(
-        near_account_id = hex::encode(&request.near_account_id),
+        near_account_id = hex::encode(match &request.near_account_id {
+            Some(ref near_account_id) => near_account_id,
+            None => "not specified",
+        }),
         public_key = hex::encode(&request.public_key),
         iodc_token = format!("{:.5}...", request.oidc_token),
         "add_key request"
@@ -544,8 +566,10 @@ mod tests {
 
     #[test]
     fn test_get_acc_id_from_pk() {
-        let public_key: PublicKey = "ed25519:2uF6ZUghFFUg3Kta9rW47iiJ3crNzRdaPD2rBPQWEwyc".parse().unwrap();
+        let public_key: PublicKey = "ed25519:2uF6ZUghFFUg3Kta9rW47iiJ3crNzRdaPD2rBPQWEwyc"
+            .parse()
+            .unwrap();
         let first_account = get_acc_id_from_pk(public_key).unwrap();
-        assert_eq!(first_account, "serhii.near".to_string());
+        assert_eq!(first_account.to_string(), "serhii.near".to_string());
     }
 }
