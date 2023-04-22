@@ -10,10 +10,13 @@ use crate::relayer::msg::RegisterAccountRequest;
 use crate::relayer::NearRpcAndRelayerClient;
 use crate::sign_node::aggregate_signer::{Reveal, SignedCommitment};
 use crate::transaction::{
-    get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
+    self, get_add_key_delegate_action, get_create_account_delegate_action,
+    get_signed_delegated_action,
 };
 use crate::{nar, NodeId};
+use anyhow::{anyhow, Context};
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
+use ed25519_dalek::Signature;
 use futures::future;
 use futures::future::FutureExt;
 use futures::stream::FuturesUnordered;
@@ -21,6 +24,7 @@ use hyper::client::ResponseFuture;
 use hyper::{Body, Client, Method, Request};
 use multi_party_eddsa::protocols::{self, aggsig, Signature};
 use near_crypto::{ParseKeyError, PublicKey, SecretKey};
+use near_crypto::{PublicKey, SecretKey};
 use near_primitives::account::id::ParseAccountError;
 use near_primitives::types::AccountId;
 use near_primitives::views::FinalExecutionStatus;
@@ -204,10 +208,12 @@ async fn process_new_account<T: OAuthTokenVerifier>(
             block_height + 100,
         )?;
         let signed_delegate_action = get_signed_delegated_action(
+            &state.reqwest_client,
+            &state.sign_nodes,
             delegate_action,
             state.account_creator_id.clone(),
-            state.account_creator_sk.clone(),
-        );
+        )
+        .await?;
 
         // Send delegate action to relayer
         let result = state.client.send_meta_tx(signed_delegate_action).await;
@@ -388,10 +394,13 @@ async fn process_add_key<T: OAuthTokenVerifier>(
             max_block_height,
         )?;
         let signed_delegate_action = get_signed_delegated_action(
+            &state.reqwest_client,
+            &state.sign_nodes,
             delegate_action,
             user_account_id.clone(),
             user_recovery_sk.clone(),
-        );
+        )
+        .await?;
 
         let resp = state.client.send_meta_tx(signed_delegate_action).await;
         if let Err(err) = resp {
@@ -476,7 +485,7 @@ async fn submit<T: OAuthTokenVerifier>(
         }
     }
 
-    match sign(
+    match transaction::sign(
         &state.reqwest_client,
         &state.sign_nodes,
         request.payload.clone().into(),
@@ -488,12 +497,11 @@ async fn submit<T: OAuthTokenVerifier>(
             (StatusCode::OK, Json(LeaderResponse::Ok { signature }))
         }
         Err(e) => {
-            tracing::error!(e);
+            tracing::error!("{}", e.to_string());
             (StatusCode::INTERNAL_SERVER_ERROR, Json(LeaderResponse::Err))
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,7 +526,6 @@ mod tests {
         assert_eq!(first_account.to_string(), "serhii.testnet".to_string());
     }
 }
-
 pub async fn sign(
     client: &reqwest::Client,
     sign_nodes: &Vec<String>,

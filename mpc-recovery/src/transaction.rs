@@ -1,13 +1,23 @@
+use anyhow::{anyhow, Context};
+use ed25519_dalek::Signature;
+use futures::{future, FutureExt};
+use multi_party_eddsa::protocols::{self, aggsig};
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use near_primitives::account::{AccessKey, AccessKeyPermission};
+use near_primitives::borsh::BorshSerialize;
+use near_primitives::hash::hash;
 use near_primitives::transaction::{Action, AddKeyAction, FunctionCallAction};
 use near_primitives::types::{AccountId, Nonce};
 
 use near_primitives::delegate_action::{DelegateAction, NonDelegateAction, SignedDelegateAction};
 use near_primitives::signable_message::{SignableMessage, SignableMessageType};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+use crate::msg::SigShareRequest;
+use crate::sign_node::aggregate_signer::{Reveal, SignedCommitment};
 
 #[derive(Serialize, Deserialize)]
 pub struct CreateAccountOptions {
@@ -84,18 +94,82 @@ pub fn get_add_key_delegate_action(
     Ok(delegate_action)
 }
 
-pub fn get_signed_delegated_action(
+pub async fn get_signed_delegated_action(
+    client: &reqwest::Client,
+    sign_nodes: &Vec<String>,
     delegate_action: DelegateAction,
     signer_id: AccountId,
-    signer_sk: SecretKey,
-) -> SignedDelegateAction {
-    let signer = InMemorySigner::from_secret_key(signer_id, signer_sk);
+) -> anyhow::Result<SignedDelegateAction> {
     let signable_message =
         SignableMessage::new(&delegate_action, SignableMessageType::DelegateAction);
-    let signature = signable_message.sign(&signer);
 
-    SignedDelegateAction {
+    let bytes = signable_message
+        .try_to_vec()
+        .expect("Failed to deserialize");
+
+    let hash = hash(&bytes);
+
+    let signature = sign(client, sign_nodes, hash.as_bytes().to_vec()).await?;
+
+    Ok(SignedDelegateAction {
         delegate_action,
-        signature,
+        signature: near_crypto::Signature::ED25519(signature),
+    })
+}
+
+pub async fn sign(
+    client: &reqwest::Client,
+    sign_nodes: &Vec<String>,
+    payload: Vec<u8>,
+) -> anyhow::Result<Signature> {
+    fn to_dalek(sig: &protocols::Signature) -> anyhow::Result<ed25519_dalek::Signature> {
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes[..32].copy_from_slice(&*sig.R.to_bytes(true));
+        sig_bytes[32..].copy_from_slice(&sig.s.to_bytes());
+
+        // let dalek_pub = ed25519_dalek::PublicKey::from_bytes(&*pk.to_bytes(true)).unwrap();
+        ed25519_dalek::Signature::from_bytes(&sig_bytes).context("Signature conversion failed")
     }
+
+    let commit_request = SigShareRequest { payload };
+
+    let commitments: Vec<SignedCommitment> =
+        call(client, sign_nodes, "commit", commit_request).await?;
+
+    let reveals: Vec<Reveal> = call(client, sign_nodes, "reveal", commitments).await?;
+
+    let signature_shares: Vec<protocols::Signature> =
+        call(client, sign_nodes, "signature_share", reveals).await?;
+
+    let raw_sig = aggsig::add_signature_parts(&signature_shares);
+
+    to_dalek(&raw_sig)
+}
+
+/// Call every node with an identical payload and send the response
+pub async fn call<Req: Serialize, Res: DeserializeOwned>(
+    client: &reqwest::Client,
+    sign_nodes: &Vec<String>,
+    path: &str,
+    request: Req,
+) -> anyhow::Result<Vec<Res>> {
+    let responses = sign_nodes.iter().map(|sign_node| {
+        client
+            .post(format!("{}/{}", sign_node, path))
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .then(|r| async move {
+                match r {
+                    // Flatten all errors to strings
+                    Ok(ok) => match ok.json::<Result<Res, String>>().await {
+                        Ok(ok) => ok.map_err(|e| anyhow!(e)),
+                        Err(e) => Err(anyhow!(e)),
+                    },
+                    Err(e) => Err(anyhow!(e)),
+                }
+            })
+    });
+
+    future::join_all(responses).await.into_iter().collect()
 }
