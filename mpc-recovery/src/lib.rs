@@ -21,9 +21,9 @@ pub use sign_node::run as run_sign_node;
 #[tracing::instrument(level = "debug", skip_all, fields(n = n))]
 pub fn generate(n: usize) -> (Vec<Point<Ed25519>>, Vec<ExpandedKeyPair>) {
     // Let's tie this up to a deterministic RNG when we can
-    let sk_set = (1..=n).map(|_| ExpandedKeyPair::create());
-    let pk_set = sk_set.clone().map(|sk| sk.public_key);
+    let sk_set: Vec<_> = (1..=n).map(|_| ExpandedKeyPair::create()).collect();
+    let pk_set: Vec<_> = sk_set.iter().map(|sk| sk.public_key.clone()).collect();
     tracing::debug!(public_key = ?pk_set);
 
-    (pk_set.collect(), sk_set.collect())
+    (pk_set, sk_set)
 }
