@@ -307,6 +307,14 @@ enum AddKeyError {
     Other(#[from] anyhow::Error),
 }
 
+fn get_acc_id_from_pk(public_key: PublicKey) -> Result<String, anyhow::Error> {
+    let url = format!("https://api.kitwallet.app/publicKey/{}/accounts", public_key.to_string());
+    let client = reqwest::blocking::Client::new();
+    let response = client.get(&url).send()?.text()?;
+    let accounts: Vec<String> = serde_json::from_str(&response)?;
+    Ok(accounts.first().cloned().unwrap_or_default())
+}
+
 async fn process_add_key<T: OAuthTokenVerifier>(
     state: LeaderState,
     request: AddKeyRequest,
@@ -527,5 +535,17 @@ async fn submit<T: OAuthTokenVerifier>(
             sig_shares_num
         );
         (StatusCode::INTERNAL_SERVER_ERROR, Json(LeaderResponse::Err))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_acc_id_from_pk() {
+        let public_key: PublicKey = "ed25519:2uF6ZUghFFUg3Kta9rW47iiJ3crNzRdaPD2rBPQWEwyc".parse().unwrap();
+        let first_account = get_acc_id_from_pk(public_key).unwrap();
+        assert_eq!(first_account, "serhii.near".to_string());
     }
 }
