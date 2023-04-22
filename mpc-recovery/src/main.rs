@@ -147,14 +147,10 @@ async fn main() -> anyhow::Result<()> {
             let account_creator_sk =
                 load_account_creator_sk(&gcp_service, node_id, account_creator_sk).await?;
 
-            let pk_set: PublicKeySet = serde_json::from_str(&pk_set)?;
-            let sk_share: SecretKeyShare = serde_json::from_str(&sk_share)?;
             let account_creator_sk = account_creator_sk.parse()?;
 
             mpc_recovery::run_leader_node(LeaderConfig {
                 id: node_id,
-                pk_set,
-                sk_share,
                 port: web_port,
                 sign_nodes,
                 near_rpc,

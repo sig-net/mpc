@@ -38,8 +38,6 @@ use threshold_crypto::{PublicKeySet, SecretKeyShare};
 
 pub struct Config {
     pub id: NodeId,
-    pub pk_set: PublicKeySet,
-    pub sk_share: SecretKeyShare,
     pub port: u16,
     pub sign_nodes: Vec<String>,
     pub near_rpc: String,
@@ -55,8 +53,6 @@ pub struct Config {
 pub async fn run(config: Config) {
     let Config {
         id,
-        pk_set,
-        sk_share,
         port,
         sign_nodes,
         near_rpc,
@@ -69,11 +65,6 @@ pub async fn run(config: Config) {
     } = config;
     let _span = tracing::debug_span!("run", id, port);
     tracing::debug!(?sign_nodes, "running a leader node");
-
-    if pk_set.public_key_share(id) != sk_share.public_key_share() {
-        tracing::error!("provided secret share does not match the node id");
-        return;
-    }
 
     let client = NearRpcAndRelayerClient::connect(&near_rpc, relayer_url);
     // FIXME: We don't have a token for ourselves, but are still forced to allocate allowance.
@@ -94,8 +85,6 @@ pub async fn run(config: Config) {
 
     let state = LeaderState {
         id,
-        pk_set,
-        sk_share,
         sign_nodes,
         client,
         reqwest_client: reqwest::Client::new(),
@@ -127,8 +116,6 @@ pub async fn run(config: Config) {
 #[derive(Clone)]
 struct LeaderState {
     id: NodeId,
-    pk_set: PublicKeySet,
-    sk_share: SecretKeyShare,
     sign_nodes: Vec<String>,
     client: NearRpcAndRelayerClient,
     reqwest_client: reqwest::Client,
