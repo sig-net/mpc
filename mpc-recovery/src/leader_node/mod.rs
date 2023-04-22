@@ -1,26 +1,32 @@
 use crate::key_recovery::{get_user_recovery_pk, get_user_recovery_sk};
 use crate::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
-    NewAccountResponse, SigShareRequest, SigShareResponse,
+    NewAccountResponse, SigShareRequest,
 };
 use crate::oauth::{IdTokenClaims, OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::primitives::InternalAccountId;
 use crate::relayer::error::RelayerError;
 use crate::relayer::msg::RegisterAccountRequest;
 use crate::relayer::NearRpcAndRelayerClient;
+use crate::sign_node::aggregate_signer::{Reveal, SignedCommitment};
 use crate::transaction::{
     get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
 };
 use crate::{nar, NodeId};
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
+use futures::future;
+use futures::future::FutureExt;
 use futures::stream::FuturesUnordered;
 use hyper::client::ResponseFuture;
 use hyper::{Body, Client, Method, Request};
+use multi_party_eddsa::protocols::{self, aggsig, Signature};
 use near_crypto::{ParseKeyError, PublicKey, SecretKey};
 use near_primitives::account::id::ParseAccountError;
 use near_primitives::types::AccountId;
 use near_primitives::views::FinalExecutionStatus;
 use rand::{distributions::Alphanumeric, Rng};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -88,6 +94,7 @@ pub async fn run(config: Config) {
         sk_share,
         sign_nodes,
         client,
+        reqwest_client: reqwest::Client::new(),
         near_root_account: near_root_account.parse().unwrap(),
         account_creator_id,
         account_creator_sk,
@@ -120,6 +127,7 @@ struct LeaderState {
     sk_share: SecretKeyShare,
     sign_nodes: Vec<String>,
     client: NearRpcAndRelayerClient,
+    reqwest_client: reqwest::Client,
     near_root_account: AccountId,
     account_creator_id: AccountId,
     // TODO: temporary solution
@@ -468,105 +476,21 @@ async fn submit<T: OAuthTokenVerifier>(
         }
     }
 
-    let sig_share_request = SigShareRequest {
-        payload: request.payload.clone(),
-    };
-    let payload_json = match serde_json::to_string(&sig_share_request) {
-        Ok(payload_json) => payload_json,
-        Err(err) => {
-            tracing::error!(%err, "failed to convert payload back to json");
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(LeaderResponse::Err));
+    match sign(
+        &state.reqwest_client,
+        &state.sign_nodes,
+        request.payload.clone().into(),
+    )
+    .await
+    {
+        Ok(signature) => {
+            tracing::debug!(?signature, "replying with full signature");
+            (StatusCode::OK, Json(LeaderResponse::Ok { signature }))
         }
-    };
-
-    let response_futures = FuturesUnordered::new();
-    for sign_node in state.sign_nodes {
-        let req = match Request::builder()
-            .method(Method::POST)
-            .uri(format!("{}/sign", sign_node))
-            .header("content-type", "application/json")
-            .body(Body::from(payload_json.clone()))
-        {
-            Ok(req) => req,
-            Err(err) => {
-                tracing::error!(%err, "failed to construct a compute request");
-                continue;
-            }
-        };
-
-        let client = Client::new();
-        response_futures.push(client.request(req));
-    }
-
-    let mut sig_shares = BTreeMap::new();
-    sig_shares.insert(state.id, state.sk_share.sign(&request.payload));
-    for response_future in response_futures {
-        let (node_id, sig_share) = match parse(response_future).await {
-            Ok(response) => match response {
-                SigShareResponse::Ok { node_id, sig_share } => (node_id, sig_share),
-                SigShareResponse::Err => {
-                    tracing::error!("Received an error response");
-                    continue;
-                }
-            },
-            Err(err) => {
-                tracing::error!(%err, "Failed to get response");
-                continue;
-            }
-        };
-
-        if state
-            .pk_set
-            .public_key_share(node_id)
-            .verify(&sig_share, &request.payload)
-        {
-            match sig_shares.entry(node_id) {
-                Entry::Vacant(e) => {
-                    tracing::debug!(?sig_share, "received valid signature share");
-                    e.insert(sig_share);
-                }
-                Entry::Occupied(e) if e.get() == &sig_share => {
-                    tracing::error!(
-                        node_id,
-                        sig_share = ?e.get(),
-                        "received a duplicate share"
-                    );
-                }
-                Entry::Occupied(e) => {
-                    tracing::error!(
-                        node_id = node_id,
-                        sig_share_1 = ?e.get(),
-                        sig_share_2 = ?sig_share,
-                        "received two different valid shares for the same node (should be impossible)"
-                    );
-                }
-            }
-        } else {
-            tracing::error!("received invalid signature",);
+        Err(e) => {
+            tracing::error!(e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(LeaderResponse::Err))
         }
-
-        if sig_shares.len() > state.pk_set.threshold() {
-            tracing::debug!(
-                "received {} valid signature shares, not waiting for the rest",
-                sig_shares.len()
-            );
-            break;
-        }
-    }
-
-    let sig_shares_num = sig_shares.len();
-    tracing::debug!("got {} valid signature shares", sig_shares_num);
-
-    if let Ok(signature) = state.pk_set.combine_signatures(&sig_shares) {
-        tracing::debug!(?signature, "replying with full signature");
-        (StatusCode::OK, Json(LeaderResponse::Ok { signature }))
-    } else {
-        tracing::error!(
-            "expected to get at least {} shares, but only got {}",
-            state.pk_set.threshold() + 1,
-            sig_shares_num
-        );
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(LeaderResponse::Err))
     }
 }
 
@@ -593,4 +517,50 @@ mod tests {
         let first_account = get_acc_id_from_pk(public_key, url).unwrap();
         assert_eq!(first_account.to_string(), "serhii.testnet".to_string());
     }
+}
+
+pub async fn sign(
+    client: &reqwest::Client,
+    sign_nodes: &Vec<String>,
+    payload: Vec<u8>,
+) -> Result<Signature, String> {
+    let commit_request = SigShareRequest { payload };
+
+    let commitments: Vec<SignedCommitment> =
+        call(client, sign_nodes, "commit", commit_request).await?;
+
+    let reveals: Vec<Reveal> = call(client, sign_nodes, "reveal", commitments).await?;
+
+    let signature_shares: Vec<protocols::Signature> =
+        call(client, sign_nodes, "signature_share", reveals).await?;
+
+    Ok(aggsig::add_signature_parts(&signature_shares))
+}
+
+/// Call every node with an identical payload and send the response
+pub async fn call<Req: Serialize, Res: DeserializeOwned>(
+    client: &reqwest::Client,
+    sign_nodes: &Vec<String>,
+    path: &str,
+    request: Req,
+) -> Result<Vec<Res>, String> {
+    let responses = sign_nodes.iter().map(|sign_node| {
+        client
+            .post(format!("{}/{}", sign_node, path))
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .then(|r| async move {
+                match r {
+                    // Flatten all errors to strings
+                    Ok(ok) => match ok.json::<Result<Res, String>>().await {
+                        Ok(ok) => ok,
+                        Err(e) => Err(e.to_string()),
+                    },
+                    Err(e) => Err(e.to_string()),
+                }
+            })
+    });
+
+    future::join_all(responses).await.into_iter().collect()
 }

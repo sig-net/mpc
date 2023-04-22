@@ -1,6 +1,6 @@
 use crate::NodeId;
+use multi_party_eddsa::protocols::Signature;
 use serde::{Deserialize, Serialize};
-use threshold_crypto::{Signature, SignatureShare};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NewAccountRequest {
@@ -63,29 +63,43 @@ pub enum LeaderResponse {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SigShareRequest {
-    pub payload: String,
+    pub payload: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[allow(clippy::large_enum_variant)]
-pub enum SigShareResponse {
-    Ok {
-        node_id: NodeId,
-        sig_share: SignatureShare,
-    },
-    Err,
-}
+// #[derive(Serialize, Deserialize, Debug)]
+// #[allow(clippy::large_enum_variant)]
+// pub enum SigShareResponse {
+//     Ok {
+//         node_id: NodeId,
+//         sig_share: SignatureShare,
+//     },
+//     Err,
+// }
 
 mod hex_sig_share {
+    use std::ops::Deref;
+
+    use curv::elliptic::curves::{Point, Scalar};
+    use multi_party_eddsa::protocols::Signature;
     use serde::{Deserialize, Deserializer, Serializer};
-    use threshold_crypto::Signature;
 
     pub fn serialize<S>(sig_share: &Signature, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let s = hex::encode(sig_share.to_bytes());
+        let s = hex::encode(to_bytes(sig_share));
         serializer.serialize_str(&s)
+    }
+
+    fn to_bytes(sig: &Signature) -> Vec<u8> {
+        [sig.R.to_bytes(false).deref(), sig.s.to_bytes().deref()].concat()
+    }
+
+    fn from_bytes(sig: [u8; 96]) -> Result<Signature, String> {
+        Ok(Signature {
+            R: Point::from_bytes(&sig.as_ref()[..32]).map_err(|e| e.to_string())?,
+            s: Scalar::from_bytes(&sig.as_ref()[32..]).map_err(|e| e.to_string())?,
+        })
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Signature, D::Error>
@@ -93,7 +107,8 @@ mod hex_sig_share {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Signature::from_bytes(
+        from_bytes(
+            // This is the length of a BLS sig not an Ed25519 I think?
             <[u8; 96]>::try_from(hex::decode(s).map_err(serde::de::Error::custom)?).map_err(
                 |v: Vec<u8>| {
                     serde::de::Error::custom(format!(

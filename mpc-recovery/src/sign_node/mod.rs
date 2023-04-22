@@ -1,5 +1,5 @@
 use self::aggregate_signer::{NodeInfo, Reveal, SignedCommitment, SigningState};
-use crate::msg::{SigShareRequest, SigShareResponse};
+use crate::msg::SigShareRequest;
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::NodeId;
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
@@ -67,9 +67,7 @@ struct SignNodeState {
 async fn commit<T: OAuthTokenVerifier>(
     Extension(state): Extension<SignNodeState>,
     Json(request): Json<SigShareRequest>,
-) -> (StatusCode, Json<Result<SignedCommitment, ()>>) {
-    tracing::info!(payload = request.payload, "sign request");
-
+) -> (StatusCode, Json<Result<SignedCommitment, String>>) {
     // TODO: extract access token from payload
     let access_token = "validToken";
     match T::verify_token(access_token, &state.pagoda_firebase_audience_id).await {
@@ -81,13 +79,14 @@ async fn commit<T: OAuthTokenVerifier>(
                 &state.node_key,
                 &state.node_key,
                 // TODO Restrict this payload
-                request.payload.into_bytes(),
+                request.payload,
             );
             (StatusCode::OK, Json(Ok(response)))
         }
         Err(_) => {
-            tracing::debug!("access token verification failed");
-            (StatusCode::UNAUTHORIZED, Json(Err(())))
+            const err: &str = "access token verification failed";
+            tracing::debug!(err);
+            (StatusCode::UNAUTHORIZED, Json(Err(err.to_string())))
         }
     }
 }

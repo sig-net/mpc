@@ -211,7 +211,6 @@ impl Committed {
         rng: &mut impl Rng,
     ) -> (SignedCommitment, Self) {
         let (ephemeral_key, commit, our_signature) =
-            // TODO this uses threadrandom which is bad, but it uses it for something superfluous which is less bad?
             aggsig::create_ephemeral_key_and_commit_rng(our_key, &message, rng);
         let s = Committed {
             ephemeral_key,
