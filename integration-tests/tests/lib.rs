@@ -72,8 +72,8 @@ where
     .await?;
 
     let mut sign_nodes = Vec::new();
-    for i in 2..=nodes {
-        let addr = SignNode::start(&docker, NETWORK, i as u64, &pk_set, &sk_shares[i - 1]).await?;
+    for i in 1..nodes {
+        let addr = SignNode::start(&docker, NETWORK, i as u64, &pk_set, &sk_shares[i]).await?;
         sign_nodes.push(addr);
     }
 
@@ -82,7 +82,7 @@ where
     let leader_node = LeaderNode::start(
         &docker,
         NETWORK,
-        1,
+        0,
         &pk_set,
         &sk_shares[0],
         sign_nodes.iter().map(|n| n.address.clone()).collect(),
