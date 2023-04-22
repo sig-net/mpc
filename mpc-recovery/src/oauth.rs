@@ -1,9 +1,12 @@
+use chrono::Utc;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 
 #[async_trait::async_trait]
 pub trait OAuthTokenVerifier {
-    async fn verify_token(token: &str) -> Result<String, String>; // TODO: replace String error with custom error type
+    async fn verify_token(token: &str) -> anyhow::Result<IdTokenClaims>;
 
     /// This function validates JWT (OIDC ID token) by checking the signature received
     /// from the issuer, issuer, audience, and expiration time.
@@ -12,22 +15,21 @@ pub trait OAuthTokenVerifier {
         public_key: &[u8],
         issuer: &str,
         audience: &str,
-    ) -> Result<IdTokenClaims, String> {
+    ) -> anyhow::Result<IdTokenClaims> {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[issuer]);
         validation.set_audience(&[audience]);
 
-        let decoding_key = DecodingKey::from_rsa_der(public_key);
+        let decoding_key = DecodingKey::from_rsa_pem(public_key)?;
 
-        match decode::<IdTokenClaims>(token, &decoding_key, &validation) {
-            Ok(token_data) => Ok(token_data.claims),
-            Err(e) => Err(format!("Failed to validate the token: {}", e)),
-        }
+        let claims =
+            decode::<IdTokenClaims>(token, &decoding_key, &validation).map(|t| t.claims)?;
+        Ok(claims)
     }
 }
 
 pub enum SupportedTokenVerifiers {
-    GoogleTokenVerifier,
+    PagodaFirebaseTokenVerifier,
     TestTokenVerifier,
 }
 
@@ -36,11 +38,10 @@ pub struct UniversalTokenVerifier {}
 
 #[async_trait::async_trait]
 impl OAuthTokenVerifier for UniversalTokenVerifier {
-    async fn verify_token(token: &str) -> Result<String, String> {
-        // TODO: here we assume that verifier type can be determined from the token
+    async fn verify_token(token: &str) -> anyhow::Result<IdTokenClaims> {
         match get_token_verifier_type(token) {
-            SupportedTokenVerifiers::GoogleTokenVerifier => {
-                return GoogleTokenVerifier::verify_token(token).await;
+            SupportedTokenVerifiers::PagodaFirebaseTokenVerifier => {
+                return PagodaFirebaseTokenVerifier::verify_token(token).await;
             }
             SupportedTokenVerifiers::TestTokenVerifier => {
                 return TestTokenVerifier::verify_token(token).await;
@@ -50,38 +51,46 @@ impl OAuthTokenVerifier for UniversalTokenVerifier {
 }
 
 fn get_token_verifier_type(token: &str) -> SupportedTokenVerifiers {
-    match token.len() {
-        // TODO: add real token type detection
-        0 => {
-            tracing::info!("Using GoogleTokenVerifier");
-            SupportedTokenVerifiers::GoogleTokenVerifier
+    match token.len() > 30 {
+        // TODO: add real token type detection, now the system can be bypassed by passing a short token
+        true => {
+            tracing::info!("Using PagodaFirebaseTokenVerifier");
+            SupportedTokenVerifiers::PagodaFirebaseTokenVerifier
         }
-        _ => {
+        false => {
             tracing::info!("Using TestTokenVerifier");
             SupportedTokenVerifiers::TestTokenVerifier
         }
     }
 }
 
-/* Google verifier */
-pub struct GoogleTokenVerifier {}
+/* Pagoda/Firebase verifier */
+pub struct PagodaFirebaseTokenVerifier {}
 
 #[async_trait::async_trait]
-impl OAuthTokenVerifier for GoogleTokenVerifier {
-    // Google specs for ID token verification: https://developers.google.com/identity/openid-connect/openid-connect#validatinganidtoken
-    async fn verify_token(token: &str) -> Result<String, String> {
-        // TODO: Extract the public key of the authorization server from the OpenID Connect discovery endpoint or other configuration sources. Link: https://accounts.google.com/.well-known/openid-configuration
-        // TODO: get certs from response (jwks_uri)
-        let public_key = Vec::<u8>::new();
+impl OAuthTokenVerifier for PagodaFirebaseTokenVerifier {
+    // Specs for ID token verification:
+    // Google: https://developers.google.com/identity/openid-connect/openid-connect#validatinganidtoken
+    // Firebase: https://firebase.google.com/docs/auth/admin/verify-id-tokens#verify_id_tokens_using_a_third-party_jwt_library
+    async fn verify_token(token: &str) -> anyhow::Result<IdTokenClaims> {
+        let public_key = get_pagoda_firebase_public_key().expect("Failed to get Google public key");
 
-        const GOOGLE_ISSUER_ID: &str = "https://accounts.google.com"; // TODO: should be an array, google provides two options
-        const GOOGLE_AUDIENCE_ID: &str = "TODO: get audience id from Google (register new project)";
+        // this is a tmp Project ID, the real one is: pagoda-onboarding-dev
+        let pagoda_firebase_audience_id: String = "pagoda-fast-auth-441fe".to_string();
+        let pagoda_firebase_issuer_id: String = format!(
+            "https://securetoken.google.com/{}",
+            pagoda_firebase_audience_id
+        );
 
-        let claims = Self::validate_jwt(token, &public_key, GOOGLE_ISSUER_ID, GOOGLE_AUDIENCE_ID)
-            .expect("Failed to validate JWT");
-        let internal_user_identifier = format!("{}:{}", claims.iss, claims.sub);
+        let claims = Self::validate_jwt(
+            token,
+            public_key.as_bytes(),
+            &pagoda_firebase_issuer_id,
+            &pagoda_firebase_audience_id,
+        )
+        .expect("Failed to validate JWT");
 
-        Ok(internal_user_identifier)
+        Ok(claims)
     }
 }
 
@@ -90,15 +99,15 @@ pub struct TestTokenVerifier {}
 
 #[async_trait::async_trait]
 impl OAuthTokenVerifier for TestTokenVerifier {
-    async fn verify_token(token: &str) -> Result<String, String> {
+    async fn verify_token(token: &str) -> anyhow::Result<IdTokenClaims> {
         match token {
             "validToken" => {
                 tracing::info!(target: "test-token-verifier", "access token is valid");
-                Ok("testAccountId".to_string())
+                Ok(get_test_claims())
             }
             _ => {
                 tracing::info!(target: "test-token-verifier", "access token verification failed");
-                Err("Invalid token".to_string())
+                Err(anyhow::anyhow!("Invalid token".to_string()))
             }
         }
     }
@@ -106,10 +115,40 @@ impl OAuthTokenVerifier for TestTokenVerifier {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IdTokenClaims {
-    iss: String,
-    sub: String,
-    aud: String,
-    exp: usize,
+    pub iss: String,
+    pub sub: String,
+    pub aud: String,
+    pub exp: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OpenIdConfig {
+    jwks_uri: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Jwks {
+    keys: Vec<Value>,
+}
+
+fn get_pagoda_firebase_public_key() -> Result<String, reqwest::Error> {
+    // TODO: handle errors
+    let url =
+        "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
+    let client = reqwest::blocking::Client::new();
+    let response = client.get(url).send()?;
+    let json: HashMap<String, Value> = response.json()?;
+    let key = json.iter().next().unwrap().1.as_str().unwrap().to_string();
+    Ok(key)
+}
+
+fn get_test_claims() -> IdTokenClaims {
+    IdTokenClaims {
+        iss: "test_issuer".to_string(),
+        sub: "test_subject".to_string(),
+        aud: "test_audience".to_string(),
+        exp: Utc::now().timestamp() as usize + 3600,
+    }
 }
 
 #[cfg(test)]
@@ -123,9 +162,22 @@ mod tests {
         RsaPrivateKey, RsaPublicKey,
     };
 
+    pub fn compare_claims(claims1: IdTokenClaims, claims2: IdTokenClaims) -> bool {
+        claims1.iss == claims2.iss
+            && claims1.sub == claims2.sub
+            && claims1.aud == claims2.aud
+            && claims1.exp == claims2.exp
+    }
+
+    #[test]
+    fn test_get_pagoda_firebase_public_key() {
+        let pk = get_pagoda_firebase_public_key().unwrap();
+        assert!(!pk.is_empty());
+    }
+
     #[test]
     fn test_validate_jwt() {
-        let (private_key_der, public_key_der): (Vec<u8>, Vec<u8>) = get_rsa_der_key_pair();
+        let (private_key_der, public_key_der): (Vec<u8>, Vec<u8>) = get_rsa_pem_key_pair();
 
         let my_claims = IdTokenClaims {
             iss: "test_issuer".to_string(),
@@ -137,99 +189,113 @@ mod tests {
         let token = match encode(
             &Header::new(Algorithm::RS256),
             &my_claims,
-            &EncodingKey::from_rsa_der(&private_key_der),
+            &EncodingKey::from_rsa_pem(&private_key_der).unwrap(),
         ) {
             Ok(t) => t,
             Err(e) => panic!("Failed to encode token: {}", e),
         };
 
         // Valid token and claims
-        GoogleTokenVerifier::validate_jwt(&token, &public_key_der, &my_claims.iss, &my_claims.aud)
-            .unwrap();
+        PagodaFirebaseTokenVerifier::validate_jwt(
+            &token,
+            &public_key_der,
+            &my_claims.iss,
+            &my_claims.aud,
+        )
+        .unwrap();
 
         // Invalid public key
-        let (invalid_public_key, _invalid_private_key) = get_rsa_der_key_pair();
-        match GoogleTokenVerifier::validate_jwt(
+        let (invalid_public_key, _invalid_private_key) = get_rsa_pem_key_pair();
+        match PagodaFirebaseTokenVerifier::validate_jwt(
             &token,
             &invalid_public_key,
             &my_claims.iss,
             &my_claims.aud,
         ) {
             Ok(_) => panic!("Token validation should fail"),
-            Err(e) => assert_eq!(e, "Failed to validate the token: InvalidSignature"),
+            Err(e) => assert_eq!(e.to_string(), "InvalidSignature"),
         }
 
         // Invalid issuer
-        match GoogleTokenVerifier::validate_jwt(
+        match PagodaFirebaseTokenVerifier::validate_jwt(
             &token,
             &public_key_der,
             "invalid_issuer",
             &my_claims.aud,
         ) {
             Ok(_) => panic!("Token validation should fail"),
-            Err(e) => assert_eq!(e, "Failed to validate the token: InvalidIssuer"),
+            Err(e) => assert_eq!(e.to_string(), "InvalidIssuer"),
         }
 
         // Invalid audience
-        match GoogleTokenVerifier::validate_jwt(
+        match PagodaFirebaseTokenVerifier::validate_jwt(
             &token,
             &public_key_der,
             &my_claims.iss,
             "invalid_audience",
         ) {
             Ok(_) => panic!("Token validation should fail"),
-            Err(e) => assert_eq!(e, "Failed to validate the token: InvalidAudience"),
+            Err(e) => assert_eq!(e.to_string(), "InvalidAudience"),
         }
     }
 
     #[tokio::test]
     async fn test_verify_token_valid() {
         let token = "validToken";
-        let account_id = TestTokenVerifier::verify_token(token).await.unwrap();
-        assert_eq!(account_id, "testAccountId");
+        let claims = TestTokenVerifier::verify_token(token).await.unwrap();
+        let test_claims = get_test_claims();
+        assert!(compare_claims(claims, test_claims));
     }
 
     #[tokio::test]
     async fn test_verify_token_invalid_with_test_verifier() {
         let token = "invalid";
-        let account_id = TestTokenVerifier::verify_token(token).await;
-        assert_eq!(account_id, Err("Invalid token".to_string()));
+        let result = TestTokenVerifier::verify_token(token).await;
+        match result {
+            Ok(_) => panic!("Token verification should fail"),
+            Err(e) => assert_eq!(e.to_string(), "Invalid token"),
+        }
     }
 
     #[tokio::test]
     async fn test_verify_token_valid_with_test_verifier() {
         let token = "validToken";
-        let account_id = TestTokenVerifier::verify_token(token).await.unwrap();
-        assert_eq!(account_id, "testAccountId");
+        let claims = TestTokenVerifier::verify_token(token).await.unwrap();
+        let test_claims = get_test_claims();
+        assert!(compare_claims(claims, test_claims));
     }
 
     #[tokio::test]
     async fn test_verify_token_invalid_with_universal_verifier() {
         let token = "invalid";
-        let account_id = UniversalTokenVerifier::verify_token(token).await;
-        assert_eq!(account_id, Err("Invalid token".to_string()));
+        let result = UniversalTokenVerifier::verify_token(token).await;
+        match result {
+            Ok(_) => panic!("Token verification should fail"),
+            Err(e) => assert_eq!(e.to_string(), "Invalid token"),
+        }
     }
 
     #[tokio::test]
     async fn test_verify_token_valid_with_universal_verifier() {
         let token = "validToken";
-        let account_id = UniversalTokenVerifier::verify_token(token).await.unwrap();
-        assert_eq!(account_id, "testAccountId");
+        let claims = UniversalTokenVerifier::verify_token(token).await.unwrap();
+        let test_claims = get_test_claims();
+        assert!(compare_claims(claims, test_claims));
     }
 
-    pub fn get_rsa_der_key_pair() -> (Vec<u8>, Vec<u8>) {
+    pub fn get_rsa_pem_key_pair() -> (Vec<u8>, Vec<u8>) {
         let mut rng = OsRng;
         let bits: usize = 2048;
         let private_key = RsaPrivateKey::new(&mut rng, bits).expect("failed to generate a key");
         let public_key = RsaPublicKey::from(&private_key);
 
         let private_key_der = private_key
-            .to_pkcs1_der()
+            .to_pkcs1_pem(rsa::pkcs8::LineEnding::LF)
             .expect("Failed to encode private key")
             .as_bytes()
             .to_vec();
         let public_key_der = public_key
-            .to_pkcs1_der()
+            .to_pkcs1_pem(rsa::pkcs8::LineEnding::LF)
             .expect("Failed to encode public key")
             .as_bytes()
             .to_vec();
