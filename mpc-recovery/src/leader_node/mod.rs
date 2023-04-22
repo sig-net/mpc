@@ -1,4 +1,4 @@
-use crate::key_recovery::{get_user_recovery_pk, get_user_recovery_sk};
+use crate::key_recovery::get_user_recovery_pk;
 use crate::msg::{
     AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
     NewAccountResponse, SigShareRequest,

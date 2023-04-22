@@ -287,8 +287,6 @@ pub struct NodeInfo {
     pub our_index: usize,
 }
 
-type PublicKey = Point<Ed25519>;
-
 impl NodeInfo {
     fn signed_by_every_node(
         &self,

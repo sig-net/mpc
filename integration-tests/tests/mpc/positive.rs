@@ -1,15 +1,19 @@
 use crate::{account, check, key, token, with_nodes};
+use ed25519_dalek::Verifier;
 use hyper::StatusCode;
-use mpc_recovery::msg::{
-    AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
-    NewAccountResponse,
+use mpc_recovery::{
+    msg::{
+        AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
+        NewAccountResponse,
+    },
+    transaction::to_dalek_combined_public_key,
 };
 use rand::{distributions::Alphanumeric, Rng};
 use std::time::Duration;
 
 #[tokio::test]
 async fn test_trio() -> anyhow::Result<()> {
-    with_nodes(4, 3, 3, |ctx| {
+    with_nodes(4, |ctx| {
         Box::pin(async move {
             let payload: String = rand::thread_rng()
                 .sample_iter(&Alphanumeric)
@@ -25,7 +29,8 @@ async fn test_trio() -> anyhow::Result<()> {
 
             assert_eq!(status_code, StatusCode::OK);
             if let LeaderResponse::Ok { signature } = response {
-                assert!(ctx.pk_set.public_key().verify(&signature, payload));
+                let combined_pub = to_dalek_combined_public_key(ctx.pk_set).unwrap();
+                combined_pub.verify(&payload.as_bytes(), &signature)?
             } else {
                 panic!("response was not successful");
             }
@@ -39,7 +44,7 @@ async fn test_trio() -> anyhow::Result<()> {
 // TODO: write a test with real token
 #[tokio::test]
 async fn test_basic_action() -> anyhow::Result<()> {
-    with_nodes(4, 3, 3, |ctx| {
+    with_nodes(4, |ctx| {
         Box::pin(async move {
             let account_id = account::random(ctx.worker)?;
             let user_public_key = key::random();

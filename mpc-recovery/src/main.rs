@@ -4,7 +4,7 @@ use gcp::GcpService;
 use mpc_recovery::LeaderConfig;
 use multi_party_eddsa::protocols::ExpandedKeyPair;
 use near_primitives::types::AccountId;
-use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
+use threshold_crypto::serde_impl::SerdeSecret;
 
 mod gcp;
 
@@ -12,7 +12,6 @@ mod gcp;
 enum Cli {
     Generate {
         n: usize,
-        t: usize,
     },
     StartLeader {
         /// Node ID
@@ -117,21 +116,19 @@ async fn main() -> anyhow::Result<()> {
     let _span = tracing::trace_span!("cli").entered();
 
     match Cli::parse() {
-        Cli::Generate { n, t } => {
-            let (pk_set, sk_shares) = mpc_recovery::generate(n, t)?;
+        Cli::Generate { n } => {
+            let (pk_set, sk_shares) = mpc_recovery::generate(n);
             println!("Public key set: {}", serde_json::to_string(&pk_set)?);
             for (i, sk_share) in sk_shares.iter().enumerate() {
                 println!(
                     "Secret key share {}: {}",
                     i,
-                    serde_json::to_string(&SerdeSecret(sk_share))?
+                    serde_json::to_string(sk_share)?
                 );
             }
         }
         Cli::StartLeader {
             node_id,
-            pk_set,
-            sk_share,
             web_port,
             sign_nodes,
             near_rpc,
@@ -143,7 +140,6 @@ async fn main() -> anyhow::Result<()> {
             pagoda_firebase_audience_id,
         } => {
             let gcp_service = GcpService::new().await?;
-            let sk_share = load_sh_skare(&gcp_service, node_id, sk_share).await?;
             let account_creator_sk =
                 load_account_creator_sk(&gcp_service, node_id, account_creator_sk).await?;
 

@@ -8,7 +8,7 @@ pub fn get_user_recovery_pk(_id: InternalAccountId) -> PublicKey {
         .unwrap()
 }
 
-pub fn get_user_recovery_sk(_id: InternalAccountId) -> SecretKey {
+pub fn _get_user_recovery_sk(_id: InternalAccountId) -> SecretKey {
     // TODO: use key derivation or other techniques to generate a key
     "ed25519:5pFJN3czPAHFWHZYjD4oTtnJE7PshLMeTkSU7CmWkvLaQWchCLgXGF1wwcJmh2AQChGH85EwcL5VW7tUavcAZDSG".parse().unwrap()
 }

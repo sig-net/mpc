@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Context};
+use curv::elliptic::curves::{Ed25519, Point};
 use ed25519_dalek::Signature;
 use futures::{future, FutureExt};
+use multi_party_eddsa::protocols::aggsig::KeyAgg;
 use multi_party_eddsa::protocols::{self, aggsig};
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use near_primitives::account::{AccessKey, AccessKeyPermission};
@@ -122,15 +124,6 @@ pub async fn sign(
     sign_nodes: &Vec<String>,
     payload: Vec<u8>,
 ) -> anyhow::Result<Signature> {
-    fn to_dalek(sig: &protocols::Signature) -> anyhow::Result<ed25519_dalek::Signature> {
-        let mut sig_bytes = [0u8; 64];
-        sig_bytes[..32].copy_from_slice(&*sig.R.to_bytes(true));
-        sig_bytes[32..].copy_from_slice(&sig.s.to_bytes());
-
-        // let dalek_pub = ed25519_dalek::PublicKey::from_bytes(&*pk.to_bytes(true)).unwrap();
-        ed25519_dalek::Signature::from_bytes(&sig_bytes).context("Signature conversion failed")
-    }
-
     let commit_request = SigShareRequest { payload };
 
     let commitments: Vec<SignedCommitment> =
@@ -143,7 +136,7 @@ pub async fn sign(
 
     let raw_sig = aggsig::add_signature_parts(&signature_shares);
 
-    to_dalek(&raw_sig)
+    to_dalek_signature(&raw_sig)
 }
 
 /// Call every node with an identical payload and send the response
@@ -172,4 +165,27 @@ pub async fn call<Req: Serialize, Res: DeserializeOwned>(
     });
 
     future::join_all(responses).await.into_iter().collect()
+}
+
+pub fn to_dalek_signature(sig: &protocols::Signature) -> anyhow::Result<ed25519_dalek::Signature> {
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(&*sig.R.to_bytes(true));
+    sig_bytes[32..].copy_from_slice(&sig.s.to_bytes());
+
+    // let dalek_pub = ed25519_dalek::PublicKey::from_bytes(&*pk.to_bytes(true)).unwrap();
+    ed25519_dalek::Signature::from_bytes(&sig_bytes).context("Signature conversion failed")
+}
+
+pub fn to_dalek_combined_public_key(
+    public_keys: &[Point<Ed25519>],
+) -> anyhow::Result<ed25519_dalek::PublicKey> {
+    let combined = KeyAgg::key_aggregation_n(public_keys, 0).apk;
+    to_dalek_public_key(&combined)
+}
+
+pub fn to_dalek_public_key(
+    public_key: &Point<Ed25519>,
+) -> anyhow::Result<ed25519_dalek::PublicKey> {
+    ed25519_dalek::PublicKey::from_bytes(&*public_key.to_bytes(true))
+        .context("Key conversion failed")
 }

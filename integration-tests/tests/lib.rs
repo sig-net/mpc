@@ -3,10 +3,10 @@ mod mpc;
 
 use crate::docker::{LeaderNode, SignNode};
 use bollard::Docker;
+use curv::elliptic::curves::{Ed25519, Point};
 use docker::{redis::Redis, relayer::Relayer};
 use futures::future::BoxFuture;
 use std::time::Duration;
-use threshold_crypto::PublicKeySet;
 use workspaces::{network::Sandbox, AccountId, Worker};
 
 const NETWORK: &str = "mpc_recovery_integration_test_network";
@@ -17,7 +17,7 @@ const HOST_MACHINE_FROM_DOCKER: &str = "docker.for.mac.localhost";
 
 pub struct TestContext<'a> {
     leader_node: &'a LeaderNode,
-    pk_set: &'a PublicKeySet,
+    pk_set: &'a Vec<Point<Ed25519>>,
     worker: &'a Worker<Sandbox>,
 }
 
@@ -36,13 +36,13 @@ async fn create_account(
     Ok((account_id, account_sk))
 }
 
-async fn with_nodes<F>(shares: usize, threshold: usize, nodes: usize, f: F) -> anyhow::Result<()>
+async fn with_nodes<F>(nodes: usize, f: F) -> anyhow::Result<()>
 where
     F: for<'a> FnOnce(TestContext<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
 {
     let docker = Docker::connect_with_local_defaults()?;
 
-    let (pk_set, sk_shares) = mpc_recovery::generate(shares, threshold)?;
+    let (pk_set, sk_shares) = mpc_recovery::generate(nodes);
     let worker = workspaces::sandbox().await?;
     let near_root_account = worker.root_account()?;
     near_root_account

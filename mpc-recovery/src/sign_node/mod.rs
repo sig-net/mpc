@@ -84,9 +84,9 @@ async fn commit<T: OAuthTokenVerifier>(
             (StatusCode::OK, Json(Ok(response)))
         }
         Err(_) => {
-            const err: &str = "access token verification failed";
-            tracing::debug!(err);
-            (StatusCode::UNAUTHORIZED, Json(Err(err.to_string())))
+            const ERR: &str = "access token verification failed";
+            tracing::debug!(ERR);
+            (StatusCode::UNAUTHORIZED, Json(Err(ERR.to_string())))
         }
     }
 }
