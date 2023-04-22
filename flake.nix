@@ -25,6 +25,9 @@
               protobuf
               curl
               gmp
+
+              # Development
+              cargo-watch
             ];
         };
       });
