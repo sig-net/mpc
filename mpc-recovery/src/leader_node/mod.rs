@@ -317,13 +317,9 @@ fn get_acc_id_from_pk(
     public_key: PublicKey,
     account_lookup_url: String,
 ) -> Result<AccountId, anyhow::Error> {
-    let url = format!(
-        "{}/publicKey/{}/accounts",
-        account_lookup_url,
-        public_key.to_string()
-    );
+    let url = format!("{}/publicKey/{}/accounts", account_lookup_url, public_key);
     let client = reqwest::blocking::Client::new();
-    let response = client.get(&url).send()?.text()?;
+    let response = client.get(url).send()?.text()?;
     let accounts: Vec<String> = serde_json::from_str(&response)?;
     Ok(accounts
         .first()
