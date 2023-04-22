@@ -569,12 +569,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_acc_id_from_pk() {
+    fn test_get_acc_id_from_pk_mainnet() {
         let url = "https://api.kitwallet.app".to_string();
         let public_key: PublicKey = "ed25519:2uF6ZUghFFUg3Kta9rW47iiJ3crNzRdaPD2rBPQWEwyc"
             .parse()
             .unwrap();
         let first_account = get_acc_id_from_pk(public_key, url).unwrap();
         assert_eq!(first_account.to_string(), "serhii.near".to_string());
+    }
+
+    #[test]
+    fn test_get_acc_id_from_pk_testnet() {
+        let url = "https://testnet-api.kitwallet.app".to_string();
+        let public_key: PublicKey = "ed25519:7WYR7ifUbdVo2soQCvzAHnfdGfDhUhF8Und5CKZYK9b8"
+            .parse()
+            .unwrap();
+        let first_account = get_acc_id_from_pk(public_key, url).unwrap();
+        assert_eq!(first_account.to_string(), "serhii.testnet".to_string());
     }
 }
