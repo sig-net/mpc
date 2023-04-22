@@ -51,6 +51,12 @@ enum Cli {
         /// TEMPORARY - Account creator ed25519 secret key
         #[arg(long, env("MPC_RECOVERY_ACCOUNT_CREATOR_SK"))]
         account_creator_sk: Option<String>,
+        #[arg(
+            long,
+            env("MPC_RECOVERY_ACCOUNT_LOOKUP_URL"),
+            default_value("https://api.kitwallet.app")
+        )]
+        account_lookup_url: String,
     },
     StartSign {
         /// Node ID
@@ -129,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
             near_root_account,
             account_creator_id,
             account_creator_sk,
+            account_lookup_url,
         } => {
             let gcp_service = GcpService::new().await?;
             let sk_share = load_sh_skare(&gcp_service, node_id, sk_share).await?;
@@ -151,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
                 // TODO: Create such an account for testnet and mainnet in a secure way
                 account_creator_id,
                 account_creator_sk,
+                account_lookup_url,
             })
             .await;
         }

@@ -38,6 +38,7 @@ pub struct Config {
     pub account_creator_id: AccountId,
     // TODO: temporary solution
     pub account_creator_sk: SecretKey,
+    pub account_lookup_url: String,
 }
 
 pub async fn run(config: Config) {
@@ -52,6 +53,7 @@ pub async fn run(config: Config) {
         near_root_account,
         account_creator_id,
         account_creator_sk,
+        account_lookup_url,
     } = config;
     let _span = tracing::debug_span!("run", id, port);
     tracing::debug!(?sign_nodes, "running a leader node");
@@ -87,6 +89,7 @@ pub async fn run(config: Config) {
         near_root_account: near_root_account.parse().unwrap(),
         account_creator_id,
         account_creator_sk,
+        account_lookup_url,
     };
 
     //TODO: not secure, allow only for testnet, whitelist endpoint etc. for mainnet
@@ -118,6 +121,7 @@ struct LeaderState {
     account_creator_id: AccountId,
     // TODO: temporary solution
     account_creator_sk: SecretKey,
+    account_lookup_url: String,
 }
 
 async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareResponse> {
@@ -309,9 +313,13 @@ enum AddKeyError {
     Other(#[from] anyhow::Error),
 }
 
-fn get_acc_id_from_pk(public_key: PublicKey) -> Result<AccountId, anyhow::Error> {
+fn get_acc_id_from_pk(
+    public_key: PublicKey,
+    account_lookup_url: String,
+) -> Result<AccountId, anyhow::Error> {
     let url = format!(
-        "https://api.kitwallet.app/publicKey/{}/accounts",
+        "{}/publicKey/{}/accounts",
+        account_lookup_url,
         public_key.to_string()
     );
     let client = reqwest::blocking::Client::new();
@@ -344,7 +352,7 @@ async fn process_add_key<T: OAuthTokenVerifier>(
         Some(near_account_id) => near_account_id
             .parse()
             .map_err(|e| AddKeyError::MalformedAccountId(request.near_account_id.unwrap(), e))?,
-        None => match get_acc_id_from_pk(user_recovery_pk.clone()) {
+        None => match get_acc_id_from_pk(user_recovery_pk.clone(), state.account_lookup_url) {
             Ok(near_account_id) => near_account_id,
             Err(e) => {
                 tracing::error!(err = ?e);
@@ -566,10 +574,11 @@ mod tests {
 
     #[test]
     fn test_get_acc_id_from_pk() {
+        let url = "https://api.kitwallet.app".to_string();
         let public_key: PublicKey = "ed25519:2uF6ZUghFFUg3Kta9rW47iiJ3crNzRdaPD2rBPQWEwyc"
             .parse()
             .unwrap();
-        let first_account = get_acc_id_from_pk(public_key).unwrap();
+        let first_account = get_acc_id_from_pk(public_key, url).unwrap();
         assert_eq!(first_account.to_string(), "serhii.near".to_string());
     }
 }
