@@ -94,6 +94,12 @@ fn aggregate_signatures() {
     verify_dalek(&aggrigate_key.apk, &signature, &message).unwrap();
 }
 
+impl Default for SigningState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SigningState {
     pub fn new() -> Self {
         SigningState {
@@ -164,7 +170,7 @@ impl SigningState {
         // Don't readd this on failure, this commitment is now burnt
         let state = self
             .revealed
-            .remove(&our_r)
+            .remove(our_r)
             .ok_or(format!("Reveal {:?} not found", &our_r))?;
 
         let signature_parts = signature_parts.into_iter().map(|s| s.0).collect();
@@ -225,7 +231,7 @@ impl Committed {
         };
         let sc = SignedCommitment::create(
             AggrCommitment(commit.commitment),
-            &node_key,
+            node_key,
             &our_key.public_key,
         )?;
         Ok((sc, s))

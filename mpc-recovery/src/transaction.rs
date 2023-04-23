@@ -136,7 +136,7 @@ pub async fn get_mpc_signed_delegated_action(
 
 pub async fn sign(
     client: &reqwest::Client,
-    sign_nodes: &Vec<String>,
+    sign_nodes: &[String],
     payload: Vec<u8>,
 ) -> anyhow::Result<Signature> {
     let commit_request = SigShareRequest { payload };
@@ -157,7 +157,7 @@ pub async fn sign(
 /// Call every node with an identical payload and send the response
 pub async fn call<Req: Serialize, Res: DeserializeOwned>(
     client: &reqwest::Client,
-    sign_nodes: &Vec<String>,
+    sign_nodes: &[String],
     path: &str,
     request: Req,
 ) -> anyhow::Result<Vec<Res>> {
@@ -184,7 +184,7 @@ pub async fn call<Req: Serialize, Res: DeserializeOwned>(
 
 pub fn to_dalek_signature(sig: &protocols::Signature) -> anyhow::Result<ed25519_dalek::Signature> {
     let mut sig_bytes = [0u8; 64];
-    sig_bytes[..32].copy_from_slice(&*sig.R.to_bytes(true));
+    sig_bytes[..32].copy_from_slice(&sig.R.to_bytes(true));
     sig_bytes[32..].copy_from_slice(&sig.s.to_bytes());
 
     // let dalek_pub = ed25519_dalek::PublicKey::from_bytes(&*pk.to_bytes(true)).unwrap();
@@ -201,6 +201,6 @@ pub fn to_dalek_combined_public_key(
 pub fn to_dalek_public_key(
     public_key: &Point<Ed25519>,
 ) -> anyhow::Result<ed25519_dalek::PublicKey> {
-    ed25519_dalek::PublicKey::from_bytes(&*public_key.to_bytes(true))
+    ed25519_dalek::PublicKey::from_bytes(&public_key.to_bytes(true))
         .context("Key conversion failed")
 }

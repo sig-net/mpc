@@ -165,7 +165,7 @@ async fn process_new_account<T: OAuthTokenVerifier>(
             internal_acc_id.clone(),
         )
         .await
-        .map_err(|e| NewAccountError::Other(e))?;
+        .map_err(NewAccountError::Other)?;
 
         let delegate_action = get_create_account_delegate_action(
             state.account_creator_id.clone(),
@@ -332,7 +332,7 @@ async fn process_add_key<T: OAuthTokenVerifier>(
         internal_acc_id.clone(),
     )
     .await
-    .map_err(|e| AddKeyError::Other(e))?;
+    .map_err(AddKeyError::Other)?;
     let new_public_key: PublicKey = request
         .public_key
         .parse()
