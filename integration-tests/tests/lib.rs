@@ -72,7 +72,7 @@ where
     .await?;
 
     let mut sign_nodes = Vec::new();
-    for i in 1..nodes {
+    for i in 0..nodes {
         let addr = SignNode::start(&docker, NETWORK, i as u64, &pk_set, &sk_shares[i]).await?;
         sign_nodes.push(addr);
     }
