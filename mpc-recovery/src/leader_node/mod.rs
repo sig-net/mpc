@@ -39,6 +39,7 @@ pub struct Config {
     // TODO: temporary solution
     pub account_creator_sk: SecretKey,
     pub account_lookup_url: String,
+    pub pagoda_firebase_audience_id: String,
 }
 
 pub async fn run(config: Config) {
@@ -54,6 +55,7 @@ pub async fn run(config: Config) {
         account_creator_id,
         account_creator_sk,
         account_lookup_url,
+        pagoda_firebase_audience_id,
     } = config;
     let _span = tracing::debug_span!("run", id, port);
     tracing::debug!(?sign_nodes, "running a leader node");
@@ -90,6 +92,7 @@ pub async fn run(config: Config) {
         account_creator_id,
         account_creator_sk,
         account_lookup_url,
+        pagoda_firebase_audience_id,
     };
 
     //TODO: not secure, allow only for testnet, whitelist endpoint etc. for mainnet
@@ -122,6 +125,7 @@ struct LeaderState {
     // TODO: temporary solution
     account_creator_sk: SecretKey,
     account_lookup_url: String,
+    pagoda_firebase_audience_id: String,
 }
 
 async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareResponse> {
@@ -156,7 +160,7 @@ async fn process_new_account<T: OAuthTokenVerifier>(
         .near_account_id
         .parse()
         .map_err(|e| NewAccountError::MalformedAccountId(request.near_account_id, e))?;
-    let oidc_token_claims = T::verify_token(&request.oidc_token)
+    let oidc_token_claims = T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
         .await
         .map_err(NewAccountError::OidcVerificationFailed)?;
     let internal_acc_id = get_internal_account_id(oidc_token_claims);
@@ -333,7 +337,7 @@ async fn process_add_key<T: OAuthTokenVerifier>(
     state: LeaderState,
     request: AddKeyRequest,
 ) -> Result<AddKeyResponse, AddKeyError> {
-    let oidc_token_claims = T::verify_token(&request.oidc_token)
+    let oidc_token_claims = T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
         .await
         .map_err(AddKeyError::OidcVerificationFailed)?;
     let internal_acc_id = get_internal_account_id(oidc_token_claims);
@@ -451,7 +455,7 @@ async fn submit<T: OAuthTokenVerifier>(
 
     // TODO: extract access token from payload
     let access_token = "validToken";
-    match T::verify_token(access_token).await {
+    match T::verify_token(access_token, &state.pagoda_firebase_audience_id).await {
         Ok(_) => {
             tracing::info!("access token is valid");
             // continue execution

@@ -57,6 +57,8 @@ enum Cli {
             default_value("https://api.kitwallet.app")
         )]
         account_lookup_url: String,
+        #[arg(long, env("PAGODA_FIREBASE_AUDIENCE_ID"))]
+        pagoda_firebase_audience_id: String,
     },
     StartSign {
         /// Node ID
@@ -136,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
             account_creator_id,
             account_creator_sk,
             account_lookup_url,
+            pagoda_firebase_audience_id,
         } => {
             let gcp_service = GcpService::new().await?;
             let sk_share = load_sh_skare(&gcp_service, node_id, sk_share).await?;
@@ -159,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
                 account_creator_id,
                 account_creator_sk,
                 account_lookup_url,
+                pagoda_firebase_audience_id,
             })
             .await;
         }
