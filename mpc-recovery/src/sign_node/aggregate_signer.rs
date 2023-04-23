@@ -5,15 +5,16 @@ use curv::arithmetic::Converter;
 use curv::cryptographic_primitives::commitments::{
     hash_commitment::HashCommitment, traits::Commitment,
 };
-use curv::elliptic::curves::{Ed25519, Point, Scalar};
+use curv::elliptic::curves::{Ed25519, Point};
 use curv::BigInt;
-use ed25519_dalek::{Sha512, Signature, SignatureError, Verifier};
+use ed25519_dalek::{Sha512, Signature, Verifier};
 use multi_party_eddsa::protocols;
 use multi_party_eddsa::protocols::aggsig::{self, KeyAgg, SignSecondMsg};
-use multi_party_eddsa::protocols::ExpandedKeyPair;
 use rand8::rngs::OsRng;
-use rand8::{thread_rng, Rng};
+use rand8::Rng;
 use serde::{Deserialize, Serialize};
+
+use crate::transaction::{to_dalek_public_key, to_dalek_signature};
 
 pub struct SigningState {
     committed: HashMap<AggrCommitment, Committed>,
@@ -22,6 +23,10 @@ pub struct SigningState {
 
 #[test]
 fn aggregate_signatures() {
+    use curv::elliptic::curves::{Ed25519, Point};
+    use ed25519_dalek::{SignatureError, Verifier};
+    use multi_party_eddsa::protocols::ExpandedKeyPair;
+
     pub fn verify_dalek(
         pk: &Point<Ed25519>,
         sig: &protocols::Signature,
@@ -62,9 +67,9 @@ fn aggregate_signatures() {
     let message = b"message in a bottle".to_vec();
 
     let commitments = vec![
-        s1.get_commitment(&k1, &n1, message.clone()),
-        s2.get_commitment(&k2, &n2, message.clone()),
-        s3.get_commitment(&k3, &n3, message.clone()),
+        s1.get_commitment(&k1, &n1, message.clone()).unwrap(),
+        s2.get_commitment(&k2, &n2, message.clone()).unwrap(),
+        s3.get_commitment(&k3, &n3, message.clone()).unwrap(),
     ];
 
     let reveals = vec![
@@ -102,7 +107,7 @@ impl SigningState {
         our_key: &protocols::ExpandedKeyPair,
         node_key: &protocols::ExpandedKeyPair,
         message: Vec<u8>,
-    ) -> SignedCommitment {
+    ) -> Result<SignedCommitment, String> {
         // We use OSRng on it's own instead of thread_random() for commit padding and OsRng
         self.get_commitment_with_rng(our_key, node_key, message, &mut OsRng)
     }
@@ -115,10 +120,10 @@ impl SigningState {
         node_key: &protocols::ExpandedKeyPair,
         message: Vec<u8>,
         rng: &mut impl Rng,
-    ) -> SignedCommitment {
-        let (commitment, state) = Committed::commit(our_key, node_key, message, rng);
+    ) -> Result<SignedCommitment, String> {
+        let (commitment, state) = Committed::commit(our_key, node_key, message, rng)?;
         self.committed.insert(commitment.commitment.clone(), state);
-        commitment
+        Ok(commitment)
     }
 
     pub fn get_reveal(
@@ -209,7 +214,7 @@ impl Committed {
         node_key: &protocols::ExpandedKeyPair,
         message: Vec<u8>,
         rng: &mut impl Rng,
-    ) -> (SignedCommitment, Self) {
+    ) -> Result<(SignedCommitment, Self), String> {
         let (ephemeral_key, commit, our_signature) =
             aggsig::create_ephemeral_key_and_commit_rng(our_key, &message, rng);
         let s = Committed {
@@ -218,8 +223,12 @@ impl Committed {
             message,
             our_key: our_key.clone(),
         };
-        let sc = SignedCommitment::create(commit.commitment, &node_key, &our_key.public_key);
-        (sc, s)
+        let sc = SignedCommitment::create(
+            AggrCommitment(commit.commitment),
+            &node_key,
+            &our_key.public_key,
+        )?;
+        Ok((sc, s))
     }
 
     pub fn reveal(
@@ -307,30 +316,44 @@ pub struct SignedCommitment {
     /// not the node public key that generated the signature
     pub signing_public_key: Point<Ed25519>,
     /// This is signed with the node public key
-    pub signed: Signature,
+    pub signature: Signature,
 }
 
 impl SignedCommitment {
     pub fn create(
-        committment: BigInt,
-        node_key_pair: &protocols::ExpandedKeyPair,
+        commitment: AggrCommitment,
+        node_private_key: &protocols::ExpandedKeyPair,
         signing_public_key: &Point<Ed25519>,
-    ) -> Self {
-        // TODO actually create this signature
-        SignedCommitment {
-            commitment: AggrCommitment(committment),
+    ) -> Result<Self, String> {
+        let to_sign = Self::serialize(&commitment, signing_public_key)?;
+        // This is awkward, we should move more stuff over to dalek later on
+        let signature = aggsig::sign_single(&to_sign, node_private_key);
+        let signature = to_dalek_signature(&signature).map_err(|e| e.to_string())?;
+        Ok(SignedCommitment {
+            commitment,
             signing_public_key: signing_public_key.clone(),
-            signed: Signature::from_bytes(&[0; 64]).unwrap(),
-        }
+            signature,
+        })
     }
 
-    // TODO Fix error prone API, the keys are different
     pub fn verify(
         &self,
         public_key: &Point<Ed25519>,
     ) -> Result<(AggrCommitment, Point<Ed25519>), String> {
-        // TODO actually check this signature
+        let public_key = to_dalek_public_key(public_key).map_err(|e| e.to_string())?;
+        let message = Self::serialize(&self.commitment, &self.signing_public_key)?;
+        public_key
+            .verify(&message, &self.signature)
+            .map_err(|e| e.to_string())?;
         Ok((self.commitment.clone(), self.signing_public_key.clone()))
+    }
+
+    fn serialize(commitment: &AggrCommitment, pk: &Point<Ed25519>) -> Result<Vec<u8>, String> {
+        let content = serde_json::to_vec(&(commitment, pk)).map_err(|e| e.to_string())?;
+        // Makes signature collisions less likely
+        let mut message = b"SignedCommitment::serialize".to_vec();
+        message.extend(content);
+        Ok(message)
     }
 }
 
