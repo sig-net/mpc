@@ -7,7 +7,7 @@ use near_crypto::{ED25519PublicKey, PublicKey, SecretKey};
 
 pub async fn get_user_recovery_pk(
     client: &reqwest::Client,
-    sign_nodes: &Vec<String>,
+    sign_nodes: &[String],
     id: InternalAccountId,
 ) -> anyhow::Result<PublicKey> {
     let res = call(client, sign_nodes, "public_key", id).await?;

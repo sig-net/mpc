@@ -114,7 +114,7 @@ pub fn get_local_signed_delegated_action(
 
 pub async fn get_mpc_signed_delegated_action(
     client: &reqwest::Client,
-    sign_nodes: &Vec<String>,
+    sign_nodes: &[String],
     delegate_action: DelegateAction,
 ) -> anyhow::Result<SignedDelegateAction> {
     let signable_message =
