@@ -75,10 +75,8 @@ impl OAuthTokenVerifier for PagodaFirebaseTokenVerifier {
     async fn verify_token(token: &str, audience: &str) -> anyhow::Result<IdTokenClaims> {
         let public_key = get_pagoda_firebase_public_key().expect("Failed to get Google public key");
 
-        let pagoda_firebase_issuer_id: String = format!(
-            "https://securetoken.google.com/{}",
-            audience
-        );
+        let pagoda_firebase_issuer_id: String =
+            format!("https://securetoken.google.com/{}", audience);
 
         let claims = Self::validate_jwt(
             token,
@@ -241,7 +239,9 @@ mod tests {
     async fn test_verify_token_valid() {
         let token = "validToken";
         let test_claims = get_test_claims();
-        let claims = TestTokenVerifier::verify_token(token, &test_claims.aud).await.unwrap();
+        let claims = TestTokenVerifier::verify_token(token, &test_claims.aud)
+            .await
+            .unwrap();
         assert!(compare_claims(claims, test_claims));
     }
 
@@ -259,7 +259,9 @@ mod tests {
     async fn test_verify_token_valid_with_test_verifier() {
         let token = "validToken";
         let test_claims = get_test_claims();
-        let claims = TestTokenVerifier::verify_token(token, &test_claims.aud).await.unwrap();
+        let claims = TestTokenVerifier::verify_token(token, &test_claims.aud)
+            .await
+            .unwrap();
         assert!(compare_claims(claims, test_claims));
     }
 
@@ -277,7 +279,9 @@ mod tests {
     async fn test_verify_token_valid_with_universal_verifier() {
         let token = "validToken";
         let test_claims = get_test_claims();
-        let claims = UniversalTokenVerifier::verify_token(token, &test_claims.aud).await.unwrap();
+        let claims = UniversalTokenVerifier::verify_token(token, &test_claims.aud)
+            .await
+            .unwrap();
         assert!(compare_claims(claims, test_claims));
     }
 

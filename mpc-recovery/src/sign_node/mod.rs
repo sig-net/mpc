@@ -16,7 +16,11 @@ pub async fn run(id: NodeId, pk_set: PublicKeySet, sk_share: SecretKeyShare, por
 
     let pagoda_firebase_audience_id = "pagoda-firebase-audience-id".to_string();
 
-    let state = SignNodeState { id, sk_share, pagoda_firebase_audience_id };
+    let state = SignNodeState {
+        id,
+        sk_share,
+        pagoda_firebase_audience_id,
+    };
 
     let app = Router::new()
         .route("/sign", post(sign::<UniversalTokenVerifier>))

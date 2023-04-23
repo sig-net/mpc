@@ -160,9 +160,10 @@ async fn process_new_account<T: OAuthTokenVerifier>(
         .near_account_id
         .parse()
         .map_err(|e| NewAccountError::MalformedAccountId(request.near_account_id, e))?;
-    let oidc_token_claims = T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
-        .await
-        .map_err(NewAccountError::OidcVerificationFailed)?;
+    let oidc_token_claims =
+        T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
+            .await
+            .map_err(NewAccountError::OidcVerificationFailed)?;
     let internal_acc_id = get_internal_account_id(oidc_token_claims);
 
     state
@@ -337,9 +338,10 @@ async fn process_add_key<T: OAuthTokenVerifier>(
     state: LeaderState,
     request: AddKeyRequest,
 ) -> Result<AddKeyResponse, AddKeyError> {
-    let oidc_token_claims = T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
-        .await
-        .map_err(AddKeyError::OidcVerificationFailed)?;
+    let oidc_token_claims =
+        T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
+            .await
+            .map_err(AddKeyError::OidcVerificationFailed)?;
     let internal_acc_id = get_internal_account_id(oidc_token_claims);
     let user_recovery_pk = get_user_recovery_pk(internal_acc_id.clone());
     let user_recovery_sk = get_user_recovery_sk(internal_acc_id);
