@@ -161,6 +161,7 @@ impl LeaderNode {
         near_root_account: &AccountId,
         account_creator_id: &AccountId,
         account_creator_sk: &SecretKey,
+        pagoda_firebase_audience_id: &str,
     ) -> anyhow::Result<LeaderNode> {
         create_network(docker, network).await?;
         let web_port = portpicker::pick_unused_port().expect("no free ports");
@@ -185,6 +186,8 @@ impl LeaderNode {
             account_creator_id.to_string(),
             "--account-creator-sk".to_string(),
             account_creator_sk.to_string(),
+            "--pagoda-firebase-audience-id".to_string(),
+            pagoda_firebase_audience_id.to_string(),
         ];
         for sign_node in sign_nodes {
             cmd.push("--sign-nodes".to_string());
