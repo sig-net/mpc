@@ -6,7 +6,8 @@ use crate::relayer::error::RelayerError;
 use crate::relayer::msg::RegisterAccountRequest;
 use crate::relayer::NearRpcAndRelayerClient;
 use crate::transaction::{
-    get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
+    get_add_key_delegate_action, get_create_account_delegate_action,
+    get_local_signed_delegated_action, get_mpc_signed_delegated_action,
 };
 use crate::{nar, NodeId};
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
@@ -158,19 +159,29 @@ async fn process_new_account<T: OAuthTokenVerifier>(
             )
             .await?;
 
+        let user_recovery_pk = get_user_recovery_pk(
+            &state.reqwest_client,
+            &state.sign_nodes,
+            internal_acc_id.clone(),
+        )
+        .await
+        .map_err(|e| NewAccountError::Other(e))?;
+
         let delegate_action = get_create_account_delegate_action(
             state.account_creator_id.clone(),
             state.account_creator_sk.public_key(),
             new_user_account_id.clone(),
-            get_user_recovery_pk(internal_acc_id.clone()),
+            user_recovery_pk,
             new_user_account_pk.clone(),
             state.near_root_account.clone(),
             nonce,
             block_height + 100,
         )?;
-        let signed_delegate_action =
-            get_signed_delegated_action(&state.reqwest_client, &state.sign_nodes, delegate_action)
-                .await?;
+        let signed_delegate_action = get_local_signed_delegated_action(
+            delegate_action,
+            state.account_creator_id.clone(),
+            state.account_creator_sk.clone(),
+        );
 
         // Send delegate action to relayer
         let result = state.client.send_meta_tx(signed_delegate_action).await;
@@ -314,7 +325,13 @@ async fn process_add_key<T: OAuthTokenVerifier>(
             .await
             .map_err(AddKeyError::OidcVerificationFailed)?;
     let internal_acc_id = get_internal_account_id(oidc_token_claims);
-    let user_recovery_pk = get_user_recovery_pk(internal_acc_id.clone());
+    let user_recovery_pk = get_user_recovery_pk(
+        &state.reqwest_client,
+        &state.sign_nodes,
+        internal_acc_id.clone(),
+    )
+    .await
+    .map_err(|e| AddKeyError::Other(e))?;
     let new_public_key: PublicKey = request
         .public_key
         .parse()
@@ -349,9 +366,12 @@ async fn process_add_key<T: OAuthTokenVerifier>(
             nonce,
             max_block_height,
         )?;
-        let signed_delegate_action =
-            get_signed_delegated_action(&state.reqwest_client, &state.sign_nodes, delegate_action)
-                .await?;
+        let signed_delegate_action = get_mpc_signed_delegated_action(
+            &state.reqwest_client,
+            &state.sign_nodes,
+            delegate_action,
+        )
+        .await?;
 
         let resp = state.client.send_meta_tx(signed_delegate_action).await;
         if let Err(err) = resp {
