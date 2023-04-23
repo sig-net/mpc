@@ -44,6 +44,7 @@ async fn test_basic_action() -> anyhow::Result<()> {
             let account_id = account::random(ctx.worker)?;
             let user_public_key = key::random();
 
+            // Create account
             let (status_code, new_acc_response) = ctx
                 .leader_node
                 .new_account(NewAccountRequest {
@@ -59,6 +60,7 @@ async fn test_basic_action() -> anyhow::Result<()> {
 
             check::access_key_exists(&ctx, &account_id, &user_public_key).await?;
 
+            // Add key
             let new_user_public_key = key::random();
 
             let (status_code, add_key_response) = ctx
@@ -71,6 +73,21 @@ async fn test_basic_action() -> anyhow::Result<()> {
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
             assert!(matches!(add_key_response, AddKeyResponse::Ok));
+
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            check::access_key_exists(&ctx, &account_id, &new_user_public_key).await?;
+
+            // Adding the same key should now fail
+            let (status_code, _add_key_response) = ctx
+                .leader_node
+                .add_key(AddKeyRequest {
+                    near_account_id: Some(account_id.to_string()),
+                    oidc_token: token::valid(),
+                    public_key: new_user_public_key.clone(),
+                })
+                .await?;
+            assert_eq!(status_code, StatusCode::OK);
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
