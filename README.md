@@ -88,7 +88,6 @@ Now, build mpc-recovery from this repository:
 
 ```BASH
 docker build . -t near/mpc-recovery
-docker build . -t pagoda-relayer-rs-fastauth:latest
 ```
 
 **Note**. You will need to re-build the Docker image each time you make a code change and want to run the integration tests.
