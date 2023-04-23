@@ -2,11 +2,8 @@ use crate::{account, check, key, token, with_nodes};
 use ed25519_dalek::Verifier;
 use hyper::StatusCode;
 use mpc_recovery::{
-    msg::{
-        AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
-        NewAccountResponse,
-    },
-    transaction::to_dalek_combined_public_key,
+    msg::{AddKeyRequest, AddKeyResponse, NewAccountRequest, NewAccountResponse},
+    transaction::{sign, to_dalek_combined_public_key},
 };
 use rand::{distributions::Alphanumeric, Rng};
 use std::time::Duration;
@@ -20,20 +17,19 @@ async fn test_trio() -> anyhow::Result<()> {
                 .take(10)
                 .map(char::from)
                 .collect();
-            let (status_code, response) = ctx
-                .leader_node
-                .submit(LeaderRequest {
-                    payload: payload.clone(),
-                })
-                .await?;
 
-            assert_eq!(status_code, StatusCode::OK);
-            if let LeaderResponse::Ok { signature } = response {
-                let combined_pub = to_dalek_combined_public_key(ctx.pk_set).unwrap();
-                combined_pub.verify(&payload.as_bytes(), &signature)?
-            } else {
-                panic!("response was not successful");
-            }
+            // TODO integrate this better with testing
+            let client = reqwest::Client::new();
+            let signer_urls: Vec<_> = ctx
+                .signer_nodes
+                .iter()
+                .map(|s| s.local_address.clone())
+                .collect();
+
+            let signature = sign(&client, &signer_urls, payload.clone().into()).await?;
+
+            let combined_pub = to_dalek_combined_public_key(ctx.pk_set).unwrap();
+            combined_pub.verify(&payload.as_bytes(), &signature)?;
 
             Ok(())
         })

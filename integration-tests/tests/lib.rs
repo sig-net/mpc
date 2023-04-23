@@ -19,6 +19,7 @@ pub struct TestContext<'a> {
     leader_node: &'a LeaderNode,
     pk_set: &'a Vec<Point<Ed25519>>,
     worker: &'a Worker<Sandbox>,
+    signer_nodes: &'a Vec<SignNode>,
 }
 
 async fn create_account(
@@ -71,19 +72,21 @@ where
     )
     .await?;
 
-    let mut sign_nodes = Vec::new();
+    let mut signer_nodes = Vec::new();
     for i in 0..nodes {
         let addr = SignNode::start(&docker, NETWORK, i as u64, &pk_set, &sk_shares[i]).await?;
-        sign_nodes.push(addr);
+        signer_nodes.push(addr);
     }
 
     let pagoda_firebase_audience_id = "not actually used in integration tests";
+
+    let signer_urls: &Vec<_> = &signer_nodes.iter().map(|n| n.address.clone()).collect();
 
     let leader_node = LeaderNode::start(
         &docker,
         NETWORK,
         0,
-        sign_nodes.iter().map(|n| n.address.clone()).collect(),
+        signer_urls.clone(),
         &near_rpc,
         &relayer.address,
         near_root_account.id(),
@@ -99,12 +102,13 @@ where
     let result = f(TestContext {
         leader_node: &leader_node,
         pk_set: &pk_set,
+        signer_nodes: &signer_nodes,
         worker: &worker,
     })
     .await;
 
     drop(leader_node);
-    drop(sign_nodes);
+    drop(signer_nodes);
     drop(relayer);
     drop(redis);
 
