@@ -159,7 +159,7 @@ async fn process_new_account<T: OAuthTokenVerifier>(
             )
             .await?;
 
-        let user_recovery_pk = get_user_recovery_pk(
+        let mpc_user_recovery_pk = get_user_recovery_pk(
             &state.reqwest_client,
             &state.sign_nodes,
             internal_acc_id.clone(),
@@ -171,12 +171,13 @@ async fn process_new_account<T: OAuthTokenVerifier>(
             state.account_creator_id.clone(),
             state.account_creator_sk.public_key(),
             new_user_account_id.clone(),
-            user_recovery_pk,
+            mpc_user_recovery_pk,
             new_user_account_pk.clone(),
             state.near_root_account.clone(),
             nonce,
             block_height + 100,
         )?;
+        // We create accounts using the local key
         let signed_delegate_action = get_local_signed_delegated_action(
             delegate_action,
             state.account_creator_id.clone(),
@@ -366,6 +367,7 @@ async fn process_add_key<T: OAuthTokenVerifier>(
             nonce,
             max_block_height,
         )?;
+        // We sign the key recovery using the signing nodes
         let signed_delegate_action = get_mpc_signed_delegated_action(
             &state.reqwest_client,
             &state.sign_nodes,
