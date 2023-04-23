@@ -24,7 +24,6 @@ use hyper::client::ResponseFuture;
 use hyper::{Body, Client, Method, Request};
 use multi_party_eddsa::protocols::{self, aggsig, Signature};
 use near_crypto::{ParseKeyError, PublicKey, SecretKey};
-use near_crypto::{PublicKey, SecretKey};
 use near_primitives::account::id::ParseAccountError;
 use near_primitives::types::AccountId;
 use near_primitives::views::FinalExecutionStatus;
@@ -125,12 +124,6 @@ struct LeaderState {
     account_creator_sk: SecretKey,
     account_lookup_url: String,
     pagoda_firebase_audience_id: String,
-}
-
-async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareResponse> {
-    let response = response_future.await?;
-    let response_body = hyper::body::to_bytes(response.into_body()).await?;
-    Ok(serde_json::from_slice(&response_body)?)
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -345,7 +338,6 @@ async fn process_add_key<T: OAuthTokenVerifier>(
             .map_err(AddKeyError::OidcVerificationFailed)?;
     let internal_acc_id = get_internal_account_id(oidc_token_claims);
     let user_recovery_pk = get_user_recovery_pk(internal_acc_id.clone());
-    let user_recovery_sk = get_user_recovery_sk(internal_acc_id);
     let new_public_key: PublicKey = request
         .public_key
         .parse()
@@ -385,7 +377,6 @@ async fn process_add_key<T: OAuthTokenVerifier>(
             &state.sign_nodes,
             delegate_action,
             user_account_id.clone(),
-            user_recovery_sk.clone(),
         )
         .await?;
 
