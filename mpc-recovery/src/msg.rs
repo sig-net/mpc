@@ -1,4 +1,3 @@
-use crate::NodeId;
 use ed25519_dalek::Signature;
 use serde::{Deserialize, Serialize};
 
@@ -67,9 +66,6 @@ pub struct SigShareRequest {
 }
 
 mod hex_sig_share {
-    use std::ops::Deref;
-
-    use curv::elliptic::curves::{Point, Scalar};
     use ed25519_dalek::Signature;
     use serde::{Deserialize, Deserializer, Serializer};
 

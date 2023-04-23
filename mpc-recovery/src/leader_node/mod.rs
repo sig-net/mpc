@@ -1,39 +1,21 @@
 use crate::key_recovery::get_user_recovery_pk;
-use crate::msg::{
-    AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
-    NewAccountResponse, SigShareRequest,
-};
+use crate::msg::{AddKeyRequest, AddKeyResponse, NewAccountRequest, NewAccountResponse};
 use crate::oauth::{IdTokenClaims, OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::primitives::InternalAccountId;
 use crate::relayer::error::RelayerError;
 use crate::relayer::msg::RegisterAccountRequest;
 use crate::relayer::NearRpcAndRelayerClient;
-use crate::sign_node::aggregate_signer::{Reveal, SignedCommitment};
 use crate::transaction::{
-    self, get_add_key_delegate_action, get_create_account_delegate_action,
-    get_signed_delegated_action,
+    get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
 };
 use crate::{nar, NodeId};
-use anyhow::{anyhow, Context};
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
-use ed25519_dalek::Signature;
-use futures::future;
-use futures::future::FutureExt;
-use futures::stream::FuturesUnordered;
-use hyper::client::ResponseFuture;
-use hyper::{Body, Client, Method, Request};
-use multi_party_eddsa::protocols::{self, aggsig, Signature};
 use near_crypto::{ParseKeyError, PublicKey, SecretKey};
 use near_primitives::account::id::ParseAccountError;
 use near_primitives::types::AccountId;
 use near_primitives::views::FinalExecutionStatus;
 use rand::{distributions::Alphanumeric, Rng};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use threshold_crypto::{PublicKeySet, SecretKeyShare};
 
 pub struct Config {
     pub id: NodeId,
@@ -98,7 +80,6 @@ pub async fn run(config: Config) {
     let cors_layer = tower_http::cors::CorsLayer::permissive();
 
     let app = Router::new()
-        .route("/submit", post(submit::<UniversalTokenVerifier>))
         .route("/new_account", post(new_account::<UniversalTokenVerifier>))
         .route("/add_key", post(add_key::<UniversalTokenVerifier>))
         .layer(Extension(state))
@@ -187,13 +168,9 @@ async fn process_new_account<T: OAuthTokenVerifier>(
             nonce,
             block_height + 100,
         )?;
-        let signed_delegate_action = get_signed_delegated_action(
-            &state.reqwest_client,
-            &state.sign_nodes,
-            delegate_action,
-            state.account_creator_id.clone(),
-        )
-        .await?;
+        let signed_delegate_action =
+            get_signed_delegated_action(&state.reqwest_client, &state.sign_nodes, delegate_action)
+                .await?;
 
         // Send delegate action to relayer
         let result = state.client.send_meta_tx(signed_delegate_action).await;
@@ -372,13 +349,9 @@ async fn process_add_key<T: OAuthTokenVerifier>(
             nonce,
             max_block_height,
         )?;
-        let signed_delegate_action = get_signed_delegated_action(
-            &state.reqwest_client,
-            &state.sign_nodes,
-            delegate_action,
-            user_account_id.clone(),
-        )
-        .await?;
+        let signed_delegate_action =
+            get_signed_delegated_action(&state.reqwest_client, &state.sign_nodes, delegate_action)
+                .await?;
 
         let resp = state.client.send_meta_tx(signed_delegate_action).await;
         if let Err(err) = resp {
@@ -442,44 +415,6 @@ async fn add_key<T: OAuthTokenVerifier>(
         }
     }
 }
-
-#[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
-async fn submit<T: OAuthTokenVerifier>(
-    Extension(state): Extension<LeaderState>,
-    Json(request): Json<LeaderRequest>,
-) -> (StatusCode, Json<LeaderResponse>) {
-    tracing::info!(payload = request.payload, "submit request");
-
-    // TODO: extract access token from payload
-    let access_token = "validToken";
-    match T::verify_token(access_token, &state.pagoda_firebase_audience_id).await {
-        Ok(_) => {
-            tracing::info!("access token is valid");
-            // continue execution
-        }
-        Err(_) => {
-            tracing::error!("access token verification failed");
-            return (StatusCode::UNAUTHORIZED, Json(LeaderResponse::Err));
-        }
-    }
-
-    match transaction::sign(
-        &state.reqwest_client,
-        &state.sign_nodes,
-        request.payload.clone().into(),
-    )
-    .await
-    {
-        Ok(signature) => {
-            tracing::debug!(?signature, "replying with full signature");
-            (StatusCode::OK, Json(LeaderResponse::Ok { signature }))
-        }
-        Err(e) => {
-            tracing::error!("{}", e.to_string());
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(LeaderResponse::Err))
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,49 +438,4 @@ mod tests {
         let first_account = get_acc_id_from_pk(public_key, url).unwrap();
         assert_eq!(first_account.to_string(), "serhii.testnet".to_string());
     }
-}
-pub async fn sign(
-    client: &reqwest::Client,
-    sign_nodes: &Vec<String>,
-    payload: Vec<u8>,
-) -> Result<Signature, String> {
-    let commit_request = SigShareRequest { payload };
-
-    let commitments: Vec<SignedCommitment> =
-        call(client, sign_nodes, "commit", commit_request).await?;
-
-    let reveals: Vec<Reveal> = call(client, sign_nodes, "reveal", commitments).await?;
-
-    let signature_shares: Vec<protocols::Signature> =
-        call(client, sign_nodes, "signature_share", reveals).await?;
-
-    Ok(aggsig::add_signature_parts(&signature_shares))
-}
-
-/// Call every node with an identical payload and send the response
-pub async fn call<Req: Serialize, Res: DeserializeOwned>(
-    client: &reqwest::Client,
-    sign_nodes: &Vec<String>,
-    path: &str,
-    request: Req,
-) -> Result<Vec<Res>, String> {
-    let responses = sign_nodes.iter().map(|sign_node| {
-        client
-            .post(format!("{}/{}", sign_node, path))
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .then(|r| async move {
-                match r {
-                    // Flatten all errors to strings
-                    Ok(ok) => match ok.json::<Result<Res, String>>().await {
-                        Ok(ok) => ok,
-                        Err(e) => Err(e.to_string()),
-                    },
-                    Err(e) => Err(e.to_string()),
-                }
-            })
-    });
-
-    future::join_all(responses).await.into_iter().collect()
 }

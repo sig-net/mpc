@@ -16,7 +16,6 @@ use near_crypto::SecretKey;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
 use tokio::io::AsyncWriteExt;
 use workspaces::AccountId;
 

@@ -4,7 +4,6 @@ use gcp::GcpService;
 use mpc_recovery::LeaderConfig;
 use multi_party_eddsa::protocols::ExpandedKeyPair;
 use near_primitives::types::AccountId;
-use threshold_crypto::serde_impl::SerdeSecret;
 
 mod gcp;
 
@@ -17,12 +16,6 @@ enum Cli {
         /// Node ID
         #[arg(long, env("MPC_RECOVERY_NODE_ID"))]
         node_id: u64,
-        /// Root public key
-        #[arg(long, env("MPC_RECOVERY_PK_SET"))]
-        pk_set: String,
-        /// Secret key share, will be pulled from GCP Secret Manager if omitted
-        #[arg(long, env("MPC_RECOVERY_SK_SHARE"))]
-        sk_share: Option<String>,
         /// The web port for this server
         #[arg(long, env("MPC_RECOVERY_WEB_PORT"))]
         web_port: u16,

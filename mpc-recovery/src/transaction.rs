@@ -4,7 +4,7 @@ use ed25519_dalek::Signature;
 use futures::{future, FutureExt};
 use multi_party_eddsa::protocols::aggsig::KeyAgg;
 use multi_party_eddsa::protocols::{self, aggsig};
-use near_crypto::{InMemorySigner, PublicKey, SecretKey};
+use near_crypto::PublicKey;
 use near_primitives::account::{AccessKey, AccessKeyPermission};
 use near_primitives::borsh::BorshSerialize;
 use near_primitives::hash::hash;
@@ -100,7 +100,6 @@ pub async fn get_signed_delegated_action(
     client: &reqwest::Client,
     sign_nodes: &Vec<String>,
     delegate_action: DelegateAction,
-    signer_id: AccountId,
 ) -> anyhow::Result<SignedDelegateAction> {
     let signable_message =
         SignableMessage::new(&delegate_action, SignableMessageType::DelegateAction);

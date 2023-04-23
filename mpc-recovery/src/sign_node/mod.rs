@@ -7,7 +7,6 @@ use curv::elliptic::curves::{Ed25519, Point};
 use multi_party_eddsa::protocols::{self, ExpandedKeyPair};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use threshold_crypto::{PublicKeySet, SecretKeyShare};
 use tokio::sync::RwLock;
 
 pub mod aggregate_signer;
@@ -81,7 +80,7 @@ async fn commit<T: OAuthTokenVerifier>(
                 // TODO Restrict this payload
                 request.payload,
             );
-            (StatusCode::OK, Json(Ok(response)))
+            (StatusCode::OK, Json(response))
         }
         Err(_) => {
             const ERR: &str = "access token verification failed";
