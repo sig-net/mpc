@@ -82,7 +82,7 @@ impl OAuthTokenVerifier for PagodaFirebaseTokenVerifier {
             token,
             public_key.as_bytes(),
             &pagoda_firebase_issuer_id,
-            &audience,
+            audience,
         )
         .expect("Failed to validate JWT");
 

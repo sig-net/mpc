@@ -91,7 +91,7 @@ where
         near_root_account.id(),
         &creator_account_id,
         &creator_account_sk,
-        &pagoda_firebase_audience_id,
+        pagoda_firebase_audience_id,
     )
     .await?;
 
