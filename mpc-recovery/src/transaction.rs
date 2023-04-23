@@ -4,7 +4,7 @@ use ed25519_dalek::Signature;
 use futures::{future, FutureExt};
 use multi_party_eddsa::protocols::aggsig::KeyAgg;
 use multi_party_eddsa::protocols::{self, aggsig};
-use near_crypto::PublicKey;
+use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use near_primitives::account::{AccessKey, AccessKeyPermission};
 use near_primitives::borsh::BorshSerialize;
 use near_primitives::hash::hash;
@@ -96,7 +96,23 @@ pub fn get_add_key_delegate_action(
     Ok(delegate_action)
 }
 
-pub async fn get_signed_delegated_action(
+pub fn get_local_signed_delegated_action(
+    delegate_action: DelegateAction,
+    signer_id: AccountId,
+    signer_sk: SecretKey,
+) -> SignedDelegateAction {
+    let signer = InMemorySigner::from_secret_key(signer_id, signer_sk);
+    let signable_message =
+        SignableMessage::new(&delegate_action, SignableMessageType::DelegateAction);
+    let signature = signable_message.sign(&signer);
+
+    SignedDelegateAction {
+        delegate_action,
+        signature,
+    }
+}
+
+pub async fn get_mpc_signed_delegated_action(
     client: &reqwest::Client,
     sign_nodes: &Vec<String>,
     delegate_action: DelegateAction,
