@@ -28,6 +28,7 @@
 
               # Development
               cargo-watch
+              cargo-audit
             ];
         };
       });
