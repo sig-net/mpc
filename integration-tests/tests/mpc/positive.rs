@@ -29,7 +29,7 @@ async fn test_trio() -> anyhow::Result<()> {
             let signature = sign(&client, &signer_urls, payload.clone().into()).await?;
 
             let combined_pub = to_dalek_combined_public_key(ctx.pk_set).unwrap();
-            combined_pub.verify(&payload.as_bytes(), &signature)?;
+            combined_pub.verify(payload.as_bytes(), &signature)?;
 
             Ok(())
         })

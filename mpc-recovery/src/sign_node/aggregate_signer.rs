@@ -33,10 +33,10 @@ fn aggregate_signatures() {
         msg: &[u8],
     ) -> Result<(), SignatureError> {
         let mut sig_bytes = [0u8; 64];
-        sig_bytes[..32].copy_from_slice(&*sig.R.to_bytes(true));
+        sig_bytes[..32].copy_from_slice(&sig.R.to_bytes(true));
         sig_bytes[32..].copy_from_slice(&sig.s.to_bytes());
 
-        let dalek_pub = ed25519_dalek::PublicKey::from_bytes(&*pk.to_bytes(true)).unwrap();
+        let dalek_pub = ed25519_dalek::PublicKey::from_bytes(&pk.to_bytes(true)).unwrap();
         let dalek_sig = ed25519_dalek::Signature::from_bytes(&sig_bytes).unwrap();
 
         dalek_pub.verify(msg, &dalek_sig)
@@ -81,7 +81,7 @@ fn aggregate_signatures() {
     let sig_shares = vec![
         s1.get_signature_share(ni(0), reveals.clone()).unwrap(),
         s2.get_signature_share(ni(1), reveals.clone()).unwrap(),
-        s3.get_signature_share(ni(2), reveals.clone()).unwrap(),
+        s3.get_signature_share(ni(2), reveals).unwrap(),
     ];
 
     let signing_keys: Vec<_> = commitments
