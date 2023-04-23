@@ -88,7 +88,8 @@ mod hex_sig_share {
             )
             .map_err(|v: Vec<u8>| {
                 serde::de::Error::custom(format!(
-                    "signature has incorrect length: expected 96 bytes, but got {}",
+                    "signature has incorrect length: expected {} bytes, but got {}",
+                    Signature::BYTE_SIZE,
                     v.len()
                 ))
             })?,
