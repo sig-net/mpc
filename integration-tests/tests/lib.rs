@@ -83,8 +83,6 @@ where
         &docker,
         NETWORK,
         0,
-        &pk_set,
-        &sk_shares[0],
         sign_nodes.iter().map(|n| n.address.clone()).collect(),
         &near_rpc,
         &relayer.address,
