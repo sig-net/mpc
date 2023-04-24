@@ -320,7 +320,7 @@ async fn new_account<T: OAuthTokenVerifier>(
 
 #[derive(thiserror::Error, Debug)]
 #[allow(dead_code)]
-enum AddKeyError {
+pub enum AddKeyError {
     #[error("malformed account id: {0}")]
     MalformedAccountId(String, ParseAccountError),
     #[error("malformed public key {0}: {1}")]

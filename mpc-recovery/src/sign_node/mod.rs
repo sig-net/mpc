@@ -3,14 +3,22 @@ use self::user_credentials::EncryptedUserCredentials;
 use crate::gcp::GcpService;
 use crate::msg::{AcceptNodePublicKeysRequest, SigShareRequest};
 use crate::oauth::OAuthTokenVerifier;
+use crate::msg::{AddKey, ClaimOidc, SigShareRequest};
+use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::primitives::InternalAccountId;
 use crate::sign_node::pk_set::SignerNodePkSet;
+use crate::transaction::get_add_key_delegate_action;
 use crate::NodeId;
 use aes_gcm::Aes256Gcm;
 use axum::routing::get;
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
 use curv::elliptic::curves::{Ed25519, Point};
 use multi_party_eddsa::protocols::{self, ExpandedKeyPair};
+use near_crypto::{ParseKeyError, PublicKey};
+use near_primitives::account::id::ParseAccountError;
+use near_primitives::borsh::BorshSerialize;
+use near_primitives::hash::hash;
+use near_primitives::types::AccountId;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -92,6 +100,10 @@ struct SignNodeState {
 
 #[derive(thiserror::Error, Debug)]
 enum CommitError {
+    #[error("malformed account id: {0}")]
+    MalformedAccountId(String, ParseAccountError),
+    #[error("malformed public key {0}: {1}")]
+    MalformedPublicKey(String, ParseKeyError),
     #[error("failed to verify oidc token: {0}")]
     OidcVerificationFailed(anyhow::Error),
     #[error("{0}")]
@@ -132,30 +144,69 @@ async fn get_or_generate_user_creds(
     }
 }
 
-async fn process_commit<T: OAuthTokenVerifier>(
+async fn process_add_key_commit<T: OAuthTokenVerifier>(
     state: SignNodeState,
-    request: SigShareRequest,
+    AddKey {
+        account_id_from_leader,
+        user_recovery_pk,
+        max_block_height,
+        nonce,
+        near_account_id,
+        oidc_token,
+        public_key,
+        signature,
+    }: AddKey,
 ) -> Result<SignedCommitment, CommitError> {
-    let oidc_token_claims =
-        T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
-            .await
-            .map_err(CommitError::OidcVerificationFailed)?;
+    let oidc_token_claims = T::verify_token(&oidc_token, &state.pagoda_firebase_audience_id)
+        .await
+        .map_err(CommitError::OidcVerificationFailed)?;
+
     let internal_account_id = oidc_token_claims.get_internal_account_id();
 
     let user_credentials = get_or_generate_user_creds(&state, internal_account_id).await?;
+
+    let new_public_key: PublicKey = public_key
+        .parse()
+        .map_err(|e| CommitError::MalformedPublicKey(public_key, e))?;
+
+    let user_account_id: AccountId = near_account_id
+        .parse()
+        .map_err(|e| CommitError::MalformedAccountId(near_account_id, e))?;
+
+    // Create a transaction to add a new key
+    let delegate_action = get_add_key_delegate_action(
+        user_account_id.clone(),
+        user_recovery_pk.clone(),
+        new_public_key.clone(),
+        nonce,
+        max_block_height,
+    )?;
+
+    let bytes = delegate_action
+        .try_to_vec()
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let hash = hash(&bytes);
 
     let response = state
         .signing_state
         .write()
         .await
-        .get_commitment(
-            &user_credentials.decrypt_key_pair(&state.cipher)?,
-            &state.node_key,
-            // TODO Restrict this payload
-            request.payload,
-        )
+        .get_commitment(&user_credentials.key_pair, &state.node_key, hash.into())
         .map_err(|e| anyhow::anyhow!(e))?;
+
     Ok(response)
+}
+
+async fn process_claim_oidc_commit(
+    state: SignNodeState,
+    ClaimOidc {
+        oidc_token_hash,
+        public_key,
+        signature,
+    }: ClaimOidc,
+) -> (StatusCode, Json<SignedCommitment, String>>) {
+    todo!()
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(id = state.node_info.our_index))]
@@ -167,24 +218,22 @@ async fn commit<T: OAuthTokenVerifier>(
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(Err(msg)));
     }
 
-    match process_commit::<T>(state, request).await {
-        Ok(signed_commitment) => (StatusCode::OK, Json(Ok(signed_commitment))),
-        Err(ref e @ CommitError::OidcVerificationFailed(ref err_msg)) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(Err(format!(
-                    "signer failed to verify oidc token: {}",
-                    err_msg
-                ))),
-            )
-        }
-        Err(e) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(Err(format!("failed to process new account: {}", e))),
-            )
+    if let Err(err_msg) = request.verify_signature(todo!()) {
+        return fail(err_msg);
+    }
+
+    match request {
+        SigShareRequest::Add(add_key) => match process_add_key_commit::<T>(state, add_key).await {
+            Ok(signed_commitment) => (StatusCode::OK, Json(Ok(signed_commitment))),
+            Err(ref e @ CommitError::OidcVerificationFailed(ref err_msg)) => {
+                return fail(format!("failed to verify oidc token: {}", err_msg))
+            }
+            Err(e) => {
+                return fail(format!("failed to process new account: {}", e));
+            }
+        },
+        SigShareRequest::Claim(claim_oidc) => {
+            todo!()
         }
     }
 }
@@ -330,4 +379,9 @@ async fn check_if_ready(state: &SignNodeState) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn fail(err_msg: String) -> (StatusCode, Json<Result<SignedCommitment, String>>) {
+    tracing::error!(err = ?err_msg);
+    (StatusCode::BAD_REQUEST, Json(Err(err_msg)))
 }
