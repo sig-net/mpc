@@ -50,7 +50,6 @@ If this repeatedly fails, you should discard your oidc token and regenerate.
         near_account_id: String,
         oidc_token: String,
         public_key: String,
-        signature: [u8; 64],
     }
     Response:
     Ok {
@@ -67,16 +66,6 @@ This creates an account with the name in `near_account_id`. If this name is alre
 This service will send a `create_account` message to the relayer from `tmp_acount_creator.serhii.testnet` creating from the request field `near_account_id`. If this operation is successful the near.org relayer will make an allowance for the created account.
 
 Newly created NEAR account will have two full access keys. One that was provided by the user, and the recovery one that is controlled by the MPC system.
-
-The signature field is an Ed22519 signature of:
-
-    sha256.hash(Borsh.serialize<u32>(SALT + 2) ++ Borsh.serialize({
-        near_account_id: String,
-        oidc_token: String,
-        public_key: String,
-    }))
-
-signed by the key you used to claim the oidc token. This does not have to be the same as the key in the public key field.
 
 ### Recover Account
 
@@ -100,7 +89,7 @@ signed by the key you used to claim the oidc token. This does not have to be the
 
 The signature field is a signature of:
 
-    sha256.hash(Borsh.serialize<u32>(SALT + 3) ++ Borsh.serialize({
+    sha256.hash(Borsh.serialize<u32>(SALT + 2) ++ Borsh.serialize({
         near_account_id: Option<String>,
         oidc_token: String,
         public_key: String,

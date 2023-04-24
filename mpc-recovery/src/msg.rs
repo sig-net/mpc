@@ -93,7 +93,8 @@ impl SigShareRequest {
 /// We don't parse these too much, because we need to sign them in a way that can be verified by the client
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ClaimOidc {
-    pub oidc_token_hash: String,
+    #[serde(with = "hex::serde")]
+    pub oidc_token_hash: [u8; 32],
     pub public_key: String,
     #[serde(with = "hex_sig_share")]
     pub signature: Signature,
