@@ -78,11 +78,7 @@ Signed by the key you used to claim the oidc token
 
 The signature field is a signature of:
 
-    sha256.hash(Borsh.serialize<u32>(SALT + 3) ++ Borsh.serialize(near_account_id, oidc_token, public_key))
-
-Or if you don't include the `near_account_id`
-
-    sha256.hash(Borsh.serialize<u32>(SALT + 3) ++ Borsh.serialize(oidc_token, public_key))
+    sha256.hash(Borsh.serialize<u32>(SALT + 3) ++ Borsh.serialize(Borsh::Option<near_account_id>, oidc_token, public_key))
 
 Signed by the key you used to claim the oidc token
 
