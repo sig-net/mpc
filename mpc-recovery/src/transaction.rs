@@ -120,9 +120,7 @@ pub async fn get_mpc_signed_delegated_action(
     let signable_message =
         SignableMessage::new(&delegate_action, SignableMessageType::DelegateAction);
 
-    let bytes = signable_message
-        .try_to_vec()
-        .expect("Failed to deserialize");
+    let bytes = signable_message.try_to_vec()?;
 
     let hash = hash(&bytes);
 

@@ -164,8 +164,7 @@ async fn process_new_account<T: OAuthTokenVerifier>(
             &state.sign_nodes,
             internal_acc_id.clone(),
         )
-        .await
-        .map_err(NewAccountError::Other)?;
+        .await?;
 
         let delegate_action = get_create_account_delegate_action(
             state.account_creator_id.clone(),
@@ -331,8 +330,7 @@ async fn process_add_key<T: OAuthTokenVerifier>(
         &state.sign_nodes,
         internal_acc_id.clone(),
     )
-    .await
-    .map_err(AddKeyError::Other)?;
+    .await?;
     let new_public_key: PublicKey = request
         .public_key
         .parse()

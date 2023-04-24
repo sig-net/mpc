@@ -21,79 +21,6 @@ pub struct SigningState {
     revealed: HashMap<Reveal, Revealed>,
 }
 
-#[test]
-fn aggregate_signatures() {
-    use curv::elliptic::curves::{Ed25519, Point};
-    use ed25519_dalek::{SignatureError, Verifier};
-    use multi_party_eddsa::protocols::ExpandedKeyPair;
-
-    pub fn verify_dalek(
-        pk: &Point<Ed25519>,
-        sig: &protocols::Signature,
-        msg: &[u8],
-    ) -> Result<(), SignatureError> {
-        let mut sig_bytes = [0u8; 64];
-        sig_bytes[..32].copy_from_slice(&sig.R.to_bytes(true));
-        sig_bytes[32..].copy_from_slice(&sig.s.to_bytes());
-
-        let dalek_pub = ed25519_dalek::PublicKey::from_bytes(&pk.to_bytes(true)).unwrap();
-        let dalek_sig = ed25519_dalek::Signature::from_bytes(&sig_bytes).unwrap();
-
-        dalek_pub.verify(msg, &dalek_sig)
-    }
-
-    // Generate node keys and signing keys
-    let ks = || (ExpandedKeyPair::create(), ExpandedKeyPair::create());
-    let (n1, k1) = ks();
-    let (n2, k2) = ks();
-    let (n3, k3) = ks();
-
-    let nodes_public_keys = vec![
-        n1.public_key.clone(),
-        n2.public_key.clone(),
-        n3.public_key.clone(),
-    ];
-
-    let ni = |n| NodeInfo {
-        nodes_public_keys: nodes_public_keys.clone(),
-        our_index: n,
-    };
-
-    // Set up nodes with that config
-    let mut s1 = SigningState::new();
-    let mut s2 = SigningState::new();
-    let mut s3 = SigningState::new();
-
-    let message = b"message in a bottle".to_vec();
-
-    let commitments = vec![
-        s1.get_commitment(&k1, &n1, message.clone()).unwrap(),
-        s2.get_commitment(&k2, &n2, message.clone()).unwrap(),
-        s3.get_commitment(&k3, &n3, message.clone()).unwrap(),
-    ];
-
-    let reveals = vec![
-        s1.get_reveal(ni(0), commitments.clone()).unwrap(),
-        s2.get_reveal(ni(1), commitments.clone()).unwrap(),
-        s3.get_reveal(ni(2), commitments.clone()).unwrap(),
-    ];
-
-    let sig_shares = vec![
-        s1.get_signature_share(ni(0), reveals.clone()).unwrap(),
-        s2.get_signature_share(ni(1), reveals.clone()).unwrap(),
-        s3.get_signature_share(ni(2), reveals).unwrap(),
-    ];
-
-    let signing_keys: Vec<_> = commitments
-        .iter()
-        .map(|c| c.signing_public_key.clone())
-        .collect();
-    let aggrigate_key = KeyAgg::key_aggregation_n(&signing_keys, 0);
-
-    let signature = aggsig::add_signature_parts(&sig_shares);
-    verify_dalek(&aggrigate_key.apk, &signature, &message).unwrap();
-}
-
 impl Default for SigningState {
     fn default() -> Self {
         Self::new()
@@ -139,11 +66,13 @@ impl SigningState {
     ) -> Result<Reveal, String> {
         // TODO Factor this out
         let i = node_info.our_index;
-        let our_c = recieved_commitments.get(i).ok_or(format!(
-            "This is node index {}, but you only gave us {} commitments",
-            i,
-            recieved_commitments.len()
-        ))?;
+        let our_c = recieved_commitments.get(i).ok_or_else(|| {
+            format!(
+                "This is node index {}, but you only gave us {} commitments",
+                i,
+                recieved_commitments.len()
+            )
+        })?;
         // Don't readd this on failure, this commitment is now burnt
         let state = self
             .committed
@@ -275,7 +204,7 @@ impl Revealed {
             check_commitment(&partial_sig.R, &partial_sig.blind_factor, &commit.0)?;
         }
         // TODO less copying
-        let rs: Vec<_> = signature_parts.iter().map(|s| s.R.clone()).collect();
+        let rs: Vec<_> = signature_parts.into_iter().map(|s| s.R).collect();
         let r_tot = aggsig::get_R_tot(&rs);
 
         let key_agg = KeyAgg::key_aggregation_n(&self.signing_public_keys, node_info.our_index);
@@ -381,5 +310,82 @@ pub fn check_commitment(
         ))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use curv::elliptic::curves::{Ed25519, Point};
+    use ed25519_dalek::{SignatureError, Verifier};
+    use multi_party_eddsa::protocols::ExpandedKeyPair;
+
+    #[test]
+    fn aggregate_signatures() {
+        pub fn verify_dalek(
+            pk: &Point<Ed25519>,
+            sig: &protocols::Signature,
+            msg: &[u8],
+        ) -> Result<(), SignatureError> {
+            let mut sig_bytes = [0u8; 64];
+            sig_bytes[..32].copy_from_slice(&sig.R.to_bytes(true));
+            sig_bytes[32..].copy_from_slice(&sig.s.to_bytes());
+
+            let dalek_pub = ed25519_dalek::PublicKey::from_bytes(&pk.to_bytes(true)).unwrap();
+            let dalek_sig = ed25519_dalek::Signature::from_bytes(&sig_bytes).unwrap();
+
+            dalek_pub.verify(msg, &dalek_sig)
+        }
+
+        // Generate node keys and signing keys
+        let ks = || (ExpandedKeyPair::create(), ExpandedKeyPair::create());
+        let (n1, k1) = ks();
+        let (n2, k2) = ks();
+        let (n3, k3) = ks();
+
+        let nodes_public_keys = vec![
+            n1.public_key.clone(),
+            n2.public_key.clone(),
+            n3.public_key.clone(),
+        ];
+
+        let ni = |n| NodeInfo {
+            nodes_public_keys: nodes_public_keys.clone(),
+            our_index: n,
+        };
+
+        // Set up nodes with that config
+        let mut s1 = SigningState::new();
+        let mut s2 = SigningState::new();
+        let mut s3 = SigningState::new();
+
+        let message = b"message in a bottle".to_vec();
+
+        let commitments = vec![
+            s1.get_commitment(&k1, &n1, message.clone()).unwrap(),
+            s2.get_commitment(&k2, &n2, message.clone()).unwrap(),
+            s3.get_commitment(&k3, &n3, message.clone()).unwrap(),
+        ];
+
+        let reveals = vec![
+            s1.get_reveal(ni(0), commitments.clone()).unwrap(),
+            s2.get_reveal(ni(1), commitments.clone()).unwrap(),
+            s3.get_reveal(ni(2), commitments.clone()).unwrap(),
+        ];
+
+        let sig_shares = vec![
+            s1.get_signature_share(ni(0), reveals.clone()).unwrap(),
+            s2.get_signature_share(ni(1), reveals.clone()).unwrap(),
+            s3.get_signature_share(ni(2), reveals).unwrap(),
+        ];
+
+        let signing_keys: Vec<_> = commitments
+            .iter()
+            .map(|c| c.signing_public_key.clone())
+            .collect();
+        let aggrigate_key = KeyAgg::key_aggregation_n(&signing_keys, 0);
+
+        let signature = aggsig::add_signature_parts(&sig_shares);
+        verify_dalek(&aggrigate_key.apk, &signature, &message).unwrap();
     }
 }
