@@ -195,12 +195,12 @@ async fn process_add_key_commit<T: OAuthTokenVerifier>(
         );
         let request_digest = hasher.finalize();
 
-        // Fetch the public key associated with the oidc key digest from the store
-
         let hasher = Sha512::default().chain(oidc_token.as_bytes());
 
         let oidc_digest = hex::encode(hasher.finalize());
 
+        // Fetch the public key associated with the oidc key digest from the store
+        // Only this public key is allowed to take actions with this token
         let public_key: PublicKey = match state
             .gcp_service
             .get::<_, OidcDigest>(format!("{}/{}", state.node_info.our_index, oidc_digest))

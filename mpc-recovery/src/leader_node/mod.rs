@@ -5,6 +5,7 @@ use crate::msg::{
 };
 use crate::nar;
 use crate::oauth::OAuthTokenVerifier;
+use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::relayer::error::RelayerError;
 use crate::relayer::msg::RegisterAccountRequest;
 use crate::relayer::NearRpcAndRelayerClient;
@@ -380,18 +381,22 @@ async fn process_add_key<T: OAuthTokenVerifier>(
     )
     .await?;
 
-    let user_account_id: AccountId = match &request.near_account_id {
-        Some(near_account_id) => near_account_id
-            .parse()
-            .map_err(|e| AddKeyError::MalformedAccountId(request.near_account_id.unwrap(), e))?,
-        None => match get_acc_id_from_pk(user_recovery_pk.clone(), state.account_lookup_url) {
-            Ok(near_account_id) => near_account_id,
-            Err(e) => {
-                tracing::error!(err = ?e);
-                return Err(AddKeyError::AccountNotFound(e.to_string()));
+    let (user_account_id, account_id_from_leader): (AccountId, bool) =
+        match &request.near_account_id {
+            Some(near_account_id) => {
+                let nid = near_account_id.parse().map_err(|e| {
+                    AddKeyError::MalformedAccountId(request.near_account_id.unwrap(), e)
+                })?;
+                (nid, false)
             }
-        },
-    };
+            None => match get_acc_id_from_pk(user_recovery_pk.clone(), state.account_lookup_url) {
+                Ok(near_account_id) => (near_account_id, true),
+                Err(e) => {
+                    tracing::error!(err = ?e);
+                    return Err(AddKeyError::AccountNotFound(e.to_string()));
+                }
+            },
+        };
 
     nar::retry(|| async {
         // Get nonce and recent block hash
@@ -402,6 +407,18 @@ async fn process_add_key<T: OAuthTokenVerifier>(
 
         // Create a transaction to create a new account
         let max_block_height: u64 = block_height + 100;
+
+        let action = AddKey {
+            account_id_from_leader,
+            user_recovery_pk: user_recovery_pk.clone(),
+            max_block_height,
+            nonce,
+            near_account_id: user_account_id.to_string(),
+            oidc_token: request.oidc_token.clone(),
+            public_key: request.public_key.clone(),
+            signature: request.signature,
+        };
+
         let delegate_action = get_add_key_delegate_action(
             user_account_id.clone(),
             user_recovery_pk.clone(),
@@ -411,10 +428,10 @@ async fn process_add_key<T: OAuthTokenVerifier>(
         )?;
         // We sign the key recovery using the signing nodes
         let signed_delegate_action = get_mpc_signed_delegated_action(
-            &state.reqwest_client,
-            &state.sign_nodes,
-            request.oidc_token.clone(),
+            &state.reqwest_client.clone(),
+            &state.sign_nodes.clone(),
             delegate_action,
+            SigShareRequest::Add(action),
         )
         .await?;
 

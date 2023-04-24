@@ -37,6 +37,9 @@ pub struct AddKeyRequest {
     pub create_account_options: CreateAccountOptions,
     pub near_account_id: Option<String>,
     pub oidc_token: String,
+
+    #[serde(with = "hex_sig_share")]
+    pub signature: Signature,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

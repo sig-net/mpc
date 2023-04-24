@@ -52,7 +52,7 @@ impl IntoValue for OidcDigest {
 
 impl FromValue for OidcDigest {
     fn from_value(value: Value) -> Result<Self, ConvertError> {
-        match value {
+        match value.clone() {
             Value::EntityValue { mut properties, .. } => {
                 let (_, node_id) = properties
                     .remove_entry("node_id")
