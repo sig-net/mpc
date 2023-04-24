@@ -12,13 +12,45 @@ Currently everything is signed by a single node with a single private key.
 
 The recovery service is currently hosted at <https://mpc-recovery-7tk2cmmtcq-ue.a.run.app>.
 
+All byte arguments are sent as a hex string.
+
+### Claim OIDC ownership
+
+    URL: /claim_oidc
+    Request parameters: {
+        oidc_token_hash: [u8; 32],
+        public_key: String,
+        signature: [u8; 64],
+    }
+    Response: Ok {"MPCSignature": String} / Taken / {"Err": String}
+
+Before transmitting your oidc token to the recovery service you must first claim the ownership of the token. This prevents a rogue node from taking your token and using it to sign another request.
+
+The signature you send must be an Ed22519 signature of the hash:
+
+    SALT = 3177899144
+    sha256.hash(Borsh.serialize<u32>(SALT + 0) ++ Borsh.serialize<[u8]>(oidc_token_hash))
+
+signed with your on device public key.
+
+The constant 3177899144 is a random number between 2^31 and 2^32 which as described [here](https://github.com/gutsyphilip/NEPs/blob/8b0b05c3727f0a90b70c6f88791152f54bf5b77f/neps/nep-0413.md#example) prevents collisions with legitimate on chain transactions.
+
+If you successfully claim the token you will receive a signature in return of:
+
+    sha256.hash(Borsh.serialize<u32>(SALT + 1) ++ Borsh.serialize<[u8]>(signature))
+
+This will be signed by the nodes combined Ed22519 signature which should be hard coded in your validation code NOT fetched from the nodes themselves.
+
+If this repeatedly fails, you should discard your oidc token and regenerate.
+
 ### Create New Account
 
     URL: /new_account
     Request parameters: {
         near_account_id: String,
         oidc_token: String,
-        public_key: String
+        public_key: String,
+        signature: [u8; 64],
     }
     Response:
     Ok {
@@ -36,6 +68,15 @@ This service will send a `create_account` message to the relayer from `tmp_acoun
 
 Newly created NEAR account will have two full access keys. One that was provided by the user, and the recovery one that is controlled by the MPC system.
 
+The signature field is an Ed22519 signature of:
+
+    sha256.hash(Borsh.serialize<u32>(SALT + 2) ++ Borsh.serialize({
+        near_account_id: String,
+        oidc_token: String,
+        public_key: String,
+    }))
+
+signed by the key you used to claim the oidc token. This does not have to be the same as the key in the public key field.
 
 ### Recover Account
 
@@ -44,8 +85,9 @@ Newly created NEAR account will have two full access keys. One that was provided
         // in case NEAR AccointId is not provided,
         // it will be determined using recovery PK and NEAR Wallet APIs
         near_account_id: Option(String),
-        public_key: String,
         oidc_token: String
+        public_key: String,
+        signature: String,
     }
     Response:
     Ok {
@@ -55,6 +97,16 @@ Newly created NEAR account will have two full access keys. One that was provided
     Err{
         msg: String
     }
+
+The signature field is a signature of:
+
+    sha256.hash(Borsh.serialize<u32>(SALT + 3) ++ Borsh.serialize({
+        near_account_id: Option<String>,
+        oidc_token: String,
+        public_key: String,
+    }))
+
+signed by the key you used to claim the oidc token. This does not have to be the same as the key in the public key field.
 
 ## OIDC (OAuth 2.0) authentication
 
