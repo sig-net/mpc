@@ -7,8 +7,8 @@ edition = "2021"
 chacha20poly1305 = "0.10"
 curve25519-dalek = "3"
 hex = "0.4"
-rand_core = "0.6"
-sha2 = "0.10"
+rand_core = {version = "0.5", features = ["getrandom"]}
+sha2 = "0.9"
 x25519-dalek = "1"
 
 [[bin]]
