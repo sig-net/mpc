@@ -1,3 +1,7 @@
+pub mod datastore;
+pub mod redis;
+pub mod relayer;
+
 use bollard::{
     container::{AttachContainerOptions, AttachContainerResults, Config, RemoveContainerOptions},
     network::CreateNetworkOptions,
@@ -16,10 +20,35 @@ use std::collections::HashMap;
 use tokio::io::AsyncWriteExt;
 use workspaces::AccountId;
 
-pub mod redis;
-pub mod relayer;
-
 static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
+
+// Removing container is an asynchronous operation and hence has to be scheduled to execute
+// outside of `drop`'s scope. This leads to problems when the drop happens right before the
+// execution ends. The invoker needs to be aware of this behavior and give `drop` some time
+// to finalize.
+#[macro_export]
+macro_rules! drop_container {
+    ( $container:ident ) => {
+        #[cfg(feature = "drop-containers")]
+        impl Drop for $container {
+            fn drop(&mut self) {
+                let container_id = self.container_id.clone();
+                let docker = self.docker.clone();
+                tokio::spawn(async move {
+                    docker
+                        .remove_container(
+                            &container_id,
+                            Some(RemoveContainerOptions {
+                                force: true,
+                                ..Default::default()
+                            }),
+                        )
+                        .await
+                });
+            }
+        }
+    };
+}
 
 async fn continuously_print_docker_output(docker: &Docker, id: &str) -> anyhow::Result<()> {
     let AttachContainerResults { mut output, .. } = docker
@@ -154,6 +183,8 @@ impl LeaderNode {
         sign_nodes: Vec<String>,
         near_rpc: &str,
         relayer_url: &str,
+        datastore_url: &str,
+        gcp_project_id: &str,
         near_root_account: &AccountId,
         account_creator_id: &AccountId,
         account_creator_sk: &SecretKey,
@@ -180,6 +211,10 @@ impl LeaderNode {
             account_creator_sk.to_string(),
             "--pagoda-firebase-audience-id".to_string(),
             pagoda_firebase_audience_id.to_string(),
+            "--gcp-project-id".to_string(),
+            gcp_project_id.to_string(),
+            "--gcp-datastore-url".to_string(),
+            datastore_url.to_string(),
         ];
         for sign_node in sign_nodes {
             cmd.push("--sign-nodes".to_string());
@@ -237,28 +272,6 @@ impl LeaderNode {
     }
 }
 
-// Removing container is an asynchronous operation and hence has to be scheduled to execute
-// outside of `drop`'s scope. This leads to problems when the drop happens right before the
-// execution ends. The invoker needs to be aware of this behavior and give `drop` some time
-// to finalize.
-impl Drop for LeaderNode {
-    fn drop(&mut self) {
-        let container_id = self.container_id.clone();
-        let docker = self.docker.clone();
-        tokio::spawn(async move {
-            docker
-                .remove_container(
-                    &container_id,
-                    Some(RemoveContainerOptions {
-                        force: true,
-                        ..Default::default()
-                    }),
-                )
-                .await
-        });
-    }
-}
-
 pub struct SignNode {
     docker: Docker,
     container_id: String,
@@ -274,6 +287,8 @@ impl SignNode {
         node_id: u64,
         pk_set: &Vec<Point<Ed25519>>,
         sk_share: &ExpandedKeyPair,
+        datastore_url: &str,
+        gcp_project_id: &str,
     ) -> anyhow::Result<SignNode> {
         create_network(docker, network).await?;
         let web_port = portpicker::pick_unused_port().expect("no free ports");
@@ -288,6 +303,10 @@ impl SignNode {
             serde_json::to_string(&sk_share)?,
             "--web-port".to_string(),
             web_port.to_string(),
+            "--gcp-project-id".to_string(),
+            gcp_project_id.to_string(),
+            "--gcp-datastore-url".to_string(),
+            datastore_url.to_string(),
         ];
 
         let (container_id, ip_address) =
@@ -302,24 +321,5 @@ impl SignNode {
     }
 }
 
-// Removing container is an asynchronous operation and hence has to be scheduled to execute
-// outside of `drop`'s scope. This leads to problems when the drop happens right before the
-// execution ends. The invoker needs to be aware of this behavior and give `drop` some time
-// to finalize.
-impl Drop for SignNode {
-    fn drop(&mut self) {
-        let container_id = self.container_id.clone();
-        let docker = self.docker.clone();
-        tokio::spawn(async move {
-            docker
-                .remove_container(
-                    &container_id,
-                    Some(RemoveContainerOptions {
-                        force: true,
-                        ..Default::default()
-                    }),
-                )
-                .await
-        });
-    }
-}
+drop_container!(LeaderNode);
+drop_container!(SignNode);

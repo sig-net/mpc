@@ -4,12 +4,13 @@ mod mpc;
 use crate::docker::{LeaderNode, SignNode};
 use bollard::Docker;
 use curv::elliptic::curves::{Ed25519, Point};
-use docker::{redis::Redis, relayer::Relayer};
+use docker::{datastore::Datastore, redis::Redis, relayer::Relayer};
 use futures::future::BoxFuture;
 use std::time::Duration;
 use workspaces::{network::Sandbox, AccountId, Worker};
 
 const NETWORK: &str = "mpc_recovery_integration_test_network";
+const GCP_PROJECT_ID: &str = "mpc-recovery-gcp-project";
 #[cfg(target_os = "linux")]
 const HOST_MACHINE_FROM_DOCKER: &str = "172.17.0.1";
 #[cfg(target_os = "macos")]
@@ -17,7 +18,7 @@ const HOST_MACHINE_FROM_DOCKER: &str = "docker.for.mac.localhost";
 
 pub struct TestContext<'a> {
     leader_node: &'a LeaderNode,
-    pk_set: &'a Vec<Point<Ed25519>>,
+    _pk_set: &'a Vec<Point<Ed25519>>,
     worker: &'a Worker<Sandbox>,
     signer_nodes: &'a Vec<SignNode>,
 }
@@ -60,6 +61,7 @@ where
     let (creator_account_id, creator_account_sk) = create_account(&worker).await?;
 
     let near_rpc = format!("http://{HOST_MACHINE_FROM_DOCKER}:{}", worker.rpc_port());
+    let datastore = Datastore::start(&docker, NETWORK, GCP_PROJECT_ID).await?;
     let redis = Redis::start(&docker, NETWORK).await?;
     let relayer = Relayer::start(
         &docker,
@@ -74,7 +76,16 @@ where
 
     let mut signer_nodes = Vec::new();
     for (i, share) in sk_shares.iter().enumerate().take(nodes) {
-        let addr = SignNode::start(&docker, NETWORK, i as u64, &pk_set, share).await?;
+        let addr = SignNode::start(
+            &docker,
+            NETWORK,
+            i as u64,
+            &pk_set,
+            share,
+            &datastore.address,
+            GCP_PROJECT_ID,
+        )
+        .await?;
         signer_nodes.push(addr);
     }
 
@@ -89,6 +100,8 @@ where
         signer_urls.clone(),
         &near_rpc,
         &relayer.address,
+        &datastore.address,
+        GCP_PROJECT_ID,
         near_root_account.id(),
         &creator_account_id,
         &creator_account_sk,
@@ -101,12 +114,13 @@ where
 
     let result = f(TestContext {
         leader_node: &leader_node,
-        pk_set: &pk_set,
+        _pk_set: &pk_set,
         signer_nodes: &signer_nodes,
         worker: &worker,
     })
     .await;
 
+    drop(datastore);
     drop(leader_node);
     drop(signer_nodes);
     drop(relayer);

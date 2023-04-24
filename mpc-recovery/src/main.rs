@@ -1,11 +1,8 @@
 use clap::Parser;
 use curv::elliptic::curves::{Ed25519, Point};
-use gcp::GcpService;
-use mpc_recovery::LeaderConfig;
+use mpc_recovery::{gcp::GcpService, LeaderConfig};
 use multi_party_eddsa::protocols::ExpandedKeyPair;
 use near_primitives::types::AccountId;
-
-mod gcp;
 
 #[derive(Parser, Debug)]
 enum Cli {
@@ -53,6 +50,12 @@ enum Cli {
         account_lookup_url: String,
         #[arg(long, env("PAGODA_FIREBASE_AUDIENCE_ID"))]
         pagoda_firebase_audience_id: String,
+        /// GCP project ID
+        #[arg(long, env("MPC_RECOVERY_GCP_PROJECT_ID"))]
+        gcp_project_id: String,
+        /// GCP datastore URL
+        #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
+        gcp_datastore_url: Option<String>,
     },
     StartSign {
         /// Node ID
@@ -67,6 +70,12 @@ enum Cli {
         /// The web port for this server
         #[arg(long, env("MPC_RECOVERY_WEB_PORT"))]
         web_port: u16,
+        /// GCP project ID
+        #[arg(long, env("MPC_RECOVERY_GCP_PROJECT_ID"))]
+        gcp_project_id: String,
+        /// GCP datastore URL
+        #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
+        gcp_datastore_url: Option<String>,
     },
 }
 
@@ -131,8 +140,10 @@ async fn main() -> anyhow::Result<()> {
             account_creator_sk,
             account_lookup_url,
             pagoda_firebase_audience_id,
+            gcp_project_id,
+            gcp_datastore_url,
         } => {
-            let gcp_service = GcpService::new().await?;
+            let gcp_service = GcpService::new(gcp_project_id, gcp_datastore_url).await?;
             let account_creator_sk =
                 load_account_creator_sk(&gcp_service, node_id, account_creator_sk).await?;
 
@@ -158,8 +169,10 @@ async fn main() -> anyhow::Result<()> {
             pk_set,
             sk_share,
             web_port,
+            gcp_project_id,
+            gcp_datastore_url,
         } => {
-            let gcp_service = GcpService::new().await?;
+            let gcp_service = GcpService::new(gcp_project_id, gcp_datastore_url).await?;
             let sk_share = load_sh_skare(&gcp_service, node_id, sk_share).await?;
 
             // TODO put these in a better defined format
@@ -167,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
             // TODO Import just the private key and derive the rest
             let sk_share: ExpandedKeyPair = serde_json::from_str(&sk_share).unwrap();
 
-            mpc_recovery::run_sign_node(node_id, pk_set, sk_share, web_port).await;
+            mpc_recovery::run_sign_node(gcp_service, node_id, pk_set, sk_share, web_port).await;
         }
     }
 
