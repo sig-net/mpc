@@ -54,13 +54,14 @@ async fn test_basic_action() -> anyhow::Result<()> {
         Box::pin(async move {
             let account_id = account::random(ctx.worker)?;
             let user_public_key = key::random();
+            let valid_id_token = token::valid();
 
             // Create account
             let (status_code, new_acc_response) = ctx
                 .leader_node
                 .new_account(NewAccountRequest {
                     near_account_id: account_id.to_string(),
-                    oidc_token: token::valid(),
+                    oidc_token: valid_id_token.clone(),
                     public_key: user_public_key.clone(),
                 })
                 .await?;
@@ -83,7 +84,7 @@ async fn test_basic_action() -> anyhow::Result<()> {
                 .leader_node
                 .add_key(AddKeyRequest {
                     near_account_id: Some(account_id.to_string()),
-                    oidc_token: token::valid(),
+                    oidc_token: valid_id_token.clone(),
                     public_key: new_user_public_key.clone(),
                 })
                 .await?;
@@ -100,12 +101,12 @@ async fn test_basic_action() -> anyhow::Result<()> {
 
             check::access_key_exists(&ctx, &account_id, &new_user_public_key).await?;
 
-            // Adding the same key should now fail
+            // Adding the same key should not fail
             let (status_code, _add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
                     near_account_id: Some(account_id.to_string()),
-                    oidc_token: token::valid(),
+                    oidc_token: valid_id_token.clone(),
                     public_key: new_user_public_key.clone(),
                 })
                 .await?;
@@ -114,6 +115,79 @@ async fn test_basic_action() -> anyhow::Result<()> {
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
             check::access_key_exists(&ctx, &account_id, &new_user_public_key).await?;
+
+            // Adding recovery key without account id should add the key and return proper account id
+            let second_user_public_key = key::random();
+            let (status_code, add_key_response) = ctx
+                .leader_node
+                .add_key(AddKeyRequest {
+                    near_account_id: None,
+                    oidc_token: valid_id_token.clone(),
+                    public_key: second_user_public_key.clone(),
+                })
+                .await?;
+
+            assert_eq!(status_code, StatusCode::OK);
+            assert!(matches!(
+                add_key_response,
+                AddKeyResponse::Ok {
+                    user_public_key: new_pk,
+                    near_account_id: acc_id,
+                } if new_pk == second_user_public_key && acc_id == account_id.to_string()
+            ));
+
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+            check::access_key_exists(&ctx, &account_id, &second_user_public_key).await?;
+
+            // Creating one more account should not fail
+            let account_id_2 = account::random(ctx.worker)?;
+            let user_public_key_2 = key::random();
+            let valid_id_token_2 = token::valid(); // TODO: it can be a source of the problem in tests, since token is the same
+
+            // Create account 2
+            let (status_code, new_acc_response) = ctx
+                .leader_node
+                .new_account(NewAccountRequest {
+                    near_account_id: account_id_2.to_string(),
+                    oidc_token: valid_id_token_2.clone(),
+                    public_key: user_public_key_2.clone(),
+                })
+                .await?;
+            assert_eq!(status_code, StatusCode::OK);
+            assert!(matches!(new_acc_response, NewAccountResponse::Ok {
+                    user_public_key: user_pk,
+                    user_recovery_public_key: _,
+                    near_account_id: acc_id,
+                } if user_pk == user_public_key_2 && acc_id == account_id_2.to_string()
+            ));
+
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            check::access_key_exists(&ctx, &account_id_2, &user_public_key_2).await?;
+
+            // Adding a key wothout specifying account id should work and return proper account id and key in a system with 1+ accounts
+            let new_user_public_key_2 = key::random();
+
+            let (status_code, add_key_response) = ctx
+                .leader_node
+                .add_key(AddKeyRequest {
+                    near_account_id: None,
+                    oidc_token: valid_id_token_2.clone(),
+                    public_key: new_user_public_key_2.clone(),
+                })
+                .await?;
+            assert_eq!(status_code, StatusCode::OK);
+            assert!(matches!(
+                add_key_response,
+                AddKeyResponse::Ok {
+                    user_public_key: new_pk,
+                    near_account_id: acc_id,
+                } if new_pk == new_user_public_key_2 && acc_id == account_id_2.to_string()
+            ));
+
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            check::access_key_exists(&ctx, &account_id_2, &new_user_public_key_2).await?;
 
             Ok(())
         })
