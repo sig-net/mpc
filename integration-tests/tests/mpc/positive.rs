@@ -165,7 +165,8 @@ async fn test_basic_action() -> anyhow::Result<()> {
 
             check::access_key_exists(&ctx, &account_id_2, &user_public_key_2).await?;
 
-            // Adding a key wothout specifying account id should work and return proper account id and key in a system with 1+ accounts
+            // Adding a key wothout specifying account id should work
+            // and return proper account id and key in a system with 1+ accounts
             let new_user_public_key_2 = key::random();
 
             let (status_code, add_key_response) = ctx
