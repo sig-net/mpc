@@ -165,7 +165,7 @@ async fn process_add_key_commit<T: OAuthTokenVerifier>(
         nonce,
         near_account_id,
         oidc_token,
-        public_key,
+        user_local_pk: public_key,
         signature,
         ..
     } = &add_key;
@@ -174,7 +174,11 @@ async fn process_add_key_commit<T: OAuthTokenVerifier>(
     // Only this public key is allowed to take actions with this token
     match state
         .gcp_service
-        .get::<_, OidcDigest>(format!("{}/{}", state.node_info.our_index, oidc_digest))
+        .get::<_, OidcDigest>(format!(
+            "{}/{}",
+            state.node_info.our_index,
+            hex::encode(oidc_digest)
+        ))
         .await
     {
         // The oidc key has been claimed

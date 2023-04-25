@@ -134,7 +134,7 @@ pub struct AddKey {
     /// We don't parse these too much, because we verify the signature created by the client
     pub near_account_id: String,
     pub oidc_token: String,
-    pub public_key: String,
+    pub user_local_pk: String,
 
     pub signature: Option<Signature>,
 }

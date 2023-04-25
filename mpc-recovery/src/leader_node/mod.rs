@@ -416,7 +416,7 @@ async fn process_add_key<T: OAuthTokenVerifier>(
             nonce,
             near_account_id: user_account_id.to_string(),
             oidc_token: request.oidc_token.clone(),
-            public_key: request.public_key.clone(),
+            user_local_pk: request.public_key.clone(),
             signature: request.signature,
         };
 
