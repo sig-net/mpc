@@ -99,15 +99,12 @@ pub struct TestTokenVerifier {}
 #[async_trait::async_trait]
 impl OAuthTokenVerifier for TestTokenVerifier {
     async fn verify_token(token: &str, _audience: &str) -> anyhow::Result<IdTokenClaims> {
-        match token {
-            "validToken" => {
-                tracing::info!(target: "test-token-verifier", "access token is valid");
-                Ok(get_test_claims())
-            }
-            _ => {
-                tracing::info!(target: "test-token-verifier", "access token verification failed");
-                Err(anyhow::anyhow!("Invalid token".to_string()))
-            }
+        if let Some(aud) = token.strip_prefix("validToken:") {
+            tracing::info!(target: "test-token-verifier", "access token is valid");
+            Ok(get_test_claims(aud.to_string()))
+        } else {
+            tracing::info!(target: "test-token-verifier", "access token verification failed");
+            Err(anyhow::anyhow!("Invalid token".to_string()))
         }
     }
 }
@@ -154,10 +151,10 @@ fn get_pagoda_firebase_public_key() -> anyhow::Result<String> {
     Ok(key)
 }
 
-pub fn get_test_claims() -> IdTokenClaims {
+pub fn get_test_claims(sub: String) -> IdTokenClaims {
     IdTokenClaims {
         iss: "test_issuer".to_string(),
-        sub: "test_subject".to_string(),
+        sub,
         aud: "test_audience".to_string(),
         exp: Utc::now().timestamp() as usize + 3600,
     }
@@ -253,8 +250,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_token_valid() {
-        let token = "validToken";
-        let test_claims = get_test_claims();
+        let token = "validToken:test-subject";
+        let test_claims = get_test_claims("test-subject".to_string());
         let claims = TestTokenVerifier::verify_token(token, &test_claims.aud)
             .await
             .unwrap();
@@ -273,8 +270,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_token_valid_with_test_verifier() {
-        let token = "validToken";
-        let test_claims = get_test_claims();
+        let token = "validToken:test-subject";
+        let test_claims = get_test_claims("test-subject".to_string());
         let claims = TestTokenVerifier::verify_token(token, &test_claims.aud)
             .await
             .unwrap();
@@ -293,8 +290,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_token_valid_with_universal_verifier() {
-        let token = "validToken";
-        let test_claims = get_test_claims();
+        let token = "validToken:test-subject";
+        let test_claims = get_test_claims("test-subject".to_string());
         let claims = UniversalTokenVerifier::verify_token(token, &test_claims.aud)
             .await
             .unwrap();
