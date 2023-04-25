@@ -328,15 +328,28 @@ fn get_acc_id_from_pk(
     account_lookup_url: String,
 ) -> Result<AccountId, anyhow::Error> {
     let url = format!("{}/publicKey/{}/accounts", account_lookup_url, public_key);
+    tracing::info!(
+        url = url,
+        public_key = public_key.to_string(),
+        "fetching account id from public key"
+    );
     let client = reqwest::blocking::Client::new();
     let response = client.get(url).send()?.text()?;
     let accounts: Vec<String> = serde_json::from_str(&response)?;
-    Ok(accounts
-        .first()
-        .cloned()
-        .unwrap_or_default()
-        .parse()
-        .unwrap())
+    tracing::info!(accounts = ?accounts, "fetched accounts");
+    match accounts.first() {
+        Some(account_id) => {
+            tracing::info!(account_id = account_id, "using first account id");
+            Ok(account_id.parse()?)
+        }
+        None => {
+            tracing::error!(
+                public_key = public_key.to_string(),
+                "no account found for pk"
+            );
+            Err(anyhow::anyhow!("no account found for pk: {}", public_key))
+        }
+    }
 }
 
 async fn process_add_key<T: OAuthTokenVerifier>(
@@ -456,6 +469,13 @@ async fn add_key<T: OAuthTokenVerifier>(
             tracing::error!(err = ?e);
             response::add_key_unauthorized(format!("failed to verify oidc token: {}", err_msg))
         }
+        Err(ref e @ AddKeyError::AccountNotFound(ref err_msg)) => {
+            tracing::error!(err = ?e);
+            response::add_key_bad_request(format!(
+                "failed to recover account_id from pk: {}",
+                err_msg
+            ))
+        }
         Err(e) => {
             tracing::error!(err = ?e);
             response::add_key_internal_error(format!("failed to process new account: {}", e))
@@ -534,5 +554,22 @@ mod tests {
             .unwrap();
         let first_account = get_acc_id_from_pk(public_key, url).unwrap();
         assert_eq!(first_account.to_string(), "serhii.testnet".to_string());
+    }
+
+    #[test]
+    fn test_get_acc_id_from_unexisting_pk_testnet() {
+        let url = "https://testnet-api.kitwallet.app".to_string();
+        let public_key: PublicKey = "ed25519:2uF6ZUghFFUg3Kta9rW47iiJ3crNzRdaPD2rBPQWEwyc"
+            .parse()
+            .unwrap();
+        match get_acc_id_from_pk(public_key.clone(), url) {
+            Ok(_) => panic!("Should not be able to get account id from unexisting pk"),
+            Err(e) => {
+                assert_eq!(
+                    e.to_string(),
+                    format!("no account found for pk: {}", public_key)
+                );
+            }
+        }
     }
 }
