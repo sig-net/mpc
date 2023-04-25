@@ -1,7 +1,7 @@
 use crate::key_recovery::get_user_recovery_pk;
 use crate::msg::{
-    AcceptNodePublicKeysRequest, AddKeyRequest, AddKeyResponse, NewAccountRequest,
-    NewAccountResponse,
+    AddKey, AddKeyRequest, AddKeyResponse, ClaimOidc, ClaimOidcRequest, ClaimOidcResponse,
+    NewAccountRequest, NewAccountResponse, SigShareRequest,
 };
 use crate::nar;
 use crate::oauth::OAuthTokenVerifier;
@@ -11,7 +11,7 @@ use crate::relayer::msg::RegisterAccountRequest;
 use crate::relayer::NearRpcAndRelayerClient;
 use crate::transaction::{
     get_add_key_delegate_action, get_create_account_delegate_action,
-    get_local_signed_delegated_action, get_mpc_signed_delegated_action,
+    get_local_signed_delegated_action, get_mpc_signed_delegated_action, sign,
 };
 use axum::routing::get;
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
@@ -118,6 +118,7 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
         )
         .route("/new_account", post(new_account::<T>))
         .route("/add_key", post(add_key::<T>))
+        .route("claim_oidc", post(claim_oidc))
         .layer(Extension(state))
         .layer(cors_layer);
 
@@ -574,6 +575,34 @@ async fn broadcast_pk_set(
     .await?;
 
     Ok(messages)
+}
+
+#[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
+async fn claim_oidc(
+    Extension(state): Extension<LeaderState>,
+    Json(ClaimOidcRequest {
+        oidc_token_hash,
+        public_key,
+        signature,
+    }): Json<ClaimOidcRequest>,
+) -> (StatusCode, Json<ClaimOidcResponse>) {
+    let claim = ClaimOidc {
+        oidc_token_hash,
+        public_key,
+        signature,
+    };
+    let payload = SigShareRequest::Claim(claim);
+    let res = sign(&state.reqwest_client, &state.sign_nodes, payload).await;
+    match res {
+        Ok(mpc_signature) => (
+            StatusCode::OK,
+            Json(ClaimOidcResponse::Ok { mpc_signature }),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ClaimOidcResponse::Err { msg: e.to_string() }),
+        ),
+    }
 }
 
 #[cfg(test)]

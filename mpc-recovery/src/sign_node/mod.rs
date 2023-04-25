@@ -1,5 +1,5 @@
 use self::aggregate_signer::{NodeInfo, Reveal, SignedCommitment, SigningState};
-use self::check_signatures::{check_add_key_signature, get_oidc_digest, HashSalt};
+use self::check_signatures::{check_add_key_signature, oidc_digest, HashSalt};
 use self::oidc_digest::OidcDigest;
 use self::user_credentials::EncryptedUserCredentials;
 use self::user_credentials::UserCredentials;
@@ -169,7 +169,7 @@ async fn process_add_key_commit<T: OAuthTokenVerifier>(
         signature,
         ..
     } = &add_key;
-    let oidc_digest = get_oidc_digest(&oidc_token);
+    let oidc_digest = oidc_digest(&oidc_token);
     // Fetch the public key associated with the oidc key digest from the store
     // Only this public key is allowed to take actions with this token
     match state
@@ -311,8 +311,10 @@ async fn process_claim_oidc_commit(
     // If you successfully claim the token you will receive a signature in return of:
     // sha256.hash(Borsh.serialize<u32>(SALT + 1) ++ Borsh.serialize<[u8]>(signature))
     let mut hasher = Sha512::default();
-    BorshSerialize::serialize(&HashSalt::ClaimOidcResponse.get_salt(), &mut hasher);
-    BorshSerialize::serialize(&signature.to_bytes(), &mut hasher);
+    BorshSerialize::serialize(&HashSalt::ClaimOidcResponse.get_salt(), &mut hasher)
+        .context("Serialization failed")?;
+    BorshSerialize::serialize(&signature.to_bytes(), &mut hasher)
+        .context("Serialization failed")?;
     let response_digest = hasher.finalize();
 
     state

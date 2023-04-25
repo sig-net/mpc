@@ -63,6 +63,26 @@ impl AddKeyResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct ClaimOidcRequest {
+    #[serde(with = "hex::serde")]
+    pub oidc_token_hash: [u8; 32],
+    pub public_key: String,
+    #[serde(with = "hex_sig_share")]
+    pub signature: Signature,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ClaimOidcResponse {
+    Ok {
+        #[serde(with = "hex_sig_share")]
+        mpc_signature: Signature,
+    },
+    Err {
+        msg: String,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct LeaderRequest {
     pub payload: String,
 }

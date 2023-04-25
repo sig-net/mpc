@@ -22,7 +22,7 @@ All byte arguments are sent as a hex string.
         public_key: String,
         signature: [u8; 64],
     }
-    Response: Ok {"MPCSignature": String} / Taken / {"Err": String}
+    Response: Ok {"mpc_signature": String} / {"Err": String}
 
 Before transmitting your oidc token to the recovery service you must first claim the ownership of the token. This prevents a rogue node from taking your token and using it to sign another request.
 

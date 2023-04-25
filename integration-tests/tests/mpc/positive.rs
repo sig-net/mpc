@@ -3,8 +3,9 @@ use anyhow::anyhow;
 use ed25519_dalek::Verifier;
 use hyper::StatusCode;
 use mpc_recovery::{
-    msg::{AddKeyRequest, AddKeyResponse, NewAccountRequest, NewAccountResponse},
+    msg::{AddKeyRequest, AddKeyResponse, ClaimOidcRequest, NewAccountRequest, NewAccountResponse},
     oauth::get_test_claims,
+    sign_node::check_signatures::oidc_digest,
     transaction::{
         call_all_nodes, sign_payload_with_mpc, to_dalek_combined_public_key, CreateAccountOptions,
         LimitedAccessKey,
@@ -15,17 +16,22 @@ use std::time::Duration;
 use workspaces::types::AccessKeyPermission;
 
 #[tokio::test]
-async fn test_aggregate_signatures() -> anyhow::Result<()> {
+async fn test_basic_action_with_sig() -> anyhow::Result<()> {
     with_nodes(3, |ctx| {
         Box::pin(async move {
-            let payload: String = rand::thread_rng()
-                .sample_iter(&Alphanumeric)
-                .take(10)
-                .map(char::from)
-                .collect();
+            let account_id = account::random(ctx.worker)?;
+            let user_public_key = key::random();
+            let oidc_token = token::valid();
+            let oidc_token_hash = oidc_digest(&oidc_token);
 
-            let client = reqwest::Client::new();
-            let signer_urls: Vec<_> = ctx.signer_nodes.iter().map(|s| s.address.clone()).collect();
+            let (status_code, new_acc_response) = ctx
+                .leader_node
+                .claim_oidc(ClaimOidcRequest {
+                    oidc_token_hash,
+                    public_key: user_public_key.clone(),
+                    signature: None,
+                })
+                .await?;
 
             let signature = sign_payload_with_mpc(
                 &client,
@@ -34,12 +40,68 @@ async fn test_aggregate_signatures() -> anyhow::Result<()> {
                 payload.clone().into(),
             )
             .await?;
+            // Create account
+            let (status_code, new_acc_response) = ctx
+                .leader_node
+                .new_account(NewAccountRequest {
+                    near_account_id: account_id.to_string(),
+                    oidc_token,
+                    public_key: user_public_key.clone(),
+                })
+                .await?;
+            assert_eq!(status_code, StatusCode::OK);
+            assert!(matches!(new_acc_response, NewAccountResponse::Ok {
+                    user_public_key: user_pk,
+                    user_recovery_public_key: _,
+                    near_account_id: acc_id,
+                } if user_pk == user_public_key && acc_id == account_id.to_string()
+            ));
 
             let account_id = get_test_claims("test-subject".to_string()).get_internal_account_id();
             let res = call_all_nodes(&client, &signer_urls, "public_key", account_id).await?;
 
-            let combined_pub = to_dalek_combined_public_key(&res).unwrap();
-            combined_pub.verify(payload.as_bytes(), &signature)?;
+            check::access_key_exists(&ctx, &account_id, &user_public_key).await?;
+
+            // Add key
+            let new_user_public_key = key::random();
+
+            let (status_code, add_key_response) = ctx
+                .leader_node
+                .add_key(AddKeyRequest {
+                    near_account_id: Some(account_id.to_string()),
+                    oidc_token: token::valid(),
+                    public_key: new_user_public_key.clone(),
+                    signature: None,
+                })
+                .await?;
+            assert_eq!(status_code, StatusCode::OK);
+            assert!(matches!(
+                add_key_response,
+                AddKeyResponse::Ok {
+                    user_public_key: new_pk,
+                    near_account_id: acc_id,
+                } if new_pk == new_user_public_key && acc_id == account_id.to_string()
+            ));
+
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            check::access_key_exists(&ctx, &account_id, &new_user_public_key).await?;
+
+            // Adding the same key should now fail
+            let (status_code, _add_key_response) = ctx
+                .leader_node
+                .add_key(AddKeyRequest {
+                    near_account_id: Some(account_id.to_string()),
+                    oidc_token: token::valid(),
+                    public_key: new_user_public_key.clone(),
+                    signature: None,
+                })
+                .await?;
+            assert_eq!(status_code, StatusCode::OK);
+
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            check::access_key_exists(&ctx, &account_id, &new_user_public_key).await?;
 
             Ok(())
         })
