@@ -13,8 +13,6 @@ jobs:
     name: Test
     steps:
       - uses: actions/checkout@v3
-        with:
-          submodules: 'true'
       - uses: actions/checkout@v3
         with:
           repository: 'near/pagoda-relayer-rs-fastauth'
@@ -48,4 +46,4 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Test
-        run: cargo test -p mpc-recovery-integration-tests
+        run: cargo test -p mpc-recovery-integration-tests --jobs 1 -- --test-threads 1

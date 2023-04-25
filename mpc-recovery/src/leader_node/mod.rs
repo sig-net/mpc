@@ -1,35 +1,28 @@
-use crate::key_recovery::{get_user_recovery_pk, get_user_recovery_sk};
+use crate::key_recovery::get_user_recovery_pk;
 use crate::msg::{
-    AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
-    NewAccountResponse, SigShareRequest, SigShareResponse,
+    AcceptNodePublicKeysRequest, AddKeyRequest, AddKeyResponse, NewAccountRequest,
+    NewAccountResponse,
 };
-use crate::oauth::{IdTokenClaims, OAuthTokenVerifier, UniversalTokenVerifier};
-use crate::primitives::InternalAccountId;
+use crate::nar;
+use crate::oauth::OAuthTokenVerifier;
 use crate::relayer::error::RelayerError;
 use crate::relayer::msg::RegisterAccountRequest;
 use crate::relayer::NearRpcAndRelayerClient;
 use crate::transaction::{
-    get_add_key_delegate_action, get_create_account_delegate_action, get_signed_delegated_action,
+    get_add_key_delegate_action, get_create_account_delegate_action,
+    get_local_signed_delegated_action, get_mpc_signed_delegated_action,
 };
-use crate::{nar, NodeId};
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
-use futures::stream::FuturesUnordered;
-use hyper::client::ResponseFuture;
-use hyper::{Body, Client, Method, Request};
+use curv::elliptic::curves::{Ed25519, Point};
 use near_crypto::{ParseKeyError, PublicKey, SecretKey};
 use near_primitives::account::id::ParseAccountError;
 use near_primitives::types::AccountId;
 use near_primitives::views::FinalExecutionStatus;
 use rand::{distributions::Alphanumeric, Rng};
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use threshold_crypto::{PublicKeySet, SecretKeyShare};
 
 pub struct Config {
-    pub id: NodeId,
-    pub pk_set: PublicKeySet,
-    pub sk_share: SecretKeyShare,
+    pub env: String,
     pub port: u16,
     pub sign_nodes: Vec<String>,
     pub near_rpc: String,
@@ -38,13 +31,13 @@ pub struct Config {
     pub account_creator_id: AccountId,
     // TODO: temporary solution
     pub account_creator_sk: SecretKey,
+    pub account_lookup_url: String,
+    pub pagoda_firebase_audience_id: String,
 }
 
-pub async fn run(config: Config) {
+pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
     let Config {
-        id,
-        pk_set,
-        sk_share,
+        env,
         port,
         sign_nodes,
         near_rpc,
@@ -52,18 +45,16 @@ pub async fn run(config: Config) {
         near_root_account,
         account_creator_id,
         account_creator_sk,
+        account_lookup_url,
+        pagoda_firebase_audience_id,
     } = config;
-    let _span = tracing::debug_span!("run", id, port);
+    let _span = tracing::debug_span!("run", env, port);
     tracing::debug!(?sign_nodes, "running a leader node");
-
-    if pk_set.public_key_share(id) != sk_share.public_key_share() {
-        tracing::error!("provided secret share does not match the node id");
-        return;
-    }
 
     let client = NearRpcAndRelayerClient::connect(&near_rpc, relayer_url);
     // FIXME: We don't have a token for ourselves, but are still forced to allocate allowance.
-    // Using randomly generated tokens ensures the uniqueness of tokens on the relayer side.
+    // Using randomly generated tokens ensures the uniqueness of tokens on the relayer side so
+    // we can update the allowance on each server run.
     let fake_oauth_token: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(16)
@@ -72,30 +63,48 @@ pub async fn run(config: Config) {
     client
         .register_account(RegisterAccountRequest {
             account_id: account_creator_id.clone(),
-            allowance: 300_000_000_000_000,
+            allowance: 18_000_000_000_000_000_000, // should be enough to create 700_000+ accs
             oauth_token: fake_oauth_token,
         })
         .await
         .unwrap();
 
     let state = LeaderState {
-        id,
-        pk_set,
-        sk_share,
+        env,
         sign_nodes,
         client,
+        reqwest_client: reqwest::Client::new(),
         near_root_account: near_root_account.parse().unwrap(),
         account_creator_id,
         account_creator_sk,
+        account_lookup_url,
+        pagoda_firebase_audience_id,
     };
+
+    // Get keys from all sign nodes, and broadcast them out as a set.
+    let pk_set = match gather_sign_node_pks(&state).await {
+        Ok(pk_set) => pk_set,
+        Err(err) => {
+            tracing::error!("Unable to gather public keys: {err}");
+            return;
+        }
+    };
+    tracing::debug!(?pk_set, "Gathered public keys");
+    let messages = match broadcast_pk_set(&state, pk_set).await {
+        Ok(messages) => messages,
+        Err(err) => {
+            tracing::error!("Unable to broadcast public keys: {err}");
+            Vec::new()
+        }
+    };
+    tracing::debug!(?messages, "broadcasted public key statuses");
 
     //TODO: not secure, allow only for testnet, whitelist endpoint etc. for mainnet
     let cors_layer = tower_http::cors::CorsLayer::permissive();
 
     let app = Router::new()
-        .route("/submit", post(submit::<UniversalTokenVerifier>))
-        .route("/new_account", post(new_account::<UniversalTokenVerifier>))
-        .route("/add_key", post(add_key::<UniversalTokenVerifier>))
+        .route("/new_account", post(new_account::<T>))
+        .route("/add_key", post(add_key::<T>))
         .layer(Extension(state))
         .layer(cors_layer);
 
@@ -109,21 +118,16 @@ pub async fn run(config: Config) {
 
 #[derive(Clone)]
 struct LeaderState {
-    id: NodeId,
-    pk_set: PublicKeySet,
-    sk_share: SecretKeyShare,
+    env: String,
     sign_nodes: Vec<String>,
     client: NearRpcAndRelayerClient,
+    reqwest_client: reqwest::Client,
     near_root_account: AccountId,
     account_creator_id: AccountId,
     // TODO: temporary solution
     account_creator_sk: SecretKey,
-}
-
-async fn parse(response_future: ResponseFuture) -> anyhow::Result<SigShareResponse> {
-    let response = response_future.await?;
-    let response_body = hyper::body::to_bytes(response.into_body()).await?;
-    Ok(serde_json::from_slice(&response_body)?)
+    account_lookup_url: String,
+    pagoda_firebase_audience_id: String,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -139,6 +143,7 @@ enum NewAccountError {
     #[error("{0}")]
     Other(#[from] anyhow::Error),
 }
+
 async fn process_new_account<T: OAuthTokenVerifier>(
     state: LeaderState,
     request: NewAccountRequest,
@@ -152,10 +157,11 @@ async fn process_new_account<T: OAuthTokenVerifier>(
         .near_account_id
         .parse()
         .map_err(|e| NewAccountError::MalformedAccountId(request.near_account_id, e))?;
-    let oidc_token_claims = T::verify_token(&request.oidc_token)
-        .await
-        .map_err(NewAccountError::OidcVerificationFailed)?;
-    let internal_acc_id = get_internal_account_id(oidc_token_claims);
+    let oidc_token_claims =
+        T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
+            .await
+            .map_err(NewAccountError::OidcVerificationFailed)?;
+    let internal_acc_id = oidc_token_claims.get_internal_account_id();
 
     state
         .client
@@ -176,17 +182,25 @@ async fn process_new_account<T: OAuthTokenVerifier>(
             )
             .await?;
 
+        let mpc_user_recovery_pk = get_user_recovery_pk(
+            &state.reqwest_client,
+            &state.sign_nodes,
+            internal_acc_id.clone(),
+        )
+        .await?;
+
         let delegate_action = get_create_account_delegate_action(
             state.account_creator_id.clone(),
             state.account_creator_sk.public_key(),
             new_user_account_id.clone(),
-            get_user_recovery_pk(internal_acc_id.clone()),
+            mpc_user_recovery_pk.clone(),
             new_user_account_pk.clone(),
             state.near_root_account.clone(),
             nonce,
             block_height + 100,
         )?;
-        let signed_delegate_action = get_signed_delegated_action(
+        // We create accounts using the local key
+        let signed_delegate_action = get_local_signed_delegated_action(
             delegate_action,
             state.account_creator_id.clone(),
             state.account_creator_sk.clone(),
@@ -211,16 +225,16 @@ async fn process_new_account<T: OAuthTokenVerifier>(
 
         // TODO: Probably need to check more fields
         if matches!(response.status, FinalExecutionStatus::SuccessValue(_)) {
-            Ok(NewAccountResponse::Ok)
+            Ok(NewAccountResponse::Ok {
+                user_public_key: new_user_account_pk.to_string(),
+                user_recovery_public_key: mpc_user_recovery_pk.to_string(),
+                near_account_id: new_user_account_id.to_string(),
+            })
         } else {
             Err(anyhow::anyhow!("transaction failed with {:?}", response.status).into())
         }
     })
     .await
-}
-
-fn get_internal_account_id(claims: IdTokenClaims) -> InternalAccountId {
-    format!("{}:{}", claims.iss, claims.sub)
 }
 
 mod response {
@@ -260,7 +274,7 @@ mod response {
     }
 }
 
-#[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
+#[tracing::instrument(level = "info", skip_all, fields(env = state.env))]
 async fn new_account<T: OAuthTokenVerifier>(
     Extension(state): Extension<LeaderState>,
     Json(request): Json<NewAccountRequest>,
@@ -303,28 +317,60 @@ enum AddKeyError {
     OidcVerificationFailed(anyhow::Error),
     #[error("relayer error: {0}")]
     RelayerError(#[from] RelayerError),
+    #[error("failed to find associated account id for pk: {0}")]
+    AccountNotFound(String),
     #[error("{0}")]
     Other(#[from] anyhow::Error),
+}
+
+fn get_acc_id_from_pk(
+    public_key: PublicKey,
+    account_lookup_url: String,
+) -> Result<AccountId, anyhow::Error> {
+    let url = format!("{}/publicKey/{}/accounts", account_lookup_url, public_key);
+    let client = reqwest::blocking::Client::new();
+    let response = client.get(url).send()?.text()?;
+    let accounts: Vec<String> = serde_json::from_str(&response)?;
+    Ok(accounts
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .parse()
+        .unwrap())
 }
 
 async fn process_add_key<T: OAuthTokenVerifier>(
     state: LeaderState,
     request: AddKeyRequest,
 ) -> Result<AddKeyResponse, AddKeyError> {
-    let oidc_token_claims = T::verify_token(&request.oidc_token)
-        .await
-        .map_err(AddKeyError::OidcVerificationFailed)?;
-    let internal_acc_id = get_internal_account_id(oidc_token_claims);
-    let user_account_id: AccountId = request
-        .near_account_id
-        .parse()
-        .map_err(|e| AddKeyError::MalformedAccountId(request.near_account_id, e))?;
-    let user_recovery_pk = get_user_recovery_pk(internal_acc_id.clone());
-    let user_recovery_sk = get_user_recovery_sk(internal_acc_id);
+    let oidc_token_claims =
+        T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
+            .await
+            .map_err(AddKeyError::OidcVerificationFailed)?;
+    let internal_acc_id = oidc_token_claims.get_internal_account_id();
+    let user_recovery_pk = get_user_recovery_pk(
+        &state.reqwest_client,
+        &state.sign_nodes,
+        internal_acc_id.clone(),
+    )
+    .await?;
     let new_public_key: PublicKey = request
         .public_key
         .parse()
         .map_err(|e| AddKeyError::MalformedPublicKey(request.public_key, e))?;
+
+    let user_account_id: AccountId = match &request.near_account_id {
+        Some(near_account_id) => near_account_id
+            .parse()
+            .map_err(|e| AddKeyError::MalformedAccountId(request.near_account_id.unwrap(), e))?,
+        None => match get_acc_id_from_pk(user_recovery_pk.clone(), state.account_lookup_url) {
+            Ok(near_account_id) => near_account_id,
+            Err(e) => {
+                tracing::error!(err = ?e);
+                return Err(AddKeyError::AccountNotFound(e.to_string()));
+            }
+        },
+    };
 
     nar::retry(|| async {
         // Get nonce and recent block hash
@@ -342,11 +388,14 @@ async fn process_add_key<T: OAuthTokenVerifier>(
             nonce,
             max_block_height,
         )?;
-        let signed_delegate_action = get_signed_delegated_action(
+        // We sign the key recovery using the signing nodes
+        let signed_delegate_action = get_mpc_signed_delegated_action(
+            &state.reqwest_client,
+            &state.sign_nodes,
+            request.oidc_token.clone(),
             delegate_action,
-            user_account_id.clone(),
-            user_recovery_sk.clone(),
-        );
+        )
+        .await?;
 
         let resp = state.client.send_meta_tx(signed_delegate_action).await;
         if let Err(err) = resp {
@@ -367,7 +416,10 @@ async fn process_add_key<T: OAuthTokenVerifier>(
 
         // TODO: Probably need to check more fields
         if matches!(resp.status, FinalExecutionStatus::SuccessValue(_)) {
-            Ok(AddKeyResponse::Ok)
+            Ok(AddKeyResponse::Ok {
+                user_public_key: new_public_key.to_string(),
+                near_account_id: user_account_id.to_string(),
+            })
         } else {
             Err(anyhow::anyhow!("transaction failed with {:?}", resp.status).into())
         }
@@ -375,13 +427,16 @@ async fn process_add_key<T: OAuthTokenVerifier>(
     .await
 }
 
-#[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
+#[tracing::instrument(level = "info", skip_all, fields(env = state.env))]
 async fn add_key<T: OAuthTokenVerifier>(
     Extension(state): Extension<LeaderState>,
     Json(request): Json<AddKeyRequest>,
 ) -> (StatusCode, Json<AddKeyResponse>) {
     tracing::info!(
-        near_account_id = hex::encode(&request.near_account_id),
+        near_account_id = hex::encode(match &request.near_account_id {
+            Some(ref near_account_id) => near_account_id,
+            None => "not specified",
+        }),
         public_key = hex::encode(&request.public_key),
         iodc_token = format!("{:.5}...", request.oidc_token),
         "add_key request"
@@ -408,124 +463,76 @@ async fn add_key<T: OAuthTokenVerifier>(
     }
 }
 
-#[tracing::instrument(level = "debug", skip_all, fields(id = state.id))]
-async fn submit<T: OAuthTokenVerifier>(
-    Extension(state): Extension<LeaderState>,
-    Json(request): Json<LeaderRequest>,
-) -> (StatusCode, Json<LeaderResponse>) {
-    tracing::info!(payload = request.payload, "submit request");
-
-    // TODO: extract access token from payload
-    let access_token = "validToken";
-    match T::verify_token(access_token).await {
-        Ok(_) => {
-            tracing::info!("access token is valid");
-            // continue execution
-        }
-        Err(_) => {
-            tracing::error!("access token verification failed");
-            return (StatusCode::UNAUTHORIZED, Json(LeaderResponse::Err));
-        }
-    }
-
-    let sig_share_request = SigShareRequest {
-        payload: request.payload.clone(),
-    };
-    let payload_json = match serde_json::to_string(&sig_share_request) {
-        Ok(payload_json) => payload_json,
-        Err(err) => {
-            tracing::error!(%err, "failed to convert payload back to json");
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(LeaderResponse::Err));
-        }
-    };
-
-    let response_futures = FuturesUnordered::new();
-    for sign_node in state.sign_nodes {
-        let req = match Request::builder()
-            .method(Method::POST)
-            .uri(format!("{}/sign", sign_node))
-            .header("content-type", "application/json")
-            .body(Body::from(payload_json.clone()))
-        {
-            Ok(req) => req,
+async fn gather_sign_node_pks(state: &LeaderState) -> anyhow::Result<Vec<Point<Ed25519>>> {
+    let fut = nar::retry_every(std::time::Duration::from_secs(1), || async {
+        let results: anyhow::Result<Vec<(usize, Point<Ed25519>)>> = crate::transaction::call(
+            &state.reqwest_client,
+            &state.sign_nodes,
+            "public_key_node",
+            (),
+        )
+        .await;
+        let mut results = match results {
+            Ok(results) => results,
             Err(err) => {
-                tracing::error!(%err, "failed to construct a compute request");
-                continue;
+                tracing::debug!("failed to gather pk: {err}");
+                return Err(err);
             }
         };
 
-        let client = Client::new();
-        response_futures.push(client.request(req));
+        results.sort_by_key(|(index, _)| *index);
+        let results: Vec<Point<Ed25519>> =
+            results.into_iter().map(|(_index, point)| point).collect();
+
+        anyhow::Result::Ok(results)
+    });
+
+    let results = tokio::time::timeout(std::time::Duration::from_secs(60), fut)
+        .await
+        .map_err(|_| anyhow::anyhow!("timeout gathering sign node pks"))??;
+    Ok(results)
+}
+
+async fn broadcast_pk_set(
+    state: &LeaderState,
+    pk_set: Vec<Point<Ed25519>>,
+) -> anyhow::Result<Vec<String>> {
+    let request = AcceptNodePublicKeysRequest {
+        public_keys: pk_set,
+    };
+
+    let messages: Vec<String> = crate::transaction::call(
+        &state.reqwest_client,
+        &state.sign_nodes,
+        "accept_pk_set",
+        request,
+    )
+    .await?;
+
+    Ok(messages)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_acc_id_from_pk_mainnet() {
+        let url = "https://api.kitwallet.app".to_string();
+        let public_key: PublicKey = "ed25519:2uF6ZUghFFUg3Kta9rW47iiJ3crNzRdaPD2rBPQWEwyc"
+            .parse()
+            .unwrap();
+        let first_account = get_acc_id_from_pk(public_key, url).unwrap();
+        assert_eq!(first_account.to_string(), "serhii.near".to_string());
     }
 
-    let mut sig_shares = BTreeMap::new();
-    sig_shares.insert(state.id, state.sk_share.sign(&request.payload));
-    for response_future in response_futures {
-        let (node_id, sig_share) = match parse(response_future).await {
-            Ok(response) => match response {
-                SigShareResponse::Ok { node_id, sig_share } => (node_id, sig_share),
-                SigShareResponse::Err => {
-                    tracing::error!("Received an error response");
-                    continue;
-                }
-            },
-            Err(err) => {
-                tracing::error!(%err, "Failed to get response");
-                continue;
-            }
-        };
-
-        if state
-            .pk_set
-            .public_key_share(node_id)
-            .verify(&sig_share, &request.payload)
-        {
-            match sig_shares.entry(node_id) {
-                Entry::Vacant(e) => {
-                    tracing::debug!(?sig_share, "received valid signature share");
-                    e.insert(sig_share);
-                }
-                Entry::Occupied(e) if e.get() == &sig_share => {
-                    tracing::error!(
-                        node_id,
-                        sig_share = ?e.get(),
-                        "received a duplicate share"
-                    );
-                }
-                Entry::Occupied(e) => {
-                    tracing::error!(
-                        node_id = node_id,
-                        sig_share_1 = ?e.get(),
-                        sig_share_2 = ?sig_share,
-                        "received two different valid shares for the same node (should be impossible)"
-                    );
-                }
-            }
-        } else {
-            tracing::error!("received invalid signature",);
-        }
-
-        if sig_shares.len() > state.pk_set.threshold() {
-            tracing::debug!(
-                "received {} valid signature shares, not waiting for the rest",
-                sig_shares.len()
-            );
-            break;
-        }
-    }
-
-    let sig_shares_num = sig_shares.len();
-    tracing::debug!("got {} valid signature shares", sig_shares_num);
-
-    if let Ok(signature) = state.pk_set.combine_signatures(&sig_shares) {
-        tracing::debug!(?signature, "replying with full signature");
-        (StatusCode::OK, Json(LeaderResponse::Ok { signature }))
-    } else {
-        tracing::error!(
-            "expected to get at least {} shares, but only got {}",
-            state.pk_set.threshold() + 1,
-            sig_shares_num
-        );
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(LeaderResponse::Err))
+    #[test]
+    fn test_get_acc_id_from_pk_testnet() {
+        let url = "https://testnet-api.kitwallet.app".to_string();
+        let public_key: PublicKey = "ed25519:7WYR7ifUbdVo2soQCvzAHnfdGfDhUhF8Und5CKZYK9b8"
+            .parse()
+            .unwrap();
+        let first_account = get_acc_id_from_pk(public_key, url).unwrap();
+        assert_eq!(first_account.to_string(), "serhii.testnet".to_string());
     }
 }

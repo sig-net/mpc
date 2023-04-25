@@ -5,10 +5,11 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn test_invalid_token() -> anyhow::Result<()> {
-    with_nodes(4, 3, 3, |ctx| {
+    with_nodes(1, |ctx| {
         Box::pin(async move {
             let account_id = account::random(ctx.worker)?;
             let user_public_key = key::random();
+            let oidc_token = token::valid_random();
 
             let (status_code, new_acc_response) = ctx
                 .leader_node
@@ -26,12 +27,17 @@ async fn test_invalid_token() -> anyhow::Result<()> {
                 .leader_node
                 .new_account(NewAccountRequest {
                     near_account_id: account_id.to_string(),
-                    oidc_token: token::valid(),
+                    oidc_token: oidc_token.clone(),
                     public_key: user_public_key.clone(),
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
-            assert!(matches!(new_acc_response, NewAccountResponse::Ok));
+            assert!(matches!(new_acc_response, NewAccountResponse::Ok {
+                    user_public_key: user_pk,
+                    user_recovery_public_key: _,
+                    near_account_id: acc_id,
+                } if user_pk == user_public_key && acc_id == account_id.to_string()
+            ));
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
@@ -42,7 +48,7 @@ async fn test_invalid_token() -> anyhow::Result<()> {
             let (status_code, add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
-                    near_account_id: account_id.to_string(),
+                    near_account_id: Some(account_id.to_string()),
                     oidc_token: token::invalid(),
                     public_key: new_user_public_key.clone(),
                 })
@@ -54,14 +60,20 @@ async fn test_invalid_token() -> anyhow::Result<()> {
             let (status_code, add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
-                    near_account_id: account_id.to_string(),
-                    oidc_token: token::valid(),
+                    near_account_id: Some(account_id.to_string()),
+                    oidc_token,
                     public_key: new_user_public_key.clone(),
                 })
                 .await?;
 
             assert_eq!(status_code, StatusCode::OK);
-            assert!(matches!(add_key_response, AddKeyResponse::Ok));
+            assert!(matches!(
+                add_key_response,
+                AddKeyResponse::Ok {
+                    user_public_key: new_pk,
+                    near_account_id: acc_id,
+                } if new_pk == new_user_public_key && acc_id == account_id.to_string()
+            ));
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
@@ -75,16 +87,17 @@ async fn test_invalid_token() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_malformed_account_id() -> anyhow::Result<()> {
-    with_nodes(4, 3, 3, |ctx| {
+    with_nodes(1, |ctx| {
         Box::pin(async move {
             let malformed_account_id = account::malformed();
             let user_public_key = key::random();
+            let oidc_token = token::valid_random();
 
             let (status_code, new_acc_response) = ctx
                 .leader_node
                 .new_account(NewAccountRequest {
                     near_account_id: malformed_account_id.to_string(),
-                    oidc_token: token::valid(),
+                    oidc_token: oidc_token.clone(),
                     public_key: user_public_key.clone(),
                 })
                 .await?;
@@ -98,12 +111,17 @@ async fn test_malformed_account_id() -> anyhow::Result<()> {
                 .leader_node
                 .new_account(NewAccountRequest {
                     near_account_id: account_id.to_string(),
-                    oidc_token: token::valid(),
+                    oidc_token: oidc_token.clone(),
                     public_key: user_public_key.clone(),
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
-            assert!(matches!(new_acc_response, NewAccountResponse::Ok));
+            assert!(matches!(new_acc_response, NewAccountResponse::Ok {
+                    user_public_key: user_pk,
+                    user_recovery_public_key: _,
+                    near_account_id: acc_id,
+                } if user_pk == user_public_key && acc_id == account_id.to_string()
+            ));
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
@@ -114,8 +132,8 @@ async fn test_malformed_account_id() -> anyhow::Result<()> {
             let (status_code, add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
-                    near_account_id: malformed_account_id.to_string(),
-                    oidc_token: token::valid(),
+                    near_account_id: Some(malformed_account_id.to_string()),
+                    oidc_token: oidc_token.clone(),
                     public_key: new_user_public_key.clone(),
                 })
                 .await?;
@@ -126,13 +144,19 @@ async fn test_malformed_account_id() -> anyhow::Result<()> {
             let (status_code, add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
-                    near_account_id: account_id.to_string(),
-                    oidc_token: token::valid(),
+                    near_account_id: Some(account_id.to_string()),
+                    oidc_token,
                     public_key: new_user_public_key.clone(),
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
-            assert!(matches!(add_key_response, AddKeyResponse::Ok));
+            assert!(matches!(
+                add_key_response,
+                AddKeyResponse::Ok {
+                    user_public_key: new_pk,
+                    near_account_id: acc_id,
+                } if new_pk == new_user_public_key && acc_id == account_id.to_string()
+            ));
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
@@ -146,16 +170,17 @@ async fn test_malformed_account_id() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_malformed_public_key() -> anyhow::Result<()> {
-    with_nodes(4, 3, 3, |ctx| {
+    with_nodes(1, |ctx| {
         Box::pin(async move {
             let account_id = account::random(ctx.worker)?;
             let malformed_public_key = key::malformed();
+            let oidc_token = token::valid_random();
 
             let (status_code, new_acc_response) = ctx
                 .leader_node
                 .new_account(NewAccountRequest {
                     near_account_id: account_id.to_string(),
-                    oidc_token: token::valid(),
+                    oidc_token: oidc_token.clone(),
                     public_key: malformed_public_key.clone(),
                 })
                 .await?;
@@ -169,12 +194,17 @@ async fn test_malformed_public_key() -> anyhow::Result<()> {
                 .leader_node
                 .new_account(NewAccountRequest {
                     near_account_id: account_id.to_string(),
-                    oidc_token: token::valid(),
+                    oidc_token: oidc_token.clone(),
                     public_key: user_public_key.clone(),
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
-            assert!(matches!(new_acc_response, NewAccountResponse::Ok));
+            assert!(matches!(new_acc_response, NewAccountResponse::Ok {
+                    user_public_key: user_pk,
+                    user_recovery_public_key: _,
+                    near_account_id: acc_id,
+                } if user_pk == user_public_key && acc_id == account_id.to_string()
+            ));
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
@@ -183,8 +213,8 @@ async fn test_malformed_public_key() -> anyhow::Result<()> {
             let (status_code, add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
-                    near_account_id: account_id.to_string(),
-                    oidc_token: token::valid(),
+                    near_account_id: Some(account_id.to_string()),
+                    oidc_token: oidc_token.clone(),
                     public_key: malformed_public_key.clone(),
                 })
                 .await?;
@@ -197,15 +227,21 @@ async fn test_malformed_public_key() -> anyhow::Result<()> {
             let (status_code, add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
-                    near_account_id: account_id.to_string(),
-                    oidc_token: token::valid(),
+                    near_account_id: Some(account_id.to_string()),
+                    oidc_token,
                     public_key: new_user_public_key.clone(),
                 })
                 .await?;
 
             assert_eq!(status_code, StatusCode::OK);
 
-            assert!(matches!(add_key_response, AddKeyResponse::Ok));
+            assert!(matches!(
+                add_key_response,
+                AddKeyResponse::Ok {
+                    user_public_key: new_pk,
+                    near_account_id: acc_id,
+                } if new_pk == new_user_public_key && acc_id == account_id.to_string()
+            ));
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
@@ -219,7 +255,7 @@ async fn test_malformed_public_key() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_add_key_to_non_existing_account() -> anyhow::Result<()> {
-    with_nodes(4, 3, 3, |ctx| {
+    with_nodes(1, |ctx| {
         Box::pin(async move {
             let account_id = account::random(ctx.worker)?;
             let user_public_key = key::random();
@@ -227,8 +263,8 @@ async fn test_add_key_to_non_existing_account() -> anyhow::Result<()> {
             let (status_code, add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
-                    near_account_id: account_id.to_string(),
-                    oidc_token: token::valid(),
+                    near_account_id: Some(account_id.to_string()),
+                    oidc_token: token::valid_random(),
                     public_key: user_public_key.clone(),
                 })
                 .await?;

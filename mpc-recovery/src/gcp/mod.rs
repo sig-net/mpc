@@ -1,69 +1,168 @@
-use hyper::client::HttpConnector;
-use hyper_rustls::HttpsConnector;
-use mpc_recovery_gcp::google::cloud::secretmanager::v1::{
-    secret_manager_service_client::SecretManagerServiceClient, AccessSecretVersionRequest,
-};
-use tonic::{
-    transport::{Certificate, Channel, ClientTlsConfig},
-    Request, Status,
-};
-use yup_oauth2::{
-    authenticator::{ApplicationDefaultCredentialsTypes, Authenticator},
+pub mod error;
+pub mod value;
+
+use self::value::{FromValue, IntoValue};
+use google_datastore1::api::{CommitRequest, Entity, Key, LookupRequest, Mutation, PathElement};
+use google_datastore1::oauth2::AccessTokenAuthenticator;
+use google_datastore1::Datastore;
+use google_secretmanager1::oauth2::authenticator::ApplicationDefaultCredentialsTypes;
+use google_secretmanager1::oauth2::{
     ApplicationDefaultCredentialsAuthenticator, ApplicationDefaultCredentialsFlowOpts,
 };
+use google_secretmanager1::SecretManager;
+use hyper::client::HttpConnector;
+use hyper_rustls::HttpsConnector;
 
-const DOMAIN_NAME: &str = "secretmanager.googleapis.com";
-const ENDPOINT: &str = "https://secretmanager.googleapis.com";
-const TLS_CERTS: &[u8] = include_bytes!("../../roots.pem");
-
+#[derive(Clone)]
 pub struct GcpService {
-    authenticator: Authenticator<HttpsConnector<HttpConnector>>,
+    env: String,
+    project_id: String,
+    datastore: Datastore<HttpsConnector<HttpConnector>>,
+    secret_manager: SecretManager<HttpsConnector<HttpConnector>>,
+}
+
+pub trait KeyKind {
+    fn kind() -> String;
 }
 
 impl GcpService {
-    pub async fn new() -> anyhow::Result<Self> {
-        let opts = ApplicationDefaultCredentialsFlowOpts::default();
-        let authenticator = match ApplicationDefaultCredentialsAuthenticator::builder(opts).await {
-            ApplicationDefaultCredentialsTypes::InstanceMetadata(auth) => auth.build().await?,
-            ApplicationDefaultCredentialsTypes::ServiceAccount(auth) => auth.build().await?,
-        };
+    pub async fn new(
+        env: String,
+        project_id: String,
+        gcp_datastore_url: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let mut datastore;
+        let secret_manager;
+        let client = hyper::Client::builder().build(
+            hyper_rustls::HttpsConnectorBuilder::new()
+                .with_native_roots()
+                .https_or_http()
+                .enable_http1()
+                .enable_http2()
+                .build(),
+        );
+        if let Some(gcp_datastore_url) = gcp_datastore_url {
+            // Assuming custom GCP URL points to an emulator, so the token does not matter
+            let authenticator = AccessTokenAuthenticator::builder("TOKEN".to_string())
+                .build()
+                .await?;
+            secret_manager = SecretManager::new(client.clone(), authenticator.clone());
+            datastore = Datastore::new(client, authenticator);
+            datastore.base_url(gcp_datastore_url.clone());
+            datastore.root_url(gcp_datastore_url);
+        } else {
+            let opts = ApplicationDefaultCredentialsFlowOpts::default();
+            let authenticator = match ApplicationDefaultCredentialsAuthenticator::builder(opts)
+                .await
+            {
+                ApplicationDefaultCredentialsTypes::InstanceMetadata(auth) => auth.build().await?,
+                ApplicationDefaultCredentialsTypes::ServiceAccount(auth) => auth.build().await?,
+            };
+            secret_manager = SecretManager::new(client.clone(), authenticator.clone());
+            datastore = Datastore::new(client, authenticator);
+        }
 
-        Ok(Self { authenticator })
+        Ok(Self {
+            env,
+            project_id,
+            datastore,
+            secret_manager,
+        })
     }
 
-    pub async fn load_secret(&self, name: String) -> anyhow::Result<Vec<u8>> {
-        let access_token = self
-            .authenticator
-            .token(&["https://www.googleapis.com/auth/cloud-platform"])
+    #[tracing::instrument(level = "debug", skip_all, fields(name = name.as_ref()))]
+    pub async fn load_secret<T: AsRef<str>>(&self, name: T) -> anyhow::Result<Vec<u8>> {
+        let (_, response) = self
+            .secret_manager
+            .projects()
+            .secrets_versions_access(name.as_ref())
+            .doit()
             .await?;
-        let token = access_token
-            .token()
-            .ok_or_else(|| anyhow::anyhow!("GCP token did not have access_token field in it"))?;
+        let secret_payload = response
+            .payload
+            .ok_or_else(|| anyhow::anyhow!("secret value is missing payload"))?;
+        let data = secret_payload
+            .data
+            .ok_or_else(|| anyhow::anyhow!("secret value payload is missing data"))?;
+        tracing::debug!("loaded secret successfully");
 
-        let tls_config = ClientTlsConfig::new()
-            .ca_certificate(Certificate::from_pem(TLS_CERTS))
-            .domain_name(DOMAIN_NAME);
+        Ok(data)
+    }
 
-        let channel = Channel::from_static(ENDPOINT)
-            .tls_config(tls_config)?
-            .connect()
+    #[tracing::instrument(level = "debug", skip_all, fields(key = name_key.to_string()))]
+    pub async fn get<K: ToString, T: FromValue + KeyKind>(
+        &self,
+        name_key: K,
+    ) -> anyhow::Result<Option<T>> {
+        let request = LookupRequest {
+            keys: Some(vec![Key {
+                path: Some(vec![PathElement {
+                    // We can't create multiple datastore databases in GCP, so we have to suffix
+                    // type kinds with env (`dev`, `prod`).
+                    kind: Some(format!("{}-{}", T::kind(), self.env)),
+                    name: Some(name_key.to_string()),
+                    id: None,
+                }]),
+                partition_id: None,
+            }]),
+            read_options: None,
+            database_id: Some("".to_string()),
+        };
+        tracing::debug!(?request);
+        let (_, response) = self
+            .datastore
+            .projects()
+            .lookup(request, &self.project_id)
+            .doit()
             .await?;
-        let mut client =
-            SecretManagerServiceClient::with_interceptor(channel, move |mut req: Request<()>| {
-                req.metadata_mut().insert(
-                    "authorization",
-                    format!("Bearer {}", token)
-                        .parse()
-                        .map_err(|_| Status::unauthenticated("failed to parse access token"))?,
-                );
-                Ok(req)
-            });
+        tracing::debug!(?response, "received response");
+        match response
+            .found
+            .and_then(|mut results| results.pop())
+            .and_then(|result| result.entity)
+        {
+            Some(found_entity) => Ok(Some(T::from_value(found_entity.into_value())?)),
+            None => Ok(None),
+        }
+    }
 
-        let request = Request::new(AccessSecretVersionRequest { name });
-        let response = client.access_secret_version(request).await?;
-        let secret_payload = response.into_inner().payload.ok_or_else(|| {
-            anyhow::anyhow!("failed to fetch secret share from GCP Secret Manager")
-        })?;
-        Ok(secret_payload.data)
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn insert<T: IntoValue + KeyKind>(&self, value: T) -> anyhow::Result<()> {
+        let mut entity = Entity::from_value(value.into_value())?;
+        let path_element = entity
+            .key
+            .as_mut()
+            .and_then(|k| k.path.as_mut())
+            .and_then(|p| p.first_mut());
+        if let Some(path_element) = path_element {
+            // We can't create multiple datastore databases in GCP, so we have to suffix
+            // type kinds with env (`dev`, `prod`).
+            path_element.kind = Some(format!("{}-{}", T::kind(), self.env))
+        }
+
+        let request = CommitRequest {
+            database_id: Some("".to_string()),
+            mode: Some(String::from("NON_TRANSACTIONAL")),
+            mutations: Some(vec![Mutation {
+                insert: Some(entity),
+                delete: None,
+                update: None,
+                base_version: None,
+                upsert: None,
+                update_time: None,
+            }]),
+            single_use_transaction: None,
+            transaction: None,
+        };
+        tracing::debug!(?request);
+        let (_, response) = self
+            .datastore
+            .projects()
+            .commit(request, &self.project_id)
+            .doit()
+            .await?;
+        tracing::debug!(?response, "received response");
+
+        Ok(())
     }
 }

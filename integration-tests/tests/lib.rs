@@ -3,13 +3,14 @@ mod mpc;
 
 use crate::docker::{LeaderNode, SignNode};
 use bollard::Docker;
-use docker::{redis::Redis, relayer::Relayer};
+use curv::elliptic::curves::{Ed25519, Point};
+use docker::{datastore::Datastore, redis::Redis, relayer::Relayer};
 use futures::future::BoxFuture;
 use std::time::Duration;
-use threshold_crypto::PublicKeySet;
 use workspaces::{network::Sandbox, AccountId, Worker};
 
 const NETWORK: &str = "mpc_recovery_integration_test_network";
+const GCP_PROJECT_ID: &str = "mpc-recovery-gcp-project";
 #[cfg(target_os = "linux")]
 const HOST_MACHINE_FROM_DOCKER: &str = "172.17.0.1";
 #[cfg(target_os = "macos")]
@@ -17,8 +18,9 @@ const HOST_MACHINE_FROM_DOCKER: &str = "docker.for.mac.localhost";
 
 pub struct TestContext<'a> {
     leader_node: &'a LeaderNode,
-    pk_set: &'a PublicKeySet,
+    _pk_set: &'a Vec<Point<Ed25519>>,
     worker: &'a Worker<Sandbox>,
+    signer_nodes: &'a Vec<SignNode>,
 }
 
 async fn create_account(
@@ -36,13 +38,13 @@ async fn create_account(
     Ok((account_id, account_sk))
 }
 
-async fn with_nodes<F>(shares: usize, threshold: usize, nodes: usize, f: F) -> anyhow::Result<()>
+async fn with_nodes<F>(nodes: usize, f: F) -> anyhow::Result<()>
 where
     F: for<'a> FnOnce(TestContext<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
 {
     let docker = Docker::connect_with_local_defaults()?;
 
-    let (pk_set, sk_shares) = mpc_recovery::generate(shares, threshold)?;
+    let (pk_set, sk_shares) = mpc_recovery::generate(nodes);
     let worker = workspaces::sandbox().await?;
     let near_root_account = worker.root_account()?;
     near_root_account
@@ -59,6 +61,7 @@ where
     let (creator_account_id, creator_account_sk) = create_account(&worker).await?;
 
     let near_rpc = format!("http://{HOST_MACHINE_FROM_DOCKER}:{}", worker.rpc_port());
+    let datastore = Datastore::start(&docker, NETWORK, GCP_PROJECT_ID).await?;
     let redis = Redis::start(&docker, NETWORK).await?;
     let relayer = Relayer::start(
         &docker,
@@ -71,38 +74,53 @@ where
     )
     .await?;
 
-    let mut sign_nodes = Vec::new();
-    for i in 2..=nodes {
-        let addr = SignNode::start(&docker, NETWORK, i as u64, &pk_set, &sk_shares[i - 1]).await?;
-        sign_nodes.push(addr);
+    let mut signer_nodes = Vec::new();
+    for (i, share) in sk_shares.iter().enumerate().take(nodes) {
+        let addr = SignNode::start(
+            &docker,
+            NETWORK,
+            i as u64,
+            share,
+            &datastore.address,
+            GCP_PROJECT_ID,
+        )
+        .await?;
+        signer_nodes.push(addr);
     }
+
+    let pagoda_firebase_audience_id = "not actually used in integration tests";
+
+    let signer_urls: &Vec<_> = &signer_nodes.iter().map(|n| n.address.clone()).collect();
+
     let leader_node = LeaderNode::start(
         &docker,
         NETWORK,
-        1,
-        &pk_set,
-        &sk_shares[0],
-        sign_nodes.iter().map(|n| n.address.clone()).collect(),
+        signer_urls.clone(),
         &near_rpc,
         &relayer.address,
+        &datastore.address,
+        GCP_PROJECT_ID,
         near_root_account.id(),
         &creator_account_id,
         &creator_account_sk,
+        pagoda_firebase_audience_id,
     )
     .await?;
 
     // Wait until all nodes initialize
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    tokio::time::sleep(Duration::from_millis(10000)).await;
 
     let result = f(TestContext {
         leader_node: &leader_node,
-        pk_set: &pk_set,
+        _pk_set: &pk_set,
+        signer_nodes: &signer_nodes,
         worker: &worker,
     })
     .await;
 
+    drop(datastore);
     drop(leader_node);
-    drop(sign_nodes);
+    drop(signer_nodes);
     drop(relayer);
     drop(redis);
 
@@ -161,8 +179,15 @@ mod key {
 }
 
 mod token {
-    pub fn valid() -> String {
-        "validToken".to_string()
+    use rand::{distributions::Alphanumeric, Rng};
+
+    pub fn valid_random() -> String {
+        let random: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+        format!("validToken:{}", random)
     }
 
     pub fn invalid() -> String {
