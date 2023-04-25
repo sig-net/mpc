@@ -1,4 +1,5 @@
 use self::aggregate_signer::{NodeInfo, Reveal, SignedCommitment, SigningState};
+use self::check_signatures::{check_add_key_signature, get_oidc_digest, HashSalt};
 use self::oidc_digest::OidcDigest;
 use self::user_credentials::EncryptedUserCredentials;
 use self::user_credentials::UserCredentials;
@@ -13,6 +14,7 @@ use crate::transaction::get_add_key_delegate_action;
 use crate::NodeId;
 use aes_gcm::Aes256Gcm;
 use axum::routing::get;
+use anyhow::Context;
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
 use curv::elliptic::curves::{Ed25519, Point};
 use ed25519_dalek::{Digest, Sha512};
@@ -27,6 +29,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub mod aggregate_signer;
+pub mod check_signatures;
 pub mod oidc_digest;
 pub mod pk_set;
 pub mod user_credentials;
@@ -103,7 +106,7 @@ struct SignNodeState {
 }
 
 #[derive(thiserror::Error, Debug)]
-enum CommitError {
+pub enum CommitError {
     #[error("malformed account id: {0}")]
     MalformedAccountId(String, ParseAccountError),
     #[error("malformed public key {0}: {1}")]
@@ -154,8 +157,9 @@ async fn get_or_generate_user_creds(
 
 async fn process_add_key_commit<T: OAuthTokenVerifier>(
     state: SignNodeState,
-    AddKey {
-        account_id_from_leader,
+    add_key: AddKey,
+) -> Result<SignedCommitment, CommitError> {
+    let AddKey {
         user_recovery_pk,
         max_block_height,
         nonce,
@@ -163,67 +167,54 @@ async fn process_add_key_commit<T: OAuthTokenVerifier>(
         oidc_token,
         public_key,
         signature,
-    }: AddKey,
-) -> Result<SignedCommitment, CommitError> {
-    // As per the readme
-    // The signature field is a signature of:
-    // sha256.hash(Borsh.serialize<u32>(SALT + 2) ++ Borsh.serialize(
-    #[derive(BorshSerialize)]
-    struct B {
-        near_account_id: Option<String>,
-        oidc_token: String,
-        public_key: String,
-    }
-    // ))
-    // signed by the key you used to claim the oidc token.
-    // This does not have to be the same as the key in the public key field.
+        ..
+    } = &add_key;
+    let oidc_digest = get_oidc_digest(&oidc_token);
+    // Fetch the public key associated with the oidc key digest from the store
+    // Only this public key is allowed to take actions with this token
+    match state
+        .gcp_service
+        .get::<_, OidcDigest>(format!("{}/{}", state.node_info.our_index, oidc_digest))
+        .await
     {
-        let mut hasher = Sha512::default();
-        BorshSerialize::serialize(&HashSalt::ClaimOidcRequest.get_salt(), &mut hasher);
-        let near_account_id = if account_id_from_leader {
-            None
-        } else {
-            Some(near_account_id.clone())
-        };
-        BorshSerialize::serialize(
-            &B {
-                near_account_id: near_account_id.clone(),
-                oidc_token: oidc_token.clone(),
-                public_key: public_key.clone(),
-            },
-            &mut hasher,
-        );
-        let request_digest = hasher.finalize();
-
-        let hasher = Sha512::default().chain(oidc_token.as_bytes());
-
-        let oidc_digest = hex::encode(hasher.finalize());
-
-        // Fetch the public key associated with the oidc key digest from the store
-        // Only this public key is allowed to take actions with this token
-        let public_key: PublicKey = match state
-            .gcp_service
-            .get::<_, OidcDigest>(format!("{}/{}", state.node_info.our_index, oidc_digest))
-            .await
-        {
-            Ok(Some(user_credentials)) => user_credentials.public_key,
-            Ok(None) => {
-                return Err(CommitError::OidcVerificationFailed(anyhow::anyhow!(
-                    "Oidc token has not been claimed"
+        // The oidc key has been claimed
+        Ok(Some(user_credentials)) => {
+            match signature {
+                // If the user doesn't sign their message they might be frontrunning
+                None => {
+                    return Err(CommitError::OidcVerificationFailed(anyhow::anyhow!(
+                    "Oidc token has been claimed, please prove ownership by attaching a signature"
                 )))
+                }
+                Some(signature) => {
+                    // Check the signature matches the public key the hash was registered to
+                    check_add_key_signature(
+                        &add_key,
+                        user_credentials.public_key,
+                        signature.clone(),
+                    )?
+                }
             }
-            Err(e) => return Err(CommitError::Other(anyhow::anyhow!(e))),
-        };
-
-        if !Signature::ED25519(signature).verify(&request_digest, &public_key) {
-            return Err(CommitError::SignatureVerificationFailed(anyhow::anyhow!(
-                "Public key {}, digest {} and signature {} don't match",
-                &public_key,
-                &hex::encode(request_digest),
-                &signature
-            )));
         }
-    }
+        // The oidc key hasn't been claimed
+        Ok(None) => {
+            match signature {
+                // The user doesn't sign their message because they're using the old version of the API
+                // Turn this into an error ASAP
+                None => tracing::debug!("A user is using the non front running resistant API"),
+                // The user is signing their messages but not registering their token, something has gone wrong
+                Some(_) => {
+                    return Err(CommitError::Other(anyhow::anyhow!(
+                        "You must call the oidc_claim endpoint first"
+                    )))
+                }
+            }
+            // return Err(CommitError::OidcVerificationFailed(anyhow::anyhow!(
+            //     "Oidc token has not been claimed"
+            // )))
+        }
+        Err(e) => return Err(CommitError::Other(anyhow::anyhow!(e))),
+    };
 
     let oidc_token_claims = T::verify_token(&oidc_token, &state.pagoda_firebase_audience_id)
         .await
@@ -235,19 +226,19 @@ async fn process_add_key_commit<T: OAuthTokenVerifier>(
 
     let new_public_key: PublicKey = public_key
         .parse()
-        .map_err(|e| CommitError::MalformedPublicKey(public_key, e))?;
+        .map_err(|e| CommitError::MalformedPublicKey(public_key.clone(), e))?;
 
     let user_account_id: AccountId = near_account_id
         .parse()
-        .map_err(|e| CommitError::MalformedAccountId(near_account_id, e))?;
+        .map_err(|e| CommitError::MalformedAccountId(near_account_id.clone(), e))?;
 
     // Create a transaction to add a new key
     let delegate_action = get_add_key_delegate_action(
         user_account_id.clone(),
         user_recovery_pk.clone(),
         new_public_key.clone(),
-        nonce,
-        max_block_height,
+        *nonce,
+        *max_block_height,
     )?;
 
     let bytes = delegate_action
@@ -276,8 +267,9 @@ async fn process_claim_oidc_commit(
     // To verify the signature of the message verify:
     // sha256.hash(Borsh.serialize<u32>(SALT + 0) ++ Borsh.serialize<[u8]>(oidc_token_hash))
     let mut hasher = Sha512::default();
-    BorshSerialize::serialize(&HashSalt::ClaimOidcRequest.get_salt(), &mut hasher);
-    BorshSerialize::serialize(&oidc_token_hash, &mut hasher);
+    BorshSerialize::serialize(&HashSalt::ClaimOidcRequest.get_salt(), &mut hasher)
+        .context("Serialization failed")?;
+    BorshSerialize::serialize(&oidc_token_hash, &mut hasher).context("Serialization failed")?;
     let request_digest = hasher.finalize();
 
     let public_key: PublicKey = public_key
@@ -504,21 +496,4 @@ async fn check_if_ready(state: &SignNodeState) -> Result<(), String> {
 fn fail(err_msg: String) -> (StatusCode, Json<Result<SignedCommitment, String>>) {
     tracing::error!(err = ?err_msg);
     (StatusCode::BAD_REQUEST, Json(Err(err_msg)))
-}
-
-#[derive(Copy, Clone)]
-enum HashSalt {
-    ClaimOidcRequest = 0,
-    ClaimOidcResponse = 1,
-    AddKeyRequest = 2,
-}
-
-/// Mentioned in the readme, here to avoid collisions with legitimate transactions
-// chosen by a fair dice roll.
-// guaranteed to be random.
-const SALT_BASE: u32 = 3177899144;
-impl HashSalt {
-    pub fn get_salt(&self) -> u32 {
-        SALT_BASE + (*self as u32)
-    }
 }

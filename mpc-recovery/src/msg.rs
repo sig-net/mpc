@@ -38,8 +38,8 @@ pub struct AddKeyRequest {
     pub near_account_id: Option<String>,
     pub oidc_token: String,
 
-    #[serde(with = "hex_sig_share")]
-    pub signature: Signature,
+    #[serde(with = "hex_option_sig_share")]
+    pub signature: Option<Signature>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -116,8 +116,7 @@ pub struct AddKey {
     pub oidc_token: String,
     pub public_key: String,
 
-    #[serde(with = "hex_sig_share")]
-    pub signature: Signature,
+    pub signature: Option<Signature>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -155,5 +154,46 @@ mod hex_sig_share {
             })?,
         )
         .map_err(serde::de::Error::custom)
+    }
+}
+
+// There has to be a less dumb way to do this, but I don't have time to work it out
+mod hex_option_sig_share {
+    use ed25519_dalek::Signature;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(sig_share: &Option<Signature>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let s = match sig_share {
+            Some(sig) => hex::encode(Signature::to_bytes(*sig)),
+            None => String::new(),
+        };
+        serializer.serialize_str(&s)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Signature>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        if s.is_empty() {
+            return Ok(None);
+        }
+        let sig = Signature::from_bytes(
+            &<[u8; Signature::BYTE_SIZE]>::try_from(
+                hex::decode(s).map_err(serde::de::Error::custom)?,
+            )
+            .map_err(|v: Vec<u8>| {
+                serde::de::Error::custom(format!(
+                    "signature has incorrect length: expected {} bytes, but got {}",
+                    Signature::BYTE_SIZE,
+                    v.len()
+                ))
+            })?,
+        )
+        .map_err(serde::de::Error::custom)?;
+        Ok(Some(sig))
     }
 }

@@ -64,6 +64,8 @@ async fn test_invalid_token() -> anyhow::Result<()> {
                         limited_access_keys: None,
                         contract_bytes: None,
                     },
+                    public_key: new_user_public_key.clone(),
+                    signature: None,
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::UNAUTHORIZED);
@@ -80,6 +82,7 @@ async fn test_invalid_token() -> anyhow::Result<()> {
                         limited_access_keys: None,
                         contract_bytes: None,
                     },
+                    signature: None,
                 })
                 .await?;
 
@@ -165,6 +168,7 @@ async fn test_malformed_account_id() -> anyhow::Result<()> {
                         limited_access_keys: None,
                         contract_bytes: None,
                     },
+                    signature: None,
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::BAD_REQUEST);
@@ -181,6 +185,7 @@ async fn test_malformed_account_id() -> anyhow::Result<()> {
                         limited_access_keys: None,
                         contract_bytes: None,
                     },
+                    signature: None,
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
@@ -242,18 +247,17 @@ async fn test_malformed_account_id() -> anyhow::Result<()> {
 //             tokio::time::sleep(Duration::from_millis(2000)).await;
 
 //             check::access_key_exists(&ctx, &account_id, &user_public_key).await?;
-
 //             let (status_code, add_key_response) = ctx
 //                 .leader_node
 //                 .add_key(AddKeyRequest {
 //                     near_account_id: Some(account_id.to_string()),
 //                     oidc_token: oidc_token.clone(),
 //                     public_key: malformed_public_key.clone(),
+// signature: None,
 //                 })
 //                 .await?;
 //             assert_eq!(status_code, StatusCode::BAD_REQUEST);
 //             assert!(matches!(add_key_response, AddKeyResponse::Err { .. }));
-
 //             // Check that the service is still available
 //             let new_user_public_key = key::random();
 
@@ -266,10 +270,10 @@ async fn test_malformed_account_id() -> anyhow::Result<()> {
 //                         full_access_keys: Some(vec![new_user_public_key.parse()?]),
 //                         limited_access_keys: None,
 //                         contract_bytes: None,
+// signature: None,
 //                     },
 //                 })
 //                 .await?;
-
 //             assert_eq!(status_code, StatusCode::OK);
 
 //             let AddKeyResponse::Ok {
@@ -308,6 +312,7 @@ async fn test_add_key_to_non_existing_account() -> anyhow::Result<()> {
                         limited_access_keys: None,
                         contract_bytes: None,
                     },
+                    signature: None,
                 })
                 .await?;
 

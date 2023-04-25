@@ -95,6 +95,7 @@ async fn test_basic_action() -> anyhow::Result<()> {
                         limited_access_keys: None,
                         contract_bytes: None,
                     },
+                    signature: None,
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
@@ -124,6 +125,7 @@ async fn test_basic_action() -> anyhow::Result<()> {
                         limited_access_keys: None,
                         contract_bytes: None,
                     },
+                    signature: None,
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
