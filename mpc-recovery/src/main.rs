@@ -14,9 +14,9 @@ enum Cli {
         n: usize,
     },
     StartLeader {
-        /// Node ID
-        #[arg(long, env("MPC_RECOVERY_NODE_ID"))]
-        node_id: u64,
+        /// Environment to run in (`dev` or `prod`)
+        #[arg(long, env("MPC_RECOVERY_ENV"), default_value("dev"))]
+        env: String,
         /// The web port for this server
         #[arg(long, env("MPC_RECOVERY_WEB_PORT"))]
         web_port: u16,
@@ -65,6 +65,9 @@ enum Cli {
         test: bool,
     },
     StartSign {
+        /// Environment to run in (`dev` or `prod`)
+        #[arg(long, env("MPC_RECOVERY_ENV"), default_value("dev"))]
+        env: String,
         /// Node ID
         #[arg(long, env("MPC_RECOVERY_NODE_ID"))]
         node_id: u64,
@@ -91,6 +94,7 @@ enum Cli {
 
 async fn load_sh_skare(
     gcp_service: &GcpService,
+    env: &str,
     node_id: u64,
     sk_share_arg: Option<String>,
 ) -> anyhow::Result<String> {
@@ -98,7 +102,7 @@ async fn load_sh_skare(
         Some(sk_share) => Ok(sk_share),
         None => {
             let name = format!(
-                "projects/pagoda-discovery-platform-dev/secrets/mpc-recovery-secret-share-{node_id}/versions/latest"
+                "projects/pagoda-discovery-platform-dev/secrets/mpc-recovery-secret-share-{node_id}-{env}/versions/latest"
             );
             Ok(std::str::from_utf8(&gcp_service.load_secret(name).await?)?.to_string())
         }
@@ -107,14 +111,14 @@ async fn load_sh_skare(
 
 async fn load_account_creator_sk(
     gcp_service: &GcpService,
-    node_id: u64,
+    env: &str,
     account_creator_sk_arg: Option<String>,
 ) -> anyhow::Result<String> {
     match account_creator_sk_arg {
         Some(account_creator_sk) => Ok(account_creator_sk),
         None => {
             let name = format!(
-                "projects/pagoda-discovery-platform-dev/secrets/mpc-recovery-account-creator-sk-{node_id}/versions/latest"
+                "projects/pagoda-discovery-platform-dev/secrets/mpc-recovery-account-creator-sk-{env}/versions/latest"
             );
             Ok(std::str::from_utf8(&gcp_service.load_secret(name).await?)?.to_string())
         }
@@ -146,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cli::StartLeader {
-            node_id,
+            env,
             web_port,
             sign_nodes,
             near_rpc,
@@ -160,14 +164,15 @@ async fn main() -> anyhow::Result<()> {
             gcp_datastore_url,
             test,
         } => {
-            let gcp_service = GcpService::new(gcp_project_id, gcp_datastore_url).await?;
+            let gcp_service =
+                GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
             let account_creator_sk =
-                load_account_creator_sk(&gcp_service, node_id, account_creator_sk).await?;
+                load_account_creator_sk(&gcp_service, &env, account_creator_sk).await?;
 
             let account_creator_sk = account_creator_sk.parse()?;
 
             let config = LeaderConfig {
-                id: node_id,
+                env,
                 port: web_port,
                 sign_nodes,
                 near_rpc,
@@ -187,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cli::StartSign {
+            env,
             node_id,
             pk_set,
             sk_share,
@@ -195,8 +201,9 @@ async fn main() -> anyhow::Result<()> {
             gcp_datastore_url,
             test,
         } => {
-            let gcp_service = GcpService::new(gcp_project_id, gcp_datastore_url).await?;
-            let sk_share = load_sh_skare(&gcp_service, node_id, sk_share).await?;
+            let gcp_service =
+                GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
+            let sk_share = load_sh_skare(&gcp_service, &env, node_id, sk_share).await?;
 
             // TODO put these in a better defined format
             let pk_set: Vec<Point<Ed25519>> = serde_json::from_str(&pk_set).unwrap();
