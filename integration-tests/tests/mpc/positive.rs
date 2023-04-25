@@ -30,12 +30,12 @@ async fn test_trio() -> anyhow::Result<()> {
             let signature = sign(
                 &client,
                 &signer_urls,
-                "validToken".to_string(),
+                "validToken:test-subject".to_string(),
                 payload.clone().into(),
             )
             .await?;
 
-            let account_id = get_test_claims().get_internal_account_id();
+            let account_id = get_test_claims("test-subject".to_string()).get_internal_account_id();
             let res = call(&client, &signer_urls, "public_key", account_id).await?;
 
             let combined_pub = to_dalek_combined_public_key(&res).unwrap();
@@ -54,7 +54,7 @@ async fn test_basic_action() -> anyhow::Result<()> {
         Box::pin(async move {
             let account_id = account::random(ctx.worker)?;
             let user_public_key = key::random();
-            let valid_id_token = token::valid();
+            let valid_id_token = token::valid_random();
 
             // Create account
             let (status_code, new_acc_response) = ctx
@@ -142,7 +142,7 @@ async fn test_basic_action() -> anyhow::Result<()> {
             // Creating one more account should not fail
             let account_id_2 = account::random(ctx.worker)?;
             let user_public_key_2 = key::random();
-            let valid_id_token_2 = token::valid(); // TODO: it can be a source of the problem in tests, since token is the same
+            let valid_id_token_2 = token::valid_random();
 
             // Create account 2
             let (status_code, new_acc_response) = ctx
@@ -188,6 +188,64 @@ async fn test_basic_action() -> anyhow::Result<()> {
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
             check::access_key_exists(&ctx, &account_id_2, &new_user_public_key_2).await?;
+
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn test_random_recovery_keys() -> anyhow::Result<()> {
+    with_nodes(4, |ctx| {
+        Box::pin(async move {
+            let account_id = account::random(ctx.worker)?;
+            let user_public_key = key::random();
+
+            let (status_code, _) = ctx
+                .leader_node
+                .new_account(NewAccountRequest {
+                    near_account_id: account_id.to_string(),
+                    oidc_token: token::valid_random(),
+                    public_key: user_public_key.clone(),
+                })
+                .await?;
+            assert_eq!(status_code, StatusCode::OK);
+
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            let access_keys = ctx.worker.view_access_keys(&account_id).await?;
+            let recovery_access_key1 = access_keys
+                .into_iter()
+                .find(|ak| ak.public_key.to_string() != user_public_key)
+                .ok_or_else(|| anyhow::anyhow!("missing recovery access key"))?;
+
+            // Generate another user
+            let account_id = account::random(ctx.worker)?;
+            let user_public_key = key::random();
+
+            let (status_code, _) = ctx
+                .leader_node
+                .new_account(NewAccountRequest {
+                    near_account_id: account_id.to_string(),
+                    oidc_token: token::valid_random(),
+                    public_key: user_public_key.clone(),
+                })
+                .await?;
+            assert_eq!(status_code, StatusCode::OK);
+
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            let access_keys = ctx.worker.view_access_keys(&account_id).await?;
+            let recovery_access_key2 = access_keys
+                .into_iter()
+                .find(|ak| ak.public_key.to_string() != user_public_key)
+                .ok_or_else(|| anyhow::anyhow!("missing recovery access key"))?;
+
+            assert_ne!(
+                recovery_access_key1.public_key, recovery_access_key2.public_key,
+                "MPC recovery should generate random recovery keys for each user"
+            );
 
             Ok(())
         })
