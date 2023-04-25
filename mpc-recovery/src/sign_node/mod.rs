@@ -221,9 +221,10 @@ async fn public_key(
             tracing::error!(?err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(Err(
-                    "failed to fetch/generate a public key for given account".to_string(),
-                )),
+                Json(Err(format!(
+                    "failed to fetch/generate a public key for given account: {}",
+                    err,
+                ))),
             )
         }
     }
