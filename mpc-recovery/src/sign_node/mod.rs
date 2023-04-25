@@ -1,11 +1,14 @@
 use self::aggregate_signer::{NodeInfo, Reveal, SignedCommitment, SigningState};
-use self::check_signatures::{check_add_key_signature, oidc_digest, HashSalt};
+use self::check_signatures::{
+    add_key_digest, check_signature, claim_oidc_request_digest, claim_oidc_response_digest,
+    oidc_digest, HashSalt,
+};
 use self::oidc_digest::OidcDigest;
 use self::user_credentials::EncryptedUserCredentials;
 use self::user_credentials::UserCredentials;
 use crate::gcp::GcpService;
 use crate::msg::{AcceptNodePublicKeysRequest, SigShareRequest};
-use crate::msg::{AddKey, ClaimOidc, SigShareRequest};
+use crate::msg::{AddKey, ClaimOidcRequest, SigShareRequest};
 use crate::oauth::OAuthTokenVerifier;
 use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::primitives::InternalAccountId;
@@ -192,11 +195,8 @@ async fn process_add_key_commit<T: OAuthTokenVerifier>(
                 }
                 Some(signature) => {
                     // Check the signature matches the public key the hash was registered to
-                    check_add_key_signature(
-                        &add_key,
-                        user_credentials.public_key,
-                        signature.clone(),
-                    )?
+                    let digest = add_key_digest(&add_key)?;
+                    check_signature(&user_credentials.public_key, signature, &digest)?
                 }
             }
         }
@@ -261,37 +261,19 @@ async fn process_add_key_commit<T: OAuthTokenVerifier>(
 
 async fn process_claim_oidc_commit(
     state: SignNodeState,
-    ClaimOidc {
-        oidc_token_hash,
-        public_key,
-        signature,
-    }: ClaimOidc,
+    req: ClaimOidcRequest,
 ) -> Result<SignedCommitment, CommitError> {
-    // As per the readme
-    // To verify the signature of the message verify:
-    // sha256.hash(Borsh.serialize<u32>(SALT + 0) ++ Borsh.serialize<[u8]>(oidc_token_hash))
-    let mut hasher = Sha512::default();
-    BorshSerialize::serialize(&HashSalt::ClaimOidcRequest.get_salt(), &mut hasher)
-        .context("Serialization failed")?;
-    BorshSerialize::serialize(&oidc_token_hash, &mut hasher).context("Serialization failed")?;
-    let request_digest = hasher.finalize();
-
-    let public_key: PublicKey = public_key
+    let digest = claim_oidc_request_digest(&req)?;
+    let public_key: PublicKey = req
+        .public_key
         .parse()
-        .map_err(|e| CommitError::MalformedPublicKey(public_key, e))?;
+        .map_err(|e| CommitError::MalformedPublicKey(req.public_key.clone(), e))?;
 
-    if !Signature::ED25519(signature).verify(&request_digest, &public_key) {
-        return Err(CommitError::SignatureVerificationFailed(anyhow::anyhow!(
-            "Public key {}, digest {} and signature {} don't match",
-            &public_key,
-            &hex::encode(request_digest),
-            &signature
-        )));
-    }
+    check_signature(&public_key, &req.signature, &digest)?;
 
     let oidc_digest = OidcDigest {
         node_id: state.node_info.our_index,
-        digest: <[u8; 32]>::try_from(request_digest.to_vec()).expect("Hash was wrong size"),
+        digest: <[u8; 32]>::try_from(digest).expect("Hash was wrong size"),
         public_key,
     };
 
@@ -311,22 +293,13 @@ async fn process_claim_oidc_commit(
         Ok(None) => state.gcp_service.insert(oidc_digest).await?,
     };
 
-    // As per the readme
-    // If you successfully claim the token you will receive a signature in return of:
-    // sha256.hash(Borsh.serialize<u32>(SALT + 1) ++ Borsh.serialize<[u8]>(signature))
-    let mut hasher = Sha512::default();
-    BorshSerialize::serialize(&HashSalt::ClaimOidcResponse.get_salt(), &mut hasher)
-        .context("Serialization failed")?;
-    BorshSerialize::serialize(&signature.to_bytes(), &mut hasher)
-        .context("Serialization failed")?;
-    let response_digest = hasher.finalize();
-
+    let response_digest = claim_oidc_response_digest(&req)?;
     state
         .signing_state
         .write()
         .await
         // This will be signed by the nodes combined Ed22519 signature
-        .get_commitment(&state.node_key, &state.node_key, response_digest.to_vec())
+        .get_commitment(&state.node_key, &state.node_key, response_digest)
         .map_err(|e| CommitError::Other(anyhow::anyhow!(e)))
 }
 

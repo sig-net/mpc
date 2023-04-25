@@ -1,7 +1,7 @@
 use crate::key_recovery::get_user_recovery_pk;
 use crate::msg::{
-    AddKey, AddKeyRequest, AddKeyResponse, ClaimOidc, ClaimOidcRequest, ClaimOidcResponse,
-    NewAccountRequest, NewAccountResponse, SigShareRequest,
+    AddKey, AddKeyRequest, AddKeyResponse, ClaimOidcRequest, ClaimOidcResponse, NewAccountRequest,
+    NewAccountResponse, SigShareRequest,
 };
 use crate::nar;
 use crate::oauth::OAuthTokenVerifier;
@@ -580,17 +580,8 @@ async fn broadcast_pk_set(
 #[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
 async fn claim_oidc(
     Extension(state): Extension<LeaderState>,
-    Json(ClaimOidcRequest {
-        oidc_token_hash,
-        public_key,
-        signature,
-    }): Json<ClaimOidcRequest>,
+    Json(claim): Json<ClaimOidcRequest>,
 ) -> (StatusCode, Json<ClaimOidcResponse>) {
-    let claim = ClaimOidc {
-        oidc_token_hash,
-        public_key,
-        signature,
-    };
     let payload = SigShareRequest::Claim(claim);
     let res = sign(&state.reqwest_client, &state.sign_nodes, payload).await;
     match res {

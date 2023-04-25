@@ -1,21 +1,22 @@
+use anyhow::Context;
 use borsh::BorshSerialize;
 use ed25519_dalek::{Digest, Sha512, Signature};
 use near_crypto::PublicKey;
 
-use crate::{msg::AddKey, sign_node::CommitError};
+use crate::{
+    msg::{AddKey, ClaimOidcRequest},
+    sign_node::CommitError,
+};
 
-pub fn check_add_key_signature(
+pub fn add_key_digest(
     AddKey {
         account_id_from_leader,
-        user_recovery_pk,
         near_account_id,
         oidc_token,
-        user_local_pk: public_key,
+        user_local_pk,
         ..
     }: &AddKey,
-    oidc_owner_public_key: PublicKey,
-    signature: Signature,
-) -> Result<(), CommitError> {
+) -> Result<Vec<u8>, CommitError> {
     // As per the readme
     // The signature field is a signature of:
     // sha256.hash(Borsh.serialize<u32>(SALT + 2) ++ Borsh.serialize(
@@ -28,27 +29,67 @@ pub fn check_add_key_signature(
     // ))
     // signed by the key you used to claim the oidc token.
     // This does not have to be the same as the key in the public key field.
-    {
-        let mut hasher = Sha512::default();
-        BorshSerialize::serialize(&HashSalt::ClaimOidcRequest.get_salt(), &mut hasher)
-            .map_err(|e| CommitError::Other(anyhow::anyhow!(e)))?;
-        let near_account_id = if *account_id_from_leader {
-            None
-        } else {
-            Some(near_account_id.clone())
-        };
-        BorshSerialize::serialize(
-            &B {
-                near_account_id: near_account_id.clone(),
-                oidc_token: oidc_token.clone(),
-                public_key: public_key.clone(),
-            },
-            &mut hasher,
-        );
-        let request_digest = hasher.finalize();
+    let mut hasher = Sha512::default();
+    BorshSerialize::serialize(&HashSalt::ClaimOidcRequest.get_salt(), &mut hasher)
+        .map_err(|e| CommitError::Other(anyhow::anyhow!(e)))?;
+    let near_account_id = if *account_id_from_leader {
+        None
+    } else {
+        Some(near_account_id.clone())
+    };
+    BorshSerialize::serialize(
+        &B {
+            near_account_id: near_account_id.clone(),
+            oidc_token: oidc_token.clone(),
+            public_key: user_local_pk.clone(),
+        },
+        &mut hasher,
+    );
+    Ok(hasher.finalize().to_vec())
+}
 
-        if !near_crypto::Signature::ED25519(signature)
-            .verify(&request_digest, &oidc_owner_public_key)
+pub fn claim_oidc_request_digest(
+    ClaimOidcRequest {
+        oidc_token_hash,
+        public_key,
+        signature,
+    }: &ClaimOidcRequest,
+) -> Result<Vec<u8>, CommitError> {
+    // As per the readme
+    // To verify the signature of the message verify:
+    // sha256.hash(Borsh.serialize<u32>(SALT + 0) ++ Borsh.serialize<[u8]>(oidc_token_hash))
+    let mut hasher = Sha512::default();
+    BorshSerialize::serialize(&HashSalt::ClaimOidcRequest.get_salt(), &mut hasher)
+        .context("Serialization failed")?;
+    BorshSerialize::serialize(&oidc_token_hash, &mut hasher).context("Serialization failed")?;
+    Ok(hasher.finalize().to_vec())
+}
+
+pub fn claim_oidc_response_digest(
+    ClaimOidcRequest {
+        oidc_token_hash,
+        public_key,
+        signature,
+    }: &ClaimOidcRequest,
+) -> Result<Vec<u8>, CommitError> {
+    // As per the readme
+    // If you successfully claim the token you will receive a signature in return of:
+    // sha256.hash(Borsh.serialize<u32>(SALT + 1) ++ Borsh.serialize<[u8]>(signature))
+    let mut hasher = Sha512::default();
+    BorshSerialize::serialize(&HashSalt::ClaimOidcResponse.get_salt(), &mut hasher)
+        .context("Serialization failed")?;
+    BorshSerialize::serialize(&signature.to_bytes(), &mut hasher)
+        .context("Serialization failed")?;
+    Ok(hasher.finalize().to_vec())
+}
+
+pub fn check_signature(
+    public_key: &PublicKey,
+    signature: &Signature,
+    request_digest: &[u8],
+) -> Result<(), CommitError> {
+    {
+        if !near_crypto::Signature::ED25519(signature.clone()).verify(&request_digest, &public_key)
         {
             return Err(CommitError::SignatureVerificationFailed(anyhow::anyhow!(
                 "Public key {}, digest {} and signature {} don't match",

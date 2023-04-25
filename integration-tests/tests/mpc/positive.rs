@@ -1,6 +1,6 @@
 use crate::{account, check, key, token, with_nodes};
 use anyhow::anyhow;
-use ed25519_dalek::Verifier;
+use ed25519_dalek::{Signature, Verifier};
 use hyper::StatusCode;
 use mpc_recovery::{
     msg::{AddKeyRequest, AddKeyResponse, ClaimOidcRequest, NewAccountRequest, NewAccountResponse},
@@ -23,6 +23,15 @@ async fn test_basic_action_with_sig() -> anyhow::Result<()> {
             let user_public_key = key::random();
             let oidc_token = token::valid();
             let oidc_token_hash = oidc_digest(&oidc_token);
+
+            let mut oidc_request = ClaimOidcRequest {
+                oidc_token_hash,
+                public_key: user_public_key.clone(),
+                // Dummy signature
+                signature: Signature::from_bytes(&[0; 32]).unwrap(),
+            };
+
+            let digest = claim_oidc_request_digest(&oidc_request);
 
             let (status_code, new_acc_response) = ctx
                 .leader_node

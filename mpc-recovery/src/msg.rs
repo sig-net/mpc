@@ -62,7 +62,7 @@ impl AddKeyResponse {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ClaimOidcRequest {
     #[serde(with = "hex::serde")]
     pub oidc_token_hash: [u8; 32],
@@ -102,7 +102,7 @@ pub enum LeaderResponse {
 /// The set of actions that a user can request us to sign
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SigShareRequest {
-    Claim(ClaimOidc),
+    Claim(ClaimOidcRequest),
     Add(AddKey),
 }
 
@@ -111,16 +111,6 @@ impl SigShareRequest {
         // TODO verify according to the spec
         Ok(())
     }
-}
-
-/// We don't parse these too much, because we need to sign them in a way that can be verified by the client
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ClaimOidc {
-    #[serde(with = "hex::serde")]
-    pub oidc_token_hash: [u8; 32],
-    pub public_key: String,
-    #[serde(with = "hex_sig_share")]
-    pub signature: Signature,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
