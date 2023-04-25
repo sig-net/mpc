@@ -1,9 +1,10 @@
 use self::aggregate_signer::{NodeInfo, Reveal, SignedCommitment, SigningState};
 use self::user_credentials::UserCredentials;
 use crate::gcp::GcpService;
-use crate::msg::SigShareRequest;
+use crate::msg::{AcceptNodePublicKeysRequest, SigShareRequest};
 use crate::oauth::OAuthTokenVerifier;
 use crate::primitives::InternalAccountId;
+use crate::sign_node::pk_set::SignerNodePkSet;
 use crate::NodeId;
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
 use curv::elliptic::curves::{Ed25519, Point};
@@ -13,37 +14,32 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub mod aggregate_signer;
+pub mod pk_set;
 pub mod user_credentials;
 
-#[tracing::instrument(level = "debug", skip(gcp_service, node_key, nodes_public_keys))]
+#[tracing::instrument(level = "debug", skip(gcp_service, node_key))]
 pub async fn run<T: OAuthTokenVerifier + 'static>(
     gcp_service: GcpService,
     our_index: NodeId,
-    nodes_public_keys: Vec<Point<Ed25519>>,
     node_key: ExpandedKeyPair,
     port: u16,
 ) {
     tracing::debug!("running a sign node");
     let our_index = usize::try_from(our_index).expect("This index is way to big");
 
-    if nodes_public_keys.get(our_index) != Some(&node_key.public_key) {
-        tracing::error!("provided secret share does not match the node id");
-        return;
-    }
+    let pk_set = gcp_service
+        .get::<_, SignerNodePkSet>(format!("{}/{}", our_index, pk_set::MAIN_KEY))
+        .await
+        .unwrap_or_default();
 
     let pagoda_firebase_audience_id = "pagoda-firebase-audience-id".to_string();
-
     let signing_state = Arc::new(RwLock::new(SigningState::new()));
-
     let state = SignNodeState {
         gcp_service,
         node_key,
         signing_state,
         pagoda_firebase_audience_id,
-        node_info: NodeInfo {
-            nodes_public_keys,
-            our_index,
-        },
+        node_info: NodeInfo::new(our_index, pk_set.map(|set| set.public_keys)),
     };
 
     let app = Router::new()
@@ -51,6 +47,8 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(
         .route("/reveal", post(reveal))
         .route("/signature_share", post(signature_share))
         .route("/public_key", post(public_key))
+        .route("/public_key_node", post(public_key_node))
+        .route("/accept_pk_set", post(accept_pk_set))
         .layer(Extension(state));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -144,6 +142,10 @@ async fn commit<T: OAuthTokenVerifier>(
     Extension(state): Extension<SignNodeState>,
     Json(request): Json<SigShareRequest>,
 ) -> (StatusCode, Json<Result<SignedCommitment, String>>) {
+    if let Err(msg) = check_if_ready(&state).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(Err(msg)));
+    }
+
     match process_commit::<T>(state, request).await {
         Ok(signed_commitment) => (StatusCode::OK, Json(Ok(signed_commitment))),
         Err(ref e @ CommitError::OidcVerificationFailed(ref err_msg)) => {
@@ -168,11 +170,16 @@ async fn reveal(
     Extension(state): Extension<SignNodeState>,
     Json(request): Json<Vec<SignedCommitment>>,
 ) -> (StatusCode, Json<Result<Reveal, String>>) {
+    if let Err(msg) = check_if_ready(&state).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(Err(msg)));
+    }
+
     match state
         .signing_state
         .write()
         .await
         .get_reveal(state.node_info, request)
+        .await
     {
         Ok(r) => {
             tracing::debug!("Successful reveal");
@@ -190,6 +197,10 @@ async fn signature_share(
     Extension(state): Extension<SignNodeState>,
     Json(request): Json<Vec<Reveal>>,
 ) -> (StatusCode, Json<Result<protocols::Signature, String>>) {
+    if let Err(msg) = check_if_ready(&state).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(Err(msg)));
+    }
+
     match state
         .signing_state
         .write()
@@ -228,4 +239,71 @@ async fn public_key(
             )
         }
     }
+}
+
+// TODO: remove type complexity
+#[allow(clippy::type_complexity)]
+#[tracing::instrument(level = "debug", skip_all, fields(id = state.node_info.our_index))]
+async fn public_key_node(
+    Extension(state): Extension<SignNodeState>,
+    Json(_): Json<()>,
+) -> (StatusCode, Json<Result<(usize, Point<Ed25519>), String>>) {
+    (
+        StatusCode::OK,
+        Json(Ok((state.node_info.our_index, state.node_key.public_key))),
+    )
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(id = state.node_info.our_index))]
+async fn accept_pk_set(
+    Extension(state): Extension<SignNodeState>,
+    Json(request): Json<AcceptNodePublicKeysRequest>,
+) -> (StatusCode, Json<Result<String, String>>) {
+    let index = state.node_info.our_index;
+    if request.public_keys.get(index) != Some(&state.node_key.public_key) {
+        tracing::error!("provided secret share does not match the node id");
+        return (StatusCode::BAD_REQUEST, Json(Err(format!(
+            "Sign node could not accept the public keys: current node index={index} does not match up"))));
+    }
+
+    let mut public_keys = state.node_info.nodes_public_keys.write().await;
+    if public_keys.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(Err(
+                "This node is already initialized with public keys".to_string()
+            )),
+        );
+    }
+    tracing::debug!("Setting node public keys => {:?}", request.public_keys);
+    public_keys.replace(request.public_keys.clone());
+    match state
+        .gcp_service
+        .insert(SignerNodePkSet {
+            node_id: state.node_info.our_index,
+            public_keys: request.public_keys,
+        })
+        .await
+    {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(Ok("Successfully set node public keys".to_string())),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(Ok("failed to save the keys".to_string())),
+        ),
+    }
+}
+
+/// Validate whether the current state of the sign node is useable or not.
+async fn check_if_ready(state: &SignNodeState) -> Result<(), String> {
+    let public_keys = state.node_info.nodes_public_keys.read().await;
+    if public_keys.is_none() {
+        return Err(
+            "Sign node is not ready yet: waiting on all public keys from leader node".into(),
+        );
+    }
+
+    Ok(())
 }

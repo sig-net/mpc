@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use curv::arithmetic::Converter;
 use curv::cryptographic_primitives::commitments::{
@@ -13,6 +14,7 @@ use multi_party_eddsa::protocols::aggsig::{self, KeyAgg, SignSecondMsg};
 use rand8::rngs::OsRng;
 use rand8::Rng;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use crate::transaction::{to_dalek_public_key, to_dalek_signature};
 
@@ -59,7 +61,7 @@ impl SigningState {
         Ok(commitment)
     }
 
-    pub fn get_reveal(
+    pub async fn get_reveal(
         &mut self,
         node_info: NodeInfo,
         recieved_commitments: Vec<SignedCommitment>,
@@ -79,7 +81,7 @@ impl SigningState {
             .remove(&our_c.commitment)
             .ok_or(format!("Committment {:?} not found", &our_c.commitment))?;
 
-        let (reveal, state) = state.reveal(&node_info, recieved_commitments)?;
+        let (reveal, state) = state.reveal(&node_info, recieved_commitments).await?;
         let reveal = Reveal(reveal);
         self.revealed.insert(reveal.clone(), state);
         Ok(reveal)
@@ -166,13 +168,14 @@ impl Committed {
         Ok((sc, s))
     }
 
-    pub fn reveal(
+    pub async fn reveal(
         self,
         node_info: &NodeInfo,
         commitments: Vec<SignedCommitment>,
     ) -> Result<(SignSecondMsg, Revealed), String> {
         let (commitments, signing_public_keys) = node_info
-            .signed_by_every_node(commitments)?
+            .signed_by_every_node(commitments)
+            .await?
             .into_iter()
             .unzip();
         Ok((
@@ -227,16 +230,27 @@ impl Revealed {
 // Stores info about the other nodes we're interacting with
 #[derive(Clone)]
 pub struct NodeInfo {
-    pub nodes_public_keys: Vec<Point<Ed25519>>,
+    pub nodes_public_keys: Arc<RwLock<Option<Vec<Point<Ed25519>>>>>,
     pub our_index: usize,
 }
 
 impl NodeInfo {
-    fn signed_by_every_node(
+    pub fn new(our_index: usize, nodes_public_keys: Option<Vec<Point<Ed25519>>>) -> Self {
+        Self {
+            our_index,
+            nodes_public_keys: Arc::new(RwLock::new(nodes_public_keys)),
+        }
+    }
+
+    async fn signed_by_every_node(
         &self,
         signed: Vec<SignedCommitment>,
     ) -> Result<Vec<(AggrCommitment, Point<Ed25519>)>, String> {
         self.nodes_public_keys
+            .read()
+            .await
+            .as_ref()
+            .ok_or_else(|| "No nodes public keys available to sign".to_string())?
             .iter()
             .zip(signed.iter())
             .map(|(public_key, signed)| signed.verify(public_key))
@@ -320,8 +334,8 @@ mod tests {
     use ed25519_dalek::{SignatureError, Verifier};
     use multi_party_eddsa::protocols::ExpandedKeyPair;
 
-    #[test]
-    fn aggregate_signatures() {
+    #[tokio::test]
+    async fn aggregate_signatures() {
         pub fn verify_dalek(
             pk: &Point<Ed25519>,
             sig: &protocols::Signature,
@@ -349,10 +363,7 @@ mod tests {
             n3.public_key.clone(),
         ];
 
-        let ni = |n| NodeInfo {
-            nodes_public_keys: nodes_public_keys.clone(),
-            our_index: n,
-        };
+        let ni = |n| NodeInfo::new(n, Some(nodes_public_keys.clone()));
 
         // Set up nodes with that config
         let mut s1 = SigningState::new();
@@ -368,9 +379,9 @@ mod tests {
         ];
 
         let reveals = vec![
-            s1.get_reveal(ni(0), commitments.clone()).unwrap(),
-            s2.get_reveal(ni(1), commitments.clone()).unwrap(),
-            s3.get_reveal(ni(2), commitments.clone()).unwrap(),
+            s1.get_reveal(ni(0), commitments.clone()).await.unwrap(),
+            s2.get_reveal(ni(1), commitments.clone()).await.unwrap(),
+            s3.get_reveal(ni(2), commitments.clone()).await.unwrap(),
         ];
 
         let sig_shares = vec![

@@ -1,5 +1,8 @@
 use crate::key_recovery::get_user_recovery_pk;
-use crate::msg::{AddKeyRequest, AddKeyResponse, NewAccountRequest, NewAccountResponse};
+use crate::msg::{
+    AcceptNodePublicKeysRequest, AddKeyRequest, AddKeyResponse, NewAccountRequest,
+    NewAccountResponse,
+};
 use crate::nar;
 use crate::oauth::OAuthTokenVerifier;
 use crate::relayer::error::RelayerError;
@@ -10,6 +13,7 @@ use crate::transaction::{
     get_local_signed_delegated_action, get_mpc_signed_delegated_action,
 };
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
+use curv::elliptic::curves::{Ed25519, Point};
 use near_crypto::{ParseKeyError, PublicKey, SecretKey};
 use near_primitives::account::id::ParseAccountError;
 use near_primitives::types::AccountId;
@@ -76,6 +80,24 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
         account_lookup_url,
         pagoda_firebase_audience_id,
     };
+
+    // Get keys from all sign nodes, and broadcast them out as a set.
+    let pk_set = match gather_sign_node_pks(&state).await {
+        Ok(pk_set) => pk_set,
+        Err(err) => {
+            tracing::error!("Unable to gather public keys: {err}");
+            return;
+        }
+    };
+    tracing::debug!(?pk_set, "Gathered public keys");
+    let messages = match broadcast_pk_set(&state, pk_set).await {
+        Ok(messages) => messages,
+        Err(err) => {
+            tracing::error!("Unable to broadcast public keys: {err}");
+            return;
+        }
+    };
+    tracing::debug!(?messages, "broadcasted public key statuses");
 
     //TODO: not secure, allow only for testnet, whitelist endpoint etc. for mainnet
     let cors_layer = tower_http::cors::CorsLayer::permissive();
@@ -440,6 +462,56 @@ async fn add_key<T: OAuthTokenVerifier>(
         }
     }
 }
+
+async fn gather_sign_node_pks(state: &LeaderState) -> anyhow::Result<Vec<Point<Ed25519>>> {
+    let fut = nar::retry_every(std::time::Duration::from_secs(1), || async {
+        let results: anyhow::Result<Vec<(usize, Point<Ed25519>)>> = crate::transaction::call(
+            &state.reqwest_client,
+            &state.sign_nodes,
+            "public_key_node",
+            (),
+        )
+        .await;
+        let mut results = match results {
+            Ok(results) => results,
+            Err(err) => {
+                tracing::debug!("failed to gather pk: {err}");
+                return Err(err);
+            }
+        };
+
+        results.sort_by_key(|(index, _)| *index);
+        let results: Vec<Point<Ed25519>> =
+            results.into_iter().map(|(_index, point)| point).collect();
+
+        anyhow::Result::Ok(results)
+    });
+
+    let results = tokio::time::timeout(std::time::Duration::from_secs(60), fut)
+        .await
+        .map_err(|_| anyhow::anyhow!("timeout gathering sign node pks"))??;
+    Ok(results)
+}
+
+async fn broadcast_pk_set(
+    state: &LeaderState,
+    pk_set: Vec<Point<Ed25519>>,
+) -> anyhow::Result<Vec<String>> {
+    let request = AcceptNodePublicKeysRequest {
+        public_keys: pk_set,
+    };
+
+    let messages: Vec<String> = crate::transaction::call(
+        &state.reqwest_client,
+        &state.sign_nodes,
+        "accept_pk_set",
+        request,
+    )
+    .await?;
+
+    Ok(messages)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
