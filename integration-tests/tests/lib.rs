@@ -80,7 +80,6 @@ where
             &docker,
             NETWORK,
             i as u64,
-            &pk_set,
             share,
             &datastore.address,
             GCP_PROJECT_ID,
@@ -96,7 +95,6 @@ where
     let leader_node = LeaderNode::start(
         &docker,
         NETWORK,
-        0,
         signer_urls.clone(),
         &near_rpc,
         &relayer.address,

@@ -8,7 +8,6 @@ use bollard::{
     service::{HostConfig, Ipam, PortBinding},
     Docker,
 };
-use curv::elliptic::curves::{Ed25519, Point};
 use futures::{lock::Mutex, StreamExt};
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use mpc_recovery::msg::{AddKeyRequest, AddKeyResponse, NewAccountRequest, NewAccountResponse};
@@ -179,7 +178,6 @@ impl LeaderNode {
     pub async fn start(
         docker: &Docker,
         network: &str,
-        node_id: u64,
         sign_nodes: Vec<String>,
         near_rpc: &str,
         relayer_url: &str,
@@ -195,8 +193,6 @@ impl LeaderNode {
 
         let mut cmd = vec![
             "start-leader".to_string(),
-            "--node-id".to_string(),
-            node_id.to_string(),
             "--web-port".to_string(),
             web_port.to_string(),
             "--near-rpc".to_string(),
@@ -215,6 +211,7 @@ impl LeaderNode {
             gcp_project_id.to_string(),
             "--gcp-datastore-url".to_string(),
             datastore_url.to_string(),
+            "--test".to_string(),
         ];
         for sign_node in sign_nodes {
             cmd.push("--sign-nodes".to_string());
@@ -285,7 +282,6 @@ impl SignNode {
         docker: &Docker,
         network: &str,
         node_id: u64,
-        pk_set: &Vec<Point<Ed25519>>,
         sk_share: &ExpandedKeyPair,
         datastore_url: &str,
         gcp_project_id: &str,
@@ -297,8 +293,6 @@ impl SignNode {
             "start-sign".to_string(),
             "--node-id".to_string(),
             node_id.to_string(),
-            "--pk-set".to_string(),
-            serde_json::to_string(&pk_set)?,
             "--sk-share".to_string(),
             serde_json::to_string(&sk_share)?,
             "--web-port".to_string(),
@@ -307,6 +301,7 @@ impl SignNode {
             gcp_project_id.to_string(),
             "--gcp-datastore-url".to_string(),
             datastore_url.to_string(),
+            "--test".to_string(),
         ];
 
         let (container_id, ip_address) =

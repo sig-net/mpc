@@ -1,6 +1,10 @@
 use crate::key_recovery::get_user_recovery_pk;
-use crate::msg::{AddKeyRequest, AddKeyResponse, NewAccountRequest, NewAccountResponse};
-use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
+use crate::msg::{
+    AcceptNodePublicKeysRequest, AddKeyRequest, AddKeyResponse, NewAccountRequest,
+    NewAccountResponse,
+};
+use crate::nar;
+use crate::oauth::OAuthTokenVerifier;
 use crate::relayer::error::RelayerError;
 use crate::relayer::msg::RegisterAccountRequest;
 use crate::relayer::NearRpcAndRelayerClient;
@@ -8,8 +12,8 @@ use crate::transaction::{
     get_add_key_delegate_action, get_create_account_delegate_action,
     get_local_signed_delegated_action, get_mpc_signed_delegated_action,
 };
-use crate::{nar, NodeId};
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
+use curv::elliptic::curves::{Ed25519, Point};
 use near_crypto::{ParseKeyError, PublicKey, SecretKey};
 use near_primitives::account::id::ParseAccountError;
 use near_primitives::types::AccountId;
@@ -18,7 +22,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use std::net::SocketAddr;
 
 pub struct Config {
-    pub id: NodeId,
+    pub env: String,
     pub port: u16,
     pub sign_nodes: Vec<String>,
     pub near_rpc: String,
@@ -31,9 +35,9 @@ pub struct Config {
     pub pagoda_firebase_audience_id: String,
 }
 
-pub async fn run(config: Config) {
+pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
     let Config {
-        id,
+        env,
         port,
         sign_nodes,
         near_rpc,
@@ -44,7 +48,7 @@ pub async fn run(config: Config) {
         account_lookup_url,
         pagoda_firebase_audience_id,
     } = config;
-    let _span = tracing::debug_span!("run", id, port);
+    let _span = tracing::debug_span!("run", env, port);
     tracing::debug!(?sign_nodes, "running a leader node");
 
     let client = NearRpcAndRelayerClient::connect(&near_rpc, relayer_url);
@@ -66,7 +70,7 @@ pub async fn run(config: Config) {
         .unwrap();
 
     let state = LeaderState {
-        id,
+        env,
         sign_nodes,
         client,
         reqwest_client: reqwest::Client::new(),
@@ -77,12 +81,30 @@ pub async fn run(config: Config) {
         pagoda_firebase_audience_id,
     };
 
+    // Get keys from all sign nodes, and broadcast them out as a set.
+    let pk_set = match gather_sign_node_pks(&state).await {
+        Ok(pk_set) => pk_set,
+        Err(err) => {
+            tracing::error!("Unable to gather public keys: {err}");
+            return;
+        }
+    };
+    tracing::debug!(?pk_set, "Gathered public keys");
+    let messages = match broadcast_pk_set(&state, pk_set).await {
+        Ok(messages) => messages,
+        Err(err) => {
+            tracing::error!("Unable to broadcast public keys: {err}");
+            Vec::new()
+        }
+    };
+    tracing::debug!(?messages, "broadcasted public key statuses");
+
     //TODO: not secure, allow only for testnet, whitelist endpoint etc. for mainnet
     let cors_layer = tower_http::cors::CorsLayer::permissive();
 
     let app = Router::new()
-        .route("/new_account", post(new_account::<UniversalTokenVerifier>))
-        .route("/add_key", post(add_key::<UniversalTokenVerifier>))
+        .route("/new_account", post(new_account::<T>))
+        .route("/add_key", post(add_key::<T>))
         .layer(Extension(state))
         .layer(cors_layer);
 
@@ -96,7 +118,7 @@ pub async fn run(config: Config) {
 
 #[derive(Clone)]
 struct LeaderState {
-    id: NodeId,
+    env: String,
     sign_nodes: Vec<String>,
     client: NearRpcAndRelayerClient,
     reqwest_client: reqwest::Client,
@@ -252,7 +274,7 @@ mod response {
     }
 }
 
-#[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
+#[tracing::instrument(level = "info", skip_all, fields(env = state.env))]
 async fn new_account<T: OAuthTokenVerifier>(
     Extension(state): Extension<LeaderState>,
     Json(request): Json<NewAccountRequest>,
@@ -405,7 +427,7 @@ async fn process_add_key<T: OAuthTokenVerifier>(
     .await
 }
 
-#[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
+#[tracing::instrument(level = "info", skip_all, fields(env = state.env))]
 async fn add_key<T: OAuthTokenVerifier>(
     Extension(state): Extension<LeaderState>,
     Json(request): Json<AddKeyRequest>,
@@ -440,6 +462,56 @@ async fn add_key<T: OAuthTokenVerifier>(
         }
     }
 }
+
+async fn gather_sign_node_pks(state: &LeaderState) -> anyhow::Result<Vec<Point<Ed25519>>> {
+    let fut = nar::retry_every(std::time::Duration::from_secs(1), || async {
+        let results: anyhow::Result<Vec<(usize, Point<Ed25519>)>> = crate::transaction::call(
+            &state.reqwest_client,
+            &state.sign_nodes,
+            "public_key_node",
+            (),
+        )
+        .await;
+        let mut results = match results {
+            Ok(results) => results,
+            Err(err) => {
+                tracing::debug!("failed to gather pk: {err}");
+                return Err(err);
+            }
+        };
+
+        results.sort_by_key(|(index, _)| *index);
+        let results: Vec<Point<Ed25519>> =
+            results.into_iter().map(|(_index, point)| point).collect();
+
+        anyhow::Result::Ok(results)
+    });
+
+    let results = tokio::time::timeout(std::time::Duration::from_secs(60), fut)
+        .await
+        .map_err(|_| anyhow::anyhow!("timeout gathering sign node pks"))??;
+    Ok(results)
+}
+
+async fn broadcast_pk_set(
+    state: &LeaderState,
+    pk_set: Vec<Point<Ed25519>>,
+) -> anyhow::Result<Vec<String>> {
+    let request = AcceptNodePublicKeysRequest {
+        public_keys: pk_set,
+    };
+
+    let messages: Vec<String> = crate::transaction::call(
+        &state.reqwest_client,
+        &state.sign_nodes,
+        "accept_pk_set",
+        request,
+    )
+    .await?;
+
+    Ok(messages)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
