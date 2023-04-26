@@ -12,7 +12,8 @@ use ed25519_dalek::ed25519::signature::digest::{consts::U32, generic_array::Gene
 use futures::{lock::Mutex, StreamExt};
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use mpc_recovery::msg::{
-    AddKeyRequest, AddKeyResponse, ClaimOidcRequest, NewAccountRequest, NewAccountResponse,
+    AddKeyRequest, AddKeyResponse, ClaimOidcRequest, ClaimOidcResponse, NewAccountRequest,
+    NewAccountResponse,
 };
 use multi_party_eddsa::protocols::ExpandedKeyPair;
 use near_crypto::SecretKey;
@@ -274,7 +275,7 @@ impl LeaderNode {
     pub async fn claim_oidc(
         &self,
         request: ClaimOidcRequest,
-    ) -> anyhow::Result<(StatusCode, AddKeyResponse)> {
+    ) -> anyhow::Result<(StatusCode, ClaimOidcResponse)> {
         self.post(format!("{}/claim_oidc", self.address), request)
             .await
     }

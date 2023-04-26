@@ -293,7 +293,7 @@ async fn process_claim_oidc_commit(
         Ok(None) => state.gcp_service.insert(oidc_digest).await?,
     };
 
-    let response_digest = claim_oidc_response_digest(&req)?;
+    let response_digest = claim_oidc_response_digest(req.signature)?;
     state
         .signing_state
         .write()
@@ -387,6 +387,9 @@ async fn public_key(
     Extension(state): Extension<SignNodeState>,
     Json(request): Json<InternalAccountId>,
 ) -> (StatusCode, Json<Result<Point<Ed25519>, String>>) {
+    if request.is_empty() {
+        return (StatusCode::OK, Json(Ok(state.node_key.public_key)));
+    }
     match get_or_generate_user_creds(&state, request).await {
         Ok(user_credentials) => (
             StatusCode::OK,

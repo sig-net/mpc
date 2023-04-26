@@ -3,9 +3,14 @@ use anyhow::anyhow;
 use ed25519_dalek::{Signature, Verifier};
 use hyper::StatusCode;
 use mpc_recovery::{
-    msg::{AddKeyRequest, AddKeyResponse, ClaimOidcRequest, NewAccountRequest, NewAccountResponse},
+    msg::{
+        AddKeyRequest, AddKeyResponse, ClaimOidcRequest, ClaimOidcResponse, NewAccountRequest,
+        NewAccountResponse,
+    },
     oauth::get_test_claims,
-    sign_node::check_signatures::oidc_digest,
+    sign_node::check_signatures::{
+        claim_oidc_request_digest, claim_oidc_response_digest, oidc_digest,
+    },
     transaction::{
         call_all_nodes, sign_payload_with_mpc, to_dalek_combined_public_key, CreateAccountOptions,
         LimitedAccessKey,
@@ -20,7 +25,10 @@ async fn test_basic_action_with_sig() -> anyhow::Result<()> {
     with_nodes(3, |ctx| {
         Box::pin(async move {
             let account_id = account::random(ctx.worker)?;
-            let user_public_key = key::random();
+
+            let user_private_key =
+                near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);
+            let user_public_key = user_private_key.public_key().to_string();
             let oidc_token = token::valid();
             let oidc_token_hash = oidc_digest(&oidc_token);
 
@@ -31,16 +39,36 @@ async fn test_basic_action_with_sig() -> anyhow::Result<()> {
                 signature: Signature::from_bytes(&[0; 32]).unwrap(),
             };
 
-            let digest = claim_oidc_request_digest(&oidc_request);
+            let digest = claim_oidc_request_digest(&oidc_request).unwrap();
 
-            let (status_code, new_acc_response) = ctx
-                .leader_node
-                .claim_oidc(ClaimOidcRequest {
-                    oidc_token_hash,
-                    public_key: user_public_key.clone(),
-                    signature: None,
-                })
-                .await?;
+            let sig = match user_private_key.sign(&digest) {
+                near_crypto::Signature::ED25519(k) => k,
+                _ => return Err(anyhow::anyhow!("Wrong signature type")),
+            };
+
+            oidc_request.signature = sig;
+
+            let (status_code, oidc_response) =
+                ctx.leader_node.claim_oidc(oidc_request.clone()).await?;
+            assert_eq!(status_code, StatusCode::OK);
+
+            let res_signature = match oidc_response {
+                ClaimOidcResponse::Ok { mpc_signature } => mpc_signature,
+                ClaimOidcResponse::Err { msg } => return Err(anyhow::anyhow!(msg)),
+            };
+
+            // Get the node public key
+            let client = reqwest::Client::new();
+            let signer_urls: Vec<_> = ctx
+                .signer_nodes
+                .iter()
+                .map(|s| s.local_address.clone())
+                .collect();
+            let res = call(&client, &signer_urls, "public_key", "").await?;
+            let combined_pub = to_dalek_combined_public_key(&res).unwrap();
+
+            let res_digest = claim_oidc_response_digest(oidc_request.signature).unwrap();
+            combined_pub.verify(&res_digest, &res_signature)?;
 
             let signature = sign_payload_with_mpc(
                 &client,
