@@ -26,6 +26,7 @@ pub struct Config {
     pub port: u16,
     pub sign_nodes: Vec<String>,
     pub near_rpc: String,
+    pub relayer_api_key: Option<String>,
     pub relayer_url: String,
     pub near_root_account: String,
     pub account_creator_id: AccountId,
@@ -41,6 +42,7 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
         port,
         sign_nodes,
         near_rpc,
+        relayer_api_key,
         relayer_url,
         near_root_account,
         account_creator_id,
@@ -51,11 +53,12 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
     let _span = tracing::debug_span!("run", env, port);
     tracing::debug!(?sign_nodes, "running a leader node");
 
-    let client = NearRpcAndRelayerClient::connect(&near_rpc, relayer_url);
-    // FIXME: We don't have a token for ourselves, but are still forced to allocate allowance.
-    // Using randomly generated tokens ensures the uniqueness of tokens on the relayer side so
+    let client = NearRpcAndRelayerClient::connect(&near_rpc, relayer_url, relayer_api_key);
+    // FIXME: Internal account id is retrieved from the ID token. We don't have a token for ourselves,
+    // but are still forced to allocate allowance.
+    // Using randomly generated internal account id ensures the uniqueness of user idenrifier on the relayer side so
     // we can update the allowance on each server run.
-    let fake_oauth_token: String = rand::thread_rng()
+    let fake_internal_account_id: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(16)
         .map(char::from)
@@ -64,7 +67,7 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
         .register_account(RegisterAccountRequest {
             account_id: account_creator_id.clone(),
             allowance: 18_000_000_000_000_000_000, // should be enough to create 700_000+ accs
-            oauth_token: fake_oauth_token,
+            oauth_token: fake_internal_account_id,
         })
         .await
         .unwrap();
@@ -168,7 +171,7 @@ async fn process_new_account<T: OAuthTokenVerifier>(
         .register_account(RegisterAccountRequest {
             account_id: new_user_account_id.clone(),
             allowance: 300_000_000_000_000,
-            oauth_token: request.oidc_token,
+            oauth_token: internal_acc_id.clone(),
         })
         .await?;
 
@@ -280,14 +283,17 @@ async fn new_account<T: OAuthTokenVerifier>(
     Json(request): Json<NewAccountRequest>,
 ) -> (StatusCode, Json<NewAccountResponse>) {
     tracing::info!(
-        near_account_id = hex::encode(request.near_account_id.clone()),
-        public_key = hex::encode(request.public_key.clone()),
+        near_account_id = request.near_account_id.clone(),
+        public_key = request.public_key.clone(),
         iodc_token = format!("{:.5}...", request.oidc_token),
         "new_account request"
     );
 
     match process_new_account::<T>(state, request).await {
-        Ok(response) => (StatusCode::OK, Json(response)),
+        Ok(response) => {
+            tracing::debug!("responding with OK");
+            (StatusCode::OK, Json(response))
+        }
         Err(ref e @ NewAccountError::MalformedPublicKey(ref pk, _)) => {
             tracing::error!(err = ?e);
             response::new_acc_bad_request(format!("bad public_key: {}", pk))
@@ -328,15 +334,28 @@ fn get_acc_id_from_pk(
     account_lookup_url: String,
 ) -> Result<AccountId, anyhow::Error> {
     let url = format!("{}/publicKey/{}/accounts", account_lookup_url, public_key);
+    tracing::info!(
+        url = url,
+        public_key = public_key.to_string(),
+        "fetching account id from public key"
+    );
     let client = reqwest::blocking::Client::new();
     let response = client.get(url).send()?.text()?;
     let accounts: Vec<String> = serde_json::from_str(&response)?;
-    Ok(accounts
-        .first()
-        .cloned()
-        .unwrap_or_default()
-        .parse()
-        .unwrap())
+    tracing::info!(accounts = ?accounts, "fetched accounts");
+    match accounts.first() {
+        Some(account_id) => {
+            tracing::info!(account_id = account_id, "using first account id");
+            Ok(account_id.parse()?)
+        }
+        None => {
+            tracing::error!(
+                public_key = public_key.to_string(),
+                "no account found for pk"
+            );
+            Err(anyhow::anyhow!("no account found for pk: {}", public_key))
+        }
+    }
 }
 
 async fn process_add_key<T: OAuthTokenVerifier>(
@@ -433,17 +452,20 @@ async fn add_key<T: OAuthTokenVerifier>(
     Json(request): Json<AddKeyRequest>,
 ) -> (StatusCode, Json<AddKeyResponse>) {
     tracing::info!(
-        near_account_id = hex::encode(match &request.near_account_id {
+        near_account_id = match &request.near_account_id {
             Some(ref near_account_id) => near_account_id,
             None => "not specified",
-        }),
-        public_key = hex::encode(&request.public_key),
+        },
+        public_key = &request.public_key,
         iodc_token = format!("{:.5}...", request.oidc_token),
         "add_key request"
     );
 
     match process_add_key::<T>(state, request).await {
-        Ok(response) => (StatusCode::OK, Json(response)),
+        Ok(response) => {
+            tracing::debug!("responding with OK");
+            (StatusCode::OK, Json(response))
+        }
         Err(ref e @ AddKeyError::MalformedPublicKey(ref pk, _)) => {
             tracing::error!(err = ?e);
             response::add_key_bad_request(format!("bad public_key: {}", pk))
@@ -455,6 +477,13 @@ async fn add_key<T: OAuthTokenVerifier>(
         Err(ref e @ AddKeyError::OidcVerificationFailed(ref err_msg)) => {
             tracing::error!(err = ?e);
             response::add_key_unauthorized(format!("failed to verify oidc token: {}", err_msg))
+        }
+        Err(ref e @ AddKeyError::AccountNotFound(ref err_msg)) => {
+            tracing::error!(err = ?e);
+            response::add_key_bad_request(format!(
+                "failed to recover account_id from pk: {}",
+                err_msg
+            ))
         }
         Err(e) => {
             tracing::error!(err = ?e);
@@ -534,5 +563,22 @@ mod tests {
             .unwrap();
         let first_account = get_acc_id_from_pk(public_key, url).unwrap();
         assert_eq!(first_account.to_string(), "serhii.testnet".to_string());
+    }
+
+    #[test]
+    fn test_get_acc_id_from_unexisting_pk_testnet() {
+        let url = "https://testnet-api.kitwallet.app".to_string();
+        let public_key: PublicKey = "ed25519:2uF6ZUghFFUg3Kta9rW47iiJ3crNzRdaPD2rBPQWEwyc"
+            .parse()
+            .unwrap();
+        match get_acc_id_from_pk(public_key.clone(), url) {
+            Ok(_) => panic!("Should not be able to get account id from unexisting pk"),
+            Err(e) => {
+                assert_eq!(
+                    e.to_string(),
+                    format!("no account found for pk: {}", public_key)
+                );
+            }
+        }
     }
 }

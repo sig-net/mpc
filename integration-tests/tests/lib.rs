@@ -6,6 +6,7 @@ use bollard::Docker;
 use curv::elliptic::curves::{Ed25519, Point};
 use docker::{datastore::Datastore, redis::Redis, relayer::Relayer};
 use futures::future::BoxFuture;
+use mpc_recovery::GenerateResult;
 use std::time::Duration;
 use workspaces::{network::Sandbox, AccountId, Worker};
 
@@ -44,8 +45,19 @@ where
 {
     let docker = Docker::connect_with_local_defaults()?;
 
-    let (pk_set, sk_shares) = mpc_recovery::generate(nodes);
+    let GenerateResult { pk_set, secrets } = mpc_recovery::generate(nodes);
     let worker = workspaces::sandbox().await?;
+    let social_db = worker
+        .import_contract(&"social.near".parse()?, &workspaces::mainnet().await?)
+        .transact()
+        .await?;
+    social_db
+        .call("new")
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
     let near_root_account = worker.root_account()?;
     near_root_account
         .deploy(include_bytes!("../linkdrop.wasm"))
@@ -59,6 +71,8 @@ where
         .into_result()?;
     let (relayer_account_id, relayer_account_sk) = create_account(&worker).await?;
     let (creator_account_id, creator_account_sk) = create_account(&worker).await?;
+    let (social_account_id, social_account_sk) = create_account(&worker).await?;
+    up_funds_for_account(&worker, &social_account_id).await?;
 
     let near_rpc = format!("http://{HOST_MACHINE_FROM_DOCKER}:{}", worker.rpc_port());
     let datastore = Datastore::start(&docker, NETWORK, GCP_PROJECT_ID).await?;
@@ -71,24 +85,30 @@ where
         &relayer_account_id,
         &relayer_account_sk,
         &creator_account_id,
+        social_db.id(),
+        &social_account_id,
+        &social_account_sk,
     )
     .await?;
+    tokio::time::sleep(Duration::from_millis(10000)).await;
+
+    let pagoda_firebase_audience_id = "not actually used in integration tests";
 
     let mut signer_nodes = Vec::new();
-    for (i, share) in sk_shares.iter().enumerate().take(nodes) {
+    for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
         let addr = SignNode::start(
             &docker,
             NETWORK,
             i as u64,
             share,
+            cipher_key,
             &datastore.address,
             GCP_PROJECT_ID,
+            pagoda_firebase_audience_id,
         )
         .await?;
         signer_nodes.push(addr);
     }
-
-    let pagoda_firebase_audience_id = "not actually used in integration tests";
 
     let signer_urls: &Vec<_> = &signer_nodes.iter().map(|n| n.address.clone()).collect();
 
@@ -129,6 +149,16 @@ where
     tokio::time::sleep(Duration::from_millis(2000)).await;
 
     result
+}
+
+async fn up_funds_for_account(worker: &Worker<Sandbox>, id: &AccountId) -> anyhow::Result<()> {
+    const AMOUNT: u128 = 99 * 10u128.pow(24);
+    for _ in 0..10 {
+        let tmp_account = worker.dev_create_account().await?;
+        tmp_account.transfer_near(id, AMOUNT).await?.into_result()?;
+        tmp_account.delete_account(id).await?.into_result()?;
+    }
+    Ok(())
 }
 
 mod account {
