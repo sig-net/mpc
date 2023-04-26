@@ -82,10 +82,11 @@ async fn test_basic_action_with_sig() -> anyhow::Result<()> {
                 .leader_node
                 .new_account(NewAccountRequest {
                     near_account_id: account_id.to_string(),
-                    oidc_token,
+                    oidc_token: oidc_token.clone(),
                     public_key: user_public_key.clone(),
                 })
                 .await?;
+
             assert_eq!(status_code, StatusCode::OK);
             assert!(matches!(new_acc_response, NewAccountResponse::Ok {
                     user_public_key: user_pk,
@@ -106,7 +107,7 @@ async fn test_basic_action_with_sig() -> anyhow::Result<()> {
                 .leader_node
                 .add_key(AddKeyRequest {
                     near_account_id: Some(account_id.to_string()),
-                    oidc_token: token::valid(),
+                    oidc_token: oidc_token.clone(),
                     public_key: new_user_public_key.clone(),
                     signature: None,
                 })
@@ -124,14 +125,21 @@ async fn test_basic_action_with_sig() -> anyhow::Result<()> {
 
             check::access_key_exists(&ctx, &account_id, &new_user_public_key).await?;
 
+            let digest = claim_oidc_request_digest(&oidc_request).unwrap();
+
+            let signature = match user_private_key.sign(&digest) {
+                near_crypto::Signature::ED25519(k) => k,
+                _ => return Err(anyhow::anyhow!("Wrong signature type")),
+            };
+
             // Adding the same key should now fail
             let (status_code, _add_key_response) = ctx
                 .leader_node
                 .add_key(AddKeyRequest {
                     near_account_id: Some(account_id.to_string()),
-                    oidc_token: token::valid(),
+                    oidc_token,
                     public_key: new_user_public_key.clone(),
-                    signature: None,
+                    signature: Some(signature),
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
