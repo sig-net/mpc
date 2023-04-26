@@ -6,6 +6,7 @@ use bollard::Docker;
 use curv::elliptic::curves::{Ed25519, Point};
 use docker::{datastore::Datastore, redis::Redis, relayer::Relayer};
 use futures::future::BoxFuture;
+use mpc_recovery::GenerateResult;
 use std::time::Duration;
 use workspaces::{network::Sandbox, AccountId, Worker};
 
@@ -44,7 +45,7 @@ where
 {
     let docker = Docker::connect_with_local_defaults()?;
 
-    let (pk_set, sk_shares) = mpc_recovery::generate(nodes);
+    let GenerateResult { pk_set, secrets } = mpc_recovery::generate(nodes);
     let worker = workspaces::sandbox().await?;
     let social_db = worker
         .import_contract(&"social.near".parse()?, &workspaces::mainnet().await?)
@@ -94,12 +95,13 @@ where
     let pagoda_firebase_audience_id = "not actually used in integration tests";
 
     let mut signer_nodes = Vec::new();
-    for (i, share) in sk_shares.iter().enumerate().take(nodes) {
+    for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
         let addr = SignNode::start(
             &docker,
             NETWORK,
             i as u64,
             share,
+            cipher_key,
             &datastore.address,
             GCP_PROJECT_ID,
             pagoda_firebase_audience_id,
