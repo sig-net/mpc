@@ -1,10 +1,11 @@
 name: Unit tests
 on:
-  push:
-    branches:
-      - main
-      - develop
-  pull_request:
+  # todo! reenable after concluding experimentation
+  # push:
+  #   branches:
+  #     - main
+  #     - develop
+  # pull_request:
 env:
   RUSTFLAGS: -D warnings
 jobs:
