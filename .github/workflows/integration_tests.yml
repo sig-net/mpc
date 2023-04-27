@@ -49,7 +49,8 @@ jobs:
           rsync -avzh --ignore-missing-args \
             ~/.cargo/{bin,git,.crates.toml,.crates2.json,registry/{cache,index}} \
             docker-cache/usr/local/cargo > /dev/null
-          tar -czvC docker-cache -f docker-cache.tgz usr
+          tar -czC docker-cache -f docker-cache.tgz usr
+          tar tf docker-cache.tgz
           echo "docker-cache.tgz:"
           du -sh docker-cache.tgz
           rm -r docker-cache
