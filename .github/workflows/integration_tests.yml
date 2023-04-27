@@ -7,6 +7,7 @@ on:
   pull_request:
 env:
   RUSTFLAGS: -D warnings
+  ACTIONS_STEP_DEBUG: true
 jobs:
   test:
     runs-on: ubuntu-latest
