@@ -40,10 +40,14 @@ jobs:
         run: |
           mkdir -p target/{docker-cache-build-target,docker-cache/usr/{local/cargo,src/app}}
           cd target
+          echo "target:"
           ls
+          echo "docker-cache-build-target:"
           ls docker-cache-build-target
           mv docker-cache-build-target docker-cache/usr/src/app/target
-          rsync -avzh --ignore-missing-args ~/.cargo/{bin,git,.crates.toml,.crates2.json,registry/{cache,index}} docker-cache/usr/local/cargo
+          rsync -avzh --ignore-missing-args \
+            ~/.cargo/{bin,git,.crates.toml,.crates2.json,registry/{cache,index}} \
+            docker-cache/usr/local/cargo > /dev/null
           tar -czC docker-cache -f docker-cache.tgz usr
           rm -r docker-cache
       - name: Set up Docker Buildx
