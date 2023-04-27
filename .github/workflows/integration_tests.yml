@@ -58,7 +58,7 @@ jobs:
           tags: near/mpc-recovery:latest
           load: true
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # cache-to: type=gha,mode=max
       - name: Export cargo artifacts from Docker image
         uses: docker/build-push-action@v4
         with:
