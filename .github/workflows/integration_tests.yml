@@ -13,8 +13,22 @@ jobs:
     name: Test
     steps:
       - uses: actions/checkout@v3
+      - uses: actions/checkout@v3
         with:
-          submodules: 'true'
+          repository: "near/pagoda-relayer-rs-fastauth"
+          ref: "mpc/entrypoint"
+          path: "relayer"
+          ssh-key: ${{ secrets.RELAYER_DEPLOY_SSH_KEY }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      - name: Build Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: relayer
+          tags: pagoda-relayer-rs-fastauth
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
       - name: Install stable toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -54,4 +68,4 @@ jobs:
           tar -xC target/docker-cache-build-target -f target/docker-cache.tar usr/src/app/target --strip-components=4
           rm target/docker-cache.tar
       - name: Test
-        run: cargo test -p mpc-recovery-integration-tests
+        run: cargo test -p mpc-recovery-integration-tests --jobs 1 -- --test-threads 1

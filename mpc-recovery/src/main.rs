@@ -1,26 +1,25 @@
+use aes_gcm::{
+    aead::{consts::U32, generic_array::GenericArray, KeyInit},
+    Aes256Gcm,
+};
 use clap::Parser;
-use mpc_recovery::LeaderConfig;
+use mpc_recovery::{
+    gcp::GcpService,
+    oauth::{PagodaFirebaseTokenVerifier, UniversalTokenVerifier},
+    GenerateResult, LeaderConfig, SignerConfig,
+};
+use multi_party_eddsa::protocols::ExpandedKeyPair;
 use near_primitives::types::AccountId;
-use threshold_crypto::{serde_impl::SerdeSecret, PublicKeySet, SecretKeyShare};
-
-mod gcp;
 
 #[derive(Parser, Debug)]
 enum Cli {
     Generate {
         n: usize,
-        t: usize,
     },
     StartLeader {
-        /// Node ID
-        #[arg(long, env("MPC_RECOVERY_NODE_ID"))]
-        node_id: u64,
-        /// Root public key
-        #[arg(long, env("MPC_RECOVERY_PK_SET"))]
-        pk_set: String,
-        /// Secret key share, will be pulled from GCP Secret Manager if omitted
-        #[arg(long, env("MPC_RECOVERY_SK_SHARE"))]
-        sk_share: Option<String>,
+        /// Environment to run in (`dev` or `prod`)
+        #[arg(long, env("MPC_RECOVERY_ENV"), default_value("dev"))]
+        env: String,
         /// The web port for this server
         #[arg(long, env("MPC_RECOVERY_WEB_PORT"))]
         web_port: u16,
@@ -35,103 +34,229 @@ enum Cli {
         )]
         near_rpc: String,
         /// NEAR meta transaction relayer URL
+        #[arg(long, env("MPC_RECOVERY_RELAYER_API_KEY"))]
+        relayer_api_key: Option<String>,
+        /// NEAR meta transaction relayer URL
         #[arg(
             long,
             env("MPC_RECOVERY_RELAYER_URL"),
             default_value("http://34.70.226.83:3030")
         )]
         relayer_url: String,
+        /// NEAR root account that has linkdrop contract deployed on it
+        #[arg(long, env("MPC_RECOVERY_NEAR_ROOT_ACCOUNT"), default_value("testnet"))]
+        near_root_account: String,
         /// Account creator ID
         #[arg(long, env("MPC_RECOVERY_ACCOUNT_ID"))]
         account_creator_id: AccountId,
         /// TEMPORARY - Account creator ed25519 secret key
         #[arg(long, env("MPC_RECOVERY_ACCOUNT_CREATOR_SK"))]
-        account_creator_sk: String,
+        account_creator_sk: Option<String>,
+        #[arg(
+            long,
+            env("MPC_RECOVERY_ACCOUNT_LOOKUP_URL"),
+            default_value("https://api.kitwallet.app")
+        )]
+        account_lookup_url: String,
+        /// Firebase Audience ID
+        #[arg(long, env("PAGODA_FIREBASE_AUDIENCE_ID"))]
+        pagoda_firebase_audience_id: String,
+        /// GCP project ID
+        #[arg(long, env("MPC_RECOVERY_GCP_PROJECT_ID"))]
+        gcp_project_id: String,
+        /// GCP datastore URL
+        #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
+        gcp_datastore_url: Option<String>,
+        /// Whether to accept test tokens
+        #[arg(long, env("MPC_RECOVERY_TEST"), default_value("false"))]
+        test: bool,
     },
     StartSign {
+        /// Environment to run in (`dev` or `prod`)
+        #[arg(long, env("MPC_RECOVERY_ENV"), default_value("dev"))]
+        env: String,
         /// Node ID
         #[arg(long, env("MPC_RECOVERY_NODE_ID"))]
         node_id: u64,
-        /// Root public key
-        #[arg(long, env("MPC_RECOVERY_PK_SET"))]
-        pk_set: String,
+        /// Cipher key to encrypt stored user credentials, will be pulled from GCP Secret Manager if omitted
+        #[arg(long, env("MPC_RECOVERY_CIPHER_KEY"))]
+        cipher_key: Option<String>,
         /// Secret key share, will be pulled from GCP Secret Manager if omitted
         #[arg(long, env("MPC_RECOVERY_SK_SHARE"))]
         sk_share: Option<String>,
         /// The web port for this server
         #[arg(long, env("MPC_RECOVERY_WEB_PORT"))]
         web_port: u16,
+        /// Firebase Audience ID
+        #[arg(long, env("PAGODA_FIREBASE_AUDIENCE_ID"))]
+        pagoda_firebase_audience_id: String,
+        /// GCP project ID
+        #[arg(long, env("MPC_RECOVERY_GCP_PROJECT_ID"))]
+        gcp_project_id: String,
+        /// GCP datastore URL
+        #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
+        gcp_datastore_url: Option<String>,
+        /// Whether to accept test tokens
+        #[arg(long, env("MPC_RECOVERY_TEST"), default_value("false"))]
+        test: bool,
     },
 }
 
-async fn load_sh_skare(node_id: u64, sk_share_arg: Option<String>) -> anyhow::Result<String> {
+async fn load_sh_skare(
+    gcp_service: &GcpService,
+    env: &str,
+    node_id: u64,
+    sk_share_arg: Option<String>,
+) -> anyhow::Result<String> {
     match sk_share_arg {
         Some(sk_share) => Ok(sk_share),
-        None => Ok(std::str::from_utf8(&gcp::load_secret_share(node_id).await?)?.to_string()),
+        None => {
+            let name = format!(
+                "projects/pagoda-discovery-platform-dev/secrets/mpc-recovery-secret-share-{node_id}-{env}/versions/latest"
+            );
+            Ok(std::str::from_utf8(&gcp_service.load_secret(name).await?)?.to_string())
+        }
+    }
+}
+
+async fn load_cipher_key(
+    gcp_service: &GcpService,
+    env: &str,
+    node_id: u64,
+    cipher_key_arg: Option<String>,
+) -> anyhow::Result<String> {
+    match cipher_key_arg {
+        Some(cipher_key) => Ok(cipher_key),
+        None => {
+            let name = format!(
+                "projects/pagoda-discovery-platform-dev/secrets/mpc-recovery-encryption-cipher-{node_id}-{env}/versions/latest"
+            );
+            Ok(std::str::from_utf8(&gcp_service.load_secret(name).await?)?.to_string())
+        }
+    }
+}
+
+async fn load_account_creator_sk(
+    gcp_service: &GcpService,
+    env: &str,
+    account_creator_sk_arg: Option<String>,
+) -> anyhow::Result<String> {
+    match account_creator_sk_arg {
+        Some(account_creator_sk) => Ok(account_creator_sk),
+        None => {
+            let name = format!(
+                "projects/pagoda-discovery-platform-dev/secrets/mpc-recovery-account-creator-sk-{env}/versions/latest"
+            );
+            Ok(std::str::from_utf8(&gcp_service.load_secret(name).await?)?.to_string())
+        }
     }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // install global collector configured based on RUST_LOG env var.
-    tracing_subscriber::fmt::init();
+    // Install global collector configured based on RUST_LOG env var.
+    let mut subscriber = tracing_subscriber::fmt();
+    // Check if running in Google Cloud Run: https://cloud.google.com/run/docs/container-contract#services-env-vars
+    if std::env::var("K_SERVICE").is_ok() {
+        // Disable colored logging as it messes up Google's log formatting
+        subscriber = subscriber.with_ansi(false);
+    }
+    subscriber.init();
     let _span = tracing::trace_span!("cli").entered();
 
     match Cli::parse() {
-        Cli::Generate { n, t } => {
-            let (pk_set, sk_shares) = mpc_recovery::generate(n, t)?;
+        Cli::Generate { n } => {
+            let GenerateResult { pk_set, secrets } = mpc_recovery::generate(n);
             println!("Public key set: {}", serde_json::to_string(&pk_set)?);
-            for (i, sk_share) in sk_shares.iter().enumerate() {
+            for (i, (sk_share, cipher_key)) in secrets.iter().enumerate() {
                 println!(
                     "Secret key share {}: {}",
                     i,
-                    serde_json::to_string(&SerdeSecret(sk_share))?
+                    serde_json::to_string(sk_share)?
                 );
+                println!("Cipher {}: {}", i, hex::encode(cipher_key));
             }
         }
         Cli::StartLeader {
-            node_id,
-            pk_set,
-            sk_share,
+            env,
             web_port,
             sign_nodes,
             near_rpc,
+            relayer_api_key,
             relayer_url,
+            near_root_account,
             account_creator_id,
             account_creator_sk,
+            account_lookup_url,
+            pagoda_firebase_audience_id,
+            gcp_project_id,
+            gcp_datastore_url,
+            test,
         } => {
-            let sk_share = load_sh_skare(node_id, sk_share).await?;
+            let gcp_service =
+                GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
+            let account_creator_sk =
+                load_account_creator_sk(&gcp_service, &env, account_creator_sk).await?;
 
-            let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
-            let sk_share: SecretKeyShare = serde_json::from_str(&sk_share).unwrap();
+            let account_creator_sk = account_creator_sk.parse()?;
 
-            mpc_recovery::run_leader_node(LeaderConfig {
-                id: node_id,
-                pk_set,
-                sk_share,
+            let config = LeaderConfig {
+                env,
                 port: web_port,
                 sign_nodes,
                 near_rpc,
+                relayer_api_key,
                 relayer_url,
+                near_root_account,
                 // TODO: Create such an account for testnet and mainnet in a secure way
                 account_creator_id,
-                // TODO: Load this account secret key from GCP Secret Manager
-                account_creator_sk: account_creator_sk.parse()?,
-            })
-            .await;
+                account_creator_sk,
+                account_lookup_url,
+                pagoda_firebase_audience_id,
+            };
+
+            if test {
+                mpc_recovery::run_leader_node::<UniversalTokenVerifier>(config).await;
+            } else {
+                mpc_recovery::run_leader_node::<PagodaFirebaseTokenVerifier>(config).await;
+            }
         }
         Cli::StartSign {
+            env,
             node_id,
-            pk_set,
             sk_share,
+            cipher_key,
             web_port,
+            pagoda_firebase_audience_id,
+            gcp_project_id,
+            gcp_datastore_url,
+            test,
         } => {
-            let sk_share = load_sh_skare(node_id, sk_share).await?;
+            let gcp_service =
+                GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
+            let cipher_key = load_cipher_key(&gcp_service, &env, node_id, cipher_key).await?;
+            let cipher_key = hex::decode(cipher_key)?;
+            let cipher_key = GenericArray::<u8, U32>::clone_from_slice(&cipher_key);
+            let cipher = Aes256Gcm::new(&cipher_key);
 
-            let pk_set: PublicKeySet = serde_json::from_str(&pk_set).unwrap();
-            let sk_share: SecretKeyShare = serde_json::from_str(&sk_share).unwrap();
+            let sk_share = load_sh_skare(&gcp_service, &env, node_id, sk_share).await?;
 
-            mpc_recovery::run_sign_node(node_id, pk_set, sk_share, web_port).await;
+            // TODO Import just the private key and derive the rest
+            let sk_share: ExpandedKeyPair = serde_json::from_str(&sk_share).unwrap();
+
+            let config = SignerConfig {
+                gcp_service,
+                our_index: node_id,
+                node_key: sk_share,
+                cipher,
+                port: web_port,
+                pagoda_firebase_audience_id,
+            };
+            if test {
+                mpc_recovery::run_sign_node::<UniversalTokenVerifier>(config).await;
+            } else {
+                mpc_recovery::run_sign_node::<PagodaFirebaseTokenVerifier>(config).await;
+            }
         }
     }
 

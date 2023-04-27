@@ -20,7 +20,15 @@ The recovery service is currently hosted at <https://mpc-recovery-7tk2cmmtcq-ue.
         oidc_token: String,
         public_key: String
     }
-    Response: Ok / {"Err": String}
+    Response:
+    Ok {
+        user_public_key: String,
+        user_recovery_public_key: String,
+        near_account_id: String,
+    } /
+    Err {
+        msg: String
+    }
 
 This creates an account with the name in `near_account_id`. If this name is already taken then this operation will fail with no action having been taken.
 
@@ -33,11 +41,20 @@ Newly created NEAR account will have two full access keys. One that was provided
 
     URL: /add_key
     Request parameters: {
-        near_account_id: String,
+        // in case NEAR AccointId is not provided,
+        // it will be determined using recovery PK and NEAR Wallet APIs
+        near_account_id: Option(String),
         public_key: String,
         oidc_token: String
     }
-    Response: "Ok" / {"Err": String}
+    Response:
+    Ok {
+        user_public_key: String,
+        near_account_id: String,
+    } /
+    Err{
+        msg: String
+    }
 
 ## OIDC (OAuth 2.0) authentication
 
@@ -54,24 +71,39 @@ Internally, we are identifying users by their issuer id (iss) and their unique I
 
 ### Contribute
 
-In order to build the project, you will need to have `protoc` installed and execute next commands:
+In order to build the project, you will need to have `protoc` and `gmp` installed. Refer to your system's package manager on how to do this.
+
+If you have [nix](https://nixos.org/) and [direnv](https://direnv.net/) installed, you can set up a development environment by running:
 
 ```BASH
-# init submodules
-git submodule update --init --recursive
-# build the Docker image
-docker build . -t near/mpc-recovery
-```
-
-alternatively if you have [nix](https://nixos.org/) and [direnv](https://direnv.net/) installed, you can set up a development environment by running:
-
-``` BASH
 direnv allow
 ```
 
-Run tests with:
-```
+Run unit tests with:
+```BASH
 cargo test -p mpc-recovery
+```
+
+#### Integration tests
+
+Running integration tests requires you to have relayer docker image present on your machine:
+
+```BASH
+# TODO: upstream these changes
+git clone -b mpc/entrypoint git@github.com:near/pagoda-relayer-rs-fastauth.git
+docker build pagoda-relayer-rs-fastauth -t pagoda-relayer-rs-fastauth
+```
+
+Now, build mpc-recovery from this repository:
+
+```BASH
+docker build . -t near/mpc-recovery
+```
+
+**Note**. You will need to re-build the Docker image each time you make a code change and want to run the integration tests.
+
+Finally, run the integration tests:
+
+```BASH
 cargo test -p mpc-recovery-integration-tests
 ```
-If you are using docker you will need to re-build the Docker image each time you made a code change and want to run the integration tests.

@@ -1,101 +1,148 @@
+mod docker;
+mod mpc;
+
 use crate::docker::{LeaderNode, SignNode};
 use bollard::Docker;
-// use docker::{redis::Redis, relayer::Relayer};
+use curv::elliptic::curves::{Ed25519, Point};
+use docker::{datastore::Datastore, redis::Redis, relayer::Relayer};
 use futures::future::BoxFuture;
-use mpc_recovery::msg::{
-    AddKeyRequest, AddKeyResponse, LeaderRequest, LeaderResponse, NewAccountRequest,
-    NewAccountResponse,
-};
-use rand::{distributions::Alphanumeric, Rng};
+use mpc_recovery::GenerateResult;
 use std::time::Duration;
-use threshold_crypto::PublicKeySet;
-use workspaces::AccountId;
-
-mod docker;
+use workspaces::{network::Sandbox, AccountId, Worker};
 
 const NETWORK: &str = "mpc_recovery_integration_test_network";
+const GCP_PROJECT_ID: &str = "mpc-recovery-gcp-project";
+#[cfg(target_os = "linux")]
+const HOST_MACHINE_FROM_DOCKER: &str = "172.17.0.1";
+#[cfg(target_os = "macos")]
+const HOST_MACHINE_FROM_DOCKER: &str = "docker.for.mac.localhost";
 
-struct TestContext<'a> {
+pub struct TestContext<'a> {
     leader_node: &'a LeaderNode,
-    pk_set: &'a PublicKeySet,
+    _pk_set: &'a Vec<Point<Ed25519>>,
+    worker: &'a Worker<Sandbox>,
+    signer_nodes: &'a Vec<SignNode>,
 }
 
-// async fn create_account(
-//     worker: &Worker<Sandbox>,
-// ) -> anyhow::Result<(AccountId, near_crypto::SecretKey)> {
-//     let (account_id, account_sk) = worker.dev_generate().await;
-//     worker
-//         .create_tla(account_id.clone(), account_sk.clone())
-//         .await?
-//         .into_result()?;
+async fn create_account(
+    worker: &Worker<Sandbox>,
+) -> anyhow::Result<(AccountId, near_crypto::SecretKey)> {
+    let (account_id, account_sk) = worker.dev_generate().await;
+    worker
+        .create_tla(account_id.clone(), account_sk.clone())
+        .await?
+        .into_result()?;
 
-//     let account_sk: near_crypto::SecretKey =
-//         serde_json::from_str(&serde_json::to_string(&account_sk)?)?;
+    let account_sk: near_crypto::SecretKey =
+        serde_json::from_str(&serde_json::to_string(&account_sk)?)?;
 
-//     Ok((account_id, account_sk))
-// }
+    Ok((account_id, account_sk))
+}
 
-async fn with_nodes<F>(shares: usize, threshold: usize, nodes: usize, f: F) -> anyhow::Result<()>
+async fn with_nodes<F>(nodes: usize, f: F) -> anyhow::Result<()>
 where
     F: for<'a> FnOnce(TestContext<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
 {
     let docker = Docker::connect_with_local_defaults()?;
 
-    let (pk_set, sk_shares) = mpc_recovery::generate(shares, threshold)?;
-    // TODO: return once sandbox+workspaces are updated to support meta txs
-    // let worker = workspaces::sandbox().await?;
-    // let (relayer_account_id, relayer_account_sk) = create_account(&worker).await?;
-    // let (creator_account_id, creator_account_sk) = create_account(&worker).await?;
+    let GenerateResult { pk_set, secrets } = mpc_recovery::generate(nodes);
+    let worker = workspaces::sandbox().await?;
+    let social_db = worker
+        .import_contract(&"social.near".parse()?, &workspaces::mainnet().await?)
+        .transact()
+        .await?;
+    social_db
+        .call("new")
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
 
-    // let near_rpc = format!("http://172.17.0.1:{}", worker.rpc_port());
-    // let redis = Redis::start(&docker, NETWORK).await?;
-    // let relayer = Relayer::start(
-    //     &docker,
-    //     NETWORK,
-    //     &near_rpc,
-    //     &redis.hostname,
-    //     &relayer_account_id,
-    //     &relayer_account_sk,
-    //     &creator_account_id,
-    // )
-    // .await?;
-    let near_rpc = "https://rpc.testnet.near.org";
-    let creator_account_id: AccountId = "tmp_acount_creator.serhii.testnet".parse().unwrap();
-    let creator_account_sk: near_crypto::SecretKey = "ed25519:5pFJN3czPAHFWHZYjD4oTtnJE7PshLMeTkSU7CmWkvLaQWchCLgXGF1wwcJmh2AQChGH85EwcL5VW7tUavcAZDSG".parse().unwrap();
+    let near_root_account = worker.root_account()?;
+    near_root_account
+        .deploy(include_bytes!("../linkdrop.wasm"))
+        .await?
+        .into_result()?;
+    near_root_account
+        .call(near_root_account.id(), "new")
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    let (relayer_account_id, relayer_account_sk) = create_account(&worker).await?;
+    let (creator_account_id, creator_account_sk) = create_account(&worker).await?;
+    let (social_account_id, social_account_sk) = create_account(&worker).await?;
+    up_funds_for_account(&worker, &social_account_id).await?;
 
-    let mut sign_nodes = Vec::new();
-    for i in 2..=nodes {
-        let addr = SignNode::start(&docker, NETWORK, i as u64, &pk_set, &sk_shares[i - 1]).await?;
-        sign_nodes.push(addr);
+    let near_rpc = format!("http://{HOST_MACHINE_FROM_DOCKER}:{}", worker.rpc_port());
+    let datastore = Datastore::start(&docker, NETWORK, GCP_PROJECT_ID).await?;
+    let redis = Redis::start(&docker, NETWORK).await?;
+    let relayer = Relayer::start(
+        &docker,
+        NETWORK,
+        &near_rpc,
+        &redis.hostname,
+        &relayer_account_id,
+        &relayer_account_sk,
+        &creator_account_id,
+        social_db.id(),
+        &social_account_id,
+        &social_account_sk,
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(10000)).await;
+
+    let pagoda_firebase_audience_id = "not actually used in integration tests";
+
+    let mut signer_nodes = Vec::new();
+    for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
+        let addr = SignNode::start(
+            &docker,
+            NETWORK,
+            i as u64,
+            share,
+            cipher_key,
+            &datastore.address,
+            GCP_PROJECT_ID,
+            pagoda_firebase_audience_id,
+        )
+        .await?;
+        signer_nodes.push(addr);
     }
+
+    let signer_urls: &Vec<_> = &signer_nodes.iter().map(|n| n.address.clone()).collect();
+
     let leader_node = LeaderNode::start(
         &docker,
         NETWORK,
-        1,
-        &pk_set,
-        &sk_shares[0],
-        sign_nodes.iter().map(|n| n.address.clone()).collect(),
-        near_rpc,
-        // &relayer.address,
-        "http://34.70.226.83:3030",
+        signer_urls.clone(),
+        &near_rpc,
+        &relayer.address,
+        &datastore.address,
+        GCP_PROJECT_ID,
+        near_root_account.id(),
         &creator_account_id,
         &creator_account_sk,
+        pagoda_firebase_audience_id,
     )
     .await?;
 
     // Wait until all nodes initialize
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    tokio::time::sleep(Duration::from_millis(10000)).await;
 
     let result = f(TestContext {
         leader_node: &leader_node,
-        pk_set: &pk_set,
+        _pk_set: &pk_set,
+        signer_nodes: &signer_nodes,
+        worker: &worker,
     })
     .await;
 
+    drop(datastore);
     drop(leader_node);
-    drop(sign_nodes);
-    // drop(relayer);
-    // drop(redis);
+    drop(signer_nodes);
+    drop(relayer);
+    drop(redis);
 
     // Wait until all docker containers are destroyed.
     // See `Drop` impl for `LeaderNode` and `SignNode` for more info.
@@ -104,90 +151,113 @@ where
     result
 }
 
-#[tokio::test]
-async fn test_trio() -> anyhow::Result<()> {
-    with_nodes(4, 3, 3, |ctx| {
-        Box::pin(async move {
-            let payload: String = rand::thread_rng()
-                .sample_iter(&Alphanumeric)
-                .take(10)
-                .map(char::from)
-                .collect();
-            let (status_code, response) = ctx
-                .leader_node
-                .submit(LeaderRequest {
-                    payload: payload.clone(),
-                })
-                .await?;
-
-            assert_eq!(status_code, 200);
-            if let LeaderResponse::Ok { signature } = response {
-                assert!(ctx.pk_set.public_key().verify(&signature, payload));
-            } else {
-                panic!("response was not successful");
-            }
-
-            Ok(())
-        })
-    })
-    .await
+async fn up_funds_for_account(worker: &Worker<Sandbox>, id: &AccountId) -> anyhow::Result<()> {
+    const AMOUNT: u128 = 99 * 10u128.pow(24);
+    for _ in 0..10 {
+        let tmp_account = worker.dev_create_account().await?;
+        tmp_account.transfer_near(id, AMOUNT).await?.into_result()?;
+        tmp_account.delete_account(id).await?.into_result()?;
+    }
+    Ok(())
 }
 
-#[tokio::test]
-async fn test_basic_action() -> anyhow::Result<()> {
-    with_nodes(4, 3, 3, |ctx| {
-        Box::pin(async move {
-            // Create new account
-            // TODO: write a test with real token
-            // "validToken" should triger test token verifyer and return success
-            let id_token = "validToken".to_string();
-            let account_id_rand: String = rand::thread_rng()
-                .sample_iter(&Alphanumeric)
-                .take(10)
-                .map(char::from)
-                .collect();
-            let account_id = format!("mpc-recovery-{}.testnet", account_id_rand.to_lowercase());
+mod account {
+    use rand::{distributions::Alphanumeric, Rng};
+    use workspaces::{network::Sandbox, AccountId, Worker};
 
-            let user_public_key =
-                near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
-                    .public_key()
-                    .to_string();
+    pub fn random(worker: &Worker<Sandbox>) -> anyhow::Result<AccountId> {
+        let account_id_rand: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+        Ok(format!(
+            "mpc-recovery-{}.{}",
+            account_id_rand.to_lowercase(),
+            worker.root_account()?.id()
+        )
+        .parse()?)
+    }
 
-            let (status_code, new_acc_response) = ctx
-                .leader_node
-                .new_account(NewAccountRequest {
-                    near_account_id: account_id.clone(),
-                    oidc_token: id_token.clone(),
-                    public_key: user_public_key,
-                })
-                .await?;
-            assert_eq!(status_code, 200);
+    pub fn malformed() -> String {
+        let random: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+        format!("malformed-account-{}-!@#$%", random.to_lowercase())
+    }
+}
 
-            assert!(matches!(new_acc_response, NewAccountResponse::Ok));
+mod key {
+    use rand::{distributions::Alphanumeric, Rng};
 
-            tokio::time::sleep(Duration::from_millis(20000)).await;
+    pub fn random() -> String {
+        near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
+            .public_key()
+            .to_string()
+    }
 
-            let new_user_public_key =
-                near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
-                    .public_key()
-                    .to_string();
+    pub fn malformed() -> String {
+        let random: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+        format!("malformed-key-{}-!@#$%", random.to_lowercase())
+    }
+}
 
-            let (status_code2, add_key_response) = ctx
-                .leader_node
-                .add_key(AddKeyRequest {
-                    near_account_id: account_id.clone(),
-                    oidc_token: id_token.clone(),
-                    public_key: new_user_public_key,
-                })
-                .await?;
+mod token {
+    use rand::{distributions::Alphanumeric, Rng};
 
-            assert_eq!(status_code2, 200);
-            assert!(matches!(add_key_response, AddKeyResponse::Ok));
+    pub fn valid_random() -> String {
+        let random: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+        format!("validToken:{}", random)
+    }
 
-            tokio::time::sleep(Duration::from_millis(120000)).await;
+    pub fn invalid() -> String {
+        "invalidToken".to_string()
+    }
+}
 
+mod check {
+    use crate::TestContext;
+    use workspaces::AccountId;
+
+    pub async fn access_key_exists<'a>(
+        ctx: &TestContext<'a>,
+        account_id: &AccountId,
+        public_key: &str,
+    ) -> anyhow::Result<()> {
+        let access_keys = ctx.worker.view_access_keys(account_id).await?;
+
+        if access_keys
+            .iter()
+            .any(|ak| ak.public_key.to_string() == public_key)
+        {
             Ok(())
-        })
-    })
-    .await
+        } else {
+            Err(anyhow::anyhow!(
+                "could not find access key {public_key} on account {account_id}"
+            ))
+        }
+    }
+
+    pub async fn no_account<'a>(
+        ctx: &TestContext<'a>,
+        account_id: &AccountId,
+    ) -> anyhow::Result<()> {
+        if ctx.worker.view_account(account_id).await.is_err() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "expected account {account_id} to not exist, but it does"
+            ))
+        }
+    }
 }

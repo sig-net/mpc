@@ -1,8 +1,11 @@
+use crate::drop_container;
 use bollard::{
     container::{Config, RemoveContainerOptions},
+    image::CreateImageOptions,
     service::HostConfig,
     Docker,
 };
+use futures::TryStreamExt;
 
 pub struct Redis {
     docker: Docker,
@@ -11,7 +14,20 @@ pub struct Redis {
 }
 
 impl Redis {
-    pub async fn start(docker: &Docker, network: &str) -> anyhow::Result<Redis> {
+    pub async fn start(docker: &Docker, network: &str) -> anyhow::Result<Self> {
+        super::create_network(docker, network).await?;
+        docker
+            .create_image(
+                Some(CreateImageOptions {
+                    from_image: "redis:latest",
+                    ..Default::default()
+                }),
+                None,
+                None,
+            )
+            .try_collect::<Vec<_>>()
+            .await?;
+
         let relayer_config = Config {
             image: Some("redis:latest".to_string()),
             tty: Some(true),
@@ -49,7 +65,7 @@ impl Redis {
             .ip_address
             .unwrap();
 
-        Ok(Redis {
+        Ok(Self {
             docker: docker.clone(),
             container_id,
             hostname: ip_address,
@@ -57,24 +73,4 @@ impl Redis {
     }
 }
 
-// Removing container is an asynchronous operation and hence has to be scheduled to execute
-// outside of `drop`'s scope. This leads to problems when the drop happens right before the
-// execution ends. The invoker needs to be aware of this behavior and give `drop` some time
-// to finalize.
-impl Drop for Redis {
-    fn drop(&mut self) {
-        let container_id = self.container_id.clone();
-        let docker = self.docker.clone();
-        tokio::spawn(async move {
-            docker
-                .remove_container(
-                    &container_id,
-                    Some(RemoveContainerOptions {
-                        force: true,
-                        ..Default::default()
-                    }),
-                )
-                .await
-        });
-    }
-}
+drop_container!(Redis);

@@ -4,6 +4,10 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive \
     apt-get install --no-install-recommends --assume-yes \
     protobuf-compiler libprotobuf-dev
+RUN echo "fn main() {}" > dummy.rs
+COPY mpc-recovery/Cargo.toml Cargo.toml
+RUN sed -i 's#src/main.rs#dummy.rs#' Cargo.toml
+RUN cargo build --release
 COPY . .
 RUN if [ -f ./target/docker-cache.tgz ]; then \
         tar -xzC / -f ./target/docker-cache.tgz \
@@ -20,7 +24,7 @@ COPY --from=builder /usr/local/cargo/.crates2.jso[n] /usr/local/cargo/.crates2.j
 COPY --from=builder /usr/local/cargo/registry/cache /usr/local/cargo/registry/cache
 COPY --from=builder /usr/local/cargo/registry/index /usr/local/cargo/registry/index
 
-FROM debian:buster-slim as runtime
+FROM debian:bullseye-slim as runtime
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive \
     apt-get install --no-install-recommends --assume-yes \
