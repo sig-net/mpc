@@ -41,7 +41,7 @@ jobs:
           mkdir -p target/{docker-cache-build-target,docker-cache/usr/{local/cargo,src/app}}
           cd target
           mv docker-cache-build-target docker-cache/usr/src/app/target
-          rsync -avzh ~/.cargo/{bin,git,.crates.toml,.crates2.json,registry/{cache,index}} docker-cache/usr/local/cargo
+          rsync -avzh ~/.cargo/{bi[n],gi[t],.crates.tom[l],.crates2.jso[n],registry/{cach[e],inde[x]}} docker-cache/usr/local/cargo
           tar -czC docker-cache -f docker-cache.tgz usr
           rm -r docker-cache
       - name: Set up Docker Buildx
