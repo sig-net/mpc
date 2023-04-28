@@ -137,8 +137,6 @@ struct LeaderState {
 enum NewAccountError {
     #[error("malformed account id: {0}")]
     MalformedAccountId(String, ParseAccountError),
-    #[error("malformed public key {0}: {1}")]
-    MalformedPublicKey(String, ParseKeyError),
     #[error("failed to verify oidc token: {0}")]
     OidcVerificationFailed(anyhow::Error),
     #[error("relayer error: {0}")]
@@ -152,10 +150,6 @@ async fn process_new_account<T: OAuthTokenVerifier>(
     request: NewAccountRequest,
 ) -> Result<NewAccountResponse, NewAccountError> {
     // Create a transaction to create new NEAR account
-    let new_user_account_pk: PublicKey = request
-        .public_key
-        .parse()
-        .map_err(|e| NewAccountError::MalformedPublicKey(request.public_key, e))?;
     let new_user_account_id: AccountId = request
         .near_account_id
         .parse()
@@ -192,12 +186,18 @@ async fn process_new_account<T: OAuthTokenVerifier>(
         )
         .await?;
 
+        // Add recovery key to create account options
+        let mut new_account_options = request.create_account_options.clone();
+        match new_account_options.full_access_keys {
+            Some(ref mut keys) => keys.push(mpc_user_recovery_pk.clone()),
+            None => new_account_options.full_access_keys = Some(vec![mpc_user_recovery_pk.clone()]),
+        }
+
         let delegate_action = get_create_account_delegate_action(
             state.account_creator_id.clone(),
             state.account_creator_sk.public_key(),
             new_user_account_id.clone(),
-            mpc_user_recovery_pk.clone(),
-            new_user_account_pk.clone(),
+            new_account_options.clone(),
             state.near_root_account.clone(),
             nonce,
             block_height + 100,
@@ -229,7 +229,7 @@ async fn process_new_account<T: OAuthTokenVerifier>(
         // TODO: Probably need to check more fields
         if matches!(response.status, FinalExecutionStatus::SuccessValue(_)) {
             Ok(NewAccountResponse::Ok {
-                user_public_key: new_user_account_pk.to_string(),
+                create_account_options: new_account_options,
                 user_recovery_public_key: mpc_user_recovery_pk.to_string(),
                 near_account_id: new_user_account_id.to_string(),
             })
@@ -284,7 +284,7 @@ async fn new_account<T: OAuthTokenVerifier>(
 ) -> (StatusCode, Json<NewAccountResponse>) {
     tracing::info!(
         near_account_id = request.near_account_id.clone(),
-        public_key = request.public_key.clone(),
+        create_account_options = request.create_account_options.to_string(),
         iodc_token = format!("{:.5}...", request.oidc_token),
         "new_account request"
     );
@@ -293,10 +293,6 @@ async fn new_account<T: OAuthTokenVerifier>(
         Ok(response) => {
             tracing::debug!("responding with OK");
             (StatusCode::OK, Json(response))
-        }
-        Err(ref e @ NewAccountError::MalformedPublicKey(ref pk, _)) => {
-            tracing::error!(err = ?e);
-            response::new_acc_bad_request(format!("bad public_key: {}", pk))
         }
         Err(ref e @ NewAccountError::MalformedAccountId(ref account_id, _)) => {
             tracing::error!(err = ?e);
@@ -314,6 +310,7 @@ async fn new_account<T: OAuthTokenVerifier>(
 }
 
 #[derive(thiserror::Error, Debug)]
+#[allow(dead_code)]
 enum AddKeyError {
     #[error("malformed account id: {0}")]
     MalformedAccountId(String, ParseAccountError),
@@ -373,10 +370,6 @@ async fn process_add_key<T: OAuthTokenVerifier>(
         internal_acc_id.clone(),
     )
     .await?;
-    let new_public_key: PublicKey = request
-        .public_key
-        .parse()
-        .map_err(|e| AddKeyError::MalformedPublicKey(request.public_key, e))?;
 
     let user_account_id: AccountId = match &request.near_account_id {
         Some(near_account_id) => near_account_id
@@ -403,7 +396,7 @@ async fn process_add_key<T: OAuthTokenVerifier>(
         let delegate_action = get_add_key_delegate_action(
             user_account_id.clone(),
             user_recovery_pk.clone(),
-            new_public_key.clone(),
+            request.create_account_options.clone(),
             nonce,
             max_block_height,
         )?;
@@ -436,7 +429,22 @@ async fn process_add_key<T: OAuthTokenVerifier>(
         // TODO: Probably need to check more fields
         if matches!(resp.status, FinalExecutionStatus::SuccessValue(_)) {
             Ok(AddKeyResponse::Ok {
-                user_public_key: new_public_key.to_string(),
+                full_access_keys: request
+                    .create_account_options
+                    .clone()
+                    .full_access_keys
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|pk| pk.to_string())
+                    .collect(),
+                limited_access_keys: request
+                    .create_account_options
+                    .clone()
+                    .limited_access_keys
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|lak| lak.public_key.to_string())
+                    .collect(),
                 near_account_id: user_account_id.to_string(),
             })
         } else {
@@ -456,7 +464,7 @@ async fn add_key<T: OAuthTokenVerifier>(
             Some(ref near_account_id) => near_account_id,
             None => "not specified",
         },
-        public_key = &request.public_key,
+        create_account_options = request.create_account_options.to_string(),
         iodc_token = format!("{:.5}...", request.oidc_token),
         "add_key request"
     );

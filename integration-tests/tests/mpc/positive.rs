@@ -1,13 +1,17 @@
 use crate::{account, check, key, token, with_nodes};
+use anyhow::anyhow;
 use ed25519_dalek::Verifier;
 use hyper::StatusCode;
 use mpc_recovery::{
     msg::{AddKeyRequest, AddKeyResponse, NewAccountRequest, NewAccountResponse},
     oauth::get_test_claims,
-    transaction::{call, sign, to_dalek_combined_public_key},
+    transaction::{
+        call, sign, to_dalek_combined_public_key, CreateAccountOptions, LimitedAccessKey,
+    },
 };
 use rand::{distributions::Alphanumeric, Rng};
 use std::time::Duration;
+use workspaces::types::AccessKeyPermission;
 
 #[tokio::test]
 async fn test_trio() -> anyhow::Result<()> {
@@ -56,21 +60,27 @@ async fn test_basic_action() -> anyhow::Result<()> {
             let user_public_key = key::random();
             let oidc_token = token::valid_random();
 
+            let create_account_options = CreateAccountOptions {
+                full_access_keys: Some(vec![user_public_key.clone().parse().unwrap()]),
+                limited_access_keys: None,
+                contract_bytes: None,
+            };
+
             // Create account
             let (status_code, new_acc_response) = ctx
                 .leader_node
                 .new_account(NewAccountRequest {
                     near_account_id: account_id.to_string(),
+                    create_account_options,
                     oidc_token: oidc_token.clone(),
-                    public_key: user_public_key.clone(),
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
             assert!(matches!(new_acc_response, NewAccountResponse::Ok {
-                    user_public_key: user_pk,
+                    create_account_options: _,
                     user_recovery_public_key: _,
                     near_account_id: acc_id,
-                } if user_pk == user_public_key && acc_id == account_id.to_string()
+                } if acc_id == account_id.to_string()
             ));
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
@@ -85,17 +95,24 @@ async fn test_basic_action() -> anyhow::Result<()> {
                 .add_key(AddKeyRequest {
                     near_account_id: Some(account_id.to_string()),
                     oidc_token: oidc_token.clone(),
-                    public_key: new_user_public_key.clone(),
+                    create_account_options: CreateAccountOptions {
+                        full_access_keys: Some(vec![new_user_public_key.parse()?]),
+                        limited_access_keys: None,
+                        contract_bytes: None,
+                    },
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
-            assert!(matches!(
-                add_key_response,
-                AddKeyResponse::Ok {
-                    user_public_key: new_pk,
-                    near_account_id: acc_id,
-                } if new_pk == new_user_public_key && acc_id == account_id.to_string()
-            ));
+            let AddKeyResponse::Ok {
+                full_access_keys,
+                limited_access_keys,
+                near_account_id,
+            } = add_key_response else {
+                anyhow::bail!("unexpected pattern");
+            };
+            assert_eq!(full_access_keys, vec![new_user_public_key.clone()]);
+            assert_eq!(limited_access_keys, Vec::<String>::new());
+            assert_eq!(near_account_id, account_id.to_string());
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
@@ -107,7 +124,11 @@ async fn test_basic_action() -> anyhow::Result<()> {
                 .add_key(AddKeyRequest {
                     near_account_id: Some(account_id.to_string()),
                     oidc_token,
-                    public_key: new_user_public_key.clone(),
+                    create_account_options: CreateAccountOptions {
+                        full_access_keys: Some(vec![new_user_public_key.clone().parse()?]),
+                        limited_access_keys: None,
+                        contract_bytes: None,
+                    },
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
@@ -127,14 +148,27 @@ async fn test_random_recovery_keys() -> anyhow::Result<()> {
     with_nodes(4, |ctx| {
         Box::pin(async move {
             let account_id = account::random(ctx.worker)?;
-            let user_public_key = key::random();
+            let user_full_access_key = key::random();
+
+            let user_limited_access_key = LimitedAccessKey {
+                public_key: key::random().parse().unwrap(),
+                allowance: "100".to_string(),
+                receiver_id: account::random(ctx.worker)?.to_string().parse().unwrap(), // TODO: type issues here
+                method_names: "method_names".to_string(),
+            };
+
+            let create_account_options = CreateAccountOptions {
+                full_access_keys: Some(vec![user_full_access_key.clone().parse().unwrap()]),
+                limited_access_keys: Some(vec![user_limited_access_key.clone()]),
+                contract_bytes: None,
+            };
 
             let (status_code, _) = ctx
                 .leader_node
                 .new_account(NewAccountRequest {
                     near_account_id: account_id.to_string(),
+                    create_account_options,
                     oidc_token: token::valid_random(),
-                    public_key: user_public_key.clone(),
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
@@ -142,21 +176,67 @@ async fn test_random_recovery_keys() -> anyhow::Result<()> {
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
             let access_keys = ctx.worker.view_access_keys(&account_id).await?;
-            let recovery_access_key1 = access_keys
+
+            let recovery_full_access_key1 = access_keys
+                .clone()
                 .into_iter()
-                .find(|ak| ak.public_key.to_string() != user_public_key)
+                .find(|ak| {
+                    ak.public_key.to_string() != user_full_access_key
+                        && ak.public_key.to_string()
+                            != user_limited_access_key.public_key.to_string()
+                })
                 .ok_or_else(|| anyhow::anyhow!("missing recovery access key"))?;
+
+            match recovery_full_access_key1.access_key.permission {
+                AccessKeyPermission::FullAccess => (),
+                AccessKeyPermission::FunctionCall(_) => {
+                    return Err(anyhow!(
+                        "Got a limited access key when we expected a full access key"
+                    ))
+                }
+            };
+
+            let la_key = access_keys
+                .into_iter()
+                .find(|ak| {
+                    ak.public_key.to_string() == user_limited_access_key.public_key.to_string()
+                })
+                .ok_or_else(|| anyhow::anyhow!("missing limited access key"))?;
+
+            match la_key.access_key.permission {
+                AccessKeyPermission::FullAccess => {
+                    return Err(anyhow!(
+                        "Got a full access key when we expected a limited access key"
+                    ))
+                }
+                AccessKeyPermission::FunctionCall(fc) => {
+                    assert_eq!(
+                        fc.receiver_id,
+                        user_limited_access_key.receiver_id.to_string()
+                    );
+                    assert_eq!(
+                        fc.method_names.first().unwrap(),
+                        &user_limited_access_key.method_names.to_string()
+                    );
+                }
+            };
 
             // Generate another user
             let account_id = account::random(ctx.worker)?;
             let user_public_key = key::random();
 
+            let create_account_options = CreateAccountOptions {
+                full_access_keys: Some(vec![user_public_key.clone().parse().unwrap()]),
+                limited_access_keys: None,
+                contract_bytes: None,
+            };
+
             let (status_code, _) = ctx
                 .leader_node
                 .new_account(NewAccountRequest {
                     near_account_id: account_id.to_string(),
+                    create_account_options,
                     oidc_token: token::valid_random(),
-                    public_key: user_public_key.clone(),
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
@@ -164,13 +244,13 @@ async fn test_random_recovery_keys() -> anyhow::Result<()> {
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
             let access_keys = ctx.worker.view_access_keys(&account_id).await?;
-            let recovery_access_key2 = access_keys
+            let recovery_full_access_key2 = access_keys
                 .into_iter()
                 .find(|ak| ak.public_key.to_string() != user_public_key)
                 .ok_or_else(|| anyhow::anyhow!("missing recovery access key"))?;
 
             assert_ne!(
-                recovery_access_key1.public_key, recovery_access_key2.public_key,
+                recovery_full_access_key1.public_key, recovery_full_access_key2.public_key,
                 "MPC recovery should generate random recovery keys for each user"
             );
 
