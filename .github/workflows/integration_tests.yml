@@ -36,18 +36,10 @@ jobs:
         run: |
           mkdir -p target/{docker-cache-build-target,docker-cache/usr/{local/cargo,src/app}}
           cd target
-          echo "target:"
-          ls
-          echo "docker-cache-build-target:"
-          ls docker-cache-build-target
-          du -sh docker-cache-build-target
           mv docker-cache-build-target docker-cache/usr/src/app/target
-          rsync -avh --ignore-missing-args ~/.cargo/{bin,git,.crates.toml,.crates2.json} docker-cache/usr/local/cargo
-          rsync -avh --ignore-missing-args ~/.cargo/registry/{cache,index} docker-cache/usr/local/cargo/registry
+          rsync -ah --ignore-missing-args ~/.cargo/{bin,git,.crates.toml,.crates2.json} docker-cache/usr/local/cargo
+          rsync -ah --ignore-missing-args ~/.cargo/registry/{cache,index} docker-cache/usr/local/cargo/registry
           tar -czC docker-cache -f docker-cache.tgz usr
-          tar tf docker-cache.tgz
-          echo "docker-cache.tgz:"
-          du -sh docker-cache.tgz
           rm -r docker-cache
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
@@ -68,8 +60,7 @@ jobs:
           outputs: type=tar,dest=target/docker-cache.tar
       - name: Integrate Rust Docker cache into Actions environment
         run: |
-          tar -xvC ~/.cargo -f target/docker-cache.tar usr/local/cargo --strip-components=3
-          tree -a ~/.cargo
+          tar -xC ~/.cargo -f target/docker-cache.tar usr/local/cargo --strip-components=3
           mkdir -p target/docker-cache-build-target
           tar -xC target/docker-cache-build-target -f target/docker-cache.tar usr/src/app/target --strip-components=4
           rm target/docker-cache.tar
