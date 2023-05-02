@@ -3,7 +3,7 @@ WORKDIR /usr/src/app
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive \
     apt-get install --no-install-recommends --assume-yes \
-    protobuf-compiler libprotobuf-dev tree
+    protobuf-compiler libprotobuf-dev
 COPY ./targe[t]/docker-cache.tg[z] ./target/docker-cache.tgz
 RUN [ -f ./target/docker-cache.tgz ] \
     && tar -xzC / -f ./target/docker-cache.tgz \
