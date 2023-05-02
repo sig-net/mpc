@@ -14,18 +14,18 @@ RUN rm -rf ./target/docker-cache.tgz
 RUN find /usr/local/cargo -type f && find ./target -type f
 RUN CARGO_INCREMENTAL=0 cargo build --release --package mpc-recovery
 # todo! prune unused artifacts (ex: now-unused deps, previous builds)
-RUN mkdir -p .stamp \
-    && find /usr/src/app/release -type f | sort > .stamp/target \
-    && find /usr/local/cargo/bin -type f | sort > .stamp/cargo-bin \
-    && find /usr/local/cargo/git/db -type f | sort > .stamp/cargo-git-db \
-    && find /usr/local/cargo/registry/cache -type f | sort > .stamp/cargo-registry-cache \
-    && find /usr/local/cargo/registry/index -type f | sort > .stamp/cargo-registry-index \
+RUN mkdir -p target/.stamp \
+    && find /usr/src/app/target/release -type f | sort > target/.stamp/target \
+    && find /usr/local/cargo/bin -type f | sort > target/.stamp/cargo-bin \
+    && find /usr/local/cargo/git/db -type f | sort > target/.stamp/cargo-git-db \
+    && find /usr/local/cargo/registry/cache -type f | sort > target/.stamp/cargo-registry-cache \
+    && find /usr/local/cargo/registry/index -type f | sort > target/.stamp/cargo-registry-index \
     && touch /usr/local/cargo/.crates.toml /usr/local/cargo/.crates2.json \
-    && sha256sum /usr/local/cargo/.crates.toml > .stamp/cargo-crates-toml \
-    && sha256sum /usr/local/cargo/.crates2.json > .stamp/cargo-crates2-json
+    && sha256sum /usr/local/cargo/.crates.toml > target/.stamp/cargo-crates-toml \
+    && sha256sum /usr/local/cargo/.crates2.json > target/.stamp/cargo-crates2-json
 
 FROM scratch as retrieve-stamp
-COPY --from=builder /usr/src/app/.stamp /
+COPY --from=builder /usr/src/app/target/.stamp /
 
 FROM scratch as export-artifacts
 COPY --from=builder /usr/src/app/target /usr/src/app/target
