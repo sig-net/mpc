@@ -44,9 +44,9 @@ _docker-run *ARGS:
     docker run -it --rm {{image}} {{ARGS}}
 
 # build the docker image, and conditionally export the cargo build artifacts
-_docker-build:
+_docker-build *ARGS:
     @just _ensure_target
-    docker build -t {{image}} .
+    docker build -t {{image}} . {{ARGS}}
     @if [[ `just __dup_stdout=1 docker cache-relevance` != *"cache hit, no update required"* ]]; then \
         just docker export; \
     fi
