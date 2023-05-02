@@ -11,8 +11,9 @@ RUN [ -f ./target/docker-cache.tgz ] \
     || true
 COPY . .
 RUN rm -rf ./target/docker-cache.tgz
-RUN tree /usr/local/cargo
+RUN tree -a /usr/local/cargo
 RUN CARGO_INCREMENTAL=0 cargo build --release --package mpc-recovery
+RUN tree -a /usr/local/cargo
 # todo! prune unused artifacts (ex: now-unused deps, previous builds)
 RUN mkdir -p target/.stamp \
     && find /usr/src/app/target/release -type f | sort > target/.stamp/target \
