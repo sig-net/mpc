@@ -68,7 +68,7 @@ _docker-build *ARGS:
                 echo -e "\x1b[1mcache hit, no update required\x1b[0m" \
                 | tee >(cat >&2) {{ if __dup_stdout == "0" { "> /dev/null" } else { "" } }}; \
         fi; \
-        rm -rf $cached_stamp_stage $latest_stamp_stage; \
+        rm -r $cached_stamp_stage $latest_stamp_stage; \
     else \
         printf "\x1b[1mTesting for cache relevance...\x1b[0m" >&2; \
         echo -e "\x1b[1mno previous cache found!\x1b[0m" >&2; \
