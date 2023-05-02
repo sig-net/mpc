@@ -61,7 +61,7 @@ jobs:
           outputs: type=tar,dest=target/docker-cache.tar
       - name: Integrate Rust Docker cache into Actions environment
         run: |
-          du -h docker-cache.tar
+          du -h target/docker-cache.tar
           tar -xC ~/.cargo -f target/docker-cache.tar usr/local/cargo --strip-components=3
           mkdir -p target/docker-cache-build-target
           tar -xC target/docker-cache-build-target -f target/docker-cache.tar usr/src/app/target --strip-components=4
