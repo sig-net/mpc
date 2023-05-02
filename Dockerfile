@@ -3,7 +3,7 @@ WORKDIR /usr/src/app
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive \
     apt-get install --no-install-recommends --assume-yes \
-    protobuf-compiler libprotobuf-dev
+    protobuf-compiler libprotobuf-dev tree
 COPY ./targe[t]/docker-cache.tg[z] ./target/docker-cache.tgz
 RUN [ -f ./target/docker-cache.tgz ] \
     && tar -xvzC / -f ./target/docker-cache.tgz \
@@ -11,7 +11,7 @@ RUN [ -f ./target/docker-cache.tgz ] \
     || true
 COPY . .
 RUN rm -rf ./target/docker-cache.tgz
-RUN find /usr/local/cargo -type f && find ./target -type f
+RUN tree /usr/local/cargo
 RUN CARGO_INCREMENTAL=0 cargo build --release --package mpc-recovery
 # todo! prune unused artifacts (ex: now-unused deps, previous builds)
 RUN mkdir -p target/.stamp \
