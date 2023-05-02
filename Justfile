@@ -22,7 +22,7 @@ set positional-arguments
 # (options: run, build, export, cache-relevance)
 docker *ARGS:
     @if just -s _docker-${1:-} 2> /dev/null 1>&2; then \
-        just __dup_stdout={{__dup_stdout}} _docker-{{ARGS}}; \
+        just image={{image}} __dup_stdout={{__dup_stdout}} _docker-{{ARGS}}; \
     else \
         echo "just docker" >&2; \
         echo "Execute docker-related tasks" >&2; \
