@@ -42,9 +42,8 @@ jobs:
           ls docker-cache-build-target
           du -sh docker-cache-build-target
           mv docker-cache-build-target docker-cache/usr/src/app/target
-          rsync -avh --ignore-missing-args \
-            ~/.cargo/{bin,git,.crates.toml,.crates2.json,registry/{cache,index}} \
-            docker-cache/usr/local/cargo
+          rsync -avh --ignore-missing-args ~/.cargo/{bin,git,.crates.toml,.crates2.json} docker-cache/usr/local/cargo
+          rsync -avh --ignore-missing-args ~/.cargo/registry/{cache,index} docker-cache/usr/local/cargo/registry
           tar -czC docker-cache -f docker-cache.tgz usr
           tar tf docker-cache.tgz
           echo "docker-cache.tgz:"
