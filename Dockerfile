@@ -6,12 +6,12 @@ RUN apt-get update \
     protobuf-compiler libprotobuf-dev
 COPY ./targe[t]/docker-cache.tg[z] ./target/docker-cache.tgz
 RUN [ -f ./target/docker-cache.tgz ] \
-    && tar -xzC / -f ./target/docker-cache.tgz \
+    && tar -xvzC / -f ./target/docker-cache.tgz \
     && rm ./target/docker-cache.tgz \
     || true
 COPY . .
 RUN rm -rf ./target/docker-cache.tgz
-RUN find ./target -type f && find /usr/local/cargo -type f
+RUN find /usr/local/cargo -type f && find ./target -type f
 RUN CARGO_INCREMENTAL=0 cargo build --release --package mpc-recovery
 # todo! prune unused artifacts (ex: now-unused deps, previous builds)
 RUN mkdir -p .stamp \
