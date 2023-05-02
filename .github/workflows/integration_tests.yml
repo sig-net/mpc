@@ -49,14 +49,13 @@ jobs:
           context: .
           tags: near/mpc-recovery:latest
           load: true
-          # cache-from: type=gha
-          # is the cache still useful?
-          # cache-to: type=gha,mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
       - name: Export cargo artifacts from Docker image
         uses: docker/build-push-action@v4
         with:
           context: .
-          # cache-from: type=gha
+          cache-from: type=gha
           target: export-artifacts
           outputs: type=tar,dest=target/docker-cache.tar
       - name: Integrate Rust Docker cache into Actions environment
@@ -66,6 +65,6 @@ jobs:
           mkdir -p target/docker-cache-build-target
           tar -xC target/docker-cache-build-target -f target/docker-cache.tar usr/src/app/target --strip-components=4
           rm target/docker-cache.tar
-      # todo! revisit after prebuilt relayer images are available
+      # todo! revisit after experimentation has concluded
       # - name: Test
       #   run: cargo test -p mpc-recovery-integration-tests --jobs 1 -- --test-threads 1
