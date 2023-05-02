@@ -60,7 +60,7 @@ _docker-build *ARGS:
         docker build . --target retrieve-stamp --output $latest_stamp_stage; \
         printf "\x1b[1mTesting for cache relevance...\x1b[0m" >&2; \
         cached_stamp_stage=$(mktemp -d); \
-        tar -C $cached_stamp_stage -xzf target/docker-cache.tgz usr/src/app/target/stamp --strip-components 5; \
+        tar -C $cached_stamp_stage -xzf target/docker-cache.tgz usr/src/app/target/.stamp --strip-components 5; \
         if ! diff -qr $latest_stamp_stage $cached_stamp_stage; \
             then \
                 echo -e "\x1b[1mcache invalidated, update required\x1b[0m" >&2; \
