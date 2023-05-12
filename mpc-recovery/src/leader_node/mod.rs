@@ -118,7 +118,7 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
         )
         .route("/new_account", post(new_account::<T>))
         .route("/add_key", post(add_key::<T>))
-        .route("claim_oidc", post(claim_oidc))
+        .route("/claim_oidc", post(claim_oidc))
         .layer(Extension(state))
         .layer(cors_layer);
 
