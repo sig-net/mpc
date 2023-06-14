@@ -18,18 +18,18 @@ All byte arguments are sent as a hex string.
 
     URL: /claim_id_token
     Request parameters: {
-        oidc_token_hash: [u8; 32],
+        id_token_hash: [u8; 32],
         public_key: String,
         signature: [u8; 64],
     }
     Response: Ok {"mpc_signature": String} / {"Err": String}
 
-Before transmitting your oidc token to the recovery service you must first claim the ownership of the token. This prevents a rogue node from taking your token and using it to sign another request.
+Before transmitting your IODC Id Token to the recovery service you must first claim the ownership of the token. This prevents a rogue node from taking your token and using it to sign another request.
 
 The signature you send must be an Ed22519 signature of the hash:
 
     SALT = 3177899144
-    sha256.hash(Borsh.serialize<u32>(SALT + 0) ++ Borsh.serialize<[u8]>(oidc_token_hash))
+    sha256.hash(Borsh.serialize<u32>(SALT + 0) ++ Borsh.serialize<[u8]>(id_token_hash))
 
 signed with your on device public key.
 
@@ -39,7 +39,12 @@ If you successfully claim the token you will receive a signature in return of:
 
     sha256.hash(Borsh.serialize<u32>(SALT + 1) ++ Borsh.serialize<[u8]>(signature))
 
-This will be signed by the nodes combined Ed22519 signature which should be hard coded in your validation code NOT fetched from the nodes themselves.
+This will be signed by the nodes combined Ed22519 signature. PK that you will use to check it should be hard coded in your validation code NOT fetched from the nodes themselves.
+
+Current MPC PK is:
+```
+TODO: add MPC PK
+```
 
 If this repeatedly fails, you should discard your oidc token and regenerate.
 

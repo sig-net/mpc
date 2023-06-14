@@ -30,10 +30,10 @@ async fn test_basic_action_with_sig() -> anyhow::Result<()> {
                 near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);
             let user_public_key = user_private_key.public_key().to_string();
             let oidc_token = token::valid();
-            let oidc_token_hash = oidc_digest(&oidc_token);
+            let id_token_hash = oidc_digest(&oidc_token);
 
             let mut oidc_request = ClaimOidcRequest {
-                oidc_token_hash,
+                id_token_hash,
                 public_key: user_public_key.clone(),
                 // Dummy signature
                 signature: Signature::from_bytes(&[0; 32]).unwrap(),
