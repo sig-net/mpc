@@ -107,7 +107,8 @@ pub fn oidc_digest(oidc_token: &str) -> [u8; 32] {
 pub enum HashSalt {
     ClaimOidcRequest = 0,
     ClaimOidcResponse = 1,
-    AddKeyRequest = 2,
+    CreateAccountRequest = 2,
+    SignRequest = 3,
 }
 
 /// Mentioned in the readme, here to avoid collisions with legitimate transactions

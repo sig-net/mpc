@@ -55,6 +55,7 @@ If this repeatedly fails, you should discard your oidc token and regenerate.
         near_account_id: String,
         oidc_token: String,
         public_key: String,
+        signature: String,
     }
     Response:
     Ok {
@@ -66,17 +67,27 @@ If this repeatedly fails, you should discard your oidc token and regenerate.
         msg: String
     }
 
-This creates an account with the name in `near_account_id`. If this name is already taken then this operation will fail with no action having been taken.
+This creates an account with account Id provided in `near_account_id`. If this name is already taken then this operation will fail with no action having been taken.
 
-This service will send a `create_account` transaction to the relayer signed by `account_creator.near`. If this operation is successful relayer will make an allowance for the created account.
+This service will send a `create_account` transaction to the relayer signed by `account_creator.near` account. If this operation is successful relayer will make an allowance for the created account.
 
 Newly created NEAR account will have two full access keys. One that was provided by the user, and the recovery one that is controlled by the MPC system.
 
 MPC Service will disallow creating account with ID Tokes that were not claimed first. It is expected, that PK that client wants to use for the account creation is the same as the one that was used to claim the ID Token.
 
-### Recover Account
+The signature field is a signature of:
 
-    URL: /add_key
+    sha256.hash(Borsh.serialize<u32>(SALT + 2) ++ Borsh.serialize({
+        near_account_id: Option<String>,
+        oidc_token: String,
+        public_key: String,
+    }))
+
+signed by the key you used to claim the oidc token. This does not have to be the same as the key in the public key field.
+
+### Recover Account (TODO: refactor to sign)
+
+    URL: /sign
     Request parameters: {
         // in case NEAR AccointId is not provided,
         // it will be determined using recovery PK and NEAR Wallet APIs
