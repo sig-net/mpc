@@ -272,11 +272,11 @@ impl LeaderNode {
             .await
     }
 
-    pub async fn claim_oidc(
+    pub async fn claim_id_token(
         &self,
         request: ClaimOidcRequest,
     ) -> anyhow::Result<(StatusCode, ClaimOidcResponse)> {
-        self.post(format!("{}/claim_oidc", self.address), request)
+        self.post(format!("{}/claim_id_token", self.address), request)
             .await
     }
 }

@@ -16,7 +16,7 @@ All byte arguments are sent as a hex string.
 
 ### Claim OIDC ownership
 
-    URL: /claim_oidc
+    URL: /claim_id_token
     Request parameters: {
         oidc_token_hash: [u8; 32],
         public_key: String,

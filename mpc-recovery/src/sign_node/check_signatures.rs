@@ -48,7 +48,7 @@ pub fn add_key_digest(
     Ok(hasher.finalize().to_vec())
 }
 
-pub fn claim_oidc_request_digest(
+pub fn claim_id_token_request_digest(
     ClaimOidcRequest {
         oidc_token_hash,
         public_key,
@@ -65,7 +65,7 @@ pub fn claim_oidc_request_digest(
     Ok(hasher.finalize().to_vec())
 }
 
-pub fn claim_oidc_response_digest(users_signature: Signature) -> Result<Vec<u8>, CommitError> {
+pub fn claim_id_token_response_digest(users_signature: Signature) -> Result<Vec<u8>, CommitError> {
     // As per the readme
     // If you successfully claim the token you will receive a signature in return of:
     // sha256.hash(Borsh.serialize<u32>(SALT + 1) ++ Borsh.serialize<[u8]>(signature))

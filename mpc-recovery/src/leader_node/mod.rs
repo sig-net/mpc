@@ -118,7 +118,7 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
         )
         .route("/new_account", post(new_account::<T>))
         .route("/add_key", post(add_key::<T>))
-        .route("/claim_oidc", post(claim_oidc))
+        .route("/claim_id_token", post(claim_id_token))
         .layer(Extension(state))
         .layer(cors_layer);
 
@@ -578,7 +578,7 @@ async fn broadcast_pk_set(
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
-async fn claim_oidc(
+async fn claim_id_token(
     Extension(state): Extension<LeaderState>,
     Json(claim): Json<ClaimOidcRequest>,
 ) -> (StatusCode, Json<ClaimOidcResponse>) {
