@@ -68,9 +68,11 @@ If this repeatedly fails, you should discard your oidc token and regenerate.
 
 This creates an account with the name in `near_account_id`. If this name is already taken then this operation will fail with no action having been taken.
 
-This service will send a `create_account` message to the relayer from `tmp_acount_creator.serhii.testnet` creating from the request field `near_account_id`. If this operation is successful the near.org relayer will make an allowance for the created account.
+This service will send a `create_account` transaction to the relayer signed by `account_creator.near`. If this operation is successful relayer will make an allowance for the created account.
 
 Newly created NEAR account will have two full access keys. One that was provided by the user, and the recovery one that is controlled by the MPC system.
+
+MPC Service will disallow creating account with ID Tokes that were not claimed first. It is expected, that PK that client wants to use for the account creation is the same as the one that was used to claim the ID Token.
 
 ### Recover Account
 
