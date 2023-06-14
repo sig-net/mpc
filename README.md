@@ -22,7 +22,11 @@ All byte arguments are sent as a hex string.
         public_key: String,
         signature: [u8; 64],
     }
-    Response: Ok {"mpc_signature": String} / {"Err": String}
+    Response: Ok {
+        "mpc_signature": String,
+        "recovery_public_key": Option<String>,
+        "account_id": Option<String>,
+    } / {"Err": String}
 
 Before transmitting your IODC Id Token to the recovery service you must first claim the ownership of the token. This prevents a rogue node from taking your token and using it to sign another request.
 
@@ -45,6 +49,8 @@ Current MPC PK is:
 ```
 TODO: add MPC PK
 ```
+
+If user has already used this token to claim an account, then the response will contain the account id and the recovery public key.
 
 If this repeatedly fails, you should discard your oidc token and regenerate.
 
@@ -85,21 +91,18 @@ The signature field is a signature of:
 
 signed by the key you used to claim the oidc token. This does not have to be the same as the key in the public key field.
 
-### Recover Account (TODO: refactor to sign)
+### Recover Account
 
     URL: /sign
     Request parameters: {
-        // in case NEAR AccointId is not provided,
-        // it will be determined using recovery PK and NEAR Wallet APIs
-        near_account_id: Option(String),
+        transaction: String,
         oidc_token: String
         public_key: String,
         signature: String,
     }
     Response:
     Ok {
-        user_public_key: String,
-        near_account_id: String,
+        // TODO: what usefull info should we return?
     } /
     Err{
         msg: String
@@ -107,13 +110,13 @@ signed by the key you used to claim the oidc token. This does not have to be the
 
 The signature field is a signature of:
 
-    sha256.hash(Borsh.serialize<u32>(SALT + 2) ++ Borsh.serialize({
-        near_account_id: Option<String>,
+    sha256.hash(Borsh.serialize<u32>(SALT + 3) ++ Borsh.serialize({
+        transaction: String,
         oidc_token: String,
         public_key: String,
     }))
 
-signed by the key you used to claim the oidc token. This does not have to be the same as the key in the public key field.
+signed by the key you used to claim the oidc token.
 
 ## OIDC (OAuth 2.0) authentication
 
