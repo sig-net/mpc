@@ -63,13 +63,14 @@ Registered ID Token will be added to the persistent DB on each Signing node and 
     URL: /new_account
     Request parameters: {
         near_account_id: String,
+        create_account_options: CreateAccountOptions,
         oidc_token: String,
         public_key: String,
         signature: String,
     }
     Response:
     Ok {
-        public_key: String,
+        create_account_options: CreateAccountOptions,
         recovery_public_key: String,
         near_account_id: String,
     } /

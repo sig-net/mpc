@@ -1,66 +1,10 @@
 use curv::elliptic::curves::{Ed25519, Point};
 use ed25519_dalek::Signature;
 use near_crypto::PublicKey;
+use near_primitives::transaction::Transaction;
 use serde::{Deserialize, Serialize};
 
 use crate::transaction::CreateAccountOptions;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct NewAccountRequest {
-    pub create_account_options: CreateAccountOptions,
-    pub near_account_id: String,
-    pub oidc_token: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
-pub enum NewAccountResponse {
-    Ok {
-        create_account_options: CreateAccountOptions,
-        user_recovery_public_key: String,
-        near_account_id: String,
-    },
-    Err {
-        msg: String,
-    },
-}
-
-impl NewAccountResponse {
-    pub fn err(msg: String) -> Self {
-        NewAccountResponse::Err { msg }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct AddKeyRequest {
-    pub create_account_options: CreateAccountOptions,
-    pub near_account_id: Option<String>,
-    pub oidc_token: String,
-
-    #[serde(with = "hex_option_sig_share")]
-    pub signature: Option<Signature>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
-pub enum AddKeyResponse {
-    Ok {
-        full_access_keys: Vec<String>,
-        limited_access_keys: Vec<String>,
-        near_account_id: String,
-    },
-    Err {
-        msg: String,
-    },
-}
-
-impl AddKeyResponse {
-    pub fn err(msg: String) -> Self {
-        AddKeyResponse::Err { msg }
-    }
-}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ClaimOidcRequest {
@@ -76,10 +20,70 @@ pub enum ClaimOidcResponse {
     Ok {
         #[serde(with = "hex_sig_share")]
         mpc_signature: Signature,
+        recovery_public_key: Option<String>,
+        near_account_id: Option<String>,
     },
     Err {
         msg: String,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NewAccountRequest {
+    pub near_account_id: String,
+    pub create_account_options: CreateAccountOptions,
+    pub oidc_token: String,
+    pub public_key: String,
+    #[serde(with = "hex_sig_share")]
+    pub signature: Signature,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum NewAccountResponse {
+    Ok {
+        create_account_options: CreateAccountOptions,
+        recovery_public_key: String,
+        near_account_id: String,
+    },
+    Err {
+        msg: String,
+    },
+}
+
+impl NewAccountResponse {
+    pub fn err(msg: String) -> Self {
+        NewAccountResponse::Err { msg }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SignRequest {
+    pub transaction: Transaction, // TODO: is it? Should it be delegated action?
+    pub oidc_token: String,
+    pub public_key: String,
+    #[serde(with = "hex_sig_share")]
+    pub signature: Signature,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum SignResponse {
+    Ok {
+        #[serde(with = "hex_sig_share")]
+        transaction_signature: Signature,
+    },
+    Err {
+        msg: String,
+    },
+}
+
+impl SignResponse {
+    pub fn err(msg: String) -> Self {
+        SignResponse::Err { msg }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
