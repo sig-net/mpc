@@ -65,7 +65,7 @@ impl AddKeyResponse {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ClaimOidcRequest {
     #[serde(with = "hex::serde")]
-    pub id_token_hash: [u8; 32],
+    pub oidc_token_hash: [u8; 32],
     pub public_key: String,
     #[serde(with = "hex_sig_share")]
     pub signature: Signature,

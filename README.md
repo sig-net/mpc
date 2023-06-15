@@ -14,26 +14,28 @@ The recovery service is currently hosted at <https://mpc-recovery-7tk2cmmtcq-ue.
 
 All byte arguments are sent as a hex string.
 
-### Claim OIDC ownership
+### Claim OIDC Id Token ownership
 
-    URL: /claim_id_token
+    URL: /claim_oidc_token
     Request parameters: {
-        id_token_hash: [u8; 32],
+        oidc_token_hash: [u8; 32],
         public_key: String,
         signature: [u8; 64],
     }
     Response: Ok {
-        "mpc_signature": String,
-        "recovery_public_key": Option<String>,
-        "account_id": Option<String>,
-    } / {"Err": String}
+        mpc_signature: String,
+        recovery_public_key: Option<String>,
+        near_account_id: Option<String>,
+    } / Err{
+        msg: String
+    }
 
 Before transmitting your IODC Id Token to the recovery service you must first claim the ownership of the token. This prevents a rogue node from taking your token and using it to sign another request.
 
 The signature you send must be an Ed22519 signature of the hash:
 
     SALT = 3177899144
-    sha256.hash(Borsh.serialize<u32>(SALT + 0) ++ Borsh.serialize<[u8]>(id_token_hash))
+    sha256.hash(Borsh.serialize<u32>(SALT + 0) ++ Borsh.serialize<[u8]>(oidc_token_hash))
 
 signed with your on device public key.
 
@@ -50,9 +52,11 @@ Current MPC PK is:
 TODO: add MPC PK
 ```
 
-If user has already used this token to claim an account, then the response will contain the account id and the recovery public key.
+If user has already used this Id Token to claim an account, then the response will contain the account id and the recovery public key.
 
 If this repeatedly fails, you should discard your oidc token and regenerate.
+
+Registered ID Token will be added to the persistent DB on each Signing node and saved until expiration. Regstered Id Tokens are tied to the provided PK.
 
 ### Create New Account
 
@@ -65,8 +69,8 @@ If this repeatedly fails, you should discard your oidc token and regenerate.
     }
     Response:
     Ok {
-        user_public_key: String,
-        user_recovery_public_key: String,
+        public_key: String,
+        recovery_public_key: String,
         near_account_id: String,
     } /
     Err {
@@ -102,7 +106,7 @@ signed by the key you used to claim the oidc token. This does not have to be the
     }
     Response:
     Ok {
-        // TODO: what usefull info should we return?
+        transaction_signature: String,
     } /
     Err{
         msg: String
@@ -117,6 +121,8 @@ The signature field is a signature of:
     }))
 
 signed by the key you used to claim the oidc token.
+
+Once you get transaction signature from the MPC service, you can broadcast the transaction to the network.
 
 ## OIDC (OAuth 2.0) authentication
 

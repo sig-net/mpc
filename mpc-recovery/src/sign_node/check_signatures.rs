@@ -48,24 +48,24 @@ pub fn add_key_digest(
     Ok(hasher.finalize().to_vec())
 }
 
-pub fn claim_id_token_request_digest(
+pub fn claim_oidc_token_request_digest(
     ClaimOidcRequest {
-        id_token_hash,
+        oidc_token_hash,
         public_key,
         signature,
     }: &ClaimOidcRequest,
 ) -> Result<Vec<u8>, CommitError> {
     // As per the readme
     // To verify the signature of the message verify:
-    // sha256.hash(Borsh.serialize<u32>(SALT + 0) ++ Borsh.serialize<[u8]>(id_token_hash))
+    // sha256.hash(Borsh.serialize<u32>(SALT + 0) ++ Borsh.serialize<[u8]>(oidc_token_hash))
     let mut hasher = Sha512::default();
     BorshSerialize::serialize(&HashSalt::ClaimOidcRequest.get_salt(), &mut hasher)
         .context("Serialization failed")?;
-    BorshSerialize::serialize(&id_token_hash, &mut hasher).context("Serialization failed")?;
+    BorshSerialize::serialize(&oidc_token_hash, &mut hasher).context("Serialization failed")?;
     Ok(hasher.finalize().to_vec())
 }
 
-pub fn claim_id_token_response_digest(users_signature: Signature) -> Result<Vec<u8>, CommitError> {
+pub fn claim_oidc_token_response_digest(users_signature: Signature) -> Result<Vec<u8>, CommitError> {
     // As per the readme
     // If you successfully claim the token you will receive a signature in return of:
     // sha256.hash(Borsh.serialize<u32>(SALT + 1) ++ Borsh.serialize<[u8]>(signature))

@@ -1,6 +1,6 @@
 use self::aggregate_signer::{NodeInfo, Reveal, SignedCommitment, SigningState};
 use self::check_signatures::{
-    add_key_digest, check_signature, claim_id_token_request_digest, claim_id_token_response_digest,
+    add_key_digest, check_signature, claim_oidc_token_request_digest, claim_oidc_token_response_digest,
     oidc_digest, HashSalt,
 };
 use self::oidc_digest::OidcDigest;
@@ -259,11 +259,11 @@ async fn process_add_key_commit<T: OAuthTokenVerifier>(
         .map_err(|e| CommitError::Other(anyhow::anyhow!(e)))
 }
 
-async fn process_claim_id_token_commit(
+async fn process_claim_oidc_token_commit(
     state: SignNodeState,
     req: ClaimOidcRequest,
 ) -> Result<SignedCommitment, CommitError> {
-    let digest = claim_id_token_request_digest(&req)?;
+    let digest = claim_oidc_token_request_digest(&req)?;
     let public_key: PublicKey = req
         .public_key
         .parse()
@@ -293,7 +293,7 @@ async fn process_claim_id_token_commit(
         Ok(None) => state.gcp_service.insert(oidc_digest).await?,
     };
 
-    let response_digest = claim_id_token_response_digest(req.signature)?;
+    let response_digest = claim_oidc_token_response_digest(req.signature)?;
     state
         .signing_state
         .write()
@@ -318,7 +318,7 @@ async fn commit<T: OAuthTokenVerifier>(
 
     let response = match request {
         SigShareRequest::Add(add_key) => process_add_key_commit::<T>(state, add_key).await,
-        SigShareRequest::Claim(claim_id_token) => process_claim_id_token_commit(state, claim_id_token).await,
+        SigShareRequest::Claim(claim_oidc_token) => process_claim_oidc_token_commit(state, claim_oidc_token).await,
     };
     match response {
         Ok(signed_commitment) => (StatusCode::OK, Json(Ok(signed_commitment))),

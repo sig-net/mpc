@@ -9,7 +9,7 @@ use mpc_recovery::{
     },
     oauth::get_test_claims,
     sign_node::check_signatures::{
-        claim_id_token_request_digest, claim_id_token_response_digest, oidc_digest,
+        claim_oidc_token_request_digest, claim_oidc_token_response_digest, oidc_digest,
     },
     transaction::{
         call_all_nodes, sign_payload_with_mpc, to_dalek_combined_public_key, CreateAccountOptions,
@@ -30,16 +30,16 @@ async fn test_basic_action_with_sig() -> anyhow::Result<()> {
                 near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);
             let user_public_key = user_private_key.public_key().to_string();
             let oidc_token = token::valid();
-            let id_token_hash = oidc_digest(&oidc_token);
+            let oidc_token_hash = oidc_digest(&oidc_token);
 
             let mut oidc_request = ClaimOidcRequest {
-                id_token_hash,
+                oidc_token_hash,
                 public_key: user_public_key.clone(),
                 // Dummy signature
                 signature: Signature::from_bytes(&[0; 32]).unwrap(),
             };
 
-            let digest = claim_id_token_request_digest(&oidc_request).unwrap();
+            let digest = claim_oidc_token_request_digest(&oidc_request).unwrap();
 
             let sig = match user_private_key.sign(&digest) {
                 near_crypto::Signature::ED25519(k) => k,
@@ -49,7 +49,7 @@ async fn test_basic_action_with_sig() -> anyhow::Result<()> {
             oidc_request.signature = sig;
 
             let (status_code, oidc_response) =
-                ctx.leader_node.claim_id_token(oidc_request.clone()).await?;
+                ctx.leader_node.claim_oidc_token(oidc_request.clone()).await?;
             assert_eq!(status_code, StatusCode::OK);
 
             let res_signature = match oidc_response {
@@ -67,7 +67,7 @@ async fn test_basic_action_with_sig() -> anyhow::Result<()> {
             let res = call(&client, &signer_urls, "public_key", "").await?;
             let combined_pub = to_dalek_combined_public_key(&res).unwrap();
 
-            let res_digest = claim_id_token_response_digest(oidc_request.signature).unwrap();
+            let res_digest = claim_oidc_token_response_digest(oidc_request.signature).unwrap();
             combined_pub.verify(&res_digest, &res_signature)?;
 
             let signature = sign_payload_with_mpc(
@@ -125,7 +125,7 @@ async fn test_basic_action_with_sig() -> anyhow::Result<()> {
 
             check::access_key_exists(&ctx, &account_id, &new_user_public_key).await?;
 
-            let digest = claim_id_token_request_digest(&oidc_request).unwrap();
+            let digest = claim_oidc_token_request_digest(&oidc_request).unwrap();
 
             let signature = match user_private_key.sign(&digest) {
                 near_crypto::Signature::ED25519(k) => k,
