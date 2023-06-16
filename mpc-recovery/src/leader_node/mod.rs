@@ -1,21 +1,21 @@
 use crate::key_recovery::get_user_recovery_pk;
 use crate::msg::{
-    AddKey, AddKeyRequest, AddKeyResponse, ClaimOidcRequest, ClaimOidcResponse, NewAccountRequest,
-    NewAccountResponse, SigShareRequest,
+    AddKey, ClaimOidcRequest, ClaimOidcResponse, NewAccountRequest, NewAccountResponse,
+    SigShareRequest, SignRequest, SignResponse,
 };
 use crate::nar;
 use crate::oauth::OAuthTokenVerifier;
-use crate::oauth::{OAuthTokenVerifier, UniversalTokenVerifier};
 use crate::relayer::error::RelayerError;
 use crate::relayer::msg::RegisterAccountRequest;
 use crate::relayer::NearRpcAndRelayerClient;
 use crate::transaction::{
-    get_add_key_delegate_action, get_create_account_delegate_action,
-    get_local_signed_delegated_action, get_mpc_signed_delegated_action, sign,
+    get_create_account_delegate_action, get_local_signed_delegated_action,
+    get_mpc_signed_delegated_action,
 };
 use axum::routing::get;
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
 use curv::elliptic::curves::{Ed25519, Point};
+use ed25519_dalek::Signature;
 use near_crypto::{ParseKeyError, PublicKey, SecretKey};
 use near_primitives::account::id::ParseAccountError;
 use near_primitives::types::AccountId;
@@ -116,9 +116,9 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
                 StatusCode::OK
             }),
         )
-        .route("/new_account", post(new_account::<T>))
-        .route("/add_key", post(add_key::<T>))
         .route("/claim_oidc_token", post(claim_oidc_token))
+        .route("/new_account", post(new_account::<T>))
+        .route("/sign", post(sign::<T>))
         .layer(Extension(state))
         .layer(cors_layer);
 
@@ -241,7 +241,7 @@ async fn process_new_account<T: OAuthTokenVerifier>(
         if matches!(response.status, FinalExecutionStatus::SuccessValue(_)) {
             Ok(NewAccountResponse::Ok {
                 create_account_options: new_account_options,
-                user_recovery_public_key: mpc_user_recovery_pk.to_string(),
+                recovery_public_key: mpc_user_recovery_pk.to_string(),
                 near_account_id: new_user_account_id.to_string(),
             })
         } else {
@@ -252,8 +252,8 @@ async fn process_new_account<T: OAuthTokenVerifier>(
 }
 
 mod response {
-    use crate::msg::AddKeyResponse;
     use crate::msg::NewAccountResponse;
+    use crate::msg::SignResponse;
     use axum::Json;
     use hyper::StatusCode;
 
@@ -272,18 +272,18 @@ mod response {
         )
     }
 
-    pub fn add_key_bad_request(msg: String) -> (StatusCode, Json<AddKeyResponse>) {
-        (StatusCode::BAD_REQUEST, Json(AddKeyResponse::err(msg)))
+    pub fn add_key_bad_request(msg: String) -> (StatusCode, Json<SignResponse>) {
+        (StatusCode::BAD_REQUEST, Json(SignResponse::err(msg)))
     }
 
-    pub fn add_key_unauthorized(msg: String) -> (StatusCode, Json<AddKeyResponse>) {
-        (StatusCode::UNAUTHORIZED, Json(AddKeyResponse::err(msg)))
+    pub fn add_key_unauthorized(msg: String) -> (StatusCode, Json<SignResponse>) {
+        (StatusCode::UNAUTHORIZED, Json(SignResponse::err(msg)))
     }
 
-    pub fn add_key_internal_error(msg: String) -> (StatusCode, Json<AddKeyResponse>) {
+    pub fn add_key_internal_error(msg: String) -> (StatusCode, Json<SignResponse>) {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(AddKeyResponse::err(msg)),
+            Json(SignResponse::err(msg)),
         )
     }
 }
@@ -322,7 +322,8 @@ async fn new_account<T: OAuthTokenVerifier>(
 
 #[derive(thiserror::Error, Debug)]
 #[allow(dead_code)]
-pub enum AddKeyError {
+pub enum SignError {
+    // TODO: refactor error types from add key errors to sign errors
     #[error("malformed account id: {0}")]
     MalformedAccountId(String, ParseAccountError),
     #[error("malformed public key {0}: {1}")]
@@ -366,154 +367,145 @@ fn get_acc_id_from_pk(
     }
 }
 
-async fn process_add_key<T: OAuthTokenVerifier>(
+async fn process_add_key() -> Result<Signature, SignError> { // TODO: add proper error type?
+    unimplemented!();
+    // TODO: refactor old add key code
+    // let internal_acc_id = oidc_token_claims.get_internal_account_id();
+
+    // let user_recovery_pk = get_user_recovery_pk(
+    //     &state.reqwest_client,
+    //     &state.sign_nodes,
+    //     internal_acc_id.clone(),
+    // )
+    // .await?;
+
+    // let (user_account_id, account_id_from_leader): (AccountId, bool) =
+    //     match &request.near_account_id {
+    //         Some(near_account_id) => {
+    //             let nid = near_account_id.parse().map_err(|e| {
+    //                 SignError::MalformedAccountId(request.near_account_id.unwrap(), e)
+    //             })?;
+    //             (nid, false)
+    //         }
+    //         None => match get_acc_id_from_pk(user_recovery_pk.clone(), state.account_lookup_url) {
+    //             Ok(near_account_id) => (near_account_id, true),
+    //             Err(e) => {
+    //                 tracing::error!(err = ?e);
+    //                 return Err(SignError::AccountNotFound(e.to_string()));
+    //             }
+    //         },
+    //     };
+
+    // nar::retry(|| async {
+        // Get nonce and recent block hash
+        // let (_hash, block_height, nonce) = state
+        //     .client
+        //     .access_key(user_account_id.clone(), user_recovery_pk.clone())
+        //     .await?;
+
+        // // Create a transaction to create a new account
+        // let max_block_height: u64 = block_height + 100;
+
+        // let action = AddKey {
+        //     account_id_from_leader,
+        //     user_recovery_pk: user_recovery_pk.clone(),
+        //     max_block_height,
+        //     nonce,
+        //     near_account_id: user_account_id.to_string(),
+        //     oidc_token: request.oidc_token.clone(),
+        //     user_local_pk: request.public_key.clone(),
+        //     signature: request.signature,
+        // };
+
+        // let delegate_action = get_add_key_delegate_action(
+        //     user_account_id.clone(),
+        //     user_recovery_pk.clone(),
+        //     request.create_account_options.clone(),
+        //     nonce,
+        //     max_block_height,
+        // )?;
+        // // We sign the key recovery using the signing nodes
+        // let signed_delegate_action = get_mpc_signed_delegated_action(
+        //     &state.reqwest_client.clone(),
+        //     &state.sign_nodes.clone(),
+        //     delegate_action,
+        //     SigShareRequest::Add(action),
+        // )
+        // .await?;
+
+        // let resp = state.client.send_meta_tx(signed_delegate_action).await;
+        // if let Err(err) = resp {
+        //     let err_str = format!("{:?}", err);
+        //     state
+        //         .client
+        //         .invalidate_cache_if_tx_failed(
+        //             &(
+        //                 state.account_creator_id.clone(),
+        //                 state.account_creator_sk.public_key(),
+        //             ),
+        //             &err_str,
+        //         )
+        //         .await;
+        //     return Err(err.into());
+        // }
+        // let resp = resp?;
+
+        // if matches!(resp.status, FinalExecutionStatus::SuccessValue(_)) {
+        //     Ok(SignResponse::Ok {
+        //         transaction_signature: ,
+        //     })
+        // } else {
+        //     Err(anyhow::anyhow!("transaction failed with {:?}", resp.status).into())
+        // }
+    // })
+    // .await
+}
+
+async fn process_sign<T: OAuthTokenVerifier>(
     state: LeaderState,
-    request: AddKeyRequest,
-) -> Result<AddKeyResponse, AddKeyError> {
+    request: SignRequest,
+) -> Result<SignResponse, SignError> {
     let oidc_token_claims =
         T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
             .await
-            .map_err(AddKeyError::OidcVerificationFailed)?;
-    let internal_acc_id = oidc_token_claims.get_internal_account_id();
-    let user_recovery_pk = get_user_recovery_pk(
-        &state.reqwest_client,
-        &state.sign_nodes,
-        internal_acc_id.clone(),
-    )
-    .await?;
+            .map_err(SignError::OidcVerificationFailed)?;
 
-    let (user_account_id, account_id_from_leader): (AccountId, bool) =
-        match &request.near_account_id {
-            Some(near_account_id) => {
-                let nid = near_account_id.parse().map_err(|e| {
-                    AddKeyError::MalformedAccountId(request.near_account_id.unwrap(), e)
-                })?;
-                (nid, false)
-            }
-            None => match get_acc_id_from_pk(user_recovery_pk.clone(), state.account_lookup_url) {
-                Ok(near_account_id) => (near_account_id, true),
-                Err(e) => {
-                    tracing::error!(err = ?e);
-                    return Err(AddKeyError::AccountNotFound(e.to_string()));
-                }
-            },
-        };
-
-    nar::retry(|| async {
-        // Get nonce and recent block hash
-        let (_hash, block_height, nonce) = state
-            .client
-            .access_key(user_account_id.clone(), user_recovery_pk.clone())
-            .await?;
-
-        // Create a transaction to create a new account
-        let max_block_height: u64 = block_height + 100;
-
-        let action = AddKey {
-            account_id_from_leader,
-            user_recovery_pk: user_recovery_pk.clone(),
-            max_block_height,
-            nonce,
-            near_account_id: user_account_id.to_string(),
-            oidc_token: request.oidc_token.clone(),
-            user_local_pk: request.public_key.clone(),
-            signature: request.signature,
-        };
-
-        let delegate_action = get_add_key_delegate_action(
-            user_account_id.clone(),
-            user_recovery_pk.clone(),
-            request.create_account_options.clone(),
-            nonce,
-            max_block_height,
-        )?;
-        // We sign the key recovery using the signing nodes
-        let signed_delegate_action = get_mpc_signed_delegated_action(
-            &state.reqwest_client.clone(),
-            &state.sign_nodes.clone(),
-            delegate_action,
-            SigShareRequest::Add(action),
-        )
-        .await?;
-
-        let resp = state.client.send_meta_tx(signed_delegate_action).await;
-        if let Err(err) = resp {
-            let err_str = format!("{:?}", err);
-            state
-                .client
-                .invalidate_cache_if_tx_failed(
-                    &(
-                        state.account_creator_id.clone(),
-                        state.account_creator_sk.public_key(),
-                    ),
-                    &err_str,
-                )
-                .await;
-            return Err(err.into());
-        }
-        let resp = resp?;
-
-        // TODO: Probably need to check more fields
-        if matches!(resp.status, FinalExecutionStatus::SuccessValue(_)) {
-            Ok(AddKeyResponse::Ok {
-                full_access_keys: request
-                    .create_account_options
-                    .clone()
-                    .full_access_keys
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|pk| pk.to_string())
-                    .collect(),
-                limited_access_keys: request
-                    .create_account_options
-                    .clone()
-                    .limited_access_keys
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|lak| lak.public_key.to_string())
-                    .collect(),
-                near_account_id: user_account_id.to_string(),
-            })
-        } else {
-            Err(anyhow::anyhow!("transaction failed with {:?}", resp.status).into())
-        }
-    })
-    .await
+    // TODO: whitelist transaction, allow only add key transactions
+    let signature = process_add_key().await?;
+    return Ok(SignResponse::Ok { transaction_signature: signature });
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(env = state.env))]
-async fn add_key<T: OAuthTokenVerifier>(
+async fn sign<T: OAuthTokenVerifier>(
     Extension(state): Extension<LeaderState>,
-    Json(request): Json<AddKeyRequest>,
-) -> (StatusCode, Json<AddKeyResponse>) {
+    Json(request): Json<SignRequest>,
+) -> (StatusCode, Json<SignResponse>) {
     tracing::info!(
-        near_account_id = match &request.near_account_id {
-            Some(ref near_account_id) => near_account_id,
-            None => "not specified",
-        },
-        create_account_options = request.create_account_options.to_string(),
+        // transaction = request.transaction, // TODO: log transaction somehow
         iodc_token = format!("{:.5}...", request.oidc_token),
-        "add_key request"
+        public_key = request.public_key.to_string(),
+        signature = format!("{:.5}...", request.signature),
+        "sign request"
     );
 
-    match process_add_key::<T>(state, request).await {
+    match process_sign::<T>(state, request).await {
         Ok(response) => {
             tracing::debug!("responding with OK");
             (StatusCode::OK, Json(response))
         }
-        Err(ref e @ AddKeyError::MalformedPublicKey(ref pk, _)) => {
+        Err(ref e @ SignError::MalformedPublicKey(ref pk, _)) => {
             tracing::error!(err = ?e);
             response::add_key_bad_request(format!("bad public_key: {}", pk))
         }
-        Err(ref e @ AddKeyError::MalformedAccountId(ref account_id, _)) => {
+        Err(ref e @ SignError::MalformedAccountId(ref account_id, _)) => {
             tracing::error!(err = ?e);
             response::add_key_bad_request(format!("bad near_account_id: {}", account_id))
         }
-        Err(ref e @ AddKeyError::OidcVerificationFailed(ref err_msg)) => {
+        Err(ref e @ SignError::OidcVerificationFailed(ref err_msg)) => {
             tracing::error!(err = ?e);
             response::add_key_unauthorized(format!("failed to verify oidc token: {}", err_msg))
         }
-        Err(ref e @ AddKeyError::AccountNotFound(ref err_msg)) => {
+        Err(ref e @ SignError::AccountNotFound(ref err_msg)) => {
             tracing::error!(err = ?e);
             response::add_key_bad_request(format!(
                 "failed to recover account_id from pk: {}",
@@ -580,14 +572,18 @@ async fn broadcast_pk_set(
 #[tracing::instrument(level = "info", skip_all, fields(id = state.id))]
 async fn claim_oidc_token(
     Extension(state): Extension<LeaderState>,
-    Json(claim): Json<ClaimOidcRequest>,
+    Json(claim_oidc_request): Json<ClaimOidcRequest>,
 ) -> (StatusCode, Json<ClaimOidcResponse>) {
-    let payload = SigShareRequest::Claim(claim);
-    let res = sign(&state.reqwest_client, &state.sign_nodes, payload).await;
+    let payload = SigShareRequest::Claim(claim_oidc_request);
+    let res = sign__with_mpc(&state.reqwest_client, &state.sign_nodes, payload).await;
     match res {
         Ok(mpc_signature) => (
             StatusCode::OK,
-            Json(ClaimOidcResponse::Ok { mpc_signature }),
+            Json(ClaimOidcResponse::Ok {
+                mpc_signature,
+                recovery_public_key: None, // TODO: add value if user is registered
+                near_account_id: None,     // TODO: add value if user is registered
+            }),
         ),
         Err(e) => (
             StatusCode::BAD_REQUEST,
