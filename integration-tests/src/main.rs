@@ -17,6 +17,7 @@ enum Cli {
 async fn main() -> anyhow::Result<()> {
     match Cli::parse() {
         Cli::TestLeader { nodes } => {
+            tracing::info!("Setting up an environment with {} nodes", nodes);
             let docker_client = containers::DockerClient::default();
 
             let relayer_ctx_future =
@@ -29,7 +30,9 @@ async fn main() -> anyhow::Result<()> {
             let relayer_ctx = relayer_ctx?;
             let datastore = datastore?;
 
+            tracing::info!("Generating secrets");
             let GenerateResult { secrets, .. } = mpc_recovery::generate(nodes);
+            tracing::info!("Running signer nodes...");
             let mut signer_node_futures = Vec::new();
             for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
                 let signer_node = containers::SignerNode::run(
@@ -48,9 +51,11 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .into_iter()
                 .collect::<Result<Vec<_>, _>>()?;
+            tracing::info!("Signer nodes initialized");
             let signer_urls: &Vec<_> = &signer_nodes.iter().map(|n| n.address.clone()).collect();
 
             let near_root_account = relayer_ctx.worker.root_account()?;
+            tracing::info!("Root account_id: {}", near_root_account.id());
 
             let mut cmd = vec![
                 "start-leader".to_string(),
@@ -96,19 +101,18 @@ async fn main() -> anyhow::Result<()> {
                 cmd.push(sign_node.clone());
             }
 
-            println!("Please run the command below to start a leader node:");
-            println!(
+            tracing::info!("Please run the command below to start a leader node:");
+            tracing::info!(
                 "RUST_LOG=mpc_recovery=debug cargo run --bin mpc-recovery -- {}",
                 cmd.join(" ")
             );
-            println!("====================================");
-            println!("You can now interact with your local service manually. For example:");
-            println!(
+            tracing::info!("====================================");
+            tracing::info!("You can now interact with your local service manually. For example:");
+            tracing::info!(
                 r#"curl -X POST -H "Content-Type: application/json" -d '{{"oidc_token": "validToken:1", "near_account_id": "abc45436676.near", "create_account_options": {{"full_access_keys": ["ed25519:4fnCz9NTEMhkfwAHDhFDkPS1mD58QHdRyago5n4vtCS2"]}}}}' http://localhost:3000/new_account"#
             );
 
-            println!();
-            println!("Press any button to exit and destroy all containers...");
+            tracing::info!("Press any button to exit and destroy all containers...");
 
             while stdin().read(&mut [0]).await? == 0 {}
         }
