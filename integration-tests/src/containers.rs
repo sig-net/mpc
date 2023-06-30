@@ -5,8 +5,8 @@ use bollard::Docker;
 use ed25519_dalek::ed25519::signature::digest::{consts::U32, generic_array::GenericArray};
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use mpc_recovery::msg::{
-    AcceptNodePublicKeysRequest, AddKeyRequest, AddKeyResponse, NewAccountRequest,
-    NewAccountResponse,
+    AcceptNodePublicKeysRequest, AddKeyRequest, AddKeyResponse, ClaimOidcRequest,
+    ClaimOidcResponse, NewAccountRequest, NewAccountResponse,
 };
 use multi_party_eddsa::protocols::ExpandedKeyPair;
 use near_crypto::SecretKey;
@@ -440,6 +440,13 @@ impl<'a> LeaderNode<'a> {
 }
 
 impl LeaderNodeApi {
+    pub async fn claim_oidc(
+        &self,
+        request: ClaimOidcRequest,
+    ) -> anyhow::Result<(StatusCode, ClaimOidcResponse)> {
+        post(format!("{}/claim_oidc", self.address), request).await
+    }
+
     pub async fn new_account(
         &self,
         request: NewAccountRequest,

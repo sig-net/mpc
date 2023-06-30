@@ -3,17 +3,215 @@ use anyhow::anyhow;
 use ed25519_dalek::Verifier;
 use hyper::StatusCode;
 use mpc_recovery::{
-    msg::{AddKeyRequest, AddKeyResponse, NewAccountRequest, NewAccountResponse},
+    msg::{
+        AddKeyRequest, AddKeyResponse, ClaimOidcRequest, ClaimOidcResponse, NewAccountRequest,
+        NewAccountResponse, SignNodeRequest, SignShareNodeRequest,
+    },
     oauth::get_test_claims,
     transaction::{
         call_all_nodes, sign_payload_with_mpc, to_dalek_combined_public_key, CreateAccountOptions,
         LimitedAccessKey,
     },
+    utils::{claim_oidc_request_digest, claim_oidc_response_digest, oidc_digest},
 };
+use near_crypto::PublicKey;
 use rand::{distributions::Alphanumeric, Rng};
-use std::time::Duration;
-use test_log::test;
+use std::{str::FromStr, time::Duration};
 use workspaces::types::AccessKeyPermission;
+
+use test_log::test;
+#[test(tokio::test)]
+async fn test_basic_front_running_protection() -> anyhow::Result<()> {
+    with_nodes(3, |ctx| {
+        Box::pin(async move {
+            // Preparing user credentials
+            let account_id = account::random(ctx.worker)?;
+
+            let user_private_key =
+                near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);
+            let user_public_key = user_private_key.public_key().to_string();
+            let oidc_token = token::valid_random();
+            let wrong_oidc_token = token::valid_random();
+
+            // Prepare the oidc claiming request
+            let oidc_token_hash = oidc_digest(&oidc_token);
+            let wrong_oidc_token_hash = oidc_digest(&wrong_oidc_token);
+
+            let request_digest = claim_oidc_request_digest(oidc_token_hash).unwrap();
+            let wrong_digest = claim_oidc_request_digest(wrong_oidc_token_hash).unwrap();
+
+            let request_digest_signature = match user_private_key.sign(&request_digest) {
+                near_crypto::Signature::ED25519(k) => k,
+                _ => return Err(anyhow::anyhow!("Wrong signature type")),
+            };
+
+            let request_digest_wrong_signature = match user_private_key.sign(&wrong_digest) {
+                near_crypto::Signature::ED25519(k) => k,
+                _ => return Err(anyhow::anyhow!("Wrong signature type")),
+            };
+
+            let oidc_request = ClaimOidcRequest {
+                oidc_token_hash,
+                public_key: user_public_key.clone(),
+                signature: request_digest_signature,
+            };
+
+            let bad_oidc_request = ClaimOidcRequest {
+                oidc_token_hash,
+                public_key: user_public_key.clone(),
+                signature: request_digest_wrong_signature,
+            };
+
+            // Make the claiming request with wrong signature
+            let (status_code, oidc_response) =
+                ctx.leader_node.claim_oidc(bad_oidc_request.clone()).await?;
+
+            assert_eq!(status_code, StatusCode::BAD_REQUEST);
+            match oidc_response {
+                ClaimOidcResponse::Ok { .. } => {
+                    return Err(anyhow::anyhow!(
+                        "Response should be Err when signature is wrong"
+                    ))
+                }
+                ClaimOidcResponse::Err { msg } => {
+                    assert!(
+                        msg.contains("failed to verify signature"),
+                        "Error message does not contain 'failed to verify signature'"
+                    );
+                }
+            }
+
+            // Making the claiming request with correct signature
+            let (status_code, oidc_response) =
+                ctx.leader_node.claim_oidc(oidc_request.clone()).await?;
+
+            assert_eq!(status_code, StatusCode::OK);
+
+            let (mpc_signature, mpc_pk) = match oidc_response {
+                ClaimOidcResponse::Ok {
+                    mpc_signature,
+                    mpc_pk,
+                    recovery_public_key: _,
+                    near_account_id: _,
+                } => (mpc_signature, mpc_pk),
+                ClaimOidcResponse::Err { msg } => return Err(anyhow::anyhow!(msg)),
+            };
+
+            let decoded_mpc_pk = match hex::decode(mpc_pk.clone()) {
+                Ok(v) => v,
+                Err(e) => return Err(anyhow::anyhow!("Failed to decode mpc pk. {}", e)),
+            };
+
+            let mpc_pk = ed25519_dalek::PublicKey::from_bytes(&decoded_mpc_pk).unwrap();
+
+            // Making the same claiming request should fail
+            let (status_code, oidc_response) =
+                ctx.leader_node.claim_oidc(oidc_request.clone()).await?;
+
+            assert_eq!(status_code, StatusCode::BAD_REQUEST);
+
+            match oidc_response {
+                ClaimOidcResponse::Ok { .. } => {
+                    return Err(anyhow::anyhow!(
+                        "Response should be Err when claiming registered token"
+                    ))
+                }
+                ClaimOidcResponse::Err { msg } => {
+                    assert!(
+                        msg.contains("already claimed"),
+                        "Wrong error message when claiming registered token",
+                    );
+                }
+            }
+
+            // Verify signature
+            let response_digest = claim_oidc_response_digest(oidc_request.signature).unwrap();
+            mpc_pk.verify(&response_digest, &mpc_signature)?;
+
+            // Verify signature with wrong digest
+            let wrong_response_digest =
+                claim_oidc_response_digest(bad_oidc_request.signature).unwrap();
+            if mpc_pk
+                .verify(&wrong_response_digest, &mpc_signature)
+                .is_ok()
+            {
+                return Err(anyhow::anyhow!(
+                    "Signature verification should fail with wrong digest"
+                ));
+            }
+
+            // Create account
+            let new_account_request = NewAccountRequest {
+                near_account_id: account_id.to_string(),
+                create_account_options: CreateAccountOptions {
+                    full_access_keys: Some(vec![
+                        PublicKey::from_str(&user_public_key.clone()).unwrap()
+                    ]),
+                    limited_access_keys: None,
+                    contract_bytes: None,
+                },
+                oidc_token: oidc_token.clone(),
+                signature: None, //TODO: add real signature
+            };
+
+            let (status_code, new_acc_response) =
+                ctx.leader_node.new_account(new_account_request).await?;
+
+            // Check account creation status
+            assert_eq!(status_code, StatusCode::OK);
+            assert!(matches!(new_acc_response, NewAccountResponse::Ok {
+                    create_account_options: _,
+                    user_recovery_public_key: _,
+                    near_account_id: acc_id,
+                } if acc_id == account_id.to_string()
+            ));
+
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+            check::access_key_exists(&ctx, &account_id, &user_public_key).await?;
+
+            // Add new FA key with front running protection (negative, wrong signature)
+            // TODO: add exaample with front running protection signature (bad one)
+
+            // Add new FA key with front running protection (positive)
+            // TODO: add front running protection signature
+            let new_user_public_key = key::random();
+
+            let (status_code, add_key_response) = ctx
+                .leader_node
+                .add_key(AddKeyRequest {
+                    create_account_options: CreateAccountOptions {
+                        full_access_keys: Some(vec![PublicKey::from_str(
+                            &new_user_public_key.clone(),
+                        )
+                        .unwrap()]),
+                        limited_access_keys: None,
+                        contract_bytes: None,
+                    },
+                    near_account_id: Some(account_id.to_string()),
+                    oidc_token: oidc_token.clone(),
+                })
+                .await?;
+            assert_eq!(status_code, StatusCode::OK);
+
+            let AddKeyResponse::Ok {
+                            full_access_keys,
+                            limited_access_keys,
+                            near_account_id,
+            } = add_key_response else {
+                anyhow::bail!("unexpected pattern");
+            };
+            assert_eq!(full_access_keys, vec![new_user_public_key.clone()]);
+            assert_eq!(limited_access_keys, Vec::<String>::new());
+            assert_eq!(near_account_id, account_id.to_string());
+
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+            check::access_key_exists(&ctx, &account_id, &new_user_public_key).await?;
+
+            Ok(())
+        })
+    })
+    .await
+}
 
 #[test(tokio::test)]
 async fn test_aggregate_signatures() -> anyhow::Result<()> {
@@ -28,13 +226,12 @@ async fn test_aggregate_signatures() -> anyhow::Result<()> {
             let client = reqwest::Client::new();
             let signer_urls: Vec<_> = ctx.signer_nodes.iter().map(|s| s.address.clone()).collect();
 
-            let signature = sign_payload_with_mpc(
-                &client,
-                &signer_urls,
-                "validToken:test-subject".to_string(),
-                payload.clone().into(),
-            )
-            .await?;
+            let request = SignNodeRequest::SignShare(SignShareNodeRequest {
+                oidc_token: "validToken:test-subject".to_string(),
+                payload: payload.clone().into_bytes(),
+            });
+
+            let signature = sign_payload_with_mpc(&client, &signer_urls, request).await?;
 
             let account_id = get_test_claims("test-subject".to_string()).get_internal_account_id();
             let res = call_all_nodes(&client, &signer_urls, "public_key", account_id).await?;
@@ -69,6 +266,7 @@ async fn test_basic_action() -> anyhow::Result<()> {
                     near_account_id: account_id.to_string(),
                     create_account_options,
                     oidc_token: oidc_token.clone(),
+                    signature: None,
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
@@ -165,6 +363,7 @@ async fn test_random_recovery_keys() -> anyhow::Result<()> {
                     near_account_id: account_id.to_string(),
                     create_account_options,
                     oidc_token: token::valid_random(),
+                    signature: None,
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
@@ -233,6 +432,7 @@ async fn test_random_recovery_keys() -> anyhow::Result<()> {
                     near_account_id: account_id.to_string(),
                     create_account_options,
                     oidc_token: token::valid_random(),
+                    signature: None,
                 })
                 .await?;
             assert_eq!(status_code, StatusCode::OK);

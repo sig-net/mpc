@@ -1,7 +1,7 @@
 use crate::key_recovery::get_user_recovery_pk;
 use crate::msg::{
-    AcceptNodePublicKeysRequest, AddKeyRequest, AddKeyResponse, NewAccountRequest,
-    NewAccountResponse,
+    AcceptNodePublicKeysRequest, AddKeyRequest, AddKeyResponse, ClaimOidcNodeRequest,
+    ClaimOidcRequest, ClaimOidcResponse, NewAccountRequest, NewAccountResponse, SignNodeRequest,
 };
 use crate::nar;
 use crate::oauth::OAuthTokenVerifier;
@@ -10,7 +10,8 @@ use crate::relayer::msg::RegisterAccountRequest;
 use crate::relayer::NearRpcAndRelayerClient;
 use crate::transaction::{
     get_add_key_delegate_action, get_create_account_delegate_action,
-    get_local_signed_delegated_action, get_mpc_signed_delegated_action,
+    get_local_signed_delegated_action, get_mpc_signed_delegated_action, sign_payload_with_mpc,
+    to_dalek_combined_public_key,
 };
 use axum::routing::get;
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
@@ -115,6 +116,7 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
                 StatusCode::OK
             }),
         )
+        .route("/claim_oidc", post(claim_oidc))
         .route("/new_account", post(new_account::<T>))
         .route("/add_key", post(add_key::<T>))
         .layer(Extension(state))
@@ -140,6 +142,65 @@ struct LeaderState {
     account_creator_sk: SecretKey,
     account_lookup_url: String,
     pagoda_firebase_audience_id: String,
+}
+
+async fn claim_oidc(
+    Extension(state): Extension<LeaderState>,
+    Json(claim_oidc_request): Json<ClaimOidcRequest>,
+) -> (StatusCode, Json<ClaimOidcResponse>) {
+    // Calim OIDC ID Token and get MPC signature from sign nodes
+    let sig_share_request = SignNodeRequest::ClaimOidc(ClaimOidcNodeRequest {
+        oidc_token_hash: claim_oidc_request.oidc_token_hash,
+        public_key: claim_oidc_request.public_key,
+        signature: claim_oidc_request.signature,
+    });
+
+    // Getting MPC PK from sign nodes
+    let pk_set = match gather_sign_node_pk_shares(&state).await {
+        Ok(pk_set) => pk_set,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ClaimOidcResponse::Err {
+                    msg: err.to_string(),
+                }),
+            )
+        }
+    };
+
+    let mpc_pk = match to_dalek_combined_public_key(&pk_set) {
+        Ok(mpc_pk) => hex::encode(mpc_pk.to_bytes()),
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ClaimOidcResponse::Err {
+                    msg: err.to_string(),
+                }),
+            )
+        }
+    };
+
+    let res =
+        sign_payload_with_mpc(&state.reqwest_client, &state.sign_nodes, sig_share_request).await;
+    // Get user recovery public key from sign nodes (if registered)
+    // TODO
+    // Get user account id (if registered)
+    // TODO
+    match res {
+        Ok(mpc_signature) => (
+            StatusCode::OK,
+            Json(ClaimOidcResponse::Ok {
+                mpc_signature,
+                mpc_pk,
+                near_account_id: None,
+                recovery_public_key: None,
+            }),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ClaimOidcResponse::Err { msg: e.to_string() }),
+        ),
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
