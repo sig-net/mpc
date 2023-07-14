@@ -4,8 +4,8 @@ use ed25519_dalek::Verifier;
 use hyper::StatusCode;
 use mpc_recovery::{
     msg::{
-        AddKeyRequest, AddKeyResponse, ClaimOidcRequest, ClaimOidcResponse, NewAccountRequest,
-        NewAccountResponse, SignNodeRequest, SignShareNodeRequest,
+        ClaimOidcRequest, ClaimOidcResponse, MpcPkRequest, MpcPkResponse, NewAccountRequest,
+        NewAccountResponse, SignNodeRequest, SignResponse, SignShareNodeRequest,
     },
     oauth::get_test_claims,
     transaction::{
@@ -32,6 +32,24 @@ async fn test_basic_front_running_protection() -> anyhow::Result<()> {
             let user_public_key = user_private_key.public_key().to_string();
             let oidc_token = token::valid_random();
             let wrong_oidc_token = token::valid_random();
+
+            // Get MPC public key
+            let (status_code, mpc_pk_response) =
+                ctx.leader_node.get_mpc_pk(MpcPkRequest {}).await?;
+
+            assert_eq!(status_code, StatusCode::OK);
+
+            let mpc_pk = match mpc_pk_response {
+                MpcPkResponse::Ok { mpc_pk } => mpc_pk,
+                MpcPkResponse::Err { msg } => return Err(anyhow::anyhow!(msg)),
+            };
+
+            let decoded_mpc_pk = match hex::decode(mpc_pk.clone()) {
+                Ok(v) => v,
+                Err(e) => return Err(anyhow::anyhow!("Failed to decode mpc pk. {}", e)),
+            };
+
+            let mpc_pk = ed25519_dalek::PublicKey::from_bytes(&decoded_mpc_pk).unwrap();
 
             // Prepare the oidc claiming request
             let oidc_token_hash = oidc_digest(&oidc_token);
@@ -87,22 +105,10 @@ async fn test_basic_front_running_protection() -> anyhow::Result<()> {
 
             assert_eq!(status_code, StatusCode::OK);
 
-            let (mpc_signature, mpc_pk) = match oidc_response {
-                ClaimOidcResponse::Ok {
-                    mpc_signature,
-                    mpc_pk,
-                    recovery_public_key: _,
-                    near_account_id: _,
-                } => (mpc_signature, mpc_pk),
+            let mpc_signature = match oidc_response {
+                ClaimOidcResponse::Ok { mpc_signature } => mpc_signature,
                 ClaimOidcResponse::Err { msg } => return Err(anyhow::anyhow!(msg)),
             };
-
-            let decoded_mpc_pk = match hex::decode(mpc_pk.clone()) {
-                Ok(v) => v,
-                Err(e) => return Err(anyhow::anyhow!("Failed to decode mpc pk. {}", e)),
-            };
-
-            let mpc_pk = ed25519_dalek::PublicKey::from_bytes(&decoded_mpc_pk).unwrap();
 
             // Making the same claiming request should fail
             let (status_code, oidc_response) =
@@ -174,35 +180,26 @@ async fn test_basic_front_running_protection() -> anyhow::Result<()> {
 
             // Add new FA key with front running protection (positive)
             // TODO: add front running protection signature
+
+            let recovery_pk = ctx.leader_node.recovery_pk(oidc_token.clone()).await?;
+
             let new_user_public_key = key::random();
 
-            let (status_code, add_key_response) = ctx
+            let (status_code, sign_response) = ctx
                 .leader_node
-                .add_key(AddKeyRequest {
-                    create_account_options: CreateAccountOptions {
-                        full_access_keys: Some(vec![PublicKey::from_str(
-                            &new_user_public_key.clone(),
-                        )
-                        .unwrap()]),
-                        limited_access_keys: None,
-                        contract_bytes: None,
-                    },
-                    near_account_id: Some(account_id.to_string()),
-                    oidc_token: oidc_token.clone(),
-                })
+                .add_key(
+                    account_id.clone(),
+                    oidc_token.clone(),
+                    new_user_public_key.parse()?,
+                    recovery_pk,
+                )
                 .await?;
+
             assert_eq!(status_code, StatusCode::OK);
 
-            let AddKeyResponse::Ok {
-                            full_access_keys,
-                            limited_access_keys,
-                            near_account_id,
-            } = add_key_response else {
-                anyhow::bail!("unexpected pattern");
+            let SignResponse::Ok { .. } = sign_response else {
+                anyhow::bail!("failed to get a signature from mpc-recovery");
             };
-            assert_eq!(full_access_keys, vec![new_user_public_key.clone()]);
-            assert_eq!(limited_access_keys, Vec::<String>::new());
-            assert_eq!(near_account_id, account_id.to_string());
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
             check::access_key_exists(&ctx, &account_id, &new_user_public_key).await?;
@@ -282,50 +279,44 @@ async fn test_basic_action() -> anyhow::Result<()> {
             check::access_key_exists(&ctx, &account_id, &user_public_key).await?;
 
             // Add key
+            let recovery_pk = ctx.leader_node.recovery_pk(oidc_token.clone()).await?;
+
             let new_user_public_key = key::random();
 
-            let (status_code, add_key_response) = ctx
+            let (status_code, sign_response) = ctx
                 .leader_node
-                .add_key(AddKeyRequest {
-                    near_account_id: Some(account_id.to_string()),
-                    oidc_token: oidc_token.clone(),
-                    create_account_options: CreateAccountOptions {
-                        full_access_keys: Some(vec![new_user_public_key.parse()?]),
-                        limited_access_keys: None,
-                        contract_bytes: None,
-                    },
-                })
+                .add_key(
+                    account_id.clone(),
+                    oidc_token.clone(),
+                    new_user_public_key.parse()?,
+                    recovery_pk.clone(),
+                )
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
-            let AddKeyResponse::Ok {
-                full_access_keys,
-                limited_access_keys,
-                near_account_id,
-            } = add_key_response else {
-                anyhow::bail!("unexpected pattern");
+
+            let SignResponse::Ok { .. } = sign_response else {
+                anyhow::bail!("failed to get a signature from mpc-recovery");
             };
-            assert_eq!(full_access_keys, vec![new_user_public_key.clone()]);
-            assert_eq!(limited_access_keys, Vec::<String>::new());
-            assert_eq!(near_account_id, account_id.to_string());
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
             check::access_key_exists(&ctx, &account_id, &new_user_public_key).await?;
 
             // Adding the same key should now fail
-            let (status_code, _add_key_response) = ctx
+            let (status_code, sign_response) = ctx
                 .leader_node
-                .add_key(AddKeyRequest {
-                    near_account_id: Some(account_id.to_string()),
+                .add_key(
+                    account_id.clone(),
                     oidc_token,
-                    create_account_options: CreateAccountOptions {
-                        full_access_keys: Some(vec![new_user_public_key.clone().parse()?]),
-                        limited_access_keys: None,
-                        contract_bytes: None,
-                    },
-                })
+                    new_user_public_key.parse()?,
+                    recovery_pk.clone(),
+                )
                 .await?;
             assert_eq!(status_code, StatusCode::OK);
+
+            let SignResponse::Ok { .. } = sign_response else {
+                anyhow::bail!("failed to get a signature from mpc-recovery");
+            };
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
 

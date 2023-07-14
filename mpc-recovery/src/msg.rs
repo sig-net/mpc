@@ -1,8 +1,18 @@
 use curv::elliptic::curves::{Ed25519, Point};
 use ed25519_dalek::Signature;
+use near_primitives::delegate_action::DelegateAction;
 use serde::{Deserialize, Serialize};
 
 use crate::transaction::CreateAccountOptions;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MpcPkRequest {}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum MpcPkResponse {
+    Ok { mpc_pk: String },
+    Err { msg: String },
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ClaimOidcRequest {
@@ -18,13 +28,21 @@ pub enum ClaimOidcResponse {
     Ok {
         #[serde(with = "hex_sig_share")]
         mpc_signature: Signature,
-        mpc_pk: String,
-        recovery_public_key: Option<String>,
-        near_account_id: Option<String>,
     },
     Err {
         msg: String,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserCredentialsRequest {
+    pub oidc_token: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum UserCredentialsResponse {
+    Ok { recovery_pk: String },
+    Err { msg: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -61,29 +79,22 @@ impl NewAccountResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AddKeyRequest {
-    pub create_account_options: CreateAccountOptions,
-    pub near_account_id: Option<String>,
+pub struct SignRequest {
+    pub delegate_action: DelegateAction,
     pub oidc_token: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-pub enum AddKeyResponse {
-    Ok {
-        full_access_keys: Vec<String>,
-        limited_access_keys: Vec<String>,
-        near_account_id: String,
-    },
-    Err {
-        msg: String,
-    },
+pub enum SignResponse {
+    Ok { signature: Signature },
+    Err { msg: String },
 }
 
-impl AddKeyResponse {
+impl SignResponse {
     pub fn err(msg: String) -> Self {
-        AddKeyResponse::Err { msg }
+        SignResponse::Err { msg }
     }
 }
 
