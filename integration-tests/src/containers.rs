@@ -3,8 +3,9 @@
 use std::str::FromStr;
 
 use anyhow::{anyhow, Ok};
-use bollard::Docker;
+use bollard::{container::LogsOptions, network::CreateNetworkOptions, service::Ipam, Docker};
 use ed25519_dalek::ed25519::signature::digest::{consts::U32, generic_array::GenericArray};
+use futures::{lock::Mutex, StreamExt};
 use hyper::StatusCode;
 use mpc_recovery::{
     msg::{
@@ -15,23 +16,27 @@ use mpc_recovery::{
     relayer::NearRpcAndRelayerClient,
 };
 use multi_party_eddsa::protocols::ExpandedKeyPair;
-use near_crypto::{PublicKey, SecretKey};
+use near_crypto::PublicKey;
 use near_primitives::{
     account::{AccessKey, AccessKeyPermission},
     delegate_action::{DelegateAction, SignedDelegateAction},
     transaction::{Action, AddKeyAction},
     views::FinalExecutionStatus,
 };
+use once_cell::sync::Lazy;
 use testcontainers::{
     clients::Cli,
     core::{ExecCommand, WaitFor},
     images::generic::GenericImage,
     Container, Image, RunnableImage,
 };
+use tokio::io::AsyncWriteExt;
 use tracing;
-use workspaces::AccountId;
+use workspaces::{types::SecretKey, AccountId};
 
 use crate::util;
+
+static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 
 pub struct DockerClient {
     pub docker: Docker,
@@ -78,12 +83,72 @@ impl DockerClient {
 
         Ok(ip_address)
     }
+
+    pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
+        let _lock = &NETWORK_MUTEX.lock().await;
+        let list = self.docker.list_networks::<&str>(None).await?;
+        if list.iter().any(|n| n.name == Some(network.to_string())) {
+            return Ok(());
+        }
+
+        let create_network_options = CreateNetworkOptions {
+            name: network,
+            check_duplicate: true,
+            driver: if cfg!(windows) {
+                "transparent"
+            } else {
+                "bridge"
+            },
+            ipam: Ipam {
+                config: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let _response = &self.docker.create_network(create_network_options).await?;
+
+        Ok(())
+    }
+
+    pub async fn continuously_print_logs(&self, id: &str) -> anyhow::Result<()> {
+        let mut output = self.docker.logs::<String>(
+            id,
+            Some(LogsOptions {
+                follow: true,
+                stdout: true,
+                stderr: true,
+                ..Default::default()
+            }),
+        );
+
+        // Asynchronous process that pipes docker attach output into stdout.
+        // Will die automatically once Docker container output is closed.
+        tokio::spawn(async move {
+            let mut stdout = tokio::io::stdout();
+
+            while let Some(Result::Ok(output)) = output.next().await {
+                stdout
+                    .write_all(output.into_bytes().as_ref())
+                    .await
+                    .unwrap();
+                stdout.flush().await.unwrap();
+            }
+        });
+
+        Ok(())
+    }
 }
 
 impl Default for DockerClient {
     fn default() -> Self {
         Self {
-            docker: Docker::connect_with_local_defaults().unwrap(),
+            docker: Docker::connect_with_local(
+                "unix:///var/run/docker.sock",
+                // 10 minutes timeout for all requests in case a lot of tests are being ran in parallel.
+                600,
+                bollard::API_DEFAULT_VERSION,
+            )
+            .unwrap(),
             cli: Default::default(),
         }
     }
@@ -114,6 +179,7 @@ impl<'a> Redis<'a> {
 pub struct Sandbox<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
+    pub local_address: String,
 }
 
 impl<'a> Sandbox<'a> {
@@ -148,10 +214,19 @@ impl<'a> Sandbox<'a> {
         let address = docker_client
             .get_network_ip_address(&container, network)
             .await?;
+        let host_port = container.get_host_port_ipv4(Self::CONTAINER_RPC_PORT);
 
         container.exec(ExecCommand {
-            cmd: format!("bash -c 'while [[ \"$(curl -s -o /dev/null -w ''%{{http_code}}'' localhost:{})\" != \"200\" ]]; do sleep 1; done'", Self::CONTAINER_RPC_PORT),
-            ready_conditions: vec![]
+            cmd: format!(
+                "bash -c 'while [[ \"$(curl -H \"Content-type: application/json\" -X POST -s -o /dev/null -w ''%{{http_code}}'' -d ''{{
+                \"jsonrpc\": \"2.0\",
+                \"id\": \"dontcare\",
+                \"method\": \"status\",
+                \"params\": []
+              }}'' localhost:{})\" != \"200\" ]]; do sleep 1; done; echo \"sandbox is ready to accept connections\"'",
+                Self::CONTAINER_RPC_PORT
+            ),
+            ready_conditions: vec![WaitFor::StdErrMessage { message: "ready".to_string() }]
         });
 
         let full_address = format!("http://{}:{}", address, Self::CONTAINER_RPC_PORT);
@@ -159,6 +234,7 @@ impl<'a> Sandbox<'a> {
         Ok(Sandbox {
             container,
             address: full_address,
+            local_address: format!("http://localhost:{host_port}"),
         })
     }
 }
@@ -166,6 +242,7 @@ impl<'a> Sandbox<'a> {
 pub struct Relayer<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
+    pub local_address: String,
 }
 
 impl<'a> Relayer<'a> {
@@ -212,12 +289,14 @@ impl<'a> Relayer<'a> {
         let ip_address = docker_client
             .get_network_ip_address(&container, network)
             .await?;
+        let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
 
         let full_address = format!("http://{}:{}", ip_address, Self::CONTAINER_PORT);
         tracing::info!("Relayer container is running at {}", full_address);
         Ok(Relayer {
             container,
             address: full_address,
+            local_address: format!("http://localhost:{host_port}"),
         })
     }
 }
