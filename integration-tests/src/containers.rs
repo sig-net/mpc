@@ -5,6 +5,7 @@ use std::str::FromStr;
 use anyhow::{anyhow, Ok};
 use bollard::{container::LogsOptions, network::CreateNetworkOptions, service::Ipam, Docker};
 use ed25519_dalek::ed25519::signature::digest::{consts::U32, generic_array::GenericArray};
+use ed25519_dalek::{PublicKey as PublicKeyEd25519, Signature, Verifier};
 use futures::{lock::Mutex, StreamExt};
 use hyper::StatusCode;
 use mpc_recovery::{
@@ -14,9 +15,14 @@ use mpc_recovery::{
         UserCredentialsRequest, UserCredentialsResponse,
     },
     relayer::NearRpcAndRelayerClient,
+    transaction::{CreateAccountOptions, LimitedAccessKey},
+    utils::{
+        claim_oidc_request_digest, claim_oidc_response_digest, new_account_request_digest,
+        oidc_digest, sign_digest, sign_request_digest, user_credentials_request_digest,
+    },
 };
 use multi_party_eddsa::protocols::ExpandedKeyPair;
-use near_crypto::PublicKey;
+use near_crypto::{PublicKey, SecretKey};
 use near_primitives::{
     account::{AccessKey, AccessKeyPermission},
     delegate_action::{DelegateAction, SignedDelegateAction},
@@ -32,7 +38,7 @@ use testcontainers::{
 };
 use tokio::io::AsyncWriteExt;
 use tracing;
-use workspaces::{types::SecretKey, AccountId};
+use workspaces::AccountId;
 
 use crate::util;
 
@@ -254,11 +260,11 @@ impl<'a> Relayer<'a> {
         near_rpc: &str,
         redis_hostname: &str,
         relayer_account_id: &AccountId,
-        relayer_account_sk: &SecretKey,
+        relayer_account_sk: &workspaces::types::SecretKey,
         creator_account_id: &AccountId,
         social_db_id: &AccountId,
         social_account_id: &AccountId,
-        social_account_sk: &SecretKey,
+        social_account_sk: &workspaces::types::SecretKey,
     ) -> anyhow::Result<Relayer<'a>> {
         tracing::info!("Running relayer container...");
         let image = GenericImage::new("ghcr.io/near/pagoda-relayer-rs-fastauth", "latest")
@@ -473,7 +479,7 @@ impl<'a> LeaderNode<'a> {
         gcp_project_id: &str,
         near_root_account: &AccountId,
         account_creator_id: &AccountId,
-        account_creator_sk: &SecretKey,
+        account_creator_sk: &workspaces::types::SecretKey,
         firebase_audience_id: &str,
     ) -> anyhow::Result<LeaderNode<'a>> {
         tracing::info!("Running leader node container...");
@@ -560,6 +566,10 @@ impl LeaderNodeApi {
         util::post(format!("{}/user_credentials", self.address), request).await
     }
 
+    pub async fn sign(&self, request: SignRequest) -> anyhow::Result<(StatusCode, SignResponse)> {
+        util::post(format!("{}/sign", self.address), request).await
+    }
+
     pub async fn new_account(
         &self,
         request: NewAccountRequest,
@@ -567,8 +577,47 @@ impl LeaderNodeApi {
         util::post(format!("{}/new_account", self.address), request).await
     }
 
-    pub async fn sign(&self, request: SignRequest) -> anyhow::Result<(StatusCode, SignResponse)> {
-        util::post(format!("{}/sign", self.address), request).await
+    // TODO: move to utils
+    // TODO: I would say this need to replace the regular `new_account` once FRP is enforced
+    pub async fn new_account_with_helper(
+        &self,
+        account_id: String,
+        user_fa_public_key: PublicKey,
+        user_la_public_key: Option<LimitedAccessKey>,
+        user_secret_key: SecretKey,
+        oidc_token: String,
+    ) -> anyhow::Result<(StatusCode, NewAccountResponse)> {
+        let user_pk = user_secret_key.public_key();
+
+        let limited_access_keys = user_la_public_key.map(|pk| vec![pk]);
+
+        let create_account_options = CreateAccountOptions {
+            full_access_keys: Some(vec![user_fa_public_key.clone()]),
+            limited_access_keys,
+            contract_bytes: None,
+        };
+
+        let new_account_digest = new_account_request_digest(
+            account_id.clone(),
+            create_account_options.clone(),
+            oidc_token.clone(),
+            user_pk.clone(),
+        )?;
+
+        let frp_signature = match user_secret_key.sign(&new_account_digest) {
+            near_crypto::Signature::ED25519(k) => k,
+            _ => return Err(anyhow::anyhow!("Wrong signature type")),
+        };
+
+        let new_account_request = NewAccountRequest {
+            near_account_id: account_id.to_string(),
+            create_account_options,
+            oidc_token: oidc_token.clone(),
+            frp_signature,
+            frp_public_key: user_pk.clone().to_string(),
+        };
+
+        self.new_account(new_account_request).await
     }
 
     // TODO: add_key should me moved to utils in the future, it is not a part of the API
@@ -578,6 +627,8 @@ impl LeaderNodeApi {
         oidc_token: String,
         public_key: PublicKey,
         recovery_pk: PublicKey,
+        frp_sk: SecretKey,
+        frp_pk: PublicKey,
     ) -> anyhow::Result<(StatusCode, SignResponse)> {
         // Prepare SignRequest with add key delegate action
         let (_, block_height, nonce) = self
@@ -593,9 +644,19 @@ impl LeaderNodeApi {
             block_height,
         )?;
 
+        let sign_request_digest = sign_request_digest(
+            add_key_delegate_action.clone(),
+            oidc_token.clone(),
+            frp_pk.clone(),
+        )?;
+
+        let frp_signature = sign_digest(&sign_request_digest, &frp_sk)?;
+
         let sign_request = SignRequest {
             delegate_action: add_key_delegate_action.clone(),
             oidc_token,
+            frp_signature,
+            frp_public_key: frp_sk.public_key().to_string(),
         };
         // Send SignRequest to leader node
         let (status_code, sign_response): (_, SignResponse) = self.sign(sign_request).await?;
@@ -617,10 +678,55 @@ impl LeaderNodeApi {
         }
     }
 
-    pub async fn recovery_pk(&self, oidc_token: String) -> anyhow::Result<PublicKey> {
+    // TODO: move to utils
+    pub async fn claim_oidc_with_helper(
+        &self,
+        oidc_token: String,
+        user_public_key: PublicKey,
+        user_secret_key: near_crypto::SecretKey,
+    ) -> anyhow::Result<()> {
+        let oidc_token_hash = oidc_digest(&oidc_token);
+
+        let request_digest =
+            claim_oidc_request_digest(oidc_token_hash, user_public_key.clone()).unwrap();
+
+        let request_digest_signature = sign_digest(&request_digest, &user_secret_key)?;
+
+        let oidc_request = ClaimOidcRequest {
+            oidc_token_hash,
+            public_key: user_public_key.clone().to_string(),
+            frp_signature: request_digest_signature,
+        };
+
+        let mpc_signature: Signature = self.claim_oidc(oidc_request.clone()).await?.1.try_into()?;
+
+        let mpc_pk: PublicKeyEd25519 = self.get_mpc_pk(MpcPkRequest {}).await?.1.try_into()?;
+
+        // Verify signature
+        let response_digest = claim_oidc_response_digest(oidc_request.frp_signature)?;
+        mpc_pk.verify(&response_digest, &mpc_signature)?;
+        Ok(())
+    }
+
+    pub async fn recovery_pk(
+        &self,
+        oidc_token: String,
+        client_sk: SecretKey,
+        client_pk: PublicKey,
+    ) -> anyhow::Result<PublicKey> {
+        let user_credentials_request_digest =
+            user_credentials_request_digest(oidc_token.clone(), client_pk.clone())?;
+
+        let frp_signature = match client_sk.sign(&user_credentials_request_digest) {
+            near_crypto::Signature::ED25519(k) => k,
+            _ => return Err(anyhow::anyhow!("Wrong signature type")),
+        };
+
         let (status_code, user_credentials) = self
             .user_credentials(UserCredentialsRequest {
                 oidc_token: oidc_token.clone(),
+                frp_signature,
+                frp_public_key: client_pk.clone().to_string(),
             })
             .await?;
 
