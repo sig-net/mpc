@@ -11,6 +11,7 @@ use crate::utils::{
     sign_request_digest, user_credentials_request_digest,
 };
 use crate::NodeId;
+
 use aes_gcm::Aes256Gcm;
 use axum::routing::get;
 use axum::{http::StatusCode, routing::post, Extension, Json, Router};
@@ -29,6 +30,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub mod aggregate_signer;
+pub mod migration;
 pub mod oidc;
 pub mod pk_set;
 pub mod user_credentials;

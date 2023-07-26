@@ -1,4 +1,6 @@
 #![allow(clippy::too_many_arguments)]
+
+use aes_gcm::{Aes256Gcm, KeyInit};
 use anyhow::{anyhow, Ok};
 use bollard::{container::LogsOptions, network::CreateNetworkOptions, service::Ipam, Docker};
 use ed25519_dalek::ed25519::signature::digest::{consts::U32, generic_array::GenericArray};
@@ -309,6 +311,7 @@ impl<'a> Relayer<'a> {
 pub struct Datastore<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
+    pub local_address: String,
 }
 
 impl<'a> Datastore<'a> {
@@ -351,11 +354,14 @@ impl<'a> Datastore<'a> {
         let ip_address = docker_client
             .get_network_ip_address(&container, network)
             .await?;
+        let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
 
         let full_address = format!("http://{}:{}/", ip_address, Self::CONTAINER_PORT);
+        let local_address = format!("http://localhost:{}/", host_port);
         tracing::info!("Datastore container is running at {}", full_address);
         Ok(Datastore {
             container,
+            local_address,
             address: full_address,
         })
     }
@@ -365,10 +371,20 @@ pub struct SignerNode<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
     pub local_address: String,
+    node_id: usize,
+    sk_share: ExpandedKeyPair,
+    cipher_key: GenericArray<u8, U32>,
+    gcp_project_id: String,
+    gcp_datastore_local_url: String,
 }
 
 pub struct SignerNodeApi {
     pub address: String,
+    pub node_id: usize,
+    pub sk_share: ExpandedKeyPair,
+    pub cipher_key: Aes256Gcm,
+    pub gcp_project_id: String,
+    pub gcp_datastore_local_url: String,
 }
 
 impl<'a> SignerNode<'a> {
@@ -382,6 +398,7 @@ impl<'a> SignerNode<'a> {
         sk_share: &ExpandedKeyPair,
         cipher_key: &GenericArray<u8, U32>,
         datastore_url: &str,
+        datastore_local_url: &str,
         gcp_project_id: &str,
         firebase_audience_id: &str,
     ) -> anyhow::Result<SignerNode<'a>> {
@@ -434,12 +451,22 @@ impl<'a> SignerNode<'a> {
             container,
             address: full_address,
             local_address: format!("http://localhost:{host_port}"),
+            node_id: node_id as usize,
+            sk_share: sk_share.clone(),
+            cipher_key: *cipher_key,
+            gcp_project_id: gcp_project_id.to_string(),
+            gcp_datastore_local_url: datastore_local_url.to_string(),
         })
     }
 
     pub fn api(&self) -> SignerNodeApi {
         SignerNodeApi {
             address: self.local_address.clone(),
+            node_id: self.node_id,
+            sk_share: self.sk_share.clone(),
+            cipher_key: Aes256Gcm::new(&self.cipher_key),
+            gcp_project_id: self.gcp_project_id.clone(),
+            gcp_datastore_local_url: self.gcp_datastore_local_url.clone(),
         }
     }
 }
@@ -450,6 +477,34 @@ impl SignerNodeApi {
         request: AcceptNodePublicKeysRequest,
     ) -> anyhow::Result<(StatusCode, Result<String, String>)> {
         util::post(format!("{}/accept_pk_set", self.address), request).await
+    }
+
+    pub async fn run_rotate_node_key(
+        &self,
+        new_cipher_key: &GenericArray<u8, U32>,
+    ) -> anyhow::Result<(Aes256Gcm, Aes256Gcm)> {
+        let env = "dev".to_string();
+        let gcp_service = mpc_recovery::gcp::GcpService::new(
+            env.clone(),
+            self.gcp_project_id.clone(),
+            Some(self.gcp_datastore_local_url.clone()),
+        )
+        .await?;
+
+        let new_cipher = Aes256Gcm::new(new_cipher_key);
+        let old_cipher = &self.cipher_key;
+
+        // Do inplace rotation of node key
+        mpc_recovery::sign_node::migration::rotate_cipher(
+            self.node_id,
+            old_cipher,
+            &new_cipher,
+            &gcp_service,
+            &gcp_service,
+        )
+        .await?;
+
+        Ok((old_cipher.clone(), new_cipher))
     }
 }
 
