@@ -173,7 +173,7 @@ async fn process_commit<T: OAuthTokenVerifier>(
                 .public_key
                 .parse()
                 .map_err(|e| CommitError::MalformedPublicKey(request.public_key.clone(), e))?;
-            let digest = claim_oidc_request_digest(request.oidc_token_hash, public_key.clone())?;
+            let digest = claim_oidc_request_digest(request.oidc_token_hash, &public_key)?;
 
             match check_digest_signature(&public_key, &request.signature, &digest) {
                 Ok(()) => tracing::debug!("claim oidc token digest signature verified"),
@@ -239,11 +239,8 @@ async fn process_commit<T: OAuthTokenVerifier>(
             let frp_pk = PublicKey::from_str(&request.frp_public_key)
                 .map_err(|e| CommitError::MalformedPublicKey(request.frp_public_key.clone(), e))?;
 
-            let digest = sign_request_digest(
-                request.delegate_action.clone(),
-                request.oidc_token.clone(),
-                frp_pk.clone(),
-            )?;
+            let digest =
+                sign_request_digest(&request.delegate_action, &request.oidc_token, &frp_pk)?;
 
             match check_digest_signature(&frp_pk, &request.frp_signature, &digest) {
                 Ok(()) => tracing::debug!("sign request digest signature verified"),
@@ -253,7 +250,7 @@ async fn process_commit<T: OAuthTokenVerifier>(
             // Check if this OIDC token was claimed
             let oidc_hash = oidc_digest(&request.oidc_token);
 
-            let claim_digest = claim_oidc_request_digest(oidc_hash, frp_pk.clone())?;
+            let claim_digest = claim_oidc_request_digest(oidc_hash, &frp_pk)?;
 
             let oidc_digest = OidcDigest {
                 node_id: state.node_info.our_index,
@@ -480,7 +477,7 @@ async fn process_public_key<T: OAuthTokenVerifier>(
         PublicKeyRequestError::MalformedPublicKey(request.frp_public_key.clone(), e)
     })?;
 
-    let digest = user_credentials_request_digest(request.oidc_token.clone(), frp_pk.clone())?;
+    let digest = user_credentials_request_digest(&request.oidc_token, &frp_pk)?;
 
     match check_digest_signature(&frp_pk, &request.frp_signature, &digest) {
         Ok(()) => tracing::debug!("user credentials digest signature verified"),
@@ -490,7 +487,7 @@ async fn process_public_key<T: OAuthTokenVerifier>(
     // Check if this OIDC token was claimed
     let oidc_hash = oidc_digest(&request.oidc_token);
 
-    let claim_digest = claim_oidc_request_digest(oidc_hash, frp_pk.clone())?;
+    let claim_digest = claim_oidc_request_digest(oidc_hash, &frp_pk)?;
 
     let oidc_digest = OidcDigest {
         node_id: state.node_info.our_index,
