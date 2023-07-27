@@ -116,8 +116,10 @@ pub enum CommitError {
     OidcVerificationFailed(anyhow::Error),
     #[error("failed to verify signature: {0}")]
     SignatureVerificationFailed(anyhow::Error),
-    #[error("oidc token {0:?} already claimed")]
+    #[error("oidc token {0:?} already claimed with another key")]
     OidcTokenAlreadyClaimed(OidcDigest),
+    #[error("oidc token {0:?} was claimed with another key")]
+    OidcTokenClaimedWithAnotherKey(OidcDigest),
     #[error("oidc token {0:?} was not claimed")]
     OidcTokenNotClaimed(OidcDigest),
     #[error("This kind of action can not be performed")]
@@ -173,9 +175,10 @@ async fn process_commit<T: OAuthTokenVerifier>(
                 .public_key
                 .parse()
                 .map_err(|e| CommitError::MalformedPublicKey(request.public_key.clone(), e))?;
-            let digest = claim_oidc_request_digest(request.oidc_token_hash, &public_key)?;
 
-            match check_digest_signature(&public_key, &request.signature, &digest) {
+            let request_digest = claim_oidc_request_digest(request.oidc_token_hash, &public_key)?;
+
+            match check_digest_signature(&public_key, &request.signature, &request_digest) {
                 Ok(()) => tracing::debug!("claim oidc token digest signature verified"),
                 Err(e) => return Err(CommitError::SignatureVerificationFailed(e)),
             };
@@ -183,7 +186,7 @@ async fn process_commit<T: OAuthTokenVerifier>(
             // Save info about token in the database, if it's present, throw an error
             let oidc_digest = OidcDigest {
                 node_id: state.node_info.our_index,
-                digest: <[u8; 32]>::try_from(digest).expect("Hash was wrong size"),
+                digest: request.oidc_token_hash,
                 public_key,
             };
 
@@ -192,11 +195,17 @@ async fn process_commit<T: OAuthTokenVerifier>(
                 .get::<_, OidcDigest>(oidc_digest.to_name())
                 .await
             {
-                Ok(Some(_stored_digest)) => {
-                    // TODO: Should we throw this error in case we use the same token but different public key?
-                    // TODO: should we throw this error at all?
-                    tracing::info!(?oidc_digest, "oidc token already claimed");
-                    return Err(CommitError::OidcTokenAlreadyClaimed(oidc_digest));
+                Ok(Some(stored_digest)) => {
+                    if stored_digest == oidc_digest {
+                        tracing::info!(?oidc_digest, "oidc token with this key is already claimed");
+                    } else {
+                        tracing::error!(
+                            ?oidc_digest,
+                            ?stored_digest,
+                            "oidc token already claimed with another key"
+                        );
+                        return Err(CommitError::OidcTokenAlreadyClaimed(oidc_digest));
+                    }
                 }
                 Ok(None) => {
                     tracing::info!(?oidc_digest, "adding oidc token digest to the database");
@@ -250,11 +259,9 @@ async fn process_commit<T: OAuthTokenVerifier>(
             // Check if this OIDC token was claimed
             let oidc_hash = oidc_digest(&request.oidc_token);
 
-            let claim_digest = claim_oidc_request_digest(oidc_hash, &frp_pk)?;
-
             let oidc_digest = OidcDigest {
                 node_id: state.node_info.our_index,
-                digest: <[u8; 32]>::try_from(claim_digest).expect("Hash was wrong size"),
+                digest: oidc_hash,
                 public_key: frp_pk,
             };
 
@@ -263,8 +270,13 @@ async fn process_commit<T: OAuthTokenVerifier>(
                 .get::<_, OidcDigest>(oidc_digest.to_name())
                 .await
             {
-                Ok(Some(_stored_digest)) => {
-                    tracing::info!(?oidc_digest, "oidc token was claimed");
+                Ok(Some(stored_digest)) => {
+                    if stored_digest == oidc_digest {
+                        tracing::info!(?oidc_digest, "oidc token was claimed with provided pk");
+                    } else {
+                        tracing::error!(?oidc_digest, "oidc token was claimed with another key");
+                        return Err(CommitError::OidcTokenClaimedWithAnotherKey(oidc_digest));
+                    }
                 }
                 Ok(None) => {
                     tracing::info!(?oidc_digest, "oidc token was not claimed");
@@ -373,6 +385,26 @@ async fn commit<T: OAuthTokenVerifier>(
                 Json(Err(format!("OIDC Token was not claimed: {}", e))),
             )
         }
+        Err(ref e @ CommitError::OidcTokenAlreadyClaimed(ref _err_msg)) => {
+            tracing::error!(err = ?e);
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(Err(format!(
+                    "OIDC Token was already claimed with another key: {}",
+                    e
+                ))),
+            )
+        }
+        Err(ref e @ CommitError::OidcTokenClaimedWithAnotherKey(ref _err_msg)) => {
+            tracing::error!(err = ?e);
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(Err(format!(
+                    "OIDC Token was claimed with another key: {}",
+                    e
+                ))),
+            )
+        }
         Err(ref e @ CommitError::UnsupportedAction) => {
             tracing::error!(err = ?e);
             (
@@ -383,12 +415,10 @@ async fn commit<T: OAuthTokenVerifier>(
                 ))),
             )
         }
-        // TODO: Ideally we should process some of the newly added errors
-        // differently here to shift the blame from us (500) to the caller (4xx)
         Err(e) => {
             tracing::error!(err = ?e);
             (
-                StatusCode::BAD_REQUEST,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(Err(format!("failed to process commit call: {}", e))),
             )
         }
@@ -456,6 +486,8 @@ pub enum PublicKeyRequestError {
     OidcVerificationFailed(anyhow::Error),
     #[error("oidc token {0:?} was not claimed")]
     OidcTokenNotClaimed(OidcDigest),
+    #[error("oidc token {0:?} was claimed with another key")]
+    OidcTokenClaimedWithAnotherKey(OidcDigest),
     #[error("failed to verify signature: {0}")]
     SignatureVerificationFailed(anyhow::Error),
     #[error("{0}")]
@@ -487,11 +519,9 @@ async fn process_public_key<T: OAuthTokenVerifier>(
     // Check if this OIDC token was claimed
     let oidc_hash = oidc_digest(&request.oidc_token);
 
-    let claim_digest = claim_oidc_request_digest(oidc_hash, &frp_pk)?;
-
     let oidc_digest = OidcDigest {
         node_id: state.node_info.our_index,
-        digest: <[u8; 32]>::try_from(claim_digest).expect("Hash was wrong size"),
+        digest: oidc_hash,
         public_key: frp_pk,
     };
 
@@ -500,8 +530,15 @@ async fn process_public_key<T: OAuthTokenVerifier>(
         .get::<_, OidcDigest>(oidc_digest.to_name())
         .await
     {
-        Ok(Some(_stored_digest)) => {
-            tracing::info!(?oidc_digest, "oidc token was claimed");
+        Ok(Some(stored_digest)) => {
+            if stored_digest == oidc_digest {
+                tracing::info!(?oidc_digest, "oidc token was claimed with provided pk");
+            } else {
+                tracing::error!(?oidc_digest, "oidc token was claimed with another key");
+                return Err(PublicKeyRequestError::OidcTokenClaimedWithAnotherKey(
+                    oidc_digest,
+                ));
+            }
         }
         Ok(None) => {
             tracing::info!(?oidc_digest, "oidc token was not claimed");
@@ -562,6 +599,16 @@ async fn public_key<T: OAuthTokenVerifier>(
             (
                 StatusCode::UNAUTHORIZED,
                 Json(Err(format!("OIDC Token was not claimed: {}", e))),
+            )
+        }
+        Err(ref e @ PublicKeyRequestError::OidcTokenClaimedWithAnotherKey(ref _err_msg)) => {
+            tracing::error!(err = ?e);
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(Err(format!(
+                    "OIDC Token was claimed with another key: {}",
+                    e
+                ))),
             )
         }
         Err(ref e @ PublicKeyRequestError::Other(ref err_msg)) => {

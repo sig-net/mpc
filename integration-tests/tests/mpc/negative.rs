@@ -300,11 +300,11 @@ async fn negative_front_running_protection() -> anyhow::Result<()> {
                 .assert_ok()?
                 .try_into()?;
 
-            // Making the same claiming request should fail
+            // Making the same claiming request should NOT fail
             ctx.leader_node
                 .claim_oidc(oidc_request.clone())
                 .await?
-                .assert_bad_request_contains("already claimed")?;
+                .assert_ok()?;
 
             // Verify signature with wrong digest
             let wrong_response_digest = claim_oidc_response_digest(bad_oidc_request.frp_signature)?;
@@ -316,6 +316,44 @@ async fn negative_front_running_protection() -> anyhow::Result<()> {
                     "Signature verification should fail with wrong digest"
                 ));
             }
+
+            // It should not be possible to make the claiming with another key
+            let new_oidc_token = token::valid_random();
+            let user_sk = key::random_sk();
+            let user_pk = user_sk.public_key();
+            let atacker_sk = key::random_sk();
+            let atacker_pk = atacker_sk.public_key();
+
+            // User claims the token
+            ctx.leader_node
+                .claim_oidc_with_helper(&new_oidc_token, &user_pk, &user_sk)
+                .await?
+                .assert_ok()?;
+
+            // Attacker tries to claim the token
+            ctx.leader_node
+                .claim_oidc_with_helper(&new_oidc_token, &atacker_pk, &atacker_sk)
+                .await?
+                .assert_bad_request_contains("already claimed with another key")?;
+
+            // Sign request with claimed token but wrong key should fail
+            ctx.leader_node
+                .add_key_with_helper(
+                    &account_id,
+                    &new_oidc_token,
+                    &new_user_public_key,
+                    &recovery_pk,
+                    &atacker_sk,
+                    &atacker_pk,
+                )
+                .await?
+                .assert_unauthorized_contains("was claimed with another key")?;
+
+            // User Credentials request with claimed token but wrong key should fail
+            ctx.leader_node
+                .user_credentials_with_helper(&new_oidc_token, &atacker_sk, &atacker_pk)
+                .await?
+                .assert_unauthorized_contains("was claimed with another key")?;
 
             Ok(())
         })
