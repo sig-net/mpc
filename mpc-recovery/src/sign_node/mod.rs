@@ -624,7 +624,6 @@ async fn public_key<T: OAuthTokenVerifier>(
     }
 }
 
-// TODO: remove type complexity
 #[allow(clippy::type_complexity)]
 #[tracing::instrument(level = "debug", skip_all, fields(id = state.node_info.our_index))]
 async fn public_key_node(

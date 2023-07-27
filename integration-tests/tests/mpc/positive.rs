@@ -19,12 +19,6 @@ async fn test_basic_front_running_protection() -> anyhow::Result<()> {
         Box::pin(async move {
             let (account_id, user_secret_key, oidc_token) = new_random_account(&ctx, None).await?;
 
-            // Add new FA key with front running protection (negative, wrong signature)
-            // TODO: add exaample with front running protection signature (bad one)
-
-            // Add new FA key with front running protection (positive)
-            // TODO: add front running protection signature
-
             // Get recovery PK with proper FRP signature
             let recovery_pk = fetch_recovery_pk(&ctx, &user_secret_key, &oidc_token).await?;
 
@@ -102,7 +96,7 @@ async fn test_random_recovery_keys() -> anyhow::Result<()> {
             let user_limited_access_key = LimitedAccessKey {
                 public_key: key::random_pk(),
                 allowance: "100".to_string(),
-                receiver_id: account::random(ctx.worker)?.to_string().parse().unwrap(), // TODO: type issues here
+                receiver_id: account::random(&ctx.worker)?,
                 method_names: "method_names".to_string(),
             };
 
