@@ -1,4 +1,6 @@
+use crate::mpc::{fetch_recovery_pk, register_account};
 use crate::{account, check, key, token, with_nodes, MpcCheck};
+
 use ed25519_dalek::{PublicKey as PublicKeyEd25519, Signature, Verifier};
 use hyper::StatusCode;
 use mpc_recovery::{
@@ -118,10 +120,10 @@ async fn whitlisted_actions_test() -> anyhow::Result<()> {
                 .assert_bad_request_contains("Recovery key can not be deleted")?;
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
-            check::access_key_exists(&ctx, &account_id, &recovery_pk.to_string()).await?;
+            check::access_key_exists(&ctx, &account_id, &recovery_pk).await?;
 
             // Deletion of the regular key should work
-            check::access_key_exists(&ctx, &account_id, &user_public_key.to_string()).await?;
+            check::access_key_exists(&ctx, &account_id, &user_public_key).await?;
 
             ctx.leader_node
                 .delete_key_with_helper(
@@ -229,41 +231,19 @@ async fn negative_front_running_protection() -> anyhow::Result<()> {
                 .await?
                 .assert_unauthorized_contains("was not claimed")?;
 
-            // Claim OIDC token
-            ctx.leader_node
-                .claim_oidc_with_helper(
-                    oidc_token_1.clone(),
-                    user_public_key.clone(),
-                    user_secret_key.clone(),
-                )
-                .await?;
-
-            // Create account with claimed OIDC token
-            ctx.leader_node
-                .new_account_with_helper(
-                    account_id.clone().to_string(),
-                    user_public_key.clone(),
-                    None,
-                    user_secret_key.clone(),
-                    oidc_token_1.clone(),
-                )
-                .await?
-                .assert_ok()?;
+            register_account(
+                &ctx,
+                &account_id,
+                &user_secret_key,
+                &user_public_key,
+                oidc_token_1.clone(),
+                None,
+            )
+            .await?;
 
             // Making a sign request with unclaimed OIDC token
-            let recovery_pk: PublicKey = match ctx
-                .leader_node
-                .user_credentials_with_helper(
-                    oidc_token_1.clone(),
-                    user_secret_key.clone(),
-                    user_secret_key.clone().public_key(),
-                )
-                .await?
-                .assert_ok()?
-            {
-                UserCredentialsResponse::Ok { recovery_pk } => PublicKey::from_str(&recovery_pk)?,
-                UserCredentialsResponse::Err { msg } => anyhow::bail!("error response: {}", msg),
-            };
+            let recovery_pk =
+                fetch_recovery_pk(&ctx, &user_secret_key, oidc_token_1.clone()).await?;
 
             let new_user_public_key = key::random_pk();
 
@@ -271,7 +251,7 @@ async fn negative_front_running_protection() -> anyhow::Result<()> {
                 .add_key_with_helper(
                     account_id.clone(),
                     oidc_token_2.clone(),
-                    new_user_public_key.parse()?,
+                    new_user_public_key.clone(),
                     recovery_pk.clone(),
                     user_secret_key.clone(),
                     user_public_key.clone(),
@@ -414,7 +394,7 @@ async fn test_invalid_token() -> anyhow::Result<()> {
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
-            check::access_key_exists(&ctx, &account_id, &user_public_key.to_string()).await?;
+            check::access_key_exists(&ctx, &account_id, &user_public_key).await?;
 
             let recovery_pk = match ctx
                 .leader_node
@@ -437,7 +417,7 @@ async fn test_invalid_token() -> anyhow::Result<()> {
                 .add_key_with_helper(
                     account_id.clone(),
                     invalid_oidc_token.clone(),
-                    new_user_public_key.parse()?,
+                    new_user_public_key.clone(),
                     recovery_pk.clone(),
                     user_secret_key.clone(),
                     user_public_key.clone(),
@@ -450,7 +430,7 @@ async fn test_invalid_token() -> anyhow::Result<()> {
                 .add_key_with_helper(
                     account_id.clone(),
                     oidc_token,
-                    new_user_public_key.parse()?,
+                    new_user_public_key.clone(),
                     recovery_pk.clone(),
                     user_secret_key.clone(),
                     user_public_key.clone(),
@@ -520,7 +500,7 @@ async fn test_malformed_account_id() -> anyhow::Result<()> {
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
 
-            check::access_key_exists(&ctx, &account_id, &user_public_key.to_string()).await?;
+            check::access_key_exists(&ctx, &account_id, &user_public_key).await?;
 
             Ok(())
         })
