@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use mpc_recovery::msg::{NewAccountResponse, UserCredentialsResponse};
 use mpc_recovery::transaction::LimitedAccessKey;
 use near_crypto::{PublicKey, SecretKey};
@@ -37,7 +35,6 @@ pub async fn register_account(
         } if acc_id == user_id.to_string()
     ));
 
-    tokio::time::sleep(Duration::from_millis(2000)).await;
     check::access_key_exists(ctx, user_id, user_pk).await?;
 
     Ok(())
@@ -102,7 +99,6 @@ pub async fn add_pk_and_check_validity(
         )
         .await?
         .assert_ok()?;
-    tokio::time::sleep(Duration::from_millis(2000)).await;
     check::access_key_exists(ctx, user_id, &new_user_pk).await?;
     Ok(new_user_pk)
 }

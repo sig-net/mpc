@@ -16,7 +16,7 @@ use near_primitives::{
         DeployContractAction, FunctionCallAction, StakeAction, TransferAction,
     },
 };
-use std::{str::FromStr, time::Duration};
+use std::str::FromStr;
 use test_log::test;
 use workspaces::AccountId;
 
@@ -114,7 +114,6 @@ async fn whitlisted_actions_test() -> anyhow::Result<()> {
                 .await?
                 .assert_bad_request_contains("Recovery key can not be deleted")?;
 
-            tokio::time::sleep(Duration::from_millis(2000)).await;
             check::access_key_exists(&ctx, &account_id, &recovery_pk).await?;
 
             // Deletion of the regular key should work
@@ -132,7 +131,6 @@ async fn whitlisted_actions_test() -> anyhow::Result<()> {
                 .await?
                 .assert_ok()?;
 
-            tokio::time::sleep(Duration::from_millis(2000)).await;
             check::access_key_does_not_exists(&ctx, &account_id, &user_public_key.to_string())
                 .await?;
 
@@ -411,9 +409,6 @@ async fn test_invalid_token() -> anyhow::Result<()> {
                     near_account_id: acc_id,
                 } if acc_id == account_id.to_string()
             ));
-
-            tokio::time::sleep(Duration::from_millis(2000)).await;
-
             check::access_key_exists(&ctx, &account_id, &user_public_key).await?;
 
             let recovery_pk = match ctx
@@ -453,8 +448,6 @@ async fn test_invalid_token() -> anyhow::Result<()> {
                 )
                 .await?
                 .assert_ok()?;
-
-            tokio::time::sleep(Duration::from_millis(2000)).await;
 
             check::access_key_exists(&ctx, &account_id, &new_user_public_key).await?;
 
@@ -510,8 +503,6 @@ async fn test_malformed_account_id() -> anyhow::Result<()> {
                     near_account_id: acc_id,
                 } if acc_id == account_id_repr
             ));
-
-            tokio::time::sleep(Duration::from_millis(2000)).await;
 
             check::access_key_exists(&ctx, &account_id, &user_public_key).await?;
 
