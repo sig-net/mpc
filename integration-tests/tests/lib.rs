@@ -184,7 +184,11 @@ mod check {
         account_id: &AccountId,
         public_key: &PublicKey,
     ) -> anyhow::Result<()> {
-        let access_keys = ctx.worker.view_access_keys(account_id).await?;
+        let access_keys = ctx
+            .worker
+            .view_access_keys(account_id)
+            .finality(workspaces::types::Finality::Final)
+            .await?;
 
         if access_keys
             .iter()
@@ -203,7 +207,11 @@ mod check {
         account_id: &AccountId,
         public_key: &str,
     ) -> anyhow::Result<()> {
-        let access_keys = ctx.worker.view_access_keys(account_id).await?;
+        let access_keys = ctx
+            .worker
+            .view_access_keys(account_id)
+            .finality(workspaces::types::Finality::Final)
+            .await?;
 
         if access_keys
             .iter()
