@@ -10,6 +10,8 @@ use crate::transaction::CreateAccountOptions;
 pub struct MpcPkRequest {}
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
 pub enum MpcPkResponse {
     Ok { mpc_pk: String },
     Err { msg: String },
@@ -38,12 +40,14 @@ impl TryInto<PublicKey> for MpcPkResponse {
 pub struct ClaimOidcRequest {
     #[serde(with = "hex::serde")]
     pub oidc_token_hash: [u8; 32],
-    pub public_key: String,
+    pub frp_public_key: String,
     #[serde(with = "hex_sig_share")]
     pub frp_signature: Signature,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
 pub enum ClaimOidcResponse {
     Ok {
         #[serde(with = "hex_sig_share")]
@@ -70,6 +74,7 @@ impl TryInto<Signature> for ClaimOidcResponse {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UserCredentialsRequest {
     pub oidc_token: String,
+    #[serde(with = "hex_sig_share")]
     pub frp_signature: Signature,
     pub frp_public_key: near_crypto::PublicKey,
 }
