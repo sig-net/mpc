@@ -115,7 +115,7 @@ async fn whitlisted_actions_test() -> anyhow::Result<()> {
                     &user_public_key,
                 )
                 .await?
-                .assert_bad_request_contains("Recovery key can not be deleted")?;
+                .assert_bad_request_contains("recovery key can not be deleted")?;
 
             tokio::time::sleep(Duration::from_millis(2000)).await;
             check::access_key_exists(&ctx, &account_id, &recovery_pk).await?;
@@ -393,7 +393,7 @@ async fn test_invalid_token() -> anyhow::Result<()> {
                     &invalid_oidc_token,
                 )
                 .await?
-                .assert_unauthorized()?;
+                .assert_bad_request()?;
 
             // Try to create an account with valid token
             let new_acc_response = ctx
@@ -442,7 +442,7 @@ async fn test_invalid_token() -> anyhow::Result<()> {
                     &user_public_key,
                 )
                 .await?
-                .assert_unauthorized()?;
+                .assert_bad_request()?;
 
             // Try to add a key with valid token
             ctx.leader_node
@@ -589,18 +589,18 @@ async fn test_malformed_raw_create_account() -> anyhow::Result<()> {
         [
             (
                 invalid_account_req,
-                (400, "bad near_account_id: groot++")),
+                (400, "malformed account id: groot++")),
             (
                 invalid_user_key_req,
                 (422, "Failed to deserialize the JSON body into the target type: create_account_options.full_access_keys")
             ),
             (
                 invalid_oidc_token_req,
-                (401, "failed to verify oidc token: Invalid token"),
+                (400, "failed to verify oidc token: Invalid token"),
             ),
             (
                 invalid_frp_signature_req,
-                (401, "signer failed to verify signature"),
+                (400, "client error: failed to verify signature: Public key "),
             )
         ]
     };

@@ -1,7 +1,7 @@
 use self::aggregate_signer::{NodeInfo, Reveal, SignedCommitment, SigningState};
 use self::oidc::OidcDigest;
 use self::user_credentials::EncryptedUserCredentials;
-use crate::error::MpcError;
+use crate::error::{MpcError, SignNodeError};
 use crate::gcp::GcpService;
 use crate::msg::{AcceptNodePublicKeysRequest, PublicKeyNodeRequest, SignNodeRequest};
 use crate::oauth::OAuthTokenVerifier;
@@ -20,15 +20,16 @@ use axum_extra::extract::WithRejection;
 use borsh::BorshSerialize;
 use curv::elliptic::curves::{Ed25519, Point};
 use multi_party_eddsa::protocols::{self, ExpandedKeyPair};
-use near_crypto::{ParseKeyError, PublicKey};
-use near_primitives::account::id::ParseAccountError;
+use tokio::sync::RwLock;
+
+use near_crypto::PublicKey;
 use near_primitives::delegate_action::NonDelegateAction;
 use near_primitives::hash::hash;
 use near_primitives::signable_message::{SignableMessage, SignableMessageType};
 use near_primitives::transaction::{Action, AddKeyAction, DeleteKeyAction};
+
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 pub mod aggregate_signer;
 pub mod migration;
@@ -107,28 +108,6 @@ struct SignNodeState {
     node_info: NodeInfo,
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum CommitError {
-    #[error("malformed account id: {0}")]
-    MalformedAccountId(String, ParseAccountError),
-    #[error("malformed public key {0}: {1}")]
-    MalformedPublicKey(String, ParseKeyError),
-    #[error("failed to verify oidc token: {0}")]
-    OidcVerificationFailed(anyhow::Error),
-    #[error("failed to verify signature: {0}")]
-    SignatureVerificationFailed(anyhow::Error),
-    #[error("oidc token {0:?} already claimed with another key")]
-    OidcTokenAlreadyClaimed(OidcDigest),
-    #[error("oidc token {0:?} was claimed with another key")]
-    OidcTokenClaimedWithAnotherKey(OidcDigest),
-    #[error("oidc token {0:?} was not claimed")]
-    OidcTokenNotClaimed(OidcDigest),
-    #[error("This kind of action can not be performed")]
-    UnsupportedAction,
-    #[error("{0}")]
-    Other(#[from] anyhow::Error),
-}
-
 async fn get_or_generate_user_creds(
     state: &SignNodeState,
     internal_account_id: InternalAccountId,
@@ -166,7 +145,7 @@ async fn get_or_generate_user_creds(
 async fn process_commit<T: OAuthTokenVerifier>(
     state: SignNodeState,
     request: SignNodeRequest,
-) -> Result<SignedCommitment, CommitError> {
+) -> Result<SignedCommitment, SignNodeError> {
     tracing::info!(?request, "processing commit request");
     match request {
         SignNodeRequest::ClaimOidc(request) => {
@@ -175,13 +154,13 @@ async fn process_commit<T: OAuthTokenVerifier>(
             let public_key: PublicKey = request
                 .public_key
                 .parse()
-                .map_err(|e| CommitError::MalformedPublicKey(request.public_key.clone(), e))?;
+                .map_err(|e| SignNodeError::MalformedPublicKey(request.public_key.clone(), e))?;
 
             let request_digest = claim_oidc_request_digest(&request.oidc_token_hash, &public_key)?;
 
             match check_digest_signature(&public_key, &request.signature, &request_digest) {
                 Ok(()) => tracing::debug!("claim oidc token digest signature verified"),
-                Err(e) => return Err(CommitError::SignatureVerificationFailed(e)),
+                Err(e) => return Err(SignNodeError::SignatureVerificationFailed(e)),
             };
 
             // Save info about token in the database, if it's present, throw an error
@@ -205,7 +184,7 @@ async fn process_commit<T: OAuthTokenVerifier>(
                             ?stored_digest,
                             "oidc token already claimed with another key"
                         );
-                        return Err(CommitError::OidcTokenAlreadyClaimed(oidc_digest));
+                        return Err(SignNodeError::OidcTokenAlreadyClaimed(oidc_digest));
                     }
                 }
                 Ok(None) => {
@@ -217,7 +196,7 @@ async fn process_commit<T: OAuthTokenVerifier>(
                         ?oidc_digest,
                         "failed to get oidc token digest from the database"
                     );
-                    return Err(CommitError::Other(e));
+                    return Err(SignNodeError::Other(e));
                 }
             };
 
@@ -242,7 +221,7 @@ async fn process_commit<T: OAuthTokenVerifier>(
             let oidc_token_claims =
                 T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
                     .await
-                    .map_err(CommitError::OidcVerificationFailed)?;
+                    .map_err(SignNodeError::OidcVerificationFailed)?;
             tracing::debug!(?oidc_token_claims, "oidc token verified");
 
             let frp_pk = request.frp_public_key;
@@ -252,7 +231,7 @@ async fn process_commit<T: OAuthTokenVerifier>(
                 sign_request_digest(&request.delegate_action, &request.oidc_token, &frp_pk)?;
             match check_digest_signature(&frp_pk, &request.frp_signature, &digest) {
                 Ok(()) => tracing::debug!("sign request digest signature verified"),
-                Err(e) => return Err(CommitError::SignatureVerificationFailed(e)),
+                Err(e) => return Err(SignNodeError::SignatureVerificationFailed(e)),
             };
 
             // Check if this OIDC token was claimed
@@ -274,19 +253,19 @@ async fn process_commit<T: OAuthTokenVerifier>(
                         tracing::info!(?oidc_digest, "oidc token was claimed with provided pk");
                     } else {
                         tracing::error!(?oidc_digest, "oidc token was claimed with another key");
-                        return Err(CommitError::OidcTokenClaimedWithAnotherKey(oidc_digest));
+                        return Err(SignNodeError::OidcTokenClaimedWithAnotherKey(oidc_digest));
                     }
                 }
                 Ok(None) => {
                     tracing::info!(?oidc_digest, "oidc token was not claimed");
-                    return Err(CommitError::OidcTokenNotClaimed(oidc_digest));
+                    return Err(SignNodeError::OidcTokenNotClaimed(oidc_digest));
                 }
                 Err(e) => {
                     tracing::error!(
                         ?oidc_digest,
                         "failed to get oidc token digest from the database"
                     );
-                    return Err(CommitError::Other(e));
+                    return Err(SignNodeError::Other(e));
                 }
             };
 
@@ -309,7 +288,7 @@ async fn process_commit<T: OAuthTokenVerifier>(
                     }
                     _ => {
                         tracing::error!("Unsupported action: {:?}", action);
-                        return Err(CommitError::UnsupportedAction);
+                        return Err(SignNodeError::UnsupportedAction);
                     }
                 }
             }
@@ -326,7 +305,7 @@ async fn process_commit<T: OAuthTokenVerifier>(
             );
             let bytes = match signable_message.try_to_vec() {
                 Ok(bytes) => bytes,
-                Err(e) => return Err(CommitError::Other(e.into())),
+                Err(e) => return Err(SignNodeError::Other(e.into())),
             };
             let hash = hash(&bytes).as_bytes().to_vec();
 
@@ -357,70 +336,7 @@ async fn commit<T: OAuthTokenVerifier>(
 
     match process_commit::<T>(state, request).await {
         Ok(signed_commitment) => (StatusCode::OK, Json(Ok(signed_commitment))),
-        Err(ref e @ CommitError::OidcVerificationFailed(ref err_msg)) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(Err(format!(
-                    "signer failed to verify oidc token: {}",
-                    err_msg
-                ))),
-            )
-        }
-        Err(ref e @ CommitError::SignatureVerificationFailed(ref err_msg)) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(Err(format!(
-                    "signer failed to verify signature: {}",
-                    err_msg
-                ))),
-            )
-        }
-        Err(ref e @ CommitError::OidcTokenNotClaimed(ref _err_msg)) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(Err(format!("OIDC Token was not claimed: {}", e))),
-            )
-        }
-        Err(ref e @ CommitError::OidcTokenAlreadyClaimed(ref _err_msg)) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(Err(format!(
-                    "OIDC Token was already claimed with another key: {}",
-                    e
-                ))),
-            )
-        }
-        Err(ref e @ CommitError::OidcTokenClaimedWithAnotherKey(ref _err_msg)) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(Err(format!(
-                    "OIDC Token was claimed with another key: {}",
-                    e
-                ))),
-            )
-        }
-        Err(ref e @ CommitError::UnsupportedAction) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(Err(format!(
-                    "You are trying to perform an action that is not supported: {}",
-                    e
-                ))),
-            )
-        }
-        Err(e) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(Err(format!("failed to process commit call: {}", e))),
-            )
-        }
+        Err(e) => (e.code(), Json(Err(e.to_string()))),
     }
 }
 
@@ -446,7 +362,7 @@ async fn reveal(
         }
         Err(e) => {
             tracing::error!("Reveal failed: {}", e);
-            (StatusCode::BAD_REQUEST, Json(Err(e)))
+            (e.code(), Json(Err(e.to_string())))
         }
     }
 }
@@ -472,43 +388,27 @@ async fn signature_share(
         }
         Err(e) => {
             tracing::error!("Signature share failed: {}", e);
-            (StatusCode::BAD_REQUEST, Json(Err(e)))
+            (e.code(), Json(Err(e.to_string())))
         }
     }
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum PublicKeyRequestError {
-    #[error("malformed public key {0}: {1}")]
-    MalformedPublicKey(near_crypto::PublicKey, ParseKeyError),
-    #[error("failed to verify oidc token: {0}")]
-    OidcVerificationFailed(anyhow::Error),
-    #[error("oidc token {0:?} was not claimed")]
-    OidcTokenNotClaimed(OidcDigest),
-    #[error("oidc token {0:?} was claimed with another key")]
-    OidcTokenClaimedWithAnotherKey(OidcDigest),
-    #[error("failed to verify signature: {0}")]
-    SignatureVerificationFailed(anyhow::Error),
-    #[error("{0}")]
-    Other(#[from] anyhow::Error),
 }
 
 async fn process_public_key<T: OAuthTokenVerifier>(
     state: SignNodeState,
     request: PublicKeyNodeRequest,
-) -> Result<Point<Ed25519>, PublicKeyRequestError> {
+) -> Result<Point<Ed25519>, SignNodeError> {
     // Check OIDC Token
     let oidc_token_claims =
         T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
             .await
-            .map_err(PublicKeyRequestError::OidcVerificationFailed)?;
+            .map_err(SignNodeError::OidcVerificationFailed)?;
 
     let frp_pk = request.frp_public_key;
     // Check the request signature
     let digest = user_credentials_request_digest(&request.oidc_token, &frp_pk)?;
     match check_digest_signature(&frp_pk, &request.frp_signature, &digest) {
         Ok(()) => tracing::debug!("user credentials digest signature verified"),
-        Err(e) => return Err(PublicKeyRequestError::SignatureVerificationFailed(e)),
+        Err(e) => return Err(SignNodeError::SignatureVerificationFailed(e)),
     };
 
     // Check if this OIDC token was claimed
@@ -530,28 +430,26 @@ async fn process_public_key<T: OAuthTokenVerifier>(
                 tracing::info!(?oidc_digest, "oidc token was claimed with provided pk");
             } else {
                 tracing::error!(?oidc_digest, "oidc token was claimed with another key");
-                return Err(PublicKeyRequestError::OidcTokenClaimedWithAnotherKey(
-                    oidc_digest,
-                ));
+                return Err(SignNodeError::OidcTokenClaimedWithAnotherKey(oidc_digest));
             }
         }
         Ok(None) => {
             tracing::info!(?oidc_digest, "oidc token was not claimed");
-            return Err(PublicKeyRequestError::OidcTokenNotClaimed(oidc_digest));
+            return Err(SignNodeError::OidcTokenNotClaimed(oidc_digest));
         }
         Err(e) => {
             tracing::error!(
                 ?oidc_digest,
                 "failed to get oidc token digest from the database"
             );
-            return Err(PublicKeyRequestError::Other(e));
+            return Err(SignNodeError::Other(e));
         }
     };
 
     let internal_acc_id = oidc_token_claims.get_internal_account_id();
     match get_or_generate_user_creds(&state, internal_acc_id).await {
         Ok(user_credentials) => Ok(user_credentials.public_key().clone()),
-        Err(err) => Err(PublicKeyRequestError::Other(err)),
+        Err(err) => Err(SignNodeError::Other(err)),
     }
 }
 
@@ -560,62 +458,10 @@ async fn public_key<T: OAuthTokenVerifier>(
     Extension(state): Extension<SignNodeState>,
     WithRejection(Json(request), _): WithRejection<Json<PublicKeyNodeRequest>, MpcError>,
 ) -> (StatusCode, Json<Result<Point<Ed25519>, String>>) {
-    match process_public_key::<T>(state, request).await {
+    let result = process_public_key::<T>(state, request).await;
+    match result {
         Ok(pk_point) => (StatusCode::OK, Json(Ok(pk_point))),
-        Err(ref e @ PublicKeyRequestError::OidcVerificationFailed(ref err_msg)) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(Err(format!(
-                    "signer failed to verify oidc token: {}",
-                    err_msg
-                ))),
-            )
-        }
-        Err(ref e @ PublicKeyRequestError::SignatureVerificationFailed(ref err_msg)) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(Err(format!(
-                    "signer failed to verify signature: {}",
-                    err_msg
-                ))),
-            )
-        }
-        Err(ref e @ PublicKeyRequestError::MalformedPublicKey(ref err_msg, ref error)) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(Err(format!("bad public key: {}, {}", err_msg, error))),
-            )
-        }
-        Err(ref e @ PublicKeyRequestError::OidcTokenNotClaimed(ref _err_msg)) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(Err(format!("OIDC Token was not claimed: {}", e))),
-            )
-        }
-        Err(ref e @ PublicKeyRequestError::OidcTokenClaimedWithAnotherKey(ref _err_msg)) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(Err(format!(
-                    "OIDC Token was claimed with another key: {}",
-                    e
-                ))),
-            )
-        }
-        Err(ref e @ PublicKeyRequestError::Other(ref err_msg)) => {
-            tracing::error!(err = ?e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(Err(format!(
-                    "signer failed to verify signature: {}",
-                    err_msg
-                ))),
-            )
-        }
+        Err(e) => (e.code(), Json(Err(e.to_string()))),
     }
 }
 

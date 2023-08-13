@@ -261,7 +261,7 @@ macro_rules! impl_mpc_check {
                     let $response::Err { ref msg, .. } = response else {
                         anyhow::bail!("unexpected Ok with a 400 http code");
                     };
-                    assert!(msg.contains(expected));
+                    assert!(msg.contains(expected), "{expected:?} not in {msg:?}");
 
                     Ok(response)
                 } else {
@@ -277,7 +277,7 @@ macro_rules! impl_mpc_check {
                     let $response::Err { ref msg, .. } = response else {
                         anyhow::bail!("unexpected Ok with a 401 http code");
                     };
-                    assert!(msg.contains(expected));
+                    assert!(msg.contains(expected), "{expected:?} not in {msg:?}");
 
                     Ok(response)
                 } else {
