@@ -2,6 +2,7 @@ use self::aggregate_signer::{NodeInfo, Reveal, SignedCommitment, SigningState};
 use self::oidc::OidcDigest;
 use self::user_credentials::EncryptedUserCredentials;
 use crate::error::{MpcError, SignNodeError};
+use crate::firewall::allowed::AllowedOidcProviders;
 use crate::gcp::GcpService;
 use crate::msg::{AcceptNodePublicKeysRequest, PublicKeyNodeRequest, SignNodeRequest};
 use crate::oauth::OAuthTokenVerifier;
@@ -42,7 +43,7 @@ pub struct Config {
     pub node_key: ExpandedKeyPair,
     pub cipher: Aes256Gcm,
     pub port: u16,
-    pub pagoda_firebase_audience_id: String,
+    pub oidc_providers: AllowedOidcProviders,
 }
 
 pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
@@ -53,7 +54,7 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
         node_key,
         cipher,
         port,
-        pagoda_firebase_audience_id,
+        oidc_providers,
     } = config;
     let our_index = usize::try_from(our_index).expect("This index is way to big");
 
@@ -68,8 +69,8 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
         node_key,
         cipher,
         signing_state,
-        pagoda_firebase_audience_id,
         node_info: NodeInfo::new(our_index, pk_set.map(|set| set.public_keys)),
+        oidc_providers,
     };
 
     let app = Router::new()
@@ -100,11 +101,11 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
 #[derive(Clone)]
 struct SignNodeState {
     gcp_service: GcpService,
-    pagoda_firebase_audience_id: String,
     node_key: ExpandedKeyPair,
     cipher: Aes256Gcm,
     signing_state: Arc<RwLock<SigningState>>,
     node_info: NodeInfo,
+    oidc_providers: AllowedOidcProviders,
 }
 
 async fn get_or_generate_user_creds(
@@ -213,10 +214,9 @@ async fn process_commit<T: OAuthTokenVerifier>(
             tracing::debug!(?request, "processing sign share request");
 
             // Check OIDC Token
-            let oidc_token_claims =
-                T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
-                    .await
-                    .map_err(SignNodeError::OidcVerificationFailed)?;
+            let oidc_token_claims = T::verify_token(&request.oidc_token, &state.oidc_providers)
+                .await
+                .map_err(SignNodeError::OidcVerificationFailed)?;
             tracing::debug!(?oidc_token_claims, "oidc token verified");
 
             let frp_pk = request.frp_public_key;
@@ -393,10 +393,9 @@ async fn process_public_key<T: OAuthTokenVerifier>(
     request: PublicKeyNodeRequest,
 ) -> Result<Point<Ed25519>, SignNodeError> {
     // Check OIDC Token
-    let oidc_token_claims =
-        T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
-            .await
-            .map_err(SignNodeError::OidcVerificationFailed)?;
+    let oidc_token_claims = T::verify_token(&request.oidc_token, &state.oidc_providers)
+        .await
+        .map_err(SignNodeError::OidcVerificationFailed)?;
 
     let frp_pk = request.frp_public_key;
     // Check the request signature

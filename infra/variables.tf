@@ -24,8 +24,9 @@ variable "zone" {
 variable "account_creator_id" {
 }
 
-variable "firebase_audience_id" {
-  default = "pagoda-oboarding-dev"
+variable "allowed_oidc_providers" {
+  type    = list(map(string))
+  default = []
 }
 
 variable "external_signer_node_urls" {

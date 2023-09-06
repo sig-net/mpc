@@ -1,4 +1,5 @@
 use crate::error::{LeaderNodeError, MpcError};
+use crate::firewall::allowed::AllowedOidcProviders;
 use crate::key_recovery::get_user_recovery_pk;
 use crate::msg::{
     AcceptNodePublicKeysRequest, ClaimOidcNodeRequest, ClaimOidcRequest, ClaimOidcResponse,
@@ -48,7 +49,7 @@ pub struct Config {
     pub account_creator_id: AccountId,
     // TODO: temporary solution
     pub account_creator_sk: SecretKey,
-    pub pagoda_firebase_audience_id: String,
+    pub oidc_providers: AllowedOidcProviders,
 }
 
 pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
@@ -62,7 +63,7 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
         near_root_account,
         account_creator_id,
         account_creator_sk,
-        pagoda_firebase_audience_id,
+        oidc_providers,
     } = config;
     let _span = tracing::debug_span!("run", env, port);
     tracing::debug!(?sign_nodes, "running a leader node");
@@ -94,7 +95,7 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
         near_root_account: near_root_account.parse().unwrap(),
         account_creator_id,
         account_creator_sk,
-        pagoda_firebase_audience_id,
+        oidc_providers,
     };
 
     // Get keys from all sign nodes, and broadcast them out as a set.
@@ -212,7 +213,7 @@ struct LeaderState {
     account_creator_id: AccountId,
     // TODO: temporary solution
     account_creator_sk: SecretKey,
-    pagoda_firebase_audience_id: String,
+    oidc_providers: AllowedOidcProviders,
 }
 
 async fn mpc_public_key(
@@ -312,7 +313,7 @@ async fn process_user_credentials<T: OAuthTokenVerifier>(
     state: LeaderState,
     request: UserCredentialsRequest,
 ) -> Result<UserCredentialsResponse, LeaderNodeError> {
-    T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
+    T::verify_token(&request.oidc_token, &state.oidc_providers)
         .await
         .map_err(LeaderNodeError::OidcVerificationFailed)?;
 
@@ -339,10 +340,9 @@ async fn process_new_account<T: OAuthTokenVerifier>(
 ) -> Result<NewAccountResponse, LeaderNodeError> {
     // Create a transaction to create new NEAR account
     let new_user_account_id = request.near_account_id;
-    let oidc_token_claims =
-        T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
-            .await
-            .map_err(LeaderNodeError::OidcVerificationFailed)?;
+    let oidc_token_claims = T::verify_token(&request.oidc_token, &state.oidc_providers)
+        .await
+        .map_err(LeaderNodeError::OidcVerificationFailed)?;
     let internal_acc_id = oidc_token_claims.get_internal_account_id();
 
     // FIXME: waiting on https://github.com/near/mpc-recovery/issues/193
@@ -475,7 +475,7 @@ async fn process_sign<T: OAuthTokenVerifier>(
         .map_err(LeaderNodeError::MalformedDelegateAction)?;
 
     // Check OIDC token
-    T::verify_token(&request.oidc_token, &state.pagoda_firebase_audience_id)
+    T::verify_token(&request.oidc_token, &state.oidc_providers)
         .await
         .map_err(LeaderNodeError::OidcVerificationFailed)?;
 
