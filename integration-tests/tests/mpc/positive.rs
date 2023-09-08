@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
-use crate::mpc::{add_pk_and_check_validity, fetch_recovery_pk, new_random_account};
-use crate::{account, key, with_nodes, MpcCheck};
+use mpc_recovery_integration_tests::util::{
+    add_pk_and_check_validity, fetch_recovery_pk, new_random_account,
+};
+use mpc_recovery_integration_tests::{account, key, with_nodes, MpcCheck};
 
 use hyper::StatusCode;
 use workspaces::types::AccessKeyPermission;
