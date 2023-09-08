@@ -10,6 +10,7 @@ RUN sed -i 's#src/main.rs#dummy.rs#' Cargo.toml
 RUN cargo build --release
 COPY . .
 RUN sed -i 's#"integration-tests",##' Cargo.toml
+RUN sed -i 's#"benches",##' Cargo.toml
 RUN cargo build --release --package mpc-recovery
 
 FROM debian:bookworm-slim as runtime

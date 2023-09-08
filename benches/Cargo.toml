@@ -1,0 +1,17 @@
+[package]
+name = "benches"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+tokio = "*"
+mpc-recovery-integration-tests = { path = "../integration-tests" }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "bench_endpoints"
+harness = false
+path = "bench_endpoints.rs"
