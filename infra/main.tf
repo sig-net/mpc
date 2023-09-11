@@ -140,3 +140,153 @@ module "leader" {
 
   depends_on = [docker_registry_image.mpc_recovery, module.signer]
 }
+
+module "security_policy" {
+  source = "GoogleCloudPlatform/cloud-armor/google"
+
+  project_id                           = var.project
+  name                                 = "my-test-ca-policy"
+  description                          = "Test Cloud Armor security policy with preconfigured rules, security rules and custom rules"
+  default_rule_action                  = "deny(403)"
+  type                                 = "CLOUD_ARMOR"
+  layer_7_ddos_defense_enable          = true
+  layer_7_ddos_defense_rule_visibility = "STANDARD"
+  json_parsing                         = "STANDARD"
+  log_level                            = "VERBOSE"
+
+  pre_configured_rules      = {}
+  security_rules            = {}
+  custom_rules              = {}
+  threat_intelligence_rules = {}
+}
+
+resource "google_compute_region_network_endpoint_group" "serverless_neg_leader" {
+  provider              = google-beta
+  name                  = "serverless-neg-leader"
+  network               = "dev"
+  network_endpoint_type = "SERVERLESS"
+  region                = var.region
+  create_url_map        = false
+  url_map               = google_compute_url_map.url_map.name
+  cloud_run {
+    service = "mpc-recovery-leader-${var.env}"
+  }
+}
+
+resource "google_compute_url_map" "urlmap" {
+  name        = "url-map-name"
+  description = "a description"
+
+  host_rule {
+    hosts        = ["mysite.com"]
+    path_matcher = "allpaths"
+  }
+
+  path_matcher {
+    name = "allpaths"
+
+    path_rule {
+      paths = ["/home"]
+      route_action {
+        cors_policy {
+          allow_credentials    = true
+          allow_headers        = ["Allowed content"]
+          allow_methods        = ["GET"]
+          allow_origin_regexes = ["abc.*"]
+          allow_origins        = ["Allowed origin"]
+          expose_headers       = ["Exposed header"]
+          max_age              = 30
+          disabled             = false
+        }
+        fault_injection_policy {
+          abort {
+            http_status = 234
+            percentage  = 5.6
+          }
+          delay {
+            fixed_delay {
+              seconds = 0
+              nanos   = 50000
+            }
+            percentage = 7.8
+          }
+        }
+        request_mirror_policy {
+          backend_service = google_compute_backend_service.home.id
+        }
+        retry_policy {
+          num_retries = 4
+          per_try_timeout {
+            seconds = 30
+          }
+          retry_conditions = ["5xx", "deadline-exceeded"]
+        }
+        timeout {
+          seconds = 20
+          nanos   = 750000000
+        }
+        url_rewrite {
+          host_rewrite        = "dev.example.com"
+          path_prefix_rewrite = "/v1/api/"
+        }
+        weighted_backend_services {
+          backend_service = google_compute_backend_service.home.id
+          weight          = 400
+          header_action {
+            request_headers_to_remove = ["RemoveMe"]
+            request_headers_to_add {
+              header_name  = "AddMe"
+              header_value = "MyValue"
+              replace      = true
+            }
+            response_headers_to_remove = ["RemoveMe"]
+            response_headers_to_add {
+              header_name  = "AddMe"
+              header_value = "MyValue"
+              replace      = false
+            }
+          }
+        }
+      }
+    }
+  }
+
+  test {
+    host = "hi.com"
+    path = "/home"
+  }
+}
+
+module "loadbalancer" {
+  source  = "GoogleCloudPlatform/lb-http/google//modules/serverless_negs"
+  version = "~> 9.0"
+
+  project                         = var.project
+  security_policy                 = module.security_policy.policy
+  region                          = var.region
+  ssl                             = true
+  https_redirect                  = true
+  managed_ssl_certificate_domains = ["your-domain.com"]
+  labels                          = {}
+
+
+  # Can have multiple back ends for signers
+  backends = {
+    default = {
+      description = null
+      groups = [
+        {
+          group = google_compute_region_network_endpoint_group.serverless_neg_leader.id
+        }
+      ]
+      enable_cdn = false
+
+      iap_config = {
+        enable = false
+      }
+      log_config = {
+        enable = false
+      }
+    }
+  }
+}
