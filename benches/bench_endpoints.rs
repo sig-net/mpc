@@ -8,22 +8,13 @@ use mpc_recovery_integration_tests::with_nodes;
 
 fn benching(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let mut group = c.benchmark_group("basic_action");
+    let mut group = c.benchmark_group("endpoints");
     group.sample_size(10);
-    group.bench_function("_1", |b| b.to_async(&rt).iter(basic_action));
-    // c.bench_function(
-    //     "basic_action",
-    //     BenchmarkId::new("_1", |b| b.iter(basic_action).sample_size(10)),
-    // );
-    // c.sample_size(10).bench_function("basic_action", |b| {
-    //     // Insert a call to `to_async` to convert the bencher to async mode.
-    //     // The timing loops are the same as with the normal bencher.
-    //     b.to_async(&rt).iter(basic_action);
-    // });
+    group.bench_function("basic_action", |b| b.to_async(&rt).iter(basic_action));
 }
 
 async fn basic_action() {
-    with_nodes(3, |ctx| {
+    with_nodes(1, |ctx| {
         Box::pin(async move {
             let (account_id, user_secret_key, oidc_token) = new_random_account(&ctx, None).await?;
 
@@ -39,7 +30,6 @@ async fn basic_action() {
             )
             .await?;
 
-            // Adding the same key should now fail
             add_pk_and_check_validity(
                 &ctx,
                 &account_id,

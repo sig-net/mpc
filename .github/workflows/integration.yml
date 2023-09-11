@@ -60,3 +60,15 @@ jobs:
         env:
           RUST_LOG: INFO
           RUST_BACKTRACE: 1
+
+      - name: Cache Criterion Results
+        uses: actions/cache@v2
+        with:
+          path: target/criterion
+          key: criterion-${{ github.event.pull_request.base.sha }}
+      - name: Run benchmarks
+        run: cargo bench
+      - uses: actions/upload-artifact@v3
+        with:
+          name: my-artifact
+          path: target/criterion
