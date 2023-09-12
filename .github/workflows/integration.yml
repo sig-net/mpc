@@ -66,54 +66,19 @@ jobs:
           RUST_LOG: INFO
           RUST_BACKTRACE: 1
 
-      - name: Cache Criterion Results
-        uses: actions/cache@v2
-        with:
-          path: target/criterion
-          key: criterion-${{ github.event.pull_request.base.sha }}
       - name: Run benchmarks
-        run: cargo bench
-      - uses: actions/upload-artifact@v3
+        id: benchmark
+        run: cargo bench | tee output.txt
+      - name: Download previous benchmark data
+        uses: actions/cache@v1
         with:
-          name: my-artifact
-          path: target/criterion
-
-      - name: Benchmark Results
-        uses: actions/github-script@v6
-        if: github.event_name == 'pull_request'
-        env:
-          PLAN: "${{ steps.plan.outputs.stdout }}"
+          path: ./cache
+          key: ${{ runner.os }}-benchmark
+      - name: Show and store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            // Retrieve existing bot comments for the PR
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            })
-            const botComment = comments.find(comment => {
-              return comment.user.type === 'Bot' && comment.body.includes('Benchmark Results')
-            })
-
-            // Output of benchmark results:
-            const output = `### Benchmark Results
-            View reports [here](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts)
-            `;
-
-            // If we have a comment, update it, otherwise create a new one
-            if (botComment) {
-              github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: output
-              })
-            } else {
-              github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: output
-              })
-            }
+          tool: 'cargo'
+          output-file-path: output.txt
+          summary-always: true
+          # Where the previous data file is stored
+          external-data-json-path: ./cache/benchmark-data.json
