@@ -66,9 +66,20 @@ jobs:
           RUST_LOG: INFO
           RUST_BACKTRACE: 1
 
+      - uses: bencherdev/bencher@v0.3.10
       - name: Run benchmarks
         id: benchmark
-        run: cargo bench | tee output.txt
+        # All the branching is used for tracking benchmarks: https://bencher.dev/docs/how-to/track-benchmarks/
+        run: |
+          bencher run \
+          --if-branch "$GITHUB_REF_NAME" \
+          --else-if-branch "$GITHUB_BASE_REF" \
+          --else-if-branch main \
+          --err \
+          --github-actions ${{ secrets.GITHUB_TOKEN }} \
+          --adapter rust_criterion \
+          --file output.txt \
+          "bencher mock"
       - name: Download previous benchmark data
         uses: actions/cache@v1
         with:
