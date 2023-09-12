@@ -14,6 +14,10 @@ jobs:
         # FIXME: macos-latest-xl is disabled since colima is erroring out right now
         os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
     name: Test
     steps:
       - uses: actions/checkout@v3
