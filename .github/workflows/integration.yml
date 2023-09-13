@@ -66,30 +66,11 @@ jobs:
           RUST_LOG: INFO
           RUST_BACKTRACE: 1
 
-      - uses: bencherdev/bencher@v0.3.10
-      - name: Run benchmarks
-        id: benchmark
-        # All the branching is used for tracking benchmarks: https://bencher.dev/docs/how-to/track-benchmarks/
-        run: |
-          bencher run \
-          --if-branch "$GITHUB_REF_NAME" \
-          --else-if-branch "$GITHUB_BASE_REF" \
-          --else-if-branch main \
-          --err \
-          --github-actions ${{ secrets.GITHUB_TOKEN }} \
-          --adapter rust_criterion \
-          --file output.txt \
-          "bencher mock"
-      - name: Download previous benchmark data
-        uses: actions/cache@v1
+      - uses: boa-dev/criterion-compare-action@v3
         with:
-          path: ./cache
-          key: ${{ runner.os }}-benchmark
-      - name: Show and store benchmark result
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          tool: 'cargo'
-          output-file-path: output.txt
-          summary-always: true
-          # Where the previous data file is stored
-          external-data-json-path: ./cache/benchmark-data.json
+          # Optional. Compare only this package
+          package: "benches"
+          # Needed. The name of the branch to compare with. This default uses the branch which is being pulled against
+          branchName: ${{ github.base_ref }}
+          # Optional. Default is `${{ github.token }}`.
+          token: ${{ secrets.GITHUB_TOKEN }}
