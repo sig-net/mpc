@@ -6,6 +6,7 @@ edition = "2021"
 [[bin]]
 name = "mpc-recovery"
 path = "src/main.rs"
+bench = false
 
 [dependencies]
 aes-gcm = "0.10"
