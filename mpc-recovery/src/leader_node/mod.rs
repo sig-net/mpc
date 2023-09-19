@@ -7,7 +7,7 @@ use crate::msg::{
     SignRequest, SignResponse, UserCredentialsRequest, UserCredentialsResponse,
 };
 use crate::oauth::OAuthTokenVerifier;
-use crate::relayer::msg::RegisterAccountRequest;
+use crate::relayer::msg::{CreateAccountAtomicRequest, RegisterAccountRequest};
 use crate::relayer::NearRpcAndRelayerClient;
 use crate::transaction::{
     get_create_account_delegate_action, get_local_signed_delegated_action, get_mpc_signature,
@@ -32,7 +32,6 @@ use near_crypto::SecretKey;
 use near_primitives::delegate_action::{DelegateAction, NonDelegateAction};
 use near_primitives::transaction::{Action, DeleteKeyAction};
 use near_primitives::types::AccountId;
-use near_primitives::views::FinalExecutionStatus;
 use prometheus::{Encoder, TextEncoder};
 use rand::{distributions::Alphanumeric, Rng};
 use std::net::SocketAddr;
@@ -356,22 +355,6 @@ async fn process_new_account<T: OAuthTokenVerifier>(
         .map_err(LeaderNodeError::SignatureVerificationFailed)?;
     tracing::debug!("user credentials digest signature verified for {new_user_account_id:?}");
 
-    let partner = state
-        .partners
-        .find(&oidc_token_claims.iss, &oidc_token_claims.aud)?;
-
-    state
-        .client
-        .register_account(
-            RegisterAccountRequest {
-                account_id: new_user_account_id.clone(),
-                allowance: 300_000_000_000_000,
-                oauth_token: internal_acc_id.clone(),
-            },
-            partner.relayer,
-        )
-        .await?;
-
     nar::retry(|| async {
         // Get nonce and recent block hash
         let (_hash, block_height, nonce) = state
@@ -417,40 +400,50 @@ async fn process_new_account<T: OAuthTokenVerifier>(
         );
 
         // Send delegate action to relayer
+        let request = CreateAccountAtomicRequest {
+            account_id: new_user_account_id.clone(),
+            allowance: 300_000_000_000_000,
+            oauth_token: internal_acc_id.clone(),
+            signed_delegate_action,
+        };
+
+        // TODO: move error message from here to this place
         let partner = state
             .partners
             .find(&oidc_token_claims.iss, &oidc_token_claims.aud)?;
+
         let result = state
             .client
-            .send_meta_tx(signed_delegate_action, partner.relayer)
+            .create_account_atomic(request, partner.relayer)
             .await;
-        if let Err(err) = &result {
-            let err_str = format!("{:?}", err);
-            state
-                .client
-                .invalidate_cache_if_tx_failed(
-                    &(
-                        state.account_creator_id.clone(),
-                        state.account_creator_sk.public_key(),
-                    ),
-                    &err_str,
-                )
-                .await;
-        }
-        let response = result?;
 
-        // TODO: Probably need to check more fields
-        if matches!(response.status, FinalExecutionStatus::SuccessValue(_)) {
-            Ok(NewAccountResponse::Ok {
-                create_account_options: new_account_options,
-                user_recovery_public_key: mpc_user_recovery_pk,
-                near_account_id: new_user_account_id.clone(),
-            })
-        } else {
-            Err(LeaderNodeError::Other(anyhow::anyhow!(
-                "transaction failed with {:?}",
-                response.status
-            )))
+        match result {
+            Ok(_) => {
+                tracing::info!(
+                    "account creation succeeded: {new_user_account_id:?}",
+                    new_user_account_id = new_user_account_id
+                );
+                Ok(NewAccountResponse::Ok {
+                    create_account_options: new_account_options,
+                    user_recovery_public_key: mpc_user_recovery_pk,
+                    near_account_id: new_user_account_id.clone(),
+                })
+            }
+            Err(err) => {
+                tracing::error!("account creation failed: {err}");
+                let err_str = format!("{:?}", err);
+                state
+                    .client
+                    .invalidate_cache_if_acc_creation_failed(
+                        &(
+                            state.account_creator_id.clone(),
+                            state.account_creator_sk.public_key(),
+                        ),
+                        &err_str,
+                    )
+                    .await;
+                Err(LeaderNodeError::RelayerError(err))
+            }
         }
     })
     .await

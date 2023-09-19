@@ -10,7 +10,9 @@ use near_primitives::types::{AccountId, BlockHeight, Nonce};
 use near_primitives::views::FinalExecutionStatus;
 
 use self::error::RelayerError;
-use self::msg::{RegisterAccountRequest, SendMetaTxRequest, SendMetaTxResponse};
+use self::msg::{
+    CreateAccountAtomicRequest, RegisterAccountRequest, SendMetaTxRequest, SendMetaTxResponse,
+};
 
 use crate::firewall::allowed::DelegateActionRelayer;
 use crate::nar::{self, CachedAccessKeyNonces};
@@ -95,6 +97,50 @@ impl NearRpcAndRelayerClient {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(account_id = request.account_id.to_string()))]
+    pub async fn create_account_atomic(
+        &self,
+        request: CreateAccountAtomicRequest,
+        relayer: DelegateActionRelayer,
+    ) -> Result<(), RelayerError> {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("{}/create_account_atomic", relayer.url))
+            .header("content-type", "application/json");
+
+        if let Some(api_key) = relayer.api_key {
+            req = req.header("x-api-key", api_key);
+        };
+
+        let request = req
+            .body(Body::from(
+                serde_json::to_vec(&request)
+                    .map_err(|e| RelayerError::DataConversionFailure(e.into()))?,
+            ))
+            .map_err(|e| RelayerError::NetworkFailure(e.into()))?;
+
+        tracing::debug!("constructed http request to {}", relayer.url);
+        let client = Client::new();
+        let response = client
+            .request(request)
+            .await
+            .map_err(|e| RelayerError::NetworkFailure(e.into()))?;
+
+        let status = response.status();
+        let response_body = hyper::body::to_bytes(response.into_body())
+            .await
+            .map_err(|e| RelayerError::NetworkFailure(e.into()))?;
+        let msg = std::str::from_utf8(&response_body)
+            .map_err(|e| RelayerError::DataConversionFailure(e.into()))?;
+
+        if status.is_success() {
+            tracing::debug!(response_body = msg, "got response");
+            Ok(())
+        } else {
+            Err(RelayerError::RequestFailure(status, msg.to_string()))
+        }
+    }
+
     #[tracing::instrument(level = "debug", skip_all, fields(receiver_id = request.delegate_action.receiver_id.to_string()))]
     pub async fn send_meta_tx(
         &self,
@@ -149,7 +195,7 @@ impl NearRpcAndRelayerClient {
         }
     }
 
-    pub(crate) async fn invalidate_cache_if_tx_failed(
+    pub(crate) async fn invalidate_cache_if_acc_creation_failed(
         &self,
         cache_key: &(AccountId, PublicKey),
         err_str: &str,
