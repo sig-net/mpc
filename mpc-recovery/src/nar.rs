@@ -22,7 +22,7 @@ use tokio_retry::Retry;
 
 use crate::relayer::error::RelayerError;
 
-pub(crate) type CachedAccessKeyNonces = RwLock<HashMap<(AccountId, PublicKey), AtomicU64>>;
+pub type CachedAccessKeyNonces = RwLock<HashMap<(AccountId, PublicKey), AtomicU64>>;
 
 pub(crate) async fn retry_every<R, E, T, F>(interval: Duration, task: F) -> T::Output
 where
@@ -94,7 +94,7 @@ async fn cached_nonce(
 /// Fetches the transaction nonce and block hash associated to the access key. Internally
 /// caches the nonce as to not need to query for it every time, and ending up having to run
 /// into contention with others.
-pub(crate) async fn fetch_tx_nonce(
+pub async fn fetch_tx_nonce(
     cached_nonces: &CachedAccessKeyNonces,
     rpc_client: &JsonRpcClient,
     cache_key: &(AccountId, near_crypto::PublicKey),
@@ -129,6 +129,7 @@ pub(crate) async fn invalidate_nonce_if_tx_failed(
 ) {
     // InvalidNonce, cached nonce is potentially very far behind, so invalidate it.
     if err_str.contains("InvalidNonce")
+        || err_str.contains("DelegateActionInvalidNonce")
         || err_str.contains("must be larger than nonce of the used access key")
     {
         let mut nonces = cached_nonces.write().await;

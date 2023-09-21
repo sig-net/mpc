@@ -1,163 +1,112 @@
-mod docker;
 mod mpc;
 
-use crate::docker::{LeaderNode, SignNode};
-use bollard::Docker;
 use curv::elliptic::curves::{Ed25519, Point};
-use docker::{datastore::Datastore, redis::Redis, relayer::Relayer};
 use futures::future::BoxFuture;
-use mpc_recovery::GenerateResult;
-use std::time::Duration;
-use workspaces::{network::Sandbox, AccountId, Worker};
+use hyper::StatusCode;
+use mpc_recovery::{
+    firewall::allowed::DelegateActionRelayer,
+    gcp::GcpService,
+    msg::{
+        ClaimOidcResponse, MpcPkResponse, NewAccountResponse, SignResponse, UserCredentialsResponse,
+    },
+    GenerateResult,
+};
+use mpc_recovery_integration_tests::containers;
+use workspaces::{network::Sandbox, Worker};
 
-const NETWORK: &str = "mpc_recovery_integration_test_network";
+const NETWORK: &str = "mpc_it_network";
 const GCP_PROJECT_ID: &str = "mpc-recovery-gcp-project";
-#[cfg(target_os = "linux")]
-const HOST_MACHINE_FROM_DOCKER: &str = "172.17.0.1";
-#[cfg(target_os = "macos")]
-const HOST_MACHINE_FROM_DOCKER: &str = "docker.for.mac.localhost";
+// TODO: figure out how to instantiate and use a local firebase deployment
+pub const FIREBASE_AUDIENCE_ID: &str = "test_audience";
 
 pub struct TestContext<'a> {
-    leader_node: &'a LeaderNode,
-    _pk_set: &'a Vec<Point<Ed25519>>,
+    leader_node: &'a containers::LeaderNodeApi,
+    pk_set: &'a Vec<Point<Ed25519>>,
     worker: &'a Worker<Sandbox>,
-    signer_nodes: &'a Vec<SignNode>,
+    signer_nodes: &'a Vec<containers::SignerNodeApi>,
+    gcp_datastore_url: String,
 }
 
-async fn create_account(
-    worker: &Worker<Sandbox>,
-) -> anyhow::Result<(AccountId, near_crypto::SecretKey)> {
-    let (account_id, account_sk) = worker.dev_generate().await;
-    worker
-        .create_tla(account_id.clone(), account_sk.clone())
-        .await?
-        .into_result()?;
-
-    let account_sk: near_crypto::SecretKey =
-        serde_json::from_str(&serde_json::to_string(&account_sk)?)?;
-
-    Ok((account_id, account_sk))
+impl<'a> TestContext<'a> {
+    pub async fn gcp_service(&self) -> anyhow::Result<GcpService> {
+        GcpService::new(
+            "dev".into(),
+            GCP_PROJECT_ID.into(),
+            Some(self.gcp_datastore_url.clone()),
+        )
+        .await
+    }
 }
 
 async fn with_nodes<F>(nodes: usize, f: F) -> anyhow::Result<()>
 where
     F: for<'a> FnOnce(TestContext<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
 {
-    let docker = Docker::connect_with_local_defaults()?;
+    let docker_client = containers::DockerClient::default();
+    docker_client.create_network(NETWORK).await?;
+
+    let relayer_ctx_future =
+        mpc_recovery_integration_tests::initialize_relayer(&docker_client, NETWORK);
+    let datastore_future = containers::Datastore::run(&docker_client, NETWORK, GCP_PROJECT_ID);
+
+    let (relayer_ctx, datastore) =
+        futures::future::join(relayer_ctx_future, datastore_future).await;
+    let relayer_ctx = relayer_ctx?;
+    let datastore = datastore?;
 
     let GenerateResult { pk_set, secrets } = mpc_recovery::generate(nodes);
-    let worker = workspaces::sandbox().await?;
-    let social_db = worker
-        .import_contract(&"social.near".parse()?, &workspaces::mainnet().await?)
-        .transact()
-        .await?;
-    social_db
-        .call("new")
-        .max_gas()
-        .transact()
-        .await?
-        .into_result()?;
-
-    let near_root_account = worker.root_account()?;
-    near_root_account
-        .deploy(include_bytes!("../linkdrop.wasm"))
-        .await?
-        .into_result()?;
-    near_root_account
-        .call(near_root_account.id(), "new")
-        .max_gas()
-        .transact()
-        .await?
-        .into_result()?;
-    let (relayer_account_id, relayer_account_sk) = create_account(&worker).await?;
-    let (creator_account_id, creator_account_sk) = create_account(&worker).await?;
-    let (social_account_id, social_account_sk) = create_account(&worker).await?;
-    up_funds_for_account(&worker, &social_account_id).await?;
-
-    let near_rpc = format!("http://{HOST_MACHINE_FROM_DOCKER}:{}", worker.rpc_port());
-    let datastore = Datastore::start(&docker, NETWORK, GCP_PROJECT_ID).await?;
-    let redis = Redis::start(&docker, NETWORK).await?;
-    let relayer = Relayer::start(
-        &docker,
-        NETWORK,
-        &near_rpc,
-        &redis.hostname,
-        &relayer_account_id,
-        &relayer_account_sk,
-        &creator_account_id,
-        social_db.id(),
-        &social_account_id,
-        &social_account_sk,
-    )
-    .await?;
-    tokio::time::sleep(Duration::from_millis(10000)).await;
-
-    let pagoda_firebase_audience_id = "not actually used in integration tests";
-
-    let mut signer_nodes = Vec::new();
+    let mut signer_node_futures = Vec::new();
     for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
-        let addr = SignNode::start(
-            &docker,
+        let signer_node = containers::SignerNode::run_signing_node(
+            &docker_client,
             NETWORK,
             i as u64,
             share,
             cipher_key,
             &datastore.address,
+            &datastore.local_address,
             GCP_PROJECT_ID,
-            pagoda_firebase_audience_id,
-        )
-        .await?;
-        signer_nodes.push(addr);
+            FIREBASE_AUDIENCE_ID,
+        );
+        signer_node_futures.push(signer_node);
     }
-
+    let signer_nodes = futures::future::join_all(signer_node_futures)
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
     let signer_urls: &Vec<_> = &signer_nodes.iter().map(|n| n.address.clone()).collect();
 
-    let leader_node = LeaderNode::start(
-        &docker,
+    let near_root_account = relayer_ctx.worker.root_account()?;
+    let leader_node = containers::LeaderNode::run(
+        &docker_client,
         NETWORK,
         signer_urls.clone(),
-        &near_rpc,
-        &relayer.address,
+        &relayer_ctx.sandbox.address,
+        &relayer_ctx.relayer.address,
         &datastore.address,
         GCP_PROJECT_ID,
         near_root_account.id(),
-        &creator_account_id,
-        &creator_account_sk,
-        pagoda_firebase_audience_id,
+        relayer_ctx.creator_account.id(),
+        relayer_ctx.creator_account.secret_key(),
+        FIREBASE_AUDIENCE_ID,
     )
     .await?;
 
-    // Wait until all nodes initialize
-    tokio::time::sleep(Duration::from_millis(10000)).await;
-
-    let result = f(TestContext {
-        leader_node: &leader_node,
-        _pk_set: &pk_set,
-        signer_nodes: &signer_nodes,
-        worker: &worker,
+    f(TestContext {
+        leader_node: &leader_node.api(
+            &relayer_ctx.sandbox.local_address,
+            &DelegateActionRelayer {
+                url: relayer_ctx.relayer.local_address.clone(),
+                api_key: None,
+            },
+        ),
+        pk_set: &pk_set,
+        signer_nodes: &signer_nodes.iter().map(|n| n.api()).collect(),
+        worker: &relayer_ctx.worker,
+        gcp_datastore_url: datastore.local_address,
     })
-    .await;
+    .await?;
 
-    drop(datastore);
-    drop(leader_node);
-    drop(signer_nodes);
-    drop(relayer);
-    drop(redis);
-
-    // Wait until all docker containers are destroyed.
-    // See `Drop` impl for `LeaderNode` and `SignNode` for more info.
-    tokio::time::sleep(Duration::from_millis(2000)).await;
-
-    result
-}
-
-async fn up_funds_for_account(worker: &Worker<Sandbox>, id: &AccountId) -> anyhow::Result<()> {
-    const AMOUNT: u128 = 99 * 10u128.pow(24);
-    for _ in 0..10 {
-        let tmp_account = worker.dev_create_account().await?;
-        tmp_account.transfer_near(id, AMOUNT).await?.into_result()?;
-        tmp_account.delete_account(id).await?.into_result()?;
-    }
     Ok(())
 }
 
@@ -190,16 +139,25 @@ mod account {
 }
 
 mod key {
+    use near_crypto::{PublicKey, SecretKey};
     use rand::{distributions::Alphanumeric, Rng};
 
-    pub fn random() -> String {
+    pub fn random() -> (SecretKey, PublicKey) {
+        let sk = random_sk();
+        let pk = sk.public_key();
+        (sk, pk)
+    }
+
+    pub fn random_sk() -> SecretKey {
         near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519)
-            .public_key()
-            .to_string()
+    }
+
+    pub fn random_pk() -> PublicKey {
+        near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519).public_key()
     }
 
     #[allow(dead_code)]
-    pub fn malformed() -> String {
+    pub fn malformed_pk() -> String {
         let random: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(10)
@@ -209,37 +167,21 @@ mod key {
     }
 }
 
-mod token {
-    use rand::{distributions::Alphanumeric, Rng};
-
-    pub fn valid_random() -> String {
-        let random: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(10)
-            .map(char::from)
-            .collect();
-        format!("validToken:{}", random)
-    }
-
-    pub fn invalid() -> String {
-        "invalidToken".to_string()
-    }
-}
-
 mod check {
     use crate::TestContext;
+    use near_crypto::PublicKey;
     use workspaces::AccountId;
 
-    pub async fn access_key_exists<'a>(
-        ctx: &TestContext<'a>,
+    pub async fn access_key_exists(
+        ctx: &TestContext<'_>,
         account_id: &AccountId,
-        public_key: &str,
+        public_key: &PublicKey,
     ) -> anyhow::Result<()> {
         let access_keys = ctx.worker.view_access_keys(account_id).await?;
 
         if access_keys
             .iter()
-            .any(|ak| ak.public_key.to_string() == public_key)
+            .any(|ak| ak.public_key.key_data() == public_key.key_data())
         {
             Ok(())
         } else {
@@ -249,16 +191,167 @@ mod check {
         }
     }
 
-    pub async fn no_account<'a>(
-        ctx: &TestContext<'a>,
+    pub async fn access_key_does_not_exists(
+        ctx: &TestContext<'_>,
         account_id: &AccountId,
+        public_key: &str,
     ) -> anyhow::Result<()> {
-        if ctx.worker.view_account(account_id).await.is_err() {
-            Ok(())
-        } else {
+        let access_keys = ctx.worker.view_access_keys(account_id).await?;
+
+        if access_keys
+            .iter()
+            .any(|ak| ak.public_key.to_string() == public_key)
+        {
             Err(anyhow::anyhow!(
-                "expected account {account_id} to not exist, but it does"
+                "Access key {public_key} still added to the account {account_id}"
             ))
+        } else {
+            Ok(())
         }
     }
 }
+
+trait MpcCheck {
+    type Response;
+
+    fn assert_ok(self) -> anyhow::Result<Self::Response>;
+    fn assert_bad_request_contains(self, expected: &str) -> anyhow::Result<Self::Response>;
+    fn assert_unauthorized_contains(self, expected: &str) -> anyhow::Result<Self::Response>;
+    fn assert_internal_error_contains(self, expected: &str) -> anyhow::Result<Self::Response>;
+    fn assert_dependency_error_contains(self, expected: &str) -> anyhow::Result<Self::Response>;
+
+    fn assert_bad_request(self) -> anyhow::Result<Self::Response>
+    where
+        Self: Sized,
+    {
+        self.assert_bad_request_contains("")
+    }
+    fn assert_unauthorized(self) -> anyhow::Result<Self::Response>
+    where
+        Self: Sized,
+    {
+        self.assert_unauthorized_contains("")
+    }
+    fn assert_internal_error(self) -> anyhow::Result<Self::Response>
+    where
+        Self: Sized,
+    {
+        self.assert_internal_error_contains("")
+    }
+}
+
+// Presumes that $response::Err has a `msg: String` field.
+#[macro_export]
+macro_rules! impl_mpc_check {
+    ( $response:ident ) => {
+        impl MpcCheck for (StatusCode, $response) {
+            type Response = $response;
+
+            fn assert_ok(self) -> anyhow::Result<Self::Response> {
+                let status_code = self.0;
+                let response = self.1;
+
+                if status_code == StatusCode::OK {
+                    let $response::Ok { .. } = response else {
+                        anyhow::bail!("failed to get a signature from mpc-recovery");
+                    };
+
+                    Ok(response)
+                } else {
+                    let $response::Err { .. } = response else {
+                        anyhow::bail!("unexpected Ok with a non-200 http code ({status_code})");
+                    };
+                    anyhow::bail!(
+                        "expected 200, but got {status_code} with response: {response:?}"
+                    );
+                }
+            }
+
+            fn assert_bad_request_contains(self, expected: &str) -> anyhow::Result<Self::Response> {
+                let status_code = self.0;
+                let response = self.1;
+
+                if status_code == StatusCode::BAD_REQUEST {
+                    let $response::Err { ref msg, .. } = response else {
+                        anyhow::bail!("unexpected Ok with a 400 http code");
+                    };
+                    assert!(msg.contains(expected), "{expected:?} not in {msg:?}");
+
+                    Ok(response)
+                } else {
+                    anyhow::bail!(
+                        "expected 400, but got {status_code} with response: {response:?}"
+                    );
+                }
+            }
+
+            fn assert_unauthorized_contains(
+                self,
+                expected: &str,
+            ) -> anyhow::Result<Self::Response> {
+                let status_code = self.0;
+                let response = self.1;
+
+                if status_code == StatusCode::UNAUTHORIZED {
+                    let $response::Err { ref msg, .. } = response else {
+                        anyhow::bail!("unexpected Ok with a 401 http code");
+                    };
+                    assert!(msg.contains(expected), "{expected:?} not in {msg:?}");
+
+                    Ok(response)
+                } else {
+                    anyhow::bail!(
+                        "expected 401, but got {status_code} with response: {response:?}"
+                    );
+                }
+            }
+            // ideally we should not have situations where we can get INTERNAL_SERVER_ERROR
+            fn assert_internal_error_contains(
+                self,
+                expected: &str,
+            ) -> anyhow::Result<Self::Response> {
+                let status_code = self.0;
+                let response = self.1;
+
+                if status_code == StatusCode::INTERNAL_SERVER_ERROR {
+                    let $response::Err { ref msg, .. } = response else {
+                        anyhow::bail!("unexpected error with a 401 http code");
+                    };
+                    assert!(msg.contains(expected));
+
+                    Ok(response)
+                } else {
+                    anyhow::bail!(
+                        "expected 401, but got {status_code} with response: {response:?}"
+                    );
+                }
+            }
+            fn assert_dependency_error_contains(
+                self,
+                expected: &str,
+            ) -> anyhow::Result<Self::Response> {
+                let status_code = self.0;
+                let response = self.1;
+
+                if status_code == StatusCode::FAILED_DEPENDENCY {
+                    let $response::Err { ref msg, .. } = response else {
+                        anyhow::bail!("unexpected error with a 424 http code");
+                    };
+                    assert!(msg.contains(expected));
+
+                    Ok(response)
+                } else {
+                    anyhow::bail!(
+                        "expected 424, but got {status_code} with response: {response:?}"
+                    );
+                }
+            }
+        }
+    };
+}
+
+impl_mpc_check!(SignResponse);
+impl_mpc_check!(NewAccountResponse);
+impl_mpc_check!(MpcPkResponse);
+impl_mpc_check!(ClaimOidcResponse);
+impl_mpc_check!(UserCredentialsResponse);

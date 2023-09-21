@@ -1,0 +1,127 @@
+use clap::Parser;
+use mpc_recovery::GenerateResult;
+use mpc_recovery_integration_tests::containers;
+use tokio::io::{stdin, AsyncReadExt};
+use tracing_subscriber::EnvFilter;
+
+const NETWORK: &str = "mpc_recovery_dev_network";
+const GCP_PROJECT_ID: &str = "mpc-recovery-dev-gcp-project";
+pub const FIREBASE_AUDIENCE_ID: &str = "test_audience";
+
+#[derive(Parser, Debug)]
+enum Cli {
+    TestLeader { nodes: usize },
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let subscriber = tracing_subscriber::fmt()
+        .with_thread_ids(true)
+        .with_env_filter(EnvFilter::from_default_env());
+    subscriber.init();
+    match Cli::parse() {
+        Cli::TestLeader { nodes } => {
+            tracing::info!("Setting up an environment with {} nodes", nodes);
+            let docker_client = containers::DockerClient::default();
+
+            let relayer_ctx_future =
+                mpc_recovery_integration_tests::initialize_relayer(&docker_client, NETWORK);
+            let datastore_future =
+                containers::Datastore::run(&docker_client, NETWORK, GCP_PROJECT_ID);
+
+            let (relayer_ctx, datastore) =
+                futures::future::join(relayer_ctx_future, datastore_future).await;
+            let relayer_ctx = relayer_ctx?;
+            let datastore = datastore?;
+
+            tracing::info!("Generating secrets");
+            let GenerateResult { secrets, .. } = mpc_recovery::generate(nodes);
+            tracing::info!("Running signer nodes...");
+            let mut signer_node_futures = Vec::new();
+            for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
+                let signer_node = containers::SignerNode::run_signing_node(
+                    &docker_client,
+                    NETWORK,
+                    i as u64,
+                    share,
+                    cipher_key,
+                    &datastore.address,
+                    &datastore.local_address,
+                    GCP_PROJECT_ID,
+                    FIREBASE_AUDIENCE_ID,
+                );
+                signer_node_futures.push(signer_node);
+            }
+            let signer_nodes = futures::future::join_all(signer_node_futures)
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+            tracing::info!("Signer nodes initialized");
+            let signer_urls: &Vec<_> = &signer_nodes.iter().map(|n| n.address.clone()).collect();
+
+            let near_root_account = relayer_ctx.worker.root_account()?;
+            tracing::info!("Root account_id: {}", near_root_account.id());
+
+            let mut cmd = vec![
+                "start-leader".to_string(),
+                "--web-port".to_string(),
+                "3000".to_string(),
+                "--near-rpc".to_string(),
+                format!(
+                    "http://localhost:{}",
+                    relayer_ctx
+                        .sandbox
+                        .container
+                        .get_host_port_ipv4(containers::Sandbox::CONTAINER_RPC_PORT)
+                ),
+                "--relayer-url".to_string(),
+                format!(
+                    "http://localhost:{}",
+                    relayer_ctx
+                        .relayer
+                        .container
+                        .get_host_port_ipv4(containers::Relayer::CONTAINER_PORT)
+                ),
+                "--near-root-account".to_string(),
+                near_root_account.id().to_string(),
+                "--account-creator-id".to_string(),
+                relayer_ctx.creator_account.id().to_string(),
+                "--account-creator-sk".to_string(),
+                relayer_ctx.creator_account.secret_key().to_string(),
+                "--pagoda-firebase-audience-id".to_string(),
+                FIREBASE_AUDIENCE_ID.to_string(),
+                "--gcp-project-id".to_string(),
+                GCP_PROJECT_ID.to_string(),
+                "--gcp-datastore-url".to_string(),
+                format!(
+                    "http://localhost:{}",
+                    datastore
+                        .container
+                        .get_host_port_ipv4(containers::Datastore::CONTAINER_PORT)
+                ),
+                "--test".to_string(),
+            ];
+            for sign_node in signer_urls {
+                cmd.push("--sign-nodes".to_string());
+                cmd.push(sign_node.clone());
+            }
+
+            tracing::info!("Please run the command below to start a leader node:");
+            tracing::info!(
+                "RUST_LOG=mpc_recovery=debug cargo run --bin mpc-recovery -- {}",
+                cmd.join(" ")
+            );
+            tracing::info!("====================================");
+            tracing::info!("You can now interact with your local service manually. For example:");
+            tracing::info!(
+                r#"curl -X POST -H "Content-Type: application/json" -d '{{"oidc_token": "validToken:1", "near_account_id": "abc45436676.near", "create_account_options": {{"full_access_keys": ["ed25519:4fnCz9NTEMhkfwAHDhFDkPS1mD58QHdRyago5n4vtCS2"]}}}}' http://localhost:3000/new_account"#
+            );
+
+            tracing::info!("Press any button to exit and destroy all containers...");
+
+            while stdin().read(&mut [0]).await? == 0 {}
+        }
+    };
+
+    Ok(())
+}

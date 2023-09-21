@@ -1,3 +1,6 @@
+// TODO: FIXME: Remove this once we have a better way to handle these large errors
+#![allow(clippy::result_large_err)]
+
 use aes_gcm::aead::consts::U32;
 use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::OsRng;
@@ -7,9 +10,12 @@ use curv::elliptic::curves::Ed25519;
 use curv::elliptic::curves::Point;
 use multi_party_eddsa::protocols::ExpandedKeyPair;
 
+pub mod error;
+pub mod firewall;
 pub mod gcp;
 pub mod key_recovery;
 pub mod leader_node;
+pub mod metrics;
 pub mod msg;
 pub mod nar;
 pub mod oauth;
@@ -17,6 +23,7 @@ pub mod primitives;
 pub mod relayer;
 pub mod sign_node;
 pub mod transaction;
+pub mod utils;
 
 type NodeId = u64;
 

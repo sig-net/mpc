@@ -9,10 +9,11 @@ COPY mpc-recovery/Cargo.toml Cargo.toml
 RUN sed -i 's#src/main.rs#dummy.rs#' Cargo.toml
 RUN cargo build --release
 COPY . .
+RUN sed -i 's#"integration-tests",##' Cargo.toml
 RUN cargo build --release --package mpc-recovery
 
-FROM debian:bullseye-slim as runtime
-RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates
+FROM debian:bookworm-slim as runtime
+RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates curl
 RUN update-ca-certificates
 COPY --from=builder /usr/src/app/target/release/mpc-recovery /usr/local/bin/mpc-recovery
 WORKDIR /usr/local/bin
