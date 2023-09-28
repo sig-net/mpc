@@ -168,6 +168,7 @@ impl Default for DockerClient {
 pub struct Redis<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
+    pub full_address: String,
 }
 
 impl<'a> Redis<'a> {
@@ -182,8 +183,15 @@ impl<'a> Redis<'a> {
             .get_network_ip_address(&container, network)
             .await?;
 
-        tracing::info!("Redis container is running at {}", address);
-        Ok(Redis { container, address })
+        // Note: this port is hardcoded in the Redis image
+        let full_address = format!("redis://{}:{}", address, 6379);
+
+        tracing::info!("Redis container is running at {}", full_address);
+        Ok(Redis {
+            container,
+            address,
+            full_address,
+        })
     }
 }
 
@@ -263,7 +271,7 @@ impl<'a> Relayer<'a> {
         docker_client: &'a DockerClient,
         network: &str,
         near_rpc: &str,
-        redis_hostname: &str,
+        redis_full_address: &str,
         relayer_account_id: &AccountId,
         relayer_account_sk: &workspaces::types::SecretKey,
         creator_account_id: &AccountId,
@@ -330,7 +338,7 @@ impl<'a> Relayer<'a> {
 
         table.insert(
             "redis_url".to_string(),
-            Value::String(redis_hostname.to_string()),
+            Value::String(redis_full_address.to_string()),
         );
         table.insert(
             "social_db_contract_id".to_string(),

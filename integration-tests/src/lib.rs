@@ -102,7 +102,7 @@ pub async fn initialize_relayer<'a>(
         docker_client,
         network,
         &sandbox.address,
-        &redis.address,
+        &redis.full_address,
         relayer_account.id(),
         relayer_account.secret_key(),
         creator_account.id(),
