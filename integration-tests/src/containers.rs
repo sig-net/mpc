@@ -355,7 +355,7 @@ impl<'a> Relayer<'a> {
             .with_exposed_port(Self::CONTAINER_PORT)
             .with_volume(
                 keys_path,
-                format!("/relayer-app/{}", keys_path),
+                format!("/relayer-app/account_keys"),
             )
             .with_volume(
                 &config_file_name,
