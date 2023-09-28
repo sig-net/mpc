@@ -40,7 +40,12 @@ use tokio::io::AsyncWriteExt;
 use tracing;
 use workspaces::AccountId;
 
-use crate::util;
+use std::fs::File;
+use std::io::Write;
+use toml;
+use toml::Value;
+
+use crate::util::{self, create_key_file};
 
 static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 
@@ -267,29 +272,92 @@ impl<'a> Relayer<'a> {
         social_account_sk: &workspaces::types::SecretKey,
     ) -> anyhow::Result<Relayer<'a>> {
         tracing::info!("Running relayer container...");
-        let image = GenericImage::new("ghcr.io/near/pagoda-relayer-rs-fastauth", "latest")
+
+        // Create JSON key files
+        let keys_path = "./account_keys";
+        std::fs::create_dir_all(keys_path).expect("Failed to create account_keys directory");
+        create_key_file(relayer_account_id, relayer_account_sk, keys_path)?;
+        create_key_file(social_account_id, social_account_sk, keys_path)?;
+
+        // Create config.toml file for relayer
+        let mut config = Value::Table(toml::value::Table::new());
+        let table = config.as_table_mut().unwrap();
+
+        table.insert(
+            "ip_address".to_string(),
+            Value::Array(vec![
+                Value::Integer(0),
+                Value::Integer(0),
+                Value::Integer(0),
+                Value::Integer(0),
+            ]),
+        );
+        table.insert(
+            "port".to_string(),
+            Value::Integer(i64::from(Self::CONTAINER_PORT)),
+        );
+
+        table.insert(
+            "relayer_account_id".to_string(),
+            Value::String(relayer_account_id.to_string()),
+        );
+        table.insert(
+            "keys_filenames".to_string(),
+            Value::Array(vec![Value::String(format!(
+                "./account_keys/{relayer_account_id}.json"
+            ))]),
+        );
+
+        table.insert(
+            "shared_storage_account_id".to_string(),
+            Value::String(social_account_id.to_string()),
+        );
+        table.insert(
+            "shared_storage_keys_filename".to_string(),
+            Value::String("shared_storage_keys_filename".to_string()),
+        ); // TODO
+
+        table.insert(
+            "whitelisted_contracts".to_string(),
+            Value::Array(vec![Value::String(creator_account_id.to_string())]),
+        );
+        table.insert(
+            "whitelisted_delegate_action_receiver_ids".to_string(),
+            Value::Array(vec![Value::String(creator_account_id.to_string())]),
+        );
+
+        table.insert(
+            "redis_url".to_string(),
+            Value::String(redis_hostname.to_string()),
+        );
+        table.insert(
+            "social_db_contract_id".to_string(),
+            Value::String(social_db_id.to_string()),
+        );
+
+        table.insert("rpc_url".to_string(), Value::String(near_rpc.to_string()));
+        table.insert("wallet_url".to_string(), Value::String("".to_string())); // not used
+        table.insert(
+            "explorer_transaction_url".to_string(),
+            Value::String("".to_string()),
+        ); // not used
+        table.insert("rpc_api_key".to_string(), Value::String("".to_string())); // not used
+
+        let config_file_name = "config.toml".to_string();
+        let config_file_path = format!("{}", config_file_name);
+        let mut file = File::create(&config_file_path).expect("Failed to create config.toml");
+        let toml_string = toml::to_string(&config).expect("Failed to convert to TOML string");
+        file.write_all(toml_string.as_bytes())
+            .expect("Failed to write to config.toml");
+
+        let image = GenericImage::new("ghcr.io/near/os-relayer", "latest")
             .with_wait_for(WaitFor::message_on_stdout("listening on"))
             .with_exposed_port(Self::CONTAINER_PORT)
             .with_env_var("RUST_LOG", "DEBUG")
-            .with_env_var("NETWORK", "custom")
-            .with_env_var("SERVER_PORT", Self::CONTAINER_PORT.to_string())
-            .with_env_var("RELAYER_RPC_URL", near_rpc)
-            .with_env_var("RELAYER_ACCOUNT_ID", relayer_account_id.to_string())
-            .with_env_var("REDIS_HOST", redis_hostname)
-            .with_env_var("OVERRIDE_RPC_CONF", "true")
-            .with_env_var("PUBLIC_KEY", relayer_account_sk.public_key().to_string())
-            .with_env_var("PRIVATE_KEY", relayer_account_sk.to_string())
-            .with_env_var("KEYS_FILENAMES", format!("{relayer_account_id}.json"))
-            .with_env_var("WHITELISTED_CONTRACT", creator_account_id.to_string())
-            .with_env_var("WHITELISTED_RECEIVER_IDS", creator_account_id.to_string())
-            .with_env_var("CUSTOM_SOCIAL_DB_ID", social_db_id.to_string())
-            .with_env_var("STORAGE_ACCOUNT_ID", social_account_id.to_string())
-            .with_env_var(
-                "STORAGE_PUBLIC_KEY",
-                social_account_sk.public_key().to_string(),
-            )
-            .with_env_var("STORAGE_PRIVATE_KEY", social_account_sk.to_string())
-            .with_env_var("NUM_KEYS", "1");
+            .with_volume(
+                &config_file_path,
+                format!("/relayer-app/relayer/{}", config_file_name),
+            );
 
         let image: RunnableImage<GenericImage> = image.into();
         let image = image.with_network(network);
@@ -301,6 +369,11 @@ impl<'a> Relayer<'a> {
 
         let full_address = format!("http://{}:{}", ip_address, Self::CONTAINER_PORT);
         tracing::info!("Relayer container is running at {}", full_address);
+
+        // Delete created files
+        std::fs::remove_file(config_file_path).expect("Failed to delete config.toml");
+        std::fs::remove_dir_all(keys_path).expect("Failed to delete account_keys directory");
+
         Ok(Relayer {
             container,
             address: full_address,
