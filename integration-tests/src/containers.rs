@@ -314,8 +314,8 @@ impl<'a> Relayer<'a> {
         );
         table.insert(
             "shared_storage_keys_filename".to_string(),
-            Value::String("shared_storage_keys_filename".to_string()),
-        ); // TODO
+            Value::String(format!("./account_keys/{}.json", social_account_id)),
+        );
 
         table.insert(
             "whitelisted_contracts".to_string(),
@@ -336,10 +336,10 @@ impl<'a> Relayer<'a> {
         );
 
         table.insert("rpc_url".to_string(), Value::String(near_rpc.to_string()));
-        table.insert("wallet_url".to_string(), Value::String("".to_string())); // not used
+        table.insert("wallet_url".to_string(), Value::String("https://wallet.testnet.near.org".to_string())); // not used
         table.insert(
             "explorer_transaction_url".to_string(),
-            Value::String("".to_string()),
+            Value::String("https://explorer.testnet.near.org/transactions/".to_string()),
         ); // not used
         table.insert("rpc_api_key".to_string(), Value::String("".to_string())); // not used
 
@@ -354,12 +354,12 @@ impl<'a> Relayer<'a> {
             .with_wait_for(WaitFor::message_on_stdout("listening on"))
             .with_exposed_port(Self::CONTAINER_PORT)
             .with_volume(
-                keys_path,
-                format!("/relayer-app/account_keys"),
+                "/Users/serhii/Projects/NEAR/mpc-recovery/integration-tests/config.toml",
+                "/relayer-app/config.toml",
             )
             .with_volume(
-                &config_file_name,
-                format!("/relayer-app/{}", &config_file_name),
+                "/Users/serhii/Projects/NEAR/mpc-recovery/integration-tests/account_keys",
+                "/relayer-app/account_keys",
             )
             .with_env_var("RUST_LOG", "DEBUG");
 
@@ -374,9 +374,9 @@ impl<'a> Relayer<'a> {
         let full_address = format!("http://{}:{}", ip_address, Self::CONTAINER_PORT);
         tracing::info!("Relayer container is running at {}", full_address);
 
-        // Delete created files
-        std::fs::remove_file(config_file_path).expect("Failed to delete config.toml");
-        std::fs::remove_dir_all(keys_path).expect("Failed to delete account_keys directory");
+        // Delete created files // TODO: these files can be deleted only after tests has finished
+        // std::fs::remove_file(config_file_path).expect("Failed to delete config.toml");
+        // std::fs::remove_dir_all(keys_path).expect("Failed to delete account_keys directory");
 
         Ok(Relayer {
             container,
