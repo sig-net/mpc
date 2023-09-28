@@ -344,7 +344,7 @@ impl<'a> Relayer<'a> {
         table.insert("rpc_api_key".to_string(), Value::String("".to_string())); // not used
 
         let config_file_name = "config.toml".to_string();
-        let config_file_path = format!("{}", config_file_name);
+        let config_file_path = format!("./{}", config_file_name);
         let mut file = File::create(&config_file_path).expect("Failed to create config.toml");
         let toml_string = toml::to_string(&config).expect("Failed to convert to TOML string");
         file.write_all(toml_string.as_bytes())
@@ -353,11 +353,15 @@ impl<'a> Relayer<'a> {
         let image = GenericImage::new("ghcr.io/near/os-relayer", "latest")
             .with_wait_for(WaitFor::message_on_stdout("listening on"))
             .with_exposed_port(Self::CONTAINER_PORT)
-            .with_env_var("RUST_LOG", "DEBUG")
-            .with_volume(
-                &config_file_path,
-                format!("/relayer-app/relayer/{}", config_file_name),
-            );
+            // .with_volume(
+            //     keys_path,
+            //     format!("/relayer-app/relayer"),
+            // )
+            // .with_volume( // TODO: probably will not work with files
+            //     &config_file_name,
+            //     format!("/relayer-app/relayer/{}", &config_file_name),
+            // )
+            .with_env_var("RUST_LOG", "DEBUG");
 
         let image: RunnableImage<GenericImage> = image.into();
         let image = image.with_network(network);
