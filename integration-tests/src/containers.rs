@@ -353,14 +353,14 @@ impl<'a> Relayer<'a> {
         let image = GenericImage::new("ghcr.io/near/os-relayer", "latest")
             .with_wait_for(WaitFor::message_on_stdout("listening on"))
             .with_exposed_port(Self::CONTAINER_PORT)
-            // .with_volume(
-            //     keys_path,
-            //     format!("/relayer-app/relayer"),
-            // )
-            // .with_volume( // TODO: probably will not work with files
-            //     &config_file_name,
-            //     format!("/relayer-app/relayer/{}", &config_file_name),
-            // )
+            .with_volume(
+                keys_path,
+                format!("/relayer-app/{}", keys_path),
+            )
+            .with_volume(
+                &config_file_name,
+                format!("/relayer-app/{}", &config_file_name),
+            )
             .with_env_var("RUST_LOG", "DEBUG");
 
         let image: RunnableImage<GenericImage> = image.into();
