@@ -40,7 +40,7 @@ use tokio::io::AsyncWriteExt;
 use tracing;
 use workspaces::AccountId;
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Write;
 use toml;
 use toml::Value;
@@ -276,6 +276,8 @@ impl<'a> Relayer<'a> {
         // Create JSON key files
         let keys_path = "./account_keys";
         std::fs::create_dir_all(keys_path).expect("Failed to create account_keys directory");
+        let keys_absolute_path =
+            fs::canonicalize(keys_path).expect("Failed to get absolute path for keys");
         create_key_file(relayer_account_id, relayer_account_sk, keys_path)?;
         create_key_file(social_account_id, social_account_sk, keys_path)?;
 
@@ -336,7 +338,10 @@ impl<'a> Relayer<'a> {
         );
 
         table.insert("rpc_url".to_string(), Value::String(near_rpc.to_string()));
-        table.insert("wallet_url".to_string(), Value::String("https://wallet.testnet.near.org".to_string())); // not used
+        table.insert(
+            "wallet_url".to_string(),
+            Value::String("https://wallet.testnet.near.org".to_string()),
+        ); // not used
         table.insert(
             "explorer_transaction_url".to_string(),
             Value::String("https://explorer.testnet.near.org/transactions/".to_string()),
@@ -350,15 +355,22 @@ impl<'a> Relayer<'a> {
         file.write_all(toml_string.as_bytes())
             .expect("Failed to write to config.toml");
 
+        let config_absolute_path = fs::canonicalize(&config_file_path)
+            .expect("Failed to get absolute path to config.toml");
+
         let image = GenericImage::new("ghcr.io/near/os-relayer", "latest")
             .with_wait_for(WaitFor::message_on_stdout("listening on"))
             .with_exposed_port(Self::CONTAINER_PORT)
             .with_volume(
-                "/Users/serhii/Projects/NEAR/mpc-recovery/integration-tests/config.toml",
-                "/relayer-app/config.toml",
+                config_absolute_path
+                    .to_str()
+                    .expect("Failed to convert config file path to string"),
+                format!("/relayer-app/{}", config_file_name),
             )
             .with_volume(
-                "/Users/serhii/Projects/NEAR/mpc-recovery/integration-tests/account_keys",
+                keys_absolute_path
+                    .to_str()
+                    .expect("Failed to convert keys path to string"),
                 "/relayer-app/account_keys",
             )
             .with_env_var("RUST_LOG", "DEBUG");
