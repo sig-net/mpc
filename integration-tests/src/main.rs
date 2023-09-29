@@ -1,6 +1,7 @@
 use clap::Parser;
 use mpc_recovery::GenerateResult;
 use mpc_recovery_integration_tests::containers;
+use near_primitives::utils::generate_random_string;
 use tokio::io::{stdin, AsyncReadExt};
 use tracing_subscriber::EnvFilter;
 
@@ -24,8 +25,12 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("Setting up an environment with {} nodes", nodes);
             let docker_client = containers::DockerClient::default();
 
-            let relayer_ctx_future =
-                mpc_recovery_integration_tests::initialize_relayer(&docker_client, NETWORK);
+            let relayer_id = generate_random_string(7);
+            let relayer_ctx_future = mpc_recovery_integration_tests::initialize_relayer(
+                &docker_client,
+                NETWORK,
+                &relayer_id,
+            );
             let datastore_future =
                 containers::Datastore::run(&docker_client, NETWORK, GCP_PROJECT_ID);
 

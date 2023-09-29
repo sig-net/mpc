@@ -28,7 +28,6 @@ use near_primitives::account::{AccessKey, AccessKeyPermission};
 use near_primitives::borsh::BorshSerialize;
 use near_primitives::delegate_action::{DelegateAction, SignedDelegateAction};
 use near_primitives::transaction::{Action, AddKeyAction, DeleteKeyAction};
-use near_primitives::utils::generate_random_string;
 use near_primitives::views::FinalExecutionStatus;
 use once_cell::sync::Lazy;
 use testcontainers::{
@@ -257,6 +256,7 @@ impl<'a> Sandbox<'a> {
 }
 
 pub struct Relayer<'a> {
+    pub id: String,
     pub container: Container<'a, GenericImage>,
     pub address: String,
     pub local_address: String,
@@ -281,6 +281,7 @@ pub struct RelayerConfig {
 
 impl<'a> Relayer<'a> {
     pub const CONTAINER_PORT: u16 = 3000;
+    pub const TMP_FOLDER_PATH: &str = "./tmp";
 
     pub async fn run(
         docker_client: &'a DockerClient,
@@ -293,12 +294,12 @@ impl<'a> Relayer<'a> {
         social_db_id: &AccountId,
         social_account_id: &AccountId,
         social_account_sk: &workspaces::types::SecretKey,
+        relayer_id: &str,
     ) -> anyhow::Result<Relayer<'a>> {
         tracing::info!("Running relayer container...");
 
         // Create tmp folder to store relayer configs
-        let relayer_id = generate_random_string(7); // We need a way to distinguish relayers in many concurrent tests
-        let relayer_configs_path = format!("./tmp/relayer-{relayer_id}");
+        let relayer_configs_path = format!("{}/{}", Self::TMP_FOLDER_PATH, relayer_id);
         std::fs::create_dir_all(&relayer_configs_path).expect(&format!(
             "Failed to create {relayer_configs_path} directory"
         ));
@@ -362,15 +363,20 @@ impl<'a> Relayer<'a> {
         let full_address = format!("http://{}:{}", ip_address, Self::CONTAINER_PORT);
         tracing::info!("Relayer container is running at {}", full_address);
 
-        // Delete created files // TODO: these files can be deleted only after tests has finished (Move to tear down)
-        // std::fs::remove_file(config_file_path).expect("Failed to delete config.toml");
-        // std::fs::remove_dir_all(keys_path).expect("Failed to delete account_keys directory");
-
         Ok(Relayer {
             container,
             address: full_address,
             local_address: format!("http://localhost:{host_port}"),
+            id: relayer_id.to_string(),
         })
+    }
+
+    pub fn clean_tmp_files(&self) -> anyhow::Result<(), anyhow::Error> {
+        std::fs::remove_dir_all(format!("{}/{}", Self::TMP_FOLDER_PATH, self.id)).expect(&format!(
+            "Failed to clean tmp files for relayer {}",
+            self.id
+        ));
+        Ok(())
     }
 }
 
