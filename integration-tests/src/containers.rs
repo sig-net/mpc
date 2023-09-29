@@ -300,9 +300,8 @@ impl<'a> Relayer<'a> {
 
         // Create tmp folder to store relayer configs
         let relayer_configs_path = format!("{}/{}", Self::TMP_FOLDER_PATH, relayer_id);
-        std::fs::create_dir_all(&relayer_configs_path).expect(&format!(
-            "Failed to create {relayer_configs_path} directory"
-        ));
+        std::fs::create_dir_all(&relayer_configs_path)
+            .unwrap_or_else(|_| panic!("Failed to create {relayer_configs_path} directory"));
 
         // Create dir for keys
         let keys_path = format!("{relayer_configs_path}/account_keys");
@@ -372,10 +371,8 @@ impl<'a> Relayer<'a> {
     }
 
     pub fn clean_tmp_files(&self) -> anyhow::Result<(), anyhow::Error> {
-        std::fs::remove_dir_all(format!("{}/{}", Self::TMP_FOLDER_PATH, self.id)).expect(&format!(
-            "Failed to clean tmp files for relayer {}",
-            self.id
-        ));
+        std::fs::remove_dir_all(format!("{}/{}", Self::TMP_FOLDER_PATH, self.id))
+            .unwrap_or_else(|_| panic!("Failed to clean tmp files for relayer {}", self.id));
         Ok(())
     }
 }

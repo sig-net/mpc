@@ -65,7 +65,7 @@ pub fn create_key_file(
     let key_json_str = serde_json::to_string(&key_file).expect("Failed to serialize to JSON");
     let key_json_file_path = format!("{key_path}/{account_id}.json");
     let mut json_key_file =
-        File::create(&key_json_file_path).expect("Failed to create JSON key file");
+        File::create(key_json_file_path).expect("Failed to create JSON key file");
     json_key_file
         .write_all(key_json_str.as_bytes())
         .expect("Failed to write to JSON key file");
@@ -161,13 +161,14 @@ pub fn create_relayer_cofig_file(
     ); // not used
     table.insert("rpc_api_key".to_string(), Value::String(config.rpc_api_key)); // not used
 
-    let mut file = File::create(&config_path).expect(&format!("Failed to create {}", config_path));
+    let mut file =
+        File::create(&config_path).unwrap_or_else(|_| panic!("Failed to write to {}", config_path));
     let toml_string = toml::to_string(&config_table).expect("Failed to convert to TOML string");
     file.write_all(toml_string.as_bytes())
         .expect(&format!("Failed to write to {}", config_path));
 
     let config_absolute_path = fs::canonicalize(&config_path)
-        .expect(&format!("Failed to get absolute path to {}", config_path));
+        .unwrap_or_else(|_| panic!("Failed to get absolute path to {}", config_path));
     Ok(config_absolute_path
         .to_str()
         .expect("Failed to convert config file path to string")
