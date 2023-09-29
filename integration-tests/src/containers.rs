@@ -28,6 +28,7 @@ use near_primitives::account::{AccessKey, AccessKeyPermission};
 use near_primitives::borsh::BorshSerialize;
 use near_primitives::delegate_action::{DelegateAction, SignedDelegateAction};
 use near_primitives::transaction::{Action, AddKeyAction, DeleteKeyAction};
+use near_primitives::utils::generate_random_string;
 use near_primitives::views::FinalExecutionStatus;
 use once_cell::sync::Lazy;
 use testcontainers::{
@@ -295,13 +296,22 @@ impl<'a> Relayer<'a> {
     ) -> anyhow::Result<Relayer<'a>> {
         tracing::info!("Running relayer container...");
 
-        // Create JSON key files
-        let keys_path = "./account_keys";
-        std::fs::create_dir_all(keys_path).expect("Failed to create account_keys directory");
+        // Create tmp folder to store relayer configs
+        let relayer_id = generate_random_string(7); // We need a way to distinguish relayers in many concurrent tests
+        let relayer_configs_path = format!("./tmp/relayer-{relayer_id}");
+        std::fs::create_dir_all(&relayer_configs_path).expect(&format!(
+            "Failed to create {relayer_configs_path} directory"
+        ));
+
+        // Create dir for keys
+        let keys_path = format!("{relayer_configs_path}/account_keys");
+        std::fs::create_dir_all(&keys_path).expect("Failed to create account_keys directory");
         let keys_absolute_path =
-            fs::canonicalize(keys_path).expect("Failed to get absolute path for keys");
-        create_key_file(relayer_account_id, relayer_account_sk, keys_path)?;
-        create_key_file(social_account_id, social_account_sk, keys_path)?;
+            fs::canonicalize(&keys_path).expect("Failed to get absolute path for keys");
+
+        // Create JSON key files
+        create_key_file(relayer_account_id, relayer_account_sk, &keys_path)?;
+        create_key_file(social_account_id, social_account_sk, &keys_path)?;
 
         // Create relayer config file
         let config_file_name = "config.toml";
@@ -310,9 +320,9 @@ impl<'a> Relayer<'a> {
                 ip_address: [0, 0, 0, 0],
                 port: Self::CONTAINER_PORT,
                 relayer_account_id: relayer_account_id.clone(),
-                keys_filenames: vec![format!("{}/{}.json", keys_path, relayer_account_id)],
+                keys_filenames: vec![format!("./account_keys/{}.json", relayer_account_id)],
                 shared_storage_account_id: social_account_id.clone(),
-                shared_storage_keys_filename: format!("{}/{}.json", keys_path, social_account_id),
+                shared_storage_keys_filename: format!("./account_keys/{}.json", social_account_id),
                 whitelisted_contracts: vec![creator_account_id.clone()],
                 whitelisted_delegate_action_receiver_ids: vec![creator_account_id.clone()],
                 redis_url: redis_full_address.to_string(),
@@ -323,8 +333,7 @@ impl<'a> Relayer<'a> {
                     .to_string(),
                 rpc_api_key: "".to_string(),
             },
-            format!("./{}", config_file_name),
-            keys_path.to_string(),
+            format!("{relayer_configs_path}/{config_file_name}"),
         )?;
 
         let image = GenericImage::new("ghcr.io/near/os-relayer", "latest")

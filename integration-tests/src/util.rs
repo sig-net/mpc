@@ -75,7 +75,6 @@ pub fn create_key_file(
 pub fn create_relayer_cofig_file(
     config: RelayerConfig,
     config_path: String,
-    keys_path: String,
 ) -> anyhow::Result<String, anyhow::Error> {
     let mut config_table = Value::Table(toml::value::Table::new());
     let table = config_table.as_table_mut().unwrap();
@@ -100,9 +99,13 @@ pub fn create_relayer_cofig_file(
     );
     table.insert(
         "keys_filenames".to_string(),
-        Value::Array(vec![Value::String(format!(
-            "{keys_path}/{relayer_account_id}.json"
-        ))]),
+        Value::Array(
+            config
+                .keys_filenames
+                .iter()
+                .map(|filename| Value::String(filename.to_string()))
+                .collect(),
+        ),
     );
 
     table.insert(
