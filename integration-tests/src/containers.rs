@@ -40,12 +40,9 @@ use tokio::io::AsyncWriteExt;
 use tracing;
 use workspaces::AccountId;
 
-use std::fs::{self, File};
-use std::io::Write;
-use toml;
-use toml::Value;
+use std::fs;
 
-use crate::util::{self, create_key_file};
+use crate::util::{self, create_key_file, create_relayer_cofig_file};
 
 static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 
@@ -264,6 +261,23 @@ pub struct Relayer<'a> {
     pub local_address: String,
 }
 
+pub struct RelayerConfig {
+    pub ip_address: [u8; 4],
+    pub port: u16,
+    pub relayer_account_id: AccountId,
+    pub keys_filenames: Vec<String>,
+    pub shared_storage_account_id: AccountId,
+    pub shared_storage_keys_filename: String,
+    pub whitelisted_contracts: Vec<AccountId>,
+    pub whitelisted_delegate_action_receiver_ids: Vec<AccountId>,
+    pub redis_url: String,
+    pub social_db_contract_id: AccountId,
+    pub rpc_url: String,
+    pub wallet_url: String,
+    pub explorer_transaction_url: String,
+    pub rpc_api_key: String,
+}
+
 impl<'a> Relayer<'a> {
     pub const CONTAINER_PORT: u16 = 3000;
 
@@ -289,90 +303,35 @@ impl<'a> Relayer<'a> {
         create_key_file(relayer_account_id, relayer_account_sk, keys_path)?;
         create_key_file(social_account_id, social_account_sk, keys_path)?;
 
-        // Create config.toml file for relayer
-        let mut config = Value::Table(toml::value::Table::new());
-        let table = config.as_table_mut().unwrap();
-
-        table.insert(
-            "ip_address".to_string(),
-            Value::Array(vec![
-                Value::Integer(0),
-                Value::Integer(0),
-                Value::Integer(0),
-                Value::Integer(0),
-            ]),
-        );
-        table.insert(
-            "port".to_string(),
-            Value::Integer(i64::from(Self::CONTAINER_PORT)),
-        );
-
-        table.insert(
-            "relayer_account_id".to_string(),
-            Value::String(relayer_account_id.to_string()),
-        );
-        table.insert(
-            "keys_filenames".to_string(),
-            Value::Array(vec![Value::String(format!(
-                "./account_keys/{relayer_account_id}.json"
-            ))]),
-        );
-
-        table.insert(
-            "shared_storage_account_id".to_string(),
-            Value::String(social_account_id.to_string()),
-        );
-        table.insert(
-            "shared_storage_keys_filename".to_string(),
-            Value::String(format!("./account_keys/{}.json", social_account_id)),
-        );
-
-        table.insert(
-            "whitelisted_contracts".to_string(),
-            Value::Array(vec![Value::String(creator_account_id.to_string())]),
-        );
-        table.insert(
-            "whitelisted_delegate_action_receiver_ids".to_string(),
-            Value::Array(vec![Value::String(creator_account_id.to_string())]),
-        );
-
-        table.insert(
-            "redis_url".to_string(),
-            Value::String(redis_full_address.to_string()),
-        );
-        table.insert(
-            "social_db_contract_id".to_string(),
-            Value::String(social_db_id.to_string()),
-        );
-
-        table.insert("rpc_url".to_string(), Value::String(near_rpc.to_string()));
-        table.insert(
-            "wallet_url".to_string(),
-            Value::String("https://wallet.testnet.near.org".to_string()),
-        ); // not used
-        table.insert(
-            "explorer_transaction_url".to_string(),
-            Value::String("https://explorer.testnet.near.org/transactions/".to_string()),
-        ); // not used
-        table.insert("rpc_api_key".to_string(), Value::String("".to_string())); // not used
-
-        let config_file_name = "config.toml".to_string();
-        let config_file_path = format!("./{}", config_file_name);
-        let mut file = File::create(&config_file_path).expect("Failed to create config.toml");
-        let toml_string = toml::to_string(&config).expect("Failed to convert to TOML string");
-        file.write_all(toml_string.as_bytes())
-            .expect("Failed to write to config.toml");
-
-        let config_absolute_path = fs::canonicalize(&config_file_path)
-            .expect("Failed to get absolute path to config.toml");
+        // Create relayer config file
+        let config_file_name = "config.toml";
+        let config_absolute_path = create_relayer_cofig_file(
+            RelayerConfig {
+                ip_address: [0, 0, 0, 0],
+                port: Self::CONTAINER_PORT,
+                relayer_account_id: relayer_account_id.clone(),
+                keys_filenames: vec![format!("{}/{}.json", keys_path, relayer_account_id)],
+                shared_storage_account_id: social_account_id.clone(),
+                shared_storage_keys_filename: format!("{}/{}.json", keys_path, social_account_id),
+                whitelisted_contracts: vec![creator_account_id.clone()],
+                whitelisted_delegate_action_receiver_ids: vec![creator_account_id.clone()],
+                redis_url: redis_full_address.to_string(),
+                social_db_contract_id: social_db_id.clone(),
+                rpc_url: near_rpc.to_string(),
+                wallet_url: "https://wallet.testnet.near.org".to_string(),
+                explorer_transaction_url: "https://explorer.testnet.near.org/transactions/"
+                    .to_string(),
+                rpc_api_key: "".to_string(),
+            },
+            format!("./{}", config_file_name),
+            keys_path.to_string(),
+        )?;
 
         let image = GenericImage::new("ghcr.io/near/os-relayer", "latest")
             .with_wait_for(WaitFor::message_on_stdout("listening on"))
             .with_exposed_port(Self::CONTAINER_PORT)
             .with_volume(
-                config_absolute_path
-                    .to_str()
-                    .expect("Failed to convert config file path to string"),
+                config_absolute_path,
                 format!("/relayer-app/{}", config_file_name),
             )
             .with_volume(
@@ -394,7 +353,7 @@ impl<'a> Relayer<'a> {
         let full_address = format!("http://{}:{}", ip_address, Self::CONTAINER_PORT);
         tracing::info!("Relayer container is running at {}", full_address);
 
-        // Delete created files // TODO: these files can be deleted only after tests has finished
+        // Delete created files // TODO: these files can be deleted only after tests has finished (Move to tear down)
         // std::fs::remove_file(config_file_path).expect("Failed to delete config.toml");
         // std::fs::remove_dir_all(keys_path).expect("Failed to delete account_keys directory");
 
