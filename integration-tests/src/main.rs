@@ -146,13 +146,13 @@ fn escape_json_string(input: &str) -> String {
 
     for c in input.chars() {
         match c {
-            '"' => result.push_str(r#"\""#),
-            '\\' => result.push_str(r#"\\"#),
-            '\n' => result.push_str(r#"\n"#),
-            '\r' => result.push_str(r#"\r"#),
-            '\t' => result.push_str(r#"\t"#),
-            '\u{08}' => result.push_str(r#"\b"#), // Backspace
-            '\u{0C}' => result.push_str(r#"\f"#), // Form feed
+            '"' => result.push_str(r"\\"),
+            '\\' => result.push_str(r"\\"),
+            '\n' => result.push_str(r"\n"),
+            '\r' => result.push_str(r"\r"),
+            '\t' => result.push_str(r"\t"),
+            '\u{08}' => result.push_str(r"\b"), // Backspace
+            '\u{0C}' => result.push_str(r"\f"), // Form feed
             _ => result.push(c),
         }
     }
