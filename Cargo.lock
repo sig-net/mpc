@@ -2829,6 +2829,7 @@ version = "0.1.0"
 dependencies = [
  "goose",
  "goose-eggs",
+ "reqwest",
  "tokio",
 ]
 
