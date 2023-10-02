@@ -30,7 +30,7 @@ async fn mpc_public_key(user: &mut GooseUser) -> TransactionResult {
     let goose_responce = user.request(goose_request).await?;
 
     let validate = &Validate::builder().status(200).build();
-    validate_and_load_static_assets(user, goose_responce, &validate).await?;
+    validate_and_load_static_assets(user, goose_responce, validate).await?;
 
     Ok(())
 }
