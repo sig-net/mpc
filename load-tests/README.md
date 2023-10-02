@@ -7,7 +7,7 @@ To start the tests, run the following command:
 ```bash
 cargo run --release -- --host <host> --report-file=load_test_results.html --test-plan "$(cat ./test_plans/short.txt)" 
 ```
-You can run Load Tests against the your local development environment (check `/integration-tests` for more info) or against the staging environment by setting the `--host` parameter.
+You can run Load Tests against your local development environment (check `/integration-tests` for more info) or against the staging environment by setting the `--host` parameter.
 
-The tests itself are written in Rust and can be found in the `/src` directory.
+The tests are written in Rust and can be found in the `/src` directory.
 You can create your own test plan or execute one of the existing test plans from `/test_plans` directory. 

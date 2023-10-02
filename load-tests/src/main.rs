@@ -5,7 +5,7 @@ use goose_eggs::{validate_and_load_static_assets, Validate};
 async fn main() -> Result<(), GooseError> {
     GooseAttack::initialize()?
         .register_scenario(
-            scenario!("LoadtestTransactions").register_transaction(transaction!(mpc_public_key)),
+            scenario!("simple_mpc_public_key").register_transaction(transaction!(mpc_public_key)),
         )
         .execute()
         .await?;
