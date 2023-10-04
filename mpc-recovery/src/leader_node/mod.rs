@@ -6,7 +6,7 @@ use crate::msg::{
     MpcPkRequest, MpcPkResponse, NewAccountRequest, NewAccountResponse, SignNodeRequest,
     SignRequest, SignResponse, UserCredentialsRequest, UserCredentialsResponse,
 };
-use crate::oauth::OAuthTokenVerifier;
+use crate::oauth::verify_oidc_token;
 use crate::relayer::msg::{CreateAccountAtomicRequest, RegisterAccountRequest};
 use crate::relayer::NearRpcAndRelayerClient;
 use crate::transaction::{
@@ -52,7 +52,7 @@ pub struct Config {
     pub partners: PartnerList,
 }
 
-pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
+pub async fn run(config: Config) {
     let Config {
         env,
         port,
@@ -133,9 +133,9 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
         )
         .route("/mpc_public_key", post(mpc_public_key))
         .route("/claim_oidc", post(claim_oidc))
-        .route("/user_credentials", post(user_credentials::<T>))
-        .route("/new_account", post(new_account::<T>))
-        .route("/sign", post(sign::<T>))
+        .route("/user_credentials", post(user_credentials))
+        .route("/new_account", post(new_account))
+        .route("/sign", post(sign))
         .route("/metrics", get(metrics))
         .route_layer(middleware::from_fn(track_metrics))
         .layer(Extension(state))
@@ -288,7 +288,7 @@ async fn claim_oidc(
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(env = state.env))]
-async fn user_credentials<T: OAuthTokenVerifier>(
+async fn user_credentials(
     Extension(state): Extension<Arc<LeaderState>>,
     WithRejection(Json(request), _): WithRejection<Json<UserCredentialsRequest>, MpcError>,
 ) -> (StatusCode, Json<UserCredentialsResponse>) {
@@ -297,7 +297,7 @@ async fn user_credentials<T: OAuthTokenVerifier>(
         "user_credentials request"
     );
 
-    match process_user_credentials::<T>(state, request).await {
+    match process_user_credentials(state, request).await {
         Ok(response) => {
             tracing::debug!("responding with OK");
             (StatusCode::OK, Json(response))
@@ -314,11 +314,11 @@ async fn user_credentials<T: OAuthTokenVerifier>(
     }
 }
 
-async fn process_user_credentials<T: OAuthTokenVerifier>(
+async fn process_user_credentials(
     state: Arc<LeaderState>,
     request: UserCredentialsRequest,
 ) -> Result<UserCredentialsResponse, LeaderNodeError> {
-    T::verify_token(&request.oidc_token, &state.partners.oidc_providers())
+    verify_oidc_token(&request.oidc_token, &state.partners.oidc_providers())
         .await
         .map_err(LeaderNodeError::OidcVerificationFailed)?;
 
@@ -339,15 +339,16 @@ async fn process_user_credentials<T: OAuthTokenVerifier>(
     .await
 }
 
-async fn process_new_account<T: OAuthTokenVerifier>(
+async fn process_new_account(
     state: Arc<LeaderState>,
     request: NewAccountRequest,
 ) -> Result<NewAccountResponse, LeaderNodeError> {
     // Create a transaction to create new NEAR account
     let new_user_account_id = request.near_account_id;
-    let oidc_token_claims = T::verify_token(&request.oidc_token, &state.partners.oidc_providers())
-        .await
-        .map_err(LeaderNodeError::OidcVerificationFailed)?;
+    let oidc_token_claims =
+        verify_oidc_token(&request.oidc_token, &state.partners.oidc_providers())
+            .await
+            .map_err(LeaderNodeError::OidcVerificationFailed)?;
     let internal_acc_id = oidc_token_claims.get_internal_account_id();
 
     // FIXME: waiting on https://github.com/near/mpc-recovery/issues/193
@@ -455,7 +456,7 @@ async fn process_new_account<T: OAuthTokenVerifier>(
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(env = state.env))]
-async fn new_account<T: OAuthTokenVerifier>(
+async fn new_account(
     Extension(state): Extension<Arc<LeaderState>>,
     WithRejection(Json(request), _): WithRejection<Json<NewAccountRequest>, MpcError>,
 ) -> (StatusCode, Json<NewAccountResponse>) {
@@ -466,7 +467,7 @@ async fn new_account<T: OAuthTokenVerifier>(
         "new_account request"
     );
 
-    match process_new_account::<T>(state, request).await {
+    match process_new_account(state, request).await {
         Ok(response) => {
             tracing::debug!("responding with OK");
             (StatusCode::OK, Json(response))
@@ -478,7 +479,7 @@ async fn new_account<T: OAuthTokenVerifier>(
     }
 }
 
-async fn process_sign<T: OAuthTokenVerifier>(
+async fn process_sign(
     state: Arc<LeaderState>,
     request: SignRequest,
 ) -> Result<SignResponse, LeaderNodeError> {
@@ -487,7 +488,7 @@ async fn process_sign<T: OAuthTokenVerifier>(
         .map_err(LeaderNodeError::MalformedDelegateAction)?;
 
     // Check OIDC token
-    T::verify_token(&request.oidc_token, &state.partners.oidc_providers())
+    verify_oidc_token(&request.oidc_token, &state.partners.oidc_providers())
         .await
         .map_err(LeaderNodeError::OidcVerificationFailed)?;
 
@@ -556,7 +557,7 @@ async fn process_sign<T: OAuthTokenVerifier>(
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(env = state.env))]
-async fn sign<T: OAuthTokenVerifier>(
+async fn sign(
     Extension(state): Extension<Arc<LeaderState>>,
     WithRejection(Json(request), _): WithRejection<Json<SignRequest>, MpcError>,
 ) -> (StatusCode, Json<SignResponse>) {
@@ -565,7 +566,7 @@ async fn sign<T: OAuthTokenVerifier>(
         "sign request"
     );
 
-    match process_sign::<T>(state, request).await {
+    match process_sign(state, request).await {
         Ok(response) => {
             tracing::debug!("responding with OK");
             (StatusCode::OK, Json(response))

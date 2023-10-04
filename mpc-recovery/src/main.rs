@@ -8,7 +8,6 @@ use clap::Parser;
 use mpc_recovery::{
     firewall::allowed::{OidcProviderList, PartnerList},
     gcp::GcpService,
-    oauth::{PagodaFirebaseTokenVerifier, UniversalTokenVerifier},
     sign_node::migration,
     GenerateResult, LeaderConfig, SignerConfig,
 };
@@ -60,9 +59,6 @@ enum Cli {
         /// GCP datastore URL
         #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
         gcp_datastore_url: Option<String>,
-        /// Whether to accept test tokens
-        #[arg(long, env("MPC_RECOVERY_TEST"), default_value("false"))]
-        test: bool,
     },
     StartSign {
         /// Environment to run in (`dev` or `prod`)
@@ -92,9 +88,6 @@ enum Cli {
         /// GCP datastore URL
         #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
         gcp_datastore_url: Option<String>,
-        /// Whether to accept test tokens
-        #[arg(long, env("MPC_RECOVERY_TEST"), default_value("false"))]
-        test: bool,
     },
     RotateSignNodeCipher {
         /// Environment to run in (`dev` or `prod`)
@@ -233,7 +226,6 @@ async fn main() -> anyhow::Result<()> {
             fast_auth_partners_filepath: partners_filepath,
             gcp_project_id,
             gcp_datastore_url,
-            test,
         } => {
             let gcp_service =
                 GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
@@ -258,11 +250,7 @@ async fn main() -> anyhow::Result<()> {
                 partners,
             };
 
-            if test {
-                mpc_recovery::run_leader_node::<UniversalTokenVerifier>(config).await;
-            } else {
-                mpc_recovery::run_leader_node::<PagodaFirebaseTokenVerifier>(config).await;
-            }
+            mpc_recovery::run_leader_node(config).await;
         }
         Cli::StartSign {
             env,
@@ -274,7 +262,6 @@ async fn main() -> anyhow::Result<()> {
             oidc_providers_filepath,
             gcp_project_id,
             gcp_datastore_url,
-            test,
         } => {
             let gcp_service =
                 GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
@@ -306,11 +293,8 @@ async fn main() -> anyhow::Result<()> {
                 port: web_port,
                 oidc_providers,
             };
-            if test {
-                mpc_recovery::run_sign_node::<UniversalTokenVerifier>(config).await;
-            } else {
-                mpc_recovery::run_sign_node::<PagodaFirebaseTokenVerifier>(config).await;
-            }
+
+            mpc_recovery::run_sign_node(config).await;
         }
         Cli::RotateSignNodeCipher {
             env,
