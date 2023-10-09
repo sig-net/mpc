@@ -50,6 +50,7 @@ pub struct Config {
     // TODO: temporary solution
     pub account_creator_sk: SecretKey,
     pub partners: PartnerList,
+    pub jwt_signature_pk_url: String,
 }
 
 pub async fn run(config: Config) {
@@ -62,6 +63,7 @@ pub async fn run(config: Config) {
         account_creator_id,
         account_creator_sk,
         partners,
+        jwt_signature_pk_url,
     } = config;
     let _span = tracing::debug_span!("run", env, port);
     tracing::debug!(?sign_nodes, "running a leader node");
@@ -99,6 +101,7 @@ pub async fn run(config: Config) {
         account_creator_id,
         account_creator_sk,
         partners,
+        jwt_signature_pk_url,
     });
 
     // Get keys from all sign nodes, and broadcast them out as a set.
@@ -219,6 +222,7 @@ struct LeaderState {
     // TODO: temporary solution
     account_creator_sk: SecretKey,
     partners: PartnerList,
+    jwt_signature_pk_url: String,
 }
 
 async fn mpc_public_key(
@@ -318,9 +322,14 @@ async fn process_user_credentials(
     state: Arc<LeaderState>,
     request: UserCredentialsRequest,
 ) -> Result<UserCredentialsResponse, LeaderNodeError> {
-    verify_oidc_token(&request.oidc_token, &state.partners.oidc_providers())
-        .await
-        .map_err(LeaderNodeError::OidcVerificationFailed)?;
+    verify_oidc_token(
+        &request.oidc_token,
+        &state.partners.oidc_providers(),
+        &state.reqwest_client,
+        &state.jwt_signature_pk_url,
+    )
+    .await
+    .map_err(LeaderNodeError::OidcVerificationFailed)?;
 
     nar::retry(|| async {
         let mpc_user_recovery_pk = get_user_recovery_pk(
@@ -345,10 +354,14 @@ async fn process_new_account(
 ) -> Result<NewAccountResponse, LeaderNodeError> {
     // Create a transaction to create new NEAR account
     let new_user_account_id = request.near_account_id;
-    let oidc_token_claims =
-        verify_oidc_token(&request.oidc_token, &state.partners.oidc_providers())
-            .await
-            .map_err(LeaderNodeError::OidcVerificationFailed)?;
+    let oidc_token_claims = verify_oidc_token(
+        &request.oidc_token,
+        &state.partners.oidc_providers(),
+        &state.reqwest_client,
+        &state.jwt_signature_pk_url,
+    )
+    .await
+    .map_err(LeaderNodeError::OidcVerificationFailed)?;
     let internal_acc_id = oidc_token_claims.get_internal_account_id();
 
     // TODO: move error message from here to this place
@@ -491,9 +504,14 @@ async fn process_sign(
         .map_err(LeaderNodeError::MalformedDelegateAction)?;
 
     // Check OIDC token
-    verify_oidc_token(&request.oidc_token, &state.partners.oidc_providers())
-        .await
-        .map_err(LeaderNodeError::OidcVerificationFailed)?;
+    verify_oidc_token(
+        &request.oidc_token,
+        &state.partners.oidc_providers(),
+        &state.reqwest_client,
+        &state.jwt_signature_pk_url,
+    )
+    .await
+    .map_err(LeaderNodeError::OidcVerificationFailed)?;
 
     // Prevent recovery key delition
     let requested_delegate_actions: &Vec<NonDelegateAction> = &delegate_action.actions;

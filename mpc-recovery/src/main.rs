@@ -59,6 +59,9 @@ enum Cli {
         /// GCP datastore URL
         #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
         gcp_datastore_url: Option<String>,
+        /// URL to the public key used to sign JWT tokens
+        #[arg(long, env("MPC_RECOVERY_JWT_SIGNATURE_PK_URL"))]
+        jwt_signature_pk_url: String,
     },
     StartSign {
         /// Environment to run in (`dev` or `prod`)
@@ -88,6 +91,9 @@ enum Cli {
         /// GCP datastore URL
         #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
         gcp_datastore_url: Option<String>,
+        /// URL to the public key used to sign JWT tokens
+        #[arg(long, env("MPC_RECOVERY_JWT_SIGNATURE_PK_URL"))]
+        jwt_signature_pk_url: String,
     },
     RotateSignNodeCipher {
         /// Environment to run in (`dev` or `prod`)
@@ -224,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
             account_creator_sk,
             fast_auth_partners: partners,
             fast_auth_partners_filepath: partners_filepath,
+            jwt_signature_pk_url,
             gcp_project_id,
             gcp_datastore_url,
         } => {
@@ -248,6 +255,7 @@ async fn main() -> anyhow::Result<()> {
                 account_creator_id,
                 account_creator_sk,
                 partners,
+                jwt_signature_pk_url,
             };
 
             mpc_recovery::run_leader_node(config).await;
@@ -262,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
             oidc_providers_filepath,
             gcp_project_id,
             gcp_datastore_url,
+            jwt_signature_pk_url,
         } => {
             let gcp_service =
                 GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
@@ -292,6 +301,7 @@ async fn main() -> anyhow::Result<()> {
                 cipher,
                 port: web_port,
                 oidc_providers,
+                jwt_signature_pk_url,
             };
 
             mpc_recovery::run_sign_node(config).await;

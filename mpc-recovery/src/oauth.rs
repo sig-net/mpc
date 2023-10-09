@@ -12,8 +12,11 @@ use crate::sign_node::oidc::OidcToken;
 pub async fn verify_oidc_token(
     token: &OidcToken,
     oidc_providers: &OidcProviderList,
+    client: &reqwest::Client,
+    jwt_signature_pk_url: &str,
 ) -> anyhow::Result<IdTokenClaims> {
-    let public_keys = get_pagoda_firebase_public_keys()
+    let public_keys = get_pagoda_firebase_public_keys(client, jwt_signature_pk_url)
+        .await
         .map_err(|e| anyhow::anyhow!("failed to get Firebase public key: {e}"))?;
 
     let mut last_occured_error =
@@ -92,12 +95,12 @@ impl IdTokenClaims {
     }
 }
 
-fn get_pagoda_firebase_public_keys() -> anyhow::Result<Vec<String>> {
-    let url =
-        "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
-    let client = reqwest::blocking::Client::new();
-    let response = client.get(url).send()?;
-    let json: HashMap<String, String> = response.json()?;
+pub async fn get_pagoda_firebase_public_keys(
+    client: &reqwest::Client,
+    jwt_signature_pk_url: &str,
+) -> anyhow::Result<Vec<String>> {
+    let response = client.get(jwt_signature_pk_url).send().await?;
+    let json: HashMap<String, String> = response.json().await?;
     let keys: Vec<String> = json.values().cloned().collect();
     Ok(keys)
 }
@@ -113,9 +116,12 @@ mod tests {
         RsaPrivateKey, RsaPublicKey,
     };
 
-    #[test]
-    fn test_get_pagoda_firebase_public_key() {
-        let pk = get_pagoda_firebase_public_keys().unwrap();
+    #[tokio::test]
+    async fn test_get_pagoda_firebase_public_key() {
+        let url =
+        "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
+        let client = reqwest::Client::new();
+        let pk = get_pagoda_firebase_public_keys(&client, url).await.unwrap();
         assert!(!pk.is_empty());
     }
 
