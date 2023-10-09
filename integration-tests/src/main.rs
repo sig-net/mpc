@@ -127,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("====================================");
             tracing::info!("You can now interact with your local service manually. For example:");
             tracing::info!(
-                r#"curl -X POST -H "Content-Type: application/json" -d '{{"oidc_token": "validToken:1", "near_account_id": "abc45436676.near", "create_account_options": {{"full_access_keys": ["ed25519:4fnCz9NTEMhkfwAHDhFDkPS1mD58QHdRyago5n4vtCS2"]}}}}' http://localhost:3000/new_account"#
+                r#"curl -X POST -H "Content-Type: application/json" -d '{{"oidc_token": <valid_token>, "near_account_id": "abc45436676.near", "create_account_options": {{"full_access_keys": ["ed25519:4fnCz9NTEMhkfwAHDhFDkPS1mD58QHdRyago5n4vtCS2"]}}}}' http://localhost:3000/new_account"#
             );
 
             tracing::info!("Press any button to exit and destroy all containers...");

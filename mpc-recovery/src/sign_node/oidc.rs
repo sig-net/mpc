@@ -63,13 +63,14 @@ impl OidcToken {
             .map(char::from)
             .collect();
         Self {
+            // TODO: return real token from local OIDC provider
             data: format!("validToken:{}", random),
         }
     }
 
     pub fn invalid() -> Self {
         Self {
-            data: "invalidToken".to_string(),
+            data: "invalid_token".to_string(),
         }
     }
 
@@ -220,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_oidc_digest_from_and_to_value() {
-        let oidc_token = OidcToken::new("validToken:oR8hig9XkU");
+        let oidc_token = OidcToken::random();
         let oidc_token_hash = oidc_token.digest_hash();
         let user_pk =
             PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae").unwrap();
@@ -260,7 +261,7 @@ mod tests {
 
     #[test]
     fn test_oidc_to_name() {
-        let oidc_token = OidcToken::new("validToken:oR8hig9XkU");
+        let oidc_token = OidcToken::random();
         let user_pk =
             PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae").unwrap();
         let oidc_token_hash = oidc_token.digest_hash();
