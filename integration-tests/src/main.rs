@@ -34,10 +34,17 @@ async fn main() -> anyhow::Result<()> {
             let datastore_future =
                 containers::Datastore::run(&docker_client, NETWORK, GCP_PROJECT_ID);
 
-            let (relayer_ctx, datastore) =
-                futures::future::join(relayer_ctx_future, datastore_future).await;
+            let oidc_provider_future = containers::OidcProvider::run(
+                &docker_client,
+                FIREBASE_AUDIENCE_ID,
+            );
+
+            let (relayer_ctx, datastore, oidc_provider) =
+                futures::future::join3(relayer_ctx_future, datastore_future, oidc_provider_future).await;
+            
             let relayer_ctx = relayer_ctx?;
             let datastore = datastore?;
+            let oidc_provider = oidc_provider?;
 
             tracing::info!("Generating secrets");
             let GenerateResult { secrets, .. } = mpc_recovery::generate(nodes);
@@ -113,6 +120,14 @@ async fn main() -> anyhow::Result<()> {
                         },
                     },
                 ]).to_string()),
+                "--jwt_signature_pk_url".to_string(),
+                format!(
+                    "http://localhost:{}/jwt_signature_pk_url", // TODO: update this once we have a real local OIDC provider
+                    oidc_provider
+                        .container
+                        .get_host_port_ipv4(containers::OidcProvider::CONTAINER_PORT)
+                ),
+
             ];
             for sign_node in signer_urls {
                 cmd.push("--sign-nodes".to_string());

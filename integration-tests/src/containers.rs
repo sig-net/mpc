@@ -377,6 +377,53 @@ impl<'a> Relayer<'a> {
     }
 }
 
+pub struct OidcProvider<'a> {
+    pub container: Container<'a, GenericImage>,
+    // TODO: do we need address and local_address?
+    pub address: String,
+    pub local_address: String,
+}
+
+impl<'a> OidcProvider<'a> {
+    pub const CONTAINER_PORT: u16 = 3000; // TODO: should it be the same port?
+
+    pub async fn run(
+        docker_client: &'a DockerClient,
+        audience_id: &str,
+    ) -> anyhow::Result<OidcProvider<'a>> {
+        tracing::info!("Running OIDC provider container...");
+        let image = GenericImage::new("near/test-oidc-provider", "latest")
+            .with_wait_for(WaitFor::message_on_stdout("listening on"))
+            .with_exposed_port(Self::CONTAINER_PORT)
+            .with_env_var("RUST_LOG", "DEBUG");
+        let image: RunnableImage<GenericImage> = (
+            image,
+            vec![
+                "--audience".to_string(),
+                audience_id.to_string(),
+                "--issuer".to_string(),
+                format!("https://securetoken.google.com/{}", audience_id), // TODO: should we pass issuer here?
+            ],
+        )
+            .into();
+        let image = image.with_network("host");
+        let container = docker_client.cli.run(image);
+        let ip_address = docker_client
+            .get_network_ip_address(&container, "host")
+            .await?;
+        let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
+
+        let full_address = format!("http://{}:{}", ip_address, Self::CONTAINER_PORT);
+        tracing::info!("OIDC provider container is running at {}", full_address);
+        Ok(OidcProvider {
+            container,
+            address: full_address,
+            local_address: format!("http://localhost:{host_port}"),
+        })
+    }
+
+}
+
 pub struct Datastore<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
