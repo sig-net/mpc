@@ -113,7 +113,6 @@ async fn main() -> anyhow::Result<()> {
                         },
                     },
                 ]).to_string()),
-                "--test".to_string(),
             ];
             for sign_node in signer_urls {
                 cmd.push("--sign-nodes".to_string());

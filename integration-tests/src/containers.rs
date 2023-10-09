@@ -499,7 +499,6 @@ impl<'a> SignerNode<'a> {
                 gcp_project_id.to_string(),
                 "--gcp-datastore-url".to_string(),
                 datastore_url.to_string(),
-                "--test".to_string(),
             ],
         )
             .into();
@@ -646,7 +645,6 @@ impl<'a> LeaderNode<'a> {
             gcp_project_id.to_string(),
             "--gcp-datastore-url".to_string(),
             datastore_url.to_string(),
-            "--test".to_string(),
         ];
         for sign_node in sign_nodes {
             cmd.push("--sign-nodes".to_string());
