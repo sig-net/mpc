@@ -74,7 +74,10 @@ ds+wB0xAtA8wkWEu8N8SGXcCAwEAAQ==
 
 #[tokio::main]
 async fn main() {
-    let app = Router::new().route("/jwt_signature_public_keys", get(jwt_signature_public_keys_handler));
+    let app = Router::new().route(
+        "/jwt_signature_public_keys",
+        get(jwt_signature_public_keys_handler),
+    );
 
     let addr = "127.0.0.1:8080".parse().unwrap();
     axum::Server::bind(&addr)
@@ -84,9 +87,7 @@ async fn main() {
 }
 
 async fn jwt_signature_public_keys_handler() -> impl axum::response::IntoResponse {
-    let jwt_signature_public_keys = jwt_signature_public_keys().await;
-    let response = axum::Json(jwt_signature_public_keys);
-    response
+    axum::Json(jwt_signature_public_keys().await)
 }
 
 async fn jwt_signature_public_keys() -> HashMap<String, String> {
