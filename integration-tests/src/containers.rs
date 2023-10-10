@@ -421,7 +421,6 @@ impl<'a> OidcProvider<'a> {
             local_address: format!("http://localhost:{host_port}"),
         })
     }
-
 }
 
 pub struct Datastore<'a> {
@@ -517,6 +516,7 @@ impl<'a> SignerNode<'a> {
         datastore_local_url: &str,
         gcp_project_id: &str,
         firebase_audience_id: &str,
+        oidc_provider_url: &str,
     ) -> anyhow::Result<SignerNode<'a>> {
         tracing::info!("Running signer node container {}...", node_id);
         let image: GenericImage = GenericImage::new("near/mpc-recovery", "latest")
@@ -546,6 +546,8 @@ impl<'a> SignerNode<'a> {
                 gcp_project_id.to_string(),
                 "--gcp-datastore-url".to_string(),
                 datastore_url.to_string(),
+                "--jwt-signature-pk-url".to_string(),
+                format!("{}/jwt_signature_pk_url", oidc_provider_url),
             ],
         )
             .into();
@@ -656,6 +658,7 @@ impl<'a> LeaderNode<'a> {
         account_creator_id: &AccountId,
         account_creator_sk: &workspaces::types::SecretKey,
         firebase_audience_id: &str,
+        oidc_provider_url: &str,
     ) -> anyhow::Result<LeaderNode<'a>> {
         tracing::info!("Running leader node container...");
 
@@ -692,6 +695,8 @@ impl<'a> LeaderNode<'a> {
             gcp_project_id.to_string(),
             "--gcp-datastore-url".to_string(),
             datastore_url.to_string(),
+            "--jwt-signature-pk-url".to_string(),
+            format!("{}/jwt_signature_pk_url", oidc_provider_url),
         ];
         for sign_node in sign_nodes {
             cmd.push("--sign-nodes".to_string());

@@ -16,8 +16,5 @@ FROM debian:bookworm-slim as runtime
 # Copy the built binary from the builder stage into the final image
 COPY --from=builder /app/target/release/test-oidc-provider /usr/local/bin/test-oidc-provider
 
-# Expose the port your application listens on
-EXPOSE 8080
-
 # Run your application when the container starts
 CMD ["test-oidc-provider"]

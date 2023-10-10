@@ -5,3 +5,4 @@ members = [
     "load-tests",
     "test-oidc-provider",
 ]
+resolver = "2"

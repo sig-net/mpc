@@ -34,14 +34,13 @@ async fn main() -> anyhow::Result<()> {
             let datastore_future =
                 containers::Datastore::run(&docker_client, NETWORK, GCP_PROJECT_ID);
 
-            let oidc_provider_future = containers::OidcProvider::run(
-                &docker_client,
-                FIREBASE_AUDIENCE_ID,
-            );
+            let oidc_provider_future =
+                containers::OidcProvider::run(&docker_client, FIREBASE_AUDIENCE_ID);
 
             let (relayer_ctx, datastore, oidc_provider) =
-                futures::future::join3(relayer_ctx_future, datastore_future, oidc_provider_future).await;
-            
+                futures::future::join3(relayer_ctx_future, datastore_future, oidc_provider_future)
+                    .await;
+
             let relayer_ctx = relayer_ctx?;
             let datastore = datastore?;
             let oidc_provider = oidc_provider?;
@@ -61,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
                     &datastore.local_address,
                     GCP_PROJECT_ID,
                     FIREBASE_AUDIENCE_ID,
+                    &oidc_provider.local_address,
                 );
                 signer_node_futures.push(signer_node);
             }
@@ -120,9 +120,9 @@ async fn main() -> anyhow::Result<()> {
                         },
                     },
                 ]).to_string()),
-                "--jwt_signature_pk_url".to_string(),
+                "--jwt-signature-pk-url".to_string(),
                 format!(
-                    "http://localhost:{}/jwt_signature_pk_url", // TODO: update this once we have a real local OIDC provider
+                    "http://localhost:{}/jwt_signature_pk_url",
                     oidc_provider
                         .container
                         .get_host_port_ipv4(containers::OidcProvider::CONTAINER_PORT)
