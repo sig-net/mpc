@@ -5625,8 +5625,6 @@ name = "test-oidc-provider"
 version = "0.1.0"
 dependencies = [
  "axum",
- "jsonwebtoken",
- "openssl",
  "tokio",
 ]
 
