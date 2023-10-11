@@ -89,11 +89,13 @@ async fn main() {
     );
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    tracing::info!(?addr, "starting http server");
+    
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
         .expect("Failed to bind server");
+
+    tracing::info!(?addr, "Test OIDC Provider server started");
 }
 
 async fn jwt_signature_public_keys_handler() -> impl axum::response::IntoResponse {

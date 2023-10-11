@@ -393,17 +393,17 @@ impl<'a> OidcProvider<'a> {
     ) -> anyhow::Result<OidcProvider<'a>> {
         tracing::info!("Running OIDC provider container...");
         let image = GenericImage::new("near/test-oidc-provider", "latest")
-            .with_wait_for(WaitFor::message_on_stdout("listening on"))
+            .with_wait_for(WaitFor::Nothing)
             .with_exposed_port(Self::CONTAINER_PORT)
             .with_env_var("RUST_LOG", "DEBUG");
-        let image: RunnableImage<GenericImage> = image.into();
-        let image = image.with_network(network);
-        let container = docker_client.cli.run(image);
-        let ip_address = docker_client
-            .get_network_ip_address(&container, "host")
+                let image: RunnableImage<GenericImage> = image.into();
+                let image = image.with_network(network);
+                let container = docker_client.cli.run(image);
+                let ip_address = docker_client
+            .get_network_ip_address(&container, network)
             .await?;
-        let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
-
+                let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
+        
         let full_address = format!("http://{}:{}", ip_address, Self::CONTAINER_PORT);
         tracing::info!("OIDC provider container is running at {}", full_address);
         Ok(OidcProvider {
