@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Ok};
@@ -208,21 +208,15 @@ pub async fn pick_unused_port() -> anyhow::Result<u16> {
 }
 
 pub fn target_dir() -> Option<PathBuf> {
-    let mut out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|e| {
-        panic!(
-            "Failed to get OUT_DIR env variable: {e}.\n\
-            Please run `cargo test` from the root of the repository.",
-        )
-    }));
-
+    let mut out_dir = Path::new(std::env!("OUT_DIR"));
     loop {
         if out_dir.ends_with("target") {
-            return Some(out_dir.to_path_buf());
+            break Some(out_dir.to_path_buf());
         }
 
         match out_dir.parent() {
-            Some(parent) => out_dir = parent.to_owned(),
-            None => return None, // We've reached the root directory and didn't find "target"
+            Some(parent) => out_dir = parent,
+            None => break None, // We've reached the root directory and didn't find "target"
         }
     }
 }

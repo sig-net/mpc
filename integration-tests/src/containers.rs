@@ -586,6 +586,8 @@ pub struct LeaderNode<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
     local_address: String,
+    near_rpc: String,
+    relayer_url: String,
 }
 
 pub struct LeaderNodeApi {
@@ -671,14 +673,19 @@ impl<'a> LeaderNode<'a> {
             container,
             address: full_address,
             local_address: format!("http://localhost:{host_port}"),
+            near_rpc: near_rpc.to_string(),
+            relayer_url: relayer_url.to_string(),
         })
     }
 
-    pub fn api(&self, near_rpc: &str, relayer: &DelegateActionRelayer) -> LeaderNodeApi {
+    pub fn api(&self) -> LeaderNodeApi {
         LeaderNodeApi {
-            address: self.local_address.clone(),
-            client: NearRpcAndRelayerClient::connect(near_rpc),
-            relayer: relayer.clone(),
+            address: self.address.clone(),
+            client: NearRpcAndRelayerClient::connect(&self.near_rpc),
+            relayer: DelegateActionRelayer {
+                url: self.relayer_url.clone(),
+                api_key: None,
+            },
         }
     }
 }

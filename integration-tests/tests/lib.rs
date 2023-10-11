@@ -3,7 +3,6 @@ mod mpc;
 use curv::elliptic::curves::{Ed25519, Point};
 use hyper::StatusCode;
 use mpc_recovery::{
-    firewall::allowed::DelegateActionRelayer,
     gcp::GcpService,
     msg::{
         ClaimOidcResponse, MpcPkResponse, NewAccountResponse, SignResponse, UserCredentialsResponse,
@@ -60,7 +59,7 @@ where
     let mut signer_node_futures = Vec::new();
     for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
         signer_node_futures.push(local::SignerNode::run(
-            util::pick_unused_port().await? as usize,
+            util::pick_unused_port().await?,
             i as u64,
             share,
             cipher_key,
@@ -78,7 +77,7 @@ where
 
     let near_root_account = relayer_ctx.worker.root_account()?;
     let leader_node = local::LeaderNode::run(
-        util::pick_unused_port().await? as usize,
+        util::pick_unused_port().await?,
         signer_urls.clone(),
         &relayer_ctx.sandbox.local_address,
         &relayer_ctx.relayer.local_address,
@@ -93,14 +92,8 @@ where
     .await?;
 
     f(TestContext {
-        leader_node: leader_node.api(
-            &relayer_ctx.sandbox.local_address,
-            &DelegateActionRelayer {
-                url: relayer_ctx.relayer.local_address.clone(),
-                api_key: None,
-            },
-        ),
         pk_set,
+        leader_node: leader_node.api(),
         signer_nodes: signer_nodes.iter().map(|n| n.api()).collect(),
         worker: relayer_ctx.worker.clone(),
         gcp_datastore_url: datastore.local_address,

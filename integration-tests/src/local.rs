@@ -27,7 +27,7 @@ pub struct SignerNode {
 
 impl SignerNode {
     pub async fn run(
-        web_port: usize,
+        web_port: u16,
         node_id: u64,
         sk_share: &ExpandedKeyPair,
         cipher_key: &GenericArray<u8, U32>,
@@ -117,22 +117,16 @@ impl SignerNode {
 
 pub struct LeaderNode {
     pub address: String,
+    near_rpc: String,
+    relayer_url: String,
 
     // process held so it's not dropped. Once dropped, process will be killed.
     #[allow(unused)]
     process: Child,
 }
 impl LeaderNode {
-    pub fn api(&self, near_rpc: &str, relayer: &DelegateActionRelayer) -> LeaderNodeApi {
-        LeaderNodeApi {
-            address: self.address.clone(),
-            client: NearRpcAndRelayerClient::connect(near_rpc),
-            relayer: relayer.clone(),
-        }
-    }
-
     pub async fn run(
-        web_port: usize,
+        web_port: u16,
         sign_nodes: Vec<String>,
         near_rpc: &str,
         relayer_url: &str,
@@ -206,7 +200,20 @@ impl LeaderNode {
         tracing::info!("Leader node container is running at {address}");
         Ok(Self {
             address,
+            near_rpc: near_rpc.to_string(),
+            relayer_url: relayer_url.to_string(),
             process: child,
         })
+    }
+
+    pub fn api(&self) -> LeaderNodeApi {
+        LeaderNodeApi {
+            address: self.address.clone(),
+            client: NearRpcAndRelayerClient::connect(&self.near_rpc),
+            relayer: DelegateActionRelayer {
+                url: self.relayer_url.clone(),
+                api_key: None,
+            },
+        }
     }
 }
