@@ -5,6 +5,7 @@ use std::{
 };
 
 use axum::{routing::get, Router};
+use tracing_subscriber::EnvFilter;
 
 const _SECRET_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----
 MIIJKAIBAAKCAgEAg6UuFBM3QmtQID8cOHltjM8WF/XpFj2d5feVShG19jan76n6
@@ -75,6 +76,12 @@ ds+wB0xAtA8wkWEu8N8SGXcCAwEAAQ==
 
 #[tokio::main]
 async fn main() {
+    // Tracing setup
+    tracing_subscriber::fmt()
+        .with_thread_ids(true)
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     tracing::info!("Starting Test OIDC Provider server...");
     let app = Router::new().route(
         "/jwt_signature_public_keys",
