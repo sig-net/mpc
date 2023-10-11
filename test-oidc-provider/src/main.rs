@@ -1,6 +1,7 @@
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
+    net::SocketAddr,
 };
 
 use axum::{routing::get, Router};
@@ -74,24 +75,29 @@ ds+wB0xAtA8wkWEu8N8SGXcCAwEAAQ==
 
 #[tokio::main]
 async fn main() {
+    tracing::info!("Starting Test OIDC Provider server...");
     let app = Router::new().route(
         "/jwt_signature_public_keys",
         get(jwt_signature_public_keys_handler),
     );
 
-    let addr = "127.0.0.1:8080".parse().unwrap();
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    tracing::info!(?addr, "starting http server");
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
-        .expect("Server error");
+        .expect("Failed to bind server");
 }
 
 async fn jwt_signature_public_keys_handler() -> impl axum::response::IntoResponse {
+    tracing::info!("jwt_signature_public_keys called");
     axum::Json(jwt_signature_public_keys().await)
 }
 
 async fn jwt_signature_public_keys() -> HashMap<String, String> {
-    HashMap::from([(hash_string(PUBLIC_KEY), String::from(PUBLIC_KEY))])
+    let public_keys = HashMap::from([(hash_string(PUBLIC_KEY), String::from(PUBLIC_KEY))]);
+    tracing::info!("Returning jwt_signature_public_keys: {:?}", public_keys);
+    public_keys
 }
 
 fn hash_string(input_string: &str) -> String {

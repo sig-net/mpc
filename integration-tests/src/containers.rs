@@ -385,28 +385,19 @@ pub struct OidcProvider<'a> {
 }
 
 impl<'a> OidcProvider<'a> {
-    pub const CONTAINER_PORT: u16 = 3000; // TODO: should it be the same port?
+    pub const CONTAINER_PORT: u16 = 3000;
 
     pub async fn run(
         docker_client: &'a DockerClient,
-        audience_id: &str,
+        network: &str,
     ) -> anyhow::Result<OidcProvider<'a>> {
         tracing::info!("Running OIDC provider container...");
         let image = GenericImage::new("near/test-oidc-provider", "latest")
             .with_wait_for(WaitFor::message_on_stdout("listening on"))
             .with_exposed_port(Self::CONTAINER_PORT)
             .with_env_var("RUST_LOG", "DEBUG");
-        let image: RunnableImage<GenericImage> = (
-            image,
-            vec![
-                "--audience".to_string(),
-                audience_id.to_string(),
-                "--issuer".to_string(),
-                format!("https://securetoken.google.com/{}", audience_id), // TODO: should we pass issuer here?
-            ],
-        )
-            .into();
-        let image = image.with_network("host");
+        let image: RunnableImage<GenericImage> = image.into();
+        let image = image.with_network(network);
         let container = docker_client.cli.run(image);
         let ip_address = docker_client
             .get_network_ip_address(&container, "host")

@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
                 containers::Datastore::run(&docker_client, NETWORK, GCP_PROJECT_ID);
 
             let oidc_provider_future =
-                containers::OidcProvider::run(&docker_client, FIREBASE_AUDIENCE_ID);
+                containers::OidcProvider::run(&docker_client, NETWORK);
 
             let (relayer_ctx, datastore, oidc_provider) =
                 futures::future::join3(relayer_ctx_future, datastore_future, oidc_provider_future)
