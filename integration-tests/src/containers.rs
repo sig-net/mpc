@@ -397,15 +397,11 @@ impl<'a> OidcProvider<'a> {
         let image: RunnableImage<GenericImage> = image.into();
         let image = image.with_network(network);
         let container = docker_client.cli.run(image);
-        let ip_address = docker_client
-            .get_network_ip_address(&container, network)
-            .await?;
+
         let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
 
-        let jwt_signature_public_keys_url = format!(
-            "http://{}:{}/jwt_signature_public_keys",
-            ip_address, host_port
-        );
+        let jwt_signature_public_keys_url =
+            format!("http://localhost:{}/jwt_signature_public_keys", host_port);
         tracing::info!(
             "OIDC provider container is running, jwt signature pk url: {}",
             jwt_signature_public_keys_url
