@@ -16,7 +16,6 @@ use workspaces::{network::Sandbox, Worker};
 
 const NETWORK: &str = "mpc_it_network";
 const GCP_PROJECT_ID: &str = "mpc-recovery-gcp-project";
-// TODO: figure out how to instantiate and use a local firebase deployment
 pub const FIREBASE_AUDIENCE_ID: &str = "test_audience";
 
 pub struct TestContext {
