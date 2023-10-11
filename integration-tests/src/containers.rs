@@ -379,9 +379,7 @@ impl<'a> Relayer<'a> {
 
 pub struct OidcProvider<'a> {
     pub container: Container<'a, GenericImage>,
-    // TODO: do we need address and local_address?
-    pub address: String,
-    pub local_address: String,
+    pub jwt_signature_public_keys_url: String,
 }
 
 impl<'a> OidcProvider<'a> {
@@ -396,20 +394,25 @@ impl<'a> OidcProvider<'a> {
             .with_wait_for(WaitFor::Nothing)
             .with_exposed_port(Self::CONTAINER_PORT)
             .with_env_var("RUST_LOG", "DEBUG");
-                let image: RunnableImage<GenericImage> = image.into();
-                let image = image.with_network(network);
-                let container = docker_client.cli.run(image);
-                let ip_address = docker_client
+        let image: RunnableImage<GenericImage> = image.into();
+        let image = image.with_network(network);
+        let container = docker_client.cli.run(image);
+        let ip_address = docker_client
             .get_network_ip_address(&container, network)
             .await?;
-                let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
-        
-        let full_address = format!("http://{}:{}", ip_address, Self::CONTAINER_PORT);
-        tracing::info!("OIDC provider container is running at {}", full_address);
+        let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
+
+        let jwt_signature_public_keys_url = format!(
+            "http://{}:{}/jwt_signature_public_keys",
+            ip_address, host_port
+        );
+        tracing::info!(
+            "OIDC provider container is running, jwt signature pk url: {}",
+            jwt_signature_public_keys_url
+        );
         Ok(OidcProvider {
             container,
-            address: full_address,
-            local_address: format!("http://localhost:{host_port}"),
+            jwt_signature_public_keys_url,
         })
     }
 }
@@ -538,7 +541,7 @@ impl<'a> SignerNode<'a> {
                 "--gcp-datastore-url".to_string(),
                 datastore_url.to_string(),
                 "--jwt-signature-pk-url".to_string(),
-                format!("{}/jwt_signature_pk_url", oidc_provider_url),
+                oidc_provider_url.to_string(),
             ],
         )
             .into();
@@ -687,7 +690,7 @@ impl<'a> LeaderNode<'a> {
             "--gcp-datastore-url".to_string(),
             datastore_url.to_string(),
             "--jwt-signature-pk-url".to_string(),
-            format!("{}/jwt_signature_pk_url", oidc_provider_url),
+            oidc_provider_url.to_string(),
         ];
         for sign_node in sign_nodes {
             cmd.push("--sign-nodes".to_string());

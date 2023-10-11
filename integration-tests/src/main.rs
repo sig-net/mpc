@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
                     &datastore.local_address,
                     GCP_PROJECT_ID,
                     FIREBASE_AUDIENCE_ID,
-                    &oidc_provider.local_address,
+                    &oidc_provider.jwt_signature_public_keys_url,
                 );
                 signer_node_futures.push(signer_node);
             }
@@ -120,12 +120,7 @@ async fn main() -> anyhow::Result<()> {
                     },
                 ]).to_string()),
                 "--jwt-signature-pk-url".to_string(),
-                format!(
-                    "http://localhost:{}/jwt_signature_pk_url",
-                    oidc_provider
-                        .container
-                        .get_host_port_ipv4(containers::OidcProvider::CONTAINER_PORT)
-                ),
+                oidc_provider.jwt_signature_public_keys_url,
 
             ];
             for sign_node in signer_urls {
