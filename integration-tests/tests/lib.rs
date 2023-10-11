@@ -10,7 +10,7 @@ use mpc_recovery::{
     },
     GenerateResult,
 };
-use mpc_recovery_integration_tests::containers;
+use mpc_recovery_integration_tests::{containers, util};
 use near_primitives::utils::generate_random_string;
 use workspaces::{network::Sandbox, Worker};
 
@@ -59,18 +59,16 @@ where
     let GenerateResult { pk_set, secrets } = mpc_recovery::generate(nodes);
     let mut signer_node_futures = Vec::new();
     for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
-        let signer_node = containers::SignerNode::run_signing_node(
-            &docker_client,
-            NETWORK,
+        signer_node_futures.push(containers::SignerNode::run_local(
+            util::pick_unused_port().await? as usize,
             i as u64,
             share,
             cipher_key,
-            &datastore.address,
             &datastore.local_address,
             GCP_PROJECT_ID,
             FIREBASE_AUDIENCE_ID,
-        );
-        signer_node_futures.push(signer_node);
+            true,
+        ));
     }
     let signer_nodes = futures::future::join_all(signer_node_futures)
         .await
@@ -79,18 +77,18 @@ where
     let signer_urls: &Vec<_> = &signer_nodes.iter().map(|n| n.address.clone()).collect();
 
     let near_root_account = relayer_ctx.worker.root_account()?;
-    let leader_node = containers::LeaderNode::run(
-        &docker_client,
-        NETWORK,
+    let leader_node = containers::LeaderNode::run_local(
+        util::pick_unused_port().await? as usize,
         signer_urls.clone(),
-        &relayer_ctx.sandbox.address,
-        &relayer_ctx.relayer.address,
-        &datastore.address,
+        &relayer_ctx.sandbox.local_address,
+        &relayer_ctx.relayer.local_address,
+        &datastore.local_address,
         GCP_PROJECT_ID,
         near_root_account.id(),
         relayer_ctx.creator_account.id(),
         relayer_ctx.creator_account.secret_key(),
         FIREBASE_AUDIENCE_ID,
+        true,
     )
     .await?;
 

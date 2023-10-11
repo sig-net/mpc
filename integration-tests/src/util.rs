@@ -1,6 +1,7 @@
 use std::{
     fs::{self, File},
     io::Write,
+    path::PathBuf,
 };
 
 use anyhow::{Context, Ok};
@@ -43,6 +44,26 @@ where
         serde_json::from_slice(&data).context("failed to deserialize the response body")?;
 
     Ok((status, response))
+}
+
+pub async fn get<U>(uri: U) -> anyhow::Result<StatusCode>
+where
+    Uri: TryFrom<U>,
+    <Uri as TryFrom<U>>::Error: Into<hyper::http::Error>,
+{
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .context("failed to build the request")?;
+
+    let client = Client::new();
+    let response = client
+        .request(req)
+        .await
+        .context("failed to send the request")?;
+    Ok(response.status())
 }
 
 #[derive(Deserialize, Serialize)]
@@ -173,4 +194,35 @@ pub fn create_relayer_cofig_file(
         .to_str()
         .expect("Failed to convert config file path to string")
         .to_string())
+}
+
+/// Request an unused port from the OS.
+pub async fn pick_unused_port() -> anyhow::Result<u16> {
+    // Port 0 means the OS gives us an unused port
+    // Important to use localhost as using 0.0.0.0 leads to users getting brief firewall popups to
+    // allow inbound connections on MacOS.
+    let addr = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let port = listener.local_addr()?.port();
+    Ok(port)
+}
+
+pub fn target_dir() -> Option<PathBuf> {
+    let mut out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|e| {
+        panic!(
+            "Failed to get OUT_DIR env variable: {e}.\n\
+            Please run `cargo test` from the root of the repository.",
+        )
+    }));
+
+    loop {
+        if out_dir.ends_with("target") {
+            return Some(out_dir.to_path_buf());
+        }
+
+        match out_dir.parent() {
+            Some(parent) => out_dir = parent.to_owned(),
+            None => return None, // We've reached the root directory and didn't find "target"
+        }
+    }
 }
