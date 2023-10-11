@@ -102,6 +102,7 @@ pub async fn get_pagoda_firebase_public_keys(
     let response = client.get(jwt_signature_pk_url).send().await?;
     let json: HashMap<String, String> = response.json().await?;
     let keys: Vec<String> = json.values().cloned().collect();
+    tracing::info!("get_pagoda_firebase_public_keys keys: {:?}", keys);
     Ok(keys)
 }
 

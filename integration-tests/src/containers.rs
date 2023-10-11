@@ -379,7 +379,7 @@ impl<'a> Relayer<'a> {
 
 pub struct OidcProvider<'a> {
     pub container: Container<'a, GenericImage>,
-    pub jwt_signature_public_keys_url: String,
+    pub jwt_pk_url: String,
 }
 
 impl<'a> OidcProvider<'a> {
@@ -398,17 +398,20 @@ impl<'a> OidcProvider<'a> {
         let image = image.with_network(network);
         let container = docker_client.cli.run(image);
 
-        let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
+        let ip_address = docker_client
+            .get_network_ip_address(&container, network)
+            .await?;
 
-        let jwt_signature_public_keys_url =
-            format!("http://localhost:{}/jwt_signature_public_keys", host_port);
+        let full_address = format!("http://{}:{}", ip_address, Self::CONTAINER_PORT);
+        let jwt_pk_url = format!("{}/jwt_signature_public_keys", full_address);
+
         tracing::info!(
             "OIDC provider container is running, jwt signature pk url: {}",
-            jwt_signature_public_keys_url
+            jwt_pk_url
         );
         Ok(OidcProvider {
             container,
-            jwt_signature_public_keys_url,
+            jwt_pk_url,
         })
     }
 }
