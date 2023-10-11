@@ -10,7 +10,7 @@ use mpc_recovery::{
     },
     GenerateResult,
 };
-use mpc_recovery_integration_tests::{containers, util};
+use mpc_recovery_integration_tests::{containers, local, util};
 use near_primitives::utils::generate_random_string;
 use workspaces::{network::Sandbox, Worker};
 
@@ -59,7 +59,7 @@ where
     let GenerateResult { pk_set, secrets } = mpc_recovery::generate(nodes);
     let mut signer_node_futures = Vec::new();
     for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
-        signer_node_futures.push(containers::SignerNode::run_local(
+        signer_node_futures.push(local::SignerNode::run(
             util::pick_unused_port().await? as usize,
             i as u64,
             share,
@@ -77,7 +77,7 @@ where
     let signer_urls: &Vec<_> = &signer_nodes.iter().map(|n| n.address.clone()).collect();
 
     let near_root_account = relayer_ctx.worker.root_account()?;
-    let leader_node = containers::LeaderNode::run_local(
+    let leader_node = local::LeaderNode::run(
         util::pick_unused_port().await? as usize,
         signer_urls.clone(),
         &relayer_ctx.sandbox.local_address,

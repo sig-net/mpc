@@ -10,6 +10,7 @@ use workspaces::{
 pub mod containers;
 pub mod sandbox;
 pub mod util;
+pub mod local;
 
 async fn fetch_validator_keys(
     docker_client: &containers::DockerClient,
