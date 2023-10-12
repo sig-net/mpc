@@ -1,7 +1,10 @@
+use std::borrow::Cow;
+
 use clap::Parser;
 use mpc_recovery::GenerateResult;
 use mpc_recovery_integration_tests::containers;
 use near_primitives::utils::generate_random_string;
+use shell_escape::escape;
 use tokio::io::{stdin, AsyncReadExt};
 use tracing_subscriber::EnvFilter;
 
@@ -101,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
                         .get_host_port_ipv4(containers::Datastore::CONTAINER_PORT)
                 ),
                 "--fast-auth-partners".to_string(),
-                escape_json_string(&serde_json::json!([
+                escape(Cow::Owned(serde_json::json!([
                     {
                         "oidc_provider": {
                             "issuer": format!("https://securetoken.google.com/{}", FIREBASE_AUDIENCE_ID.to_string()),
@@ -118,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
                             "api_key": serde_json::Value::Null,
                         },
                     },
-                ]).to_string()),
+                ]).to_string())).to_string(),
                 "--jwt-signature-pk-url".to_string(),
                 oidc_provider.jwt_pk_url,
 
@@ -146,25 +149,4 @@ async fn main() -> anyhow::Result<()> {
     };
 
     Ok(())
-}
-
-fn escape_json_string(input: &str) -> String {
-    let mut result = String::with_capacity(input.len() + 2);
-    result.push('"');
-
-    for c in input.chars() {
-        match c {
-            '"' => result.push_str(r"\\"),
-            '\\' => result.push_str(r"\\"),
-            '\n' => result.push_str(r"\n"),
-            '\r' => result.push_str(r"\r"),
-            '\t' => result.push_str(r"\t"),
-            '\u{08}' => result.push_str(r"\b"), // Backspace
-            '\u{0C}' => result.push_str(r"\f"), // Form feed
-            _ => result.push(c),
-        }
-    }
-
-    result.push('"');
-    result
 }
