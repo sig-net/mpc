@@ -61,6 +61,17 @@ resource "google_cloud_run_v2_service" "leader" {
           }
         }
       }
+
+      env {
+        name = "MPC_RECOVERY_JWT_SIGNATURE_PK_URL"
+        value_source {
+          secret_key_ref {
+            secret  = var.jwt_signature_pk_url
+            version = "latest"
+          }
+        }
+      }
+
       env {
         name  = "RUST_LOG"
         value = "mpc_recovery=debug"
