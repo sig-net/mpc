@@ -406,114 +406,153 @@ where
     Ok(entries)
 }
 
-// impl Cli {
+impl Cli {
+    pub fn into_str_args(self) -> Vec<String> {
+        match self {
+            Cli::Generate { n } => {
+                vec!["generate".to_string(), n.to_string()]
+            }
+            Cli::StartLeader {
+                env,
+                web_port,
+                sign_nodes,
+                near_rpc,
+                near_root_account,
+                account_creator_id,
+                account_creator_sk,
+                fast_auth_partners,
+                fast_auth_partners_filepath,
+                gcp_project_id,
+                gcp_datastore_url,
+                test,
+            } => {
+                let mut buf = vec![
+                    "start-leader".to_string(),
+                    "--env".to_string(),
+                    env.to_string(),
+                    "--web-port".to_string(),
+                    web_port.to_string(),
+                    "--near-rpc".to_string(),
+                    near_rpc,
+                    "--near-root-account".to_string(),
+                    near_root_account,
+                    "--account-creator-id".to_string(),
+                    account_creator_id.to_string(),
+                    "--gcp-project-id".to_string(),
+                    gcp_project_id,
+                ];
 
-// fn generate_command_args(self) -> Vec<String> {
-//     match self {
-//         Cli::Generate { n } => {
-//             command_args.push("--n".to_string());
-//             command_args.push(n.to_string());
-//         }
-//         Cli::StartLeader {
-//             env,
-//             web_port,
-//             sign_nodes,
-//             near_rpc,
-//             near_root_account,
-//             account_creator_id,
-//             account_creator_sk,
-//             fast_auth_partners,
-//             fast_auth_partners_filepath,
-//             gcp_project_id,
-//             gcp_datastore_url,
-//             test,
-//         } => {
-//             // command_args.push("--env".to_string());
-//             // command_args.push(env);
-//             // command_args.push("--web_port".to_string());
-//             // command_args.push(web_port.to_string());
+                if let Some(key) = account_creator_sk {
+                    buf.push("--account-creator-sk".to_string());
+                    buf.push(key);
+                }
+                if let Some(partners) = fast_auth_partners {
+                    buf.push("--fast-auth-partners".to_string());
+                    buf.push(partners);
+                }
+                if let Some(partners_filepath) = fast_auth_partners_filepath {
+                    buf.push("--fast-auth-partners-filepath".to_string());
+                    buf.push(partners_filepath.to_str().unwrap().to_string());
+                }
+                if let Some(gcp_datastore_url) = gcp_datastore_url {
+                    buf.push("--gcp-datastore-url".to_string());
+                    buf.push(gcp_datastore_url);
+                }
+                if test {
+                    buf.push("--test".to_string());
+                }
+                for sign_node in sign_nodes {
+                    buf.push("--sign-nodes".to_string());
+                    buf.push(sign_node);
+                }
+                buf
+            }
+            Cli::StartSign {
+                env,
+                node_id,
+                web_port,
+                cipher_key,
+                sk_share,
+                oidc_providers,
+                oidc_providers_filepath,
+                gcp_project_id,
+                gcp_datastore_url,
+                test,
+            } => {
+                let mut buf = vec![
+                    "start-sign".to_string(),
+                    "--env".to_string(),
+                    env.to_string(),
+                    "--node-id".to_string(),
+                    node_id.to_string(),
+                    "--web-port".to_string(),
+                    web_port.to_string(),
+                    "--gcp-project-id".to_string(),
+                    gcp_project_id,
+                ];
+                if let Some(key) = cipher_key {
+                    buf.push("--cipher-key".to_string());
+                    buf.push(key);
+                }
+                if let Some(share) = sk_share {
+                    buf.push("--sk-share".to_string());
+                    buf.push(share);
+                }
+                if let Some(providers) = oidc_providers {
+                    buf.push("--oidc-providers".to_string());
+                    buf.push(providers);
+                }
+                if let Some(providers_filepath) = oidc_providers_filepath {
+                    buf.push("--oidc-providers-filepath".to_string());
+                    buf.push(providers_filepath.to_str().unwrap().to_string());
+                }
+                if let Some(gcp_datastore_url) = gcp_datastore_url {
+                    buf.push("--gcp-datastore-url".to_string());
+                    buf.push(gcp_datastore_url);
+                }
+                if test {
+                    buf.push("--test".to_string());
+                }
 
-//             // for sign_node in sign_nodes {
-//             //     command_args.push("--sign_nodes".to_string());
-//             //     command_args.push(sign_node);
-//             // }
+                buf
+            }
+            Cli::RotateSignNodeCipher {
+                env,
+                new_env,
+                node_id,
+                old_cipher_key,
+                new_cipher_key,
+                gcp_project_id,
+                gcp_datastore_url,
+            } => {
+                let mut buf = vec![
+                    "rotate-sign-node-cipher".to_string(),
+                    "--env".to_string(),
+                    env.to_string(),
+                    "--node-id".to_string(),
+                    node_id.to_string(),
+                    "--gcp-project-id".to_string(),
+                    gcp_project_id,
+                ];
+                if let Some(new_env) = new_env {
+                    buf.push("--new-env".to_string());
+                    buf.push(new_env);
+                }
+                if let Some(old_cipher_key) = old_cipher_key {
+                    buf.push("--old-cipher-key".to_string());
+                    buf.push(old_cipher_key);
+                }
+                if let Some(new_cipher_key) = new_cipher_key {
+                    buf.push("--new-cipher-key".to_string());
+                    buf.push(new_cipher_key);
+                }
+                if let Some(gcp_datastore_url) = gcp_datastore_url {
+                    buf.push("--gcp-datastore-url".to_string());
+                    buf.push(gcp_datastore_url);
+                }
 
-//             // command_args.push("--near_rpc".to_string());
-//             // command_args.push(near_rpc);
-//             // command_args.push("--near_root_account".to_string());
-//             // command_args.push(near_root_account);
-//             // // ...
-
-//             vec![
-//                 "--env".into(), env,
-//                 "--web_port".into(), web_port.to_string(),
-//             ]
-
-//         }
-//         Cli::StartSign {
-//             env,
-//             node_id,
-//             cipher_key,
-//             sk_share,
-//             web_port,
-//             oidc_providers,
-//             // ...
-//         } => {
-//             command_args.push("--env".to_string());
-//             command_args.push(env);
-//             command_args.push("--node_id".to_string());
-//             command_args.push(node_id.to_string();
-
-//             if let Some(key) = cipher_key {
-//                 command_args.push("--cipher_key".to_string());
-//                 command_args.push(key);
-//             }
-
-//             if let Some(share) = sk_share {
-//                 command_args.push("--sk_share".to_string());
-//                 command_args.push(share);
-//             }
-
-//             command_args.push("--web_port".to_string());
-//             command_args.push(web_port.to_string());
-
-//             if let Some(providers) = oidc_providers {
-//                 command_args.push("--oidc_providers".to_string());
-//                 command_args.push(providers);
-//             }
-//             // ...
-//         }
-//         Cli::RotateSignNodeCipher {
-//             env,
-//             new_env,
-//             node_id,
-//             old_cipher_key,
-//             new_cipher_key,
-//             gcp_project_id,
-//             gcp_datastore_url,
-//         } => {
-//             command_args.push("--env".to_string());
-//             command_args.push(env);
-
-//             if let Some(new_env) = new_env {
-//                 command_args.push("--new_env".to_string());
-//                 command_args.push(new_env);
-//             }
-
-//             command_args.push("--node_id".to_string());
-//             command_args.push(node_id.to_string();
-
-//             if let Some(old_key) = old_cipher_key {
-//                 command_args.push("--old_cipher_key".to_string());
-//                 command_args.push(old_key);
-//             }
-
-//             if let Some(new_key) = new_cipher_key {
-//                 command_args.push("--new_cipher_key".to_string());
-//                 command_args.push(new_key);
-//             }
-//         }
-//     }
-// }
-
-// }
+                buf
+            }
+        }
+    }
+}

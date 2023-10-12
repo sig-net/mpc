@@ -478,33 +478,30 @@ impl<'a> SignerNode<'a> {
             .with_wait_for(WaitFor::Nothing)
             .with_exposed_port(Self::CONTAINER_PORT)
             .with_env_var("RUST_LOG", "mpc_recovery=DEBUG");
-        let image: RunnableImage<GenericImage> = (
-            image,
-            vec![
-                "start-sign".to_string(),
-                "--node-id".to_string(),
-                node_id.to_string(),
-                "--sk-share".to_string(),
-                serde_json::to_string(&sk_share)?,
-                "--cipher-key".to_string(),
-                hex::encode(cipher_key),
-                "--web-port".to_string(),
-                Self::CONTAINER_PORT.to_string(),
-                "--oidc-providers".to_string(),
+
+        let args = mpc_recovery::Cli::StartSign {
+            env: "dev".to_string(),
+            node_id,
+            web_port: Self::CONTAINER_PORT,
+            sk_share: Some(serde_json::to_string(&sk_share)?),
+            cipher_key: Some(hex::encode(cipher_key)),
+            oidc_providers_filepath: None,
+            oidc_providers: Some(
                 serde_json::json!([
                     {
-                        "issuer": format!("https://securetoken.google.com/{}", firebase_audience_id),
+                        "issuer": format!("https://securetoken.google.com/{firebase_audience_id}"),
                         "audience": firebase_audience_id,
                     },
-                ]).to_string(),
-                "--gcp-project-id".to_string(),
-                gcp_project_id.to_string(),
-                "--gcp-datastore-url".to_string(),
-                datastore_url.to_string(),
-                "--test".to_string(),
-            ],
-        )
-            .into();
+                ])
+                .to_string(),
+            ),
+            gcp_project_id: gcp_project_id.to_string(),
+            gcp_datastore_url: Some(datastore_url.to_string()),
+            test: true,
+        }
+        .into_str_args();
+
+        let image: RunnableImage<GenericImage> = (image, args).into();
         let image = image.with_network(network);
         let container = docker_client.cli.run(image);
         let ip_address = docker_client
@@ -619,23 +616,19 @@ impl<'a> LeaderNode<'a> {
             .with_wait_for(WaitFor::Nothing)
             .with_exposed_port(Self::CONTAINER_PORT)
             .with_env_var("RUST_LOG", "mpc_recovery=DEBUG");
-        let mut cmd = vec![
-            "start-leader".to_string(),
-            "--web-port".to_string(),
-            Self::CONTAINER_PORT.to_string(),
-            "--near-rpc".to_string(),
-            ctx.relayer_ctx.sandbox.address.to_string(),
-            "--near-root-account".to_string(),
-            near_root_account.to_string(),
-            "--account-creator-id".to_string(),
-            account_creator_id.to_string(),
-            "--account-creator-sk".to_string(),
-            account_creator_sk.to_string(),
-            "--fast-auth-partners".to_string(),
-            serde_json::json!([
+
+        let args = mpc_recovery::Cli::StartLeader {
+            env: "dev".to_string(),
+            web_port: Self::CONTAINER_PORT,
+            sign_nodes,
+            near_rpc: ctx.relayer_ctx.sandbox.address.clone(),
+            near_root_account: near_root_account.to_string(),
+            account_creator_id: account_creator_id.clone(),
+            account_creator_sk: Some(account_creator_sk.to_string()),
+            fast_auth_partners: Some(serde_json::json!([
                 {
                     "oidc_provider": {
-                        "issuer": format!("https://securetoken.google.com/{}", firebase_audience_id),
+                        "issuer": format!("https://securetoken.google.com/{firebase_audience_id}"),
                         "audience": firebase_audience_id,
                     },
                     "relayer": {
@@ -643,18 +636,15 @@ impl<'a> LeaderNode<'a> {
                         "api_key": serde_json::Value::Null,
                     },
                 },
-            ]).to_string(),
-            "--gcp-project-id".to_string(),
-            gcp_project_id.to_string(),
-            "--gcp-datastore-url".to_string(),
-            ctx.datastore.address.to_string(),
-            "--test".to_string(),
-        ];
-        for sign_node in sign_nodes {
-            cmd.push("--sign-nodes".to_string());
-            cmd.push(sign_node);
+            ]).to_string()),
+            fast_auth_partners_filepath: None,
+            gcp_project_id: gcp_project_id.to_string(),
+            gcp_datastore_url: Some(ctx.datastore.address.to_string()),
+            test: true,
         }
-        let image: RunnableImage<GenericImage> = (image, cmd).into();
+        .into_str_args();
+
+        let image: RunnableImage<GenericImage> = (image, args).into();
         let image = image.with_network(network);
         let container = docker_client.cli.run(image);
         let ip_address = docker_client

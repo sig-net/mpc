@@ -42,30 +42,28 @@ impl SignerNode {
             .context("could not find target dir while running signing node")?
             .join(if release { "release" } else { "debug" })
             .join(EXECUTABLE);
-        let args = vec![
-            "start-sign".to_string(),
-            "--node-id".to_string(),
-            node_id.to_string(),
-            "--sk-share".to_string(),
-            serde_json::to_string(&sk_share)?,
-            "--cipher-key".to_string(),
-            hex::encode(cipher_key),
-            "--web-port".to_string(),
-            web_port.to_string(),
-            "--oidc-providers".to_string(),
-            serde_json::json!([
-                {
-                    "issuer": format!("https://securetoken.google.com/{firebase_audience_id}"),
-                    "audience": firebase_audience_id,
-                },
-            ])
-            .to_string(),
-            "--gcp-project-id".to_string(),
-            gcp_project_id.to_string(),
-            "--gcp-datastore-url".to_string(),
-            datastore_url.to_string(),
-            "--test".to_string(),
-        ];
+
+        let args = mpc_recovery::Cli::StartSign {
+            env: "dev".to_string(),
+            node_id,
+            web_port,
+            sk_share: Some(serde_json::to_string(&sk_share)?),
+            cipher_key: Some(hex::encode(cipher_key)),
+            oidc_providers_filepath: None,
+            oidc_providers: Some(
+                serde_json::json!([
+                    {
+                        "issuer": format!("https://securetoken.google.com/{firebase_audience_id}"),
+                        "audience": firebase_audience_id,
+                    },
+                ])
+                .to_string(),
+            ),
+            gcp_project_id: gcp_project_id.to_string(),
+            gcp_datastore_url: Some(datastore_url.to_string()),
+            test: true,
+        }
+        .into_str_args();
 
         let address = format!("http://localhost:{web_port}");
         let child = Command::new(&executable)
@@ -143,20 +141,16 @@ impl LeaderNode {
             .context("could not find target dir while running leader node")?
             .join(if release { "release" } else { "debug" })
             .join(EXECUTABLE);
-        let mut args = vec![
-            "start-leader".to_string(),
-            "--web-port".to_string(),
-            web_port.to_string(),
-            "--near-rpc".to_string(),
-            ctx.relayer_ctx.sandbox.local_address.clone(),
-            "--near-root-account".to_string(),
-            near_root_account.to_string(),
-            "--account-creator-id".to_string(),
-            account_creator_id.to_string(),
-            "--account-creator-sk".to_string(),
-            account_creator_sk.to_string(),
-            "--fast-auth-partners".to_string(),
-            serde_json::json!([
+
+        let args = mpc_recovery::Cli::StartLeader {
+            env: "dev".to_string(),
+            web_port,
+            sign_nodes,
+            near_rpc: ctx.relayer_ctx.sandbox.local_address.clone(),
+            near_root_account: near_root_account.to_string(),
+            account_creator_id: account_creator_id.clone(),
+            account_creator_sk: Some(account_creator_sk.to_string()),
+            fast_auth_partners: Some(serde_json::json!([
                 {
                     "oidc_provider": {
                         "issuer": format!("https://securetoken.google.com/{}", firebase_audience_id),
@@ -167,17 +161,13 @@ impl LeaderNode {
                         "api_key": serde_json::Value::Null,
                     },
                 },
-            ]).to_string(),
-            "--gcp-project-id".to_string(),
-            gcp_project_id.to_string(),
-            "--gcp-datastore-url".to_string(),
-            ctx.datastore.local_address.to_string(),
-            "--test".to_string(),
-        ];
-        for sign_node in sign_nodes {
-            args.push("--sign-nodes".to_string());
-            args.push(sign_node);
+            ]).to_string()),
+            fast_auth_partners_filepath: None,
+            gcp_project_id: gcp_project_id.to_string(),
+            gcp_datastore_url: Some(ctx.datastore.local_address.to_string()),
+            test: true,
         }
+        .into_str_args();
 
         let child = Command::new(&executable)
             .args(&args)
