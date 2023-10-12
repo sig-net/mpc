@@ -166,6 +166,8 @@ impl LeaderNode {
             gcp_project_id: gcp_project_id.to_string(),
             gcp_datastore_url: Some(ctx.datastore.local_address.to_string()),
             test: true,
+            // TODO: remove once relayer is merged as one
+            public_relayer: true,
         }
         .into_str_args();
 
@@ -199,7 +201,7 @@ impl LeaderNode {
     pub fn api(&self) -> LeaderNodeApi {
         LeaderNodeApi {
             address: self.address.clone(),
-            client: NearRpcAndRelayerClient::connect(&self.near_rpc),
+            client: NearRpcAndRelayerClient::connect(&self.near_rpc, true),
             relayer: DelegateActionRelayer {
                 url: self.relayer_url.clone(),
                 api_key: None,

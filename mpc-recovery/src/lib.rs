@@ -110,6 +110,10 @@ pub enum Cli {
         /// Whether to accept test tokens
         #[arg(long, env("MPC_RECOVERY_TEST"), default_value("false"))]
         test: bool,
+        // TODO/HACK: remove the need for this, once relayer is merged as one.
+        /// Whether to use the public relayer
+        #[arg(long, env("MPC_PUBLIC_RELAYER"), default_value("false"))]
+        public_relayer: bool,
     },
     StartSign {
         /// Environment to run in (`dev` or `prod`)
@@ -207,6 +211,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             gcp_project_id,
             gcp_datastore_url,
             test,
+            public_relayer,
         } => {
             let gcp_service =
                 GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
@@ -229,6 +234,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 account_creator_id,
                 account_creator_sk,
                 partners,
+                public_relayer,
             };
 
             if test {
@@ -425,6 +431,7 @@ impl Cli {
                 gcp_project_id,
                 gcp_datastore_url,
                 test,
+                public_relayer,
             } => {
                 let mut buf = vec![
                     "start-leader".to_string(),
@@ -460,6 +467,9 @@ impl Cli {
                 }
                 if test {
                     buf.push("--test".to_string());
+                }
+                if public_relayer {
+                    buf.push("--public-relayer".to_string());
                 }
                 for sign_node in sign_nodes {
                     buf.push("--sign-nodes".to_string());
