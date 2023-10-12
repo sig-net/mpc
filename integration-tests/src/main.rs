@@ -1,6 +1,6 @@
 use clap::Parser;
 use mpc_recovery::GenerateResult;
-use mpc_recovery_integration_tests::containers;
+use mpc_recovery_integration_tests::env::containers;
 use near_primitives::utils::generate_random_string;
 use tokio::io::{stdin, AsyncReadExt};
 use tracing_subscriber::EnvFilter;

@@ -1,9 +1,12 @@
+pub mod containers;
+pub mod local;
+
 use curv::elliptic::curves::{Ed25519, Point};
 use mpc_recovery::GenerateResult;
 use near_primitives::utils::generate_random_string;
 
-use crate::containers::{DockerClient, LeaderNodeApi, SignerNodeApi};
-use crate::{containers, initialize_relayer, local, util, RelayerCtx};
+use crate::env::containers::{DockerClient, LeaderNodeApi, SignerNodeApi};
+use crate::{initialize_relayer, util, RelayerCtx};
 
 pub const NETWORK: &str = "mpc_it_network";
 pub const GCP_PROJECT_ID: &str = "mpc-recovery-gcp-project";

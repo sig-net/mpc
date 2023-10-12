@@ -7,9 +7,9 @@ use workspaces::{
     Account, Worker,
 };
 
-pub mod containers;
+use crate::env::containers;
+
 pub mod env;
-pub mod local;
 pub mod sandbox;
 pub mod util;
 

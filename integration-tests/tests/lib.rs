@@ -8,10 +8,7 @@ use mpc_recovery::{
         ClaimOidcResponse, MpcPkResponse, NewAccountResponse, SignResponse, UserCredentialsResponse,
     },
 };
-use mpc_recovery_integration_tests::{
-    containers,
-    env::{self, GCP_PROJECT_ID},
-};
+use mpc_recovery_integration_tests::env::{self, containers, GCP_PROJECT_ID};
 use workspaces::{network::Sandbox, Worker};
 
 pub struct TestContext {
