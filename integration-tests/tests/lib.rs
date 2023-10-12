@@ -36,10 +36,10 @@ where
     Fut: core::future::Future<Output = anyhow::Result<Val>>,
 {
     let docker_client = containers::DockerClient::default();
-    let nodes = if cfg!(feature = "test-local") {
-        env::host(nodes, &docker_client).await?
-    } else {
+    let nodes = if cfg!(feature = "docker-test") {
         env::docker(nodes, &docker_client).await?
+    } else {
+        env::host(nodes, &docker_client).await?
     };
 
     f(TestContext {
