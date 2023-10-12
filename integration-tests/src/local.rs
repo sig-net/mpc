@@ -12,6 +12,8 @@ use multi_party_eddsa::protocols::ExpandedKeyPair;
 use crate::containers::{LeaderNodeApi, SignerNodeApi};
 use crate::util;
 
+const EXECUTABLE: &str = "mpc-recovery";
+
 pub struct SignerNode {
     pub address: String,
     node_id: usize,
@@ -39,7 +41,7 @@ impl SignerNode {
         let executable = util::target_dir()
             .context("could not find target dir while running signing node")?
             .join(if release { "release" } else { "debug" })
-            .join("mpc-recovery");
+            .join(EXECUTABLE);
         let args = vec![
             "start-sign".to_string(),
             "--node-id".to_string(),
@@ -142,7 +144,7 @@ impl LeaderNode {
         let executable = util::target_dir()
             .context("could not find target dir while running leader node")?
             .join(if release { "release" } else { "debug" })
-            .join("mpc-recovery");
+            .join(EXECUTABLE);
         let mut args = vec![
             "start-leader".to_string(),
             "--web-port".to_string(),

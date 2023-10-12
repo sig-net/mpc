@@ -7,16 +7,12 @@ use mpc_recovery::{
     msg::{
         ClaimOidcResponse, MpcPkResponse, NewAccountResponse, SignResponse, UserCredentialsResponse,
     },
-    GenerateResult,
 };
-use mpc_recovery_integration_tests::{containers, local, util};
-use near_primitives::utils::generate_random_string;
+use mpc_recovery_integration_tests::{
+    containers,
+    env::{self, GCP_PROJECT_ID},
+};
 use workspaces::{network::Sandbox, Worker};
-
-const NETWORK: &str = "mpc_it_network";
-const GCP_PROJECT_ID: &str = "mpc-recovery-gcp-project";
-// TODO: figure out how to instantiate and use a local firebase deployment
-pub const FIREBASE_AUDIENCE_ID: &str = "test_audience";
 
 pub struct TestContext {
     leader_node: containers::LeaderNodeApi,
@@ -43,64 +39,22 @@ where
     Fut: core::future::Future<Output = anyhow::Result<Val>>,
 {
     let docker_client = containers::DockerClient::default();
-    docker_client.create_network(NETWORK).await?;
-
-    let relayer_id = generate_random_string(7); // used to distinguish relayer tmp files in multiple tests
-    let relayer_ctx_future =
-        mpc_recovery_integration_tests::initialize_relayer(&docker_client, NETWORK, &relayer_id);
-    let datastore_future = containers::Datastore::run(&docker_client, NETWORK, GCP_PROJECT_ID);
-
-    let (relayer_ctx, datastore) =
-        futures::future::join(relayer_ctx_future, datastore_future).await;
-    let relayer_ctx = relayer_ctx?;
-    let datastore = datastore?;
-
-    let GenerateResult { pk_set, secrets } = mpc_recovery::generate(nodes);
-    let mut signer_node_futures = Vec::new();
-    for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
-        signer_node_futures.push(local::SignerNode::run(
-            util::pick_unused_port().await?,
-            i as u64,
-            share,
-            cipher_key,
-            &datastore.local_address,
-            GCP_PROJECT_ID,
-            FIREBASE_AUDIENCE_ID,
-            true,
-        ));
-    }
-    let signer_nodes = futures::future::join_all(signer_node_futures)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-    let signer_urls: &Vec<_> = &signer_nodes.iter().map(|n| n.address.clone()).collect();
-
-    let near_root_account = relayer_ctx.worker.root_account()?;
-    let leader_node = local::LeaderNode::run(
-        util::pick_unused_port().await?,
-        signer_urls.clone(),
-        &relayer_ctx.sandbox.local_address,
-        &relayer_ctx.relayer.local_address,
-        &datastore.local_address,
-        GCP_PROJECT_ID,
-        near_root_account.id(),
-        relayer_ctx.creator_account.id(),
-        relayer_ctx.creator_account.secret_key(),
-        FIREBASE_AUDIENCE_ID,
-        true,
-    )
-    .await?;
+    let nodes = if cfg!(feature = "test-local") {
+        env::host(nodes, &docker_client).await?
+    } else {
+        env::docker(nodes, &docker_client).await?
+    };
 
     f(TestContext {
-        pk_set,
-        leader_node: leader_node.api(),
-        signer_nodes: signer_nodes.iter().map(|n| n.api()).collect(),
-        worker: relayer_ctx.worker.clone(),
-        gcp_datastore_url: datastore.local_address,
+        pk_set: nodes.pk_set(),
+        leader_node: nodes.leader_api(),
+        signer_nodes: nodes.signer_apis(),
+        worker: nodes.ctx().relayer_ctx.worker.clone(),
+        gcp_datastore_url: nodes.datastore_addr(),
     })
     .await?;
 
-    relayer_ctx.relayer.clean_tmp_files()?;
+    nodes.ctx().relayer_ctx.relayer.clean_tmp_files()?;
 
     Ok(())
 }
