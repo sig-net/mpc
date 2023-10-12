@@ -44,6 +44,8 @@ use std::fs;
 
 use crate::util::{self, create_key_file, create_relayer_cofig_file};
 
+use super::Context;
+
 static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 
 pub struct DockerClient {
@@ -586,8 +588,8 @@ pub struct LeaderNode<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
     local_address: String,
-    near_rpc: String,
-    relayer_url: String,
+    local_rpc_url: String,
+    local_relayer_url: String,
 }
 
 pub struct LeaderNodeApi {
@@ -604,9 +606,7 @@ impl<'a> LeaderNode<'a> {
         docker_client: &'a DockerClient,
         network: &str,
         sign_nodes: Vec<String>,
-        near_rpc: &str,
-        relayer_url: &str,
-        datastore_url: &str,
+        ctx: &Context<'a>,
         gcp_project_id: &str,
         near_root_account: &AccountId,
         account_creator_id: &AccountId,
@@ -624,7 +624,7 @@ impl<'a> LeaderNode<'a> {
             "--web-port".to_string(),
             Self::CONTAINER_PORT.to_string(),
             "--near-rpc".to_string(),
-            near_rpc.to_string(),
+            ctx.relayer_ctx.sandbox.address.to_string(),
             "--near-root-account".to_string(),
             near_root_account.to_string(),
             "--account-creator-id".to_string(),
@@ -639,7 +639,7 @@ impl<'a> LeaderNode<'a> {
                         "audience": firebase_audience_id,
                     },
                     "relayer": {
-                        "url": relayer_url.to_string(),
+                        "url": &ctx.relayer_ctx.relayer.address,
                         "api_key": serde_json::Value::Null,
                     },
                 },
@@ -647,7 +647,7 @@ impl<'a> LeaderNode<'a> {
             "--gcp-project-id".to_string(),
             gcp_project_id.to_string(),
             "--gcp-datastore-url".to_string(),
-            datastore_url.to_string(),
+            ctx.datastore.address.to_string(),
             "--test".to_string(),
         ];
         for sign_node in sign_nodes {
@@ -673,17 +673,17 @@ impl<'a> LeaderNode<'a> {
             container,
             address: full_address,
             local_address: format!("http://localhost:{host_port}"),
-            near_rpc: near_rpc.to_string(),
-            relayer_url: relayer_url.to_string(),
+            local_rpc_url: ctx.relayer_ctx.sandbox.local_address.clone(),
+            local_relayer_url: ctx.relayer_ctx.relayer.local_address.clone(),
         })
     }
 
     pub fn api(&self) -> LeaderNodeApi {
         LeaderNodeApi {
-            address: self.address.clone(),
-            client: NearRpcAndRelayerClient::connect(&self.near_rpc),
+            address: self.local_address.clone(),
+            client: NearRpcAndRelayerClient::connect(&self.local_rpc_url),
             relayer: DelegateActionRelayer {
-                url: self.relayer_url.clone(),
+                url: self.local_relayer_url.clone(),
                 api_key: None,
             },
         }

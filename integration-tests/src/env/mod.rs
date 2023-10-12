@@ -58,11 +58,7 @@ impl Nodes<'_> {
     }
 
     pub fn datastore_addr(&self) -> String {
-        // this is different per env:
-        match self {
-            Nodes::Local { ctx, .. } => ctx.datastore.local_address.clone(),
-            Nodes::Docker { ctx, .. } => ctx.datastore.address.clone(),
-        }
+        self.ctx().datastore.local_address.clone()
     }
 }
 
@@ -71,12 +67,12 @@ pub struct Context<'a> {
     pub datastore: containers::Datastore<'a>,
 }
 
-pub async fn setup<'a>(docker_client: &'a DockerClient) -> anyhow::Result<Context<'a>> {
+pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> {
     docker_client.create_network(NETWORK).await?;
 
     let relayer_id = generate_random_string(7); // used to distinguish relayer tmp files in multiple tests
-    let relayer_ctx_future = initialize_relayer(&docker_client, NETWORK, &relayer_id);
-    let datastore_future = containers::Datastore::run(&docker_client, NETWORK, GCP_PROJECT_ID);
+    let relayer_ctx_future = initialize_relayer(docker_client, NETWORK, &relayer_id);
+    let datastore_future = containers::Datastore::run(docker_client, NETWORK, GCP_PROJECT_ID);
 
     let (relayer_ctx, datastore) =
         futures::future::join(relayer_ctx_future, datastore_future).await;
@@ -96,7 +92,7 @@ pub async fn docker(nodes: usize, docker_client: &DockerClient) -> anyhow::Resul
     let mut signer_node_futures = Vec::with_capacity(nodes);
     for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
         signer_node_futures.push(containers::SignerNode::run_signing_node(
-            &docker_client,
+            docker_client,
             NETWORK,
             i as u64,
             share,
@@ -115,12 +111,10 @@ pub async fn docker(nodes: usize, docker_client: &DockerClient) -> anyhow::Resul
 
     let near_root_account = ctx.relayer_ctx.worker.root_account()?;
     let leader_node = containers::LeaderNode::run(
-        &docker_client,
+        docker_client,
         NETWORK,
         signer_urls.clone(),
-        &ctx.relayer_ctx.sandbox.address,
-        &ctx.relayer_ctx.relayer.address,
-        &ctx.datastore.address,
+        &ctx,
         GCP_PROJECT_ID,
         near_root_account.id(),
         ctx.relayer_ctx.creator_account.id(),
@@ -162,9 +156,7 @@ pub async fn host(nodes: usize, docker_client: &DockerClient) -> anyhow::Result<
     let leader_node = local::LeaderNode::run(
         util::pick_unused_port().await?,
         signer_nodes.iter().map(|n| n.address.clone()).collect(),
-        &ctx.relayer_ctx.sandbox.local_address,
-        &ctx.relayer_ctx.relayer.local_address,
-        &ctx.datastore.local_address,
+        &ctx,
         GCP_PROJECT_ID,
         near_root_account.id(),
         ctx.relayer_ctx.creator_account.id(),

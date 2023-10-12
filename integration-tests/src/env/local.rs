@@ -130,9 +130,7 @@ impl LeaderNode {
     pub async fn run(
         web_port: u16,
         sign_nodes: Vec<String>,
-        near_rpc: &str,
-        relayer_url: &str,
-        datastore_url: &str,
+        ctx: &super::Context<'_>,
         gcp_project_id: &str,
         near_root_account: &workspaces::AccountId,
         account_creator_id: &workspaces::AccountId,
@@ -150,7 +148,7 @@ impl LeaderNode {
             "--web-port".to_string(),
             web_port.to_string(),
             "--near-rpc".to_string(),
-            near_rpc.to_string(),
+            ctx.relayer_ctx.sandbox.local_address.clone(),
             "--near-root-account".to_string(),
             near_root_account.to_string(),
             "--account-creator-id".to_string(),
@@ -165,7 +163,7 @@ impl LeaderNode {
                         "audience": firebase_audience_id,
                     },
                     "relayer": {
-                        "url": relayer_url.to_string(),
+                        "url": &ctx.relayer_ctx.relayer.local_address,
                         "api_key": serde_json::Value::Null,
                     },
                 },
@@ -173,7 +171,7 @@ impl LeaderNode {
             "--gcp-project-id".to_string(),
             gcp_project_id.to_string(),
             "--gcp-datastore-url".to_string(),
-            datastore_url.to_string(),
+            ctx.datastore.local_address.to_string(),
             "--test".to_string(),
         ];
         for sign_node in sign_nodes {
@@ -202,8 +200,8 @@ impl LeaderNode {
         tracing::info!("Leader node container is running at {address}");
         Ok(Self {
             address,
-            near_rpc: near_rpc.to_string(),
-            relayer_url: relayer_url.to_string(),
+            near_rpc: ctx.relayer_ctx.sandbox.local_address.clone(),
+            relayer_url: ctx.relayer_ctx.relayer.local_address.clone(),
             process: child,
         })
     }
