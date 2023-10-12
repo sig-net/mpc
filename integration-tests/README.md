@@ -5,12 +5,27 @@
 Running integration tests requires you to have relayer and sandbox docker images present on your machine:
 
 ```BASH
-docker pull ghcr.io/near/pagoda-relayer-rs-fastauth
+docker pull ghcr.io/near/os-relayer
 docker pull ghcr.io/near/sandbox
 ```
+
 In case of authorization issues make sure you have logged into docker using your [access token](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
 
 Now, build mpc-recovery from the project's root:
+
+```BASH
+cargo build --release
+```
+
+Then run the integration tests:
+
+```BASH
+cargo test -p mpc-recovery-integration-tests
+```
+
+### Alternative: Docker Builds/Tests
+
+If instead, we need to run docker build/tests:
 
 ```BASH
 docker build . -t near/mpc-recovery
@@ -18,10 +33,10 @@ docker build . -t near/mpc-recovery
 
 **Note**. You will need to re-build the Docker image each time you make a code change and want to run the integration tests.
 
-Finally, run the integration tests:
+Finally, run the integration tests with the built docker image:
 
 ```BASH
-cargo test -p mpc-recovery-integration-tests
+cargo test -p mpc-recovery-integration-tests --features docker-test
 ```
 
 ## FAQ
@@ -50,7 +65,7 @@ b2724d0c9530   near/mpc-recovery:latest                         "mpc-recovery st
 67308ab06c5d   near/mpc-recovery:latest                         "mpc-recovery start-…"   5 minutes ago   Up 5 minutes   0.0.0.0:32791->3000/tcp, :::32791->3000/tcp     upbeat_volhard
 65ec65384af4   near/mpc-recovery:latest                         "mpc-recovery start-…"   5 minutes ago   Up 5 minutes   0.0.0.0:32790->3000/tcp, :::32790->3000/tcp     friendly_easley
 b4f90b1546ec   near/mpc-recovery:latest                         "mpc-recovery start-…"   5 minutes ago   Up 5 minutes   0.0.0.0:32789->3000/tcp, :::32789->3000/tcp     vibrant_allen
-934ec13d9146   ghcr.io/near/pagoda-relayer-rs-fastauth:latest   "/usr/local/bin/entr…"   5 minutes ago   Up 5 minutes   0.0.0.0:32788->16581/tcp, :::32788->16581/tcp   sleepy_grothendieck
+934ec13d9146   ghcr.io/near/os-relayer:latest                   "/usr/local/bin/entr…"   5 minutes ago   Up 5 minutes   0.0.0.0:32788->16581/tcp, :::32788->16581/tcp   sleepy_grothendieck
 c505ead6eb18   redis:latest                                     "docker-entrypoint.s…"   5 minutes ago   Up 5 minutes   0.0.0.0:32787->6379/tcp, :::32787->6379/tcp     trusting_lederberg
 2843226b16a9   google/cloud-sdk:latest                          "gcloud beta emulato…"   5 minutes ago   Up 5 minutes   0.0.0.0:32786->15805/tcp, :::32786->15805/tcp   hungry_pasteur
 3f4c70020a4c   ghcr.io/near/sandbox:latest                      "near-sandbox --home…"   5 minutes ago   Up 5 minutes                                                   practical_elbakyan
@@ -67,6 +82,7 @@ $ cargo run -p mpc-recovery-integration-tests -- test-leader 3
 ```
 
 ### I'm getting "Error: error trying to connect: No such file or directory (os error 2)"
+
 It's a known issue on MacOS. Try executiong the following command:
 
 ```bash

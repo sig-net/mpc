@@ -12,8 +12,6 @@ use multi_party_eddsa::protocols::ExpandedKeyPair;
 use crate::containers::{LeaderNodeApi, SignerNodeApi};
 use crate::util;
 
-const EXECUTABLE: &str = "mpc-recovery";
-
 pub struct SignerNode {
     pub address: String,
     node_id: usize,
@@ -38,10 +36,8 @@ impl SignerNode {
         firebase_audience_id: &str,
         release: bool,
     ) -> anyhow::Result<Self> {
-        let executable = util::target_dir()
-            .context("could not find target dir while running signing node")?
-            .join(if release { "release" } else { "debug" })
-            .join(EXECUTABLE);
+        let executable = util::executable(release)
+            .context("could not find target dir while running signing node")?;
 
         let args = mpc_recovery::Cli::StartSign {
             env: "dev".to_string(),
@@ -86,7 +82,7 @@ impl SignerNode {
             let x: anyhow::Result<StatusCode> = util::get(&address).await;
             match x {
                 std::result::Result::Ok(status) if status == StatusCode::OK => break,
-                _err => {}
+                _ => (),
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
@@ -124,6 +120,7 @@ pub struct LeaderNode {
     #[allow(unused)]
     process: Child,
 }
+
 impl LeaderNode {
     pub async fn run(
         web_port: u16,
@@ -137,10 +134,8 @@ impl LeaderNode {
         release: bool,
     ) -> anyhow::Result<Self> {
         tracing::info!("Running leader node...");
-        let executable = util::target_dir()
-            .context("could not find target dir while running leader node")?
-            .join(if release { "release" } else { "debug" })
-            .join(EXECUTABLE);
+        let executable = util::executable(release)
+            .context("could not find target dir while running leader node")?;
 
         let args = mpc_recovery::Cli::StartLeader {
             env: "dev".to_string(),

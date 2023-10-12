@@ -12,6 +12,8 @@ use workspaces::{types::SecretKey, AccountId};
 
 use crate::containers::RelayerConfig;
 
+const EXECUTABLE: &str = "mpc-recovery";
+
 pub async fn post<U, Req: Serialize, Resp>(
     uri: U,
     request: Req,
@@ -219,4 +221,11 @@ pub fn target_dir() -> Option<PathBuf> {
             None => break None, // We've reached the root directory and didn't find "target"
         }
     }
+}
+
+pub fn executable(release: bool) -> Option<PathBuf> {
+    let executable = target_dir()?
+        .join(if release { "release" } else { "debug" })
+        .join(EXECUTABLE);
+    Some(executable)
 }
