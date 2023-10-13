@@ -12,14 +12,16 @@ use mpc_recovery::relayer::NearRpcAndRelayerClient;
 use mpc_recovery::GenerateResult;
 
 use crate::env::containers::DockerClient;
-use crate::{initialize_relayer, util, RelayerCtx};
+use crate::{initialize_relayer, RelayerCtx};
 
-pub const NETWORK: &str = "mpc_it_network";
-pub const GCP_PROJECT_ID: &str = "mpc-recovery-gcp-project";
+const ENV: &str = "dev";
+const NETWORK: &str = "mpc_it_network";
+const GCP_PROJECT_ID: &str = "mpc-recovery-gcp-project";
 // TODO: figure out how to instantiate and use a local firebase deployment
-pub const FIREBASE_AUDIENCE_ID: &str = "test_audience";
+const FIREBASE_AUDIENCE_ID: &str = "test_audience";
 
 pub struct SignerNodeApi {
+    pub env: String,
     pub address: String,
     pub node_id: usize,
     pub sk_share: ExpandedKeyPair,
@@ -84,10 +86,12 @@ impl Nodes<'_> {
 }
 
 pub struct Context<'a> {
+    pub env: String,
     pub docker_client: &'a DockerClient,
     pub docker_network: String,
     pub gcp_project_id: String,
     pub audience_id: String,
+    pub release: bool,
 
     pub relayer_ctx: RelayerCtx<'a>,
     pub datastore: containers::Datastore<'a>,
@@ -112,10 +116,12 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
     let oidc_provider = oidc_provider?;
 
     Ok(Context {
+        env: ENV.to_string(),
         docker_client,
         docker_network: docker_network.to_string(),
         gcp_project_id: gcp_project_id.to_string(),
         audience_id: FIREBASE_AUDIENCE_ID.to_string(),
+        release: true,
         relayer_ctx,
         datastore,
         oidc_provider,
@@ -136,17 +142,8 @@ pub async fn docker(nodes: usize, docker_client: &DockerClient) -> anyhow::Resul
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    let signer_urls: &Vec<_> = &signer_nodes.iter().map(|n| n.address.clone()).collect();
-
-    let near_root_account = ctx.relayer_ctx.worker.root_account()?;
-    let leader_node = containers::LeaderNode::run(
-        &ctx,
-        signer_urls.clone(),
-        near_root_account.id(),
-        ctx.relayer_ctx.creator_account.id(),
-        ctx.relayer_ctx.creator_account.secret_key(),
-    )
-    .await?;
+    let sign_nodes = signer_nodes.iter().map(|n| n.address.clone()).collect();
+    let leader_node = containers::LeaderNode::run(&ctx, sign_nodes).await?;
 
     Ok(Nodes::Docker {
         ctx,
@@ -161,31 +158,15 @@ pub async fn host(nodes: usize, docker_client: &DockerClient) -> anyhow::Result<
     let GenerateResult { pk_set, secrets } = mpc_recovery::generate(nodes);
     let mut signer_node_futures = Vec::with_capacity(nodes);
     for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
-        signer_node_futures.push(local::SignerNode::run(
-            util::pick_unused_port().await?,
-            i as u64,
-            share,
-            cipher_key,
-            &ctx,
-            true,
-        ));
+        signer_node_futures.push(local::SignerNode::run(&ctx, i as u64, share, cipher_key));
     }
     let signer_nodes = futures::future::join_all(signer_node_futures)
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
 
-    let near_root_account = ctx.relayer_ctx.worker.root_account()?;
-    let leader_node = local::LeaderNode::run(
-        &ctx,
-        util::pick_unused_port().await?,
-        signer_nodes.iter().map(|n| n.address.clone()).collect(),
-        near_root_account.id(),
-        ctx.relayer_ctx.creator_account.id(),
-        ctx.relayer_ctx.creator_account.secret_key(),
-        true,
-    )
-    .await?;
+    let sign_nodes = signer_nodes.iter().map(|n| n.address.clone()).collect();
+    let leader_node = local::LeaderNode::run(&ctx, sign_nodes).await?;
 
     Ok(Nodes::Local {
         ctx,
@@ -193,4 +174,12 @@ pub async fn host(nodes: usize, docker_client: &DockerClient) -> anyhow::Result<
         leader_node,
         signer_nodes,
     })
+}
+
+pub async fn run(nodes: usize, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
+    #[cfg(feature = "docker-test")]
+    return docker(nodes, docker_client).await;
+
+    #[cfg(not(feature = "docker-test"))]
+    return host(nodes, docker_client).await;
 }

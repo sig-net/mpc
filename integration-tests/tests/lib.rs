@@ -13,6 +13,7 @@ use mpc_recovery_integration_tests::env::containers::DockerClient;
 use workspaces::{network::Sandbox, Worker};
 
 pub struct TestContext {
+    env: String,
     leader_node: env::LeaderNodeApi,
     pk_set: Vec<Point<Ed25519>>,
     worker: Worker<Sandbox>,
@@ -24,7 +25,7 @@ pub struct TestContext {
 impl TestContext {
     pub async fn gcp_service(&self) -> anyhow::Result<GcpService> {
         GcpService::new(
-            "dev".into(),
+            self.env.clone(),
             self.gcp_project_id.clone(),
             Some(self.gcp_datastore_url.clone()),
         )
@@ -38,13 +39,10 @@ where
     Fut: core::future::Future<Output = anyhow::Result<Val>>,
 {
     let docker_client = DockerClient::default();
-    let nodes = if cfg!(feature = "docker-test") {
-        env::docker(nodes, &docker_client).await?
-    } else {
-        env::host(nodes, &docker_client).await?
-    };
+    let nodes = env::run(nodes, &docker_client).await?;
 
     f(TestContext {
+        env: nodes.ctx().env.clone(),
         pk_set: nodes.pk_set(),
         leader_node: nodes.leader_api(),
         signer_nodes: nodes.signer_apis(),

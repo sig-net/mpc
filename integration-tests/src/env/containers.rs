@@ -484,6 +484,8 @@ pub struct SignerNode<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
     pub local_address: String,
+
+    env: String,
     node_id: usize,
     sk_share: ExpandedKeyPair,
     cipher_key: GenericArray<u8, U32>,
@@ -508,7 +510,7 @@ impl SignerNode<'_> {
             .with_env_var("RUST_LOG", "mpc_recovery=DEBUG");
 
         let args = mpc_recovery::Cli::StartSign {
-            env: "dev".to_string(),
+            env: ctx.env.clone(),
             node_id: node_id as u64,
             web_port: Self::CONTAINER_PORT,
             sk_share: Some(serde_json::to_string(&sk_share)?),
@@ -553,6 +555,8 @@ impl SignerNode<'_> {
             container,
             address: full_address,
             local_address: format!("http://localhost:{host_port}"),
+
+            env: ctx.env.clone(),
             node_id,
             sk_share: sk_share.clone(),
             cipher_key: *cipher_key,
@@ -563,6 +567,7 @@ impl SignerNode<'_> {
 
     pub fn api(&self) -> SignerNodeApi {
         SignerNodeApi {
+            env: self.env.clone(),
             address: self.local_address.clone(),
             node_id: self.node_id,
             sk_share: self.sk_share.clone(),
@@ -585,9 +590,8 @@ impl SignerNodeApi {
         &self,
         new_cipher_key: &GenericArray<u8, U32>,
     ) -> anyhow::Result<(Aes256Gcm, Aes256Gcm)> {
-        let env = "dev".to_string();
         let gcp_service = mpc_recovery::gcp::GcpService::new(
-            env,
+            self.env.clone(),
             self.gcp_project_id.clone(),
             Some(self.gcp_datastore_local_url.clone()),
         )
@@ -622,14 +626,9 @@ impl<'a> LeaderNode<'a> {
     // Container port used for the docker network, does not have to be unique
     const CONTAINER_PORT: u16 = 3000;
 
-    pub async fn run(
-        ctx: &Context<'a>,
-        sign_nodes: Vec<String>,
-        near_root_account: &AccountId,
-        account_creator_id: &AccountId,
-        account_creator_sk: &workspaces::types::SecretKey,
-    ) -> anyhow::Result<LeaderNode<'a>> {
+    pub async fn run(ctx: &Context<'a>, sign_nodes: Vec<String>) -> anyhow::Result<LeaderNode<'a>> {
         tracing::info!("Running leader node container...");
+        let account_creator = &ctx.relayer_ctx.creator_account;
 
         let image = GenericImage::new("near/mpc-recovery", "latest")
             .with_wait_for(WaitFor::Nothing)
@@ -637,13 +636,13 @@ impl<'a> LeaderNode<'a> {
             .with_env_var("RUST_LOG", "mpc_recovery=DEBUG");
 
         let args = mpc_recovery::Cli::StartLeader {
-            env: "dev".to_string(),
+            env: ctx.env.clone(),
             web_port: Self::CONTAINER_PORT,
             sign_nodes,
             near_rpc: ctx.relayer_ctx.sandbox.address.clone(),
-            near_root_account: near_root_account.to_string(),
-            account_creator_id: account_creator_id.clone(),
-            account_creator_sk: Some(account_creator_sk.to_string()),
+            near_root_account: ctx.relayer_ctx.worker.root_account()?.id().to_string(),
+            account_creator_id: account_creator.id().clone(),
+            account_creator_sk: Some(account_creator.secret_key().to_string()),
             fast_auth_partners: Some(
                 serde_json::json!([
                     {

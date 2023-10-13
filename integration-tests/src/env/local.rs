@@ -14,6 +14,7 @@ use crate::util;
 
 pub struct SignerNode {
     pub address: String,
+    env: String,
     node_id: usize,
     sk_share: ExpandedKeyPair,
     cipher_key: GenericArray<u8, U32>,
@@ -27,18 +28,17 @@ pub struct SignerNode {
 
 impl SignerNode {
     pub async fn run(
-        web_port: u16,
+        ctx: &super::Context<'_>,
         node_id: u64,
         sk_share: &ExpandedKeyPair,
         cipher_key: &GenericArray<u8, U32>,
-        ctx: &super::Context<'_>,
-        release: bool,
     ) -> anyhow::Result<Self> {
-        let executable = util::executable(release)
+        let executable = util::executable(ctx.release)
             .context("could not find target dir while running signing node")?;
+        let web_port = util::pick_unused_port().await?;
 
         let args = mpc_recovery::Cli::StartSign {
-            env: "dev".to_string(),
+            env: ctx.env.clone(),
             node_id,
             web_port,
             sk_share: Some(serde_json::to_string(&sk_share)?),
@@ -88,6 +88,7 @@ impl SignerNode {
 
         Ok(Self {
             address,
+            env: ctx.env.clone(),
             node_id: node_id as usize,
             sk_share: sk_share.clone(),
             cipher_key: *cipher_key,
@@ -100,6 +101,7 @@ impl SignerNode {
     pub fn api(&self) -> SignerNodeApi {
         SignerNodeApi {
             address: self.address.clone(),
+            env: self.env.clone(),
             node_id: self.node_id,
             sk_share: self.sk_share.clone(),
             cipher_key: self.cipher_key,
@@ -120,27 +122,21 @@ pub struct LeaderNode {
 }
 
 impl LeaderNode {
-    pub async fn run(
-        ctx: &super::Context<'_>,
-        web_port: u16,
-        sign_nodes: Vec<String>,
-        near_root_account: &workspaces::AccountId,
-        account_creator_id: &workspaces::AccountId,
-        account_creator_sk: &workspaces::types::SecretKey,
-        release: bool,
-    ) -> anyhow::Result<Self> {
+    pub async fn run(ctx: &super::Context<'_>, sign_nodes: Vec<String>) -> anyhow::Result<Self> {
         tracing::info!("Running leader node...");
-        let executable = util::executable(release)
+        let executable = util::executable(ctx.release)
             .context("could not find target dir while running leader node")?;
+        let account_creator = &ctx.relayer_ctx.creator_account;
+        let web_port = util::pick_unused_port().await?;
 
         let args = mpc_recovery::Cli::StartLeader {
-            env: "dev".to_string(),
+            env: ctx.env.clone(),
             web_port,
             sign_nodes,
             near_rpc: ctx.relayer_ctx.sandbox.local_address.clone(),
-            near_root_account: near_root_account.to_string(),
-            account_creator_id: account_creator_id.clone(),
-            account_creator_sk: Some(account_creator_sk.to_string()),
+            near_root_account: ctx.relayer_ctx.worker.root_account()?.id().to_string(),
+            account_creator_id: account_creator.id().clone(),
+            account_creator_sk: Some(account_creator.secret_key().to_string()),
             fast_auth_partners: Some(
                 serde_json::json!([
                     {
