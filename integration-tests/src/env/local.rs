@@ -2,9 +2,7 @@
 
 use aes_gcm::aead::consts::U32;
 use aes_gcm::aead::generic_array::GenericArray;
-use anyhow::Context;
-use async_process::{Child, Command, Stdio};
-use hyper::StatusCode;
+use async_process::Child;
 use mpc_recovery::firewall::allowed::DelegateActionRelayer;
 use mpc_recovery::relayer::NearRpcAndRelayerClient;
 use multi_party_eddsa::protocols::ExpandedKeyPair;
@@ -33,10 +31,7 @@ impl SignerNode {
         sk_share: &ExpandedKeyPair,
         cipher_key: &GenericArray<u8, U32>,
     ) -> anyhow::Result<Self> {
-        let executable = util::executable(ctx.release)
-            .context("could not find target dir while running signing node")?;
         let web_port = util::pick_unused_port().await?;
-
         let args = mpc_recovery::Cli::StartSign {
             env: ctx.env.clone(),
             node_id,
@@ -59,31 +54,11 @@ impl SignerNode {
         }
         .into_str_args();
 
+        let sign_node_id = format!("sign/{node_id}");
+        let process = util::spawn_mpc(ctx.release, &sign_node_id, &args)?;
         let address = format!("http://localhost:{web_port}");
-        let child = Command::new(&executable)
-            .args(&args)
-            .env("RUST_LOG", "mpc_recovery=INFO")
-            .envs(std::env::vars())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "failed to run signing node: [node_id={node_id}, {}]",
-                    executable.display()
-                )
-            })?;
-
-        tracing::info!("Signer node is start on {}", address);
-        loop {
-            let x: anyhow::Result<StatusCode> = util::get(&address).await;
-            match x {
-                std::result::Result::Ok(status) if status == StatusCode::OK => break,
-                _ => (),
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
+        tracing::info!("Signer node is starting at {}", address);
+        util::ping_until_ok(&address, 60).await?;
         tracing::info!("Signer node started [node_id={node_id}, {address}]");
 
         Ok(Self {
@@ -94,7 +69,7 @@ impl SignerNode {
             cipher_key: *cipher_key,
             gcp_project_id: ctx.gcp_project_id.clone(),
             gcp_datastore_url: ctx.datastore.local_address.clone(),
-            process: child,
+            process,
         })
     }
 
@@ -124,11 +99,8 @@ pub struct LeaderNode {
 impl LeaderNode {
     pub async fn run(ctx: &super::Context<'_>, sign_nodes: Vec<String>) -> anyhow::Result<Self> {
         tracing::info!("Running leader node...");
-        let executable = util::executable(ctx.release)
-            .context("could not find target dir while running leader node")?;
         let account_creator = &ctx.relayer_ctx.creator_account;
         let web_port = util::pick_unused_port().await?;
-
         let args = mpc_recovery::Cli::StartLeader {
             env: ctx.env.clone(),
             web_port,
@@ -137,6 +109,7 @@ impl LeaderNode {
             near_root_account: ctx.relayer_ctx.worker.root_account()?.id().to_string(),
             account_creator_id: account_creator.id().clone(),
             account_creator_sk: Some(account_creator.secret_key().to_string()),
+            fast_auth_partners_filepath: None,
             fast_auth_partners: Some(
                 serde_json::json!([
                     {
@@ -152,38 +125,23 @@ impl LeaderNode {
                 ])
                 .to_string(),
             ),
-            fast_auth_partners_filepath: None,
             gcp_project_id: ctx.gcp_project_id.clone(),
             gcp_datastore_url: Some(ctx.datastore.local_address.clone()),
             jwt_signature_pk_url: ctx.oidc_provider.jwt_local_url.clone(),
         }
         .into_str_args();
 
-        let child = Command::new(&executable)
-            .args(&args)
-            .env("RUST_LOG", "mpc_recovery=INFO")
-            .envs(std::env::vars())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("failed to run leader node: {}", executable.display()))?;
-
+        let process = util::spawn_mpc(ctx.release, "leader", &args)?;
         let address = format!("http://localhost:{web_port}");
         tracing::info!("Leader node container is starting at {}", address);
-        loop {
-            match util::get(&address).await {
-                std::result::Result::Ok(status) if status == StatusCode::OK => break,
-                _ => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
-            }
-        }
+        util::ping_until_ok(&address, 60).await?;
+        tracing::info!("Leader node running at {address}");
 
-        tracing::info!("Leader node container is running at {address}");
         Ok(Self {
             address,
             near_rpc: ctx.relayer_ctx.sandbox.local_address.clone(),
             relayer_url: ctx.relayer_ctx.relayer.local_address.clone(),
-            process: child,
+            process,
         })
     }
 

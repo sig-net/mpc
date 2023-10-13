@@ -1,7 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use aes_gcm::{Aes256Gcm, KeyInit};
-use anyhow::{anyhow, Ok};
+use anyhow::anyhow;
 use bollard::{container::LogsOptions, network::CreateNetworkOptions, service::Ipam, Docker};
 use ed25519_dalek::ed25519::signature::digest::{consts::U32, generic_array::GenericArray};
 use ed25519_dalek::{PublicKey as PublicKeyEd25519, Verifier};
@@ -135,7 +135,7 @@ impl DockerClient {
         tokio::spawn(async move {
             let mut stdout = tokio::io::stdout();
 
-            while let Some(Result::Ok(output)) = output.next().await {
+            while let Some(Ok(output)) = output.next().await {
                 stdout
                     .write_all(output.into_bytes().as_ref())
                     .await
@@ -504,11 +504,6 @@ impl SignerNode<'_> {
         cipher_key: &GenericArray<u8, U32>,
     ) -> anyhow::Result<SignerNode<'a>> {
         tracing::info!("Running signer node container {}...", node_id);
-        let image: GenericImage = GenericImage::new("near/mpc-recovery", "latest")
-            .with_wait_for(WaitFor::Nothing)
-            .with_exposed_port(Self::CONTAINER_PORT)
-            .with_env_var("RUST_LOG", "mpc_recovery=DEBUG");
-
         let args = mpc_recovery::Cli::StartSign {
             env: ctx.env.clone(),
             node_id: node_id as u64,
@@ -531,6 +526,10 @@ impl SignerNode<'_> {
         }
         .into_str_args();
 
+        let image: GenericImage = GenericImage::new("near/mpc-recovery", "latest")
+            .with_wait_for(WaitFor::Nothing)
+            .with_exposed_port(Self::CONTAINER_PORT)
+            .with_env_var("RUST_LOG", "mpc_recovery=DEBUG");
         let image: RunnableImage<GenericImage> = (image, args).into();
         let image = image.with_network(&ctx.docker_network);
         let container = ctx.docker_client.cli.run(image);
@@ -629,12 +628,6 @@ impl<'a> LeaderNode<'a> {
     pub async fn run(ctx: &Context<'a>, sign_nodes: Vec<String>) -> anyhow::Result<LeaderNode<'a>> {
         tracing::info!("Running leader node container...");
         let account_creator = &ctx.relayer_ctx.creator_account;
-
-        let image = GenericImage::new("near/mpc-recovery", "latest")
-            .with_wait_for(WaitFor::Nothing)
-            .with_exposed_port(Self::CONTAINER_PORT)
-            .with_env_var("RUST_LOG", "mpc_recovery=DEBUG");
-
         let args = mpc_recovery::Cli::StartLeader {
             env: ctx.env.clone(),
             web_port: Self::CONTAINER_PORT,
@@ -665,6 +658,10 @@ impl<'a> LeaderNode<'a> {
         }
         .into_str_args();
 
+        let image = GenericImage::new("near/mpc-recovery", "latest")
+            .with_wait_for(WaitFor::Nothing)
+            .with_exposed_port(Self::CONTAINER_PORT)
+            .with_env_var("RUST_LOG", "mpc_recovery=DEBUG");
         let image: RunnableImage<GenericImage> = (image, args).into();
         let image = image.with_network(&ctx.docker_network);
         let container = ctx.docker_client.cli.run(image);

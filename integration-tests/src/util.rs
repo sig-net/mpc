@@ -4,7 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Ok};
+use anyhow::Context;
+use async_process::{Child, Command, Stdio};
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use toml::Value;
@@ -209,6 +210,19 @@ pub async fn pick_unused_port() -> anyhow::Result<u16> {
     Ok(port)
 }
 
+pub async fn ping_until_ok(addr: &str, timeout: u64) -> anyhow::Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
+        loop {
+            match get(addr).await {
+                Ok(status) if status == StatusCode::OK => break,
+                _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+            }
+        }
+    })
+    .await?;
+    Ok(())
+}
+
 pub fn target_dir() -> Option<PathBuf> {
     let mut out_dir = Path::new(std::env!("OUT_DIR"));
     loop {
@@ -228,4 +242,19 @@ pub fn executable(release: bool) -> Option<PathBuf> {
         .join(if release { "release" } else { "debug" })
         .join(EXECUTABLE);
     Some(executable)
+}
+
+pub fn spawn_mpc(release: bool, node: &str, args: &[String]) -> anyhow::Result<Child> {
+    let executable = executable(release)
+        .with_context(|| format!("could not find target dir while starting {node} node"))?;
+
+    Command::new(&executable)
+        .args(args)
+        .env("RUST_LOG", "mpc_recovery=INFO")
+        .envs(std::env::vars())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("failed to run {node} node: {}", executable.display()))
 }
