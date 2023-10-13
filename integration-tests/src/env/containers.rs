@@ -379,6 +379,49 @@ impl<'a> Relayer<'a> {
     }
 }
 
+pub struct OidcProvider<'a> {
+    pub container: Container<'a, GenericImage>,
+    pub jwt_pk_url: String,
+    pub jwt_local_url: String,
+}
+
+impl<'a> OidcProvider<'a> {
+    pub const CONTAINER_PORT: u16 = 3000;
+
+    pub async fn run(
+        docker_client: &'a DockerClient,
+        network: &str,
+    ) -> anyhow::Result<OidcProvider<'a>> {
+        tracing::info!("Running OIDC provider container...");
+        let image = GenericImage::new("near/test-oidc-provider", "latest")
+            .with_wait_for(WaitFor::Nothing)
+            .with_exposed_port(Self::CONTAINER_PORT)
+            .with_env_var("RUST_LOG", "DEBUG");
+        let image: RunnableImage<GenericImage> = image.into();
+        let image = image.with_network(network);
+        let container = docker_client.cli.run(image);
+
+        let ip_address = docker_client
+            .get_network_ip_address(&container, network)
+            .await?;
+
+        let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
+        let full_address = format!("http://{}:{}", ip_address, Self::CONTAINER_PORT);
+        let jwt_pk_url = format!("{}/jwt_signature_public_keys", full_address);
+        let jwt_local_url = format!("http://localhost:{}/jwt_signature_public_keys", host_port);
+
+        tracing::info!(
+            "OIDC provider container is running, jwt signature pk url: {}",
+            jwt_pk_url
+        );
+        Ok(OidcProvider {
+            container,
+            jwt_pk_url,
+            jwt_local_url,
+        })
+    }
+}
+
 pub struct Datastore<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
@@ -472,6 +515,7 @@ impl<'a> SignerNode<'a> {
         datastore_local_url: &str,
         gcp_project_id: &str,
         firebase_audience_id: &str,
+        oidc_provider_url: &str,
     ) -> anyhow::Result<SignerNode<'a>> {
         tracing::info!("Running signer node container {}...", node_id);
         let image: GenericImage = GenericImage::new("near/mpc-recovery", "latest")
@@ -497,7 +541,7 @@ impl<'a> SignerNode<'a> {
             ),
             gcp_project_id: gcp_project_id.to_string(),
             gcp_datastore_url: Some(datastore_url.to_string()),
-            test: true,
+            jwt_signature_pk_url: oidc_provider_url.to_string(),
         }
         .into_str_args();
 
@@ -640,9 +684,7 @@ impl<'a> LeaderNode<'a> {
             fast_auth_partners_filepath: None,
             gcp_project_id: gcp_project_id.to_string(),
             gcp_datastore_url: Some(ctx.datastore.address.to_string()),
-            test: true,
-            // TODO: remove once relayer is merged as one
-            public_relayer: true,
+            jwt_signature_pk_url: ctx.oidc_provider.jwt_pk_url.to_string(),
         }
         .into_str_args();
 
@@ -673,8 +715,7 @@ impl<'a> LeaderNode<'a> {
     pub fn api(&self) -> LeaderNodeApi {
         LeaderNodeApi {
             address: self.local_address.clone(),
-            // NOTE: integration tests uses public relayer
-            client: NearRpcAndRelayerClient::connect(&self.local_rpc_url, true),
+            client: NearRpcAndRelayerClient::connect(&self.local_rpc_url),
             relayer: DelegateActionRelayer {
                 url: self.local_relayer_url.clone(),
                 api_key: None,

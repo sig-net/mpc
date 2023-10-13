@@ -31,6 +31,7 @@ impl SignerNode {
         node_id: u64,
         sk_share: &ExpandedKeyPair,
         cipher_key: &GenericArray<u8, U32>,
+        ctx: &super::Context<'_>,
         datastore_url: &str,
         gcp_project_id: &str,
         firebase_audience_id: &str,
@@ -57,7 +58,7 @@ impl SignerNode {
             ),
             gcp_project_id: gcp_project_id.to_string(),
             gcp_datastore_url: Some(datastore_url.to_string()),
-            test: true,
+            jwt_signature_pk_url: ctx.oidc_provider.jwt_local_url.clone(),
         }
         .into_str_args();
 
@@ -160,9 +161,7 @@ impl LeaderNode {
             fast_auth_partners_filepath: None,
             gcp_project_id: gcp_project_id.to_string(),
             gcp_datastore_url: Some(ctx.datastore.local_address.to_string()),
-            test: true,
-            // TODO: remove once relayer is merged as one
-            public_relayer: true,
+            jwt_signature_pk_url: ctx.oidc_provider.jwt_local_url.clone(),
         }
         .into_str_args();
 
@@ -196,7 +195,7 @@ impl LeaderNode {
     pub fn api(&self) -> LeaderNodeApi {
         LeaderNodeApi {
             address: self.address.clone(),
-            client: NearRpcAndRelayerClient::connect(&self.near_rpc, true),
+            client: NearRpcAndRelayerClient::connect(&self.near_rpc),
             relayer: DelegateActionRelayer {
                 url: self.relayer_url.clone(),
                 api_key: None,

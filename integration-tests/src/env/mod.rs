@@ -65,6 +65,7 @@ impl Nodes<'_> {
 pub struct Context<'a> {
     pub relayer_ctx: RelayerCtx<'a>,
     pub datastore: containers::Datastore<'a>,
+    pub oidc_provider: containers::OidcProvider<'a>,
 }
 
 pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> {
@@ -73,15 +74,18 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
     let relayer_id = generate_random_string(7); // used to distinguish relayer tmp files in multiple tests
     let relayer_ctx_future = initialize_relayer(docker_client, NETWORK, &relayer_id);
     let datastore_future = containers::Datastore::run(docker_client, NETWORK, GCP_PROJECT_ID);
+    let oidc_provider_future = containers::OidcProvider::run(&docker_client, NETWORK);
 
-    let (relayer_ctx, datastore) =
-        futures::future::join(relayer_ctx_future, datastore_future).await;
+    let (relayer_ctx, datastore, oidc_provider) =
+        futures::future::join3(relayer_ctx_future, datastore_future, oidc_provider_future).await;
     let relayer_ctx = relayer_ctx?;
     let datastore = datastore?;
+    let oidc_provider = oidc_provider?;
 
     Ok(Context {
         relayer_ctx,
         datastore,
+        oidc_provider,
     })
 }
 
@@ -101,6 +105,7 @@ pub async fn docker(nodes: usize, docker_client: &DockerClient) -> anyhow::Resul
             &ctx.datastore.local_address,
             GCP_PROJECT_ID,
             FIREBASE_AUDIENCE_ID,
+            &ctx.oidc_provider.jwt_pk_url,
         ));
     }
     let signer_nodes = futures::future::join_all(signer_node_futures)
@@ -141,6 +146,7 @@ pub async fn host(nodes: usize, docker_client: &DockerClient) -> anyhow::Result<
             i as u64,
             share,
             cipher_key,
+            &ctx,
             &ctx.datastore.local_address,
             GCP_PROJECT_ID,
             FIREBASE_AUDIENCE_ID,

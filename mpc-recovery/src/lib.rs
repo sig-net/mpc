@@ -18,7 +18,6 @@ use near_primitives::types::AccountId;
 
 use crate::firewall::allowed::{OidcProviderList, PartnerList};
 use crate::gcp::GcpService;
-use crate::oauth::{PagodaFirebaseTokenVerifier, UniversalTokenVerifier};
 use crate::sign_node::migration;
 
 pub mod error;
@@ -107,13 +106,9 @@ pub enum Cli {
         /// GCP datastore URL
         #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
         gcp_datastore_url: Option<String>,
-        /// Whether to accept test tokens
-        #[arg(long, env("MPC_RECOVERY_TEST"), default_value("false"))]
-        test: bool,
-        // TODO/HACK: remove the need for this, once relayer is merged as one.
-        /// Whether to use the public relayer
-        #[arg(long, env("MPC_PUBLIC_RELAYER"), default_value("false"))]
-        public_relayer: bool,
+        /// URL to the public key used to sign JWT tokens
+        #[arg(long, env("MPC_RECOVERY_JWT_SIGNATURE_PK_URL"))]
+        jwt_signature_pk_url: String,
     },
     StartSign {
         /// Environment to run in (`dev` or `prod`)
@@ -143,9 +138,9 @@ pub enum Cli {
         /// GCP datastore URL
         #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
         gcp_datastore_url: Option<String>,
-        /// Whether to accept test tokens
-        #[arg(long, env("MPC_RECOVERY_TEST"), default_value("false"))]
-        test: bool,
+        /// URL to the public key used to sign JWT tokens
+        #[arg(long, env("MPC_RECOVERY_JWT_SIGNATURE_PK_URL"))]
+        jwt_signature_pk_url: String,
     },
     RotateSignNodeCipher {
         /// Environment to run in (`dev` or `prod`)
@@ -210,8 +205,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             fast_auth_partners_filepath: partners_filepath,
             gcp_project_id,
             gcp_datastore_url,
-            test,
-            public_relayer,
+            jwt_signature_pk_url,
         } => {
             let gcp_service =
                 GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
@@ -234,14 +228,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 account_creator_id,
                 account_creator_sk,
                 partners,
-                public_relayer,
+                jwt_signature_pk_url,
             };
 
-            if test {
-                run_leader_node::<UniversalTokenVerifier>(config).await;
-            } else {
-                run_leader_node::<PagodaFirebaseTokenVerifier>(config).await;
-            }
+            run_leader_node(config).await;
         }
         Cli::StartSign {
             env,
@@ -253,7 +243,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             oidc_providers_filepath,
             gcp_project_id,
             gcp_datastore_url,
-            test,
+            jwt_signature_pk_url,
         } => {
             let gcp_service =
                 GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
@@ -284,12 +274,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 cipher,
                 port: web_port,
                 oidc_providers,
+                jwt_signature_pk_url,
             };
-            if test {
-                run_sign_node::<UniversalTokenVerifier>(config).await;
-            } else {
-                run_sign_node::<PagodaFirebaseTokenVerifier>(config).await;
-            }
+            run_sign_node(config).await;
         }
         Cli::RotateSignNodeCipher {
             env,
@@ -430,8 +417,7 @@ impl Cli {
                 fast_auth_partners_filepath,
                 gcp_project_id,
                 gcp_datastore_url,
-                test,
-                public_relayer,
+                jwt_signature_pk_url,
             } => {
                 let mut buf = vec![
                     "start-leader".to_string(),
@@ -447,6 +433,8 @@ impl Cli {
                     account_creator_id.to_string(),
                     "--gcp-project-id".to_string(),
                     gcp_project_id,
+                    "--jwt-signature-pk-url".to_string(),
+                    jwt_signature_pk_url,
                 ];
 
                 if let Some(key) = account_creator_sk {
@@ -465,12 +453,6 @@ impl Cli {
                     buf.push("--gcp-datastore-url".to_string());
                     buf.push(gcp_datastore_url);
                 }
-                if test {
-                    buf.push("--test".to_string());
-                }
-                if public_relayer {
-                    buf.push("--public-relayer".to_string());
-                }
                 for sign_node in sign_nodes {
                     buf.push("--sign-nodes".to_string());
                     buf.push(sign_node);
@@ -487,7 +469,7 @@ impl Cli {
                 oidc_providers_filepath,
                 gcp_project_id,
                 gcp_datastore_url,
-                test,
+                jwt_signature_pk_url,
             } => {
                 let mut buf = vec![
                     "start-sign".to_string(),
@@ -499,6 +481,8 @@ impl Cli {
                     web_port.to_string(),
                     "--gcp-project-id".to_string(),
                     gcp_project_id,
+                    "--jwt-signature-pk-url".to_string(),
+                    jwt_signature_pk_url,
                 ];
                 if let Some(key) = cipher_key {
                     buf.push("--cipher-key".to_string());
@@ -519,9 +503,6 @@ impl Cli {
                 if let Some(gcp_datastore_url) = gcp_datastore_url {
                     buf.push("--gcp-datastore-url".to_string());
                     buf.push(gcp_datastore_url);
-                }
-                if test {
-                    buf.push("--test".to_string());
                 }
 
                 buf

@@ -11,6 +11,11 @@ docker pull ghcr.io/near/sandbox
 
 In case of authorization issues make sure you have logged into docker using your [access token](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
 
+Build OIDC Provider test image
+```bash
+docker build -t near/test-oidc-provider ./test-oidc-provider
+```
+
 Now, build mpc-recovery from the project's root:
 
 ```BASH
