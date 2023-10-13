@@ -19,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
         Cli::SetupEnv { nodes } => {
             tracing::info!("Setting up an environment with {} nodes", nodes);
             let docker_client = DockerClient::default();
-            let nodes = env::host(nodes, &docker_client).await?;
+            let nodes = env::run(nodes, &docker_client).await?;
             let ctx = nodes.ctx();
 
             tracing::info!("");
