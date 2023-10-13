@@ -8,14 +8,16 @@ use mpc_recovery::{
         ClaimOidcResponse, MpcPkResponse, NewAccountResponse, SignResponse, UserCredentialsResponse,
     },
 };
-use mpc_recovery_integration_tests::env::{self, containers, GCP_PROJECT_ID};
+use mpc_recovery_integration_tests::env;
+use mpc_recovery_integration_tests::env::containers::DockerClient;
 use workspaces::{network::Sandbox, Worker};
 
 pub struct TestContext {
-    leader_node: containers::LeaderNodeApi,
+    leader_node: env::LeaderNodeApi,
     pk_set: Vec<Point<Ed25519>>,
     worker: Worker<Sandbox>,
-    signer_nodes: Vec<containers::SignerNodeApi>,
+    signer_nodes: Vec<env::SignerNodeApi>,
+    gcp_project_id: String,
     gcp_datastore_url: String,
 }
 
@@ -23,7 +25,7 @@ impl TestContext {
     pub async fn gcp_service(&self) -> anyhow::Result<GcpService> {
         GcpService::new(
             "dev".into(),
-            GCP_PROJECT_ID.into(),
+            self.gcp_project_id.clone(),
             Some(self.gcp_datastore_url.clone()),
         )
         .await
@@ -35,7 +37,7 @@ where
     Task: FnOnce(TestContext) -> Fut,
     Fut: core::future::Future<Output = anyhow::Result<Val>>,
 {
-    let docker_client = containers::DockerClient::default();
+    let docker_client = DockerClient::default();
     let nodes = if cfg!(feature = "docker-test") {
         env::docker(nodes, &docker_client).await?
     } else {
@@ -47,6 +49,7 @@ where
         leader_node: nodes.leader_api(),
         signer_nodes: nodes.signer_apis(),
         worker: nodes.ctx().relayer_ctx.worker.clone(),
+        gcp_project_id: nodes.ctx().gcp_project_id.clone(),
         gcp_datastore_url: nodes.datastore_addr(),
     })
     .await?;

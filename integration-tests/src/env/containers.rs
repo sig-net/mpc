@@ -42,9 +42,8 @@ use workspaces::AccountId;
 
 use std::fs;
 
+use crate::env::{Context, LeaderNodeApi, SignerNodeApi};
 use crate::util::{self, create_key_file, create_relayer_cofig_file};
-
-use super::Context;
 
 static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 
@@ -492,30 +491,15 @@ pub struct SignerNode<'a> {
     gcp_datastore_local_url: String,
 }
 
-pub struct SignerNodeApi {
-    pub address: String,
-    pub node_id: usize,
-    pub sk_share: ExpandedKeyPair,
-    pub cipher_key: GenericArray<u8, U32>,
-    pub gcp_project_id: String,
-    pub gcp_datastore_local_url: String,
-}
-
-impl<'a> SignerNode<'a> {
+impl SignerNode<'_> {
     // Container port used for the docker network, does not have to be unique
     const CONTAINER_PORT: u16 = 3000;
 
-    pub async fn run_signing_node(
-        docker_client: &'a DockerClient,
-        network: &str,
-        node_id: u64,
+    pub async fn run<'a>(
+        ctx: &super::Context<'a>,
+        node_id: usize,
         sk_share: &ExpandedKeyPair,
         cipher_key: &GenericArray<u8, U32>,
-        datastore_url: &str,
-        datastore_local_url: &str,
-        gcp_project_id: &str,
-        firebase_audience_id: &str,
-        oidc_provider_url: &str,
     ) -> anyhow::Result<SignerNode<'a>> {
         tracing::info!("Running signer node container {}...", node_id);
         let image: GenericImage = GenericImage::new("near/mpc-recovery", "latest")
@@ -525,7 +509,7 @@ impl<'a> SignerNode<'a> {
 
         let args = mpc_recovery::Cli::StartSign {
             env: "dev".to_string(),
-            node_id,
+            node_id: node_id as u64,
             web_port: Self::CONTAINER_PORT,
             sk_share: Some(serde_json::to_string(&sk_share)?),
             cipher_key: Some(hex::encode(cipher_key)),
@@ -533,23 +517,24 @@ impl<'a> SignerNode<'a> {
             oidc_providers: Some(
                 serde_json::json!([
                     {
-                        "issuer": format!("https://securetoken.google.com/{firebase_audience_id}"),
-                        "audience": firebase_audience_id,
+                        "issuer": format!("https://securetoken.google.com/{}", ctx.audience_id),
+                        "audience": ctx.audience_id,
                     },
                 ])
                 .to_string(),
             ),
-            gcp_project_id: gcp_project_id.to_string(),
-            gcp_datastore_url: Some(datastore_url.to_string()),
-            jwt_signature_pk_url: oidc_provider_url.to_string(),
+            gcp_project_id: ctx.gcp_project_id.clone(),
+            gcp_datastore_url: Some(ctx.datastore.address.clone()),
+            jwt_signature_pk_url: ctx.oidc_provider.jwt_pk_url.clone(),
         }
         .into_str_args();
 
         let image: RunnableImage<GenericImage> = (image, args).into();
-        let image = image.with_network(network);
-        let container = docker_client.cli.run(image);
-        let ip_address = docker_client
-            .get_network_ip_address(&container, network)
+        let image = image.with_network(&ctx.docker_network);
+        let container = ctx.docker_client.cli.run(image);
+        let ip_address = ctx
+            .docker_client
+            .get_network_ip_address(&container, &ctx.docker_network)
             .await?;
         let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
 
@@ -568,11 +553,11 @@ impl<'a> SignerNode<'a> {
             container,
             address: full_address,
             local_address: format!("http://localhost:{host_port}"),
-            node_id: node_id as usize,
+            node_id,
             sk_share: sk_share.clone(),
             cipher_key: *cipher_key,
-            gcp_project_id: gcp_project_id.to_string(),
-            gcp_datastore_local_url: datastore_local_url.to_string(),
+            gcp_project_id: ctx.gcp_project_id.clone(),
+            gcp_datastore_local_url: ctx.datastore.local_address.clone(),
         })
     }
 
@@ -633,26 +618,16 @@ pub struct LeaderNode<'a> {
     local_relayer_url: String,
 }
 
-pub struct LeaderNodeApi {
-    pub address: String,
-    pub relayer: DelegateActionRelayer,
-    pub(crate) client: NearRpcAndRelayerClient,
-}
-
 impl<'a> LeaderNode<'a> {
     // Container port used for the docker network, does not have to be unique
     const CONTAINER_PORT: u16 = 3000;
 
     pub async fn run(
-        docker_client: &'a DockerClient,
-        network: &str,
-        sign_nodes: Vec<String>,
         ctx: &Context<'a>,
-        gcp_project_id: &str,
+        sign_nodes: Vec<String>,
         near_root_account: &AccountId,
         account_creator_id: &AccountId,
         account_creator_sk: &workspaces::types::SecretKey,
-        firebase_audience_id: &str,
     ) -> anyhow::Result<LeaderNode<'a>> {
         tracing::info!("Running leader node container...");
 
@@ -669,30 +644,34 @@ impl<'a> LeaderNode<'a> {
             near_root_account: near_root_account.to_string(),
             account_creator_id: account_creator_id.clone(),
             account_creator_sk: Some(account_creator_sk.to_string()),
-            fast_auth_partners: Some(serde_json::json!([
-                {
-                    "oidc_provider": {
-                        "issuer": format!("https://securetoken.google.com/{firebase_audience_id}"),
-                        "audience": firebase_audience_id,
+            fast_auth_partners: Some(
+                serde_json::json!([
+                    {
+                        "oidc_provider": {
+                            "issuer": format!("https://securetoken.google.com/{}", ctx.audience_id),
+                            "audience": ctx.audience_id,
+                        },
+                        "relayer": {
+                            "url": &ctx.relayer_ctx.relayer.address,
+                            "api_key": serde_json::Value::Null,
+                        },
                     },
-                    "relayer": {
-                        "url": &ctx.relayer_ctx.relayer.address,
-                        "api_key": serde_json::Value::Null,
-                    },
-                },
-            ]).to_string()),
+                ])
+                .to_string(),
+            ),
             fast_auth_partners_filepath: None,
-            gcp_project_id: gcp_project_id.to_string(),
+            gcp_project_id: ctx.gcp_project_id.clone(),
             gcp_datastore_url: Some(ctx.datastore.address.to_string()),
             jwt_signature_pk_url: ctx.oidc_provider.jwt_pk_url.to_string(),
         }
         .into_str_args();
 
         let image: RunnableImage<GenericImage> = (image, args).into();
-        let image = image.with_network(network);
-        let container = docker_client.cli.run(image);
-        let ip_address = docker_client
-            .get_network_ip_address(&container, network)
+        let image = image.with_network(&ctx.docker_network);
+        let container = ctx.docker_client.cli.run(image);
+        let ip_address = ctx
+            .docker_client
+            .get_network_ip_address(&container, &ctx.docker_network)
             .await?;
         let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
 

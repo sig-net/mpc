@@ -9,7 +9,7 @@ use mpc_recovery::firewall::allowed::DelegateActionRelayer;
 use mpc_recovery::relayer::NearRpcAndRelayerClient;
 use multi_party_eddsa::protocols::ExpandedKeyPair;
 
-use crate::containers::{LeaderNodeApi, SignerNodeApi};
+use crate::env::{LeaderNodeApi, SignerNodeApi};
 use crate::util;
 
 pub struct SignerNode {
@@ -32,9 +32,6 @@ impl SignerNode {
         sk_share: &ExpandedKeyPair,
         cipher_key: &GenericArray<u8, U32>,
         ctx: &super::Context<'_>,
-        datastore_url: &str,
-        gcp_project_id: &str,
-        firebase_audience_id: &str,
         release: bool,
     ) -> anyhow::Result<Self> {
         let executable = util::executable(release)
@@ -50,14 +47,14 @@ impl SignerNode {
             oidc_providers: Some(
                 serde_json::json!([
                     {
-                        "issuer": format!("https://securetoken.google.com/{firebase_audience_id}"),
-                        "audience": firebase_audience_id,
+                        "issuer": format!("https://securetoken.google.com/{}", ctx.audience_id),
+                        "audience": ctx.audience_id,
                     },
                 ])
                 .to_string(),
             ),
-            gcp_project_id: gcp_project_id.to_string(),
-            gcp_datastore_url: Some(datastore_url.to_string()),
+            gcp_project_id: ctx.gcp_project_id.clone(),
+            gcp_datastore_url: Some(ctx.datastore.local_address.clone()),
             jwt_signature_pk_url: ctx.oidc_provider.jwt_local_url.clone(),
         }
         .into_str_args();
@@ -65,8 +62,8 @@ impl SignerNode {
         let address = format!("http://localhost:{web_port}");
         let child = Command::new(&executable)
             .args(&args)
-            .envs(std::env::vars())
             .env("RUST_LOG", "mpc_recovery=DEBUG")
+            .envs(std::env::vars())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
@@ -94,8 +91,8 @@ impl SignerNode {
             node_id: node_id as usize,
             sk_share: sk_share.clone(),
             cipher_key: *cipher_key,
-            gcp_project_id: gcp_project_id.to_string(),
-            gcp_datastore_url: datastore_url.to_string(),
+            gcp_project_id: ctx.gcp_project_id.clone(),
+            gcp_datastore_url: ctx.datastore.local_address.clone(),
             process: child,
         })
     }
@@ -124,14 +121,12 @@ pub struct LeaderNode {
 
 impl LeaderNode {
     pub async fn run(
+        ctx: &super::Context<'_>,
         web_port: u16,
         sign_nodes: Vec<String>,
-        ctx: &super::Context<'_>,
-        gcp_project_id: &str,
         near_root_account: &workspaces::AccountId,
         account_creator_id: &workspaces::AccountId,
         account_creator_sk: &workspaces::types::SecretKey,
-        firebase_audience_id: &str,
         release: bool,
     ) -> anyhow::Result<Self> {
         tracing::info!("Running leader node...");
@@ -146,21 +141,24 @@ impl LeaderNode {
             near_root_account: near_root_account.to_string(),
             account_creator_id: account_creator_id.clone(),
             account_creator_sk: Some(account_creator_sk.to_string()),
-            fast_auth_partners: Some(serde_json::json!([
-                {
-                    "oidc_provider": {
-                        "issuer": format!("https://securetoken.google.com/{}", firebase_audience_id),
-                        "audience": firebase_audience_id,
+            fast_auth_partners: Some(
+                serde_json::json!([
+                    {
+                        "oidc_provider": {
+                            "issuer": format!("https://securetoken.google.com/{}", ctx.audience_id),
+                            "audience": ctx.audience_id,
+                        },
+                        "relayer": {
+                            "url": &ctx.relayer_ctx.relayer.local_address,
+                            "api_key": serde_json::Value::Null,
+                        },
                     },
-                    "relayer": {
-                        "url": &ctx.relayer_ctx.relayer.local_address,
-                        "api_key": serde_json::Value::Null,
-                    },
-                },
-            ]).to_string()),
+                ])
+                .to_string(),
+            ),
             fast_auth_partners_filepath: None,
-            gcp_project_id: gcp_project_id.to_string(),
-            gcp_datastore_url: Some(ctx.datastore.local_address.to_string()),
+            gcp_project_id: ctx.gcp_project_id.clone(),
+            gcp_datastore_url: Some(ctx.datastore.local_address.clone()),
             jwt_signature_pk_url: ctx.oidc_provider.jwt_local_url.clone(),
         }
         .into_str_args();
