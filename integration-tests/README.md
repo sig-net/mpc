@@ -83,7 +83,8 @@ Now, you can inspect each container's logs according to your needs using `docker
 We have a CLI tool that can instantiate a short-lived development environment that has everything except for the leader node set up. You can then seamlessly plug in your own leader node instance that you have set up manually (the tool gives you a CLI command to use as a starting point, but you can attach debugger, enable extra logs etc). Try it out now (sets up 3 signer nodes):
 
 ```bash
-$ cargo run -p mpc-recovery-integration-tests -- test-leader 3
+$ export RUST_LOG=info
+$ cargo run -p mpc-recovery-integration-tests -- setup-env 3
 ```
 
 ### I'm getting "Error: error trying to connect: No such file or directory (os error 2)"

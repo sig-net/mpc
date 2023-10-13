@@ -62,7 +62,7 @@ impl SignerNode {
         let address = format!("http://localhost:{web_port}");
         let child = Command::new(&executable)
             .args(&args)
-            .env("RUST_LOG", "mpc_recovery=DEBUG")
+            .env("RUST_LOG", "mpc_recovery=INFO")
             .envs(std::env::vars())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -165,6 +165,7 @@ impl LeaderNode {
 
         let child = Command::new(&executable)
             .args(&args)
+            .env("RUST_LOG", "mpc_recovery=INFO")
             .envs(std::env::vars())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
