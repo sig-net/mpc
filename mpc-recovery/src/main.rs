@@ -8,7 +8,6 @@ use clap::Parser;
 use mpc_recovery::{
     firewall::allowed::{OidcProviderList, PartnerList},
     gcp::GcpService,
-    oauth::{PagodaFirebaseTokenVerifier, UniversalTokenVerifier},
     sign_node::migration,
     GenerateResult, LeaderConfig, SignerConfig,
 };
@@ -60,13 +59,9 @@ enum Cli {
         /// GCP datastore URL
         #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
         gcp_datastore_url: Option<String>,
-        /// Whether to accept test tokens
-        #[arg(long, env("MPC_RECOVERY_TEST"), default_value("false"))]
-        test: bool,
-        // TODO/HACK: remove the need for this, once relayer is merged as one.
-        /// Whether to use the public relayer
-        #[arg(long, env("MPC_PUBLIC_RELAYER"), default_value("false"))]
-        public_relayer: bool,
+        /// URL to the public key used to sign JWT tokens
+        #[arg(long, env("MPC_RECOVERY_JWT_SIGNATURE_PK_URL"))]
+        jwt_signature_pk_url: String,
     },
     StartSign {
         /// Environment to run in (`dev` or `prod`)
@@ -96,9 +91,9 @@ enum Cli {
         /// GCP datastore URL
         #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
         gcp_datastore_url: Option<String>,
-        /// Whether to accept test tokens
-        #[arg(long, env("MPC_RECOVERY_TEST"), default_value("false"))]
-        test: bool,
+        /// URL to the public key used to sign JWT tokens
+        #[arg(long, env("MPC_RECOVERY_JWT_SIGNATURE_PK_URL"))]
+        jwt_signature_pk_url: String,
     },
     RotateSignNodeCipher {
         /// Environment to run in (`dev` or `prod`)
@@ -235,10 +230,9 @@ async fn main() -> anyhow::Result<()> {
             account_creator_sk,
             fast_auth_partners: partners,
             fast_auth_partners_filepath: partners_filepath,
+            jwt_signature_pk_url,
             gcp_project_id,
             gcp_datastore_url,
-            test,
-            public_relayer,
         } => {
             let gcp_service =
                 GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
@@ -261,14 +255,10 @@ async fn main() -> anyhow::Result<()> {
                 account_creator_id,
                 account_creator_sk,
                 partners,
-                public_relayer,
+                jwt_signature_pk_url,
             };
 
-            if test {
-                mpc_recovery::run_leader_node::<UniversalTokenVerifier>(config).await;
-            } else {
-                mpc_recovery::run_leader_node::<PagodaFirebaseTokenVerifier>(config).await;
-            }
+            mpc_recovery::run_leader_node(config).await;
         }
         Cli::StartSign {
             env,
@@ -280,7 +270,7 @@ async fn main() -> anyhow::Result<()> {
             oidc_providers_filepath,
             gcp_project_id,
             gcp_datastore_url,
-            test,
+            jwt_signature_pk_url,
         } => {
             let gcp_service =
                 GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
@@ -311,12 +301,10 @@ async fn main() -> anyhow::Result<()> {
                 cipher,
                 port: web_port,
                 oidc_providers,
+                jwt_signature_pk_url,
             };
-            if test {
-                mpc_recovery::run_sign_node::<UniversalTokenVerifier>(config).await;
-            } else {
-                mpc_recovery::run_sign_node::<PagodaFirebaseTokenVerifier>(config).await;
-            }
+
+            mpc_recovery::run_sign_node(config).await;
         }
         Cli::RotateSignNodeCipher {
             env,
