@@ -19,6 +19,7 @@ const NETWORK: &str = "mpc_it_network";
 const GCP_PROJECT_ID: &str = "mpc-recovery-gcp-project";
 // TODO: figure out how to instantiate and use a local firebase deployment
 const FIREBASE_AUDIENCE_ID: &str = "test_audience";
+const ISSUER: &str = "https://securetoken.google.com/test_audience";
 
 pub struct SignerNodeApi {
     pub env: String,
@@ -91,6 +92,7 @@ pub struct Context<'a> {
     pub docker_network: String,
     pub gcp_project_id: String,
     pub audience_id: String,
+    pub issuer: String,
     pub release: bool,
 
     pub relayer_ctx: RelayerCtx<'a>,
@@ -121,6 +123,7 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         docker_network: docker_network.to_string(),
         gcp_project_id: gcp_project_id.to_string(),
         audience_id: FIREBASE_AUDIENCE_ID.to_string(),
+        issuer: ISSUER.to_string(),
         release: true,
         relayer_ctx,
         datastore,

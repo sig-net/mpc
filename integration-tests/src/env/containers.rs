@@ -167,12 +167,16 @@ pub struct Redis<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
     pub full_address: String,
+    pub local_address: String,
 }
 
 impl<'a> Redis<'a> {
+    const CONTAINER_PORT: u16 = 3000;
+
     pub async fn run(docker_client: &'a DockerClient, network: &str) -> anyhow::Result<Redis<'a>> {
         tracing::info!("Running Redis container...");
         let image = GenericImage::new("redis", "latest")
+            .with_exposed_port(Self::CONTAINER_PORT)
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"));
         let image: RunnableImage<GenericImage> = image.into();
         let image = image.with_network(network);
@@ -183,12 +187,14 @@ impl<'a> Redis<'a> {
 
         // Note: this port is hardcoded in the Redis image
         let full_address = format!("redis://{}:{}", address, 6379);
+        let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
 
         tracing::info!("Redis container is running at {}", full_address);
         Ok(Redis {
             container,
             address,
             full_address,
+            local_address: format!("http://localhost:{host_port}"),
         })
     }
 }
@@ -514,7 +520,7 @@ impl SignerNode<'_> {
             oidc_providers: Some(
                 serde_json::json!([
                     {
-                        "issuer": format!("https://securetoken.google.com/{}", ctx.audience_id),
+                        "issuer": ctx.issuer,
                         "audience": ctx.audience_id,
                     },
                 ])
@@ -640,7 +646,7 @@ impl<'a> LeaderNode<'a> {
                 serde_json::json!([
                     {
                         "oidc_provider": {
-                            "issuer": format!("https://securetoken.google.com/{}", ctx.audience_id),
+                            "issuer": ctx.issuer,
                             "audience": ctx.audience_id,
                         },
                         "relayer": {

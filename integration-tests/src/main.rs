@@ -17,41 +17,43 @@ async fn main() -> anyhow::Result<()> {
     subscriber.init();
     match Cli::parse() {
         Cli::SetupEnv { nodes } => {
-            tracing::info!("Setting up an environment with {} nodes", nodes);
+            println!("Setting up an environment with {} nodes...", nodes);
             let docker_client = DockerClient::default();
             let nodes = env::run(nodes, &docker_client).await?;
             let ctx = nodes.ctx();
 
-            tracing::info!("");
-            tracing::info!("Environment is ready");
-            tracing::info!("  Docker network: {}", ctx.docker_network);
-            tracing::info!("  GCP project id: {}", ctx.gcp_project_id);
-            tracing::info!("  Audience id: {}", ctx.audience_id);
+            println!("\nEnvironment is ready:");
+            println!("  docker-network: {}", ctx.docker_network);
+            println!("  gcp-project-id: {}", ctx.gcp_project_id);
+            println!("  audience-id:    {}", ctx.audience_id);
+            println!("  issuer:         {}", ctx.issuer);
+            println!("  release:        {}", ctx.release);
+            println!("  env:            {}", ctx.env);
 
-            tracing::info!("Datastore address: {}", nodes.datastore_addr());
-            tracing::info!("Sandbox address: {}", ctx.relayer_ctx.sandbox.local_address);
-            tracing::info!(
-                "Sandbox root account: {}",
-                ctx.relayer_ctx.worker.root_account()?.id()
-            );
-            tracing::info!("Relayer address: {}", ctx.relayer_ctx.relayer.local_address);
-            tracing::info!(
-                "Relayer creator account: {}",
-                ctx.relayer_ctx.creator_account.id()
-            );
-            tracing::info!("OidcProvider address: {}", ctx.oidc_provider.jwt_local_url);
-            tracing::info!(
-                "Signer node URLs:\n{:#?}",
-                nodes
-                    .signer_apis()
-                    .iter()
-                    .map(|n| n.address.as_str())
-                    .collect::<Vec<_>>()
-            );
-            tracing::info!("pk set: {:?}", nodes.pk_set());
-            tracing::info!("Leader node address: {}", nodes.leader_api().address);
-            tracing::info!("Press any button to exit and destroy all containers...");
+            println!("\nAccounts:");
+            println!("  creator: {}", ctx.relayer_ctx.creator_account.id());
+            println!("  root:    {}", ctx.relayer_ctx.worker.root_account()?.id());
 
+            println!("\nExternal services:");
+            println!("  oidc-provider: {}", ctx.oidc_provider.jwt_local_url);
+            println!("  datastore:     {}", nodes.datastore_addr());
+            println!("  sandbox:       {}", ctx.relayer_ctx.sandbox.local_address);
+            println!("  relayer:       {}", ctx.relayer_ctx.relayer.local_address);
+            println!("  redis:         {}", ctx.relayer_ctx.redis.local_address);
+
+            println!("\nNode services:");
+            println!("  leader node:   {}", nodes.leader_api().address);
+            println!("  signer nodes:");
+            for node in nodes.signer_apis() {
+                println!("    {}: {}", node.node_id, node.address);
+            }
+
+            println!("\nSigner public key set:");
+            for pk in nodes.pk_set() {
+                println!("  {pk:?}");
+            }
+
+            println!("\nPress any button to exit and destroy all containers...");
             while stdin().read(&mut [0]).await? == 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }

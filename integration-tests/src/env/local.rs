@@ -1,5 +1,3 @@
-#![allow(clippy::too_many_arguments)]
-
 use aes_gcm::aead::consts::U32;
 use aes_gcm::aead::generic_array::GenericArray;
 use async_process::Child;
@@ -42,7 +40,7 @@ impl SignerNode {
             oidc_providers: Some(
                 serde_json::json!([
                     {
-                        "issuer": format!("https://securetoken.google.com/{}", ctx.audience_id),
+                        "issuer": ctx.issuer,
                         "audience": ctx.audience_id,
                     },
                 ])
@@ -114,7 +112,7 @@ impl LeaderNode {
                 serde_json::json!([
                     {
                         "oidc_provider": {
-                            "issuer": format!("https://securetoken.google.com/{}", ctx.audience_id),
+                            "issuer": ctx.issuer,
                             "audience": ctx.audience_id,
                         },
                         "relayer": {
