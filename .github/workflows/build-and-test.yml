@@ -76,10 +76,9 @@ jobs:
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS_DEV }}
 
-      - name: Pull MPC Recovery Docker Image
+      - name: Build MPC Recovery Binary Locally
         run: |
-          docker pull us-east1-docker.pkg.dev/pagoda-discovery-platform-dev/mpc-recovery/mpc-recovery-dev:${{ github.sha }}
-          docker tag us-east1-docker.pkg.dev/pagoda-discovery-platform-dev/mpc-recovery/mpc-recovery-dev:${{ github.sha }} near/mpc-recovery:latest
+          cargo build --release
 
       - name: Install stable toolchain
         uses: actions-rs/toolchain@v1
