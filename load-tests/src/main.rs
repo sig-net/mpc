@@ -7,6 +7,7 @@ use std::time::Duration;
 use constants::VALID_OIDC_PROVIDER_KEY;
 use goose::prelude::*;
 use goose_eggs::{validate_and_load_static_assets, Validate};
+use mpc_recovery::msg::MpcPkRequest;
 use near_crypto::SecretKey;
 use primitives::UserSession;
 use reqwest::{header::CONTENT_TYPE, Body};
@@ -56,9 +57,10 @@ async fn prepare_user_credentials(user: &mut GooseUser) -> TransactionResult {
 }
 
 async fn mpc_public_key(user: &mut GooseUser) -> TransactionResult {
+    let body_json = serde_json::to_string(&MpcPkRequest {}).expect("json serialization failed");
     let request_builder = user
         .get_request_builder(&GooseMethod::Post, "mpc_public_key")?
-        .body(Body::from("{}"))
+        .body(Body::from(body_json))
         .header(CONTENT_TYPE, "application/json")
         .timeout(Duration::from_secs(10));
 

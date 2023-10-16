@@ -2845,10 +2845,12 @@ dependencies = [
  "goose",
  "goose-eggs",
  "jsonwebtoken 9.0.0",
+ "mpc-recovery",
  "near-crypto 0.17.0",
  "near-primitives 0.17.0",
  "reqwest",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
