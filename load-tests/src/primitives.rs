@@ -1,3 +1,4 @@
+use mpc_recovery::sign_node::oidc::OidcToken;
 use near_crypto::SecretKey;
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +11,7 @@ pub struct IdTokenClaims {
 }
 
 pub struct UserSession {
-    pub jwt_token: String,
+    pub jwt_token: OidcToken,
     pub fa_sk: SecretKey,
     pub la_sk: SecretKey,
 }
