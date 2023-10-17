@@ -25,6 +25,7 @@ pub mod firewall;
 pub mod gcp;
 pub mod key_recovery;
 pub mod leader_node;
+pub mod logging;
 pub mod metrics;
 pub mod msg;
 pub mod nar;
@@ -55,7 +56,6 @@ pub fn generate(n: usize) -> GenerateResult {
         .map(|_| Aes256Gcm::generate_key(&mut OsRng))
         .collect();
     let pk_set: Vec<_> = sk_set.iter().map(|sk| sk.public_key.clone()).collect();
-    tracing::debug!(public_key = ?pk_set);
 
     GenerateResult {
         pk_set,
@@ -109,6 +109,9 @@ pub enum Cli {
         /// URL to the public key used to sign JWT tokens
         #[arg(long, env("MPC_RECOVERY_JWT_SIGNATURE_PK_URL"))]
         jwt_signature_pk_url: String,
+        /// Enables export of span data using opentelemetry protocol.
+        #[clap(flatten)]
+        logging_options: logging::Options,
     },
     StartSign {
         /// Environment to run in (`dev` or `prod`)
@@ -141,6 +144,9 @@ pub enum Cli {
         /// URL to the public key used to sign JWT tokens
         #[arg(long, env("MPC_RECOVERY_JWT_SIGNATURE_PK_URL"))]
         jwt_signature_pk_url: String,
+        /// Enables export of span data using opentelemetry protocol.
+        #[clap(flatten)]
+        logging_options: logging::Options,
     },
     RotateSignNodeCipher {
         /// Environment to run in (`dev` or `prod`)
@@ -164,33 +170,24 @@ pub enum Cli {
         /// GCP datastore URL
         #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
         gcp_datastore_url: Option<String>,
+        /// Enables export of span data using opentelemetry protocol.
+        #[clap(flatten)]
+        logging_options: logging::Options,
     },
 }
 
 pub async fn run(cmd: Cli) -> anyhow::Result<()> {
-    // Install global collector configured based on RUST_LOG env var.
-    let mut subscriber = tracing_subscriber::fmt()
-        .with_thread_ids(true)
-        .with_env_filter(EnvFilter::from_default_env());
-    // Check if running in Google Cloud Run: https://cloud.google.com/run/docs/container-contract#services-env-vars
-    if std::env::var("K_SERVICE").is_ok() {
-        // Disable colored logging as it messes up Google's log formatting
-        subscriber = subscriber.with_ansi(false);
-    }
-    subscriber.init();
-    let _span = tracing::trace_span!("cli").entered();
-
     match cmd {
         Cli::Generate { n } => {
             let GenerateResult { pk_set, secrets } = generate(n);
-            tracing::info!("Public key set: {}", serde_json::to_string(&pk_set)?);
+            println!("Public key set: {}", serde_json::to_string(&pk_set)?);
             for (i, (sk_share, cipher_key)) in secrets.iter().enumerate() {
-                tracing::info!(
+                println!(
                     "Secret key share {}: {}",
                     i,
                     serde_json::to_string(sk_share)?
                 );
-                tracing::info!("Cipher {}: {}", i, hex::encode(cipher_key));
+                println!("Cipher {}: {}", i, hex::encode(cipher_key));
             }
         }
         Cli::StartLeader {
@@ -206,7 +203,16 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             gcp_project_id,
             gcp_datastore_url,
             jwt_signature_pk_url,
+            logging_options,
         } => {
+            let _subscriber_guard = logging::default_subscriber_with_opentelemetry(
+                EnvFilter::from_default_env(),
+                &logging_options,
+                env.clone(),
+                "leader".to_string(),
+            )
+            .await
+            .global();
             let gcp_service =
                 GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
             let account_creator_sk =
@@ -244,7 +250,16 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             gcp_project_id,
             gcp_datastore_url,
             jwt_signature_pk_url,
+            logging_options,
         } => {
+            let _subscriber_guard = logging::default_subscriber_with_opentelemetry(
+                EnvFilter::from_default_env(),
+                &logging_options,
+                env.clone(),
+                node_id.to_string(),
+            )
+            .await
+            .global();
             let gcp_service =
                 GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
             let oidc_providers = OidcProviderList {
@@ -286,7 +301,16 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             new_cipher_key,
             gcp_project_id,
             gcp_datastore_url,
+            logging_options,
         } => {
+            let _subscriber_guard = logging::default_subscriber_with_opentelemetry(
+                EnvFilter::from_default_env(),
+                &logging_options,
+                env.clone(),
+                node_id.to_string(),
+            )
+            .await
+            .global();
             let gcp_service = GcpService::new(
                 env.clone(),
                 gcp_project_id.clone(),
@@ -418,6 +442,7 @@ impl Cli {
                 gcp_project_id,
                 gcp_datastore_url,
                 jwt_signature_pk_url,
+                logging_options,
             } => {
                 let mut buf = vec![
                     "start-leader".to_string(),
@@ -457,6 +482,8 @@ impl Cli {
                     buf.push("--sign-nodes".to_string());
                     buf.push(sign_node);
                 }
+                buf.extend(logging_options.into_str_args());
+
                 buf
             }
             Cli::StartSign {
@@ -470,6 +497,7 @@ impl Cli {
                 gcp_project_id,
                 gcp_datastore_url,
                 jwt_signature_pk_url,
+                logging_options,
             } => {
                 let mut buf = vec![
                     "start-sign".to_string(),
@@ -504,6 +532,7 @@ impl Cli {
                     buf.push("--gcp-datastore-url".to_string());
                     buf.push(gcp_datastore_url);
                 }
+                buf.extend(logging_options.into_str_args());
 
                 buf
             }
@@ -515,6 +544,7 @@ impl Cli {
                 new_cipher_key,
                 gcp_project_id,
                 gcp_datastore_url,
+                logging_options,
             } => {
                 let mut buf = vec![
                     "rotate-sign-node-cipher".to_string(),
@@ -541,6 +571,7 @@ impl Cli {
                     buf.push("--gcp-datastore-url".to_string());
                     buf.push(gcp_datastore_url);
                 }
+                buf.extend(logging_options.into_str_args());
 
                 buf
             }

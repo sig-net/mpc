@@ -15,7 +15,6 @@ use crate::transaction::{
 };
 use crate::utils::{check_digest_signature, user_credentials_request_digest};
 use crate::{metrics, nar};
-
 use anyhow::Context;
 use axum::extract::MatchedPath;
 use axum::middleware::{self, Next};
@@ -35,7 +34,6 @@ use near_primitives::transaction::{Action, DeleteKeyAction};
 use near_primitives::types::AccountId;
 use prometheus::{Encoder, TextEncoder};
 use rand::{distributions::Alphanumeric, Rng};
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
