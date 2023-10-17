@@ -13,8 +13,9 @@ use mpc_recovery::{
     utils::{claim_oidc_request_digest, sign_digest, user_credentials_request_digest},
 };
 use near_crypto::SecretKey;
-use near_primitives::{types::AccountId, utils::generate_random_string};
+use near_primitives::types::AccountId;
 use primitives::UserSession;
+use rand::{distributions::Alphanumeric, Rng};
 use utils::build_send_and_check_request;
 
 #[tokio::main]
@@ -22,9 +23,9 @@ async fn main() -> Result<(), GooseError> {
     GooseAttack::initialize()?
         .register_scenario(
             scenario!("registration")
-                .register_transaction(transaction!(prepare_user_credentials))
-                .register_transaction(transaction!(claim_oidc))
-                .register_transaction(transaction!(new_account)),
+                .register_transaction(transaction!(prepare_user_credentials).set_sequence(1))
+                .register_transaction(transaction!(claim_oidc).set_sequence(2))
+                .register_transaction(transaction!(new_account).set_sequence(3)),
         )
         .register_scenario(
             scenario!("simpleMpcPublicKey").register_transaction(transaction!(mpc_public_key)),
@@ -49,18 +50,22 @@ async fn prepare_user_credentials(user: &mut GooseUser) -> TransactionResult {
     );
 
     // Generate random near account id
-    let near_account_id: AccountId = format!("acc-{}.near", generate_random_string(7))
+    let account_id_rand: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(10)
+        .map(char::from)
+        .collect();
+    let near_account_id: AccountId = format!("acc-{}.near", account_id_rand.to_lowercase())
         .try_into()
         .unwrap();
 
+    // Save session data
     let session = UserSession {
         jwt_token: OidcToken::new(&jwt_token),
         near_account_id,
         fa_sk,
         la_sk,
     };
-
-    // Save JWT to session
     user.set_session_data(session);
 
     Ok(())
@@ -126,7 +131,7 @@ async fn new_account(user: &mut GooseUser) -> TransactionResult {
     };
 
     let body_json = serde_json::to_string(&new_account_request).expect("json serialization failed");
-    build_send_and_check_request(user, "claim_oidc", &body_json).await
+    build_send_and_check_request(user, "new_account", &body_json).await
 }
 
 async fn _sign(_user: &mut GooseUser) -> TransactionResult {
