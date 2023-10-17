@@ -2,14 +2,18 @@ mod constants;
 mod primitives;
 pub mod utils;
 
+use std::vec;
+
 use constants::VALID_OIDC_PROVIDER_KEY;
 use goose::prelude::*;
 use mpc_recovery::{
-    msg::{ClaimOidcRequest, MpcPkRequest},
+    msg::{ClaimOidcRequest, MpcPkRequest, NewAccountRequest},
     sign_node::oidc::OidcToken,
-    utils::{claim_oidc_request_digest, sign_digest},
+    transaction::CreateAccountOptions,
+    utils::{claim_oidc_request_digest, sign_digest, user_credentials_request_digest},
 };
 use near_crypto::SecretKey;
+use near_primitives::{types::AccountId, utils::generate_random_string};
 use primitives::UserSession;
 use utils::build_send_and_check_request;
 
@@ -44,8 +48,14 @@ async fn prepare_user_credentials(user: &mut GooseUser) -> TransactionResult {
         None,
     );
 
+    // Generate random near account id
+    let near_account_id: AccountId = format!("acc-{}.near", generate_random_string(7))
+        .try_into()
+        .unwrap();
+
     let session = UserSession {
         jwt_token: OidcToken::new(&jwt_token),
+        near_account_id,
         fa_sk,
         la_sk,
     };
@@ -85,8 +95,38 @@ async fn _user_credentials(_user: &mut GooseUser) -> TransactionResult {
     Ok(())
 }
 
-async fn new_account(_user: &mut GooseUser) -> TransactionResult {
-    Ok(())
+async fn new_account(user: &mut GooseUser) -> TransactionResult {
+    let sesion = user.get_session_data::<UserSession>().unwrap();
+    let oidc_token = sesion.jwt_token.clone();
+    let fa_secret_key = sesion.fa_sk.clone();
+    let fa_public_key = fa_secret_key.public_key();
+    let user_account_id = sesion.near_account_id.clone();
+
+    let create_account_options = CreateAccountOptions {
+        full_access_keys: Some(vec![fa_public_key.clone()]),
+        limited_access_keys: None,
+        contract_bytes: None,
+    };
+
+    let user_credentials_request_digest =
+        user_credentials_request_digest(&oidc_token, &fa_public_key).unwrap();
+
+    let user_credentials_frp_signature = match fa_secret_key.sign(&user_credentials_request_digest)
+    {
+        near_crypto::Signature::ED25519(k) => k,
+        _ => panic!("wrong signature type"),
+    };
+
+    let new_account_request = NewAccountRequest {
+        near_account_id: user_account_id,
+        create_account_options,
+        oidc_token: sesion.jwt_token.clone(),
+        user_credentials_frp_signature,
+        frp_public_key: fa_public_key,
+    };
+
+    let body_json = serde_json::to_string(&new_account_request).expect("json serialization failed");
+    build_send_and_check_request(user, "claim_oidc", &body_json).await
 }
 
 async fn _sign(_user: &mut GooseUser) -> TransactionResult {
