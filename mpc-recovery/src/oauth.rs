@@ -18,6 +18,7 @@ pub async fn verify_oidc_token(
     let public_keys = get_pagoda_firebase_public_keys(client, jwt_signature_pk_url)
         .await
         .map_err(|e| anyhow::anyhow!("failed to get Firebase public key: {e}"))?;
+    tracing::info!("verify_oidc_token firebase public keys: {public_keys:?}");
 
     let mut last_occured_error =
         anyhow::anyhow!("Unexpected error. Firebase public keys not found");

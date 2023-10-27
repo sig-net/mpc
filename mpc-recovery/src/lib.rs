@@ -206,14 +206,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             jwt_signature_pk_url,
             logging_options,
         } => {
-            let _subscriber_guard = logging::default_subscriber_with_opentelemetry(
+            let _subscriber_guard = logging::subscribe_global(
                 EnvFilter::from_default_env(),
                 &logging_options,
                 env.clone(),
                 "leader".to_string(),
             )
-            .await
-            .global();
+            .await;
             let gcp_service =
                 GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
             let account_creator_signer =
@@ -250,14 +249,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             jwt_signature_pk_url,
             logging_options,
         } => {
-            let _subscriber_guard = logging::default_subscriber_with_opentelemetry(
+            let _subscriber_guard = logging::subscribe_global(
                 EnvFilter::from_default_env(),
                 &logging_options,
                 env.clone(),
                 node_id.to_string(),
             )
-            .await
-            .global();
+            .await;
             let gcp_service =
                 GcpService::new(env.clone(), gcp_project_id, gcp_datastore_url).await?;
             let cipher_key = load_cipher_key(&gcp_service, &env, node_id, cipher_key).await?;
@@ -290,14 +288,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             gcp_datastore_url,
             logging_options,
         } => {
-            let _subscriber_guard = logging::default_subscriber_with_opentelemetry(
+            let _subscriber_guard = logging::subscribe_global(
                 EnvFilter::from_default_env(),
                 &logging_options,
                 env.clone(),
                 node_id.to_string(),
             )
-            .await
-            .global();
+            .await;
             let gcp_service = GcpService::new(
                 env.clone(),
                 gcp_project_id.clone(),

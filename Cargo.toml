@@ -7,3 +7,7 @@ members = [
     "load-tests",
     "test-oidc-provider",
 ]
+
+[profile.flamegraph]
+inherits = "release"
+debug = true
