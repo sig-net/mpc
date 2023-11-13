@@ -65,12 +65,13 @@ pub struct MultichainTestContext<'a> {
     http_client: reqwest::Client,
 }
 
-async fn with_multichain_nodes<F>(nodes: usize, f: F) -> anyhow::Result<()>
+async fn with_multichain_nodes<F>(nodes: usize, treshold: usize, f: F) -> anyhow::Result<()>
 where
     F: for<'a> FnOnce(MultichainTestContext<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
 {
     let docker_client = DockerClient::default();
-    let nodes = mpc_recovery_integration_tests::multichain::run(nodes, &docker_client).await?;
+    let nodes =
+        mpc_recovery_integration_tests::multichain::run(nodes, treshold, &docker_client).await?;
 
     let rpc_client = near_fetch::Client::new(&nodes.ctx().sandbox.local_address);
     f(MultichainTestContext {

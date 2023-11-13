@@ -90,7 +90,11 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
     })
 }
 
-pub async fn docker(nodes: usize, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
+pub async fn docker(
+    nodes: usize,
+    treshold: usize,
+    docker_client: &DockerClient,
+) -> anyhow::Result<Nodes> {
     let ctx = setup(docker_client).await?;
 
     let accounts = futures::future::join_all((0..nodes).map(|_| ctx.worker.dev_create_account()))
@@ -125,7 +129,7 @@ pub async fn docker(nodes: usize, docker_client: &DockerClient) -> anyhow::Resul
     ctx.mpc_contract
         .call("init")
         .args_json(json!({
-            "threshold": 2,
+            "threshold": treshold,
             "participants": participants
         }))
         .transact()
@@ -135,7 +139,11 @@ pub async fn docker(nodes: usize, docker_client: &DockerClient) -> anyhow::Resul
     Ok(Nodes::Docker { ctx, nodes })
 }
 
-pub async fn host(nodes: usize, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
+pub async fn host(
+    nodes: usize,
+    treshold: usize,
+    docker_client: &DockerClient,
+) -> anyhow::Result<Nodes> {
     let ctx = setup(docker_client).await?;
 
     let accounts = futures::future::join_all((0..nodes).map(|_| ctx.worker.dev_create_account()))
@@ -174,7 +182,7 @@ pub async fn host(nodes: usize, docker_client: &DockerClient) -> anyhow::Result<
     ctx.mpc_contract
         .call("init")
         .args_json(json!({
-            "threshold": 2,
+            "threshold": treshold,
             "participants": participants
         }))
         .transact()
@@ -184,10 +192,14 @@ pub async fn host(nodes: usize, docker_client: &DockerClient) -> anyhow::Result<
     Ok(Nodes::Local { ctx, nodes })
 }
 
-pub async fn run(nodes: usize, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
+pub async fn run(
+    nodes: usize,
+    treshold: usize,
+    docker_client: &DockerClient,
+) -> anyhow::Result<Nodes> {
     #[cfg(feature = "docker-test")]
-    return docker(nodes, docker_client).await;
+    return docker(nodes, treshold, docker_client).await;
 
     #[cfg(not(feature = "docker-test"))]
-    return host(nodes, docker_client).await;
+    return host(nodes, treshold, docker_client).await;
 }
