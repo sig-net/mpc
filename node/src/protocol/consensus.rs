@@ -493,9 +493,11 @@ impl ConsensusProtocol for JoiningState {
                         if voted.contains(&p) {
                             continue;
                         }
-                        http_client::join(ctx.http_client(), url, &ctx.me())
-                            .await
-                            .unwrap()
+                        if let Err(e) = http_client::join(ctx.http_client(), url, &ctx.me()).await {
+                            tracing::error!("failed to join participant set: {}", e);
+                        } else {
+                            tracing::info!("successfully joined participant set");
+                        }
                     }
                     Ok(NodeState::Joining(self))
                 } else {
