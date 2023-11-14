@@ -3,54 +3,34 @@ use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, PublicKey};
 use std::collections::{HashMap, HashSet};
 
-type ParticipantId = u32;
-
-#[derive(
-    Serialize,
-    Deserialize,
-    BorshDeserialize,
-    BorshSerialize,
-    Clone,
-    Hash,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Debug,
-)]
-pub struct ParticipantInfo {
-    pub id: ParticipantId,
-    pub account_id: AccountId,
-    pub url: String,
-}
-
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 pub struct InitializingContractState {
-    pub participants: HashMap<AccountId, ParticipantInfo>,
+    pub participants: HashMap<AccountId, String>,
     pub threshold: usize,
-    pub pk_votes: HashMap<PublicKey, HashSet<ParticipantId>>,
+    pub pk_votes: HashMap<PublicKey, HashSet<AccountId>>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 pub struct RunningContractState {
     pub epoch: u64,
-    pub participants: HashMap<AccountId, ParticipantInfo>,
+    pub participants: HashMap<AccountId, String>, // TODO: should be a URL
     pub threshold: usize,
     pub public_key: PublicKey,
-    pub candidates: HashMap<ParticipantId, ParticipantInfo>,
-    pub join_votes: HashMap<ParticipantId, HashSet<ParticipantId>>,
-    pub leave_votes: HashMap<ParticipantId, HashSet<ParticipantId>>,
+    // TODO: do we need to store candidates separately? Isn't join_votes and leave_votes enough?
+    pub candidates: HashMap<AccountId, String>,
+    pub join_votes: HashMap<AccountId, HashSet<AccountId>>,
+    pub leave_votes: HashMap<AccountId, HashSet<AccountId>>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 pub struct ResharingContractState {
     pub old_epoch: u64,
-    pub old_participants: HashMap<AccountId, ParticipantInfo>,
+    pub old_participants: HashMap<AccountId, String>,
     // TODO: only store diff to save on storage
-    pub new_participants: HashMap<AccountId, ParticipantInfo>,
+    pub new_participants: HashMap<AccountId, String>,
     pub threshold: usize,
     pub public_key: PublicKey,
-    pub finished_votes: HashSet<ParticipantId>,
+    pub finished_votes: HashSet<AccountId>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
@@ -69,7 +49,7 @@ pub struct MpcContract {
 #[near_bindgen]
 impl MpcContract {
     #[init]
-    pub fn init(threshold: usize, participants: HashMap<AccountId, ParticipantInfo>) -> Self {
+    pub fn init(threshold: usize, participants: HashMap<AccountId, String>) -> Self {
         MpcContract {
             protocol_state: ProtocolContractState::Initializing(InitializingContractState {
                 participants,
@@ -83,7 +63,7 @@ impl MpcContract {
         self.protocol_state
     }
 
-    pub fn join(&mut self, participant_id: ParticipantId, url: String) {
+    pub fn join(&mut self, url: String) {
         match &mut self.protocol_state {
             ProtocolContractState::Running(RunningContractState {
                 participants,
@@ -94,20 +74,13 @@ impl MpcContract {
                 if participants.contains_key(&account_id) {
                     env::panic_str("this participant is already in the participant set");
                 }
-                candidates.insert(
-                    participant_id,
-                    ParticipantInfo {
-                        id: participant_id,
-                        account_id,
-                        url,
-                    },
-                );
+                candidates.insert(account_id.clone(), url);
             }
             _ => env::panic_str("protocol state can't accept new participants right now"),
         }
     }
 
-    pub fn vote_join(&mut self, participant: ParticipantId) -> bool {
+    pub fn vote_join(&mut self, participant: AccountId) -> bool {
         match &mut self.protocol_state {
             ProtocolContractState::Running(RunningContractState {
                 epoch,
@@ -118,19 +91,20 @@ impl MpcContract {
                 join_votes,
                 ..
             }) => {
-                let voting_participant = participants
+                let signer_account_id = env::signer_account_id();
+                participants
                     .get(&env::signer_account_id())
                     .unwrap_or_else(|| {
                         env::panic_str("calling account is not in the participant set")
                     });
-                let candidate = candidates
+                let participant_url = candidates
                     .get(&participant)
                     .unwrap_or_else(|| env::panic_str("candidate is not registered"));
-                let voted = join_votes.entry(participant).or_default();
-                voted.insert(voting_participant.id);
+                let voted = join_votes.entry(participant.clone()).or_default();
+                voted.insert(signer_account_id);
                 if voted.len() >= *threshold {
                     let mut new_participants = participants.clone();
-                    new_participants.insert(candidate.account_id.clone(), candidate.clone());
+                    new_participants.insert(participant, participant_url.clone());
                     self.protocol_state =
                         ProtocolContractState::Resharing(ResharingContractState {
                             old_epoch: *epoch,
@@ -149,7 +123,7 @@ impl MpcContract {
         }
     }
 
-    pub fn vote_leave(&mut self, participant: ParticipantId) -> bool {
+    pub fn vote_leave(&mut self, participant: AccountId) -> bool {
         match &mut self.protocol_state {
             ProtocolContractState::Running(RunningContractState {
                 epoch,
@@ -160,19 +134,21 @@ impl MpcContract {
                 leave_votes,
                 ..
             }) => {
-                let voting_participant = participants
-                    .get(&env::signer_account_id())
+                let signer_account_id = env::signer_account_id();
+                participants
+                    .get(&signer_account_id) // TODO: is there a shorter way to do this check?
                     .unwrap_or_else(|| {
                         env::panic_str("calling account is not in the participant set")
                     });
-                let candidate = candidates
+                // TODO: looks like this logic is copy pasted from vote_join.
+                candidates
                     .get(&participant)
                     .unwrap_or_else(|| env::panic_str("candidate is not registered"));
-                let voted = leave_votes.entry(participant).or_default();
-                voted.insert(voting_participant.id);
+                let voted = leave_votes.entry(participant.clone()).or_default();
+                voted.insert(signer_account_id);
                 if voted.len() >= *threshold {
                     let mut new_participants = participants.clone();
-                    new_participants.remove(&candidate.account_id);
+                    new_participants.remove(&participant);
                     self.protocol_state =
                         ProtocolContractState::Resharing(ResharingContractState {
                             old_epoch: *epoch,
@@ -198,13 +174,12 @@ impl MpcContract {
                 threshold,
                 pk_votes,
             }) => {
-                let voting_participant = participants
-                    .get(&env::signer_account_id())
-                    .unwrap_or_else(|| {
-                        env::panic_str("calling account is not in the participant set")
-                    });
+                let signer_account_id = env::signer_account_id();
+                participants.get(&signer_account_id).unwrap_or_else(|| {
+                    env::panic_str("calling account is not in the participant set")
+                });
                 let voted = pk_votes.entry(public_key.clone()).or_default();
-                voted.insert(voting_participant.id);
+                voted.insert(signer_account_id);
                 if voted.len() >= *threshold {
                     self.protocol_state = ProtocolContractState::Running(RunningContractState {
                         epoch: 0,
@@ -239,12 +214,12 @@ impl MpcContract {
                 if *old_epoch + 1 != epoch {
                     env::panic_str("mismatched epochs");
                 }
-                let voting_participant = old_participants
-                    .get(&env::signer_account_id())
-                    .unwrap_or_else(|| {
-                        env::panic_str("calling account is not in the old participant set")
-                    });
-                finished_votes.insert(voting_participant.id);
+                // TODO: code duplication
+                let signer_account_id = env::signer_account_id();
+                old_participants.get(&signer_account_id).unwrap_or_else(|| {
+                    env::panic_str("calling account is not in the old participant set")
+                });
+                finished_votes.insert(signer_account_id);
                 if finished_votes.len() >= *threshold {
                     self.protocol_state = ProtocolContractState::Running(RunningContractState {
                         epoch: *old_epoch + 1,
