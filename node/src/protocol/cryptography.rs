@@ -48,7 +48,7 @@ impl CryptographicProtocol for GeneratingState {
                 }
                 Action::SendMany(m) => {
                     tracing::debug!("sending a message to many participants");
-                    for (p, url) in &self.participants {
+                    for (p, url) in &self.participants.map {
                         if p == &ctx.me() {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;
@@ -117,7 +117,7 @@ impl CryptographicProtocol for ResharingState {
                 }
                 Action::SendMany(m) => {
                     tracing::debug!("sending a message to all participants");
-                    for (p, url) in &self.new_participants {
+                    for (p, url) in &self.new_participants.map {
                         if p == &ctx.me() {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;

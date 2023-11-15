@@ -489,7 +489,7 @@ impl ConsensusProtocol for JoiningState {
                         votes_to_go = contract_state.threshold - voted.len(),
                         "trying to get participants to vote for us"
                     );
-                    for (p, url) in contract_state.participants {
+                    for (p, url) in contract_state.participants.map {
                         if voted.contains(&p) {
                             continue;
                         }

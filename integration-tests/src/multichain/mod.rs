@@ -3,7 +3,6 @@ pub mod local;
 
 use crate::env::containers::DockerClient;
 use crate::{initialize_sandbox, SandboxCtx};
-use mpc_contract::ParticipantInfo;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{AccountId, Contract, Worker};
 use serde_json::json;
@@ -110,21 +109,12 @@ pub async fn docker(
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    let participants: HashMap<AccountId, ParticipantInfo> = accounts
+    let participants: HashMap<AccountId, String> = accounts
         .iter()
         .cloned()
         .enumerate()
         .zip(&nodes)
-        .map(|((i, account), node)| {
-            (
-                account.id().clone(),
-                ParticipantInfo {
-                    id: i as u32,
-                    account_id: account.id().to_string().parse().unwrap(),
-                    url: node.address.clone(),
-                },
-            )
-        })
+        .map(|((_i, account), node)| (account.id().clone(), node.address.clone()))
         .collect();
     ctx.mpc_contract
         .call("init")
@@ -163,21 +153,12 @@ pub async fn host(
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    let participants: HashMap<AccountId, ParticipantInfo> = accounts
+    let participants: HashMap<AccountId, String> = accounts
         .iter()
         .cloned()
         .enumerate()
         .zip(&nodes)
-        .map(|((i, account), node)| {
-            (
-                account.id().clone(),
-                ParticipantInfo {
-                    id: i as u32,
-                    account_id: account.id().to_string().parse().unwrap(),
-                    url: node.address.clone(),
-                },
-            )
-        })
+        .map(|((_i, account), node)| (account.id().clone(), node.address.clone()))
         .collect();
     ctx.mpc_contract
         .call("init")

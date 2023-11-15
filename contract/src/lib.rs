@@ -10,10 +10,10 @@ pub struct InitializingContractState {
     pub pk_votes: HashMap<PublicKey, HashSet<AccountId>>,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct RunningContractState {
     pub epoch: u64,
-    pub participants: HashMap<AccountId, String>, // TODO: should be a URL
+    pub participants: HashMap<AccountId, String>,
     pub threshold: usize,
     pub public_key: PublicKey,
     // TODO: do we need to store candidates separately? Isn't join_votes and leave_votes enough?
