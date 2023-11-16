@@ -16,7 +16,6 @@ pub struct RunningContractState {
     pub participants: HashMap<AccountId, String>,
     pub threshold: usize,
     pub public_key: PublicKey,
-    // TODO: do we need to store candidates separately? Isn't join_votes and leave_votes enough?
     pub candidates: HashMap<AccountId, String>,
     pub join_votes: HashMap<AccountId, HashSet<AccountId>>,
     pub leave_votes: HashMap<AccountId, HashSet<AccountId>>,
@@ -92,11 +91,9 @@ impl MpcContract {
                 ..
             }) => {
                 let signer_account_id = env::signer_account_id();
-                participants
-                    .get(&env::signer_account_id())
-                    .unwrap_or_else(|| {
-                        env::panic_str("calling account is not in the participant set")
-                    });
+                if !participants.contains_key(&signer_account_id) {
+                    env::panic_str("calling account is not in the participant set");
+                }
                 let participant_url = candidates
                     .get(&participant)
                     .unwrap_or_else(|| env::panic_str("candidate is not registered"));
@@ -135,15 +132,13 @@ impl MpcContract {
                 ..
             }) => {
                 let signer_account_id = env::signer_account_id();
-                participants
-                    .get(&signer_account_id) // TODO: is there a shorter way to do this check?
-                    .unwrap_or_else(|| {
-                        env::panic_str("calling account is not in the participant set")
-                    });
+                if !participants.contains_key(&signer_account_id) {
+                    env::panic_str("calling account is not in the participant set");
+                }
                 // TODO: looks like this logic is copy pasted from vote_join.
-                candidates
-                    .get(&participant)
-                    .unwrap_or_else(|| env::panic_str("candidate is not registered"));
+                if !candidates.contains_key(&participant) {
+                    env::panic_str("candidate is not registered");
+                }
                 let voted = leave_votes.entry(participant.clone()).or_default();
                 voted.insert(signer_account_id);
                 if voted.len() >= *threshold {
@@ -175,9 +170,9 @@ impl MpcContract {
                 pk_votes,
             }) => {
                 let signer_account_id = env::signer_account_id();
-                participants.get(&signer_account_id).unwrap_or_else(|| {
-                    env::panic_str("calling account is not in the participant set")
-                });
+                if !participants.contains_key(&signer_account_id) {
+                    env::panic_str("calling account is already in the participant set");
+                }
                 let voted = pk_votes.entry(public_key.clone()).or_default();
                 voted.insert(signer_account_id);
                 if voted.len() >= *threshold {
@@ -216,9 +211,9 @@ impl MpcContract {
                 }
                 // TODO: code duplication
                 let signer_account_id = env::signer_account_id();
-                old_participants.get(&signer_account_id).unwrap_or_else(|| {
-                    env::panic_str("calling account is not in the old participant set")
-                });
+                if !old_participants.contains_key(&signer_account_id) {
+                    env::panic_str("calling account is not in the old participant set");
+                }
                 finished_votes.insert(signer_account_id);
                 if finished_votes.len() >= *threshold {
                     self.protocol_state = ProtocolContractState::Running(RunningContractState {
