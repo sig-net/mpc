@@ -2,25 +2,24 @@ use crate::types::PublicKey;
 use crate::util::NearPublicKeyExt;
 use cait_sith::protocol::Participant;
 use mpc_contract::ProtocolContractState;
-use near_sdk::AccountId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use url::Url;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InitializingContractState {
-    pub participants: ParticipantsInfo,
+    pub participants: Participants,
     pub threshold: usize,
     pub pk_votes: HashMap<near_crypto::PublicKey, ParticipantSet>,
 }
 
 // TODO: consider renaming
 #[derive(Serialize, Deserialize, Debug)]
-pub struct ParticipantsInfo {
+pub struct Participants {
     pub map: HashMap<Participant, Url>,
 }
 
-impl ParticipantsInfo {
+impl Participants {
     pub fn get(&self, key: &Participant) -> Option<&Url> {
         self.map.get(key)
     }
@@ -34,16 +33,16 @@ impl ParticipantsInfo {
     }
 }
 
-impl PartialEq for ParticipantsInfo {
+impl PartialEq for Participants {
     fn eq(&self, other: &Self) -> bool {
         self.map == other.map
     }
 }
 
-impl Eq for ParticipantsInfo {}
+impl Eq for Participants {}
 
-impl From<HashMap<AccountId, String>> for ParticipantsInfo {
-    fn from(participants: HashMap<AccountId, String>) -> Self {
+impl From<mpc_contract::primitives::Participants> for Participants {
+    fn from(participants: mpc_contract::primitives::Participants) -> Self {
         // TODO: make sure that the ordering works as expected
         // TODO: consider refactoring this
         let participants_id_set = participants
@@ -87,8 +86,8 @@ impl ParticipantSet {
     }
 }
 
-impl From<HashSet<AccountId>> for ParticipantSet {
-    fn from(participants: HashSet<AccountId>) -> Self {
+impl From<mpc_contract::primitives::ParticipantSet> for ParticipantSet {
+    fn from(participants: mpc_contract::primitives::ParticipantSet) -> Self {
         let btree_participants_set = participants
             .iter()
             .map(|id| id.to_string())
@@ -117,7 +116,7 @@ impl From<HashSet<AccountId>> for ParticipantSet {
 impl From<mpc_contract::InitializingContractState> for InitializingContractState {
     fn from(contract_state: mpc_contract::InitializingContractState) -> Self {
         InitializingContractState {
-            participants: ParticipantsInfo::from(contract_state.participants),
+            participants: Participants::from(contract_state.participants),
             threshold: contract_state.threshold,
             pk_votes: contract_state
                 .pk_votes
@@ -138,10 +137,10 @@ impl From<mpc_contract::InitializingContractState> for InitializingContractState
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RunningContractState {
     pub epoch: u64,
-    pub participants: ParticipantsInfo,
+    pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
-    pub candidates: ParticipantsInfo,
+    pub candidates: Participants,
     pub join_votes: Votes,
     pub leave_votes: Votes,
 }
@@ -159,14 +158,14 @@ impl Votes {
 
 impl
     From<(
-        HashMap<AccountId, String>,
-        HashMap<AccountId, HashSet<AccountId>>,
+        mpc_contract::primitives::Participants,
+        mpc_contract::primitives::Votes,
     )> for Votes
 {
     fn from(
         participants_and_votes: (
-            HashMap<AccountId, String>,
-            HashMap<AccountId, HashSet<AccountId>>,
+            mpc_contract::primitives::Participants,
+        mpc_contract::primitives::Votes,
         ),
     ) -> Self {
         let btree_participants_set = participants_and_votes
@@ -201,10 +200,10 @@ impl From<mpc_contract::RunningContractState> for RunningContractState {
     fn from(contract_state: mpc_contract::RunningContractState) -> Self {
         RunningContractState {
             epoch: contract_state.epoch,
-            participants: ParticipantsInfo::from(contract_state.participants.clone()),
+            participants: Participants::from(contract_state.participants.clone()),
             threshold: contract_state.threshold,
             public_key: contract_state.public_key.into_affine_point(),
-            candidates: ParticipantsInfo::from(contract_state.candidates),
+            candidates: Participants::from(contract_state.candidates),
             join_votes: Votes::from((
                 contract_state.participants.clone(),
                 contract_state.join_votes,
@@ -217,8 +216,8 @@ impl From<mpc_contract::RunningContractState> for RunningContractState {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ResharingContractState {
     pub old_epoch: u64,
-    pub old_participants: ParticipantsInfo,
-    pub new_participants: ParticipantsInfo,
+    pub old_participants: Participants,
+    pub new_participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
     pub finished_votes: ParticipantSet,
@@ -228,8 +227,8 @@ impl From<mpc_contract::ResharingContractState> for ResharingContractState {
     fn from(contract_state: mpc_contract::ResharingContractState) -> Self {
         ResharingContractState {
             old_epoch: contract_state.old_epoch,
-            old_participants: ParticipantsInfo::from(contract_state.old_participants),
-            new_participants: ParticipantsInfo::from(contract_state.new_participants),
+            old_participants: Participants::from(contract_state.old_participants),
+            new_participants: Participants::from(contract_state.new_participants),
             threshold: contract_state.threshold,
             public_key: contract_state.public_key.into_affine_point(),
             finished_votes: ParticipantSet::from(contract_state.finished_votes),
@@ -245,7 +244,7 @@ pub enum ProtocolState {
 }
 
 impl ProtocolState {
-    pub fn participants(&self) -> &ParticipantsInfo {
+    pub fn participants(&self) -> &Participants {
         match self {
             ProtocolState::Initializing(InitializingContractState { participants, .. }) => {
                 participants

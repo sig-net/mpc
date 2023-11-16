@@ -1,5 +1,5 @@
 use super::presignature::PresignatureManager;
-use super::{contract::ParticipantsInfo, triple::TripleManager};
+use super::{contract::Participants, triple::TripleManager};
 use crate::types::{KeygenProtocol, PrivateKeyShare, PublicKey, ReshareProtocol};
 
 pub struct PersistentNodeData {
@@ -11,14 +11,14 @@ pub struct PersistentNodeData {
 pub struct StartedState(pub Option<PersistentNodeData>);
 
 pub struct GeneratingState {
-    pub participants: ParticipantsInfo,
+    pub participants: Participants,
     pub threshold: usize,
     pub protocol: KeygenProtocol,
 }
 
 pub struct WaitingForConsensusState {
     pub epoch: u64,
-    pub participants: ParticipantsInfo,
+    pub participants: Participants,
     pub threshold: usize,
     pub private_share: PrivateKeyShare,
     pub public_key: PublicKey,
@@ -26,7 +26,7 @@ pub struct WaitingForConsensusState {
 
 pub struct RunningState {
     pub epoch: u64,
-    pub participants: ParticipantsInfo,
+    pub participants: Participants,
     pub threshold: usize,
     pub private_share: PrivateKeyShare,
     pub public_key: PublicKey,
@@ -36,8 +36,8 @@ pub struct RunningState {
 
 pub struct ResharingState {
     pub old_epoch: u64,
-    pub old_participants: ParticipantsInfo,
-    pub new_participants: ParticipantsInfo,
+    pub old_participants: Participants,
+    pub new_participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
     pub protocol: ReshareProtocol,

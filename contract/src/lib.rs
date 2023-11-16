@@ -1,35 +1,37 @@
+pub mod primitives;
+
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, PublicKey};
-use std::collections::{HashMap, HashSet};
+use primitives::{ParticipantSet, Participants, PkVotes, Votes};
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 pub struct InitializingContractState {
-    pub participants: HashMap<AccountId, String>,
+    pub participants: Participants,
     pub threshold: usize,
-    pub pk_votes: HashMap<PublicKey, HashSet<AccountId>>,
+    pub pk_votes: PkVotes,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct RunningContractState {
     pub epoch: u64,
-    pub participants: HashMap<AccountId, String>,
+    pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
-    pub candidates: HashMap<AccountId, String>,
-    pub join_votes: HashMap<AccountId, HashSet<AccountId>>,
-    pub leave_votes: HashMap<AccountId, HashSet<AccountId>>,
+    pub candidates: Participants,
+    pub join_votes: Votes,
+    pub leave_votes: Votes,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 pub struct ResharingContractState {
     pub old_epoch: u64,
-    pub old_participants: HashMap<AccountId, String>,
+    pub old_participants: Participants,
     // TODO: only store diff to save on storage
-    pub new_participants: HashMap<AccountId, String>,
+    pub new_participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
-    pub finished_votes: HashSet<AccountId>,
+    pub finished_votes: ParticipantSet,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
@@ -48,12 +50,12 @@ pub struct MpcContract {
 #[near_bindgen]
 impl MpcContract {
     #[init]
-    pub fn init(threshold: usize, participants: HashMap<AccountId, String>) -> Self {
+    pub fn init(threshold: usize, participants: Participants) -> Self {
         MpcContract {
             protocol_state: ProtocolContractState::Initializing(InitializingContractState {
                 participants,
                 threshold,
-                pk_votes: HashMap::new(),
+                pk_votes: PkVotes::new(),
             }),
         }
     }
@@ -97,7 +99,7 @@ impl MpcContract {
                 let participant_url = candidates
                     .get(&participant)
                     .unwrap_or_else(|| env::panic_str("candidate is not registered"));
-                let voted = join_votes.entry(participant.clone()).or_default();
+                let voted = join_votes.entry(participant.clone());
                 voted.insert(signer_account_id);
                 if voted.len() >= *threshold {
                     let mut new_participants = participants.clone();
@@ -109,7 +111,7 @@ impl MpcContract {
                             new_participants,
                             threshold: *threshold,
                             public_key: public_key.clone(),
-                            finished_votes: HashSet::new(),
+                            finished_votes: ParticipantSet::new(),
                         });
                     true
                 } else {
@@ -139,7 +141,7 @@ impl MpcContract {
                 if !candidates.contains_key(&participant) {
                     env::panic_str("candidate is not registered");
                 }
-                let voted = leave_votes.entry(participant.clone()).or_default();
+                let voted = leave_votes.entry(participant.clone());
                 voted.insert(signer_account_id);
                 if voted.len() >= *threshold {
                     let mut new_participants = participants.clone();
@@ -151,7 +153,7 @@ impl MpcContract {
                             new_participants,
                             threshold: *threshold,
                             public_key: public_key.clone(),
-                            finished_votes: HashSet::new(),
+                            finished_votes: ParticipantSet::new(),
                         });
                     true
                 } else {
@@ -173,7 +175,7 @@ impl MpcContract {
                 if !participants.contains_key(&signer_account_id) {
                     env::panic_str("calling account is already in the participant set");
                 }
-                let voted = pk_votes.entry(public_key.clone()).or_default();
+                let voted = pk_votes.entry(public_key.clone());
                 voted.insert(signer_account_id);
                 if voted.len() >= *threshold {
                     self.protocol_state = ProtocolContractState::Running(RunningContractState {
@@ -181,9 +183,9 @@ impl MpcContract {
                         participants: participants.clone(),
                         threshold: *threshold,
                         public_key,
-                        candidates: HashMap::new(),
-                        join_votes: HashMap::new(),
-                        leave_votes: HashMap::new(),
+                        candidates: Participants::new(),
+                        join_votes: Votes::new(),
+                        leave_votes: Votes::new(),
                     });
                     true
                 } else {
@@ -209,7 +211,6 @@ impl MpcContract {
                 if *old_epoch + 1 != epoch {
                     env::panic_str("mismatched epochs");
                 }
-                // TODO: code duplication
                 let signer_account_id = env::signer_account_id();
                 if !old_participants.contains_key(&signer_account_id) {
                     env::panic_str("calling account is not in the old participant set");
@@ -221,9 +222,9 @@ impl MpcContract {
                         participants: new_participants.clone(),
                         threshold: *threshold,
                         public_key: public_key.clone(),
-                        candidates: HashMap::new(),
-                        join_votes: HashMap::new(),
-                        leave_votes: HashMap::new(),
+                        candidates: Participants::new(),
+                        join_votes: Votes::new(),
+                        leave_votes: Votes::new(),
                     });
                     true
                 } else {
