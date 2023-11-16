@@ -73,7 +73,7 @@ where
     let nodes =
         mpc_recovery_integration_tests::multichain::run(nodes, treshold, &docker_client).await?;
 
-    let rpc_client = near_fetch::Client::new(&nodes.ctx().sandbox.local_address);
+    let rpc_client = near_fetch::Client::new(&nodes.ctx().lake_indexer.rpc_host_address);
     f(MultichainTestContext {
         nodes,
         rpc_client,
@@ -241,6 +241,35 @@ mod wait_for {
             }
         };
         is_enough_triples
+            .retry(&ExponentialBuilder::default().with_max_times(6))
+            .await
+    }
+
+    pub async fn has_at_least_presignatures<'a>(
+        ctx: &MultichainTestContext<'a>,
+        id: usize,
+        expected_presignature_count: usize,
+    ) -> anyhow::Result<StateView> {
+        let is_enough_presignatures = || async {
+            let state_view: StateView = ctx
+                .http_client
+                .get(format!("{}/state", ctx.nodes.url(id)))
+                .send()
+                .await?
+                .json()
+                .await?;
+
+            match state_view {
+                StateView::Running {
+                    presignature_count, ..
+                } if presignature_count >= expected_presignature_count => Ok(state_view),
+                StateView::Running { .. } => {
+                    anyhow::bail!("node does not have enough presignatures yet")
+                }
+                StateView::NotRunning => anyhow::bail!("node is not running"),
+            }
+        };
+        is_enough_presignatures
             .retry(&ExponentialBuilder::default().with_max_times(6))
             .await
     }

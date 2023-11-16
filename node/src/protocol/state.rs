@@ -1,3 +1,4 @@
+use super::presignature::PresignatureManager;
 use super::{contract::ParticipantsInfo, triple::TripleManager};
 use crate::types::{KeygenProtocol, PrivateKeyShare, PublicKey, ReshareProtocol};
 
@@ -30,6 +31,7 @@ pub struct RunningState {
     pub private_share: PrivateKeyShare,
     pub public_key: PublicKey,
     pub triple_manager: TripleManager,
+    pub presignature_manager: PresignatureManager,
 }
 
 pub struct ResharingState {
@@ -46,6 +48,7 @@ pub struct JoiningState {
 }
 
 #[derive(Default)]
+#[allow(clippy::large_enum_variant)]
 pub enum NodeState {
     #[default]
     Starting,
