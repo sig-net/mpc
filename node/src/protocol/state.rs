@@ -1,5 +1,5 @@
 use super::presignature::PresignatureManager;
-use super::{contract::Participants, triple::TripleManager};
+use super::{contract::primitives::Participants, triple::TripleManager};
 use crate::types::{KeygenProtocol, PrivateKeyShare, PublicKey, ReshareProtocol};
 
 pub struct PersistentNodeData {
