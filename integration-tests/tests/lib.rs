@@ -10,9 +10,15 @@ use mpc_recovery::{
         ClaimOidcResponse, MpcPkResponse, NewAccountResponse, SignResponse, UserCredentialsResponse,
     },
 };
-use mpc_recovery_integration_tests::env;
 use mpc_recovery_integration_tests::env::containers::DockerClient;
+use mpc_recovery_integration_tests::indexer::FullSignature;
+use mpc_recovery_integration_tests::{env, indexer};
+use near_primitives::hash::CryptoHash;
 use near_workspaces::{network::Sandbox, Worker};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::thread;
+use tokio::sync::RwLock;
 
 pub struct TestContext {
     env: String,
@@ -63,6 +69,7 @@ pub struct MultichainTestContext<'a> {
     nodes: mpc_recovery_integration_tests::multichain::Nodes<'a>,
     rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
+    responses: Arc<RwLock<HashMap<CryptoHash, FullSignature>>>,
 }
 
 async fn with_multichain_nodes<F>(nodes: usize, f: F) -> anyhow::Result<()>
@@ -72,11 +79,30 @@ where
     let docker_client = DockerClient::default();
     let nodes = mpc_recovery_integration_tests::multichain::run(nodes, &docker_client).await?;
 
+    let s3_bucket = nodes.ctx().localstack.s3_bucket.clone();
+    let s3_region = nodes.ctx().localstack.s3_region.clone();
+    let s3_url = nodes.ctx().localstack.s3_host_address.clone();
+    let mpc_contract_id = nodes.ctx().mpc_contract.id().clone();
+    let responses = Arc::new(RwLock::new(HashMap::new()));
+    let responses_clone = responses.clone();
+    thread::spawn(move || {
+        indexer::run(
+            &s3_bucket,
+            &s3_region,
+            0,
+            &s3_url,
+            mpc_contract_id,
+            responses_clone,
+        )
+        .unwrap();
+    });
+
     let rpc_client = near_fetch::Client::new(&nodes.ctx().lake_indexer.rpc_host_address);
     f(MultichainTestContext {
         nodes,
         rpc_client,
         http_client: reqwest::Client::default(),
+        responses,
     })
     .await?;
 
@@ -190,7 +216,9 @@ mod wait_for {
     use backon::Retryable;
     use mpc_contract::ProtocolContractState;
     use mpc_contract::RunningContractState;
+    use mpc_recovery_integration_tests::indexer::FullSignature;
     use mpc_recovery_node::web::StateView;
+    use near_primitives::hash::CryptoHash;
 
     pub async fn running_mpc<'a>(
         ctx: &MultichainTestContext<'a>,
@@ -270,6 +298,23 @@ mod wait_for {
         };
         is_enough_presignatures
             .retry(&ExponentialBuilder::default().with_max_times(6))
+            .await
+    }
+
+    pub async fn has_response<'a>(
+        ctx: &MultichainTestContext<'a>,
+        receipt_id: CryptoHash,
+    ) -> anyhow::Result<FullSignature> {
+        let is_enough_presignatures = || async {
+            let mut responses = ctx.responses.write().await;
+            if let Some(signature) = responses.remove(&receipt_id) {
+                return Ok(signature);
+            }
+            drop(responses);
+            anyhow::bail!("mpc has not responded yet")
+        };
+        is_enough_presignatures
+            .retry(&ExponentialBuilder::default().with_max_times(8))
             .await
     }
 }

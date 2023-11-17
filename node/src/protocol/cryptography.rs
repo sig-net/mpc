@@ -6,10 +6,15 @@ use crate::protocol::MpcMessage;
 use async_trait::async_trait;
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use k256::elliptic_curve::group::GroupEncoding;
+use near_crypto::InMemorySigner;
+use near_primitives::types::AccountId;
 
 pub trait CryptographicCtx {
     fn me(&self) -> Participant;
     fn http_client(&self) -> &reqwest::Client;
+    fn rpc_client(&self) -> &near_fetch::Client;
+    fn signer(&self) -> &InMemorySigner;
+    fn mpc_contract_id(&self) -> &AccountId;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -18,6 +23,8 @@ pub enum CryptographicError {
     SendError(#[from] SendError),
     #[error("unknown participant: {0:?}")]
     UnknownParticipant(Participant),
+    #[error("rpc error: {0}")]
+    RpcError(#[from] near_fetch::Error),
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
     #[error("cait-sith protocol error: {0}")]
@@ -205,6 +212,35 @@ impl CryptographicProtocol for RunningState {
             )
             .await?;
         }
+
+        let mut sign_queue = self.sign_queue.write().await;
+        sign_queue.organize(&self, ctx.me());
+        let my_requests = sign_queue.my_requests(ctx.me());
+        while self.presignature_manager.my_len() > 0 {
+            let Some((receipt_id, _)) = my_requests.iter().next() else {
+                break;
+            };
+            let Some(presignature) = self.presignature_manager.take_mine() else {
+                break;
+            };
+            let receipt_id = *receipt_id;
+            let my_request = my_requests.remove(&receipt_id).unwrap();
+            self.signature_manager.generate(
+                receipt_id,
+                presignature,
+                self.public_key,
+                my_request.msg_hash,
+            )?;
+        }
+        drop(sign_queue);
+        for (p, msg) in self.signature_manager.poke()? {
+            let url = self.participants.get(&p).unwrap();
+            http_client::message(ctx.http_client(), url.clone(), MpcMessage::Signature(msg))
+                .await?;
+        }
+        self.signature_manager
+            .publish(ctx.rpc_client(), ctx.signer(), ctx.mpc_contract_id())
+            .await?;
 
         Ok(NodeState::Running(self))
     }

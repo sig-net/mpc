@@ -3,7 +3,9 @@ use super::state::{
     JoiningState, NodeState, PersistentNodeData, RunningState, StartedState,
     WaitingForConsensusState,
 };
+use super::SignQueue;
 use crate::protocol::presignature::PresignatureManager;
+use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
 use crate::types::PrivateKeyShare;
@@ -16,6 +18,8 @@ use near_crypto::InMemorySigner;
 use near_primitives::transaction::{Action, FunctionCallAction};
 use near_primitives::types::AccountId;
 use std::cmp::Ordering;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use url::Url;
 
 pub trait ConsensusCtx {
@@ -25,6 +29,7 @@ pub trait ConsensusCtx {
     fn signer(&self) -> &InMemorySigner;
     fn mpc_contract_id(&self) -> &AccountId;
     fn my_address(&self) -> &Url;
+    fn sign_queue(&self) -> Arc<RwLock<SignQueue>>;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -95,6 +100,7 @@ impl ConsensusProtocol for StartedState {
                                     threshold: contract_state.threshold,
                                     private_share,
                                     public_key,
+                                    sign_queue: ctx.sign_queue(),
                                     triple_manager: TripleManager::new(
                                         participants_vec.clone(),
                                         ctx.me(),
@@ -102,9 +108,15 @@ impl ConsensusProtocol for StartedState {
                                         epoch,
                                     ),
                                     presignature_manager: PresignatureManager::new(
-                                        participants_vec,
+                                        participants_vec.clone(),
                                         ctx.me(),
                                         contract_state.threshold,
+                                        epoch,
+                                    ),
+                                    signature_manager: SignatureManager::new(
+                                        participants_vec,
+                                        ctx.me(),
+                                        contract_state.public_key,
                                         epoch,
                                     ),
                                 }))
@@ -276,6 +288,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         threshold: self.threshold,
                         private_share: self.private_share,
                         public_key: self.public_key,
+                        sign_queue: ctx.sign_queue(),
                         triple_manager: TripleManager::new(
                             participants_vec.clone(),
                             ctx.me(),
@@ -283,9 +296,15 @@ impl ConsensusProtocol for WaitingForConsensusState {
                             self.epoch,
                         ),
                         presignature_manager: PresignatureManager::new(
-                            participants_vec,
+                            participants_vec.clone(),
                             ctx.me(),
                             self.threshold,
+                            self.epoch,
+                        ),
+                        signature_manager: SignatureManager::new(
+                            participants_vec,
+                            ctx.me(),
+                            self.public_key,
                             self.epoch,
                         ),
                     }))

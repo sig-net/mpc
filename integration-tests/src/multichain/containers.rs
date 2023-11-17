@@ -41,8 +41,9 @@ impl<'a> Node<'a> {
             account_sk: account_sk.to_string().parse()?,
             web_port: Self::CONTAINER_PORT,
             indexer_options: mpc_recovery_node::indexer::Options {
-                s3_bucket: ctx.localstack.s3_host_address.clone(),
+                s3_bucket: ctx.localstack.s3_bucket.clone(),
                 s3_region: ctx.localstack.s3_region.clone(),
+                s3_url: Some(ctx.localstack.s3_host_address.clone()),
                 start_block_height: 0,
             },
         }

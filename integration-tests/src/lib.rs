@@ -12,6 +12,7 @@ use crate::env::containers::{self, LocalStack};
 use testcontainers::{Container, GenericImage};
 
 pub mod env;
+pub mod indexer;
 pub mod mpc;
 pub mod multichain;
 pub mod sandbox;

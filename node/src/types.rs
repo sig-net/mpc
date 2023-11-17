@@ -1,6 +1,6 @@
 use cait_sith::triples::TripleGenerationOutput;
-use cait_sith::PresignOutput;
 use cait_sith::{protocol::Protocol, KeygenOutput};
+use cait_sith::{FullSignature, PresignOutput};
 use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
 
 pub type PrivateKeyShare = <Secp256k1 as CurveArithmetic>::Scalar;
@@ -10,3 +10,4 @@ pub type ReshareProtocol = Box<dyn Protocol<Output = PrivateKeyShare> + Send + S
 pub type TripleProtocol =
     Box<dyn Protocol<Output = TripleGenerationOutput<Secp256k1>> + Send + Sync>;
 pub type PresignatureProtocol = Box<dyn Protocol<Output = PresignOutput<Secp256k1>> + Send + Sync>;
+pub type SignatureProtocol = Box<dyn Protocol<Output = FullSignature<Secp256k1>> + Send + Sync>;

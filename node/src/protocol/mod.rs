@@ -3,11 +3,14 @@ mod contract;
 mod cryptography;
 mod message;
 mod presignature;
+mod signature;
 mod state;
 mod triple;
 
 pub use contract::ProtocolState;
 pub use message::MpcMessage;
+pub use signature::SignQueue;
+pub use signature::SignRequest;
 pub use state::NodeState;
 
 use self::consensus::ConsensusCtx;
@@ -33,6 +36,7 @@ struct Ctx {
     signer: InMemorySigner,
     rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
+    sign_queue: Arc<RwLock<SignQueue>>,
 }
 
 impl ConsensusCtx for &Ctx {
@@ -59,6 +63,10 @@ impl ConsensusCtx for &Ctx {
     fn my_address(&self) -> &Url {
         &self.my_address
     }
+
+    fn sign_queue(&self) -> Arc<RwLock<SignQueue>> {
+        self.sign_queue.clone()
+    }
 }
 
 impl CryptographicCtx for &Ctx {
@@ -68,6 +76,18 @@ impl CryptographicCtx for &Ctx {
 
     fn http_client(&self) -> &reqwest::Client {
         &self.http_client
+    }
+
+    fn rpc_client(&self) -> &near_fetch::Client {
+        &self.rpc_client
+    }
+
+    fn signer(&self) -> &InMemorySigner {
+        &self.signer
+    }
+
+    fn mpc_contract_id(&self) -> &AccountId {
+        &self.mpc_contract_id
     }
 }
 
@@ -91,6 +111,7 @@ impl MpcSignProtocol {
         rpc_client: near_fetch::Client,
         signer: InMemorySigner,
         receiver: mpsc::Receiver<MpcMessage>,
+        sign_queue: Arc<RwLock<SignQueue>>,
     ) -> (Self, Arc<RwLock<NodeState>>) {
         let state = Arc::new(RwLock::new(NodeState::Starting));
         let ctx = Ctx {
@@ -100,6 +121,7 @@ impl MpcSignProtocol {
             signer,
             rpc_client,
             http_client: reqwest::Client::new(),
+            sign_queue,
         };
         let protocol = MpcSignProtocol {
             ctx,
@@ -149,7 +171,7 @@ impl MpcSignProtocol {
             let mut state = std::mem::take(&mut *state_guard);
             state = state.progress(&self.ctx).await?;
             state = state.advance(&self.ctx, contract_state).await?;
-            state.handle(&self.ctx, &mut queue)?;
+            state.handle(&self.ctx, &mut queue).await?;
             *state_guard = state;
             drop(state_guard);
             tokio::time::sleep(Duration::from_millis(1000)).await;

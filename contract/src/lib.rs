@@ -1,7 +1,7 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, PublicKey};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 type ParticipantId = u32;
 
@@ -26,28 +26,28 @@ pub struct ParticipantInfo {
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 pub struct InitializingContractState {
-    pub participants: HashMap<AccountId, ParticipantInfo>,
+    pub participants: BTreeMap<AccountId, ParticipantInfo>,
     pub threshold: usize,
-    pub pk_votes: HashMap<PublicKey, HashSet<ParticipantId>>,
+    pub pk_votes: BTreeMap<PublicKey, HashSet<ParticipantId>>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 pub struct RunningContractState {
     pub epoch: u64,
-    pub participants: HashMap<AccountId, ParticipantInfo>,
+    pub participants: BTreeMap<AccountId, ParticipantInfo>,
     pub threshold: usize,
     pub public_key: PublicKey,
-    pub candidates: HashMap<ParticipantId, ParticipantInfo>,
-    pub join_votes: HashMap<ParticipantId, HashSet<ParticipantId>>,
-    pub leave_votes: HashMap<ParticipantId, HashSet<ParticipantId>>,
+    pub candidates: BTreeMap<ParticipantId, ParticipantInfo>,
+    pub join_votes: BTreeMap<ParticipantId, HashSet<ParticipantId>>,
+    pub leave_votes: BTreeMap<ParticipantId, HashSet<ParticipantId>>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 pub struct ResharingContractState {
     pub old_epoch: u64,
-    pub old_participants: HashMap<AccountId, ParticipantInfo>,
+    pub old_participants: BTreeMap<AccountId, ParticipantInfo>,
     // TODO: only store diff to save on storage
-    pub new_participants: HashMap<AccountId, ParticipantInfo>,
+    pub new_participants: BTreeMap<AccountId, ParticipantInfo>,
     pub threshold: usize,
     pub public_key: PublicKey,
     pub finished_votes: HashSet<ParticipantId>,
@@ -69,12 +69,12 @@ pub struct MpcContract {
 #[near_bindgen]
 impl MpcContract {
     #[init]
-    pub fn init(threshold: usize, participants: HashMap<AccountId, ParticipantInfo>) -> Self {
+    pub fn init(threshold: usize, participants: BTreeMap<AccountId, ParticipantInfo>) -> Self {
         MpcContract {
             protocol_state: ProtocolContractState::Initializing(InitializingContractState {
                 participants,
                 threshold,
-                pk_votes: HashMap::new(),
+                pk_votes: BTreeMap::new(),
             }),
         }
     }
@@ -211,9 +211,9 @@ impl MpcContract {
                         participants: participants.clone(),
                         threshold: *threshold,
                         public_key,
-                        candidates: HashMap::new(),
-                        join_votes: HashMap::new(),
-                        leave_votes: HashMap::new(),
+                        candidates: BTreeMap::new(),
+                        join_votes: BTreeMap::new(),
+                        leave_votes: BTreeMap::new(),
                     });
                     true
                 } else {
@@ -251,9 +251,9 @@ impl MpcContract {
                         participants: new_participants.clone(),
                         threshold: *threshold,
                         public_key: public_key.clone(),
-                        candidates: HashMap::new(),
-                        join_votes: HashMap::new(),
-                        leave_votes: HashMap::new(),
+                        candidates: BTreeMap::new(),
+                        join_votes: BTreeMap::new(),
+                        leave_votes: BTreeMap::new(),
                     });
                     true
                 } else {
@@ -270,4 +270,12 @@ impl MpcContract {
             _ => env::panic_str("protocol is not resharing right now"),
         }
     }
+
+    #[allow(unused_variables)]
+    pub fn sign(&mut self, payload: [u8; 32]) -> [u8; 32] {
+        near_sdk::env::random_seed_array()
+    }
+
+    #[allow(unused_variables)]
+    pub fn respond(&mut self, receipt_id: [u8; 32], big_r: String, s: String) {}
 }
