@@ -1,46 +1,18 @@
-resource "google_secret_manager_secret" "account_creator_sk" {
-  secret_id = "mpc-recovery-account-creator-sk-${var.env}"
-  replication {
-    automatic = true
-  }
-}
-
-resource "google_secret_manager_secret_version" "account_creator_sk_data" {
-  secret      = google_secret_manager_secret.account_creator_sk.name
-  secret_data = var.account_creator_sk
-}
-
-resource "google_secret_manager_secret_iam_member" "account_creator_secret_access" {
-  secret_id = google_secret_manager_secret.account_creator_sk.id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${var.service_account_email}"
-}
-
-resource "google_secret_manager_secret" "fast_auth_partners" {
-  secret_id = "mpc-recovery-allowed-oidc-providers-leader-${var.env}"
-  replication {
-    automatic = true
-  }
-}
-
-resource "google_secret_manager_secret_version" "fast_auth_partners_data" {
-  secret      = google_secret_manager_secret.fast_auth_partners.name
-  secret_data = jsonencode(var.fast_auth_partners)
-}
-
-resource "google_secret_manager_secret_iam_member" "fast_auth_partners_secret_access" {
-  secret_id = google_secret_manager_secret.fast_auth_partners.id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${var.service_account_email}"
-}
-
 resource "google_cloud_run_v2_service" "leader" {
-  name     = "mpc-recovery-leader-${var.env}"
+  name     = var.service_name
   location = var.region
-  ingress  = "INGRESS_TRAFFIC_ALL"
+  ingress  = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+
 
   template {
     service_account = var.service_account_email
+
+    annotations = var.metadata_annotations == null ? null : var.metadata_annotations
+
+    vpc_access {
+      connector = var.connector_id
+      egress    = "PRIVATE_RANGES_ONLY"
+    }
 
     scaling {
       min_instance_count = 1
@@ -80,6 +52,37 @@ resource "google_cloud_run_v2_service" "leader" {
         value = var.env
       }
       env {
+        name = "MPC_RECOVERY_ACCOUNT_CREATOR_SK"
+        value_source {
+          secret_key_ref {
+            secret  = var.account_creator_sk_secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "FAST_AUTH_PARTNERS"
+        value_source {
+          secret_key_ref {
+            secret  = var.fast_auth_partners_secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name  = "MPC_RECOVERY_JWT_SIGNATURE_PK_URL"
+        value = var.jwt_signature_pk_url
+      }
+      env {
+        name  = "MPC_RECOVERY_OTLP_ENDPOINT"
+        value = var.otlp_endpoint
+      }
+      env {
+        name  = "MPC_RECOVERY_OPENTELEMETRY_LEVEL"
+        value = var.opentelemetry_level
+      }
+
+      env {
         name  = "RUST_LOG"
         value = "mpc_recovery=debug"
       }
@@ -87,7 +90,6 @@ resource "google_cloud_run_v2_service" "leader" {
       ports {
         container_port = 3000
       }
-
       resources {
         cpu_idle = false
 
@@ -98,12 +100,6 @@ resource "google_cloud_run_v2_service" "leader" {
       }
     }
   }
-  depends_on = [
-    google_secret_manager_secret_version.account_creator_sk_data,
-    google_secret_manager_secret_version.fast_auth_partners_data,
-    google_secret_manager_secret_iam_member.account_creator_secret_access,
-    google_secret_manager_secret_iam_member.fast_auth_partners_secret_access
-  ]
 }
 
 // Allow unauthenticated requests

@@ -1,0 +1,74 @@
+name: Integration (Multichain)
+
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+    paths:
+      - integration-tests/**
+      - node/**
+      - contract/**
+
+env:
+  RUSTFLAGS: -D warnings
+jobs:
+  test:
+    name: Test
+    strategy:
+      matrix:
+        # FIXME: macos-latest-xl is disabled since colima is erroring out right now
+        os: [ubuntu-22.04-4core]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Docker
+        if: ${{ matrix.os == 'macos-latest-xl' }}
+        run: |
+          brew install docker
+          colima start
+          # Colima does not expose the Docker socket by default, we have to symlink it
+          # https://github.com/abiosoft/colima/blob/main/docs/FAQ.md#cannot-connect-to-the-docker-daemon-at-unixvarrundockersock-is-the-docker-daemon-running
+          sudo ln -sf $HOME/.colima/default/docker.sock /var/run/docker.sock
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Relayer & Sandbox Docker Images
+        run: |
+          docker pull ghcr.io/near/os-relayer:12ba6e35690df3979fce0b36a41d0ca0db9c0ab4
+          docker pull ghcr.io/near/near-lake-indexer:e6519c922435f3d18b5f2ddac5d1ec171ef4dd6b
+          docker pull localstack/localstack:latest
+
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v1
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v1.1.2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compile Contract
+        run: cargo build -p mpc-contract --target wasm32-unknown-unknown --release
+
+      - name: Build MPC Recovery Binary Locally
+        run: |
+          cargo build -p mpc-recovery-node --release
+
+      - name: Test
+        run: cargo test -p mpc-recovery-integration-tests multichain --jobs 1 -- --test-threads 1
+        env:
+          RUST_LOG: INFO
+          RUST_BACKTRACE: 1

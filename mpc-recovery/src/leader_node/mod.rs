@@ -6,12 +6,12 @@ use crate::msg::{
     MpcPkRequest, MpcPkResponse, NewAccountRequest, NewAccountResponse, SignNodeRequest,
     SignRequest, SignResponse, UserCredentialsRequest, UserCredentialsResponse,
 };
-use crate::oauth::OAuthTokenVerifier;
-use crate::relayer::msg::{CreateAccountAtomicRequest, RegisterAccountRequest};
+use crate::oauth::verify_oidc_token;
+use crate::relayer::msg::CreateAccountAtomicRequest;
 use crate::relayer::NearRpcAndRelayerClient;
 use crate::transaction::{
-    get_create_account_delegate_action, get_local_signed_delegated_action, get_mpc_signature,
-    sign_payload_with_mpc, to_dalek_combined_public_key,
+    get_mpc_signature, new_create_account_delegate_action, sign_payload_with_mpc,
+    to_dalek_combined_public_key,
 };
 use crate::utils::{check_digest_signature, user_credentials_request_digest};
 use crate::{metrics, nar};
@@ -26,15 +26,16 @@ use axum::{
     Extension, Json, Router,
 };
 use axum_extra::extract::WithRejection;
+use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
 use borsh::BorshDeserialize;
 use curv::elliptic::curves::{Ed25519, Point};
-use near_crypto::SecretKey;
+use near_fetch::signer::KeyRotatingSigner;
 use near_primitives::delegate_action::{DelegateAction, NonDelegateAction};
-use near_primitives::transaction::{Action, DeleteKeyAction};
+use near_primitives::transaction::{Action, DeleteAccountAction, DeleteKeyAction};
 use near_primitives::types::AccountId;
 use prometheus::{Encoder, TextEncoder};
-use rand::{distributions::Alphanumeric, Rng};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 pub struct Config {
@@ -43,60 +44,38 @@ pub struct Config {
     pub sign_nodes: Vec<String>,
     pub near_rpc: String,
     pub near_root_account: String,
-    pub account_creator_id: AccountId,
     // TODO: temporary solution
-    pub account_creator_sk: SecretKey,
+    pub account_creator_signer: KeyRotatingSigner,
     pub partners: PartnerList,
+    pub jwt_signature_pk_url: String,
 }
 
-pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
+pub async fn run(config: Config) {
     let Config {
         env,
         port,
         sign_nodes,
         near_rpc,
         near_root_account,
-        account_creator_id,
-        account_creator_sk,
+        account_creator_signer,
         partners,
+        jwt_signature_pk_url,
     } = config;
     let _span = tracing::debug_span!("run", env, port);
     tracing::debug!(?sign_nodes, "running a leader node");
 
     let client = NearRpcAndRelayerClient::connect(&near_rpc);
-    // FIXME: Internal account id is retrieved from the ID token. We don't have a token for ourselves,
-    // but are still forced to allocate allowance.
-    // Using randomly generated internal account id ensures the uniqueness of user idenrifier on the relayer side so
-    // we can update the allowance on each server run.
-    for partner in partners.entries.iter() {
-        let fake_internal_account_id: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(16)
-            .map(char::from)
-            .collect();
-        client
-            .register_account(
-                RegisterAccountRequest {
-                    account_id: account_creator_id.clone(),
-                    allowance: 18_000_000_000_000_000_000, // should be enough to create 700_000+ accs
-                    oauth_token: fake_internal_account_id,
-                },
-                partner.relayer.clone(),
-            )
-            .await
-            .unwrap();
-    }
 
-    let state = LeaderState {
+    let state = Arc::new(LeaderState {
         env,
         sign_nodes,
         client,
         reqwest_client: reqwest::Client::new(),
         near_root_account: near_root_account.parse().unwrap(),
-        account_creator_id,
-        account_creator_sk,
+        account_creator_signer,
         partners,
-    };
+        jwt_signature_pk_url,
+    });
 
     // Get keys from all sign nodes, and broadcast them out as a set.
     let pk_set = match gather_sign_node_pk_shares(&state).await {
@@ -130,13 +109,17 @@ pub async fn run<T: OAuthTokenVerifier + 'static>(config: Config) {
         )
         .route("/mpc_public_key", post(mpc_public_key))
         .route("/claim_oidc", post(claim_oidc))
-        .route("/user_credentials", post(user_credentials::<T>))
-        .route("/new_account", post(new_account::<T>))
-        .route("/sign", post(sign::<T>))
+        .route("/user_credentials", post(user_credentials))
+        .route("/new_account", post(new_account))
+        .route("/sign", post(sign))
         .route("/metrics", get(metrics))
         .route_layer(middleware::from_fn(track_metrics))
         .layer(Extension(state))
-        .layer(cors_layer);
+        .layer(cors_layer)
+        // Include trace context as header into the response
+        .layer(OtelInResponseLayer)
+        // Start OpenTelemetry trace on incoming request
+        .layer(OtelAxumLayer::default());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::debug!(?addr, "starting http server");
@@ -206,21 +189,20 @@ async fn metrics() -> (StatusCode, String) {
     }
 }
 
-#[derive(Clone)]
 struct LeaderState {
     env: String,
     sign_nodes: Vec<String>,
     client: NearRpcAndRelayerClient,
     reqwest_client: reqwest::Client,
     near_root_account: AccountId,
-    account_creator_id: AccountId,
     // TODO: temporary solution
-    account_creator_sk: SecretKey,
+    account_creator_signer: KeyRotatingSigner,
     partners: PartnerList,
+    jwt_signature_pk_url: String,
 }
 
 async fn mpc_public_key(
-    Extension(state): Extension<LeaderState>,
+    Extension(state): Extension<Arc<LeaderState>>,
     WithRejection(Json(_), _): WithRejection<Json<MpcPkRequest>, MpcError>,
 ) -> (StatusCode, Json<MpcPkResponse>) {
     // Getting MPC PK from sign nodes
@@ -253,7 +235,7 @@ async fn mpc_public_key(
 
 #[tracing::instrument(level = "info", skip_all, fields(env = state.env))]
 async fn claim_oidc(
-    Extension(state): Extension<LeaderState>,
+    Extension(state): Extension<Arc<LeaderState>>,
     WithRejection(Json(claim_oidc_request), _): WithRejection<Json<ClaimOidcRequest>, MpcError>,
 ) -> (StatusCode, Json<ClaimOidcResponse>) {
     tracing::info!(
@@ -286,8 +268,8 @@ async fn claim_oidc(
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(env = state.env))]
-async fn user_credentials<T: OAuthTokenVerifier>(
-    Extension(state): Extension<LeaderState>,
+async fn user_credentials(
+    Extension(state): Extension<Arc<LeaderState>>,
     WithRejection(Json(request), _): WithRejection<Json<UserCredentialsRequest>, MpcError>,
 ) -> (StatusCode, Json<UserCredentialsResponse>) {
     tracing::info!(
@@ -295,7 +277,7 @@ async fn user_credentials<T: OAuthTokenVerifier>(
         "user_credentials request"
     );
 
-    match process_user_credentials::<T>(state, request).await {
+    match process_user_credentials(state, request).await {
         Ok(response) => {
             tracing::debug!("responding with OK");
             (StatusCode::OK, Json(response))
@@ -312,20 +294,25 @@ async fn user_credentials<T: OAuthTokenVerifier>(
     }
 }
 
-async fn process_user_credentials<T: OAuthTokenVerifier>(
-    state: LeaderState,
+async fn process_user_credentials(
+    state: Arc<LeaderState>,
     request: UserCredentialsRequest,
 ) -> Result<UserCredentialsResponse, LeaderNodeError> {
-    T::verify_token(&request.oidc_token, &state.partners.oidc_providers())
-        .await
-        .map_err(LeaderNodeError::OidcVerificationFailed)?;
+    verify_oidc_token(
+        &request.oidc_token,
+        Some(&state.partners.oidc_providers()),
+        &state.reqwest_client,
+        &state.jwt_signature_pk_url,
+    )
+    .await
+    .map_err(LeaderNodeError::OidcVerificationFailed)?;
 
     nar::retry(|| async {
         let mpc_user_recovery_pk = get_user_recovery_pk(
             &state.reqwest_client,
             &state.sign_nodes,
             &request.oidc_token,
-            request.frp_signature,
+            &request.frp_signature,
             &request.frp_public_key,
         )
         .await?;
@@ -337,15 +324,20 @@ async fn process_user_credentials<T: OAuthTokenVerifier>(
     .await
 }
 
-async fn process_new_account<T: OAuthTokenVerifier>(
-    state: LeaderState,
+async fn process_new_account(
+    state: Arc<LeaderState>,
     request: NewAccountRequest,
 ) -> Result<NewAccountResponse, LeaderNodeError> {
     // Create a transaction to create new NEAR account
     let new_user_account_id = request.near_account_id;
-    let oidc_token_claims = T::verify_token(&request.oidc_token, &state.partners.oidc_providers())
-        .await
-        .map_err(LeaderNodeError::OidcVerificationFailed)?;
+    let oidc_token_claims = verify_oidc_token(
+        &request.oidc_token,
+        Some(&state.partners.oidc_providers()),
+        &state.reqwest_client,
+        &state.jwt_signature_pk_url,
+    )
+    .await
+    .map_err(LeaderNodeError::OidcVerificationFailed)?;
     let internal_acc_id = oidc_token_claims.get_internal_account_id();
 
     // FIXME: waiting on https://github.com/near/mpc-recovery/issues/193
@@ -358,25 +350,32 @@ async fn process_new_account<T: OAuthTokenVerifier>(
         .map_err(LeaderNodeError::SignatureVerificationFailed)?;
     tracing::debug!("user credentials digest signature verified for {new_user_account_id:?}");
 
-    nar::retry(|| async {
-        // Get nonce and recent block hash
-        let (_hash, block_height, nonce) = state
-            .client
-            .access_key(
-                state.account_creator_id.clone(),
-                state.account_creator_sk.public_key(),
-            )
-            .await
-            .map_err(LeaderNodeError::RelayerError)?;
+    // TODO: move error message from here to this place
+    let partner = state
+        .partners
+        .find(&oidc_token_claims.iss, &oidc_token_claims.aud)?;
 
-        let mpc_user_recovery_pk = get_user_recovery_pk(
+    let mpc_user_recovery_pk = nar::retry(|| async {
+        get_user_recovery_pk(
             &state.reqwest_client,
             &state.sign_nodes,
             &request.oidc_token,
-            request.user_credentials_frp_signature,
+            &request.user_credentials_frp_signature,
             &request.frp_public_key,
         )
-        .await?;
+        .await
+    })
+    .await?;
+
+    nar::retry(|| async {
+        let account_creator = state.account_creator_signer.fetch_and_rotate_signer();
+
+        // Get nonce and recent block hash
+        let (_hash, block_height, nonce) = state
+            .client
+            .access_key(&account_creator.account_id, &account_creator.public_key)
+            .await
+            .map_err(LeaderNodeError::RelayerError)?;
 
         // Add recovery key to create account options
         let mut new_account_options = request.create_account_options.clone();
@@ -385,22 +384,16 @@ async fn process_new_account<T: OAuthTokenVerifier>(
             None => new_account_options.full_access_keys = Some(vec![mpc_user_recovery_pk.clone()]),
         }
 
-        let delegate_action = get_create_account_delegate_action(
-            &state.account_creator_id,
-            &state.account_creator_sk.public_key(),
+        // We create accounts using the local key
+        let signed_delegate_action = new_create_account_delegate_action(
+            account_creator,
             &new_user_account_id,
-            new_account_options.clone(),
+            &new_account_options,
             &state.near_root_account,
             nonce,
             block_height + 100,
         )
         .map_err(LeaderNodeError::Other)?;
-        // We create accounts using the local key
-        let signed_delegate_action = get_local_signed_delegated_action(
-            delegate_action,
-            state.account_creator_id.clone(),
-            state.account_creator_sk.clone(),
-        );
 
         // Send delegate action to relayer
         let request = CreateAccountAtomicRequest {
@@ -410,14 +403,9 @@ async fn process_new_account<T: OAuthTokenVerifier>(
             signed_delegate_action,
         };
 
-        // TODO: move error message from here to this place
-        let partner = state
-            .partners
-            .find(&oidc_token_claims.iss, &oidc_token_claims.aud)?;
-
         let result = state
             .client
-            .create_account_atomic(request, partner.relayer)
+            .create_account_atomic(request, &partner.relayer)
             .await;
 
         match result {
@@ -428,7 +416,7 @@ async fn process_new_account<T: OAuthTokenVerifier>(
                 );
                 Ok(NewAccountResponse::Ok {
                     create_account_options: new_account_options,
-                    user_recovery_public_key: mpc_user_recovery_pk,
+                    user_recovery_public_key: mpc_user_recovery_pk.clone(),
                     near_account_id: new_user_account_id.clone(),
                 })
             }
@@ -439,8 +427,8 @@ async fn process_new_account<T: OAuthTokenVerifier>(
                     .client
                     .invalidate_cache_if_acc_creation_failed(
                         &(
-                            state.account_creator_id.clone(),
-                            state.account_creator_sk.public_key(),
+                            account_creator.account_id.clone(),
+                            account_creator.public_key.clone(),
                         ),
                         &err_str,
                     )
@@ -453,8 +441,8 @@ async fn process_new_account<T: OAuthTokenVerifier>(
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(env = state.env))]
-async fn new_account<T: OAuthTokenVerifier>(
-    Extension(state): Extension<LeaderState>,
+async fn new_account(
+    Extension(state): Extension<Arc<LeaderState>>,
     WithRejection(Json(request), _): WithRejection<Json<NewAccountRequest>, MpcError>,
 ) -> (StatusCode, Json<NewAccountResponse>) {
     tracing::info!(
@@ -464,7 +452,7 @@ async fn new_account<T: OAuthTokenVerifier>(
         "new_account request"
     );
 
-    match process_new_account::<T>(state, request).await {
+    match process_new_account(state, request).await {
         Ok(response) => {
             tracing::debug!("responding with OK");
             (StatusCode::OK, Json(response))
@@ -476,8 +464,8 @@ async fn new_account<T: OAuthTokenVerifier>(
     }
 }
 
-async fn process_sign<T: OAuthTokenVerifier>(
-    state: LeaderState,
+async fn process_sign(
+    state: Arc<LeaderState>,
     request: SignRequest,
 ) -> Result<SignResponse, LeaderNodeError> {
     // Deserialize the included delegate action via borsh
@@ -485,9 +473,14 @@ async fn process_sign<T: OAuthTokenVerifier>(
         .map_err(LeaderNodeError::MalformedDelegateAction)?;
 
     // Check OIDC token
-    T::verify_token(&request.oidc_token, &state.partners.oidc_providers())
-        .await
-        .map_err(LeaderNodeError::OidcVerificationFailed)?;
+    verify_oidc_token(
+        &request.oidc_token,
+        Some(&state.partners.oidc_providers()),
+        &state.reqwest_client,
+        &state.jwt_signature_pk_url,
+    )
+    .await
+    .map_err(LeaderNodeError::OidcVerificationFailed)?;
 
     // Prevent recovery key delition
     let requested_delegate_actions: &Vec<NonDelegateAction> = &delegate_action.actions;
@@ -510,7 +503,7 @@ async fn process_sign<T: OAuthTokenVerifier>(
             &state.reqwest_client,
             &state.sign_nodes,
             &request.oidc_token,
-            request.user_credentials_frp_signature,
+            &request.user_credentials_frp_signature,
             &request.frp_public_key,
         )
         .await?;
@@ -536,6 +529,21 @@ async fn process_sign<T: OAuthTokenVerifier>(
         }
     }
 
+    // Prevent account deletion
+    // Note: we can allow account deletionn once we sync that with relayer. With current logic user will not be able to create another account.
+    let delete_account_actions: Vec<&DeleteAccountAction> = requested_actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::DeleteAccount(delete_account_action) => Some(delete_account_action),
+            _ => None,
+        })
+        .collect();
+
+    if !delete_account_actions.is_empty() {
+        tracing::error!("Account deletion is not allowed");
+        Err(LeaderNodeError::AccountDeletionUnsupported)?;
+    }
+
     // Get MPC signature
     nar::retry(|| async {
         let signature = get_mpc_signature(
@@ -543,7 +551,7 @@ async fn process_sign<T: OAuthTokenVerifier>(
             &state.sign_nodes,
             &request.oidc_token,
             delegate_action.clone(),
-            request.frp_signature,
+            &request.frp_signature,
             &request.frp_public_key,
         )
         .await?;
@@ -554,8 +562,8 @@ async fn process_sign<T: OAuthTokenVerifier>(
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(env = state.env))]
-async fn sign<T: OAuthTokenVerifier>(
-    Extension(state): Extension<LeaderState>,
+async fn sign(
+    Extension(state): Extension<Arc<LeaderState>>,
     WithRejection(Json(request), _): WithRejection<Json<SignRequest>, MpcError>,
 ) -> (StatusCode, Json<SignResponse>) {
     tracing::info!(
@@ -563,7 +571,7 @@ async fn sign<T: OAuthTokenVerifier>(
         "sign request"
     );
 
-    match process_sign::<T>(state, request).await {
+    match process_sign(state, request).await {
         Ok(response) => {
             tracing::debug!("responding with OK");
             (StatusCode::OK, Json(response))

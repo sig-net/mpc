@@ -1,109 +1,82 @@
 mod mpc;
+mod multichain;
 
 use curv::elliptic::curves::{Ed25519, Point};
 use futures::future::BoxFuture;
 use hyper::StatusCode;
 use mpc_recovery::{
-    firewall::allowed::DelegateActionRelayer,
     gcp::GcpService,
     msg::{
         ClaimOidcResponse, MpcPkResponse, NewAccountResponse, SignResponse, UserCredentialsResponse,
     },
-    GenerateResult,
 };
-use mpc_recovery_integration_tests::containers;
-use workspaces::{network::Sandbox, Worker};
+use mpc_recovery_integration_tests::env;
+use mpc_recovery_integration_tests::env::containers::DockerClient;
+use near_workspaces::{network::Sandbox, Worker};
 
-const NETWORK: &str = "mpc_it_network";
-const GCP_PROJECT_ID: &str = "mpc-recovery-gcp-project";
-// TODO: figure out how to instantiate and use a local firebase deployment
-pub const FIREBASE_AUDIENCE_ID: &str = "test_audience";
-
-pub struct TestContext<'a> {
-    leader_node: &'a containers::LeaderNodeApi,
-    pk_set: &'a Vec<Point<Ed25519>>,
-    worker: &'a Worker<Sandbox>,
-    signer_nodes: &'a Vec<containers::SignerNodeApi>,
+pub struct TestContext {
+    env: String,
+    leader_node: env::LeaderNodeApi,
+    pk_set: Vec<Point<Ed25519>>,
+    worker: Worker<Sandbox>,
+    signer_nodes: Vec<env::SignerNodeApi>,
+    gcp_project_id: String,
     gcp_datastore_url: String,
 }
 
-impl<'a> TestContext<'a> {
+impl TestContext {
     pub async fn gcp_service(&self) -> anyhow::Result<GcpService> {
         GcpService::new(
-            "dev".into(),
-            GCP_PROJECT_ID.into(),
+            self.env.clone(),
+            self.gcp_project_id.clone(),
             Some(self.gcp_datastore_url.clone()),
         )
         .await
     }
 }
 
-async fn with_nodes<F>(nodes: usize, f: F) -> anyhow::Result<()>
+async fn with_nodes<Task, Fut, Val>(nodes: usize, f: Task) -> anyhow::Result<()>
 where
-    F: for<'a> FnOnce(TestContext<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
+    Task: FnOnce(TestContext) -> Fut,
+    Fut: core::future::Future<Output = anyhow::Result<Val>>,
 {
-    let docker_client = containers::DockerClient::default();
-    docker_client.create_network(NETWORK).await?;
-
-    let relayer_ctx_future =
-        mpc_recovery_integration_tests::initialize_relayer(&docker_client, NETWORK);
-    let datastore_future = containers::Datastore::run(&docker_client, NETWORK, GCP_PROJECT_ID);
-
-    let (relayer_ctx, datastore) =
-        futures::future::join(relayer_ctx_future, datastore_future).await;
-    let relayer_ctx = relayer_ctx?;
-    let datastore = datastore?;
-
-    let GenerateResult { pk_set, secrets } = mpc_recovery::generate(nodes);
-    let mut signer_node_futures = Vec::new();
-    for (i, (share, cipher_key)) in secrets.iter().enumerate().take(nodes) {
-        let signer_node = containers::SignerNode::run_signing_node(
-            &docker_client,
-            NETWORK,
-            i as u64,
-            share,
-            cipher_key,
-            &datastore.address,
-            &datastore.local_address,
-            GCP_PROJECT_ID,
-            FIREBASE_AUDIENCE_ID,
-        );
-        signer_node_futures.push(signer_node);
-    }
-    let signer_nodes = futures::future::join_all(signer_node_futures)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-    let signer_urls: &Vec<_> = &signer_nodes.iter().map(|n| n.address.clone()).collect();
-
-    let near_root_account = relayer_ctx.worker.root_account()?;
-    let leader_node = containers::LeaderNode::run(
-        &docker_client,
-        NETWORK,
-        signer_urls.clone(),
-        &relayer_ctx.sandbox.address,
-        &relayer_ctx.relayer.address,
-        &datastore.address,
-        GCP_PROJECT_ID,
-        near_root_account.id(),
-        relayer_ctx.creator_account.id(),
-        relayer_ctx.creator_account.secret_key(),
-        FIREBASE_AUDIENCE_ID,
-    )
-    .await?;
+    let docker_client = DockerClient::default();
+    let nodes = env::run(nodes, &docker_client).await?;
 
     f(TestContext {
-        leader_node: &leader_node.api(
-            &relayer_ctx.sandbox.local_address,
-            &DelegateActionRelayer {
-                url: relayer_ctx.relayer.local_address.clone(),
-                api_key: None,
-            },
-        ),
-        pk_set: &pk_set,
-        signer_nodes: &signer_nodes.iter().map(|n| n.api()).collect(),
-        worker: &relayer_ctx.worker,
-        gcp_datastore_url: datastore.local_address,
+        env: nodes.ctx().env.clone(),
+        pk_set: nodes.pk_set(),
+        leader_node: nodes.leader_api(),
+        signer_nodes: nodes.signer_apis(),
+        worker: nodes.ctx().relayer_ctx.worker.clone(),
+        gcp_project_id: nodes.ctx().gcp_project_id.clone(),
+        gcp_datastore_url: nodes.datastore_addr(),
+    })
+    .await?;
+
+    nodes.ctx().relayer_ctx.relayer.clean_tmp_files()?;
+
+    Ok(())
+}
+
+pub struct MultichainTestContext<'a> {
+    nodes: mpc_recovery_integration_tests::multichain::Nodes<'a>,
+    rpc_client: near_fetch::Client,
+    http_client: reqwest::Client,
+}
+
+async fn with_multichain_nodes<F>(nodes: usize, f: F) -> anyhow::Result<()>
+where
+    F: for<'a> FnOnce(MultichainTestContext<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
+{
+    let docker_client = DockerClient::default();
+    let nodes = mpc_recovery_integration_tests::multichain::run(nodes, &docker_client).await?;
+
+    let rpc_client = near_fetch::Client::new(&nodes.ctx().lake_indexer.rpc_host_address);
+    f(MultichainTestContext {
+        nodes,
+        rpc_client,
+        http_client: reqwest::Client::default(),
     })
     .await?;
 
@@ -111,8 +84,8 @@ where
 }
 
 mod account {
+    use near_workspaces::{network::Sandbox, AccountId, Worker};
     use rand::{distributions::Alphanumeric, Rng};
-    use workspaces::{network::Sandbox, AccountId, Worker};
 
     pub fn random(worker: &Worker<Sandbox>) -> anyhow::Result<AccountId> {
         let account_id_rand: String = rand::thread_rng()
@@ -170,10 +143,10 @@ mod key {
 mod check {
     use crate::TestContext;
     use near_crypto::PublicKey;
-    use workspaces::AccountId;
+    use near_workspaces::AccountId;
 
     pub async fn access_key_exists(
-        ctx: &TestContext<'_>,
+        ctx: &TestContext,
         account_id: &AccountId,
         public_key: &PublicKey,
     ) -> anyhow::Result<()> {
@@ -192,7 +165,7 @@ mod check {
     }
 
     pub async fn access_key_does_not_exists(
-        ctx: &TestContext<'_>,
+        ctx: &TestContext,
         account_id: &AccountId,
         public_key: &str,
     ) -> anyhow::Result<()> {
@@ -208,6 +181,96 @@ mod check {
         } else {
             Ok(())
         }
+    }
+}
+
+mod wait_for {
+    use crate::MultichainTestContext;
+    use backon::ExponentialBuilder;
+    use backon::Retryable;
+    use mpc_contract::ProtocolContractState;
+    use mpc_contract::RunningContractState;
+    use mpc_recovery_node::web::StateView;
+
+    pub async fn running_mpc<'a>(
+        ctx: &MultichainTestContext<'a>,
+        epoch: u64,
+    ) -> anyhow::Result<RunningContractState> {
+        let is_running = || async {
+            let state: ProtocolContractState = ctx
+                .rpc_client
+                .view(ctx.nodes.ctx().mpc_contract.id(), "state", ())
+                .await?;
+
+            match state {
+                ProtocolContractState::Running(running) if running.epoch >= epoch => Ok(running),
+                ProtocolContractState::Running(running) => {
+                    anyhow::bail!("running with an older epoch: {}", running.epoch)
+                }
+                _ => anyhow::bail!("not running"),
+            }
+        };
+        is_running
+            .retry(&ExponentialBuilder::default().with_max_times(6))
+            .await
+    }
+
+    pub async fn has_at_least_triples<'a>(
+        ctx: &MultichainTestContext<'a>,
+        id: usize,
+        expected_triple_count: usize,
+    ) -> anyhow::Result<StateView> {
+        let is_enough_triples = || async {
+            let state_view: StateView = ctx
+                .http_client
+                .get(format!("{}/state", ctx.nodes.url(id)))
+                .send()
+                .await?
+                .json()
+                .await?;
+
+            match state_view {
+                StateView::Running { triple_count, .. }
+                    if triple_count >= expected_triple_count =>
+                {
+                    Ok(state_view)
+                }
+                StateView::Running { .. } => anyhow::bail!("node does not have enough triples yet"),
+                StateView::NotRunning => anyhow::bail!("node is not running"),
+            }
+        };
+        is_enough_triples
+            .retry(&ExponentialBuilder::default().with_max_times(6))
+            .await
+    }
+
+    pub async fn has_at_least_presignatures<'a>(
+        ctx: &MultichainTestContext<'a>,
+        id: usize,
+        expected_presignature_count: usize,
+    ) -> anyhow::Result<StateView> {
+        let is_enough_presignatures = || async {
+            let state_view: StateView = ctx
+                .http_client
+                .get(format!("{}/state", ctx.nodes.url(id)))
+                .send()
+                .await?
+                .json()
+                .await?;
+
+            match state_view {
+                StateView::Running {
+                    presignature_count, ..
+                } if presignature_count >= expected_presignature_count => Ok(state_view),
+                StateView::Running { .. } => {
+                    anyhow::bail!("node does not have enough presignatures yet")
+                }
+                StateView::NotRunning => anyhow::bail!("node is not running"),
+            }
+        };
+        is_enough_presignatures
+            .retry(&ExponentialBuilder::default().with_max_times(6))
+            .await
     }
 }
 

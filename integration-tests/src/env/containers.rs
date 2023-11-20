@@ -1,13 +1,14 @@
 #![allow(clippy::too_many_arguments)]
 
 use aes_gcm::{Aes256Gcm, KeyInit};
-use anyhow::{anyhow, Ok};
+use anyhow::anyhow;
 use bollard::{container::LogsOptions, network::CreateNetworkOptions, service::Ipam, Docker};
 use ed25519_dalek::ed25519::signature::digest::{consts::U32, generic_array::GenericArray};
 use ed25519_dalek::{PublicKey as PublicKeyEd25519, Verifier};
 use futures::{lock::Mutex, StreamExt};
 use hyper::StatusCode;
 use mpc_recovery::firewall::allowed::DelegateActionRelayer;
+use mpc_recovery::logging;
 use mpc_recovery::sign_node::oidc::OidcToken;
 use mpc_recovery::{
     msg::{
@@ -29,18 +30,23 @@ use near_primitives::borsh::BorshSerialize;
 use near_primitives::delegate_action::{DelegateAction, SignedDelegateAction};
 use near_primitives::transaction::{Action, AddKeyAction, DeleteKeyAction};
 use near_primitives::views::FinalExecutionStatus;
+use near_workspaces::AccountId;
 use once_cell::sync::Lazy;
 use testcontainers::{
     clients::Cli,
     core::{ExecCommand, WaitFor},
-    images::generic::GenericImage,
-    Container, Image, RunnableImage,
+    Container, GenericImage, Image, RunnableImage,
 };
 use tokio::io::AsyncWriteExt;
 use tracing;
-use workspaces::AccountId;
 
-use crate::util;
+use std::fs;
+
+use crate::env::{Context, LeaderNodeApi, SignerNodeApi};
+use crate::util::{
+    self, create_key_file, create_key_file_with_filepath, create_relayer_cofig_file,
+};
+use bollard::exec::CreateExecOptions;
 
 static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 
@@ -132,7 +138,7 @@ impl DockerClient {
         tokio::spawn(async move {
             let mut stdout = tokio::io::stdout();
 
-            while let Some(Result::Ok(output)) = output.next().await {
+            while let Some(Ok(output)) = output.next().await {
                 stdout
                     .write_all(output.into_bytes().as_ref())
                     .await
@@ -163,12 +169,17 @@ impl Default for DockerClient {
 pub struct Redis<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
+    pub full_address: String,
+    pub local_address: String,
 }
 
 impl<'a> Redis<'a> {
+    const CONTAINER_PORT: u16 = 3000;
+
     pub async fn run(docker_client: &'a DockerClient, network: &str) -> anyhow::Result<Redis<'a>> {
         tracing::info!("Running Redis container...");
         let image = GenericImage::new("redis", "latest")
+            .with_exposed_port(Self::CONTAINER_PORT)
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"));
         let image: RunnableImage<GenericImage> = image.into();
         let image = image.with_network(network);
@@ -177,8 +188,17 @@ impl<'a> Redis<'a> {
             .get_network_ip_address(&container, network)
             .await?;
 
-        tracing::info!("Redis container is running at {}", address);
-        Ok(Redis { container, address })
+        // Note: this port is hardcoded in the Redis image
+        let full_address = format!("redis://{}:{}", address, 6379);
+        let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
+
+        tracing::info!("Redis container is running at {}", full_address);
+        Ok(Redis {
+            container,
+            address,
+            full_address,
+            local_address: format!("http://127.0.0.1:{host_port}"),
+        })
     }
 }
 
@@ -240,56 +260,115 @@ impl<'a> Sandbox<'a> {
         Ok(Sandbox {
             container,
             address: full_address,
-            local_address: format!("http://localhost:{host_port}"),
+            local_address: format!("http://127.0.0.1:{host_port}"),
         })
     }
 }
 
 pub struct Relayer<'a> {
+    pub id: String,
     pub container: Container<'a, GenericImage>,
     pub address: String,
     pub local_address: String,
 }
 
+pub struct RelayerConfig {
+    pub ip_address: [u8; 4],
+    pub port: u16,
+    pub relayer_account_id: AccountId,
+    pub keys_filenames: Vec<String>,
+    pub shared_storage_account_id: AccountId,
+    pub shared_storage_keys_filename: String,
+    pub whitelisted_contracts: Vec<AccountId>,
+    pub whitelisted_delegate_action_receiver_ids: Vec<AccountId>,
+    pub redis_url: String,
+    pub social_db_contract_id: AccountId,
+    pub rpc_url: String,
+    pub wallet_url: String,
+    pub explorer_transaction_url: String,
+    pub rpc_api_key: String,
+}
+
 impl<'a> Relayer<'a> {
     pub const CONTAINER_PORT: u16 = 3000;
+    pub const TMP_FOLDER_PATH: &'static str = "./tmp";
 
     pub async fn run(
         docker_client: &'a DockerClient,
         network: &str,
         near_rpc: &str,
-        redis_hostname: &str,
+        redis_full_address: &str,
         relayer_account_id: &AccountId,
-        relayer_account_sk: &workspaces::types::SecretKey,
+        relayer_account_sks: &[near_workspaces::types::SecretKey],
         creator_account_id: &AccountId,
         social_db_id: &AccountId,
         social_account_id: &AccountId,
-        social_account_sk: &workspaces::types::SecretKey,
+        social_account_sk: &near_workspaces::types::SecretKey,
+        relayer_id: &str,
     ) -> anyhow::Result<Relayer<'a>> {
         tracing::info!("Running relayer container...");
-        let image = GenericImage::new("ghcr.io/near/pagoda-relayer-rs-fastauth", "latest")
-            .with_wait_for(WaitFor::message_on_stdout("listening on"))
-            .with_exposed_port(Self::CONTAINER_PORT)
-            .with_env_var("RUST_LOG", "DEBUG")
-            .with_env_var("NETWORK", "custom")
-            .with_env_var("SERVER_PORT", Self::CONTAINER_PORT.to_string())
-            .with_env_var("RELAYER_RPC_URL", near_rpc)
-            .with_env_var("RELAYER_ACCOUNT_ID", relayer_account_id.to_string())
-            .with_env_var("REDIS_HOST", redis_hostname)
-            .with_env_var("OVERRIDE_RPC_CONF", "true")
-            .with_env_var("PUBLIC_KEY", relayer_account_sk.public_key().to_string())
-            .with_env_var("PRIVATE_KEY", relayer_account_sk.to_string())
-            .with_env_var("KEYS_FILENAMES", format!("{relayer_account_id}.json"))
-            .with_env_var("WHITELISTED_CONTRACT", creator_account_id.to_string())
-            .with_env_var("WHITELISTED_RECEIVER_IDS", creator_account_id.to_string())
-            .with_env_var("CUSTOM_SOCIAL_DB_ID", social_db_id.to_string())
-            .with_env_var("STORAGE_ACCOUNT_ID", social_account_id.to_string())
-            .with_env_var(
-                "STORAGE_PUBLIC_KEY",
-                social_account_sk.public_key().to_string(),
-            )
-            .with_env_var("STORAGE_PRIVATE_KEY", social_account_sk.to_string())
-            .with_env_var("NUM_KEYS", "1");
+
+        // Create tmp folder to store relayer configs
+        let relayer_configs_path = format!("{}/{}", Self::TMP_FOLDER_PATH, relayer_id);
+        std::fs::create_dir_all(&relayer_configs_path)
+            .unwrap_or_else(|_| panic!("Failed to create {relayer_configs_path} directory"));
+
+        // Create dir for keys
+        let key_dir = format!("{relayer_configs_path}/account_keys");
+        std::fs::create_dir_all(&key_dir).expect("Failed to create account_keys directory");
+        let keys_absolute_path =
+            fs::canonicalize(&key_dir).expect("Failed to get absolute path for keys");
+
+        // Create JSON key files
+        create_key_file(social_account_id, social_account_sk, &key_dir)?;
+        let mut relayer_keyfiles = Vec::with_capacity(relayer_account_sks.len());
+        for (i, relayer_sk) in relayer_account_sks.iter().enumerate() {
+            let filename = format!("{i}-{relayer_account_id}");
+            let keypath = format!("{key_dir}/{filename}.json");
+            create_key_file_with_filepath(relayer_account_id, relayer_sk, &keypath)?;
+            relayer_keyfiles.push(format!("./account_keys/{filename}.json"));
+        }
+
+        // Create relayer config file
+        let config_file_name = "config.toml";
+        let config_absolute_path = create_relayer_cofig_file(
+            RelayerConfig {
+                ip_address: [0, 0, 0, 0],
+                port: Self::CONTAINER_PORT,
+                relayer_account_id: relayer_account_id.clone(),
+                keys_filenames: relayer_keyfiles,
+                shared_storage_account_id: social_account_id.clone(),
+                shared_storage_keys_filename: format!("./account_keys/{}.json", social_account_id),
+                whitelisted_contracts: vec![creator_account_id.clone()],
+                whitelisted_delegate_action_receiver_ids: vec![creator_account_id.clone()],
+                redis_url: redis_full_address.to_string(),
+                social_db_contract_id: social_db_id.clone(),
+                rpc_url: near_rpc.to_string(),
+                wallet_url: "https://wallet.testnet.near.org".to_string(),
+                explorer_transaction_url: "https://explorer.testnet.near.org/transactions/"
+                    .to_string(),
+                rpc_api_key: "".to_string(),
+            },
+            format!("{relayer_configs_path}/{config_file_name}"),
+        )?;
+
+        let image = GenericImage::new(
+            "ghcr.io/near/os-relayer",
+            "12ba6e35690df3979fce0b36a41d0ca0db9c0ab4",
+        )
+        .with_wait_for(WaitFor::message_on_stdout("listening on"))
+        .with_exposed_port(Self::CONTAINER_PORT)
+        .with_volume(
+            config_absolute_path,
+            format!("/relayer-app/{}", config_file_name),
+        )
+        .with_volume(
+            keys_absolute_path
+                .to_str()
+                .expect("Failed to convert keys path to string"),
+            "/relayer-app/account_keys",
+        )
+        .with_env_var("RUST_LOG", "DEBUG");
 
         let image: RunnableImage<GenericImage> = image.into();
         let image = image.with_network(network);
@@ -301,10 +380,61 @@ impl<'a> Relayer<'a> {
 
         let full_address = format!("http://{}:{}", ip_address, Self::CONTAINER_PORT);
         tracing::info!("Relayer container is running at {}", full_address);
+
         Ok(Relayer {
             container,
             address: full_address,
-            local_address: format!("http://localhost:{host_port}"),
+            local_address: format!("http://127.0.0.1:{host_port}"),
+            id: relayer_id.to_string(),
+        })
+    }
+
+    pub fn clean_tmp_files(&self) -> anyhow::Result<(), anyhow::Error> {
+        std::fs::remove_dir_all(format!("{}/{}", Self::TMP_FOLDER_PATH, self.id))
+            .unwrap_or_else(|_| panic!("Failed to clean tmp files for relayer {}", self.id));
+        Ok(())
+    }
+}
+
+pub struct OidcProvider<'a> {
+    pub container: Container<'a, GenericImage>,
+    pub jwt_pk_url: String,
+    pub jwt_pk_local_url: String,
+}
+
+impl<'a> OidcProvider<'a> {
+    pub const CONTAINER_PORT: u16 = 3000;
+
+    pub async fn run(
+        docker_client: &'a DockerClient,
+        network: &str,
+    ) -> anyhow::Result<OidcProvider<'a>> {
+        tracing::info!("Running OIDC provider container...");
+        let image = GenericImage::new("near/test-oidc-provider", "latest")
+            .with_wait_for(WaitFor::Nothing)
+            .with_exposed_port(Self::CONTAINER_PORT)
+            .with_env_var("RUST_LOG", "DEBUG");
+        let image: RunnableImage<GenericImage> = image.into();
+        let image = image.with_network(network);
+        let container = docker_client.cli.run(image);
+
+        let ip_address = docker_client
+            .get_network_ip_address(&container, network)
+            .await?;
+
+        let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
+        let full_address = format!("http://{}:{}", ip_address, Self::CONTAINER_PORT);
+        let jwt_pk_url = format!("{}/jwt_signature_public_keys", full_address);
+        let jwt_local_url = format!("http://127.0.0.1:{}/jwt_signature_public_keys", host_port);
+
+        tracing::info!(
+            "OIDC provider container is running, jwt signature pk url: {}",
+            jwt_pk_url
+        );
+        Ok(OidcProvider {
+            container,
+            jwt_pk_url,
+            jwt_pk_local_url: jwt_local_url,
         })
     }
 }
@@ -358,7 +488,7 @@ impl<'a> Datastore<'a> {
         let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
 
         let full_address = format!("http://{}:{}/", ip_address, Self::CONTAINER_PORT);
-        let local_address = format!("http://localhost:{}/", host_port);
+        let local_address = format!("http://127.0.0.1:{}/", host_port);
         tracing::info!("Datastore container is running at {}", full_address);
         Ok(Datastore {
             container,
@@ -368,10 +498,161 @@ impl<'a> Datastore<'a> {
     }
 }
 
+pub struct LocalStack<'a> {
+    pub container: Container<'a, GenericImage>,
+    pub address: String,
+    pub s3_address: String,
+    pub s3_host_address: String,
+    pub s3_bucket: String,
+    pub s3_region: String,
+}
+
+impl<'a> LocalStack<'a> {
+    const S3_CONTAINER_PORT: u16 = 4566;
+
+    pub async fn run(
+        docker_client: &'a DockerClient,
+        network: &str,
+        s3_bucket: String,
+        s3_region: String,
+    ) -> anyhow::Result<LocalStack<'a>> {
+        tracing::info!("running LocalStack container...");
+        let image = GenericImage::new("localstack/localstack", "latest")
+            .with_exposed_port(Self::S3_CONTAINER_PORT)
+            .with_wait_for(WaitFor::message_on_stdout("Running on"));
+        let image: RunnableImage<GenericImage> = image.into();
+        let image = image.with_network(network);
+        let container = docker_client.cli.run(image);
+        let address = docker_client
+            .get_network_ip_address(&container, network)
+            .await?;
+
+        // Create the bucket
+        let create_result = docker_client
+            .docker
+            .create_exec(
+                container.id(),
+                CreateExecOptions::<&str> {
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    cmd: Some(vec![
+                        "awslocal",
+                        "s3api",
+                        "create-bucket",
+                        "--bucket",
+                        &s3_bucket,
+                        "--region",
+                        &s3_region,
+                    ]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        docker_client
+            .docker
+            .start_exec(&create_result.id, None)
+            .await?;
+
+        let s3_address = format!("http://{}:{}", address, Self::S3_CONTAINER_PORT);
+        let s3_host_port = container.get_host_port_ipv4(Self::S3_CONTAINER_PORT);
+        let s3_host_address = format!("http://127.0.0.1:{s3_host_port}");
+
+        tracing::info!(
+            s3_address,
+            s3_host_address,
+            "LocalStack container is running"
+        );
+        Ok(LocalStack {
+            container,
+            address,
+            s3_address,
+            s3_host_address,
+            s3_bucket,
+            s3_region,
+        })
+    }
+}
+
+pub struct LakeIndexer<'a> {
+    pub container: Container<'a, GenericImage>,
+    pub bucket_name: String,
+    pub region: String,
+    pub rpc_address: String,
+    pub rpc_host_address: String,
+}
+
+impl<'a> LakeIndexer<'a> {
+    pub const CONTAINER_RPC_PORT: u16 = 3030;
+
+    pub async fn run(
+        docker_client: &'a DockerClient,
+        network: &str,
+        s3_address: &str,
+        bucket_name: String,
+        region: String,
+    ) -> anyhow::Result<LakeIndexer<'a>> {
+        tracing::info!(
+            network,
+            s3_address,
+            bucket_name,
+            region,
+            "running NEAR Lake Indexer container..."
+        );
+
+        let image = GenericImage::new(
+            "ghcr.io/near/near-lake-indexer",
+            "e6519c922435f3d18b5f2ddac5d1ec171ef4dd6b",
+        )
+        .with_env_var("AWS_ACCESS_KEY_ID", "FAKE_LOCALSTACK_KEY_ID")
+        .with_env_var("AWS_SECRET_ACCESS_KEY", "FAKE_LOCALSTACK_ACCESS_KEY")
+        .with_wait_for(WaitFor::message_on_stderr("Starting Streamer"))
+        .with_exposed_port(Self::CONTAINER_RPC_PORT);
+        let image: RunnableImage<GenericImage> = (
+            image,
+            vec![
+                "--endpoint".to_string(),
+                s3_address.to_string(),
+                "--bucket".to_string(),
+                bucket_name.clone(),
+                "--region".to_string(),
+                region.clone(),
+                "--stream-while-syncing".to_string(),
+                "sync-from-latest".to_string(),
+            ],
+        )
+            .into();
+        let image = image.with_network(network);
+        let container = docker_client.cli.run(image);
+        let address = docker_client
+            .get_network_ip_address(&container, network)
+            .await?;
+        let rpc_address = format!("http://{}:{}", address, Self::CONTAINER_RPC_PORT);
+        let rpc_host_port = container.get_host_port_ipv4(Self::CONTAINER_RPC_PORT);
+        let rpc_host_address = format!("http://127.0.0.1:{rpc_host_port}");
+
+        tracing::info!(
+            bucket_name,
+            region,
+            rpc_address,
+            rpc_host_address,
+            "NEAR Lake Indexer container is running"
+        );
+        Ok(LakeIndexer {
+            container,
+            bucket_name,
+            region,
+            rpc_address,
+            rpc_host_address,
+        })
+    }
+}
+
 pub struct SignerNode<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
     pub local_address: String,
+
+    env: String,
     node_id: usize,
     sk_share: ExpandedKeyPair,
     cipher_key: GenericArray<u8, U32>,
@@ -379,72 +660,46 @@ pub struct SignerNode<'a> {
     gcp_datastore_local_url: String,
 }
 
-pub struct SignerNodeApi {
-    pub address: String,
-    pub node_id: usize,
-    pub sk_share: ExpandedKeyPair,
-    pub cipher_key: GenericArray<u8, U32>,
-    pub gcp_project_id: String,
-    pub gcp_datastore_local_url: String,
-}
-
-impl<'a> SignerNode<'a> {
+impl SignerNode<'_> {
     // Container port used for the docker network, does not have to be unique
     const CONTAINER_PORT: u16 = 3000;
 
-    pub async fn run_signing_node(
-        docker_client: &'a DockerClient,
-        network: &str,
-        node_id: u64,
+    pub async fn run<'a>(
+        ctx: &super::Context<'a>,
+        node_id: usize,
         sk_share: &ExpandedKeyPair,
         cipher_key: &GenericArray<u8, U32>,
-        datastore_url: &str,
-        datastore_local_url: &str,
-        gcp_project_id: &str,
-        firebase_audience_id: &str,
     ) -> anyhow::Result<SignerNode<'a>> {
         tracing::info!("Running signer node container {}...", node_id);
+        let args = mpc_recovery::Cli::StartSign {
+            env: ctx.env.clone(),
+            node_id: node_id as u64,
+            web_port: Self::CONTAINER_PORT,
+            sk_share: Some(serde_json::to_string(&sk_share)?),
+            cipher_key: Some(hex::encode(cipher_key)),
+            gcp_project_id: ctx.gcp_project_id.clone(),
+            gcp_datastore_url: Some(ctx.datastore.address.clone()),
+            jwt_signature_pk_url: ctx.oidc_provider.jwt_pk_url.clone(),
+            logging_options: logging::Options::default(),
+        }
+        .into_str_args();
+
         let image: GenericImage = GenericImage::new("near/mpc-recovery", "latest")
             .with_wait_for(WaitFor::Nothing)
             .with_exposed_port(Self::CONTAINER_PORT)
             .with_env_var("RUST_LOG", "mpc_recovery=DEBUG");
-        let image: RunnableImage<GenericImage> = (
-            image,
-            vec![
-                "start-sign".to_string(),
-                "--node-id".to_string(),
-                node_id.to_string(),
-                "--sk-share".to_string(),
-                serde_json::to_string(&sk_share)?,
-                "--cipher-key".to_string(),
-                hex::encode(cipher_key),
-                "--web-port".to_string(),
-                Self::CONTAINER_PORT.to_string(),
-                "--oidc-providers".to_string(),
-                serde_json::json!([
-                    {
-                        "issuer": format!("https://securetoken.google.com/{}", firebase_audience_id),
-                        "audience": firebase_audience_id,
-                    },
-                ]).to_string(),
-                "--gcp-project-id".to_string(),
-                gcp_project_id.to_string(),
-                "--gcp-datastore-url".to_string(),
-                datastore_url.to_string(),
-                "--test".to_string(),
-            ],
-        )
-            .into();
-        let image = image.with_network(network);
-        let container = docker_client.cli.run(image);
-        let ip_address = docker_client
-            .get_network_ip_address(&container, network)
+        let image: RunnableImage<GenericImage> = (image, args).into();
+        let image = image.with_network(&ctx.docker_network);
+        let container = ctx.docker_client.cli.run(image);
+        let ip_address = ctx
+            .docker_client
+            .get_network_ip_address(&container, &ctx.docker_network)
             .await?;
         let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
 
         container.exec(ExecCommand {
             cmd: format!("bash -c 'while [[ \"$(curl -s -o /dev/null -w ''%{{http_code}}'' localhost:{})\" != \"200\" ]]; do sleep 1; done'", Self::CONTAINER_PORT),
-            ready_conditions: vec![WaitFor::message_on_stdout("node is ready to accept connections")]
+            ready_conditions: vec![WaitFor::message_on_stderr("node is ready to accept connections")]
         });
 
         let full_address = format!("http://{ip_address}:{}", Self::CONTAINER_PORT);
@@ -456,17 +711,20 @@ impl<'a> SignerNode<'a> {
         Ok(SignerNode {
             container,
             address: full_address,
-            local_address: format!("http://localhost:{host_port}"),
-            node_id: node_id as usize,
+            local_address: format!("http://127.0.0.1:{host_port}"),
+
+            env: ctx.env.clone(),
+            node_id,
             sk_share: sk_share.clone(),
             cipher_key: *cipher_key,
-            gcp_project_id: gcp_project_id.to_string(),
-            gcp_datastore_local_url: datastore_local_url.to_string(),
+            gcp_project_id: ctx.gcp_project_id.clone(),
+            gcp_datastore_local_url: ctx.datastore.local_address.clone(),
         })
     }
 
     pub fn api(&self) -> SignerNodeApi {
         SignerNodeApi {
+            env: self.env.clone(),
             address: self.local_address.clone(),
             node_id: self.node_id,
             sk_share: self.sk_share.clone(),
@@ -489,9 +747,8 @@ impl SignerNodeApi {
         &self,
         new_cipher_key: &GenericArray<u8, U32>,
     ) -> anyhow::Result<(Aes256Gcm, Aes256Gcm)> {
-        let env = "dev".to_string();
         let gcp_service = mpc_recovery::gcp::GcpService::new(
-            env,
+            self.env.clone(),
             self.gcp_project_id.clone(),
             Some(self.gcp_datastore_local_url.clone()),
         )
@@ -518,83 +775,69 @@ pub struct LeaderNode<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
     local_address: String,
-}
-
-pub struct LeaderNodeApi {
-    pub address: String,
-    pub relayer: DelegateActionRelayer,
-    client: NearRpcAndRelayerClient,
+    local_rpc_url: String,
+    local_relayer_url: String,
 }
 
 impl<'a> LeaderNode<'a> {
     // Container port used for the docker network, does not have to be unique
     const CONTAINER_PORT: u16 = 3000;
 
-    pub async fn run(
-        docker_client: &'a DockerClient,
-        network: &str,
-        sign_nodes: Vec<String>,
-        near_rpc: &str,
-        relayer_url: &str,
-        datastore_url: &str,
-        gcp_project_id: &str,
-        near_root_account: &AccountId,
-        account_creator_id: &AccountId,
-        account_creator_sk: &workspaces::types::SecretKey,
-        firebase_audience_id: &str,
-    ) -> anyhow::Result<LeaderNode<'a>> {
+    pub async fn run(ctx: &Context<'a>, sign_nodes: Vec<String>) -> anyhow::Result<LeaderNode<'a>> {
         tracing::info!("Running leader node container...");
+        let account_creator = &ctx.relayer_ctx.creator_account;
+        let args = mpc_recovery::Cli::StartLeader {
+            env: ctx.env.clone(),
+            web_port: Self::CONTAINER_PORT,
+            sign_nodes,
+            near_rpc: ctx.relayer_ctx.sandbox.address.clone(),
+            near_root_account: ctx.relayer_ctx.worker.root_account()?.id().to_string(),
+            account_creator_id: account_creator.id().clone(),
+            account_creator_sk: ctx
+                .relayer_ctx
+                .creator_account_keys
+                .iter()
+                .map(|k| k.to_string().parse())
+                .collect::<Result<Vec<_>, _>>()?,
+            fast_auth_partners: Some(
+                serde_json::json!([
+                    {
+                        "oidc_provider": {
+                            "issuer": ctx.issuer,
+                            "audience": ctx.audience_id,
+                        },
+                        "relayer": {
+                            "url": &ctx.relayer_ctx.relayer.address,
+                            "api_key": serde_json::Value::Null,
+                        },
+                    },
+                ])
+                .to_string(),
+            ),
+            fast_auth_partners_filepath: None,
+            gcp_project_id: ctx.gcp_project_id.clone(),
+            gcp_datastore_url: Some(ctx.datastore.address.to_string()),
+            jwt_signature_pk_url: ctx.oidc_provider.jwt_pk_url.to_string(),
+            logging_options: logging::Options::default(),
+        }
+        .into_str_args();
 
         let image = GenericImage::new("near/mpc-recovery", "latest")
             .with_wait_for(WaitFor::Nothing)
             .with_exposed_port(Self::CONTAINER_PORT)
             .with_env_var("RUST_LOG", "mpc_recovery=DEBUG");
-        let mut cmd = vec![
-            "start-leader".to_string(),
-            "--web-port".to_string(),
-            Self::CONTAINER_PORT.to_string(),
-            "--near-rpc".to_string(),
-            near_rpc.to_string(),
-            "--near-root-account".to_string(),
-            near_root_account.to_string(),
-            "--account-creator-id".to_string(),
-            account_creator_id.to_string(),
-            "--account-creator-sk".to_string(),
-            account_creator_sk.to_string(),
-            "--fast-auth-partners".to_string(),
-            serde_json::json!([
-                {
-                    "oidc_provider": {
-                        "issuer": format!("https://securetoken.google.com/{}", firebase_audience_id),
-                        "audience": firebase_audience_id,
-                    },
-                    "relayer": {
-                        "url": relayer_url.to_string(),
-                        "api_key": serde_json::Value::Null,
-                    },
-                },
-            ]).to_string(),
-            "--gcp-project-id".to_string(),
-            gcp_project_id.to_string(),
-            "--gcp-datastore-url".to_string(),
-            datastore_url.to_string(),
-            "--test".to_string(),
-        ];
-        for sign_node in sign_nodes {
-            cmd.push("--sign-nodes".to_string());
-            cmd.push(sign_node);
-        }
-        let image: RunnableImage<GenericImage> = (image, cmd).into();
-        let image = image.with_network(network);
-        let container = docker_client.cli.run(image);
-        let ip_address = docker_client
-            .get_network_ip_address(&container, network)
+        let image: RunnableImage<GenericImage> = (image, args).into();
+        let image = image.with_network(&ctx.docker_network);
+        let container = ctx.docker_client.cli.run(image);
+        let ip_address = ctx
+            .docker_client
+            .get_network_ip_address(&container, &ctx.docker_network)
             .await?;
         let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
 
         container.exec(ExecCommand {
             cmd: format!("bash -c 'while [[ \"$(curl -s -o /dev/null -w ''%{{http_code}}'' localhost:{})\" != \"200\" ]]; do sleep 1; done'", Self::CONTAINER_PORT),
-            ready_conditions: vec![WaitFor::message_on_stdout("node is ready to accept connections")]
+            ready_conditions: vec![WaitFor::message_on_stderr("node is ready to accept connections")]
         });
 
         let full_address = format!("http://{ip_address}:{}", Self::CONTAINER_PORT);
@@ -602,15 +845,20 @@ impl<'a> LeaderNode<'a> {
         Ok(LeaderNode {
             container,
             address: full_address,
-            local_address: format!("http://localhost:{host_port}"),
+            local_address: format!("http://127.0.0.1:{host_port}"),
+            local_rpc_url: ctx.relayer_ctx.sandbox.local_address.clone(),
+            local_relayer_url: ctx.relayer_ctx.relayer.local_address.clone(),
         })
     }
 
-    pub fn api(&self, near_rpc: &str, relayer: &DelegateActionRelayer) -> LeaderNodeApi {
+    pub fn api(&self) -> LeaderNodeApi {
         LeaderNodeApi {
             address: self.local_address.clone(),
-            client: NearRpcAndRelayerClient::connect(near_rpc),
-            relayer: relayer.clone(),
+            client: NearRpcAndRelayerClient::connect(&self.local_rpc_url),
+            relayer: DelegateActionRelayer {
+                url: self.local_relayer_url.clone(),
+                api_key: None,
+            },
         }
     }
 }
@@ -672,7 +920,7 @@ impl LeaderNodeApi {
 
         let frp_signature = match user_secret_key.sign(&user_credentials_request_digest) {
             near_crypto::Signature::ED25519(k) => k,
-            _ => return Err(anyhow::anyhow!("Wrong signature type")),
+            _ => anyhow::bail!("Wrong signature type"),
         };
 
         let new_account_request = NewAccountRequest {
@@ -680,7 +928,7 @@ impl LeaderNodeApi {
             create_account_options,
             oidc_token: oidc_token.clone(),
             user_credentials_frp_signature: frp_signature,
-            frp_public_key: user_pk.clone(),
+            frp_public_key: user_pk,
         };
 
         self.new_account(new_account_request).await
@@ -696,10 +944,7 @@ impl LeaderNodeApi {
         frp_pk: &PublicKey,
     ) -> anyhow::Result<(StatusCode, SignResponse)> {
         // Prepare SignRequest with add key delegate action
-        let (_, block_height, nonce) = self
-            .client
-            .access_key(account_id.clone(), recovery_pk.clone())
-            .await?;
+        let (_, block_height, nonce) = self.client.access_key(account_id, recovery_pk).await?;
 
         let add_key_delegate_action = DelegateAction {
             sender_id: account_id.clone(),
@@ -753,10 +998,7 @@ impl LeaderNodeApi {
         frp_pk: &PublicKey,
     ) -> anyhow::Result<(StatusCode, SignResponse)> {
         // Prepare SignRequest with add key delegate action
-        let (_, block_height, nonce) = self
-            .client
-            .access_key(account_id.clone(), recovery_pk.clone())
-            .await?;
+        let (_, block_height, nonce) = self.client.access_key(account_id, recovery_pk).await?;
 
         let delete_key_delegate_action = DelegateAction {
             sender_id: account_id.clone(),
