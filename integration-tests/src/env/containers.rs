@@ -218,11 +218,11 @@ impl<'a> Sandbox<'a> {
     ) -> anyhow::Result<Sandbox<'a>> {
         tracing::info!("Running sandbox container...");
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        let image = GenericImage::new("ghcr.io/near/sandbox", "latest-aarch64")
+        let image = GenericImage::new("ghcr.io/near/sandbox", "6b3f0c0fc85551d25eb251cb281585f42d24ef09-aarch64")
             .with_wait_for(WaitFor::Nothing)
             .with_exposed_port(Self::CONTAINER_RPC_PORT);
         #[cfg(target_arch = "x86_64")]
-        let image = GenericImage::new("ghcr.io/near/sandbox", "latest")
+        let image = GenericImage::new("ghcr.io/near/sandbox", "6b3f0c0fc85551d25eb251cb281585f42d24ef09")
             .with_wait_for(WaitFor::Nothing)
             .with_exposed_port(Self::CONTAINER_RPC_PORT);
         let image: RunnableImage<GenericImage> = (
