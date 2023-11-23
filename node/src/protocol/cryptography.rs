@@ -1,3 +1,5 @@
+use std::sync::PoisonError;
+
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use crate::http_client::{self, SendError};
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
@@ -15,6 +17,7 @@ pub trait CryptographicCtx {
     fn rpc_client(&self) -> &near_fetch::Client;
     fn signer(&self) -> &InMemorySigner;
     fn mpc_contract_id(&self) -> &AccountId;
+    fn sign_sk(&self) -> &near_crypto::SecretKey;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -29,6 +32,21 @@ pub enum CryptographicError {
     CaitSithInitializationError(#[from] InitializationError),
     #[error("cait-sith protocol error: {0}")]
     CaitSithProtocolError(#[from] ProtocolError),
+    #[error("sync failed: {0}")]
+    SyncError(String),
+    #[error(transparent)]
+    DataConversion(#[from] serde_json::Error),
+    #[error("encryption failed: {0}")]
+    Encryption(String),
+    #[error("more than one writing to state: {0}")]
+    InvalidStateHandle(String),
+}
+
+impl<T> From<PoisonError<T>> for CryptographicError {
+    fn from(_: PoisonError<T>) -> Self {
+        let typename = std::any::type_name::<T>();
+        Self::SyncError(format!("PoisonError: {typename}"))
+    }
 }
 
 #[async_trait]
@@ -46,23 +64,28 @@ impl CryptographicProtocol for GeneratingState {
         ctx: C,
     ) -> Result<NodeState, CryptographicError> {
         tracing::info!("progressing key generation");
+        let mut protocol = self.protocol.write().await;
         loop {
-            let action = self.protocol.poke()?;
+            let action = protocol.poke()?;
             match action {
                 Action::Wait => {
+                    drop(protocol);
                     tracing::debug!("waiting");
                     return Ok(NodeState::Generating(self));
                 }
                 Action::SendMany(m) => {
                     tracing::debug!("sending a message to many participants");
-                    for (p, url) in &self.participants {
+                    for (p, info) in &self.participants {
                         if p == &ctx.me() {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;
                         }
-                        http_client::message(
+                        http_client::send_encrypted(
+                            ctx.me(),
+                            &info.cipher_pk,
+                            ctx.sign_sk(),
                             ctx.http_client(),
-                            url.clone(),
+                            info.url.clone(),
                             MpcMessage::Generating(GeneratingMessage {
                                 from: ctx.me(),
                                 data: m.clone(),
@@ -74,10 +97,13 @@ impl CryptographicProtocol for GeneratingState {
                 Action::SendPrivate(to, m) => {
                     tracing::debug!("sending a private message to {to:?}");
                     match self.participants.get(&to) {
-                        Some(url) => {
-                            http_client::message(
+                        Some(info) => {
+                            http_client::send_encrypted(
+                                ctx.me(),
+                                &info.cipher_pk,
+                                ctx.sign_sk(),
                                 ctx.http_client(),
-                                url.clone(),
+                                info.url.clone(),
                                 MpcMessage::Generating(GeneratingMessage {
                                     from: ctx.me(),
                                     data: m.clone(),
@@ -115,23 +141,28 @@ impl CryptographicProtocol for ResharingState {
         ctx: C,
     ) -> Result<NodeState, CryptographicError> {
         tracing::info!("progressing key reshare");
+        let mut protocol = self.protocol.write().await;
         loop {
-            let action = self.protocol.poke()?;
+            let action = protocol.poke()?;
             match action {
                 Action::Wait => {
+                    drop(protocol);
                     tracing::debug!("waiting");
                     return Ok(NodeState::Resharing(self));
                 }
                 Action::SendMany(m) => {
                     tracing::debug!("sending a message to all participants");
-                    for (p, url) in &self.new_participants {
+                    for (p, info) in &self.new_participants {
                         if p == &ctx.me() {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;
                         }
-                        http_client::message(
+                        http_client::send_encrypted(
+                            ctx.me(),
+                            &info.cipher_pk,
+                            ctx.sign_sk(),
                             ctx.http_client(),
-                            url.clone(),
+                            info.url.clone(),
                             MpcMessage::Resharing(ResharingMessage {
                                 epoch: self.old_epoch,
                                 from: ctx.me(),
@@ -144,10 +175,13 @@ impl CryptographicProtocol for ResharingState {
                 Action::SendPrivate(to, m) => {
                     tracing::debug!("sending a private message to {to:?}");
                     match self.new_participants.get(&to) {
-                        Some(url) => {
-                            http_client::message(
+                        Some(info) => {
+                            http_client::send_encrypted(
+                                ctx.me(),
+                                &info.cipher_pk,
+                                ctx.sign_sk(),
                                 ctx.http_client(),
-                                url.clone(),
+                                info.url.clone(),
                                 MpcMessage::Resharing(ResharingMessage {
                                     epoch: self.old_epoch,
                                     from: ctx.me(),
@@ -180,20 +214,34 @@ impl CryptographicProtocol for RunningState {
         mut self,
         ctx: C,
     ) -> Result<NodeState, CryptographicError> {
-        if self.triple_manager.my_len() < 2 {
-            self.triple_manager.generate()?;
+        let mut triple_manager = self.triple_manager.write().await;
+        if triple_manager.my_len() < 2 {
+            triple_manager.generate()?;
         }
-        for (p, msg) in self.triple_manager.poke()? {
-            let url = self.participants.get(&p).unwrap();
-            http_client::message(ctx.http_client(), url.clone(), MpcMessage::Triple(msg)).await?;
+        for (p, msg) in triple_manager.poke()? {
+            let info = self
+                .participants
+                .get(&p)
+                .ok_or(CryptographicError::UnknownParticipant(p))?;
+
+            http_client::send_encrypted(
+                ctx.me(),
+                &info.cipher_pk,
+                ctx.sign_sk(),
+                ctx.http_client(),
+                info.url.clone(),
+                MpcMessage::Triple(msg),
+            )
+            .await?;
         }
 
-        if self.presignature_manager.potential_len() < 2 {
+        let mut presignature_manager = self.presignature_manager.write().await;
+        if presignature_manager.potential_len() < 2 {
             // To ensure there is no contention between different nodes we are only using triples
             // that we proposed. This way in a non-BFT environment we are guaranteed to never try
             // to use the same triple as any other node.
-            if let Some((triple0, triple1)) = self.triple_manager.take_mine_twice() {
-                self.presignature_manager.generate(
+            if let Some((triple0, triple1)) = triple_manager.take_mine_twice() {
+                presignature_manager.generate(
                     triple0,
                     triple1,
                     &self.public_key,
@@ -203,29 +251,34 @@ impl CryptographicProtocol for RunningState {
                 tracing::debug!("we don't have enough triples to generate a presignature");
             }
         }
-        for (p, msg) in self.presignature_manager.poke()? {
-            let url = self.participants.get(&p).unwrap();
-            http_client::message(
+        drop(triple_manager);
+        for (p, msg) in presignature_manager.poke()? {
+            let info = self.participants.get(&p).unwrap();
+            http_client::send_encrypted(
+                ctx.me(),
+                &info.cipher_pk,
+                ctx.sign_sk(),
                 ctx.http_client(),
-                url.clone(),
+                info.url.clone(),
                 MpcMessage::Presignature(msg),
             )
             .await?;
         }
 
         let mut sign_queue = self.sign_queue.write().await;
+        let mut signature_manager = self.signature_manager.write().await;
         sign_queue.organize(&self, ctx.me());
         let my_requests = sign_queue.my_requests(ctx.me());
-        while self.presignature_manager.my_len() > 0 {
+        while presignature_manager.my_len() > 0 {
             let Some((receipt_id, _)) = my_requests.iter().next() else {
                 break;
             };
-            let Some(presignature) = self.presignature_manager.take_mine() else {
+            let Some(presignature) = presignature_manager.take_mine() else {
                 break;
             };
             let receipt_id = *receipt_id;
             let my_request = my_requests.remove(&receipt_id).unwrap();
-            self.signature_manager.generate(
+            signature_manager.generate(
                 receipt_id,
                 presignature,
                 self.public_key,
@@ -233,14 +286,23 @@ impl CryptographicProtocol for RunningState {
             )?;
         }
         drop(sign_queue);
-        for (p, msg) in self.signature_manager.poke()? {
-            let url = self.participants.get(&p).unwrap();
-            http_client::message(ctx.http_client(), url.clone(), MpcMessage::Signature(msg))
-                .await?;
+        drop(presignature_manager);
+        for (p, msg) in signature_manager.poke()? {
+            let info = self.participants.get(&p).unwrap();
+            http_client::send_encrypted(
+                ctx.me(),
+                &info.cipher_pk,
+                ctx.sign_sk(),
+                ctx.http_client(),
+                info.url.clone(),
+                MpcMessage::Signature(msg),
+            )
+            .await?;
         }
-        self.signature_manager
+        signature_manager
             .publish(ctx.rpc_client(), ctx.signer(), ctx.mpc_contract_id())
             .await?;
+        drop(signature_manager);
 
         Ok(NodeState::Running(self))
     }

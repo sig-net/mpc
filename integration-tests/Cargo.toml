@@ -39,11 +39,12 @@ near-crypto = "0.17"
 near-fetch = "0.0.12"
 near-jsonrpc-client = "0.6"
 near-primitives = "0.17"
-near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs.git", branch = "daniyar/reproduce" }
-near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs.git", branch = "daniyar/reproduce" }
+near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs.git", branch = "daniyar/upgrade-sdk" }
+near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs.git", branch = "daniyar/upgrade-sdk" }
 near-units = "0.2.0"
 
 mpc-contract = { path = "../contract" }
+mpc-keys = { path = "../keys" }
 mpc-recovery = { path = "../mpc-recovery" }
 mpc-recovery-node = { path = "../node" }
 
@@ -56,8 +57,6 @@ env_logger = "0.10.0"
 tracing-log = "0.1.3"
 tokio-util = { version = "0.7", features = ["full"] }
 reqwest = "0.11.16"
-
-mpc-contract = { path = "../contract" }
 
 [features]
 default = []

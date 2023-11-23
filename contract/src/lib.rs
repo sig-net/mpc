@@ -5,6 +5,10 @@ use std::collections::{BTreeMap, HashSet};
 
 type ParticipantId = u32;
 
+pub mod hpke {
+    pub type PublicKey = [u8; 32];
+}
+
 #[derive(
     Serialize,
     Deserialize,
@@ -22,6 +26,10 @@ pub struct ParticipantInfo {
     pub id: ParticipantId,
     pub account_id: AccountId,
     pub url: String,
+    /// The public key used for encrypting messages.
+    pub cipher_pk: hpke::PublicKey,
+    /// The public key used for verifying messages.
+    pub sign_pk: PublicKey,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
@@ -34,6 +42,7 @@ pub struct InitializingContractState {
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 pub struct RunningContractState {
     pub epoch: u64,
+    // TODO: why is this account id for participants instead of participant id?
     pub participants: BTreeMap<AccountId, ParticipantInfo>,
     pub threshold: usize,
     pub public_key: PublicKey,
@@ -83,7 +92,13 @@ impl MpcContract {
         self.protocol_state
     }
 
-    pub fn join(&mut self, participant_id: ParticipantId, url: String) {
+    pub fn join(
+        &mut self,
+        participant_id: ParticipantId,
+        url: String,
+        cipher_pk: hpke::PublicKey,
+        sign_pk: PublicKey,
+    ) {
         match &mut self.protocol_state {
             ProtocolContractState::Running(RunningContractState {
                 participants,
@@ -100,6 +115,8 @@ impl MpcContract {
                         id: participant_id,
                         account_id,
                         url,
+                        cipher_pk,
+                        sign_pk,
                     },
                 );
             }

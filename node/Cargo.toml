@@ -35,9 +35,10 @@ url = { version = "2.4.0", features = ["serde"] }
 
 near-crypto = "0.17"
 near-fetch = "0.0.12"
-near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs.git", branch = "daniyar/reproduce" }
-near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs.git", branch = "daniyar/reproduce" }
+near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs.git", branch = "daniyar/upgrade-sdk" }
+near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs.git", branch = "daniyar/upgrade-sdk" }
 near-primitives = "0.17"
 near-sdk = "4.1.1"
 
 mpc-contract = { path = "../contract" }
+mpc-keys = { path = "../keys" }

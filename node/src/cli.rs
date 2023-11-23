@@ -11,6 +11,8 @@ use tokio::sync::{mpsc, RwLock};
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
+use mpc_keys::hpke;
+
 #[derive(Parser, Debug)]
 pub enum Cli {
     Start {
@@ -36,6 +38,13 @@ pub enum Cli {
         /// The web port for this server
         #[arg(long, env("MPC_RECOVERY_WEB_PORT"))]
         web_port: u16,
+        // TODO: need to add in CipherPK type for parsing.
+        /// The cipher public key used to encrypt messages between nodes.
+        #[arg(long, env("MPC_RECOVERY_CIPHER_PK"))]
+        cipher_pk: String,
+        /// The cipher secret key used to decrypt messages between nodes.
+        #[arg(long, env("MPC_RECOVERY_CIPHER_SK"))]
+        cipher_sk: String,
         /// NEAR Lake Indexer options
         #[clap(flatten)]
         indexer_options: indexer::Options,
@@ -57,6 +66,8 @@ impl Cli {
                 account,
                 account_sk,
                 web_port,
+                cipher_pk,
+                cipher_sk,
                 indexer_options,
             } => {
                 let mut args = vec![
@@ -73,6 +84,10 @@ impl Cli {
                     account_sk.to_string(),
                     "--web-port".to_string(),
                     web_port.to_string(),
+                    "--cipher-pk".to_string(),
+                    cipher_pk,
+                    "--cipher-sk".to_string(),
+                    cipher_sk,
                 ];
                 args.extend(indexer_options.into_str_args());
                 args
@@ -102,6 +117,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             mpc_contract_id,
             account,
             account_sk,
+            cipher_pk,
+            cipher_sk,
             indexer_options,
         } => {
             let sign_queue = Arc::new(RwLock::new(SignQueue::new()));
@@ -132,6 +149,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                         signer.clone(),
                         receiver,
                         sign_queue.clone(),
+                        hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?).unwrap(),
                     );
                     tracing::debug!("protocol initialized");
                     let protocol_handle = tokio::spawn(async move {
@@ -139,6 +157,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     });
                     tracing::debug!("protocol thread spawned");
                     let mpc_contract_id_cloned = mpc_contract_id.clone();
+                    let cipher_sk =
+                        hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?).unwrap();
                     let web_handle = tokio::spawn(async move {
                         web::run(
                             web_port,
@@ -146,6 +166,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                             rpc_client,
                             signer,
                             sender,
+                            cipher_sk,
                             protocol_state,
                         )
                         .await
