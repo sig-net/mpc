@@ -12,10 +12,13 @@ use crate::{http_client, rpc_client};
 use async_trait::async_trait;
 use cait_sith::protocol::{InitializationError, Participant};
 use k256::Secp256k1;
+use mpc_keys::hpke;
 use near_crypto::InMemorySigner;
 use near_primitives::transaction::{Action, FunctionCallAction};
 use near_primitives::types::AccountId;
 use std::cmp::Ordering;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use url::Url;
 
 pub trait ConsensusCtx {
@@ -25,6 +28,8 @@ pub trait ConsensusCtx {
     fn signer(&self) -> &InMemorySigner;
     fn mpc_contract_id(&self) -> &AccountId;
     fn my_address(&self) -> &Url;
+    fn cipher_pk(&self) -> &hpke::PublicKey;
+    fn sign_pk(&self) -> near_crypto::PublicKey;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -95,18 +100,20 @@ impl ConsensusProtocol for StartedState {
                                     threshold: contract_state.threshold,
                                     private_share,
                                     public_key,
-                                    triple_manager: TripleManager::new(
+                                    triple_manager: Arc::new(RwLock::new(TripleManager::new(
                                         participants_vec.clone(),
                                         ctx.me(),
                                         contract_state.threshold,
                                         epoch,
-                                    ),
-                                    presignature_manager: PresignatureManager::new(
-                                        participants_vec,
-                                        ctx.me(),
-                                        contract_state.threshold,
-                                        epoch,
-                                    ),
+                                    ))),
+                                    presignature_manager: Arc::new(RwLock::new(
+                                        PresignatureManager::new(
+                                            participants_vec,
+                                            ctx.me(),
+                                            contract_state.threshold,
+                                            epoch,
+                                        ),
+                                    )),
                                 }))
                             } else {
                                 Ok(NodeState::Joining(JoiningState { public_key }))
@@ -150,7 +157,7 @@ impl ConsensusProtocol for StartedState {
                         Ok(NodeState::Generating(GeneratingState {
                             participants,
                             threshold: contract_state.threshold,
-                            protocol: Box::new(protocol),
+                            protocol: Arc::new(RwLock::new(protocol)),
                         }))
                     } else {
                         tracing::info!("we are not a part of the initial participant set, waiting for key generation to complete");
@@ -276,18 +283,18 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         threshold: self.threshold,
                         private_share: self.private_share,
                         public_key: self.public_key,
-                        triple_manager: TripleManager::new(
+                        triple_manager: Arc::new(RwLock::new(TripleManager::new(
                             participants_vec.clone(),
                             ctx.me(),
                             self.threshold,
                             self.epoch,
-                        ),
-                        presignature_manager: PresignatureManager::new(
+                        ))),
+                        presignature_manager: Arc::new(RwLock::new(PresignatureManager::new(
                             participants_vec,
                             ctx.me(),
                             self.threshold,
                             self.epoch,
-                        ),
+                        ))),
                     }))
                 }
             },
@@ -503,11 +510,11 @@ impl ConsensusProtocol for JoiningState {
                         votes_to_go = contract_state.threshold - voted.len(),
                         "trying to get participants to vote for us"
                     );
-                    for (p, url) in contract_state.participants {
+                    for (p, info) in contract_state.participants {
                         if voted.contains(&p) {
                             continue;
                         }
-                        http_client::join(ctx.http_client(), url, &ctx.me())
+                        http_client::join(ctx.http_client(), info.url, &ctx.me())
                             .await
                             .unwrap()
                     }
@@ -517,6 +524,8 @@ impl ConsensusProtocol for JoiningState {
                     let args = serde_json::json!({
                         "participant_id": ctx.me(),
                         "url": ctx.my_address(),
+                        "cipher_pk": ctx.cipher_pk().to_bytes(),
+                        "sign_pk": ctx.sign_pk(),
                     });
                     ctx.rpc_client()
                         .send_tx(
@@ -597,6 +606,6 @@ fn start_resharing<C: ConsensusCtx>(
         new_participants: contract_state.new_participants,
         threshold: contract_state.threshold,
         public_key: contract_state.public_key,
-        protocol: Box::new(protocol),
+        protocol: Arc::new(RwLock::new(protocol)),
     }))
 }

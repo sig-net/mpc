@@ -1,12 +1,13 @@
 mod consensus;
 mod contract;
 mod cryptography;
-mod message;
 mod presignature;
-mod state;
 mod triple;
 
-pub use contract::ProtocolState;
+pub mod message;
+pub mod state;
+
+pub use contract::{ParticipantInfo, ProtocolState};
 pub use message::MpcMessage;
 pub use state::NodeState;
 
@@ -26,6 +27,8 @@ use tokio::sync::mpsc::{self, error::TryRecvError};
 use tokio::sync::RwLock;
 use url::Url;
 
+use mpc_keys::hpke;
+
 struct Ctx {
     me: Participant,
     my_address: Url,
@@ -33,6 +36,8 @@ struct Ctx {
     signer: InMemorySigner,
     rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
+    cipher_pk: hpke::PublicKey,
+    sign_sk: near_crypto::SecretKey,
 }
 
 impl ConsensusCtx for &Ctx {
@@ -59,6 +64,14 @@ impl ConsensusCtx for &Ctx {
     fn my_address(&self) -> &Url {
         &self.my_address
     }
+
+    fn cipher_pk(&self) -> &hpke::PublicKey {
+        &self.cipher_pk
+    }
+
+    fn sign_pk(&self) -> near_crypto::PublicKey {
+        self.sign_sk.public_key()
+    }
 }
 
 impl CryptographicCtx for &Ctx {
@@ -68,6 +81,10 @@ impl CryptographicCtx for &Ctx {
 
     fn http_client(&self) -> &reqwest::Client {
         &self.http_client
+    }
+
+    fn sign_sk(&self) -> &near_crypto::SecretKey {
+        &self.sign_sk
     }
 }
 
@@ -91,15 +108,18 @@ impl MpcSignProtocol {
         rpc_client: near_fetch::Client,
         signer: InMemorySigner,
         receiver: mpsc::Receiver<MpcMessage>,
+        cipher_pk: hpke::PublicKey,
     ) -> (Self, Arc<RwLock<NodeState>>) {
         let state = Arc::new(RwLock::new(NodeState::Starting));
         let ctx = Ctx {
             me,
             my_address: my_address.into_url().unwrap(),
             mpc_contract_id,
-            signer,
             rpc_client,
             http_client: reqwest::Client::new(),
+            cipher_pk,
+            sign_sk: signer.secret_key.clone(),
+            signer,
         };
         let protocol = MpcSignProtocol {
             ctx,
@@ -145,13 +165,19 @@ impl MpcSignProtocol {
                     }
                 }
             }
-            let mut state_guard = self.state.write().await;
-            let mut state = std::mem::take(&mut *state_guard);
+
+            let mut state = {
+                let guard = self.state.write().await;
+                guard.clone()
+            };
             state = state.progress(&self.ctx).await?;
             state = state.advance(&self.ctx, contract_state).await?;
-            state.handle(&self.ctx, &mut queue)?;
-            *state_guard = state;
-            drop(state_guard);
+            state.handle(&self.ctx, &mut queue).await?;
+
+            let mut guard = self.state.write().await;
+            *guard = state;
+            drop(guard);
+
             tokio::time::sleep(Duration::from_millis(1000)).await;
         }
     }

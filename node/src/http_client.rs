@@ -1,5 +1,7 @@
+use crate::protocol::message::SignedMessage;
 use crate::protocol::MpcMessage;
 use cait_sith::protocol::Participant;
+use mpc_keys::hpke;
 use reqwest::{Client, IntoUrl};
 use std::str::Utf8Error;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
@@ -9,19 +11,30 @@ use tokio_retry::Retry;
 pub enum SendError {
     #[error("http request was unsuccessful: {0}")]
     Unsuccessful(String),
+    #[error("serialization unsuccessful: {0}")]
+    DataConversionError(serde_json::Error),
     #[error("http client error: {0}")]
     ReqwestClientError(reqwest::Error),
     #[error("http response could not be parsed: {0}")]
     ReqwestBodyError(reqwest::Error),
     #[error("http response body is not valid utf-8: {0}")]
     MalformedResponse(Utf8Error),
+    #[error("encryption error: {0}")]
+    EncryptionError(String),
 }
 
-pub async fn message<U: IntoUrl>(
+pub async fn send_encrypted<U: IntoUrl>(
+    participant: Participant,
+    cipher_pk: &hpke::PublicKey,
+    sign_sk: &near_crypto::SecretKey,
     client: &Client,
     url: U,
     message: MpcMessage,
 ) -> Result<(), SendError> {
+    let encrypted = SignedMessage::encrypt(message, participant, sign_sk, cipher_pk)
+        .map_err(|err| SendError::EncryptionError(err.to_string()))?;
+    tracing::debug!(?participant, ciphertext = ?encrypted.text, "sending encrypted");
+
     let _span = tracing::info_span!("message_request");
     let mut url = url.into_url().unwrap();
     url.set_path("msg");
@@ -30,7 +43,7 @@ pub async fn message<U: IntoUrl>(
         let response = client
             .post(url.clone())
             .header("content-type", "application/json")
-            .json(&message)
+            .json(&encrypted)
             .send()
             .await
             .map_err(SendError::ReqwestClientError)?;
@@ -88,4 +101,30 @@ pub async fn join<U: IntoUrl>(client: &Client, url: U, me: &Participant) -> Resu
 
     let retry_strategy = ExponentialBackoff::from_millis(10).map(jitter).take(3);
     Retry::spawn(retry_strategy, action).await
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::message::GeneratingMessage;
+    use crate::protocol::MpcMessage;
+
+    #[test]
+    fn test_sending_encrypted_message() {
+        let associated_data = b"";
+        let (sk, pk) = mpc_keys::hpke::generate();
+        let starting_message = MpcMessage::Generating(GeneratingMessage {
+            from: cait_sith::protocol::Participant::from(0),
+            data: vec![],
+        });
+
+        let message = serde_json::to_vec(&starting_message).unwrap();
+        let message = pk.encrypt(&message, associated_data).unwrap();
+
+        let message = serde_json::to_vec(&message).unwrap();
+        let cipher = serde_json::from_slice(&message).unwrap();
+        let message = sk.decrypt(&cipher, associated_data).unwrap();
+        let message: MpcMessage = serde_json::from_slice(&message).unwrap();
+
+        assert_eq!(starting_message, message);
+    }
 }

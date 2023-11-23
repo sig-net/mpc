@@ -1,3 +1,4 @@
+use super::cryptography::CryptographicError;
 use super::message::TripleMessage;
 use crate::types::TripleProtocol;
 use crate::util::AffinePointExt;
@@ -6,6 +7,7 @@ use cait_sith::triples::{TriplePub, TripleShare};
 use k256::Secp256k1;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, RwLock};
 
 /// Unique number used to identify a specific ongoing triple generation protocol.
 /// Without `TripleId` it would be unclear where to route incoming cait-sith triple generation
@@ -74,18 +76,18 @@ impl TripleManager {
     /// Returns the number of unspent triples we will have in the manager once
     /// all ongoing generation protocols complete.
     pub fn potential_len(&self) -> usize {
-        self.triples.len() + self.generators.len()
+        self.len() + self.generators.len()
     }
 
     /// Starts a new Beaver triple generation protocol.
     pub fn generate(&mut self) -> Result<(), InitializationError> {
         let id = rand::random();
         tracing::info!(id, "starting protocol to generate a new triple");
-        let protocol: TripleProtocol = Box::new(cait_sith::triples::generate_triple(
+        let protocol: TripleProtocol = Arc::new(RwLock::new(cait_sith::triples::generate_triple(
             &self.participants,
             self.me,
             self.threshold,
-        )?);
+        )?));
         self.generators.insert(
             id,
             TripleGenerator {
@@ -133,18 +135,18 @@ impl TripleManager {
     pub fn get_or_generate(
         &mut self,
         id: TripleId,
-    ) -> Result<Option<&mut TripleProtocol>, InitializationError> {
+    ) -> Result<Option<&mut TripleProtocol>, CryptographicError> {
         if self.triples.contains_key(&id) {
             Ok(None)
         } else {
             match self.generators.entry(id) {
                 Entry::Vacant(e) => {
                     tracing::info!(id, "joining protocol to generate a new triple");
-                    let protocol = Box::new(cait_sith::triples::generate_triple(
+                    let protocol = Arc::new(RwLock::new(cait_sith::triples::generate_triple(
                         &self.participants,
                         self.me,
                         self.threshold,
-                    )?);
+                    )?));
                     let generator = e.insert(TripleGenerator {
                         protocol,
                         mine: false,
@@ -165,13 +167,25 @@ impl TripleManager {
         let mut result = Ok(());
         self.generators.retain(|id, generator| {
             loop {
-                let action = match generator.protocol.poke() {
+                let mut protocol = match generator.protocol.write() {
+                    Ok(protocol) => protocol,
+                    Err(err) => {
+                        tracing::error!(
+                            ?err,
+                            "failed to acquire lock on triple generation protocol"
+                        );
+                        break false;
+                    }
+                };
+
+                let action = match protocol.poke() {
                     Ok(action) => action,
                     Err(e) => {
                         result = Err(e);
                         break false;
                     }
                 };
+
                 match action {
                     Action::Wait => {
                         tracing::debug!("waiting");
@@ -216,6 +230,7 @@ impl TripleManager {
                                 public: output.1,
                             },
                         );
+
                         if generator.mine {
                             self.mine.push_back(*id);
                         }

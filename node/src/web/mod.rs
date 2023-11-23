@@ -1,12 +1,14 @@
 mod error;
 
 use self::error::MpcSignError;
+use crate::protocol::message::SignedMessage;
 use crate::protocol::{MpcMessage, NodeState};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
 use cait_sith::protocol::Participant;
+use mpc_keys::hpke::{self, Ciphered};
 use near_crypto::InMemorySigner;
 use near_primitives::transaction::{Action, FunctionCallAction};
 use near_primitives::types::AccountId;
@@ -20,6 +22,7 @@ struct AxumState {
     signer: InMemorySigner,
     sender: Sender<MpcMessage>,
     protocol_state: Arc<RwLock<NodeState>>,
+    cipher_sk: hpke::SecretKey,
 }
 
 pub async fn run(
@@ -28,6 +31,7 @@ pub async fn run(
     rpc_client: near_fetch::Client,
     signer: InMemorySigner,
     sender: Sender<MpcMessage>,
+    cipher_sk: hpke::SecretKey,
     protocol_state: Arc<RwLock<NodeState>>,
 ) -> anyhow::Result<()> {
     tracing::debug!("running a node");
@@ -37,6 +41,7 @@ pub async fn run(
         signer,
         sender,
         protocol_state,
+        cipher_sk,
     };
 
     let app = Router::new()
@@ -72,13 +77,22 @@ pub struct MsgRequest {
 #[tracing::instrument(level = "debug", skip_all)]
 async fn msg(
     Extension(state): Extension<Arc<AxumState>>,
-    WithRejection(Json(message), _): WithRejection<Json<MpcMessage>, MpcSignError>,
+    WithRejection(Json(encrypted), _): WithRejection<Json<Ciphered>, MpcSignError>,
 ) -> StatusCode {
-    tracing::debug!(?message, "received");
+    tracing::debug!(ciphertext = ?encrypted.text, "received encrypted");
+    let message =
+        match SignedMessage::decrypt(&state.cipher_sk, &state.protocol_state, encrypted).await {
+            Ok(msg) => msg,
+            Err(err) => {
+                tracing::error!(?err, "failed to decrypt or verify an encrypted message");
+                return StatusCode::BAD_REQUEST;
+            }
+        };
+
     match state.sender.send(message).await {
         Ok(()) => StatusCode::OK,
         Err(e) => {
-            tracing::error!("failed to send a protocol message: {e}");
+            tracing::error!("failed to send an encrypted protocol message: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
@@ -144,13 +158,16 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> (StatusCode, Json
     let protocol_state = state.protocol_state.read().await;
     match &*protocol_state {
         NodeState::Running(state) => {
+            let triple_count = state.triple_manager.read().await.len();
+            let presignature_count = state.presignature_manager.read().await.len();
+
             tracing::debug!("not running, state unavailable");
             (
                 StatusCode::OK,
                 Json(StateView::Running {
                     participants: state.participants.keys().cloned().collect(),
-                    triple_count: state.triple_manager.len(),
-                    presignature_count: state.presignature_manager.len(),
+                    triple_count,
+                    presignature_count,
                 }),
             )
         }
