@@ -121,6 +121,7 @@ pub struct MpcSignProtocol {
 }
 
 impl MpcSignProtocol {
+    #![allow(clippy::too_many_arguments)]
     pub fn init<U: IntoUrl>(
         me: Participant,
         my_address: U,
