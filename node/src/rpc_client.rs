@@ -22,6 +22,7 @@ pub async fn vote_for_public_key(
     mpc_contract_id: &AccountId,
     public_key: &near_crypto::PublicKey,
 ) -> anyhow::Result<bool> {
+    tracing::info!(%public_key, "voting for public key");
     let args = json!({
         "public_key": public_key
     });

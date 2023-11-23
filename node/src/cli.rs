@@ -1,11 +1,13 @@
-use crate::protocol::MpcSignProtocol;
+use crate::protocol::{MpcSignProtocol, SignQueue};
 use crate::{indexer, web};
 use cait_sith::protocol::Participant;
 use clap::Parser;
 use local_ip_address::local_ip;
 use near_crypto::{InMemorySigner, SecretKey};
 use near_primitives::types::AccountId;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use std::thread;
+use tokio::sync::{mpsc, RwLock};
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
@@ -119,6 +121,13 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             cipher_sk,
             indexer_options,
         } => {
+            let sign_queue = Arc::new(RwLock::new(SignQueue::new()));
+            let a = indexer_options.clone();
+            let b = mpc_contract_id.clone();
+            let c = sign_queue.clone();
+            let indexer_handler = thread::spawn(move || {
+                indexer::run(a, b, c).unwrap();
+            });
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -139,6 +148,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                         rpc_client.clone(),
                         signer.clone(),
                         receiver,
+                        sign_queue.clone(),
                         hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?).unwrap(),
                     );
                     tracing::debug!("protocol initialized");
@@ -170,7 +180,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
 
                     anyhow::Ok(())
                 })?;
-            indexer::run(&indexer_options, mpc_contract_id)?;
+            indexer_handler.join().unwrap();
         }
     }
 

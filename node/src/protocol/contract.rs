@@ -6,7 +6,7 @@ use mpc_keys::hpke;
 use near_primitives::borsh::BorshDeserialize;
 use near_sdk::AccountId;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 type ParticipantId = u32;
 
@@ -35,9 +35,9 @@ impl From<mpc_contract::ParticipantInfo> for ParticipantInfo {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InitializingContractState {
-    pub participants: HashMap<Participant, ParticipantInfo>,
+    pub participants: BTreeMap<Participant, ParticipantInfo>,
     pub threshold: usize,
-    pub pk_votes: HashMap<near_crypto::PublicKey, HashSet<Participant>>,
+    pub pk_votes: BTreeMap<near_crypto::PublicKey, HashSet<Participant>>,
 }
 
 impl From<mpc_contract::InitializingContractState> for InitializingContractState {
@@ -67,12 +67,12 @@ impl From<mpc_contract::InitializingContractState> for InitializingContractState
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RunningContractState {
     pub epoch: u64,
-    pub participants: HashMap<Participant, ParticipantInfo>,
+    pub participants: BTreeMap<Participant, ParticipantInfo>,
     pub threshold: usize,
     pub public_key: PublicKey,
-    pub candidates: HashMap<Participant, ParticipantInfo>,
-    pub join_votes: HashMap<Participant, HashSet<Participant>>,
-    pub leave_votes: HashMap<Participant, HashSet<Participant>>,
+    pub candidates: BTreeMap<Participant, ParticipantInfo>,
+    pub join_votes: BTreeMap<Participant, HashSet<Participant>>,
+    pub leave_votes: BTreeMap<Participant, HashSet<Participant>>,
 }
 
 impl From<mpc_contract::RunningContractState> for RunningContractState {
@@ -114,8 +114,8 @@ impl From<mpc_contract::RunningContractState> for RunningContractState {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ResharingContractState {
     pub old_epoch: u64,
-    pub old_participants: HashMap<Participant, ParticipantInfo>,
-    pub new_participants: HashMap<Participant, ParticipantInfo>,
+    pub old_participants: BTreeMap<Participant, ParticipantInfo>,
+    pub new_participants: BTreeMap<Participant, ParticipantInfo>,
     pub threshold: usize,
     pub public_key: PublicKey,
     pub finished_votes: HashSet<Participant>,
@@ -146,7 +146,7 @@ pub enum ProtocolState {
 }
 
 impl ProtocolState {
-    pub fn participants(&self) -> &HashMap<Participant, ParticipantInfo> {
+    pub fn participants(&self) -> &BTreeMap<Participant, ParticipantInfo> {
         match self {
             ProtocolState::Initializing(InitializingContractState { participants, .. }) => {
                 participants
@@ -190,8 +190,8 @@ impl TryFrom<ProtocolContractState> for ProtocolState {
 }
 
 fn contract_participants_into_cait_participants(
-    participants: HashMap<AccountId, mpc_contract::ParticipantInfo>,
-) -> HashMap<Participant, ParticipantInfo> {
+    participants: BTreeMap<AccountId, mpc_contract::ParticipantInfo>,
+) -> BTreeMap<Participant, ParticipantInfo> {
     participants
         .into_values()
         .map(|p| (Participant::from(p.id), p.into()))

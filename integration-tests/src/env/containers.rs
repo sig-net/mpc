@@ -517,8 +517,7 @@ impl<'a> LocalStack<'a> {
         s3_region: String,
     ) -> anyhow::Result<LocalStack<'a>> {
         tracing::info!("running LocalStack container...");
-        let image = GenericImage::new("localstack/localstack", "latest")
-            .with_exposed_port(Self::S3_CONTAINER_PORT)
+        let image = GenericImage::new("localstack/localstack", "3.0.0")
             .with_wait_for(WaitFor::message_on_stdout("Running on"));
         let image: RunnableImage<GenericImage> = image.into();
         let image = image.with_network(network);
@@ -554,8 +553,8 @@ impl<'a> LocalStack<'a> {
             .await?;
 
         let s3_address = format!("http://{}:{}", address, Self::S3_CONTAINER_PORT);
-        let s3_host_port = container.get_host_port_ipv4(Self::S3_CONTAINER_PORT);
-        let s3_host_address = format!("http://127.0.0.1:{s3_host_port}");
+        let s3_host_port = container.get_host_port_ipv6(Self::S3_CONTAINER_PORT);
+        let s3_host_address = format!("http://[::1]:{s3_host_port}");
 
         tracing::info!(
             s3_address,

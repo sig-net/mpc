@@ -3,7 +3,9 @@ use super::state::{
     JoiningState, NodeState, PersistentNodeData, RunningState, StartedState,
     WaitingForConsensusState,
 };
+use super::SignQueue;
 use crate::protocol::presignature::PresignatureManager;
+use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
 use crate::types::PrivateKeyShare;
@@ -28,6 +30,7 @@ pub trait ConsensusCtx {
     fn signer(&self) -> &InMemorySigner;
     fn mpc_contract_id(&self) -> &AccountId;
     fn my_address(&self) -> &Url;
+    fn sign_queue(&self) -> Arc<RwLock<SignQueue>>;
     fn cipher_pk(&self) -> &hpke::PublicKey;
     fn sign_pk(&self) -> near_crypto::PublicKey;
 }
@@ -100,6 +103,7 @@ impl ConsensusProtocol for StartedState {
                                     threshold: contract_state.threshold,
                                     private_share,
                                     public_key,
+                                    sign_queue: ctx.sign_queue(),
                                     triple_manager: Arc::new(RwLock::new(TripleManager::new(
                                         participants_vec.clone(),
                                         ctx.me(),
@@ -108,9 +112,17 @@ impl ConsensusProtocol for StartedState {
                                     ))),
                                     presignature_manager: Arc::new(RwLock::new(
                                         PresignatureManager::new(
-                                            participants_vec,
+                                            participants_vec.clone(),
                                             ctx.me(),
                                             contract_state.threshold,
+                                            epoch,
+                                        ),
+                                    )),
+                                    signature_manager: Arc::new(RwLock::new(
+                                        SignatureManager::new(
+                                            participants_vec,
+                                            ctx.me(),
+                                            contract_state.public_key,
                                             epoch,
                                         ),
                                     )),
@@ -149,7 +161,7 @@ impl ConsensusProtocol for StartedState {
                     if contract_state.participants.contains_key(&ctx.me()) {
                         tracing::info!("starting key generation as a part of the participant set");
                         let participants = contract_state.participants;
-                        let protocol = cait_sith::keygen(
+                        let protocol = cait_sith::keygen::<Secp256k1>(
                             &participants.keys().cloned().collect::<Vec<_>>(),
                             ctx.me(),
                             contract_state.threshold,
@@ -283,6 +295,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         threshold: self.threshold,
                         private_share: self.private_share,
                         public_key: self.public_key,
+                        sign_queue: ctx.sign_queue(),
                         triple_manager: Arc::new(RwLock::new(TripleManager::new(
                             participants_vec.clone(),
                             ctx.me(),
@@ -290,9 +303,15 @@ impl ConsensusProtocol for WaitingForConsensusState {
                             self.epoch,
                         ))),
                         presignature_manager: Arc::new(RwLock::new(PresignatureManager::new(
-                            participants_vec,
+                            participants_vec.clone(),
                             ctx.me(),
                             self.threshold,
+                            self.epoch,
+                        ))),
+                        signature_manager: Arc::new(RwLock::new(SignatureManager::new(
+                            participants_vec,
+                            ctx.me(),
+                            self.public_key,
                             self.epoch,
                         ))),
                     }))

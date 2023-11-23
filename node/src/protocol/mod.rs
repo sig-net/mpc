@@ -2,6 +2,7 @@ mod consensus;
 mod contract;
 mod cryptography;
 mod presignature;
+mod signature;
 mod triple;
 
 pub mod message;
@@ -9,6 +10,8 @@ pub mod state;
 
 pub use contract::{ParticipantInfo, ProtocolState};
 pub use message::MpcMessage;
+pub use signature::SignQueue;
+pub use signature::SignRequest;
 pub use state::NodeState;
 
 use self::consensus::ConsensusCtx;
@@ -36,6 +39,7 @@ struct Ctx {
     signer: InMemorySigner,
     rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
+    sign_queue: Arc<RwLock<SignQueue>>,
     cipher_pk: hpke::PublicKey,
     sign_sk: near_crypto::SecretKey,
 }
@@ -65,6 +69,10 @@ impl ConsensusCtx for &Ctx {
         &self.my_address
     }
 
+    fn sign_queue(&self) -> Arc<RwLock<SignQueue>> {
+        self.sign_queue.clone()
+    }
+
     fn cipher_pk(&self) -> &hpke::PublicKey {
         &self.cipher_pk
     }
@@ -81,6 +89,18 @@ impl CryptographicCtx for &Ctx {
 
     fn http_client(&self) -> &reqwest::Client {
         &self.http_client
+    }
+
+    fn rpc_client(&self) -> &near_fetch::Client {
+        &self.rpc_client
+    }
+
+    fn signer(&self) -> &InMemorySigner {
+        &self.signer
+    }
+
+    fn mpc_contract_id(&self) -> &AccountId {
+        &self.mpc_contract_id
     }
 
     fn sign_sk(&self) -> &near_crypto::SecretKey {
@@ -101,6 +121,7 @@ pub struct MpcSignProtocol {
 }
 
 impl MpcSignProtocol {
+    #![allow(clippy::too_many_arguments)]
     pub fn init<U: IntoUrl>(
         me: Participant,
         my_address: U,
@@ -108,6 +129,7 @@ impl MpcSignProtocol {
         rpc_client: near_fetch::Client,
         signer: InMemorySigner,
         receiver: mpsc::Receiver<MpcMessage>,
+        sign_queue: Arc<RwLock<SignQueue>>,
         cipher_pk: hpke::PublicKey,
     ) -> (Self, Arc<RwLock<NodeState>>) {
         let state = Arc::new(RwLock::new(NodeState::Starting));
@@ -117,6 +139,7 @@ impl MpcSignProtocol {
             mpc_contract_id,
             rpc_client,
             http_client: reqwest::Client::new(),
+            sign_queue,
             cipher_pk,
             sign_sk: signer.secret_key.clone(),
             signer,

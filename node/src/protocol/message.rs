@@ -1,15 +1,16 @@
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
-
-use crate::http_client::SendError;
-
 use super::cryptography::CryptographicError;
+use super::presignature::{self, PresignatureId};
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
+use super::triple::TripleId;
+use crate::http_client::SendError;
 use async_trait::async_trait;
 use cait_sith::protocol::{InitializationError, MessageData, Participant, ProtocolError};
 use mpc_keys::hpke::{self, Ciphered};
 use near_crypto::Signature;
+use near_primitives::hash::CryptoHash;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub trait MessageCtx {
@@ -40,8 +41,19 @@ pub struct TripleMessage {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct PresignatureMessage {
     pub id: u64,
-    pub triple0: u64,
-    pub triple1: u64,
+    pub triple0: TripleId,
+    pub triple1: TripleId,
+    pub epoch: u64,
+    pub from: Participant,
+    pub data: MessageData,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct SignatureMessage {
+    pub receipt_id: CryptoHash,
+    pub proposer: Participant,
+    pub presignature_id: PresignatureId,
+    pub msg_hash: [u8; 32],
     pub epoch: u64,
     pub from: Participant,
     pub data: MessageData,
@@ -53,14 +65,16 @@ pub enum MpcMessage {
     Resharing(ResharingMessage),
     Triple(TripleMessage),
     Presignature(PresignatureMessage),
+    Signature(SignatureMessage),
 }
 
 #[derive(Default)]
 pub struct MpcMessageQueue {
     generating: VecDeque<GeneratingMessage>,
     resharing_bins: HashMap<u64, VecDeque<ResharingMessage>>,
-    triple_bins: HashMap<u64, HashMap<u64, VecDeque<TripleMessage>>>,
-    presignature_bins: HashMap<u64, HashMap<u64, VecDeque<PresignatureMessage>>>,
+    triple_bins: HashMap<u64, HashMap<TripleId, VecDeque<TripleMessage>>>,
+    presignature_bins: HashMap<u64, HashMap<PresignatureId, VecDeque<PresignatureMessage>>>,
+    signature_bins: HashMap<u64, HashMap<CryptoHash, VecDeque<SignatureMessage>>>,
 }
 
 impl MpcMessageQueue {
@@ -86,6 +100,13 @@ impl MpcMessageQueue {
                 .entry(message.id)
                 .or_default()
                 .push_back(message),
+            MpcMessage::Signature(message) => self
+                .signature_bins
+                .entry(message.epoch)
+                .or_default()
+                .entry(message.receipt_id)
+                .or_default()
+                .push_back(message),
         }
     }
 }
@@ -108,6 +129,8 @@ pub enum MessageHandleError {
     Encryption(String),
     #[error("invalid state")]
     InvalidStateHandle(String),
+    #[error("rpc error: {0}")]
+    RpcError(#[from] near_fetch::Error),
 }
 
 impl From<CryptographicError> for MessageHandleError {
@@ -123,6 +146,7 @@ impl From<CryptographicError> for MessageHandleError {
             CryptographicError::DataConversion(e) => Self::DataConversion(e),
             CryptographicError::Encryption(e) => Self::Encryption(e),
             CryptographicError::InvalidStateHandle(e) => Self::InvalidStateHandle(e),
+            CryptographicError::RpcError(e) => Self::RpcError(e),
         }
     }
 }
@@ -190,17 +214,86 @@ impl MessageHandler for RunningState {
 
         let mut presignature_manager = self.presignature_manager.write().await;
         for (id, queue) in queue.presignature_bins.entry(self.epoch).or_default() {
+            let mut leftover_messages = Vec::new();
             while let Some(message) = queue.pop_front() {
-                if let Some(protocol) = presignature_manager.get_or_generate(
+                match presignature_manager.get_or_generate(
                     *id,
                     message.triple0,
                     message.triple1,
                     &mut triple_manager,
                     &self.public_key,
                     &self.private_share,
-                )? {
-                    protocol.message(message.from, message.data);
+                ) {
+                    Ok(protocol) => {
+                        let mut protocol = protocol
+                            .write()
+                            .map_err(|err| MessageHandleError::SyncError(err.to_string()))?;
+                        protocol.message(message.from, message.data)
+                    }
+                    Err(presignature::GenerationError::AlreadyGenerated) => {
+                        tracing::info!(id, "presignature already generated, nothing left to do")
+                    }
+                    Err(presignature::GenerationError::TripleIsMissing(_)) => {
+                        // Store the message until we are ready to process it
+                        leftover_messages.push(message)
+                    }
+                    Err(presignature::GenerationError::CaitSithInitializationError(error)) => {
+                        return Err(error.into())
+                    }
                 }
+            }
+            if !leftover_messages.is_empty() {
+                tracing::warn!(
+                    msg_count = leftover_messages.len(),
+                    "unable to process messages, storing for future"
+                );
+                queue.extend(leftover_messages);
+            }
+        }
+
+        let mut signature_manager = self.signature_manager.write().await;
+        for (receipt_id, queue) in queue.signature_bins.entry(self.epoch).or_default() {
+            let mut leftover_messages = Vec::new();
+            while let Some(message) = queue.pop_front() {
+                tracing::info!(
+                    presignature_id = message.presignature_id,
+                    "new signature message"
+                );
+                // if !self
+                //     .sign_queue
+                //     .read()
+                //     .await
+                //     .contains(message.proposer, receipt_id.clone())
+                // {
+                //     leftover_messages.push(message);
+                //     continue;
+                // };
+                // TODO: Validate that the message matches our sign_queue
+                match signature_manager.get_or_generate(
+                    *receipt_id,
+                    message.proposer,
+                    message.presignature_id,
+                    message.msg_hash,
+                    &mut presignature_manager,
+                )? {
+                    Some(protocol) => {
+                        let mut protocol = protocol
+                            .write()
+                            .map_err(|err| MessageHandleError::SyncError(err.to_string()))?;
+                        protocol.message(message.from, message.data)
+                    }
+                    None => {
+                        // Store the message until we are ready to process it
+                        leftover_messages.push(message)
+                    }
+                }
+            }
+            if !leftover_messages.is_empty() {
+                tracing::warn!(
+                    msg_count = leftover_messages.len(),
+                    "unable to process messages, storing for future"
+                );
+                queue.extend(leftover_messages);
             }
         }
         Ok(())

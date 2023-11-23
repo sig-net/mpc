@@ -48,8 +48,9 @@ impl<'a> Node<'a> {
             cipher_pk: hex::encode(cipher_pk.to_bytes()),
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
             indexer_options: mpc_recovery_node::indexer::Options {
-                s3_bucket: ctx.localstack.s3_host_address.clone(),
+                s3_bucket: ctx.localstack.s3_bucket.clone(),
                 s3_region: ctx.localstack.s3_region.clone(),
+                s3_url: Some(ctx.localstack.s3_host_address.clone()),
                 start_block_height: 0,
             },
         }

@@ -1,9 +1,11 @@
 use super::presignature::PresignatureManager;
+use super::signature::SignatureManager;
 use super::triple::TripleManager;
+use super::SignQueue;
 use crate::protocol::ParticipantInfo;
 use crate::types::{KeygenProtocol, PrivateKeyShare, PublicKey, ReshareProtocol};
 use cait_sith::protocol::Participant;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -19,7 +21,7 @@ pub struct StartedState(pub Option<PersistentNodeData>);
 
 #[derive(Clone)]
 pub struct GeneratingState {
-    pub participants: HashMap<Participant, ParticipantInfo>,
+    pub participants: BTreeMap<Participant, ParticipantInfo>,
     pub threshold: usize,
     pub protocol: KeygenProtocol,
 }
@@ -27,7 +29,7 @@ pub struct GeneratingState {
 #[derive(Clone)]
 pub struct WaitingForConsensusState {
     pub epoch: u64,
-    pub participants: HashMap<Participant, ParticipantInfo>,
+    pub participants: BTreeMap<Participant, ParticipantInfo>,
     pub threshold: usize,
     pub private_share: PrivateKeyShare,
     pub public_key: PublicKey,
@@ -36,19 +38,21 @@ pub struct WaitingForConsensusState {
 #[derive(Clone)]
 pub struct RunningState {
     pub epoch: u64,
-    pub participants: HashMap<Participant, ParticipantInfo>,
+    pub participants: BTreeMap<Participant, ParticipantInfo>,
     pub threshold: usize,
     pub private_share: PrivateKeyShare,
     pub public_key: PublicKey,
+    pub sign_queue: Arc<RwLock<SignQueue>>,
     pub triple_manager: Arc<RwLock<TripleManager>>,
     pub presignature_manager: Arc<RwLock<PresignatureManager>>,
+    pub signature_manager: Arc<RwLock<SignatureManager>>,
 }
 
 #[derive(Clone)]
 pub struct ResharingState {
     pub old_epoch: u64,
-    pub old_participants: HashMap<Participant, ParticipantInfo>,
-    pub new_participants: HashMap<Participant, ParticipantInfo>,
+    pub old_participants: BTreeMap<Participant, ParticipantInfo>,
+    pub new_participants: BTreeMap<Participant, ParticipantInfo>,
     pub threshold: usize,
     pub public_key: PublicKey,
     pub protocol: ReshareProtocol,
