@@ -48,6 +48,9 @@ pub enum Cli {
         /// NEAR Lake Indexer options
         #[clap(flatten)]
         indexer_options: indexer::Options,
+        /// Local address that other peers can use to message this node.
+        #[arg(long, env("MPC_RECOVERY_LOCAL_ADDRESS"))]
+        my_address: Option<Url>,
     },
 }
 
@@ -69,6 +72,7 @@ impl Cli {
                 cipher_pk,
                 cipher_sk,
                 indexer_options,
+                my_address,
             } => {
                 let mut args = vec![
                     "start".to_string(),
@@ -89,6 +93,9 @@ impl Cli {
                     "--cipher-sk".to_string(),
                     cipher_sk,
                 ];
+                if let Some(my_address) = my_address {
+                    args.extend(vec!["--my-address".to_string(), my_address.to_string()]);
+                }
                 args.extend(indexer_options.into_str_args());
                 args
             }
@@ -120,6 +127,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             cipher_pk,
             cipher_sk,
             indexer_options,
+            my_address,
         } => {
             let sign_queue = Arc::new(RwLock::new(SignQueue::new()));
             let a = indexer_options.clone();
@@ -135,8 +143,10 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 .block_on(async {
                     let (sender, receiver) = mpsc::channel(16384);
 
-                    let my_ip = local_ip()?;
-                    let my_address = Url::parse(&format!("http://{my_ip}:{web_port}"))?;
+                    let my_address = my_address.unwrap_or_else(|| {
+                        let my_ip = local_ip().unwrap();
+                        Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
+                    });
                     tracing::info!(%my_address, "address detected");
                     let rpc_client = near_fetch::Client::new(&near_rpc);
                     tracing::debug!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
