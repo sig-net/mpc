@@ -295,4 +295,11 @@ impl MpcContract {
 
     #[allow(unused_variables)]
     pub fn respond(&mut self, receipt_id: [u8; 32], big_r: String, s: String) {}
+
+    #[private]
+    pub fn clean(keys: Vec<near_sdk::json_types::Base64VecU8>) {
+        for key in keys.iter() {
+            env::storage_remove(&key.0);
+        }
+    }
 }
