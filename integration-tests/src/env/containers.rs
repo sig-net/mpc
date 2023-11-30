@@ -353,8 +353,8 @@ impl<'a> Relayer<'a> {
         )?;
 
         let image = GenericImage::new(
-            "ghcr.io/near/os-relayer",
-            "12ba6e35690df3979fce0b36a41d0ca0db9c0ab4",
+            "ghcr.io/near/relayer-rs-fastauth",
+            "3ed15fa3decfb0e5351e398d7fbee86ceeea6fd2",
         )
         .with_wait_for(WaitFor::message_on_stdout("listening on"))
         .with_exposed_port(Self::CONTAINER_PORT)
