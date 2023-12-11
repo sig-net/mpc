@@ -7,7 +7,7 @@ indexer_options = {
   s3_bucket          = "near-lake-data-testnet"
   s3_region          = "eu-central-1"
   s3_url             = null
-  start_block_height = 147325476
+  start_block_height = 149685857
 }
 
 aws_access_key_secret_id = "multichain-indexer-aws-access-key"

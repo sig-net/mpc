@@ -106,6 +106,9 @@ async fn handle_block(
             }
         }
     }
+    if block.block_height() % 1000 == 0 {
+        tracing::info!(block_height = block.block_height(), "indexed block")
+    }
     Ok(())
 }
 
