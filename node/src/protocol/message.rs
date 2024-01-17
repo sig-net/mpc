@@ -15,8 +15,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+#[async_trait::async_trait]
 pub trait MessageCtx {
-    fn me(&self) -> Participant;
+    async fn me(&self) -> Participant;
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -193,7 +194,6 @@ impl MessageHandler for ResharingState {
         let q = queue.resharing_bins.entry(self.old_epoch).or_default();
         let mut protocol = self.protocol.write().await;
         while let Some(msg) = q.pop_front() {
-            tracing::debug!("handling new resharing message");
             protocol.message(msg.from, msg.data);
         }
         Ok(())
