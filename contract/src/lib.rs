@@ -48,7 +48,7 @@ pub enum ProtocolContractState {
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct MpcContract {
     protocol_state: ProtocolContractState,
-    pending_requests: LookupMap<[u8; 32], Option<(String, String)>>,
+    pending_requests: LookupMap<[u8; 32], Option<String>>,
 }
 
 #[near_bindgen]
@@ -276,7 +276,7 @@ impl MpcContract {
         &mut self,
         payload: [u8; 32],
         depth: usize,
-    ) -> PromiseOrValue<(String, String)> {
+    ) -> PromiseOrValue<String> {
         if let Some(signature) = self.pending_requests.get(&payload) {
             match signature {
                 Some(signature) => {
@@ -294,8 +294,8 @@ impl MpcContract {
         }
     }
 
-    pub fn respond(&mut self, payload: [u8; 32], big_r: String, s: String) {
-        self.pending_requests.insert(&payload, &Some((big_r, s)));
+    pub fn respond(&mut self, payload: [u8; 32], signature: String) {
+        self.pending_requests.insert(&payload, &Some(signature));
     }
 
     #[private]
@@ -306,7 +306,7 @@ impl MpcContract {
         }
         Self {
             protocol_state: ProtocolContractState::NotInitialized,
-            pending_requests: LookupMap::new(b"m"),
+            pending_requests: LookupMap::<[u8; 32], Option<String>>::new(b"m"),
         }
     }
 
