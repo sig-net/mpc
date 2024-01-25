@@ -272,11 +272,7 @@ impl MpcContract {
     }
 
     #[private]
-    pub fn sign_helper(
-        &mut self,
-        payload: [u8; 32],
-        depth: usize,
-    ) -> PromiseOrValue<String> {
+    pub fn sign_helper(&mut self, payload: [u8; 32], depth: usize) -> PromiseOrValue<String> {
         if let Some(signature) = self.pending_requests.get(&payload) {
             match signature {
                 Some(signature) => {
