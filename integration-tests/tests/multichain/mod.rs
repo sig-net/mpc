@@ -128,10 +128,10 @@ async fn test_signature() -> anyhow::Result<()> {
                         },
                     })
                     .await?;
-                let FinalExecutionStatus::SuccessValue(payload) = outcome_view.status else {
+                let FinalExecutionStatus::SuccessValue(value) = outcome_view.status else {
                     anyhow::bail!("tx finished unsuccessfully: {:?}", outcome_view.status);
                 };
-                let (big_r, s): (AffinePoint, Scalar) = serde_json::from_slice(&payload)?;
+                let (big_r, s): (AffinePoint, Scalar) = serde_json::from_slice(&value)?;
                 let signature = cait_sith::FullSignature::<Secp256k1> { big_r, s };
                 Ok(signature)
             };
@@ -139,16 +139,21 @@ async fn test_signature() -> anyhow::Result<()> {
                 .retry(&ExponentialBuilder::default().with_max_times(6))
                 .await
                 .with_context(|| "failed to wait for signature response")?;
+
+            // Covert near_sdk::Publickey to k256::AffinePoint
             let mut bytes = vec![0x04];
             bytes.extend_from_slice(&state_0.public_key.as_bytes()[1..]);
             let point = EncodedPoint::from_bytes(bytes).unwrap();
             let public_key = AffinePoint::from_encoded_point(&point).unwrap();
-            let epsilon = kdf::derive_epsilon(&account_id, "test");
 
-            assert!(signature.verify(
-                &kdf::derive_key(public_key, epsilon),
-                &Scalar::from_bytes(&payload),
-            ));
+            // Derive user PK
+            let epsilon = kdf::derive_epsilon(&account_id, "test");
+            let user_public_key = kdf::derive_key(public_key, epsilon);
+
+            // Get payload hash
+            let payload_hash = Scalar::from_bytes(&payload);
+
+            assert!(signature.verify(&user_public_key, &payload_hash,));
 
             Ok(())
         })
