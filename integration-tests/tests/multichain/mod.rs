@@ -1,10 +1,7 @@
 use crate::{wait_for, with_multichain_nodes};
 use anyhow::Context;
 use backon::{ExponentialBuilder, Retryable};
-use k256::elliptic_curve::sec1::FromEncodedPoint;
-use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
-use mpc_recovery_node::kdf;
-use mpc_recovery_node::util::ScalarExt;
+use mpc_recovery_node::kdf::derive_near_key;
 use near_crypto::{InMemorySigner, Signer};
 use near_fetch::signer::ExposeAccountId;
 use near_jsonrpc_client::methods::broadcast_tx_async::RpcBroadcastTxAsyncRequest;
@@ -131,8 +128,7 @@ async fn test_signature() -> anyhow::Result<()> {
                 let FinalExecutionStatus::SuccessValue(value) = outcome_view.status else {
                     anyhow::bail!("tx finished unsuccessfully: {:?}", outcome_view.status);
                 };
-                let (big_r, s): (AffinePoint, Scalar) = serde_json::from_slice(&value)?;
-                let signature = cait_sith::FullSignature::<Secp256k1> { big_r, s };
+                let signature: near_crypto::Signature = serde_json::from_slice(&value)?;
                 Ok(signature)
             };
             let signature = is_tx_ready
@@ -140,20 +136,14 @@ async fn test_signature() -> anyhow::Result<()> {
                 .await
                 .with_context(|| "failed to wait for signature response")?;
 
-            // Covert near_sdk::Publickey to k256::AffinePoint
-            let mut bytes = vec![0x04];
-            bytes.extend_from_slice(&state_0.public_key.as_bytes()[1..]);
-            let point = EncodedPoint::from_bytes(bytes).unwrap();
-            let public_key = AffinePoint::from_encoded_point(&point).unwrap();
+            let mpc_pk = near_crypto::PublicKey::SECP256K1(
+                near_crypto::Secp256K1PublicKey::try_from(state_0.public_key.as_bytes())?,
+            );
 
-            // Derive user PK
-            let epsilon = kdf::derive_epsilon(&account_id, "test");
-            let user_public_key = kdf::derive_key(public_key, epsilon);
+            let user_pk = derive_near_key(&mpc_pk, &account_id, "test");
 
-            // Get payload hash
-            let payload_hash = Scalar::from_bytes(&payload);
-
-            assert!(signature.verify(&user_public_key, &payload_hash,));
+            // TODO: check if we need to hash the payload
+            assert!(signature.verify(&payload, &user_pk));
 
             Ok(())
         })

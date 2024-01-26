@@ -41,3 +41,13 @@ pub fn derive_delta(receipt_id: CryptoHash, entropy: [u8; 32]) -> Scalar {
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
     (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key).to_affine()
 }
+
+// TODO: move this function to a proper lace
+pub fn derive_near_key(
+    public_key: &near_crypto::PublicKey,
+    _account_id: &AccountId,
+    _path: &str,
+) -> near_crypto::PublicKey {
+    // TODO: implement near key derivation
+    public_key.clone()
+}
