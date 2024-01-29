@@ -1,7 +1,12 @@
 use crate::types::PublicKey;
+use cait_sith::FullSignature;
+use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::scalar::FromUintUnchecked;
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
+use k256::elliptic_curve::subtle::ConditionallySelectable;
+use k256::Secp256k1;
 use k256::{AffinePoint, EncodedPoint, Scalar, U256};
+use sha2::digest::generic_array::sequence::{Concat, Lengthen};
 
 pub trait NearPublicKeyExt {
     fn into_affine_point(self) -> PublicKey;
@@ -65,5 +70,19 @@ pub trait ScalarExt {
 impl ScalarExt for Scalar {
     fn from_bytes(bytes: &[u8]) -> Self {
         Scalar::from_uint_unchecked(U256::from_le_slice(bytes))
+    }
+}
+
+pub trait FullSignatureExt {
+    fn into_near_signature(self) -> near_crypto::Signature;
+}
+
+impl FullSignatureExt for FullSignature<Secp256k1> {
+    fn into_near_signature(self) -> near_crypto::Signature {
+        let r_s = self.big_r.x().concat(self.s.to_bytes());
+        let tag = ConditionallySelectable::conditional_select(&2u8, &3u8, self.big_r.y_is_odd());
+        let signature = r_s.append(tag);
+        let signature = near_crypto::Secp256K1Signature::try_from(signature.as_slice()).unwrap();
+        near_crypto::Signature::SECP256K1(signature)
     }
 }

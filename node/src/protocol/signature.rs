@@ -3,11 +3,9 @@ use super::presignature::{Presignature, PresignatureId, PresignatureManager};
 use super::state::RunningState;
 use crate::kdf;
 use crate::types::{PublicKey, SignatureProtocol};
-use crate::util::{AffinePointExt, ScalarExt};
+use crate::util::{AffinePointExt, FullSignatureExt, ScalarExt};
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{FullSignature, PresignOutput};
-use k256::elliptic_curve::point::AffineCoordinates;
-use k256::elliptic_curve::subtle::ConditionallySelectable;
 use k256::{Scalar, Secp256k1};
 use near_crypto::Signer;
 use near_fetch::signer::ExposeAccountId;
@@ -17,7 +15,6 @@ use near_primitives::types::AccountId;
 use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
-use sha2::digest::generic_array::sequence::{Concat, Lengthen};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
@@ -312,8 +309,7 @@ impl SignatureManager {
         mpc_contract_id: &AccountId,
     ) -> Result<(), near_fetch::Error> {
         for (receipt_id, payload, signature) in self.signatures.drain(..) {
-            let signature = Self::cait_sith_to_near_signature(signature);
-
+            let signature = signature.into_near_signature().to_string();
             let response = rpc_client
                 .send_tx(
                     signer,
@@ -323,7 +319,7 @@ impl SignatureManager {
                             method_name: "respond".to_string(),
                             args: serde_json::to_vec(&serde_json::json!({
                                 "payload": payload,
-                                "signature": signature.to_string(),
+                                "signature": signature,
                             }))
                             .unwrap(),
                             gas: 300_000_000_000_000,
@@ -335,15 +331,5 @@ impl SignatureManager {
             tracing::info!(%receipt_id, signature = ?signature, status = ?response.status, "published signature response");
         }
         Ok(())
-    }
-
-    fn cait_sith_to_near_signature(signature: FullSignature<Secp256k1>) -> near_crypto::Signature {
-        // TODO: check conversion
-        let r_s = signature.big_r.x().concat(signature.s.to_bytes());
-        let tag =
-            ConditionallySelectable::conditional_select(&2u8, &3u8, signature.big_r.y_is_odd());
-        let signature = r_s.append(tag);
-        let signature = near_crypto::Secp256K1Signature::try_from(signature.as_slice()).unwrap();
-        near_crypto::Signature::SECP256K1(signature)
     }
 }
