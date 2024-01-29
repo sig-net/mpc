@@ -1,3 +1,4 @@
+use crate::kdf::{derive_epsilon, derive_key};
 use crate::types::PublicKey;
 use cait_sith::FullSignature;
 use k256::elliptic_curve::point::AffineCoordinates;
@@ -6,6 +7,7 @@ use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::elliptic_curve::subtle::ConditionallySelectable;
 use k256::Secp256k1;
 use k256::{AffinePoint, EncodedPoint, Scalar, U256};
+use near_primitives::types::AccountId;
 use sha2::digest::generic_array::sequence::{Concat, Lengthen};
 
 pub trait NearPublicKeyExt {
@@ -85,4 +87,15 @@ impl FullSignatureExt for FullSignature<Secp256k1> {
         let signature = near_crypto::Secp256K1Signature::try_from(signature.as_slice()).unwrap();
         near_crypto::Signature::SECP256K1(signature)
     }
+}
+
+pub fn derive_near_key(
+    public_key: &near_crypto::PublicKey,
+    account_id: &AccountId,
+    path: &str,
+) -> near_crypto::PublicKey {
+    let point: AffinePoint = public_key.clone().into_affine_point();
+    let epsilon = derive_epsilon(account_id, path);
+    let cait_sith_pk = derive_key(point, epsilon);
+    cait_sith_pk.into_near_public_key()
 }

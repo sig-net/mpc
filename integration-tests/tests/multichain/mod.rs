@@ -1,7 +1,7 @@
 use crate::{wait_for, with_multichain_nodes};
 use anyhow::Context;
 use backon::{ExponentialBuilder, Retryable};
-use mpc_recovery_node::kdf::derive_near_key;
+use mpc_recovery_node::util::derive_near_key;
 use near_crypto::{InMemorySigner, Signer};
 use near_fetch::signer::ExposeAccountId;
 use near_jsonrpc_client::methods::broadcast_tx_async::RpcBroadcastTxAsyncRequest;
