@@ -1,7 +1,7 @@
 use crate::{wait_for, with_multichain_nodes};
 use anyhow::Context;
 use backon::{ExponentialBuilder, Retryable};
-use mpc_recovery_node::util::derive_near_key;
+use mpc_recovery_node::util::{derive_near_key, NearCryptoPkExt};
 use near_crypto::{InMemorySigner, Signer};
 use near_fetch::signer::ExposeAccountId;
 use near_jsonrpc_client::methods::broadcast_tx_async::RpcBroadcastTxAsyncRequest;
@@ -136,13 +136,10 @@ async fn test_signature() -> anyhow::Result<()> {
                 .await
                 .with_context(|| "failed to wait for signature response")?;
 
-            let mpc_pk = near_crypto::PublicKey::SECP256K1(
-                near_crypto::Secp256K1PublicKey::try_from(state_0.public_key.as_bytes())?,
-            );
+            let mpc_pk = state_0.public_key.into_near_crypto_pk();
 
             let user_pk = derive_near_key(&mpc_pk, &account_id, "test");
 
-            // TODO: check if we need to hash the payload
             assert!(signature.verify(&payload, &user_pk));
 
             Ok(())

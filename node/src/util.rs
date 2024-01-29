@@ -14,12 +14,29 @@ pub trait NearPublicKeyExt {
     fn into_affine_point(self) -> PublicKey;
 }
 
+pub trait NearCryptoPkExt {
+    fn into_near_crypto_pk(self) -> near_crypto::PublicKey;
+}
+
 impl NearPublicKeyExt for near_sdk::PublicKey {
     fn into_affine_point(self) -> PublicKey {
         let mut bytes = self.into_bytes();
         bytes[0] = 0x04;
         let point = EncodedPoint::from_bytes(bytes).unwrap();
         PublicKey::from_encoded_point(&point).unwrap()
+    }
+}
+
+impl NearCryptoPkExt for near_sdk::PublicKey {
+    fn into_near_crypto_pk(self) -> near_crypto::PublicKey {
+        match self.curve_type() {
+            near_sdk::CurveType::ED25519 => near_crypto::PublicKey::ED25519(
+                near_crypto::ED25519PublicKey::try_from(self.as_bytes()).unwrap(),
+            ),
+            near_sdk::CurveType::SECP256K1 => near_crypto::PublicKey::SECP256K1(
+                near_crypto::Secp256K1PublicKey::try_from(self.as_bytes()).unwrap(),
+            ),
+        }
     }
 }
 
