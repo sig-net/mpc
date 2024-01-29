@@ -245,38 +245,147 @@ impl TripleManager {
 
 #[cfg(test)]
 mod test {
-    use std::{collections::HashMap, fs::OpenOptions, ops::Range};
+    use std::{
+        collections::{HashMap, HashSet, VecDeque},
+        fs::OpenOptions,
+        ops::Range,
+    };
 
     use crate::protocol::message::TripleMessage;
     use cait_sith::protocol::{InitializationError, Participant, ProtocolError};
     use itertools::multiunzip;
+    use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
     use std::io::prelude::*;
 
     use super::TripleManager;
 
     struct TestManagers {
+        mailboxes: MailBoxes,
         managers: Vec<TripleManager>,
     }
 
+    // The first message sent is the first message recieved
+    struct MailBoxes {
+        queue: HashMap<Participant, Vec<TripleMessage>>,
+        mutators: Vec<Mutator>,
+    }
+
+    // This trait allows for testing with a dodgey mailbox
+    impl MailBoxes {
+        fn new(mutators: Vec<Mutator>) {
+            MailBoxes {
+                queue: HashMap::new(),
+                mutators,
+            }
+        }
+
+        fn send(&mut self, p: Participant, msg: TripleMessage) {
+            for mut m in self.mutators.iter_mut() {
+                m.is_for_participant(p);
+                match m {
+                    Mutator::DropAt { indexes } => {
+                        if indexes.first() == 0 {
+                            // remove this drop index
+                            indexes.pop();
+                            // and we lose the message
+                            return ();
+                        }
+                        // Decrement all the indexes
+                        indexes.iter_mut().map(|mut i| i -= 1);
+                    }
+                    Mutator::DuplicateAt { indexes } => {
+                        if indexes.first() == 0 {
+                            // remove the duplicate index
+                            indexes.pop();
+                            // Send this message a second time
+                            Self::send(self, p, msg);
+                        }
+                        // We do this here rather than before the self call so [0, 1] doesn't duplicate index 0 twice
+                        indexes.iter_mut().map(|mut i| i -= 1);
+                    }
+                    _ => (),
+                }
+            }
+            self.queue.push(msg)
+        }
+
+        fn recieve(&mut self, p: Participant) -> Vec<TripleMessage> {
+            // By default return everything and leave nothing in the queue
+            let mut queue = self.queue.get_mut(&p).unwrap();
+            let mut output = *queue;
+            *queue = Vec::new();
+            for mut m in self.mutators.iter_mut() {
+                m.is_for_participant(p);
+                match m {
+                    Mutator::Shuffle { rng } => output.shuffle(&mut self.rng),
+                    Mutator::RecieveMax { max } => {
+                        let front = output.split_off(max);
+                    }
+                    _ => (),
+                }
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    enum Mutator {
+        Shuffle {
+            rng: StdRng,
+        },
+        // An ordered list of indexes to drop
+        DropAt {
+            indexes: Vec<usize>,
+        },
+        DuplicateAt {
+            indexes: Vec<usize>,
+        },
+        RecieveMax {
+            max: usize,
+        },
+        ForParticipant {
+            participant: Participant,
+            mutator: Box<Mutator>,
+        },
+    }
+
+    impl Mutator {
+        // Extracts a mutator if it's relevant to the participant
+        fn is_for_participant(&mut self, p: Participant) {
+            if let Mutator::ForParticipant {
+                participant,
+                mutator,
+            } = self
+            {
+                if participant == &p {
+                    *self = **mutator
+                }
+            }
+        }
+    }
+
     impl TestManagers {
-        fn new(number: u32) -> Self {
+        fn new<F: Fn(u32) -> MailBoxes>(number: u32, generator: F) -> Self {
             let range = 0..number;
             // Self::wipe_mailboxes(range.clone());
             let participants: Vec<Participant> = range.map(Participant::from).collect();
             let managers = participants
                 .iter()
-                .map(|me| TripleManager::new(participants.clone(), *me, number as usize, 0))
+                .map(|me| {
+                    let t = TripleManager::new(participants.clone(), *me, number as usize, 0);
+                    let m = generator(u32::from(*me));
+                    (t, m)
+                })
                 .collect();
             TestManagers { managers }
         }
 
         fn generate(&mut self, index: usize) -> Result<(), InitializationError> {
-            self.managers[index].generate()
+            self.managers[index].0.generate()
         }
 
         fn poke(&mut self, index: usize) -> Result<bool, ProtocolError> {
             let mut quiet = true;
-            let messages = self.managers[index].poke()?;
+            let messages = self.managers[index].0.poke()?;
             for (
                 participant,
                 ref tm @ TripleMessage {
@@ -288,7 +397,7 @@ mod test {
                 quiet = false;
                 let participant_i: u32 = participant.into();
                 let manager = &mut self.managers[participant_i as usize];
-                if let Some(protocol) = manager.get_or_generate(id).unwrap() {
+                if let Some(protocol) = manager.0.get_or_generate(id).unwrap() {
                     protocol.message(from, data.to_vec());
                 } else {
                     println!("Tried to write to completed mailbox {:?}", tm);
@@ -340,7 +449,7 @@ mod test {
     // Improve this before we make more similar tests
     #[test]
     fn happy_triple_generation() {
-        let mut tm = TestManagers::new(5);
+        let mut tm = TestManagers::new(5, Perfect);
 
         const M: usize = 2;
         const N: usize = M + 3;
