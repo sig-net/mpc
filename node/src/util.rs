@@ -30,12 +30,10 @@ impl NearPublicKeyExt for near_sdk::PublicKey {
 impl NearCryptoPkExt for near_sdk::PublicKey {
     fn into_near_crypto_pk(self) -> near_crypto::PublicKey {
         match self.curve_type() {
-            near_sdk::CurveType::ED25519 => near_crypto::PublicKey::ED25519(
-                near_crypto::ED25519PublicKey::try_from(self.as_bytes()).unwrap(),
-            ),
             near_sdk::CurveType::SECP256K1 => near_crypto::PublicKey::SECP256K1(
-                near_crypto::Secp256K1PublicKey::try_from(self.as_bytes()).unwrap(),
+                near_crypto::Secp256K1PublicKey::try_from(&self.as_bytes()[1..65]).unwrap(),
             ),
+            _ => panic!("unsupported key type"),
         }
     }
 }
