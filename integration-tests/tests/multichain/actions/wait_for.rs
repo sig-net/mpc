@@ -115,7 +115,7 @@ pub async fn has_at_least_presignatures<'a>(
 pub async fn signature_responded(
     ctx: &MultichainTestContext<'_>,
     tx_hash: CryptoHash,
-) -> anyhow::Result<FullSignature<Secp256k1>> {
+) -> anyhow::Result<(AffinePoint, Scalar)> {
     let is_tx_ready = || async {
         let outcome_view = ctx
             .jsonrpc_client
@@ -130,13 +130,12 @@ pub async fn signature_responded(
             anyhow::bail!("tx finished unsuccessfully: {:?}", outcome_view.status);
         };
         let (big_r, s): (AffinePoint, Scalar) = serde_json::from_slice(&payload)?;
-        let signature = cait_sith::FullSignature::<Secp256k1> { big_r, s };
-        Ok(signature)
+        Ok((big_r, s))
     };
 
-    let signature = is_tx_ready
+    let signature_primitives = is_tx_ready
         .retry(&ExponentialBuilder::default().with_max_times(6))
         .await
         .with_context(|| "failed to wait for signature response")?;
-    Ok(signature)
+    Ok(signature_primitives)
 }
