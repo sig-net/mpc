@@ -92,5 +92,8 @@ fn check_signature_cait_sith(
 
     let user_pk = kdf::derive_key(*mpc_pk, *derivation_epsilon);
 
-    assert!(signature.verify(&user_pk, &Scalar::from_bytes(payload),));
+    let payload2: [u8; 32] = rand::thread_rng().gen();
+
+    assert!(signature.verify(&user_pk, &Scalar::from_bytes(payload)));
+    assert_eq!(signature.verify(&user_pk, &Scalar::from_bytes(&payload2)), false);
 }
