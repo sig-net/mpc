@@ -5,7 +5,6 @@ edition = "2021"
 publish = false
 
 [dependencies]
-near-sdk = "5.0.0-alpha.1"
 aes-gcm = "0.10"
 anyhow = { version = "1.0", features = ["backtrace"] }
 async-process = "1"

@@ -3929,7 +3929,6 @@ dependencies = [
  "near-lake-framework",
  "near-lake-primitives",
  "near-primitives 0.17.0",
- "near-sdk",
  "near-workspaces",
  "nix",
  "once_cell",
