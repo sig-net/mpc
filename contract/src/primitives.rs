@@ -187,7 +187,7 @@ impl Votes {
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 pub struct PkVotes {
-    pub votes: BTreeMap<PublicKey, HashSet<AccountId>>,
+    pub votes: BTreeMap<String, HashSet<AccountId>>,
 }
 
 impl Default for PkVotes {
@@ -203,7 +203,7 @@ impl PkVotes {
         }
     }
 
-    pub fn entry(&mut self, public_key: PublicKey) -> &mut HashSet<AccountId> {
+    pub fn entry(&mut self, public_key: String) -> &mut HashSet<AccountId> {
         self.votes.entry(public_key).or_default()
     }
 }
