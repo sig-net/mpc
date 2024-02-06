@@ -1,4 +1,5 @@
 use crate::protocol::ProtocolState;
+use crate::util::NearPublicKeyExt;
 use near_crypto::InMemorySigner;
 use near_primitives::transaction::{Action, FunctionCallAction};
 use near_primitives::types::AccountId;
@@ -24,7 +25,7 @@ pub async fn vote_for_public_key(
 ) -> anyhow::Result<bool> {
     tracing::info!(%public_key, "voting for public key");
     let args = json!({
-        "public_key": public_key
+        "public_key": public_key.clone().into_affine_point()
     });
     let result = rpc_client
         .send_tx(

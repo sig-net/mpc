@@ -19,7 +19,7 @@ pub struct RunningContractState {
     pub epoch: u64,
     pub participants: Participants,
     pub threshold: usize,
-    pub public_key: PublicKey,
+    pub public_key: String,
     pub candidates: Candidates,
     pub join_votes: Votes,
     pub leave_votes: Votes,
@@ -32,7 +32,7 @@ pub struct ResharingContractState {
     // TODO: only store diff to save on storage
     pub new_participants: Participants,
     pub threshold: usize,
-    pub public_key: PublicKey,
+    pub public_key: String,
     pub finished_votes: HashSet<AccountId>,
 }
 
@@ -181,7 +181,7 @@ impl MpcContract {
         }
     }
 
-    pub fn vote_pk(&mut self, public_key: PublicKey) -> bool {
+    pub fn vote_pk(&mut self, public_key: String) -> bool {
         match &mut self.protocol_state {
             ProtocolContractState::Initializing(InitializingContractState {
                 candidates,
@@ -311,7 +311,7 @@ impl MpcContract {
     }
 
     /// This is the root public key combined from all the public keys of the participants.
-    pub fn public_key(&self) -> PublicKey {
+    pub fn public_key(&self) -> String {
         match &self.protocol_state {
             ProtocolContractState::Running(state) => state.public_key.clone(),
             ProtocolContractState::Resharing(state) => state.public_key.clone(),
