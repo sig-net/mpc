@@ -2,9 +2,8 @@ pub mod wait_for;
 
 use crate::MultichainTestContext;
 
-use k256::elliptic_curve::group::GroupEncoding;
 use k256::elliptic_curve::point::AffineCoordinates;
-use k256::{AffinePoint, Scalar, Secp256k1};
+use k256::{ecdsa, AffinePoint, Scalar, Secp256k1};
 use mpc_contract::RunningContractState;
 use mpc_recovery_node::kdf;
 use mpc_recovery_node::util::{NearPublicKeyExt, ScalarExt};
@@ -120,15 +119,17 @@ fn check_signature_ethers(
 ) {
     let chain_id = 1; // 1 for Ethereum mainnet
 
-    let r = ethers_core::types::U256::from_big_endian(signature_big_r.x().as_slice());
-    let s = ethers_core::types::U256::from_big_endian(signature_s.to_bytes().as_slice());
+    let r = ethers_core::types::U256::from_little_endian(signature_big_r.x().as_slice());
+    let s = ethers_core::types::U256::from_little_endian(signature_s.to_bytes().as_slice());
     let v = (signature_big_r.y_is_odd().unwrap_u8() + chain_id * 2 + 35) as u64;
 
     let signature = ethers_core::types::Signature { r, s, v };
 
-    let user_pk = kdf::derive_key(*mpc_pk, *derivation_epsilon);
-    let user_eth_address = ethers_core::utils::raw_public_key_to_address(user_pk.to_bytes());
+    let user_pk_affine_point = kdf::derive_key(*mpc_pk, *derivation_epsilon);
+    let user_pk = ethers_core::k256::PublicKey::from_affine(user_pk_affine_point).unwrap();
+    let user_pk = ecdsa::VerifyingKey::from(&user_pk);
+    let user_eth_address: ethers_core::types::H160 =
+        ethers_core::utils::public_key_to_address(&user_pk);
 
-    let recovered_address = signature.recover(*payload).unwrap();
-    assert_eq!(recovered_address, user_eth_address);
+    assert!(signature.verify(*payload, user_eth_address).is_ok());
 }
