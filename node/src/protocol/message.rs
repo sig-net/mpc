@@ -381,3 +381,50 @@ where
         Ok(serde_json::from_slice(&msg)?)
     }
 }
+
+// From private caitsith field ChannelTag::Size
+const CHANNEL_TAG_SIZE: usize = 20;
+const MESSAGE_HEADER_SIZE: usize = CHANNEL_TAG_SIZE + 8;
+
+#[derive(Debug)]
+pub struct ParsedMessage {
+    pub channel_tag: String,
+    pub waitpoint: u64,
+    pub contents: Contents,
+}
+
+#[derive(Serialize, Debug)]
+pub enum Contents {
+    DontKnow{data: Vec<u8>}
+}
+
+impl Contents {
+    pub fn dont_know(data: Vec<u8>) -> Self {
+        Contents::DontKnow { data }
+    }
+
+    pub fn csv(&self) -> Vec<String> {
+        match self {
+            Self::DontKnow { data } => vec!["Don't Know".to_string(), hex::encode(data)],
+        }
+    }
+}
+
+impl ParsedMessage{
+    pub fn from(md: MessageData) -> Self {
+        let (channel_tag, waitpoint, data) = Self::parts(&md);
+        let contents = Contents::dont_know(data);
+        let channel_tag = hex::encode(channel_tag);
+        Self { channel_tag, waitpoint, contents }
+    }
+
+    // Returns (header, waitpoint, data)
+    pub fn parts(md: &MessageData) -> ([u8; CHANNEL_TAG_SIZE],u64, Vec<u8>) {
+        // Message data must contain a channel tag and a waitpoint
+        let channel_tag  = md[..CHANNEL_TAG_SIZE].try_into().unwrap();
+        let waitpoint = md[CHANNEL_TAG_SIZE..MESSAGE_HEADER_SIZE].try_into().unwrap();
+        let waitpoint = u64::from_le_bytes(waitpoint);
+        let data = md[MESSAGE_HEADER_SIZE..].to_vec();
+        (channel_tag, waitpoint, data)
+    }
+}

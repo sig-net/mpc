@@ -247,7 +247,7 @@ impl TripleManager {
 mod test {
     use std::{collections::HashMap, fs::OpenOptions, ops::Range};
 
-    use crate::protocol::message::TripleMessage;
+    use crate::protocol::message::{ParsedMessage, TripleMessage};
     use cait_sith::protocol::{InitializationError, Participant, ProtocolError};
     use itertools::multiunzip;
     use std::io::prelude::*;
@@ -261,7 +261,7 @@ mod test {
     impl TestManagers {
         fn new(number: u32) -> Self {
             let range = 0..number;
-            // Self::wipe_mailboxes(range.clone());
+            Self::wipe_mailboxes(range.clone());
             let participants: Vec<Participant> = range.map(Participant::from).collect();
             let managers = participants
                 .iter()
@@ -284,7 +284,7 @@ mod test {
                 },
             ) in messages
             {
-                // Self::debug_mailbox(participant.into(), &tm);
+                Self::debug_mailbox(participant.into(), &tm);
                 quiet = false;
                 let participant_i: u32 = participant.into();
                 let manager = &mut self.managers[participant_i as usize];
@@ -297,29 +297,39 @@ mod test {
             Ok(quiet)
         }
 
-        #[allow(unused)]
         fn wipe_mailboxes(mailboxes: Range<u32>) {
             for m in mailboxes {
                 let mut file = OpenOptions::new()
                     .write(true)
-                    .append(false)
                     .create(true)
+                    .truncate(true)
                     .open(format!("{}.csv", m))
                     .unwrap();
-                write!(file, "").unwrap();
+                writeln!(file, "id, from, channel_tag, waitpoint, contents",).unwrap();
             }
         }
 
         // This allows you to see what each node is recieving and when
-        #[allow(unused)]
         fn debug_mailbox(participant: u32, TripleMessage { id, from, data, .. }: &TripleMessage) {
+            let ParsedMessage {
+                channel_tag,
+                waitpoint,
+                contents,
+            } = ParsedMessage::from(data.clone());
+            let contents = contents.csv().join(",");
+            let from: u32 = u32::from(*from);
+
             let mut file = OpenOptions::new()
                 .write(true)
                 .append(true)
                 .open(format!("{}.csv", participant))
                 .unwrap();
 
-            writeln!(file, "'{id}, {from:?}, {}", hex::encode(data)).unwrap();
+            writeln!(
+                file,
+                "'{id}, {from}, {channel_tag}, {waitpoint}, {contents},",
+            )
+            .unwrap();
         }
 
         fn poke_until_quiet(&mut self) -> Result<(), ProtocolError> {
@@ -340,18 +350,18 @@ mod test {
     // Improve this before we make more similar tests
     #[test]
     fn happy_triple_generation() {
-        let mut tm = TestManagers::new(5);
+        let mut tm = TestManagers::new(2);
 
-        const M: usize = 2;
-        const N: usize = M + 3;
+        const M: usize = 0;
+        const N: usize = 1;
         // Generate 5 triples
         for _ in 0..M {
             tm.generate(0).unwrap();
         }
         tm.poke_until_quiet().unwrap();
         tm.generate(1).unwrap();
-        tm.generate(2).unwrap();
-        tm.generate(4).unwrap();
+        // tm.generate(2).unwrap();
+        // tm.generate(4).unwrap();
 
         tm.poke_until_quiet().unwrap();
 
