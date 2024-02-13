@@ -54,14 +54,28 @@ async fn test_triples_and_presignatures() -> anyhow::Result<()> {
 }
 
 #[test(tokio::test)]
-async fn test_signature() -> anyhow::Result<()> {
+async fn test_signature_async() -> anyhow::Result<()> {
     with_multichain_nodes(3, |ctx| {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, 0).await?;
             assert_eq!(state_0.participants.len(), 3);
             wait_for::has_at_least_triples(&ctx, 2).await?;
             wait_for::has_at_least_presignatures(&ctx, 2).await?;
-            actions::single_signature_production(&ctx, &state_0).await
+            actions::single_signature_production_async(&ctx, &state_0).await
+        })
+    })
+    .await
+}
+
+#[test(tokio::test)]
+async fn test_signature_sync() -> anyhow::Result<()> {
+    with_multichain_nodes(3, |ctx| {
+        Box::pin(async move {
+            let state_0 = wait_for::running_mpc(&ctx, 0).await?;
+            assert_eq!(state_0.participants.len(), 3);
+            wait_for::has_at_least_triples(&ctx, 2).await?;
+            wait_for::has_at_least_presignatures(&ctx, 2).await?;
+            actions::single_signature_production_sync(&ctx, &state_0).await
         })
     })
     .await

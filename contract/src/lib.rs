@@ -309,14 +309,10 @@ impl MpcContract {
             payload,
             path
         );
-        match self.pending_requests.get(&payload) {
-            None => {
-                self.pending_requests.insert(&payload, &None);
-                log!(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
-                Self::ext(env::current_account_id()).sign_helper(payload, 0)
-            }
-            Some(_) => env::panic_str("Signature for this payload already requested"),
-        }
+        // TODO: prevent submitting the same paload twice which can cause conflicts
+        self.pending_requests.insert(&payload, &None);
+        log!(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
+        Self::ext(env::current_account_id()).sign_helper(payload, 0)
     }
 
     #[private]
