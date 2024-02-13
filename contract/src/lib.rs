@@ -4,7 +4,7 @@ use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
 use near_sdk::log;
 use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, Promise, PromiseOrValue, PublicKey};
+use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, PromiseOrValue, PublicKey};
 use primitives::{CandidateInfo, Candidates, Participants, PkVotes, Votes};
 use std::collections::{BTreeMap, HashSet};
 
@@ -293,9 +293,13 @@ impl MpcContract {
         }
     }
 
-    #[allow(unused_variables)]
     /// `key_version` must be less than or equal to the value at `latest_key_version`
-    pub fn sign(&mut self, payload: [u8; 32], path: String, key_version: Option<u32>) -> Promise {
+    pub fn sign(
+        &mut self,
+        payload: [u8; 32],
+        path: String,
+        key_version: Option<u32>,
+    ) -> PromiseOrValue<(String, String)> {
         let key_version = key_version.unwrap_or(0);
         let latest_key_version: u32 = self.latest_key_version();
         assert!(
@@ -309,10 +313,19 @@ impl MpcContract {
             payload,
             path
         );
-        // TODO: prevent submitting the same paload twice which can cause conflicts
-        self.pending_requests.insert(&payload, &None);
-        log!(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
-        Self::ext(env::current_account_id()).sign_helper(payload, 0)
+        match self.pending_requests.get(&payload) {
+            None => {
+                self.pending_requests.insert(&payload, &None);
+                log!(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
+                PromiseOrValue::Promise(
+                    Self::ext(env::current_account_id()).sign_helper(payload, 0),
+                )
+            }
+            Some(None) => PromiseOrValue::Promise(
+                Self::ext(env::current_account_id()).sign_helper(payload, 0),
+            ),
+            Some(Some(signature)) => PromiseOrValue::Value(signature),
+        }
     }
 
     #[private]
@@ -329,7 +342,6 @@ impl MpcContract {
                         signature,
                         depth
                     );
-                    self.pending_requests.remove(&payload);
                     PromiseOrValue::Value(signature)
                 }
                 None => {
