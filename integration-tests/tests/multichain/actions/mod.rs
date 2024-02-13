@@ -10,14 +10,12 @@ use mpc_recovery_node::kdf;
 use mpc_recovery_node::util::ScalarExt;
 use near_crypto::InMemorySigner;
 use near_jsonrpc_client::methods::broadcast_tx_async::RpcBroadcastTxAsyncRequest;
-use near_jsonrpc_client::methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest;
 use near_lake_primitives::CryptoHash;
 use near_primitives::transaction::{Action, FunctionCallAction, Transaction};
 use near_primitives::views::FinalExecutionStatus;
 use near_workspaces::Account;
 use rand::Rng;
 
-use core::sync;
 use std::time::Duration;
 
 pub async fn request_sign_async(
@@ -84,10 +82,11 @@ pub async fn request_sign_sync(
     })];
     let outcome = ctx
         .rpc_client
-        .send_tx(&signer, &receiver_id, actions)
+        .send_tx(&signer, receiver_id, actions)
         .await?;
     tokio::time::sleep(Duration::from_secs(1)).await;
     tracing::info!("outcome: {:?}", outcome);
+
     match outcome.status {
         FinalExecutionStatus::SuccessValue(signature_primitives_bytes) => {
             let (big_r, s): (AffinePoint, Scalar) =
