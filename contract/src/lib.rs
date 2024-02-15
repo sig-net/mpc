@@ -406,7 +406,7 @@ impl MpcContract {
     pub fn dummy_sign(&mut self, msg_hash: [u8; 32], path: String) {
         let predecessor = env::predecessor_account_id();
         let epsilon = mpc_kdf::derive_epsilon(&predecessor, &path);
-        let (_public, private) = self.dummy_key_pair(epsilon);
+        let (_public, private) = self.dummy_keypair(epsilon);
 
         let (sig, _) = private
             .try_sign_prehashed(DUMMY_EPHEMERAL_SCALAR, &msg_hash.into())
