@@ -100,7 +100,7 @@ async fn handle_block(
                         };
                         let epsilon =
                             mpc_kdf::derive_epsilon(&action.predecessor_id(), &sign_payload.path);
-                        let delta = mpc_kdf::derive_delta(receipt_id, entropy);
+                        let delta = mpc_kdf::derive_delta(receipt_id.0, entropy);
                         tracing::info!(
                             receipt_id = %receipt_id,
                             caller_id = receipt.predecessor_id().to_string(),

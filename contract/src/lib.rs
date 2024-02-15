@@ -1,5 +1,8 @@
 pub mod primitives;
 
+use k256::ecdsa::hazmat::SignPrimitive;
+use k256::elliptic_curve::CurveArithmetic;
+use k256::{Scalar, Secp256k1};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
 use near_sdk::log;
@@ -44,6 +47,15 @@ pub enum ProtocolContractState {
     Running(RunningContractState),
     Resharing(ResharingContractState),
 }
+
+/// TODO: Remove this on production contract
+/// Obviously this private key isn't private
+/// DO NOT USE THIS FOR NON DUMMY SIGNING
+static DUMMY_ROOT_PRIVATE_KEY: Scalar = Scalar::ZERO;
+
+/// Obviously this scalar is not ephemeral
+/// DO NOT USE THIS FOR NON DUMMY SIGNING
+static DUMMY_EPHEMERAL_SCALAR: Scalar = Scalar::ONE;
 
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
@@ -390,6 +402,25 @@ impl MpcContract {
     pub const fn latest_key_version(&self) -> u32 {
         0
     }
+
+    pub fn dummy_sign(&mut self, msg_hash: [u8; 32], path: String) {
+        let predecessor = env::predecessor_account_id();
+        let epsilon = mpc_kdf::derive_epsilon(&predecessor, &path);
+        let (_public, private) = self.dummy_key_pair(epsilon);
+
+        let (sig, _) = private
+            .try_sign_prehashed(DUMMY_EPHEMERAL_SCALAR, &msg_hash.into())
+            .unwrap();
+
+        self.respond(msg_hash, sig.r().to_string(), sig.s().to_string());
+    }
+
+    pub fn dummy_keypair(&self, epsilon: k256::Scalar) -> (mpc_kdf::PublicKey, k256::Scalar) {
+        let private_key_derivation = DUMMY_ROOT_PRIVATE_KEY + epsilon;
+        let public_key_derivation =
+            <Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * private_key_derivation;
+        (public_key_derivation.to_affine(), private_key_derivation)
+    }
 }
 
 #[cfg(test)]
@@ -408,7 +439,7 @@ mod test {
     ) -> ecdsa::Signature {
         let epsilon = mpc_kdf::derive_epsilon(predecessor_id, path);
 
-        let (_public, private) = dummy_key_pair(epsilon);
+        let (_public, private) = dummy_keypair(epsilon);
 
         let (signature, _) = private
             .try_sign_prehashed(DUMMY_EPHEMERAL_SCALAR, &payload.into())
@@ -447,7 +478,7 @@ mod test {
     /// kdf::derive_key PublicKey + Generator * epsilon = Tweaked Public Key
     /// Generator * (Private Key + epsilon) = Tweaked Public Key
     /// Generator * Private Key = Public Key
-    pub fn dummy_key_pair(epsilon: Scalar) -> (mpc_kdf::PublicKey, Scalar) {
+    pub fn dummy_keypair(epsilon: Scalar) -> (mpc_kdf::PublicKey, Scalar) {
         let private_key_derivation = DUMMY_ROOT_PRIVATE_KEY + epsilon;
         let public_key_derivation =
             <Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * private_key_derivation;
