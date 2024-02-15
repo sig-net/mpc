@@ -1,9 +1,9 @@
 use super::message::SignatureMessage;
 use super::presignature::{Presignature, PresignatureId, PresignatureManager};
 use super::state::RunningState;
-use crate::kdf;
 use crate::types::{PublicKey, SignatureProtocol};
-use crate::util::{AffinePointExt, ScalarExt};
+use crate::util::AffinePointExt;
+use mpc_contract::kdf::{self, ScalarExt};
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{Scalar, Secp256k1};

@@ -2,9 +2,9 @@ pub mod primitives;
 
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
-use near_sdk::log;
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, Promise, PromiseOrValue, PublicKey};
+use near_sdk::{log, CryptoHash};
 use primitives::{CandidateInfo, Candidates, Participants, PkVotes, Votes};
 use std::collections::{BTreeMap, HashSet};
 
@@ -304,8 +304,8 @@ impl MpcContract {
             latest_key_version,
         );
         log!(
-            "sign: signer={}, payload={:?} path={:?}",
-            env::signer_account_id(),
+            "sign: predecessor={}, payload={:?} path={:?}",
+            env::predecessor_account_id(),
             payload,
             path
         );
@@ -389,5 +389,72 @@ impl MpcContract {
     /// Currently only 0 is a valid key version
     pub const fn latest_key_version(&self) -> u32 {
         0
+    }
+}
+
+#[cfg(test)]
+pub mod kdf;
+
+#[cfg(test)]
+mod test {
+    use super::kdf;
+    use k256::ecdsa::hazmat::{SignPrimitive, VerifyPrimitive};
+    use k256::ecdsa::Signature;
+    use k256::elliptic_curve::CurveArithmetic;
+    use k256::{ecdsa, Scalar, Secp256k1};
+    use std::str::FromStr;
+
+    /// Generate a signature to allow people to test when the MPC service is down
+    pub fn dummy_signature(
+        payload: [u8; 32],
+        predecessor_id: &near_primitives::types::AccountId,
+        path: &str,
+    ) -> ecdsa::Signature {
+        let epsilon = kdf::derive_epsilon(predecessor_id, path);
+
+        let (public, private) = dummy_key_pair(epsilon);
+
+        let (signature, _) = private
+            .try_sign_prehashed(DUMMY_EPHEMERAL_SCALAR, &payload.into())
+            .unwrap();
+
+        signature
+    }
+
+    #[test]
+    fn verify_dummy_signature() {
+        let msg_hash: [u8; 32] = [0u8; 32];
+        let predecessor = near_primitives::types::AccountId::from_str("david.near").unwrap();
+        let path = "arbitrary_path";
+
+        let sig: Signature = dummy_signature(msg_hash, &predecessor, path);
+        let epsilon: Scalar = kdf::derive_epsilon(&predecessor, path);
+        let public_key: k256::AffinePoint = kdf::derive_key(dummy_root_public_key(), epsilon);
+
+        public_key.verify_prehashed(&msg_hash.into(), &sig).unwrap();
+    }
+
+    /// TODO: Remove this on production contract
+    /// Obviously this private key isn't private
+    /// DO NOT USE THIS FOR NON DUMMY SIGNING
+    static DUMMY_ROOT_PRIVATE_KEY: Scalar = Scalar::ZERO;
+
+    /// Obviously this scalar is not ephemeral
+    /// DO NOT USE THIS FOR NON DUMMY SIGNING
+    static DUMMY_EPHEMERAL_SCALAR: Scalar = Scalar::ONE;
+
+    fn dummy_root_public_key() -> kdf::PublicKey {
+        (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * DUMMY_ROOT_PRIVATE_KEY)
+            .to_affine()
+    }
+
+    /// kdf::derive_key PublicKey + Generator * epsilon = Tweaked Public Key
+    /// Generator * (Private Key + epsilon) = Tweaked Public Key
+    /// Generator * Private Key = Public Key
+    pub fn dummy_key_pair(epsilon: Scalar) -> (kdf::PublicKey, Scalar) {
+        let private_key_derivation = DUMMY_ROOT_PRIVATE_KEY + epsilon;
+        let public_key_derivation =
+            <Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * private_key_derivation;
+        (public_key_derivation.to_affine(), private_key_derivation)
     }
 }

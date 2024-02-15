@@ -12,6 +12,17 @@ near-sdk = "5.0.0-alpha.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "0.8"
+# Forces deps to build with this feature
+getrandom = {version = "0.2", features = ["js"]}
+# Testing deps
+hkdf = "0.12.4"
+sha2 = "0.10.8"
+
+// These break the wasm build
+[dev-dependencies]
+near-primitives = "0.17.0"
+k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
+near-crypto = "0.17"
 
 [profile.release]
 codegen-units = 1

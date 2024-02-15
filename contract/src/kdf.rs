@@ -1,11 +1,22 @@
-use crate::types::PublicKey;
-use crate::util::ScalarExt;
 use hkdf::Hkdf;
+use k256::elliptic_curve::scalar::FromUintUnchecked;
 use k256::elliptic_curve::CurveArithmetic;
-use k256::{Scalar, Secp256k1};
+use k256::{Scalar, Secp256k1, U256};
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::AccountId;
 use sha2::{Digest, Sha256};
+
+pub trait ScalarExt {
+    fn from_bytes(bytes: &[u8]) -> Self;
+}
+
+impl ScalarExt for Scalar {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        Scalar::from_uint_unchecked(U256::from_le_slice(bytes))
+    }
+}
+
+pub type PublicKey = <Secp256k1 as CurveArithmetic>::AffinePoint;
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // near-mpc-recovery with key derivation protocol vX.Y.Z.

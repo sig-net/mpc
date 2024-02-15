@@ -1,4 +1,4 @@
-use crate::kdf;
+use mpc_contract::kdf;
 use crate::protocol::{SignQueue, SignRequest};
 use near_lake_framework::{LakeBuilder, LakeContext};
 use near_lake_primitives::actions::ActionMetaDataExt;
