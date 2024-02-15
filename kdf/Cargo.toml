@@ -1,0 +1,10 @@
+[package]
+name = "mpc-kdf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hkdf = "0.12.4"
+sha2 = "0.10.8"
+k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
+bs58 = "0.5"
