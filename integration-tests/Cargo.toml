@@ -45,6 +45,7 @@ near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs.g
 
 mpc-contract = { path = "../contract" }
 mpc-keys = { path = "../keys" }
+mpc-kdf = { path = "../kdf" }
 mpc-recovery = { path = "../mpc-recovery" }
 mpc-recovery-node = { path = "../node" }
 

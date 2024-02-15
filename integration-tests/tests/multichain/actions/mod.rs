@@ -6,8 +6,7 @@ use cait_sith::FullSignature;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
 use mpc_contract::RunningContractState;
-use mpc_recovery_node::kdf;
-use mpc_recovery_node::util::ScalarExt;
+use mpc_kdf::ScalarExt;
 use near_crypto::InMemorySigner;
 use near_jsonrpc_client::methods::broadcast_tx_async::RpcBroadcastTxAsyncRequest;
 use near_lake_primitives::CryptoHash;
@@ -66,10 +65,10 @@ pub async fn assert_signature(
 ) {
     let point = EncodedPoint::from_bytes(pk_bytes).unwrap();
     let public_key = AffinePoint::from_encoded_point(&point).unwrap();
-    let epsilon = kdf::derive_epsilon(account_id, "test");
+    let epsilon = mpc_kdf::derive_epsilon(account_id, "test");
 
     assert!(signature.verify(
-        &kdf::derive_key(public_key, epsilon),
+        &mpc_kdf::derive_key(public_key, epsilon),
         &Scalar::from_bytes(payload),
     ));
 }

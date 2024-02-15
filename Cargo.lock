@@ -3825,15 +3825,23 @@ name = "mpc-contract"
 version = "0.1.0"
 dependencies = [
  "borsh 1.3.1",
- "getrandom 0.2.12",
- "hkdf",
  "k256",
- "near-crypto 0.17.0",
+ "mpc-kdf",
  "near-primitives 0.17.0",
  "near-sdk",
  "schemars",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "mpc-kdf"
+version = "0.1.0"
+dependencies = [
+ "hkdf",
+ "k256",
+ "near-crypto 0.17.0",
+ "near-primitives 0.17.0",
  "sha2 0.10.8",
 ]
 
@@ -3925,6 +3933,7 @@ dependencies = [
  "hyper",
  "k256",
  "mpc-contract",
+ "mpc-kdf",
  "mpc-keys",
  "mpc-recovery",
  "mpc-recovery-node",
@@ -3978,6 +3987,7 @@ dependencies = [
  "k256",
  "local-ip-address",
  "mpc-contract",
+ "mpc-kdf",
  "mpc-keys",
  "near-crypto 0.17.0",
  "near-fetch",

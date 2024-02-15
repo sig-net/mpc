@@ -2,9 +2,9 @@ pub mod primitives;
 
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
+use near_sdk::log;
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, Promise, PromiseOrValue, PublicKey};
-use near_sdk::{log, CryptoHash};
 use primitives::{CandidateInfo, Candidates, Participants, PkVotes, Votes};
 use std::collections::{BTreeMap, HashSet};
 
@@ -393,11 +393,7 @@ impl MpcContract {
 }
 
 #[cfg(test)]
-pub mod kdf;
-
-#[cfg(test)]
 mod test {
-    use super::kdf;
     use k256::ecdsa::hazmat::{SignPrimitive, VerifyPrimitive};
     use k256::ecdsa::Signature;
     use k256::elliptic_curve::CurveArithmetic;
@@ -410,9 +406,9 @@ mod test {
         predecessor_id: &near_primitives::types::AccountId,
         path: &str,
     ) -> ecdsa::Signature {
-        let epsilon = kdf::derive_epsilon(predecessor_id, path);
+        let epsilon = mpc_kdf::derive_epsilon(predecessor_id, path);
 
-        let (public, private) = dummy_key_pair(epsilon);
+        let (_public, private) = dummy_key_pair(epsilon);
 
         let (signature, _) = private
             .try_sign_prehashed(DUMMY_EPHEMERAL_SCALAR, &payload.into())
@@ -428,8 +424,8 @@ mod test {
         let path = "arbitrary_path";
 
         let sig: Signature = dummy_signature(msg_hash, &predecessor, path);
-        let epsilon: Scalar = kdf::derive_epsilon(&predecessor, path);
-        let public_key: k256::AffinePoint = kdf::derive_key(dummy_root_public_key(), epsilon);
+        let epsilon: Scalar = mpc_kdf::derive_epsilon(&predecessor, path);
+        let public_key: k256::AffinePoint = mpc_kdf::derive_key(dummy_root_public_key(), epsilon);
 
         public_key.verify_prehashed(&msg_hash.into(), &sig).unwrap();
     }
@@ -443,7 +439,7 @@ mod test {
     /// DO NOT USE THIS FOR NON DUMMY SIGNING
     static DUMMY_EPHEMERAL_SCALAR: Scalar = Scalar::ONE;
 
-    fn dummy_root_public_key() -> kdf::PublicKey {
+    fn dummy_root_public_key() -> mpc_kdf::PublicKey {
         (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * DUMMY_ROOT_PRIVATE_KEY)
             .to_affine()
     }
@@ -451,7 +447,7 @@ mod test {
     /// kdf::derive_key PublicKey + Generator * epsilon = Tweaked Public Key
     /// Generator * (Private Key + epsilon) = Tweaked Public Key
     /// Generator * Private Key = Public Key
-    pub fn dummy_key_pair(epsilon: Scalar) -> (kdf::PublicKey, Scalar) {
+    pub fn dummy_key_pair(epsilon: Scalar) -> (mpc_kdf::PublicKey, Scalar) {
         let private_key_derivation = DUMMY_ROOT_PRIVATE_KEY + epsilon;
         let public_key_derivation =
             <Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * private_key_derivation;

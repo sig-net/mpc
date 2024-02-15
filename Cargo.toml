@@ -6,6 +6,7 @@ members = [
     "integration-tests",
     "load-tests",
     "keys",
+    "kdf",
     "test-oidc-provider",
 ]
 

@@ -3,10 +3,10 @@ use super::presignature::{Presignature, PresignatureId, PresignatureManager};
 use super::state::RunningState;
 use crate::types::{PublicKey, SignatureProtocol};
 use crate::util::AffinePointExt;
-use mpc_contract::kdf::{self, ScalarExt};
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{Scalar, Secp256k1};
+use mpc_kdf::{self, ScalarExt};
 use near_crypto::Signer;
 use near_fetch::signer::ExposeAccountId;
 use near_primitives::hash::CryptoHash;
@@ -198,7 +198,7 @@ impl SignatureManager {
         let protocol = Box::new(cait_sith::sign(
             participants,
             me,
-            kdf::derive_key(public_key, epsilon),
+            mpc_kdf::derive_key(public_key, epsilon),
             output,
             Scalar::from_bytes(&msg_hash),
         )?);

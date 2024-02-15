@@ -1,4 +1,3 @@
-use mpc_contract::kdf;
 use crate::protocol::{SignQueue, SignRequest};
 use near_lake_framework::{LakeBuilder, LakeContext};
 use near_lake_primitives::actions::ActionMetaDataExt;
@@ -100,8 +99,8 @@ async fn handle_block(
                             continue;
                         };
                         let epsilon =
-                            kdf::derive_epsilon(&action.predecessor_id(), &sign_payload.path);
-                        let delta = kdf::derive_delta(receipt_id, entropy);
+                            mpc_kdf::derive_epsilon(&action.predecessor_id(), &sign_payload.path);
+                        let delta = mpc_kdf::derive_delta(receipt_id, entropy);
                         tracing::info!(
                             receipt_id = %receipt_id,
                             caller_id = receipt.predecessor_id().to_string(),
