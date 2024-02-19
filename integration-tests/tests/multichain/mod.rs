@@ -1,7 +1,13 @@
 pub mod actions;
 
-use crate::with_multichain_nodes;
+use crate::{multichain::actions::request_sign, with_multichain_nodes};
 use actions::wait_for;
+use k256::elliptic_curve::group::GroupEncoding;
+use k256::elliptic_curve::point::AffineCoordinates;
+use k256::AffinePoint;
+use mpc_recovery_node::kdf;
+use mpc_recovery_node::util::NearPublicKeyExt;
+use secp256k1::XOnlyPublicKey;
 use test_log::test;
 
 #[test(tokio::test)]
@@ -67,39 +73,92 @@ async fn test_signature() -> anyhow::Result<()> {
     .await
 }
 
-use std::str::FromStr;
+// TODO: working ethereum example for referance
+// use std::str::FromStr;
 
-use web3::{
-    ethabi::ethereum_types::U256,
-    signing::SecretKey,
-    types::{Address, TransactionParameters},
-};
+// use web3::{
+//     ethabi::ethereum_types::U256,
+//     signing::SecretKey,
+//     types::{Address, TransactionParameters},
+// };
+
+// #[test(tokio::test)]
+// async fn test_ecsign_experiment() -> Result<(), Box<dyn std::error::Error>> {
+//     let transport = web3::transports::Http::new("https://rpc2.sepolia.org")?;
+//     let web3 = web3::Web3::new(transport);
+
+//     let to = Address::from_str("0xa3286628134bad128faeef82f44e99aa64085c93").unwrap();
+
+//     let prvk =
+//         SecretKey::from_str("9ea65c28a56227218ae206bacfa424be4da742791d93cb396d0ff5da3cee3736")
+//             .unwrap();
+
+//     let tx_object = TransactionParameters {
+//         to: Some(to),
+//         value: U256::one(),
+//         ..Default::default()
+//     };
+
+//     let signed = web3.accounts().sign_transaction(tx_object, &prvk).await?;
+
+//     let result = web3
+//         .eth()
+//         .send_raw_transaction(signed.raw_transaction)
+//         .await?;
+
+//     println!("Tx succeeded with hash: {}", result);
+
+//     Ok(())
+// }
 
 #[test(tokio::test)]
-async fn test_ecsign_experiment() -> Result<(), Box<dyn std::error::Error>> {
-    let transport = web3::transports::Http::new("https://rpc2.sepolia.org")?;
-    let web3 = web3::Web3::new(transport);
+async fn test_pk_recovery() -> anyhow::Result<()> {
+    with_multichain_nodes(3, |ctx| {
+        Box::pin(async move {
+            let state_0 = wait_for::running_mpc(&ctx, 0).await?;
+            assert_eq!(state_0.participants.len(), 3);
+            wait_for::has_at_least_triples(&ctx, 2).await?;
+            wait_for::has_at_least_presignatures(&ctx, 2).await?;
 
-    let to = Address::from_str("0xa3286628134bad128faeef82f44e99aa64085c93").unwrap();
+            let (payload, account, tx_hash) = request_sign(&ctx).await?;
+            let (signature_big_r, signature_s) =
+                wait_for::signature_responded(&ctx, tx_hash).await?;
 
-    let prvk =
-        SecretKey::from_str("9ea65c28a56227218ae206bacfa424be4da742791d93cb396d0ff5da3cee3736")
-            .unwrap();
+            let mpc_pk: AffinePoint = state_0.public_key.clone().into_affine_point();
+            let derivation_epsilon: k256::Scalar = kdf::derive_epsilon(account.id(), "test");
+            let user_pk: AffinePoint = kdf::derive_key(mpc_pk, derivation_epsilon);
+            let y_parity = match user_pk.y_is_odd().unwrap_u8() {
+                0 => secp256k1::Parity::Even,
+                1 => secp256k1::Parity::Odd,
+                _ => unreachable!(),
+            };
+            let user_pk: XOnlyPublicKey = XOnlyPublicKey::from_slice(&user_pk.to_bytes()).unwrap(); // TODO: probably we will need to get x cocrdinate only
+            let user_pk: secp256k1::PublicKey = secp256k1::PublicKey::from_x_only_public_key(user_pk, y_parity);
+            let user_address = public_key_to_address(&user_pk.into());
 
-    let tx_object = TransactionParameters {
-        to: Some(to),
-        value: U256::one(),
-        ..Default::default()
-    };
+            let signature_for_recovery: [u8; 64] = {
+                let mut signature = [0u8; 64];
+                signature[..32].copy_from_slice(&signature_big_r.to_bytes()); // TODO: we need to take r, not R
+                signature[32..].copy_from_slice(&signature_s.to_bytes());
+                signature
+            };
 
-    let signed = web3.accounts().sign_transaction(tx_object, &prvk).await?;
+            let recovery_id: i32 = signature_big_r.y_is_odd().unwrap_u8() as i32; // TODO: should it be 0/1 or 27/28, or formula?
 
-    let result = web3
-        .eth()
-        .send_raw_transaction(signed.raw_transaction)
-        .await?;
+            let recovered_address = web3::signing::recover(&payload, &signature_for_recovery, recovery_id).unwrap();
 
-    println!("Tx succeeded with hash: {}", result);
+            assert_eq!(user_address, recovered_address);
+            Ok(())
+        })
+    })
+    .await
+}
 
-    Ok(())
+pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> web3::types::Address {
+    let public_key = public_key.serialize_uncompressed();
+
+    debug_assert_eq!(public_key[0], 0x04);
+    let hash = web3::signing::keccak256(&public_key[1..]);
+
+    web3::types::Address::from_slice(&hash[12..])
 }
