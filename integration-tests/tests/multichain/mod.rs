@@ -66,3 +66,40 @@ async fn test_signature() -> anyhow::Result<()> {
     })
     .await
 }
+
+use std::str::FromStr;
+
+use web3::{
+    ethabi::ethereum_types::U256,
+    signing::SecretKey,
+    types::{Address, TransactionParameters},
+};
+
+#[test(tokio::test)]
+async fn test_ecsign_experiment() -> Result<(), Box<dyn std::error::Error>> {
+    let transport = web3::transports::Http::new("https://rpc2.sepolia.org")?;
+    let web3 = web3::Web3::new(transport);
+
+    let to = Address::from_str("0xa3286628134bad128faeef82f44e99aa64085c93").unwrap();
+
+    let prvk =
+        SecretKey::from_str("9ea65c28a56227218ae206bacfa424be4da742791d93cb396d0ff5da3cee3736")
+            .unwrap();
+
+    let tx_object = TransactionParameters {
+        to: Some(to),
+        value: U256::one(),
+        ..Default::default()
+    };
+
+    let signed = web3.accounts().sign_transaction(tx_object, &prvk).await?;
+
+    let result = web3
+        .eth()
+        .send_raw_transaction(signed.raw_transaction)
+        .await?;
+
+    println!("Tx succeeded with hash: {}", result);
+
+    Ok(())
+}
