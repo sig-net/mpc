@@ -7,6 +7,7 @@ use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
 use k256::Secp256k1;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
+use std::time::Instant;
 
 /// Unique number used to identify a specific ongoing presignature generation protocol.
 /// Without `PresignatureId` it would be unclear where to route incoming cait-sith presignature
@@ -25,6 +26,40 @@ pub struct PresignatureGenerator {
     pub triple0: TripleId,
     pub triple1: TripleId,
     pub mine: bool,
+    pub timestamp: Instant,
+}
+
+impl PresignatureGenerator {
+    pub fn new(
+        protocol: PresignatureProtocol,
+        triple0: TripleId,
+        triple1: TripleId,
+        mine: bool,
+    ) -> Self {
+        Self {
+            protocol,
+            triple0,
+            triple1,
+            mine,
+            timestamp: Instant::now(),
+        }
+    }
+
+    pub fn poke(&mut self) -> Result<Action<PresignOutput<Secp256k1>>, ProtocolError> {
+        if self.timestamp.elapsed() > crate::types::PROTOCOL_TIMEOUT {
+            tracing::info!(
+                self.triple0,
+                self.triple1,
+                self.mine,
+                "presignature protocol timed out"
+            );
+            return Err(ProtocolError::Other(
+                anyhow::anyhow!("presignature protocol timed out").into(),
+            ));
+        }
+
+        self.protocol.poke()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -111,12 +146,9 @@ impl PresignatureManager {
                 threshold,
             },
         )?);
-        Ok(PresignatureGenerator {
-            protocol,
-            triple0: triple0.id,
-            triple1: triple1.id,
-            mine,
-        })
+        Ok(PresignatureGenerator::new(
+            protocol, triple0.id, triple1.id, mine,
+        ))
     }
 
     /// Starts a new presignature generation protocol.
@@ -149,7 +181,7 @@ impl PresignatureManager {
     /// 3) Has never been seen by the manager in which case start a new protocol and returns `Some(protocol)`, or
     /// 4) Depends on triples (`triple0`/`triple1`) that are unknown to the node
     // TODO: What if the presignature completed generation and is already spent?
-    pub fn get_or_generate(
+    pub async fn get_or_generate(
         &mut self,
         id: PresignatureId,
         triple0: TripleId,
@@ -164,17 +196,18 @@ impl PresignatureManager {
             match self.generators.entry(id) {
                 Entry::Vacant(entry) => {
                     tracing::info!(id, "joining protocol to generate a new presignature");
-                    let (triple0, triple1) = match triple_manager.take_two(triple0, triple1) {
-                        Ok(result) => result,
-                        Err(missing_triple_id) => {
-                            tracing::warn!(
-                                triple0,
-                                triple1,
-                                "one of the triples is missing, can't join"
-                            );
-                            return Err(GenerationError::TripleIsMissing(missing_triple_id));
-                        }
-                    };
+                    let (triple0, triple1) =
+                        match triple_manager.take_two(triple0, triple1, false).await {
+                            Ok(result) => result,
+                            Err(missing_triple_id) => {
+                                tracing::warn!(
+                                    triple0,
+                                    triple1,
+                                    "one of the triples is missing, can't join"
+                                );
+                                return Err(GenerationError::TripleIsMissing(missing_triple_id));
+                            }
+                        };
                     let generator = Self::generate_internal(
                         &self.participants,
                         self.me,
@@ -212,8 +245,7 @@ impl PresignatureManager {
         let mut result = Ok(());
         self.generators.retain(|id, generator| {
             loop {
-                let protocol = &mut generator.protocol;
-                let action = match protocol.poke() {
+                let action = match generator.poke() {
                     Ok(action) => action,
                     Err(e) => {
                         result = Err(e);

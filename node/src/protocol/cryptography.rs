@@ -1,11 +1,12 @@
 use std::sync::PoisonError;
 
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
+use crate::gcp::error::SecretStorageError;
 use crate::http_client::SendError;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MpcMessage;
-use crate::storage::{SecretNodeStorageBox, SecretStorageError};
+use crate::storage::secret_storage::SecretNodeStorageBox;
 use async_trait::async_trait;
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use k256::elliptic_curve::group::GroupEncoding;
@@ -296,20 +297,20 @@ impl CryptographicProtocol for RunningState {
         }
 
         let mut triple_manager = self.triple_manager.write().await;
-        if triple_manager.my_len() < 2 && triple_manager.potential_len() < 10 {
+        if triple_manager.my_len() < 2 {
             triple_manager.generate()?;
         }
-        for (p, msg) in triple_manager.poke()? {
+        for (p, msg) in triple_manager.poke().await? {
             let info = self.fetch_participant(&p)?;
             messages.push(info.clone(), MpcMessage::Triple(msg));
         }
 
         let mut presignature_manager = self.presignature_manager.write().await;
-        if presignature_manager.my_len() < 2 && presignature_manager.potential_len() < 10 {
+        if presignature_manager.my_len() < 2 {
             // To ensure there is no contention between different nodes we are only using triples
             // that we proposed. This way in a non-BFT environment we are guaranteed to never try
             // to use the same triple as any other node.
-            if let Some((triple0, triple1)) = triple_manager.take_two_mine() {
+            if let Some((triple0, triple1)) = triple_manager.take_two_mine().await {
                 presignature_manager.generate(
                     triple0,
                     triple1,
@@ -333,12 +334,22 @@ impl CryptographicProtocol for RunningState {
         sign_queue.organize(&self, ctx.me().await);
         let my_requests = sign_queue.my_requests(ctx.me().await);
         while presignature_manager.my_len() > 0 {
+            if signature_manager.failed_len() > 0 {
+                let Some(presignature) = presignature_manager.take_mine() else {
+                    break;
+                };
+                signature_manager.retry_failed_generation(presignature);
+                break;
+            }
+
             let Some((receipt_id, _)) = my_requests.iter().next() else {
                 break;
             };
+
             let Some(presignature) = presignature_manager.take_mine() else {
                 break;
             };
+
             let receipt_id = *receipt_id;
             let my_request = my_requests.remove(&receipt_id).unwrap();
             signature_manager.generate(
@@ -352,7 +363,7 @@ impl CryptographicProtocol for RunningState {
         }
         drop(sign_queue);
         drop(presignature_manager);
-        for (p, msg) in signature_manager.poke()? {
+        for (p, msg) in signature_manager.poke() {
             let info = self.participants.get(&p).unwrap();
             messages.push(info.clone(), MpcMessage::Signature(msg));
         }
