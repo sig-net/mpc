@@ -105,13 +105,8 @@ fn check_signature_cait_sith(
     };
 
     let user_pk = kdf::derive_key(*mpc_pk, *derivation_epsilon);
-    let encoded_point = signature_big_r.to_encoded_point(true); // Use `true` for compressed encoding
 
-    let x_bytes = &encoded_point.as_ref()[1..]; // Skip the first byte (compression indicator)
-
-    let fb = FieldBytes::from_slice(x_bytes);
-    // Convert the x-coordinate bytes into a `FieldBytes<C>`
-    let sig = Signature::from_scalars(*fb, signature_s).unwrap();
+    let sig = Signature::from_scalars(signature_big_r.x(), signature_s).unwrap();
 
     println!("Actual Public Key {:?}", VerifyingKey::from_affine(user_pk));
     for i in 0u8..=3 {
