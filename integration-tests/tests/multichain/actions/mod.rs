@@ -2,8 +2,13 @@ pub mod wait_for;
 
 use crate::MultichainTestContext;
 
+use curv::arithmetic::Converter;
+use k256::ecdsa::{Signature, VerifyingKey, RecoveryId};
+use k256::ecdsa::hazmat::VerifyPrimitive;
+use k256::elliptic_curve::Field;
 use k256::elliptic_curve::point::AffineCoordinates;
-use k256::{ecdsa, AffinePoint, Scalar, Secp256k1};
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use k256::{ecdsa, AffinePoint, Scalar, Secp256k1, FieldBytes, PublicKey};
 use mpc_contract::RunningContractState;
 use mpc_recovery_node::kdf;
 use mpc_recovery_node::util::{NearPublicKeyExt, ScalarExt};
@@ -100,6 +105,20 @@ fn check_signature_cait_sith(
     };
 
     let user_pk = kdf::derive_key(*mpc_pk, *derivation_epsilon);
+    let encoded_point = signature_big_r.to_encoded_point(true); // Use `true` for compressed encoding
+
+    let x_bytes = &encoded_point.as_ref()[1..]; // Skip the first byte (compression indicator)
+
+    let fb = FieldBytes::from_slice(x_bytes);
+    // Convert the x-coordinate bytes into a `FieldBytes<C>`
+    let sig = Signature::from_scalars(*fb, signature_s).unwrap();
+
+    println!("Actual Public Key {:?}", VerifyingKey::from_affine(user_pk));
+    for i in 0u8..=3 {
+        let recovery_id = RecoveryId::from_byte(i).unwrap();
+        let res = VerifyingKey::recover_from_prehash(payload, &sig, recovery_id);
+        println!("{} {:?}", i, res);
+    }
 
     let payload2: [u8; 32] = rand::thread_rng().gen();
 
