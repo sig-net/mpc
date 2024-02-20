@@ -1,7 +1,8 @@
 pub mod wait_for;
 
-use crate::MultichainTestContext;
+use crate::{account, MultichainTestContext};
 
+use anyhow::Ok;
 use curv::arithmetic::Converter;
 use k256::ecdsa::{Signature, VerifyingKey, RecoveryId};
 use k256::ecdsa::hazmat::VerifyPrimitive;
@@ -16,7 +17,8 @@ use near_crypto::InMemorySigner;
 use near_jsonrpc_client::methods::broadcast_tx_async::RpcBroadcastTxAsyncRequest;
 use near_lake_primitives::CryptoHash;
 use near_primitives::transaction::{Action, FunctionCallAction, Transaction};
-use near_workspaces::Account;
+use near_workspaces::types::{KeyType, SecretKey};
+use near_workspaces::{Account, AccountId};
 use rand::Rng;
 
 use std::time::Duration;
@@ -25,8 +27,15 @@ pub async fn request_sign(
     ctx: &MultichainTestContext<'_>,
 ) -> anyhow::Result<([u8; 32], Account, CryptoHash)> {
     let worker = &ctx.nodes.ctx().worker;
-    let account = worker.dev_create_account().await?;
-    let payload: [u8; 32] = rand::thread_rng().gen();
+    let sk = SecretKey::from_seed(KeyType::SECP256K1, "seed");
+    let account_id = AccountId::try_from("acc_mc.test.near".to_string())?;
+    // same account is used multiple times, we are creating it if it doesn't already exist
+    let account = match worker.view_account(&account_id).await.is_ok() {
+        true => Account::from_secret_key(account_id, sk, worker),
+        false => worker.create_tla(account_id, sk).await?.unwrap(),
+    };
+    let payload = rand::thread_rng().gen();
+    // let payload: [u8; 32] = [5u8; 32];
     let signer = InMemorySigner {
         account_id: account.id().clone(),
         public_key: account.secret_key().public_key().clone().into(),
@@ -65,6 +74,7 @@ pub async fn request_sign(
 pub async fn single_signature_production(
     ctx: &MultichainTestContext<'_>,
     state: &RunningContractState,
+    execution_index: i32,
 ) -> anyhow::Result<()> {
     let (payload, account, tx_hash) = request_sign(ctx).await?;
     let (signature_big_r, signature_s) = wait_for::signature_responded(ctx, tx_hash).await?;
@@ -79,6 +89,7 @@ pub async fn single_signature_production(
         &payload,
         &derivation_epsilon,
         &mpc_pk,
+        execution_index,
     );
 
     check_signature_ethers(
@@ -98,6 +109,7 @@ fn check_signature_cait_sith(
     payload: &[u8; 32],
     derivation_epsilon: &Scalar,
     mpc_pk: &AffinePoint,
+    execution_index: i32,
 ) {
     let signature = cait_sith::FullSignature::<Secp256k1> {
         big_r: *signature_big_r,
@@ -108,11 +120,11 @@ fn check_signature_cait_sith(
 
     let sig = Signature::from_scalars(signature_big_r.x(), signature_s).unwrap();
 
-    println!("Actual Public Key {:?}", VerifyingKey::from_affine(user_pk));
+    println!("Expected Public Key {:?}", VerifyingKey::from_affine(user_pk));
     for i in 0u8..=3 {
         let recovery_id = RecoveryId::from_byte(i).unwrap();
         let res = VerifyingKey::recover_from_prehash(payload, &sig, recovery_id);
-        println!("{} {:?}", i, res);
+        println!("Execution index: {}, v? : {}, res: {:?}", execution_index, i, res);
     }
 
     let payload2: [u8; 32] = rand::thread_rng().gen();

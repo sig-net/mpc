@@ -1,7 +1,7 @@
 use crate::types::PublicKey;
 use crate::util::ScalarExt;
 use hkdf::Hkdf;
-use k256::elliptic_curve::CurveArithmetic;
+use k256::elliptic_curve::{CurveArithmetic, Field};
 use k256::{Scalar, Secp256k1};
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::AccountId;
@@ -31,11 +31,12 @@ pub fn derive_epsilon(signer_id: &AccountId, path: &str) -> Scalar {
 // that we generate different random scalars as delta tweaks.
 // Receipt ID should be unique inside of a block, so it serves us as the request identifier.
 pub fn derive_delta(receipt_id: CryptoHash, entropy: [u8; 32]) -> Scalar {
-    let hk = Hkdf::<Sha256>::new(None, &entropy);
-    let info = format!("{DELTA_DERIVATION_PREFIX}:{}", receipt_id);
-    let mut okm = [0u8; 32];
-    hk.expand(info.as_bytes(), &mut okm).unwrap();
-    Scalar::from_bytes(&okm)
+    // let hk = Hkdf::<Sha256>::new(None, &entropy);
+    // let info = format!("{DELTA_DERIVATION_PREFIX}:{}", receipt_id);
+    // let mut okm = [0u8; 32];
+    // hk.expand(info.as_bytes(), &mut okm).unwrap();
+    // Scalar::from_bytes(&okm)
+    Scalar::ONE
 }
 
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
