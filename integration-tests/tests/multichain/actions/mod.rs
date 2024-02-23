@@ -127,11 +127,16 @@ fn check_signature_cait_sith(
         println!("Execution index: {}, v? : {}, res: {:?}", execution_index, i, res);
     }
 
-    let payload2: [u8; 32] = rand::thread_rng().gen();
+    let bad_payload: [u8; 32] = rand::thread_rng().gen();
+    let bad_pk = kdf::derive_key(*mpc_pk, *derivation_epsilon + Scalar::ONE);
 
     assert!(signature.verify(&user_pk, &Scalar::from_bytes(payload)));
     assert_eq!(
-        signature.verify(&user_pk, &Scalar::from_bytes(&payload2)),
+        signature.verify(&user_pk, &Scalar::from_bytes(&bad_payload)),
+        false
+    );
+    assert_eq!(
+        signature.verify(&bad_pk, &Scalar::from_bytes(payload)),
         false
     );
 }
