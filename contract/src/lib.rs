@@ -5,7 +5,9 @@ use near_sdk::collections::LookupMap;
 use near_sdk::log;
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, Promise, PromiseOrValue, PublicKey};
-use primitives::{CandidateInfo, Candidates, Participants, PkVotes, Votes};
+use primitives::{
+    CandidateInfo, Candidates, Participants, PkVotes, SignRequest, SignResponse, Votes,
+};
 use std::collections::{BTreeMap, HashSet};
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
@@ -49,7 +51,7 @@ pub enum ProtocolContractState {
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct MpcContract {
     protocol_state: ProtocolContractState,
-    pending_requests: LookupMap<[u8; 32], Option<(String, String)>>,
+    pending_requests: LookupMap<SignRequest, Option<SignResponse>>,
 }
 
 #[near_bindgen]
@@ -295,7 +297,12 @@ impl MpcContract {
 
     #[allow(unused_variables)]
     /// `key_version` must be less than or equal to the value at `latest_key_version`
-    pub fn sign(&mut self, payload: [u8; 32], path: String, key_version: Option<u32>) -> Promise {
+    pub fn sign(
+        &mut self,
+        sign_request: SignRequest,
+        path: String,
+        key_version: Option<u32>,
+    ) -> Promise {
         let key_version = key_version.unwrap_or(0);
         let latest_key_version: u32 = self.latest_key_version();
         assert!(
@@ -304,45 +311,47 @@ impl MpcContract {
             latest_key_version,
         );
         log!(
-            "sign: signer={}, payload={:?} path={:?}",
+            "sign: signer={}, sign_request={:?} path={:?}",
             env::signer_account_id(),
-            payload,
+            sign_request,
             path
         );
-        match self.pending_requests.get(&payload) {
+        match self.pending_requests.get(&sign_request) {
             None => {
-                self.pending_requests.insert(&payload, &None);
+                self.pending_requests.insert(&sign_request, &None);
                 log!(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
-                Self::ext(env::current_account_id()).sign_helper(payload, 0)
+                Self::ext(env::current_account_id()).check_if_signature_ready(sign_request, 0)
             }
             Some(_) => env::panic_str("Signature for this payload already requested"),
         }
     }
 
     #[private]
-    pub fn sign_helper(
+    pub fn check_if_signature_ready(
         &mut self,
-        payload: [u8; 32],
+        sign_request: SignRequest,
         depth: usize,
-    ) -> PromiseOrValue<(String, String)> {
-        if let Some(signature) = self.pending_requests.get(&payload) {
-            match signature {
-                Some(signature) => {
+    ) -> PromiseOrValue<SignResponse> {
+        if let Some(sign_response) = self.pending_requests.get(&sign_request) {
+            match sign_response {
+                Some(sign_response) => {
                     log!(
-                        "sign_helper: signature ready: {:?}, depth: {:?}",
-                        signature,
+                        "check_if_signature_ready: signature response: {:?}, depth: {:?}",
+                        sign_response,
                         depth
                     );
-                    self.pending_requests.remove(&payload);
-                    PromiseOrValue::Value(signature)
+                    self.pending_requests.remove(&sign_request);
+                    PromiseOrValue::Value(sign_response)
                 }
                 None => {
                     log!(&format!(
-                        "sign_helper: signature not ready yet (depth={})",
+                        "check_if_signature_ready: signature not ready yet (depth={})",
                         depth
                     ));
                     let account_id = env::current_account_id();
-                    PromiseOrValue::Promise(Self::ext(account_id).sign_helper(payload, depth + 1))
+                    PromiseOrValue::Promise(
+                        Self::ext(account_id).check_if_signature_ready(sign_request, depth + 1),
+                    )
                 }
             }
         } else {
@@ -350,15 +359,15 @@ impl MpcContract {
         }
     }
 
-    pub fn respond(&mut self, payload: [u8; 32], big_r: String, s: String) {
+    pub fn respond(&mut self, sign_request: SignRequest, sign_response: SignResponse) {
         log!(
-            "respond: signer={}, payload={:?} big_r={} s={}",
+            "respond: signer={}, sign_request={:?} sign_respose={:?}",
             env::signer_account_id(),
-            payload,
-            big_r,
-            s
+            sign_request,
+            sign_response,
         );
-        self.pending_requests.insert(&payload, &Some((big_r, s)));
+        self.pending_requests
+            .insert(&sign_request, &Some(sign_response));
     }
 
     #[private]

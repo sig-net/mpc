@@ -207,3 +207,21 @@ impl PkVotes {
         self.votes.entry(public_key).or_default()
     }
 }
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+pub struct SignRequest {
+    payload: String, // TODO: should it be vec<u8>?
+    hash_function: HashFunction,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)] // TODO: check if this is needed
+pub enum HashFunction {
+    Sha256,
+    Keccak256,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+pub struct SignResponse {
+    big_r: String,
+    s: String,
+}
