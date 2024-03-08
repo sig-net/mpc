@@ -297,16 +297,17 @@ impl CryptographicProtocol for RunningState {
         }
 
         let mut triple_manager = self.triple_manager.write().await;
-        if triple_manager.my_len() < 2 && triple_manager.potential_len() < 10 {
-            triple_manager.generate()?;
-        }
+        triple_manager.stockpile()?;
         for (p, msg) in triple_manager.poke().await? {
             let info = self.fetch_participant(&p)?;
             messages.push(info.clone(), MpcMessage::Triple(msg));
         }
 
         let mut presignature_manager = self.presignature_manager.write().await;
-        if presignature_manager.my_len() < 2 && presignature_manager.potential_len() < 10 {
+        // TODO: separate out into our own presignature_cfg
+        if presignature_manager.my_len() < triple_manager.triple_cfg.min_triples
+            && presignature_manager.potential_len() < triple_manager.triple_cfg.max_triples
+        {
             // To ensure there is no contention between different nodes we are only using triples
             // that we proposed. This way in a non-BFT environment we are guaranteed to never try
             // to use the same triple as any other node.
