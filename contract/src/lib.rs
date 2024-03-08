@@ -6,7 +6,8 @@ use near_sdk::log;
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, Promise, PromiseOrValue, PublicKey};
 use primitives::{
-    CandidateInfo, Candidates, Participants, PkVotes, SignRequest, SignResponse, Votes,
+    CandidateInfo, Candidates, ContractSignRequest, ContractSignResponse, Participants, PkVotes,
+    Votes,
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -51,7 +52,7 @@ pub enum ProtocolContractState {
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct MpcContract {
     protocol_state: ProtocolContractState,
-    pending_requests: LookupMap<SignRequest, Option<SignResponse>>,
+    pending_requests: LookupMap<ContractSignRequest, Option<ContractSignResponse>>,
 }
 
 #[near_bindgen]
@@ -297,13 +298,8 @@ impl MpcContract {
 
     #[allow(unused_variables)]
     /// `key_version` must be less than or equal to the value at `latest_key_version`
-    pub fn sign(
-        &mut self,
-        sign_request: SignRequest,
-        path: String,
-        key_version: Option<u32>,
-    ) -> Promise {
-        let key_version = key_version.unwrap_or(0);
+    pub fn sign(&mut self, sign_request: ContractSignRequest) -> Promise {
+        let key_version = sign_request.key_version.unwrap_or(0);
         let latest_key_version: u32 = self.latest_key_version();
         assert!(
             key_version <= latest_key_version,
@@ -314,7 +310,7 @@ impl MpcContract {
             "sign: signer={}, sign_request={:?} path={:?}",
             env::signer_account_id(),
             sign_request,
-            path
+            sign_request.path
         );
         match self.pending_requests.get(&sign_request) {
             None => {
@@ -329,9 +325,9 @@ impl MpcContract {
     #[private]
     pub fn check_if_signature_ready(
         &mut self,
-        sign_request: SignRequest,
+        sign_request: ContractSignRequest,
         depth: usize,
-    ) -> PromiseOrValue<SignResponse> {
+    ) -> PromiseOrValue<ContractSignResponse> {
         if let Some(sign_response) = self.pending_requests.get(&sign_request) {
             match sign_response {
                 Some(sign_response) => {
@@ -359,7 +355,11 @@ impl MpcContract {
         }
     }
 
-    pub fn respond(&mut self, sign_request: SignRequest, sign_response: SignResponse) {
+    pub fn respond(
+        &mut self,
+        sign_request: ContractSignRequest,
+        sign_response: ContractSignResponse,
+    ) {
         log!(
             "respond: signer={}, sign_request={:?} sign_respose={:?}",
             env::signer_account_id(),

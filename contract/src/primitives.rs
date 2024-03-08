@@ -208,20 +208,22 @@ impl PkVotes {
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
-pub struct SignRequest {
-    payload: String, // TODO: should it be vec<u8>?
-    hash_function: HashFunction,
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct ContractSignRequest {
+    pub payload: String, // TODO: should it be vec<u8>?
+    pub hash_function: HashFunction,
+    pub path: String,
+    pub key_version: Option<u32>,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)] // TODO: check if this is needed
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub enum HashFunction {
     Sha256,
     Keccak256,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
-pub struct SignResponse {
+pub struct ContractSignResponse {
     big_r: String,
     s: String,
 }

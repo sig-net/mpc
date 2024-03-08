@@ -2,11 +2,11 @@ use super::cryptography::CryptographicError;
 use super::presignature::{self, PresignatureId};
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
+use super::SignRequest;
 use crate::gcp::error::SecretStorageError;
 use crate::http_client::SendError;
 use async_trait::async_trait;
 use cait_sith::protocol::{InitializationError, MessageData, Participant, ProtocolError};
-use k256::Scalar;
 use mpc_keys::hpke::{self, Ciphered};
 use near_crypto::Signature;
 use near_primitives::hash::CryptoHash;
@@ -56,9 +56,7 @@ pub struct SignatureMessage {
     pub receipt_id: CryptoHash,
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
-    pub msg_hash: [u8; 32],
-    pub epsilon: Scalar,
-    pub delta: Scalar,
+    pub sign_request: SignRequest,
     pub epoch: u64,
     pub from: Participant,
     pub data: MessageData,
@@ -279,9 +277,7 @@ impl MessageHandler for RunningState {
                     *receipt_id,
                     message.proposer,
                     message.presignature_id,
-                    message.msg_hash,
-                    message.epsilon,
-                    message.delta,
+                    message.sign_request.clone(), // Clone the sign_request
                     &mut presignature_manager,
                 )? {
                     Some(protocol) => protocol.message(message.from, message.data),

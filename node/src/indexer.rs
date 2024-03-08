@@ -2,6 +2,7 @@ use crate::gcp::GcpService;
 use crate::kdf;
 use crate::protocol::{SignQueue, SignRequest};
 use crate::types::LatestBlockHeight;
+use mpc_contract::primitives::ContractSignRequest;
 use near_lake_framework::{LakeBuilder, LakeContext};
 use near_lake_primitives::actions::ActionMetaDataExt;
 use near_lake_primitives::{receipts::ExecutionStatus, AccountId};
@@ -63,9 +64,8 @@ impl Options {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct SignPayload {
-    payload: [u8; 32],
-    path: String,
+struct SignArguments {
+    sign_request: ContractSignRequest,
 }
 
 #[derive(LakeContext)]
@@ -88,9 +88,10 @@ async fn handle_block(
             };
             if let Some(function_call) = action.as_function_call() {
                 if function_call.method_name() == "sign" {
-                    if let Ok(sign_payload) =
-                        serde_json::from_slice::<'_, SignPayload>(function_call.args())
+                    if let Ok(sign_arguments) =
+                        serde_json::from_slice::<'_, SignArguments>(function_call.args())
                     {
+                        let contract_sign_request = &sign_arguments.sign_request;
                         if receipt.logs().is_empty() {
                             tracing::warn!("`sign` did not produce entropy");
                             continue;
@@ -99,24 +100,32 @@ async fn handle_block(
                         else {
                             tracing::warn!(
                                 "`sign` did not produce entropy correctly: {:?}",
-                                receipt.logs()[0]
+                                receipt.logs()[1]
                             );
                             continue;
                         };
-                        let epsilon =
-                            kdf::derive_epsilon(&action.predecessor_id(), &sign_payload.path);
+                        let epsilon = kdf::derive_epsilon(
+                            &action.predecessor_id(),
+                            &contract_sign_request.path,
+                        );
                         let delta = kdf::derive_delta(receipt_id, entropy);
                         tracing::info!(
                             receipt_id = %receipt_id,
                             caller_id = receipt.predecessor_id().to_string(),
-                            payload = hex::encode(sign_payload.payload),
+                            payload = hex::encode(&contract_sign_request.payload),
                             entropy = hex::encode(entropy),
                             "indexed new `sign` function call"
                         );
                         let mut queue = ctx.queue.write().await;
+
+                        let payload_hash: [u8; 32] = [0; 32]; // TODO: [0; 32] should be replaced with the actual hash of the payload
+
+                        // TODO: add from to SignRequest
                         queue.add(SignRequest {
                             receipt_id,
-                            msg_hash: sign_payload.payload,
+                            payload: contract_sign_request.payload.clone(),
+                            payload_hash,
+                            hash_function: contract_sign_request.hash_function.clone(),
                             epsilon,
                             delta,
                             entropy,

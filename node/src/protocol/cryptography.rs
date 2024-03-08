@@ -351,14 +351,12 @@ impl CryptographicProtocol for RunningState {
             };
 
             let receipt_id = *receipt_id;
-            let my_request = my_requests.remove(&receipt_id).unwrap();
+            let my_sign_request = my_requests.remove(&receipt_id).unwrap();
             signature_manager.generate(
                 receipt_id,
                 presignature,
                 self.public_key,
-                my_request.msg_hash,
-                my_request.epsilon,
-                my_request.delta,
+                my_sign_request,
             )?;
         }
         drop(sign_queue);

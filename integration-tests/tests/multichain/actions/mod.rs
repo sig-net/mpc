@@ -60,7 +60,7 @@ pub async fn request_sign(
                 actions: vec![Action::FunctionCall(FunctionCallAction {
                     method_name: "sign".to_string(),
                     args: serde_json::to_vec(&serde_json::json!({
-                        "payload": payload_hashed,
+                        "payload": payload_hashed, // TODO: we should pass raw payload here
                         "path": "test",
                     }))?,
                     gas: 300_000_000_000_000,

@@ -7,6 +7,7 @@ use crate::util::{AffinePointExt, ScalarExt};
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{Scalar, Secp256k1};
+use mpc_contract::primitives::HashFunction;
 use near_crypto::Signer;
 use near_fetch::signer::ExposeAccountId;
 use near_primitives::hash::CryptoHash;
@@ -15,13 +16,17 @@ use near_primitives::types::AccountId;
 use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
+use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignRequest {
     pub receipt_id: CryptoHash,
-    pub msg_hash: [u8; 32],
+    pub payload: String,
+    pub payload_hash: [u8; 32],
+    pub hash_function: HashFunction,
     pub epsilon: Scalar,
     pub delta: Scalar,
     pub entropy: [u8; 32],
@@ -41,7 +46,7 @@ impl SignQueue {
     pub fn add(&mut self, request: SignRequest) {
         tracing::info!(
             receipt_id = %request.receipt_id,
-            payload = hex::encode(request.msg_hash),
+            payload = hex::encode(request.payload_hash),
             entropy = hex::encode(request.entropy),
             "new sign request"
         );
@@ -93,9 +98,7 @@ pub struct SignatureGenerator {
     pub protocol: SignatureProtocol,
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
-    pub msg_hash: [u8; 32],
-    pub epsilon: Scalar,
-    pub delta: Scalar,
+    pub sign_request: SignRequest,
     pub timestamp: Instant,
 }
 
@@ -104,17 +107,13 @@ impl SignatureGenerator {
         protocol: SignatureProtocol,
         proposer: Participant,
         presignature_id: PresignatureId,
-        msg_hash: [u8; 32],
-        epsilon: Scalar,
-        delta: Scalar,
+        sign_request: SignRequest,
     ) -> Self {
         Self {
             protocol,
             proposer,
             presignature_id,
-            msg_hash,
-            epsilon,
-            delta,
+            sign_request,
             timestamp: Instant::now(),
         }
     }
@@ -135,9 +134,7 @@ impl SignatureGenerator {
 /// for starting up this failed signature once again.
 pub struct FailedGenerator {
     pub proposer: Participant,
-    pub msg_hash: [u8; 32],
-    pub epsilon: Scalar,
-    pub delta: Scalar,
+    pub sign_request: SignRequest,
     pub timestamp: Instant,
 }
 
@@ -147,7 +144,7 @@ pub struct SignatureManager {
     /// Failed signatures awaiting to be retried.
     failed_generators: VecDeque<(CryptoHash, FailedGenerator)>,
     /// Generated signatures assigned to the current node that are yet to be published.
-    signatures: Vec<(CryptoHash, [u8; 32], FullSignature<Secp256k1>)>,
+    signatures: Vec<(CryptoHash, SignRequest, FullSignature<Secp256k1>)>,
 
     participants: Vec<Participant>,
     me: Participant,
@@ -184,31 +181,27 @@ impl SignatureManager {
         public_key: PublicKey,
         proposer: Participant,
         presignature: Presignature,
-        msg_hash: [u8; 32],
-        epsilon: Scalar,
-        delta: Scalar,
+        sign_request: SignRequest,
     ) -> Result<SignatureGenerator, InitializationError> {
         let PresignOutput { big_r, k, sigma } = presignature.output;
         // TODO: Check whether it is okay to use invert_vartime instead
         let output: PresignOutput<Secp256k1> = PresignOutput {
-            big_r: (big_r * delta).to_affine(),
-            k: k * delta.invert().unwrap(),
-            sigma: (sigma + epsilon * k) * delta.invert().unwrap(),
+            big_r: (big_r * sign_request.delta).to_affine(),
+            k: k * sign_request.delta.invert().unwrap(),
+            sigma: (sigma + sign_request.epsilon * k) * sign_request.delta.invert().unwrap(),
         };
         let protocol = Box::new(cait_sith::sign(
             participants,
             me,
-            kdf::derive_key(public_key, epsilon),
+            kdf::derive_key(public_key, sign_request.epsilon),
             output,
-            Scalar::from_bytes(&msg_hash),
+            Scalar::from_bytes(&sign_request.payload_hash),
         )?);
         Ok(SignatureGenerator::new(
             protocol,
             proposer,
             presignature.id,
-            msg_hash,
-            epsilon,
-            delta,
+            sign_request,
         ))
     }
 
@@ -220,9 +213,7 @@ impl SignatureManager {
             self.public_key,
             failed_generator.proposer,
             presignature,
-            failed_generator.msg_hash,
-            failed_generator.epsilon,
-            failed_generator.delta,
+            failed_generator.sign_request,
         )
         .unwrap();
         self.generators.insert(hash, generator);
@@ -235,9 +226,7 @@ impl SignatureManager {
         receipt_id: CryptoHash,
         presignature: Presignature,
         public_key: PublicKey,
-        msg_hash: [u8; 32],
-        epsilon: Scalar,
-        delta: Scalar,
+        sign_request: SignRequest,
     ) -> Result<(), InitializationError> {
         tracing::info!(%receipt_id, "starting protocol to generate a new signature");
         let generator = Self::generate_internal(
@@ -246,9 +235,7 @@ impl SignatureManager {
             public_key,
             self.me,
             presignature,
-            msg_hash,
-            epsilon,
-            delta,
+            sign_request,
         )?;
         self.generators.insert(receipt_id, generator);
         Ok(())
@@ -266,9 +253,7 @@ impl SignatureManager {
         receipt_id: CryptoHash,
         proposer: Participant,
         presignature_id: PresignatureId,
-        msg_hash: [u8; 32],
-        epsilon: Scalar,
-        delta: Scalar,
+        sign_request: SignRequest,
         presignature_manager: &mut PresignatureManager,
     ) -> Result<Option<&mut SignatureProtocol>, InitializationError> {
         match self.generators.entry(receipt_id) {
@@ -284,9 +269,7 @@ impl SignatureManager {
                     self.public_key,
                     proposer,
                     presignature,
-                    msg_hash,
-                    epsilon,
-                    delta,
+                    sign_request,
                 )?;
                 let generator = entry.insert(generator);
                 Ok(Some(&mut generator.protocol))
@@ -311,9 +294,7 @@ impl SignatureManager {
                             *receipt_id,
                             FailedGenerator {
                                 proposer: generator.proposer,
-                                msg_hash: generator.msg_hash,
-                                epsilon: generator.epsilon,
-                                delta: generator.delta,
+                                sign_request: generator.sign_request.clone(),
                                 timestamp: generator.timestamp,
                             },
                         ));
@@ -334,9 +315,7 @@ impl SignatureManager {
                                     receipt_id: *receipt_id,
                                     proposer: generator.proposer,
                                     presignature_id: generator.presignature_id,
-                                    msg_hash: generator.msg_hash,
-                                    epsilon: generator.epsilon,
-                                    delta: generator.delta,
+                                    sign_request: generator.sign_request.clone(),
                                     epoch: self.epoch,
                                     from: self.me,
                                     data: data.clone(),
@@ -350,9 +329,7 @@ impl SignatureManager {
                             receipt_id: *receipt_id,
                             proposer: generator.proposer,
                             presignature_id: generator.presignature_id,
-                            msg_hash: generator.msg_hash,
-                            epsilon: generator.epsilon,
-                            delta: generator.delta,
+                            sign_request: generator.sign_request.clone(),
                             epoch: self.epoch,
                             from: self.me,
                             data: data.clone(),
@@ -367,7 +344,7 @@ impl SignatureManager {
                         );
                         if generator.proposer == self.me {
                             self.signatures
-                                .push((*receipt_id, generator.msg_hash, output));
+                                .push((*receipt_id, generator.sign_request.clone(), output));
                         }
                         // Do not retain the protocol
                         return false;
@@ -384,14 +361,7 @@ impl SignatureManager {
         signer: &T,
         mpc_contract_id: &AccountId,
     ) -> Result<(), near_fetch::Error> {
-        for (receipt_id, payload, signature) in self.signatures.drain(..) {
-            // TODO: Figure out how to properly serialize the signature
-            // let r_s = signature.big_r.x().concat(signature.s.to_bytes());
-            // let tag =
-            //     ConditionallySelectable::conditional_select(&2u8, &3u8, signature.big_r.y_is_odd());
-            // let signature = r_s.append(tag);
-            // let signature = Secp256K1Signature::try_from(signature.as_slice()).unwrap();
-            // let signature = Signature::SECP256K1(signature);
+        for (receipt_id, sign_request, signature) in self.signatures.drain(..) {
             let response = rpc_client
                 .send_tx(
                     signer,
@@ -400,9 +370,11 @@ impl SignatureManager {
                         FunctionCallAction {
                             method_name: "respond".to_string(),
                             args: serde_json::to_vec(&serde_json::json!({
-                                "payload": payload,
-                                "big_r": signature.big_r,
-                                "s": signature.s
+                                "sign_request": sign_request,
+                                "sign_response": {
+                                    "big_r": signature.big_r,
+                                    "s": signature.s,
+                                },
                             }))
                             .unwrap(),
                             gas: 300_000_000_000_000,
