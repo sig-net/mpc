@@ -2,7 +2,7 @@ use crate::gcp::GcpService;
 use crate::kdf;
 use crate::protocol::{SignQueue, SignRequest};
 use crate::types::LatestBlockHeight;
-use mpc_contract::primitives::ContractSignRequest;
+use mpc_contract::primitives::{ContractSignRequest, HashFunction};
 use near_lake_framework::{LakeBuilder, LakeContext};
 use near_lake_primitives::actions::ActionMetaDataExt;
 use near_lake_primitives::{receipts::ExecutionStatus, AccountId};
@@ -118,9 +118,26 @@ async fn handle_block(
                         );
                         let mut queue = ctx.queue.write().await;
 
-                        let payload_hash: [u8; 32] = [0; 32]; // TODO: [0; 32] should be replaced with the actual hash of the payload
+                        let payload_hash: [u8; 32] = match contract_sign_request.hash_function {
+                            HashFunction::Sha256 => {
+                                use sha2::{Digest, Sha256};
+                                let mut hasher = Sha256::new();
+                                hasher.update(contract_sign_request.payload.as_bytes());
+                                let result = hasher.finalize();
+                                let mut output = [0u8; 32];
+                                output.copy_from_slice(&result);
+                                output
+                            }
+                            HashFunction::Keccak256 => {
+                                use tiny_keccak::{Hasher, Keccak};
+                                let mut output = [0u8; 32];
+                                let mut hasher = Keccak::v256();
+                                hasher.update(contract_sign_request.payload.as_bytes());
+                                hasher.finalize(&mut output);
+                                output
+                            }
+                        };
 
-                        // TODO: add from to SignRequest
                         queue.add(SignRequest {
                             receipt_id,
                             payload: contract_sign_request.payload.clone(),

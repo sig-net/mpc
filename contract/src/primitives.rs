@@ -210,7 +210,7 @@ impl PkVotes {
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct ContractSignRequest {
-    pub payload: String, // TODO: should it be vec<u8>?
+    pub payload: String,
     pub hash_function: HashFunction,
     pub path: String,
     pub key_version: Option<u32>,
