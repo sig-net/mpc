@@ -208,7 +208,7 @@ impl PkVotes {
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct ContractSignRequest {
     pub payload: String,
     pub hash_function: HashFunction,

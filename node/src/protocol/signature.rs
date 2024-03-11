@@ -7,7 +7,7 @@ use crate::util::{AffinePointExt, ScalarExt};
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{Scalar, Secp256k1};
-use mpc_contract::primitives::HashFunction;
+use mpc_contract::primitives::ContractSignRequest;
 use near_crypto::Signer;
 use near_fetch::signer::ExposeAccountId;
 use near_primitives::hash::CryptoHash;
@@ -23,12 +23,11 @@ use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignRequest {
+    pub contract_sign_request: ContractSignRequest,
     pub receipt_id: CryptoHash,
-    pub payload: String,
-    pub payload_hash: [u8; 32],
-    pub hash_function: HashFunction,
-    pub epsilon: Scalar,
-    pub delta: Scalar,
+    pub payload_hash: [u8; 32], // TODO: this can be computed, should it be represented as a field?
+    pub epsilon: Scalar,        // TODO: this can be computed, should it be represented as a field?
+    pub delta: Scalar,          // TODO: this can be computed, should it be represented as a field?
     pub entropy: [u8; 32],
 }
 
@@ -370,7 +369,7 @@ impl SignatureManager {
                         FunctionCallAction {
                             method_name: "respond".to_string(),
                             args: serde_json::to_vec(&serde_json::json!({
-                                "sign_request": sign_request, // TODO: wrong type
+                                "sign_request": sign_request.contract_sign_request,
                                 "sign_response": {
                                     "big_r": signature.big_r,
                                     "s": signature.s,

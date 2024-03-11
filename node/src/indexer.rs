@@ -139,10 +139,9 @@ async fn handle_block(
                         };
 
                         queue.add(SignRequest {
+                            contract_sign_request: contract_sign_request.clone(),
                             receipt_id,
-                            payload: contract_sign_request.payload.clone(),
                             payload_hash,
-                            hash_function: contract_sign_request.hash_function.clone(),
                             epsilon,
                             delta,
                             entropy,
