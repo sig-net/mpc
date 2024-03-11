@@ -1,3 +1,5 @@
+use elliptic_curve::{AffinePoint, Scalar};
+use k256::Secp256k1;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, PublicKey};
@@ -224,6 +226,6 @@ pub enum HashFunction {
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 pub struct ContractSignResponse {
-    big_r: String,
-    s: String,
+    pub big_r: AffinePoint<Secp256k1>,
+    pub s: Scalar<Secp256k1>,
 }

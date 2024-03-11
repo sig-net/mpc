@@ -6,6 +6,7 @@ use cait_sith::FullSignature;
 use k256::AffinePoint;
 use k256::Scalar;
 use k256::Secp256k1;
+use mpc_contract::primitives::ContractSignResponse;
 use mpc_contract::ProtocolContractState;
 use mpc_contract::RunningContractState;
 use mpc_recovery_node::web::StateView;
@@ -129,8 +130,11 @@ pub async fn signature_responded(
         let FinalExecutionStatus::SuccessValue(payload) = outcome_view.status else {
             anyhow::bail!("tx finished unsuccessfully: {:?}", outcome_view.status);
         };
-        let (big_r, s): (AffinePoint, Scalar) = serde_json::from_slice(&payload)?;
-        let signature = cait_sith::FullSignature::<Secp256k1> { big_r, s };
+        let sign_response: ContractSignResponse = serde_json::from_slice(&payload)?;
+        let signature = cait_sith::FullSignature::<Secp256k1> {
+            big_r: sign_response.big_r,
+            s: sign_response.s,
+        };
         Ok(signature)
     };
 
