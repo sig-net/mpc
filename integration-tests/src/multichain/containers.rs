@@ -8,6 +8,8 @@ use testcontainers::{
 };
 use tracing;
 
+use super::MultichainConfig;
+
 pub struct Node<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
@@ -35,6 +37,7 @@ impl<'a> Node<'a> {
         ctx: &super::Context<'a>,
         account_id: &AccountId,
         account_sk: &near_workspaces::types::SecretKey,
+        cfg: &MultichainConfig,
     ) -> anyhow::Result<Node<'a>> {
         tracing::info!("running node container, account_id={}", account_id);
         let (cipher_sk, cipher_pk) = hpke::generate();
@@ -55,6 +58,8 @@ impl<'a> Node<'a> {
             },
             my_address: None,
             storage_options: storage_options.clone(),
+            min_triples: cfg.triple_cfg.min_triples,
+            max_triples: cfg.triple_cfg.max_triples,
         }
         .into_str_args();
         let image: GenericImage = GenericImage::new("near/mpc-recovery-node", "latest")

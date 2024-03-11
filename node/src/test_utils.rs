@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fs::OpenOptions, ops::Range};
 
+use crate::protocol::triple::TripleConfig;
 use crate::{gcp::GcpService, protocol::message::TripleMessage, storage};
 use cait_sith::protocol::{InitializationError, Participant, ProtocolError};
 use std::io::prelude::*;
@@ -14,6 +15,13 @@ use itertools::multiunzip;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+// Constants to be used for testing.
+const STARTING_EPOCH: u64 = 0;
+const DEFAULT_TRIPLE_CONFIG: TripleConfig = TripleConfig {
+    min_triples: 2,
+    max_triples: 10,
+};
 
 struct TestTripleManagers {
     managers: Vec<TripleManager>,
@@ -48,7 +56,8 @@ impl TestTripleManagers {
                     participants.clone(),
                     Participant::from(num),
                     num_managers as usize,
-                    0,
+                    STARTING_EPOCH,
+                    DEFAULT_TRIPLE_CONFIG,
                     vec![],
                     triple_storage,
                 )

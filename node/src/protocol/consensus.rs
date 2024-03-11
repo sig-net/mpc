@@ -3,6 +3,7 @@ use super::state::{
     JoiningState, NodeState, PersistentNodeData, RunningState, StartedState,
     WaitingForConsensusState,
 };
+use super::triple::TripleConfig;
 use super::SignQueue;
 use crate::gcp::error::DatastoreStorageError;
 use crate::gcp::error::SecretStorageError;
@@ -40,6 +41,7 @@ pub trait ConsensusCtx {
     fn sign_pk(&self) -> near_crypto::PublicKey;
     fn sign_sk(&self) -> &near_crypto::SecretKey;
     fn secret_storage(&self) -> &SecretNodeStorageBox;
+    fn triple_cfg(&self) -> TripleConfig;
     fn triple_storage(&mut self) -> LockTripleNodeStorageBox;
 }
 
@@ -127,6 +129,16 @@ impl ConsensusProtocol for StartedState {
                                     );
                                     let participants_vec: Vec<Participant> =
                                         contract_state.participants.keys().cloned().collect();
+                                    let triple_manager = TripleManager::new(
+                                        participants_vec.clone(),
+                                        me,
+                                        contract_state.threshold,
+                                        epoch,
+                                        ctx.triple_cfg(),
+                                        vec![],
+                                        ctx.triple_storage(),
+                                    );
+
                                     Ok(NodeState::Running(RunningState {
                                         epoch,
                                         participants: contract_state.participants,
@@ -134,14 +146,7 @@ impl ConsensusProtocol for StartedState {
                                         private_share,
                                         public_key,
                                         sign_queue,
-                                        triple_manager: Arc::new(RwLock::new(TripleManager::new(
-                                            participants_vec.clone(),
-                                            me,
-                                            contract_state.threshold,
-                                            epoch,
-                                            self.triple_data,
-                                            ctx.triple_storage(),
-                                        ))),
+                                        triple_manager: Arc::new(RwLock::new(triple_manager)),
                                         presignature_manager: Arc::new(RwLock::new(
                                             PresignatureManager::new(
                                                 participants_vec.clone(),
@@ -345,6 +350,16 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         .find_participant(ctx.my_account_id())
                         .unwrap();
 
+                    let triple_manager = TripleManager::new(
+                        participants_vec.clone(),
+                        me,
+                        self.threshold,
+                        self.epoch,
+                        ctx.triple_cfg(),
+                        vec![],
+                        ctx.triple_storage(),
+                    );
+
                     Ok(NodeState::Running(RunningState {
                         epoch: self.epoch,
                         participants: self.participants,
@@ -352,14 +367,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         private_share: self.private_share,
                         public_key: self.public_key,
                         sign_queue: ctx.sign_queue(),
-                        triple_manager: Arc::new(RwLock::new(TripleManager::new(
-                            participants_vec.clone(),
-                            me,
-                            self.threshold,
-                            self.epoch,
-                            vec![],
-                            ctx.triple_storage(),
-                        ))),
+                        triple_manager: Arc::new(RwLock::new(triple_manager)),
                         presignature_manager: Arc::new(RwLock::new(PresignatureManager::new(
                             participants_vec.clone(),
                             me,

@@ -10,6 +10,7 @@ use crate::types::{KeygenProtocol, PublicKey, ReshareProtocol, SecretKeyShare};
 use cait_sith::protocol::Participant;
 use near_primitives::types::AccountId;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -20,7 +21,16 @@ pub struct PersistentNodeData {
     pub public_key: PublicKey,
 }
 
-#[derive(Clone)]
+impl fmt::Debug for PersistentNodeData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PersistentNodeData")
+            .field("epoch", &self.epoch)
+            .field("public_key", &self.public_key)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct StartedState {
     pub persistent_node_data: Option<PersistentNodeData>,
     pub triple_data: Vec<TripleData>,
@@ -51,6 +61,17 @@ pub struct WaitingForConsensusState {
     pub private_share: SecretKeyShare,
     pub public_key: PublicKey,
     pub messages: Arc<RwLock<MessageQueue>>,
+}
+
+impl fmt::Debug for WaitingForConsensusState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WaitingForConsensusState")
+            .field("epoch", &self.epoch)
+            .field("threshold", &self.threshold)
+            .field("public_key", &self.public_key)
+            .field("participants", &self.participants)
+            .finish()
+    }
 }
 
 impl WaitingForConsensusState {

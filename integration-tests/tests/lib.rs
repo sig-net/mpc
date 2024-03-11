@@ -11,7 +11,7 @@ use mpc_recovery::{
     },
 };
 use mpc_recovery_integration_tests::env;
-use mpc_recovery_integration_tests::env::containers::DockerClient;
+use mpc_recovery_integration_tests::{env::containers::DockerClient, multichain::MultichainConfig};
 use near_jsonrpc_client::JsonRpcClient;
 use near_workspaces::{network::Sandbox, Worker};
 
@@ -65,14 +65,16 @@ pub struct MultichainTestContext<'a> {
     rpc_client: near_fetch::Client,
     jsonrpc_client: JsonRpcClient,
     http_client: reqwest::Client,
+    cfg: MultichainConfig,
 }
 
-async fn with_multichain_nodes<F>(nodes: usize, f: F) -> anyhow::Result<()>
+async fn with_multichain_nodes<F>(cfg: MultichainConfig, f: F) -> anyhow::Result<()>
 where
     F: for<'a> FnOnce(MultichainTestContext<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
 {
     let docker_client = DockerClient::default();
-    let nodes = mpc_recovery_integration_tests::multichain::run(nodes, &docker_client).await?;
+    let nodes =
+        mpc_recovery_integration_tests::multichain::run(cfg.clone(), &docker_client).await?;
 
     let connector = JsonRpcClient::new_client();
     let jsonrpc_client = connector.connect(&nodes.ctx().lake_indexer.rpc_host_address);
@@ -82,6 +84,7 @@ where
         rpc_client,
         jsonrpc_client,
         http_client: reqwest::Client::default(),
+        cfg,
     })
     .await?;
 
