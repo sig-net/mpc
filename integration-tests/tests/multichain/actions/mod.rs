@@ -11,6 +11,7 @@ use k256::elliptic_curve::scalar::FromUintUnchecked;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::elliptic_curve::ProjectivePoint;
 use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
+use mpc_contract::primitives::{ContractSignRequest, HashFunction};
 use mpc_contract::RunningContractState;
 use mpc_recovery_node::kdf;
 use mpc_recovery_node::util::ScalarExt;
@@ -33,11 +34,18 @@ use k256::{
 
 pub async fn request_sign(
     ctx: &MultichainTestContext<'_>,
-) -> anyhow::Result<([u8; 32], [u8; 32], Account, CryptoHash)> {
+) -> anyhow::Result<(String, [u8; 32], Account, CryptoHash)> {
     let worker = &ctx.nodes.ctx().worker;
     let account = worker.dev_create_account().await?;
     let payload: [u8; 32] = rand::thread_rng().gen();
     let payload_hashed = web3::signing::keccak256(&payload);
+    let payload = String::from_utf8_lossy(&payload).to_string();
+    let sign_request: ContractSignRequest = ContractSignRequest {
+        payload: payload.clone(),
+        hash_function: HashFunction::Keccak256,
+        path: "test".to_string(),
+        key_version: None,
+    };
 
     let signer = InMemorySigner {
         account_id: account.id().clone(),
@@ -60,8 +68,7 @@ pub async fn request_sign(
                 actions: vec![Action::FunctionCall(FunctionCallAction {
                     method_name: "sign".to_string(),
                     args: serde_json::to_vec(&serde_json::json!({
-                        "payload": payload_hashed, // TODO: we should pass raw payload here
-                        "path": "test",
+                        "sign_request": sign_request,
                     }))?,
                     gas: 300_000_000_000_000,
                     deposit: 0,

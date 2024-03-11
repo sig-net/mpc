@@ -370,7 +370,7 @@ impl SignatureManager {
                         FunctionCallAction {
                             method_name: "respond".to_string(),
                             args: serde_json::to_vec(&serde_json::json!({
-                                "sign_request": sign_request,
+                                "sign_request": sign_request, // TODO: wrong type
                                 "sign_response": {
                                     "big_r": signature.big_r,
                                     "s": signature.s,
