@@ -3,8 +3,6 @@ use anyhow::Context;
 use backon::ExponentialBuilder;
 use backon::Retryable;
 use cait_sith::FullSignature;
-use k256::AffinePoint;
-use k256::Scalar;
 use k256::Secp256k1;
 use mpc_contract::primitives::ContractSignResponse;
 use mpc_contract::ProtocolContractState;

@@ -1,6 +1,6 @@
-use elliptic_curve::generic_array::GenericArray;
-use elliptic_curve::group::GroupEncoding;
-use elliptic_curve::{AffinePoint, Scalar, ScalarPrimitive};
+use k256::elliptic_curve::generic_array::GenericArray;
+use k256::elliptic_curve::group::GroupEncoding;
+use k256::elliptic_curve::{AffinePoint, Scalar, ScalarPrimitive};
 use k256::Secp256k1;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
