@@ -12,7 +12,8 @@ near-sdk = "5.0.0-alpha.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "0.8"
-k256 = "0.13.3"
+k256 = {version = "0.13.3", features = ["serde"]}
+getrandom = { version = "0.2.3", features = ["js"] }
 
 [profile.release]
 codegen-units = 1
