@@ -1,4 +1,6 @@
-use elliptic_curve::{AffinePoint, Scalar};
+use elliptic_curve::generic_array::GenericArray;
+use elliptic_curve::group::GroupEncoding;
+use elliptic_curve::{AffinePoint, Scalar, ScalarPrimitive};
 use k256::Secp256k1;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
@@ -224,8 +226,29 @@ pub enum HashFunction {
     Keccak256,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ContractSignResponse {
     pub big_r: AffinePoint<Secp256k1>,
     pub s: Scalar<Secp256k1>,
+}
+
+impl BorshSerialize for ContractSignResponse {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        let big_r = self.big_r.clone().to_bytes().to_vec();
+        let s = self.s.to_bytes().to_vec();
+        let members = (big_r, s);
+        BorshSerialize::serialize(&members, writer)
+    }
+}
+
+impl BorshDeserialize for ContractSignResponse {
+    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let (big_r, s): (Vec<u8>, Vec<u8>) = BorshDeserialize::deserialize_reader(reader)?;
+        let big_r =
+            AffinePoint::<Secp256k1>::from_bytes(&GenericArray::clone_from_slice(&big_r)).unwrap();
+        let s_primitive: ScalarPrimitive<Secp256k1> =
+            ScalarPrimitive::from_bytes(&GenericArray::clone_from_slice(&s)).unwrap();
+        let s = Scalar::<Secp256k1>::from(s_primitive);
+        Ok(ContractSignResponse { big_r, s })
+    }
 }
