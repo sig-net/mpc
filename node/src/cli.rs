@@ -58,6 +58,9 @@ pub enum Cli {
         /// At maximum, how many triples to stockpile on this node.
         #[arg(long, env("MPC_RECOVERY_MAX_TRIPLES"), default_value("10"))]
         max_triples: usize,
+        /// List of allowed participant account ids
+        #[arg(long, env("MPC_RECOVERY_ALLOWED_PARTICIPANTS"))]
+        allowed_participants: Vec<AccountId>,
     },
 }
 
@@ -77,6 +80,7 @@ impl Cli {
                 storage_options,
                 min_triples,
                 max_triples,
+                allowed_participants,
             } => {
                 let mut args = vec![
                     "start".to_string(),
@@ -98,6 +102,8 @@ impl Cli {
                     min_triples.to_string(),
                     "--max-triples".to_string(),
                     max_triples.to_string(),
+                    "--allowed-participants".to_string(),
+                    allowed_participants.join(","),
                 ];
                 if let Some(my_address) = my_address {
                     args.extend(vec!["--my-address".to_string(), my_address.to_string()]);
@@ -137,6 +143,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             storage_options,
             min_triples,
             max_triples,
+            allowed_participants,
         } => {
             let sign_queue = Arc::new(RwLock::new(SignQueue::new()));
             tokio::runtime::Builder::new_multi_thread()
@@ -199,6 +206,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                             sender,
                             cipher_sk,
                             protocol_state,
+                            allowed_participants,
                         )
                         .await
                     });

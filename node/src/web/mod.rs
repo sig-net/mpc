@@ -2,7 +2,7 @@ mod error;
 
 use self::error::Error;
 use crate::protocol::message::SignedMessage;
-use crate::protocol::{MpcMessage, NodeState};
+use crate::protocol::{ConsensusError, MpcMessage, NodeState};
 use crate::web::error::Result;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -24,6 +24,7 @@ struct AxumState {
     sender: Sender<MpcMessage>,
     protocol_state: Arc<RwLock<NodeState>>,
     cipher_sk: hpke::SecretKey,
+    allowed_participants: Vec<AccountId>,
 }
 
 pub async fn run(
@@ -34,6 +35,7 @@ pub async fn run(
     sender: Sender<MpcMessage>,
     cipher_sk: hpke::SecretKey,
     protocol_state: Arc<RwLock<NodeState>>,
+    allowed_participants: Vec<AccountId>,
 ) -> anyhow::Result<()> {
     tracing::debug!("running a node");
     let axum_state = AxumState {
@@ -43,6 +45,7 @@ pub async fn run(
         sender,
         protocol_state,
         cipher_sk,
+        allowed_participants,
     };
 
     let app = Router::new()
@@ -102,6 +105,10 @@ async fn join(
     Extension(state): Extension<Arc<AxumState>>,
     WithRejection(Json(account_id), _): WithRejection<Json<AccountId>, Error>,
 ) -> Result<()> {
+    if !state.allowed_participants.contains(&account_id) {
+        tracing::error!(?account_id, "is not added to the allow list");
+        return Err(Error::Protocol(ConsensusError::AccountIdIsNotInAllowList));
+    }
     let protocol_state = state.protocol_state.read().await;
     match &*protocol_state {
         NodeState::Running { .. } => {

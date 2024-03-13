@@ -65,6 +65,8 @@ pub enum ConsensusError {
     SecretStorageError(SecretStorageError),
     #[error("datastore storage error: {0}")]
     DatastoreStorageError(DatastoreStorageError),
+    #[error("This candidate accountId is not in the node allowlist")]
+    AccountIdIsNotInAllowList,
 }
 
 impl From<SecretStorageError> for ConsensusError {

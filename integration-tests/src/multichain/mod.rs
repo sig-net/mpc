@@ -19,6 +19,7 @@ const NETWORK: &str = "mpc_it_network";
 pub struct MultichainConfig {
     pub nodes: usize,
     pub triple_cfg: TripleConfig,
+    pub allowed_participants: Vec<AccountId>,
 }
 
 impl Default for MultichainConfig {
@@ -29,6 +30,7 @@ impl Default for MultichainConfig {
                 min_triples: 2,
                 max_triples: 10,
             },
+            allowed_participants: Vec::new(), // TODO: acc ids are generated on each run
         }
     }
 }
