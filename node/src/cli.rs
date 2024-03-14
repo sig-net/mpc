@@ -60,6 +60,7 @@ pub enum Cli {
         max_triples: usize,
         /// List of allowed participant account ids
         #[arg(long, env("MPC_RECOVERY_ALLOWED_PARTICIPANTS"))]
+        #[clap(value_delimiter = ',')]
         allowed_participants: Vec<AccountId>,
     },
 }
