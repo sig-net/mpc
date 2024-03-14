@@ -33,9 +33,10 @@ impl Default for MultichainConfig {
                 max_triples: 10,
             },
             allowed_participants: vec![
-                AccountId::from_str("node0.near").unwrap(),
-                AccountId::from_str("node1.near").unwrap(),
-                AccountId::from_str("node2.near").unwrap(),
+                // Account Ids must be implicit
+                AccountId::from_str("dev-11111111111111-11111111111111").unwrap(),
+                AccountId::from_str("dev-22222222222222-22222222222222").unwrap(),
+                AccountId::from_str("dev-33333333333333-33333333333333").unwrap(),
             ],
         }
     }
@@ -193,11 +194,8 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
 pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
     let ctx = setup(docker_client).await?;
 
-    let accounts =
-        futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+    let accounts = create_accounts(&cfg, &ctx).await;
+
     let mut node_futures = Vec::new();
     for account in &accounts {
         let node = containers::Node::run(&ctx, account.id(), account.secret_key(), &cfg);
@@ -239,19 +237,7 @@ pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyh
 pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
     let ctx = setup(docker_client).await?;
 
-    let accounts = futures::future::join_all((0..cfg.nodes).map(|i| {
-        let account_id = cfg
-            .allowed_participants
-            .get(i)
-            .expect("Not enough account ids")
-            .clone();
-        ctx.worker
-            .create_tla(account_id, SecretKey::from_random(KeyType::ED25519))
-    }))
-    .await
-    .into_iter()
-    .map(|result| result.map(|execution| execution.result))
-    .collect::<Result<Vec<_>, _>>()?;
+    let accounts = create_accounts(&cfg, &ctx).await;
     let mut node_futures = Vec::with_capacity(cfg.nodes);
     for account in accounts.iter().take(cfg.nodes) {
         node_futures.push(local::Node::run(
@@ -292,6 +278,26 @@ pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow
         .into_result()?;
 
     Ok(Nodes::Local { ctx, nodes })
+}
+
+pub async fn create_accounts(
+    cfg: &MultichainConfig,
+    ctx: &Context<'_>,
+) -> Vec<near_workspaces::Account> {
+    futures::future::join_all((0..cfg.nodes).map(|i| {
+        let account_id = cfg
+            .allowed_participants
+            .get(i)
+            .expect("Not enough account ids")
+            .clone();
+        ctx.worker
+            .create_tla(account_id, SecretKey::from_random(KeyType::ED25519))
+    }))
+    .await
+    .into_iter()
+    .map(|result| result.map(|execution| execution.result))
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap()
 }
 
 pub async fn run(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
