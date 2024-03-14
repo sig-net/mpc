@@ -1,5 +1,8 @@
 pub mod actions;
 
+use core::panic;
+use std::str::FromStr;
+
 use crate::with_multichain_nodes;
 use actions::wait_for;
 use k256::elliptic_curve::point::AffineCoordinates;
@@ -7,21 +10,41 @@ use mpc_recovery_integration_tests::env::containers::DockerClient;
 use mpc_recovery_integration_tests::multichain::MultichainConfig;
 use mpc_recovery_node::kdf::{self, x_coordinate};
 use mpc_recovery_node::protocol::triple::TripleConfig;
-use mpc_recovery_node::test_utils;
 use mpc_recovery_node::types::LatestBlockHeight;
 use mpc_recovery_node::util::{NearPublicKeyExt, ScalarExt};
+use mpc_recovery_node::{http_client, test_utils};
+use near_workspaces::types::{KeyType, SecretKey};
+use near_workspaces::AccountId;
 use test_log::test;
 
 #[test(tokio::test)]
 async fn test_multichain_reshare() -> anyhow::Result<()> {
-    with_multichain_nodes(MultichainConfig::default(), |mut ctx| {
+    let allowed_account_id: AccountId = "dev-44444444444444-44444444444444".parse()?;
+    let config = MultichainConfig {
+        allowed_participants: vec![
+            AccountId::from_str("dev-11111111111111-11111111111111").unwrap(),
+            AccountId::from_str("dev-22222222222222-22222222222222").unwrap(),
+            AccountId::from_str("dev-33333333333333-33333333333333").unwrap(),
+            allowed_account_id.clone(),
+        ],
+        ..MultichainConfig::default()
+    };
+
+    with_multichain_nodes(config, |mut ctx| {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, 0).await?;
             assert_eq!(state_0.participants.len(), 3);
+            let worker = ctx.nodes.ctx().worker.clone();
 
-            let account = ctx.nodes.ctx().worker.dev_create_account().await?;
+            // Add allowlisted node
+            let allowed_acc_sk = SecretKey::from_random(KeyType::ED25519);
+            let allowerd_account = worker
+                .create_tla(allowed_account_id.clone(), allowed_acc_sk)
+                .await?
+                .result;
+
             ctx.nodes
-                .add_node(account.id(), account.secret_key(), &ctx.cfg)
+                .add_node(&allowed_account_id, allowerd_account.secret_key(), &ctx.cfg)
                 .await?;
 
             let state_1 = wait_for::running_mpc(&ctx, 1).await?;
@@ -31,6 +54,16 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
                 state_0.public_key, state_1.public_key,
                 "public key must stay the same"
             );
+
+            // Try calling join with non-allowlisted account
+            let non_allowlisted_acc_id: AccountId = "dev-55555555555555-55555555555555".parse()?;
+            let node0_url = ctx.nodes.url(0);
+            match http_client::join(&ctx.http_client, node0_url, &non_allowlisted_acc_id).await {
+                Err(e) => {
+                    assert!(e.to_string().contains("AccountIdIsNotInAllowList"));
+                }
+                Ok(_) => panic!("Join call with non-allowlisted account should fail"),
+            };
 
             Ok(())
         })
