@@ -9,9 +9,11 @@ use mpc_recovery_node::protocol::triple::TripleConfig;
 use mpc_recovery_node::storage;
 use mpc_recovery_node::storage::triple_storage::TripleNodeStorageBox;
 use near_workspaces::network::Sandbox;
+use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{AccountId, Contract, Worker};
 use serde_json::json;
 use std::collections::HashMap;
+use std::str::FromStr;
 
 const NETWORK: &str = "mpc_it_network";
 
@@ -30,7 +32,11 @@ impl Default for MultichainConfig {
                 min_triples: 2,
                 max_triples: 10,
             },
-            allowed_participants: Vec::new(), // TODO: acc ids are generated on each run
+            allowed_participants: vec![
+                AccountId::from_str("node0.near").unwrap(),
+                AccountId::from_str("node1.near").unwrap(),
+                AccountId::from_str("node2.near").unwrap(),
+            ],
         }
     }
 }
@@ -233,11 +239,19 @@ pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyh
 pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
     let ctx = setup(docker_client).await?;
 
-    let accounts =
-        futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+    let accounts = futures::future::join_all((0..cfg.nodes).map(|i| {
+        let account_id = cfg
+            .allowed_participants
+            .get(i)
+            .expect("Not enough account ids")
+            .clone();
+        ctx.worker
+            .create_tla(account_id, SecretKey::from_random(KeyType::ED25519))
+    }))
+    .await
+    .into_iter()
+    .map(|result| result.map(|execution| execution.result))
+    .collect::<Result<Vec<_>, _>>()?;
     let mut node_futures = Vec::with_capacity(cfg.nodes);
     for account in accounts.iter().take(cfg.nodes) {
         node_futures.push(local::Node::run(
