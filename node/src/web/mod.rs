@@ -27,6 +27,7 @@ struct AxumState {
     allowed_participants: Vec<AccountId>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     port: u16,
     mpc_contract_id: AccountId,
