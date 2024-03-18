@@ -89,6 +89,24 @@ impl Nodes<'_> {
         Ok(())
     }
 
+    pub async fn kill_node(&mut self, index: usize) -> anyhow::Result<()> {
+        match self {
+            Nodes::Local { nodes, .. } => {
+                nodes[index].kill()?;
+                nodes.remove(index);
+            }
+            Nodes::Docker { nodes, .. } => {
+                nodes[index].kill();
+                nodes.remove(index);
+            }
+        }
+
+        // wait for the node to be removed from the network
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        Ok(())
+    }
+
     pub async fn triple_storage(&self, account_id: String) -> anyhow::Result<TripleNodeStorageBox> {
         let gcp_service = GcpService::init(&account_id, &self.ctx().storage_options).await?;
         Ok(storage::triple_storage::init(

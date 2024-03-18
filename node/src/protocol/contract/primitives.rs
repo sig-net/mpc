@@ -20,7 +20,19 @@ pub struct ParticipantInfo {
     pub sign_pk: near_crypto::PublicKey,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+impl ParticipantInfo {
+    pub fn new(id: u32) -> Self {
+        Self {
+            id,
+            account_id: format!("p-{id}").parse().unwrap(),
+            url: String::default(),
+            cipher_pk: hpke::PublicKey::from_bytes(&[0; 32]),
+            sign_pk: near_crypto::PublicKey::empty(near_crypto::KeyType::ED25519),
+        }
+    }
+}
+
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Participants {
     pub participants: BTreeMap<Participant, ParticipantInfo>,
 }
@@ -93,6 +105,10 @@ impl IntoIterator for Participants {
 }
 
 impl Participants {
+    pub fn insert(&mut self, id: &Participant, info: ParticipantInfo) {
+        self.participants.insert(*id, info);
+    }
+
     pub fn get(&self, id: &Participant) -> Option<&ParticipantInfo> {
         self.participants.get(id)
     }
@@ -103,6 +119,10 @@ impl Participants {
 
     pub fn keys(&self) -> impl Iterator<Item = &Participant> {
         self.participants.keys()
+    }
+
+    pub fn keys_vec(&self) -> Vec<Participant> {
+        self.participants.keys().cloned().collect()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&Participant, &ParticipantInfo)> {
@@ -133,6 +153,34 @@ impl Participants {
             .values()
             .map(|participant_info| participant_info.account_id.clone())
             .collect()
+    }
+
+    pub fn and(&self, other: &Self) -> Self {
+        let mut participants = self.participants.clone();
+        for (participant, info) in &other.participants {
+            participants.insert(*participant, info.clone());
+        }
+        Participants { participants }
+    }
+
+    pub fn intersection(&self, other: &[&[Participant]]) -> Self {
+        let mut intersect = BTreeMap::new();
+        let other = other
+            .iter()
+            .map(|participants| participants.iter().cloned().collect::<HashSet<_>>())
+            .collect::<Vec<_>>();
+
+        'outer: for (participant, info) in &self.participants {
+            for participants in &other {
+                if !participants.contains(participant) {
+                    continue 'outer;
+                }
+            }
+            intersect.insert(*participant, info.clone());
+        }
+        Participants {
+            participants: intersect,
+        }
     }
 }
 

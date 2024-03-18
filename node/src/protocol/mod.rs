@@ -21,11 +21,14 @@ use self::consensus::ConsensusCtx;
 use self::cryptography::CryptographicCtx;
 use self::message::MessageCtx;
 use self::triple::TripleConfig;
+use crate::mesh::Mesh;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{MessageHandler, MpcMessageQueue};
 use crate::rpc_client::{self};
 use crate::storage::secret_storage::SecretNodeStorageBox;
+use crate::storage::triple_storage::LockTripleNodeStorageBox;
+
 use cait_sith::protocol::Participant;
 use near_crypto::InMemorySigner;
 use near_primitives::types::AccountId;
@@ -35,7 +38,6 @@ use tokio::sync::mpsc::{self, error::TryRecvError};
 use tokio::sync::RwLock;
 use url::Url;
 
-use crate::storage::triple_storage::LockTripleNodeStorageBox;
 use mpc_keys::hpke;
 
 struct Ctx {
@@ -51,6 +53,7 @@ struct Ctx {
     secret_storage: SecretNodeStorageBox,
     triple_cfg: TripleConfig,
     triple_storage: LockTripleNodeStorageBox,
+    mesh: Mesh,
 }
 
 impl ConsensusCtx for &mut MpcSignProtocol {
@@ -140,12 +143,20 @@ impl CryptographicCtx for &mut MpcSignProtocol {
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox {
         &mut self.ctx.secret_storage
     }
+
+    fn mesh(&self) -> &Mesh {
+        &self.ctx.mesh
+    }
 }
 
 #[async_trait::async_trait]
 impl MessageCtx for &MpcSignProtocol {
     async fn me(&self) -> Participant {
         get_my_participant(self).await
+    }
+
+    fn mesh(&self) -> &Mesh {
+        &self.ctx.mesh
     }
 }
 
@@ -184,6 +195,7 @@ impl MpcSignProtocol {
             secret_storage,
             triple_cfg,
             triple_storage,
+            mesh: Mesh::default(),
         };
         let protocol = MpcSignProtocol {
             ctx,
@@ -233,6 +245,11 @@ impl MpcSignProtocol {
                     }
                 }
             }
+
+            // Establish the participants for this current iteration of the protocol loop. This will
+            // set which participants are currently active in the protocol and determines who will be
+            // receiving messages.
+            self.ctx.mesh.establish_participants(&contract_state).await;
 
             let state = {
                 let guard = self.state.read().await;

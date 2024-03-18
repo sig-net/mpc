@@ -1,6 +1,6 @@
+use super::contract::primitives::Participants;
 use super::message::SignatureMessage;
 use super::presignature::{Presignature, PresignatureId, PresignatureManager};
-use super::state::RunningState;
 use crate::kdf;
 use crate::types::{PublicKey, SignatureProtocol};
 use crate::util::{AffinePointExt, ScalarExt};
@@ -49,13 +49,10 @@ impl SignQueue {
         self.unorganized_requests.push(request);
     }
 
-    pub fn organize(&mut self, state: &RunningState, me: Participant) {
+    pub fn organize(&mut self, threshold: usize, active: &Participants, me: Participant) {
         for request in self.unorganized_requests.drain(..) {
             let mut rng = StdRng::from_seed(request.entropy);
-            let subset = state
-                .participants
-                .keys()
-                .choose_multiple(&mut rng, state.threshold);
+            let subset = active.keys().choose_multiple(&mut rng, threshold);
             let proposer = **subset.choose(&mut rng).unwrap();
             if subset.contains(&&me) {
                 tracing::info!(
@@ -92,6 +89,7 @@ impl SignQueue {
 /// An ongoing signature generator.
 pub struct SignatureGenerator {
     pub protocol: SignatureProtocol,
+    pub participants: Vec<Participant>,
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
     pub msg_hash: [u8; 32],
@@ -101,8 +99,10 @@ pub struct SignatureGenerator {
 }
 
 impl SignatureGenerator {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         protocol: SignatureProtocol,
+        participants: Vec<Participant>,
         proposer: Participant,
         presignature_id: PresignatureId,
         msg_hash: [u8; 32],
@@ -112,6 +112,7 @@ impl SignatureGenerator {
     ) -> Self {
         Self {
             protocol,
+            participants,
             proposer,
             presignature_id,
             msg_hash,
@@ -151,24 +152,17 @@ pub struct SignatureManager {
     /// Generated signatures assigned to the current node that are yet to be published.
     /// Vec<(receipt_id, msg_hash, timestamp, output)>
     signatures: Vec<(CryptoHash, [u8; 32], Instant, FullSignature<Secp256k1>)>,
-    participants: Vec<Participant>,
     me: Participant,
     public_key: PublicKey,
     epoch: u64,
 }
 
 impl SignatureManager {
-    pub fn new(
-        participants: Vec<Participant>,
-        me: Participant,
-        public_key: PublicKey,
-        epoch: u64,
-    ) -> Self {
+    pub fn new(me: Participant, public_key: PublicKey, epoch: u64) -> Self {
         Self {
             generators: HashMap::new(),
             failed_generators: VecDeque::new(),
             signatures: Vec::new(),
-            participants,
             me,
             public_key,
             epoch,
@@ -181,7 +175,7 @@ impl SignatureManager {
 
     #[allow(clippy::too_many_arguments)]
     fn generate_internal(
-        participants: &[Participant],
+        participants: &Participants,
         me: Participant,
         public_key: PublicKey,
         proposer: Participant,
@@ -191,6 +185,7 @@ impl SignatureManager {
         delta: Scalar,
         time_added: Instant,
     ) -> Result<SignatureGenerator, InitializationError> {
+        let participants: Vec<_> = participants.keys().cloned().collect();
         let PresignOutput { big_r, k, sigma } = presignature.output;
         // TODO: Check whether it is okay to use invert_vartime instead
         let output: PresignOutput<Secp256k1> = PresignOutput {
@@ -199,7 +194,7 @@ impl SignatureManager {
             sigma: (sigma + epsilon * k) * delta.invert().unwrap(),
         };
         let protocol = Box::new(cait_sith::sign(
-            participants,
+            &participants,
             me,
             kdf::derive_key(public_key, epsilon),
             output,
@@ -207,6 +202,7 @@ impl SignatureManager {
         )?);
         Ok(SignatureGenerator::new(
             protocol,
+            participants,
             proposer,
             presignature.id,
             msg_hash,
@@ -216,10 +212,15 @@ impl SignatureManager {
         ))
     }
 
-    pub fn retry_failed_generation(&mut self, presignature: Presignature) -> Option<()> {
+    pub fn retry_failed_generation(
+        &mut self,
+        presignature: Presignature,
+        participants: &Participants,
+    ) -> Option<()> {
         let (hash, failed_generator) = self.failed_generators.pop_front()?;
+        tracing::info!(receipt_id = %hash, participants = ?participants.keys().collect::<Vec<_>>(), "restarting failed protocol to generate signature");
         let generator = Self::generate_internal(
-            &self.participants,
+            participants,
             self.me,
             self.public_key,
             failed_generator.proposer,
@@ -238,6 +239,7 @@ impl SignatureManager {
     #[allow(clippy::too_many_arguments)]
     pub fn generate(
         &mut self,
+        participants: &Participants,
         receipt_id: CryptoHash,
         presignature: Presignature,
         public_key: PublicKey,
@@ -246,9 +248,9 @@ impl SignatureManager {
         delta: Scalar,
         time_added: Instant,
     ) -> Result<(), InitializationError> {
-        tracing::info!(%receipt_id, "starting protocol to generate a new signature");
+        tracing::info!(%receipt_id, participants = ?participants.keys().collect::<Vec<_>>(), "starting protocol to generate a new signature");
         let generator = Self::generate_internal(
-            &self.participants,
+            participants,
             self.me,
             public_key,
             self.me,
@@ -271,6 +273,7 @@ impl SignatureManager {
     #[allow(clippy::too_many_arguments)]
     pub fn get_or_generate(
         &mut self,
+        participants: &Participants,
         receipt_id: CryptoHash,
         proposer: Participant,
         presignature_id: PresignatureId,
@@ -287,7 +290,7 @@ impl SignatureManager {
                     return Ok(None);
                 };
                 let generator = Self::generate_internal(
-                    &self.participants,
+                    participants,
                     self.me,
                     self.public_key,
                     proposer,
@@ -336,7 +339,7 @@ impl SignatureManager {
                         return true;
                     }
                     Action::SendMany(data) => {
-                        for p in &self.participants {
+                        for p in generator.participants.iter() {
                             messages.push((
                                 *p,
                                 SignatureMessage {
