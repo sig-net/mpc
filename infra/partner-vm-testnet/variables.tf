@@ -1,13 +1,13 @@
 variable "project_id" {
   description = "The project ID to deploy resource into"
   type        = string
-  default     = "pagoda-discovery-platform-dev"
+  default     = "<your-project-name-here>"
 }
 
 variable "subnetwork" {
   description = "The name of the subnetwork to deploy instances into"
   type        = string
-  default     = "dev-us-central1"
+  default     = "us-central1-subnet"
 }
 
 variable "mig_name" {
@@ -17,9 +17,9 @@ variable "mig_name" {
 }
 
 variable "image" {
-  description = "The Docker image to deploy to GCE instances"
+  description = "The Docker image to deploy to GCE instances. Note: This is a public image repository used for updating your nodes, please do not change this"
   type        = string
-  default     = "us-east1-docker.pkg.dev/pagoda-discovery-platform-dev/multichain/multichain-dev:latest"
+  default     = "us-east1-docker.pkg.dev/pagoda-discovery-platform-prod/multichain-public/multichain-dev:latest"
 }
 
 variable "image_port" {
@@ -37,7 +37,7 @@ variable "region" {
 variable "network" {
   description = "The GCP network"
   type        = string
-  default     = "dev"
+  default     = "default"
 }
 
 variable "additional_metadata" {
@@ -97,7 +97,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_RECOVERY_INDEXER_START_BLOCK_HEIGHT"
-      value = 159307004
+      value = 158767549
     },
     {
       name  = "AWS_DEFAULT_REGION"
@@ -105,7 +105,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_RECOVERY_GCP_PROJECT_ID"
-      value = "pagoda-discovery-platform-dev"
+      value = "<your-project-id>"
     },
     {
       name  = "MPC_RECOVERY_WEB_PORT"
@@ -120,4 +120,9 @@ variable "static_env" {
       value = "eu-central-1"
     }
   ]
+}
+
+variable "create_network" {
+  default = false
+  description = "Do you want to create a new VPC network or use default GCP network?"
 }
