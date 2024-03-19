@@ -68,7 +68,7 @@ pub struct MultichainTestContext<'a> {
     cfg: MultichainConfig,
 }
 
-async fn with_multichain_nodes<F>(cfg: MultichainConfig, f: F) -> anyhow::Result<()>
+async fn with_multichain_nodes<F>(cfg: &MultichainConfig, f: F) -> anyhow::Result<()>
 where
     F: for<'a> FnOnce(MultichainTestContext<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
 {
@@ -84,7 +84,7 @@ where
         rpc_client,
         jsonrpc_client,
         http_client: reqwest::Client::default(),
-        cfg,
+        cfg: cfg.clone(),
     })
     .await?;
 

@@ -18,14 +18,14 @@ const NETWORK: &str = "mpc_it_network";
 
 #[derive(Clone)]
 pub struct MultichainConfig {
-    pub nodes: usize,
+    pub initial_number_of_nodes: usize,
     pub triple_cfg: TripleConfig,
 }
 
 impl Default for MultichainConfig {
     fn default() -> Self {
         Self {
-            nodes: 3,
+            initial_number_of_nodes: 3,
             triple_cfg: TripleConfig {
                 min_triples: 2,
                 max_triples: 10,
@@ -205,11 +205,12 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
 pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
     let ctx = setup(docker_client).await?;
 
-    let accounts =
-        futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+    let accounts = futures::future::join_all(
+        (0..cfg.initial_number_of_nodes).map(|_| ctx.worker.dev_create_account()),
+    )
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
     let mut node_futures = Vec::new();
     for account in &accounts {
         let node = containers::Node::run(&ctx, account.id(), account.secret_key(), &cfg);
@@ -251,13 +252,14 @@ pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyh
 pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
     let ctx = setup(docker_client).await?;
 
-    let accounts =
-        futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-    let mut node_futures = Vec::with_capacity(cfg.nodes);
-    for account in accounts.iter().take(cfg.nodes) {
+    let accounts = futures::future::join_all(
+        (0..cfg.initial_number_of_nodes).map(|_| ctx.worker.dev_create_account()),
+    )
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
+    let mut node_futures = Vec::with_capacity(cfg.initial_number_of_nodes);
+    for account in accounts.iter().take(cfg.initial_number_of_nodes) {
         node_futures.push(local::Node::run(
             &ctx,
             account.id(),

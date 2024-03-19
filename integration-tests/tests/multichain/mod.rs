@@ -14,10 +14,11 @@ use test_log::test;
 
 #[test(tokio::test)]
 async fn test_multichain_reshare() -> anyhow::Result<()> {
-    with_multichain_nodes(MultichainConfig::default(), |mut ctx| {
+    let config = MultichainConfig::default();
+    with_multichain_nodes(&config, |mut ctx| {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, 0).await?;
-            assert_eq!(state_0.participants.len(), 3);
+            assert_eq!(state_0.participants.len(), config.initial_number_of_nodes);
 
             let account = ctx.nodes.ctx().worker.dev_create_account().await?;
             ctx.nodes
@@ -25,7 +26,10 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
                 .await?;
 
             let state_1 = wait_for::running_mpc(&ctx, 1).await?;
-            assert_eq!(state_1.participants.len(), 4);
+            assert_eq!(
+                state_1.participants.len(),
+                config.initial_number_of_nodes + 1
+            );
 
             assert_eq!(
                 state_0.public_key, state_1.public_key,
@@ -40,10 +44,11 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_triples_and_presignatures() -> anyhow::Result<()> {
-    with_multichain_nodes(MultichainConfig::default(), |ctx| {
+    let config = MultichainConfig::default();
+    with_multichain_nodes(&config, |ctx| {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, 0).await?;
-            assert_eq!(state_0.participants.len(), 3);
+            assert_eq!(state_0.participants.len(), config.initial_number_of_nodes);
             wait_for::has_at_least_triples(&ctx, 2).await?;
             wait_for::has_at_least_presignatures(&ctx, 2).await?;
             Ok(())
@@ -54,10 +59,11 @@ async fn test_triples_and_presignatures() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_signature() -> anyhow::Result<()> {
-    with_multichain_nodes(MultichainConfig::default(), |ctx| {
+    let config = MultichainConfig::default();
+    with_multichain_nodes(&config, |ctx| {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, 0).await?;
-            assert_eq!(state_0.participants.len(), 3);
+            assert_eq!(state_0.participants.len(), config.initial_number_of_nodes);
             wait_for::has_at_least_triples(&ctx, 2).await?;
             wait_for::has_at_least_presignatures(&ctx, 2).await?;
             actions::single_signature_production(&ctx, &state_0).await
@@ -68,10 +74,11 @@ async fn test_signature() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_signature_offline_node() -> anyhow::Result<()> {
-    with_multichain_nodes(MultichainConfig::default(), |mut ctx| {
+    let config = MultichainConfig::default();
+    with_multichain_nodes(&config, |mut ctx| {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, 0).await?;
-            assert_eq!(state_0.participants.len(), 3);
+            assert_eq!(state_0.participants.len(), config.initial_number_of_nodes);
             wait_for::has_at_least_triples(&ctx, 2).await?;
 
             // Kill the node then have presignature and signature generation only use the active set of nodes
@@ -102,10 +109,10 @@ async fn test_signature_large_stockpile() -> anyhow::Result<()> {
         ..MultichainConfig::default()
     };
 
-    with_multichain_nodes(config, |ctx| {
+    with_multichain_nodes(&config, |ctx| {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, 0).await?;
-            assert_eq!(state_0.participants.len(), 3);
+            assert_eq!(state_0.participants.len(), config.initial_number_of_nodes);
             wait_for::has_at_least_triples(&ctx, triple_cfg.min_triples).await?;
             wait_for::has_at_least_presignatures(&ctx, SIGNATURE_AMOUNT).await?;
 
@@ -120,10 +127,11 @@ async fn test_signature_large_stockpile() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_key_derivation() -> anyhow::Result<()> {
-    with_multichain_nodes(MultichainConfig::default(), |ctx| {
+    let config = MultichainConfig::default();
+    with_multichain_nodes(&config, |ctx| {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, 0).await?;
-            assert_eq!(state_0.participants.len(), 3);
+            assert_eq!(state_0.participants.len(), config.initial_number_of_nodes);
             wait_for::has_at_least_triples(&ctx, 2).await?;
             wait_for::has_at_least_presignatures(&ctx, 2).await?;
 
@@ -211,10 +219,11 @@ async fn test_triples_persistence_for_deletion() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_latest_block_height() -> anyhow::Result<()> {
-    with_multichain_nodes(MultichainConfig::default(), |ctx| {
+    let config = MultichainConfig::default();
+    with_multichain_nodes(&config, |ctx| {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, 0).await?;
-            assert_eq!(state_0.participants.len(), 3);
+            assert_eq!(state_0.participants.len(), config.initial_number_of_nodes);
             wait_for::has_at_least_triples(&ctx, 2).await?;
             wait_for::has_at_least_presignatures(&ctx, 2).await?;
 
