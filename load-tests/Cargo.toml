@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 goose = "^0.17"
 goose-eggs = "0.5.1"
-tokio = "^1.12"
+tokio = "^1.36"
 reqwest = "^0.11"
 jsonwebtoken = "8.3.0"
 near-primitives = "0.17.0"

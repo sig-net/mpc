@@ -34,18 +34,18 @@ sha2 = "0.10.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
-tokio = { version = "1.28", features = ["full"] }
+tokio = { version = "1.36", features = ["full"] }
 tokio-retry = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2.4.0", features = ["serde"] }
 
 near-crypto = "0.17"
-near-fetch = "0.0.12"
+near-fetch = { path = "../../fetch/near-fetch" }
 near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs.git", branch = "daniyar/upgrade-sdk" }
 near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs.git", branch = "daniyar/upgrade-sdk" }
 near-primitives = "0.17.0"
-near-sdk = "5.0.0-alpha.1"
+near-sdk = {version = "5.0.0-alpha.3", features = ["legacy"]}
 
 mpc-contract = { path = "../contract" }
 mpc-keys = { path = "../keys" }
