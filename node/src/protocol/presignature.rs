@@ -210,14 +210,22 @@ impl PresignatureManager {
             match self.generators.entry(id) {
                 Entry::Vacant(entry) => {
                     tracing::info!(id, "joining protocol to generate a new presignature");
-                    let (triple0, triple1) =
-                        match triple_manager.take_two(triple0, triple1, false).await {
-                            Ok(result) => result,
-                            Err(error) => {
-                                tracing::warn!(?error, triple0, triple1,);
-                                return Err(error);
-                            }
-                        };
+                    let (triple0, triple1) = match triple_manager
+                        .take_two(triple0, triple1, false)
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => {
+                            tracing::warn!(
+                                ?error,
+                                id,
+                                triple0,
+                                triple1,
+                                "could not initiate non-introduced presignature: triple might not have completed for this node yet"
+                            );
+                            return Err(error);
+                        }
+                    };
                     let generator = Self::generate_internal(
                         participants,
                         self.me,
@@ -244,6 +252,11 @@ impl PresignatureManager {
 
     pub fn take(&mut self, id: PresignatureId) -> Option<Presignature> {
         self.presignatures.remove(&id)
+    }
+
+    pub fn insert_mine(&mut self, presig: Presignature) {
+        self.mine.push_back(presig.id);
+        self.presignatures.insert(presig.id, presig);
     }
 
     /// Pokes all of the ongoing generation protocols and returns a vector of
@@ -297,6 +310,7 @@ impl PresignatureManager {
                     Action::Return(output) => {
                         tracing::info!(
                             id,
+                            me = ?self.me,
                             big_r = ?output.big_r.to_base58(),
                             "completed presignature generation"
                         );

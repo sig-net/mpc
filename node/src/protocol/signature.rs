@@ -17,7 +17,10 @@ use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Duration for which completed signatures are retained.
+pub const COMPLETION_EXISTENCE_TIMEOUT: Duration = Duration::from_secs(120 * 60);
 
 pub struct SignRequest {
     pub receipt_id: CryptoHash,
@@ -57,6 +60,7 @@ impl SignQueue {
             if subset.contains(&&me) {
                 tracing::info!(
                     receipt_id = %request.receipt_id,
+                    ?me,
                     ?subset,
                     ?proposer,
                     "saving sign request: node is in the signer subset"
@@ -66,6 +70,7 @@ impl SignQueue {
             } else {
                 tracing::info!(
                     receipt_id = %request.receipt_id,
+                    ?me,
                     ?subset,
                     ?proposer,
                     "skipping sign request: node is NOT in the signer subset"
@@ -151,6 +156,8 @@ pub struct SignatureManager {
     generators: HashMap<CryptoHash, SignatureGenerator>,
     /// Failed signatures awaiting to be retried.
     failed_generators: VecDeque<(CryptoHash, FailedGenerator)>,
+    /// Set of completed signatures
+    completed: HashMap<PresignatureId, Instant>,
     /// Generated signatures assigned to the current node that are yet to be published.
     /// Vec<(receipt_id, msg_hash, timestamp, output)>
     signatures: Vec<(CryptoHash, [u8; 32], Instant, FullSignature<Secp256k1>)>,
@@ -164,6 +171,7 @@ impl SignatureManager {
         Self {
             generators: HashMap::new(),
             failed_generators: VecDeque::new(),
+            completed: HashMap::new(),
             signatures: Vec::new(),
             me,
             public_key,
@@ -250,7 +258,13 @@ impl SignatureManager {
         delta: Scalar,
         sign_request_timestamp: Instant,
     ) -> Result<(), InitializationError> {
-        tracing::info!(%receipt_id, participants = ?participants.keys().collect::<Vec<_>>(), "starting protocol to generate a new signature");
+        tracing::info!(
+            %receipt_id,
+            me = ?self.me,
+            presignature_id = presignature.id,
+            participants = ?participants.keys_vec(),
+            "starting protocol to generate a new signature",
+        );
         let generator = Self::generate_internal(
             participants,
             self.me,
@@ -286,11 +300,12 @@ impl SignatureManager {
     ) -> Result<Option<&mut SignatureProtocol>, InitializationError> {
         match self.generators.entry(receipt_id) {
             Entry::Vacant(entry) => {
-                tracing::info!(%receipt_id, "joining protocol to generate a new signature");
+                tracing::info!(%receipt_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
                 let Some(presignature) = presignature_manager.take(presignature_id) else {
-                    tracing::warn!(presignature_id, "presignature is missing, can't join");
+                    tracing::warn!(me = ?self.me, presignature_id, "presignature is missing, can't join");
                     return Ok(None);
                 };
+                tracing::info!(me = ?self.me, presignature_id, "found presignature: ready to start signature generation");
                 let generator = Self::generate_internal(
                     participants,
                     self.me,
@@ -375,10 +390,13 @@ impl SignatureManager {
                     Action::Return(output) => {
                         tracing::info!(
                             ?receipt_id,
+                            me = ?self.me,
+                            presignature_id = generator.presignature_id,
                             big_r = ?output.big_r.to_base58(),
                             s = ?output.s,
                             "completed signature generation"
                         );
+                        self.completed.insert(generator.presignature_id, Instant::now());
                         if generator.proposer == self.me {
                             self.signatures
                                 .push((*receipt_id, generator.msg_hash, generator.sign_request_timestamp, output));
@@ -435,5 +453,13 @@ impl SignatureManager {
             tracing::info!(%receipt_id, big_r = signature.big_r.to_base58(), s = ?signature.s, status = ?response.status, "published signature response");
         }
         Ok(())
+    }
+
+    /// Check whether or not the signature has been completed with this presignature_id.
+    pub fn has_completed(&mut self, presignature_id: &PresignatureId) -> bool {
+        self.completed
+            .retain(|_, timestamp| timestamp.elapsed() < COMPLETION_EXISTENCE_TIMEOUT);
+
+        self.completed.contains_key(presignature_id)
     }
 }
