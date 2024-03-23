@@ -143,6 +143,10 @@ impl PresignatureManager {
         let protocol = Box::new(cait_sith::presign(
             &participants,
             me,
+            // These paramaters appear to be to make it easier to use different indexing schemes for triples
+            // Introduced in this PR https://github.com/LIT-Protocol/cait-sith/pull/7
+            &participants,
+            me,
             PresignArguments {
                 triple0: (triple0.share, triple0.public),
                 triple1: (triple1.share, triple1.public),
