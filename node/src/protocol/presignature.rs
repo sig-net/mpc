@@ -219,6 +219,12 @@ impl PresignatureManager {
         )?;
         self.generators.insert(id, generator);
         self.introduced.insert(id);
+        crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS
+            .with_label_values(&[&self.my_account_id.as_ref()])
+            .inc();
+        crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE
+            .with_label_values(&[&self.my_account_id.as_ref()])
+            .inc();
         Ok(())
     }
 
@@ -330,6 +336,9 @@ impl PresignatureManager {
                         false,
                     )?;
                     let generator = entry.insert(generator);
+                    crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS
+                        .with_label_values(&[&self.my_account_id.as_ref()])
+                        .inc();
                     Ok(&mut generator.protocol)
                 }
                 Entry::Occupied(entry) => Ok(&mut entry.into_mut().protocol),
@@ -423,13 +432,18 @@ impl PresignatureManager {
                         if generator.mine {
                             tracing::info!(id, "assigning presignature to myself");
                             self.mine.push_back(*id);
+                            crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS
+                                .with_label_values(&[&self.my_account_id.as_ref()])
+                                .inc();
                         }
                         self.introduced.remove(id);
 
                         crate::metrics::PRESIGNATURE_LATENCY
                             .with_label_values(&[&self.my_account_id.as_ref()])
                             .observe(generator.timestamp.elapsed().as_secs_f64());
-
+                        crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS
+                            .with_label_values(&[&self.my_account_id.as_ref()])
+                            .inc();
                         // Do not retain the protocol
                         return false;
                     }
