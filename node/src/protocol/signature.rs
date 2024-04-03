@@ -387,7 +387,7 @@ impl SignatureManager {
                         );
                         if generator.proposer == self.me {
                             self.signatures
-                                .push((*receipt_id, generator.msg_hash, generator.epsilon, generator.timestamp, output));
+                                .push((*receipt_id, generator.msg_hash, generator.epsilon, generator.sign_request_timestamp, output));
                         }
                         // Do not retain the protocol
                         return false;

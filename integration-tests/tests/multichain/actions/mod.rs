@@ -12,12 +12,13 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::elliptic_curve::ProjectivePoint;
 use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
 use mpc_contract::RunningContractState;
-use mpc_recovery_node::kdf;
+use mpc_recovery_node::kdf::{self, derive_epsilon};
 use mpc_recovery_node::util::ScalarExt;
 use near_crypto::InMemorySigner;
 use near_jsonrpc_client::methods::broadcast_tx_async::RpcBroadcastTxAsyncRequest;
 use near_lake_primitives::CryptoHash;
 use near_primitives::transaction::{Action, FunctionCallAction, Transaction};
+use near_primitives::types::AccountId;
 use near_workspaces::Account;
 use rand::Rng;
 use secp256k1::XOnlyPublicKey;
@@ -33,7 +34,7 @@ use k256::{
 
 pub async fn request_sign(
     ctx: &MultichainTestContext<'_>,
-) -> anyhow::Result<([u8; 32], [u8; 32], Account, CryptoHash)> {
+) -> anyhow::Result<([u8; 32], [u8; 32], Account, CryptoHash, String)> {
     let worker = &ctx.nodes.ctx().worker;
     let account = worker.dev_create_account().await?;
     let payload: [u8; 32] = rand::thread_rng().gen();
@@ -48,6 +49,7 @@ pub async fn request_sign(
         .rpc_client
         .fetch_nonce(&signer.account_id, &signer.public_key)
         .await?;
+    let path = "test".to_string();
     let tx_hash = ctx
         .jsonrpc_client
         .call(&RpcBroadcastTxAsyncRequest {
@@ -61,7 +63,7 @@ pub async fn request_sign(
                     method_name: "sign".to_string(),
                     args: serde_json::to_vec(&serde_json::json!({
                         "payload": payload_hashed,
-                        "path": "test",
+                        "path": &path,
                         "key_version": 0,
                     }))?,
                     gas: 300_000_000_000_000,
@@ -72,12 +74,14 @@ pub async fn request_sign(
         })
         .await?;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    Ok((payload, payload_hashed, account, tx_hash))
+    Ok((payload, payload_hashed, account, tx_hash, path))
 }
 
 pub async fn rogue_respond(
     ctx: &MultichainTestContext<'_>,
     payload_hash: [u8; 32],
+    predecessor: &AccountId,
+    path: &str,
 ) -> anyhow::Result<CryptoHash> {
     let worker = &ctx.nodes.ctx().worker;
     let account = worker.dev_create_account().await?;
@@ -91,7 +95,17 @@ pub async fn rogue_respond(
         .rpc_client
         .fetch_nonce(&signer.account_id, &signer.public_key)
         .await?;
-    let epsilon = [0u8; 32];
+    let epsilon: [u8; 32] = derive_epsilon(predecessor, path)
+        .to_bytes()
+        .try_into()
+        .expect("Epsilon to be 32 bytes");
+    let json = &serde_json::json!({
+        "payload": payload_hash,
+        "epsilon": epsilon,
+        "big_r": "Fake BigR",
+        "s": "Fake S",
+    });
+    println!("JSON: {json}");
     let hash = ctx
         .jsonrpc_client
         .call(&RpcBroadcastTxAsyncRequest {
@@ -103,12 +117,7 @@ pub async fn rogue_respond(
                 receiver_id: ctx.nodes.ctx().mpc_contract.id().clone(),
                 actions: vec![Action::FunctionCall(FunctionCallAction {
                     method_name: "respond".to_string(),
-                    args: serde_json::to_vec(&serde_json::json!({
-                        "payload": payload_hash,
-                        "epsilon": epsilon,
-                        "big_r": "Fake BigR",
-                        "s": "Fake S",
-                    }))?,
+                    args: serde_json::to_vec(json)?,
                     gas: 300_000_000_000_000,
                     deposit: 0,
                 })],
@@ -139,7 +148,7 @@ pub async fn single_signature_production(
     ctx: &MultichainTestContext<'_>,
     state: &RunningContractState,
 ) -> anyhow::Result<()> {
-    let (_, payload_hash, account, tx_hash) = request_sign(ctx).await?;
+    let (_, payload_hash, account, tx_hash, _) = request_sign(ctx).await?;
 
     let signature = wait_for::signature_responded(ctx, tx_hash).await?;
 
@@ -155,19 +164,20 @@ pub async fn single_signature_rogue_responder(
     ctx: &MultichainTestContext<'_>,
     state: &RunningContractState,
 ) -> anyhow::Result<()> {
-    let (_, payload_hash, account, tx_hash) = request_sign(ctx).await?;
+    let (_, payload_hash, account, tx_hash, path) = request_sign(ctx).await?;
     // We have to use seperate transactions because one could fail.
     // This leads to a potential race condition where this transaction could get sent after the signature completes, but I think that's unlikely
-    let rogue_hash = rogue_respond(ctx, payload_hash).await?;
-
-    let signature = wait_for::signature_responded(ctx, tx_hash).await?;
+    let rogue_hash = rogue_respond(ctx, payload_hash, &account.id(), &path).await?;
 
     let err = wait_for::rogue_message_responded(ctx, rogue_hash).await?;
+
     assert_eq!(
         err,
         "Smart contract panicked: You must be participating in the MPC protocol to respond"
             .to_string()
     );
+
+    let signature = wait_for::signature_responded(ctx, tx_hash).await?;
 
     let mut mpc_pk_bytes = vec![0x04];
     mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);

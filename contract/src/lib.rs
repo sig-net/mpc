@@ -1,5 +1,10 @@
 pub mod primitives;
 
+use k256::elliptic_curve::point::AffineCoordinates;
+use k256::elliptic_curve::scalar::FromUintUnchecked;
+use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
+use k256::elliptic_curve::CurveArithmetic;
+use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar, Secp256k1, U256};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
 use near_sdk::log;
@@ -49,7 +54,7 @@ pub enum ProtocolContractState {
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct MpcContract {
     protocol_state: ProtocolContractState,
-    pending_requests: LookupMap<[u8; 32], Option<(String, String)>>,
+    pending_requests: LookupMap<([u8; 32], [u8; 32]), Option<(String, String)>>,
 }
 
 #[near_bindgen]
@@ -302,18 +307,22 @@ impl MpcContract {
             "This version of the signer contract doesn't support versions greater than {}",
             latest_key_version,
         );
+        let predecessor = env::predecessor_account_id();
+        let epsilon = self.derive_epsilon(&predecessor, &path);
         log!(
-            "sign: signer={}, payload={:?}, path={:?}, key_version={}",
-            env::signer_account_id(),
+            "sign: predecessor={}, epsilon={:?}, payload={:?}, path={:?}, key_version={}",
+            predecessor,
+            epsilon,
             payload,
             path,
             key_version
         );
-        match self.pending_requests.get(&payload) {
+
+        match self.pending_requests.get(&(payload, epsilon)) {
             None => {
-                self.pending_requests.insert(&payload, &None);
+                self.pending_requests.insert(&(payload, epsilon), &None);
                 log!(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
-                Self::ext(env::current_account_id()).sign_helper(payload, 0)
+                Self::ext(env::current_account_id()).sign_helper(payload, epsilon, 0)
             }
             Some(_) => env::panic_str("Signature for this payload already requested"),
         }
@@ -323,9 +332,10 @@ impl MpcContract {
     pub fn sign_helper(
         &mut self,
         payload: [u8; 32],
+        epsilon: [u8; 32],
         depth: usize,
     ) -> PromiseOrValue<(String, String)> {
-        if let Some(signature) = self.pending_requests.get(&payload) {
+        if let Some(signature) = self.pending_requests.get(&(payload, epsilon)) {
             match signature {
                 Some(signature) => {
                     log!(
@@ -333,7 +343,7 @@ impl MpcContract {
                         signature,
                         depth
                     );
-                    self.pending_requests.remove(&payload);
+                    self.pending_requests.remove(&(payload, epsilon));
                     PromiseOrValue::Value(signature)
                 }
                 None => {
@@ -342,7 +352,11 @@ impl MpcContract {
                         depth
                     ));
                     let account_id = env::current_account_id();
-                    PromiseOrValue::Promise(Self::ext(account_id).sign_helper(payload, depth + 1))
+                    PromiseOrValue::Promise(Self::ext(account_id).sign_helper(
+                        payload,
+                        epsilon,
+                        depth + 1,
+                    ))
                 }
             }
         } else {
@@ -350,7 +364,7 @@ impl MpcContract {
         }
     }
 
-    pub fn respond(&mut self, payload: [u8; 32], big_r: String, s: String) {
+    pub fn respond(&mut self, payload: [u8; 32], epsilon: [u8; 32], big_r: String, s: String) {
         log!(
             "respond: signer={}, payload={:?} big_r={} s={}",
             env::signer_account_id(),
@@ -358,7 +372,56 @@ impl MpcContract {
             big_r,
             s
         );
-        self.pending_requests.insert(&payload, &Some((big_r, s)));
+
+        // let expected = self.pending_requests.get(&([0; 32], [0; 32]));
+        match self.pending_requests.get(&(payload, epsilon)) {
+            // There is an outstanding request, and it hasn't been answered
+            Some(None) => {
+                self.verify_signature(payload, epsilon, &big_r, &s);
+                self.pending_requests
+                    .insert(&(payload, epsilon), &Some((big_r, s)));
+            }
+            Some(_) => env::panic_str("This request has already been answered, but not returned"),
+            None => env::panic_str(&format!(
+                "This request either wasn't made or has been returned to the sender already",
+                // expected.unwrap().unwrap().0
+            )),
+        };
+    }
+
+    fn verify_signature(&self, payload_hash: [u8; 32], epsilon: [u8; 32], big_r: &str, s: &str) {
+        let expected_key = self.derive_key(&epsilon).to_encoded_point(false).to_bytes();
+
+        let big_r = hex::decode(big_r).unwrap();
+        let big_r = EncodedPoint::from_bytes(big_r).unwrap();
+        let big_r = AffinePoint::from_encoded_point(&big_r).unwrap();
+        // let big_r_y_parity = big_r.y_is_odd().unwrap_u8() as i32;
+
+        fn x_coordinate(
+            point: &<Secp256k1 as CurveArithmetic>::AffinePoint,
+        ) -> <Secp256k1 as CurveArithmetic>::Scalar {
+            <<Secp256k1 as CurveArithmetic>::Scalar as k256::elliptic_curve::ops::Reduce<
+                <k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint,
+            >>::reduce_bytes(&point.x())
+        }
+
+        let s = hex::decode(s).unwrap();
+        let s = k256::Scalar::from_uint_unchecked(k256::U256::from_be_slice(s.as_slice()));
+        let r = x_coordinate(&big_r);
+
+        let signature: [u8; 64] = {
+            let mut signature = [0u8; 64]; // TODO: is there a better way to get these bytes?
+            signature[..32].copy_from_slice(&r.to_bytes());
+            signature[32..].copy_from_slice(&s.to_bytes());
+            signature
+        };
+
+        // Try with a recovery ID of 0
+        let recovered_key = env::ecrecover(&payload_hash, &signature, 0, false)
+            // If that doesn't work with a recovery ID of 1
+            .or_else(|| env::ecrecover(&payload_hash, &signature, 1, false));
+
+        assert_eq!(Some(&*expected_key), recovered_key.as_ref().map(|k| &k[..]));
     }
 
     #[private]
@@ -390,4 +453,53 @@ impl MpcContract {
     pub const fn latest_key_version(&self) -> u32 {
         0
     }
+
+    fn derive_epsilon(&self, predecessor: &AccountId, path: &str) -> [u8; 32] {
+        // Constant prefix that ensures epsilon derivation values are used specifically for
+        // near-mpc-recovery with key derivation protocol vX.Y.Z.
+        // TODO put this somewhere shared
+        const EPSILON_DERIVATION_PREFIX: &str = "near-mpc-recovery v0.1.0 epsilon derivation:";
+
+        let derivation_path = format!("{EPSILON_DERIVATION_PREFIX}{},{}", predecessor, path);
+        let mut res = env::sha256(&derivation_path.into_bytes());
+        // Our key derivation algorithm is backwards for reasons of historical mistake
+        res.reverse();
+
+        res.try_into().expect("That sha256 is 32 bytes long")
+    }
+
+    pub fn derive_key(&self, epsilon: &[u8; 32]) -> PublicKeyA {
+        let epsilon = scalar_from_bytes(epsilon);
+        // This will always succeed because the underlying type is [u8;64]
+        let uncompressed_public_key: [u8; 64] = self.public_key().into_bytes().try_into().unwrap();
+        let (x, y) = uncompressed_public_key.split_at(32);
+        let x = FieldBytes::from_slice(&x);
+        let y = FieldBytes::from_slice(&y);
+        let encoded_point = EncodedPoint::from_affine_coordinates(x, y, true);
+
+        let public_key =
+            AffinePoint::from_encoded_point(&encoded_point).expect("Valid public key conversion");
+
+        // let public_key: AffinePoint = AffinePoint::from_bytes(&public_key_a).unwrap();
+
+        (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key)
+            .to_affine()
+    }
+}
+
+// Our wasm runtime doesn't support good syncronous entropy.
+// We could use something VRF + pseudorandom here, but someone would likely shoot themselves in the foot with it.
+// Our crypto libraries should definately panic, because they normally expect randomness to be private
+use getrandom::{register_custom_getrandom, Error};
+pub fn randomness_unsupported(_: &mut [u8]) -> Result<(), Error> {
+    Err(Error::UNSUPPORTED)
+}
+register_custom_getrandom!(randomness_unsupported);
+
+// TODO Give this a better name
+pub type PublicKeyA = <Secp256k1 as CurveArithmetic>::AffinePoint;
+
+// TODO put in shared lib
+fn scalar_from_bytes(bytes: &[u8]) -> Scalar {
+    Scalar::from_uint_unchecked(U256::from_le_slice(bytes))
 }

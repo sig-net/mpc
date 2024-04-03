@@ -1457,7 +1457,7 @@ dependencies = [
  "env_logger 0.9.3",
  "libloading",
  "log",
- "near-abi 0.3.0",
+ "near-abi",
  "rustc_version",
  "schemars",
  "serde_json",
@@ -4039,6 +4039,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "borsh 1.3.1",
+ "getrandom 0.2.12",
+ "hex 0.4.3",
+ "k256",
  "near-sdk",
  "near-workspaces 0.10.0",
  "schemars",
@@ -4277,18 +4280,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "near-abi"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bd176820187cfb134a5147330fe803357bf5dab9a14f891d1702beb3d471dfb"
-dependencies = [
- "borsh 1.3.1",
- "schemars",
- "semver",
- "serde",
-]
-
-[[package]]
 name = "near-account-id"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4305,7 +4296,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35cbb989542587b47205e608324ddd391f0cee1c22b4b64ae49f458334b95907"
 dependencies = [
  "borsh 1.3.1",
- "schemars",
  "serde",
 ]
 
@@ -4914,26 +4904,19 @@ dependencies = [
 
 [[package]]
 name = "near-sdk"
-version = "5.0.0-alpha.2"
+version = "5.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8869ab54cd71a1a4239002f8c00b9e6742725c386e23084be98dd4bb69336266"
+checksum = "520234cfdf04a805ac2f04715889d096eb83fdd5b99ca7d0f8027ae473f891a8"
 dependencies = [
- "base64 0.13.1",
+ "base64 0.21.7",
  "borsh 1.3.1",
- "bs58 0.4.0",
- "near-abi 0.4.0",
+ "bs58 0.5.0",
  "near-account-id 1.0.0",
- "near-crypto 0.20.1",
  "near-gas",
- "near-parameters",
- "near-primitives 0.20.1",
- "near-primitives-core 0.20.1",
  "near-sdk-macros",
  "near-sys",
  "near-token",
- "near-vm-runner",
  "once_cell",
- "schemars",
  "serde",
  "serde_json",
  "wee_alloc",
@@ -4941,9 +4924,9 @@ dependencies = [
 
 [[package]]
 name = "near-sdk-macros"
-version = "5.0.0-alpha.2"
+version = "5.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0efa94eb99a64491323b71ba2c0591ce4649817f26339de56f110f00649ea908"
+checksum = "ee2fe3fc30068c5f20e89b0985d6104c5cc1c6742dbc6efbf352be4189b9bbf7"
 dependencies = [
  "Inflector",
  "darling 0.20.3",
@@ -4951,8 +4934,8 @@ dependencies = [
  "quote",
  "serde",
  "serde_json",
- "strum 0.24.1",
- "strum_macros 0.24.3",
+ "strum 0.26.2",
+ "strum_macros 0.26.2",
  "syn 2.0.48",
 ]
 
@@ -4981,7 +4964,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b68f3f8a2409f72b43efdbeff8e820b81e70824c49fee8572979d789d1683fb"
 dependencies = [
  "borsh 1.3.1",
- "schemars",
  "serde",
 ]
 
@@ -7580,6 +7562,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "strum"
+version = "0.26.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d8cec3501a5194c432b2b7976db6b7d10ec95c253208b45f83f7136aa985e29"
+
+[[package]]
 name = "strum_macros"
 version = "0.24.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7597,6 +7585,19 @@ name = "strum_macros"
 version = "0.25.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23dc1fa9ac9c169a78ba62f0b841814b7abae11bdd047b9c58f893439e309ea0"
+dependencies = [
+ "heck 0.4.1",
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn 2.0.48",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.26.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6cf59daf282c0a494ba14fd21610a0325f9f90ec9d1231dea26bcb1d696c946"
 dependencies = [
  "heck 0.4.1",
  "proc-macro2",

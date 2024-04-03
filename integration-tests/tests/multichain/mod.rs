@@ -177,7 +177,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
 
             for _ in 0..5 {
                 let mpc_pk: k256::AffinePoint = state_0.public_key.clone().into_affine_point();
-                let (_, payload_hashed, account, tx_hash) = actions::request_sign(&ctx).await?;
+                let (_, payload_hashed, account, tx_hash, _) = actions::request_sign(&ctx).await?;
                 let payload_hashed_rev = {
                     let mut rev = payload_hashed;
                     rev.reverse();
