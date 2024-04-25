@@ -11,7 +11,7 @@ COPY . .
 RUN cargo build --release
 
 # Create a smaller image for running the application
-FROM debian:bookworm-slim as runtime
+FROM debian:12.5-slim as runtime
 
 # Copy the built binary from the builder stage into the final image
 COPY --from=builder /app/target/release/test-oidc-provider /usr/local/bin/test-oidc-provider
