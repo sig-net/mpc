@@ -1,9 +1,13 @@
 pub mod primitives;
 
+use k256::ecdsa::{self, VerifyingKey};
+use k256::elliptic_curve::group::GroupEncoding;
+use k256::elliptic_curve::ops::{Invert, Reduce};
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::scalar::FromUintUnchecked;
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use k256::elliptic_curve::CurveArithmetic;
+use k256::elliptic_curve::{CurveArithmetic, ProjectivePoint};
+use k256::FieldElement;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar, Secp256k1, U256};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
@@ -391,37 +395,67 @@ impl MpcContract {
 
     fn verify_signature(&self, payload_hash: [u8; 32], epsilon: [u8; 32], big_r: &str, s: &str) {
         let expected_key = self.derive_key(&epsilon).to_encoded_point(false).to_bytes();
+        MpcContract::verify_signature_2(expected_key, payload_hash, epsilon, big_r, s);
+    }
 
+    fn verify_signature_2(
+        root_key: Box<[u8]>,
+        payload_hash: [u8; 32],
+        epsilon: [u8; 32],
+        big_r: &str,
+        s: &str,
+    ) {
+        let expected_key = derive_key_2(root_key.to_vec(), &epsilon);
+
+        // Prepare R ans s signature values
         let big_r = hex::decode(big_r).unwrap();
         let big_r = EncodedPoint::from_bytes(big_r).unwrap();
         let big_r = AffinePoint::from_encoded_point(&big_r).unwrap();
-        // let big_r_y_parity = big_r.y_is_odd().unwrap_u8() as i32;
-
-        fn x_coordinate(
-            point: &<Secp256k1 as CurveArithmetic>::AffinePoint,
-        ) -> <Secp256k1 as CurveArithmetic>::Scalar {
-            <<Secp256k1 as CurveArithmetic>::Scalar as k256::elliptic_curve::ops::Reduce<
-                <k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint,
-            >>::reduce_bytes(&point.x())
-        }
+        let big_r_y_parity = big_r.y_is_odd().unwrap_u8() as i32;
+        assert!(big_r_y_parity == 0 || big_r_y_parity == 1);
 
         let s = hex::decode(s).unwrap();
         let s = k256::Scalar::from_uint_unchecked(k256::U256::from_be_slice(s.as_slice()));
         let r = x_coordinate(&big_r);
 
-        let signature: [u8; 64] = {
-            let mut signature = [0u8; 64]; // TODO: is there a better way to get these bytes?
-            signature[..32].copy_from_slice(&r.to_bytes());
-            signature[32..].copy_from_slice(&s.to_bytes());
-            signature
-        };
+        let k256_sig = k256::ecdsa::Signature::from_scalars(r, s).unwrap();
 
+        let mut payload_hash = payload_hash.to_vec();
+        payload_hash.reverse();
+
+        let user_pk_k256: k256::elliptic_curve::PublicKey<Secp256k1> =
+            k256::PublicKey::from_affine(expected_key).unwrap();
+
+        let ecdsa_local_verify_result = verify(
+            &k256::ecdsa::VerifyingKey::from(&user_pk_k256),
+            &payload_hash,
+            &k256_sig,
+        )
+        .unwrap();
+
+        // let s = hex::decode(s).unwrap();
+        // let s = k256::Scalar::from_uint_unchecked(k256::U256::from_be_slice(s.as_slice()));
+        // let r = x_coordinate(&big_r);
+
+        // let signature: [u8; 64] = {
+        //     let mut signature = [0u8; 64]; // TODO: is there a better way to get these bytes?
+        //     signature[..32].copy_from_slice(&r.to_bytes());
+        //     signature[32..].copy_from_slice(&s.to_bytes());
+        //     signature
+        // };
+
+        // TODO switch to this more efficient implementation
         // Try with a recovery ID of 0
-        let recovered_key = env::ecrecover(&payload_hash, &signature, 0, false)
-            // If that doesn't work with a recovery ID of 1
-            .or_else(|| env::ecrecover(&payload_hash, &signature, 1, false));
+        // let recovered_key_1 = ecrecover(&payload_hash, &signature, 0, false);
+        // If that doesn't work with a recovery ID of 1
+        // let recovered_key_2 = ecrecover(&payload_hash, &signature, 1, false);
 
-        assert_eq!(Some(&*expected_key), recovered_key.as_ref().map(|k| &k[..]));
+        // assert_eq!(
+        //     Some(&expected_key.to_bytes()[..]),
+        //     recovered_key_1.as_ref().map(|k| &k[..]),
+        //     "{:?}",
+        //     recovered_key_2.unwrap().to_vec()
+        // );
     }
 
     #[private]
@@ -469,21 +503,9 @@ impl MpcContract {
     }
 
     pub fn derive_key(&self, epsilon: &[u8; 32]) -> PublicKeyA {
-        let epsilon = scalar_from_bytes(epsilon);
-        // This will always succeed because the underlying type is [u8;64]
-        let uncompressed_public_key: [u8; 64] = self.public_key().into_bytes().try_into().unwrap();
-        let (x, y) = uncompressed_public_key.split_at(32);
-        let x = FieldBytes::from_slice(&x);
-        let y = FieldBytes::from_slice(&y);
-        let encoded_point = EncodedPoint::from_affine_coordinates(x, y, true);
+        let root_public_key = self.public_key().into_bytes();
 
-        let public_key =
-            AffinePoint::from_encoded_point(&encoded_point).expect("Valid public key conversion");
-
-        // let public_key: AffinePoint = AffinePoint::from_bytes(&public_key_a).unwrap();
-
-        (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key)
-            .to_affine()
+        derive_key_2(root_public_key, epsilon)
     }
 }
 
@@ -502,4 +524,136 @@ pub type PublicKeyA = <Secp256k1 as CurveArithmetic>::AffinePoint;
 // TODO put in shared lib
 fn scalar_from_bytes(bytes: &[u8]) -> Scalar {
     Scalar::from_uint_unchecked(U256::from_le_slice(bytes))
+}
+
+#[test]
+fn test_verify_signature() {
+    let (payload_hash, epsilon, root_public_key, big_r, s) = (
+        [
+            63, 227, 72, 40, 227, 125, 36, 60, 18, 137, 171, 164, 119, 139, 108, 235, 139, 236, 76,
+            44, 26, 251, 92, 196, 86, 66, 138, 4, 6, 30, 15, 187,
+        ],
+        [
+            134, 113, 30, 241, 22, 73, 106, 18, 77, 155, 116, 49, 30, 224, 206, 7, 112, 102, 212,
+            35, 248, 104, 2, 225, 47, 167, 106, 98, 61, 251, 132, 103,
+        ],
+        [
+            1, 130, 206, 251, 221, 10, 94, 128, 6, 111, 8, 221, 250, 199, 197, 43, 74, 10, 21, 181,
+            250, 90, 184, 234, 161, 152, 208, 67, 96, 10, 244, 9, 100, 27, 33, 90, 252, 159, 79,
+            165, 9, 182, 180, 168, 48, 144, 31, 112, 141, 180, 166, 39, 254, 219, 103, 139, 186,
+            101, 137, 217, 30, 184, 19, 131, 157,
+        ],
+        "031B6CB556A0815348F2E47F1700C29E69D73EA227FD69D5B8EA1D3EE78CA1CFFD",
+        "5E5AE35CE5970601A60BD3A01767F2E5D12960169BAED76A106B5870049799B7",
+    );
+    MpcContract::verify_signature_2(
+        root_public_key.to_vec().into_boxed_slice(),
+        payload_hash,
+        epsilon,
+        big_r,
+        s,
+    )
+}
+
+#[test]
+fn test_derive_key() {
+    // 2024-04-03T10:47:45.210605Z  INFO ThreadId(06) mpc_recovery_node::protocol::signature: published signature response receipt_id=8FspWH26CQJhPmhBKZJkCkgfJQXkZXeCyGiiT63U1xgt big_r="3Y3YEA69ymnYCkcNH5GqMLgY1pSxjQaeg5p2MccBkacHLDfQEF71gRXgLpa8RMDeausaD3Bo8LaB3JKahR96Fuvj" s=Scalar(Uint(0x72D1B2D77C9F427B3879B461C3FB48542FE8A1887D62F3906B90DDDFF0128A7E)) status=Failure(ActionError(ActionError { index: Some(0), kind: FunctionCallError(ExecutionError("Smart contract panicked:
+    let root_public_key = [
+        1, 212, 91, 86, 124, 226, 155, 141, 152, 35, 173, 104, 63, 123, 77, 166, 138, 244, 53, 67,
+        175, 24, 203, 45, 178, 118, 50, 112, 245, 4, 241, 220, 239, 75, 233, 25, 119, 123, 116,
+        206, 218, 48, 149, 172, 10, 148, 1, 160, 9, 169, 237, 9, 73, 100, 176, 33, 116, 94, 194,
+        202, 195, 62, 179, 222, 50,
+    ];
+    let epsilon = [
+        153, 65, 75, 154, 139, 193, 79, 187, 144, 250, 176, 243, 43, 73, 237, 200, 161, 189, 29,
+        152, 16, 249, 238, 165, 1, 196, 137, 125, 85, 18, 68, 47,
+    ];
+    derive_key_2(root_public_key.to_vec(), &epsilon);
+}
+
+pub fn derive_key_2(mut root_public_key: Vec<u8>, epsilon: &[u8; 32]) -> PublicKeyA {
+    let epsilon = scalar_from_bytes(epsilon);
+    // This will always succeed because the underlying type is [u8;64]
+
+    // Remove the first element which is the curve type
+    root_public_key[0] = 0x04;
+    let point = EncodedPoint::from_bytes(root_public_key).unwrap();
+    let public_key = AffinePoint::from_encoded_point(&point).unwrap();
+
+    (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key).to_affine()
+}
+
+// pub fn ecrecover(
+//     hash: &[u8],
+//     signature: &[u8],
+//     v: u8,
+//     malleability_flag: bool,
+// ) -> Option<[u8; 64]> {
+//     if cfg!(target_arch = "wasm32") {
+//         return env::ecrecover(hash, signature, v, malleability_flag);
+//     };
+
+//     // let m = logic.internal_mem_write(&signature);
+//     // let sig = logic.internal_mem_write(&signature);
+
+//     // logic
+//     //     .ecrecover(m.len, m.ptr, sig.len, sig.ptr, v as _, mc as _, 1)
+//     //     .unwrap();
+// }
+
+fn verify(key: &VerifyingKey, msg: &[u8], sig: &k256::ecdsa::Signature) -> Result<(), String> {
+    let q = ProjectivePoint::<Secp256k1>::from(key.as_affine());
+    let z = ecdsa::hazmat::bits2field::<Secp256k1>(msg).unwrap();
+
+    // &k256::FieldBytes::from_slice(&k256::Scalar::from_bytes(msg).to_bytes()),
+    verify_prehashed(&q, &z, sig)
+}
+
+fn verify_prehashed(
+    q: &ProjectivePoint<Secp256k1>,
+    z: &k256::FieldBytes,
+    sig: &k256::ecdsa::Signature,
+) -> Result<(), String> {
+    // let z: Scalar = Scalar::reduce_bytes(z);
+    let z =
+        <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(z);
+    let (r, s) = sig.split_scalars();
+    let s_inv = *s.invert_vartime();
+    let u1 = z * s_inv;
+    let u2 = *r * s_inv;
+    let reproduced = lincomb(&ProjectivePoint::<Secp256k1>::GENERATOR, &u1, q, &u2).to_affine();
+    let x = reproduced.x();
+
+    let reduced =
+        <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
+            &x,
+        );
+
+    if *r == reduced {
+        Ok(())
+    } else {
+        // TODO stop this leaking data
+        Err(format!(
+            "r={:?}, reduced={:?}",
+            r.to_bytes(),
+            reduced.to_bytes()
+        ))
+    }
+}
+
+fn lincomb(
+    x: &ProjectivePoint<Secp256k1>,
+    k: &Scalar,
+    y: &ProjectivePoint<Secp256k1>,
+    l: &Scalar,
+) -> ProjectivePoint<Secp256k1> {
+    (*x * k) + (*y * l)
+}
+
+fn x_coordinate(
+    point: &<Secp256k1 as CurveArithmetic>::AffinePoint,
+) -> <Secp256k1 as CurveArithmetic>::Scalar {
+    <<Secp256k1 as CurveArithmetic>::Scalar as k256::elliptic_curve::ops::Reduce<
+        <k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint,
+    >>::reduce_bytes(&point.x())
 }

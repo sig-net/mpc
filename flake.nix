@@ -22,8 +22,8 @@
           # More agressively cache build artefacts
           # Uses more disk but speeds up compile times significantly
           env = {
-            # SCCACHE_GHA_ENABLED = true;
-            # RUSTC_WRAPPER = "sccache";
+            SCCACHE_GHA_ENABLED = true;
+            RUSTC_WRAPPER = "sccache";
           };
 
           # Everything in this list is added to your path
