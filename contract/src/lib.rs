@@ -384,21 +384,36 @@ impl MpcContract {
                     PromiseOrValue::Value(signature)
                 }
                 None => {
-                    if depth > 30 {
+                    // Make sure we have enough gas left to do 1 more call and clean up afterwards
+                    // Observationally 30 calls < 300 TGas so 2 calls < 20 TGas
+                    // We keep one call back so we can cleanup then call panic on the next call
+                    if depth > 29 {
                         self.remove_request(&payload);
-                        env::panic_str("Signature was not provided in time. Please, try again.");
+                        let self_id = env::current_account_id();
+                        PromiseOrValue::Promise(Self::ext(self_id).fail_helper(
+                            "Signature was not provided in time. Please, try again.".to_string(),
+                        ))
+                    } else {
+                        log!(&format!(
+                            "sign_helper: signature not ready yet (depth={})",
+                            depth
+                        ));
+                        let account_id = env::current_account_id();
+                        PromiseOrValue::Promise(
+                            Self::ext(account_id).sign_helper(payload, depth + 1),
+                        )
                     }
-                    log!(&format!(
-                        "sign_helper: signature not ready yet (depth={})",
-                        depth
-                    ));
-                    let account_id = env::current_account_id();
-                    PromiseOrValue::Promise(Self::ext(account_id).sign_helper(payload, depth + 1))
                 }
             }
         } else {
-            env::panic_str("unexpected request");
+            env::panic_str("unexpected request")
         }
+    }
+
+    /// This allows us to return a panic, without rolling back the state from this call
+    #[private]
+    pub fn fail_helper(&mut self, message: String) {
+        env::panic_str(&message);
     }
 
     pub fn respond(&mut self, payload: [u8; 32], big_r: String, s: String) {
