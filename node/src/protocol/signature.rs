@@ -6,6 +6,7 @@ use crate::types::{PublicKey, SignatureProtocol};
 use crate::util::{AffinePointExt, ScalarExt};
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{FullSignature, PresignOutput};
+use chrono::Utc;
 use k256::{Scalar, Secp256k1};
 use near_crypto::Signer;
 use near_fetch::signer::ExposeAccountId;
@@ -386,6 +387,7 @@ impl SignatureManager {
                                     epoch: self.epoch,
                                     from: self.me,
                                     data: data.clone(),
+                                    timestamp: Utc::now().timestamp() as u64
                                 },
                             ))
                         }
@@ -402,6 +404,7 @@ impl SignatureManager {
                             epoch: self.epoch,
                             from: self.me,
                             data,
+                            timestamp: Utc::now().timestamp() as u64
                         },
                     )),
                     Action::Return(output) => {
