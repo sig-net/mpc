@@ -47,11 +47,11 @@ tracing = "0.1"
 tracing-appender = "0.2.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-opentelemetry = "0.21.0"
-near-fetch = "0.0.12"
-near-jsonrpc-client = "0.6"
+near-fetch = {git = "https://github.com/r-near/fetch.git", branch = "chore/deps"}
+near-jsonrpc-client = "0.9"
 near-jsonrpc-primitives = "0.17"
 near-primitives = "0.17.0"
-near-crypto = "0.17"
+near-crypto = "0.21"
 tower-http = { version = "0.4.0", features = ["cors"] }
 yup-oauth2 = "8"
 multi-party-eddsa = { git = "https://github.com/DavidM-D/multi-party-eddsa.git", rev = "25ae4fdc5ff7819ae70e73ab4afacf1c24fc4da1" }

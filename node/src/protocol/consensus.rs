@@ -650,12 +650,14 @@ impl ConsensusProtocol for JoiningState {
                             .send_tx(
                                 ctx.signer(),
                                 ctx.mpc_contract_id(),
-                                vec![Action::FunctionCall(FunctionCallAction {
+                                vec![Action::FunctionCall(Box::new(FunctionCallAction {
                                     method_name: "join".to_string(),
                                     args: args.to_string().into_bytes(),
                                     gas: 300_000_000_000_000,
                                     deposit: 0,
-                                })],
+                                }))],
+                                // TODO check this is right
+                                None,
                             )
                             .await
                             .unwrap();

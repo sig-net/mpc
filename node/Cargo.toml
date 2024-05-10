@@ -41,12 +41,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2.4.0", features = ["serde"] }
 
-near-crypto = "0.17"
-near-fetch = "0.0.12"
+near-crypto = "0.21"
+near-fetch = {git = "https://github.com/r-near/fetch.git", branch = "chore/deps"}
 near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs.git", rev = "dc0f1f9"} # branch = "daniyar/upgrade-sdk"
 near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs.git", rev = "dc0f1f9" } # branch = "daniyar/upgrade-sdk"
-near-primitives = "0.17.0"
-near-sdk = "5.0.0-alpha.1"
+near-primitives = "0.21"
+near-sdk = "5.1"
 
 mpc-contract = { path = "../contract" }
 mpc-keys = { path = "../keys" }
