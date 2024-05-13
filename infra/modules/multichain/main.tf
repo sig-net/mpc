@@ -79,6 +79,19 @@ resource "google_cloud_run_v2_service" "node" {
           }
         }
       }
+      // include sign_sk as ENV variable if it exists in secrets:
+      dynamic "env" {
+        for_each = var.sign_sk_secret_id == null ? [] : [1]
+        content {
+          name = "MPC_RECOVERY_SIGN_SK"
+          value_source {
+            secret_key_ref {
+              secret  = var.sign_sk_secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
       env {
         name = "AWS_ACCESS_KEY_ID"
         value_source {

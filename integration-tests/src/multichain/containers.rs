@@ -42,6 +42,9 @@ impl<'a> Node<'a> {
     ) -> anyhow::Result<Node<'a>> {
         tracing::info!("running node container, account_id={}", account_id);
         let (cipher_sk, cipher_pk) = hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
+        let sign_pk = sign_sk.public_key();
         let storage_options = ctx.storage_options.clone();
         let args = mpc_recovery_node::cli::Cli::Start {
             near_rpc: ctx.lake_indexer.rpc_host_address.clone(),
@@ -51,6 +54,7 @@ impl<'a> Node<'a> {
             web_port: Self::CONTAINER_PORT,
             cipher_pk: hex::encode(cipher_pk.to_bytes()),
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
+            sign_sk: Some(sign_sk),
             indexer_options: mpc_recovery_node::indexer::Options {
                 s3_bucket: ctx.localstack.s3_bucket.clone(),
                 s3_region: ctx.localstack.s3_region.clone(),
@@ -100,7 +104,7 @@ impl<'a> Node<'a> {
             local_address: format!("http://localhost:{host_port}"),
             cipher_pk,
             cipher_sk,
-            sign_pk: account_sk.public_key(),
+            sign_pk: sign_pk.to_string().parse()?,
         })
     }
 
