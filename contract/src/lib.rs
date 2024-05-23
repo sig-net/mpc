@@ -3,7 +3,7 @@ pub mod primitives;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
 use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::{env, near_bindgen, AccountId, Promise, PromiseOrValue, PublicKey};
+use near_sdk::{env, near_bindgen, AccountId, NearToken, Promise, PromiseOrValue, PublicKey};
 use near_sdk::{log, Gas};
 use primitives::{CandidateInfo, Candidates, ParticipantInfo, Participants, PkVotes, Votes};
 use std::collections::{BTreeMap, HashSet};
@@ -114,6 +114,7 @@ impl MpcContract {
 impl VersionedMpcContract {
     #[allow(unused_variables)]
     /// `key_version` must be less than or equal to the value at `latest_key_version`
+    #[payable]
     pub fn sign(&mut self, payload: [u8; 32], path: String, key_version: u32) -> Promise {
         let latest_key_version: u32 = self.latest_key_version();
         assert!(
@@ -121,6 +122,15 @@ impl VersionedMpcContract {
             "This version of the signer contract doesn't support versions greater than {}",
             latest_key_version,
         );
+        // Check deposit
+        let deposit = env::attached_deposit();
+        let required_deposit = self.signature_deposit();
+        if deposit.as_yoctonear() < required_deposit {
+            env::panic_str(&format!(
+                "Attached deposit is {}, required deposit is {}",
+                deposit, required_deposit
+            ));
+        }
         // Make sure sign call will not run out of gas doing recursive calls because the payload will never be removed
         assert!(
             env::prepaid_gas() >= GAS_FOR_SIGN_CALL,
@@ -151,6 +161,24 @@ impl VersionedMpcContract {
             ProtocolContractState::Running(state) => state.public_key.clone(),
             ProtocolContractState::Resharing(state) => state.public_key.clone(),
             _ => env::panic_str("public key not available (protocol is not running or resharing)"),
+        }
+    }
+
+    /// To avoid overloading the network with too many requests,
+    /// we ask for a small deposit for each signature request.
+    /// The fee changes based on how busy the network is.
+    pub fn signature_deposit(&self) -> u128 {
+        const CHEAP_REQUESTS: u32 = 3;
+        let pending_requests = match self {
+            Self::V0(mpc_contract) => mpc_contract.request_counter,
+        };
+        match pending_requests {
+            0..=CHEAP_REQUESTS => 1,
+            _ => {
+                (pending_requests - CHEAP_REQUESTS) as u128
+                    * NearToken::from_millinear(50).as_yoctonear()
+                    + 1
+            }
         }
     }
 
