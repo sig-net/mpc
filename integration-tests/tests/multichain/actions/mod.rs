@@ -65,7 +65,7 @@ pub async fn request_sign(
                         "key_version": 0,
                     }))?,
                     gas: 300_000_000_000_000,
-                    deposit: 0,
+                    deposit: 1,
                 })],
             }
             .sign(&signer),
