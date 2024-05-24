@@ -208,7 +208,7 @@ impl PkVotes {
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Debug)]
+#[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Debug)]
 pub struct SignResult {
     pub big_r: String,
     pub s: String,
