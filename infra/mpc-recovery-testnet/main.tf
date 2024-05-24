@@ -18,8 +18,8 @@ locals {
   client_id    = jsondecode(local.credentials).client_id
 
   workspace = {
-    near_rpc          = "https://rpc.mainnet.near.org"
-    near_root_account = "near"
+    near_rpc          = "https://rpc.testnet.near.org"
+    near_root_account = "testnet"
   }
 }
 
@@ -87,18 +87,6 @@ resource "google_secret_manager_secret_iam_member" "fast_auth_partners_secret_ac
   secret_id = var.fast_auth_partners_secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.service_account.email}"
-}
-
-module "mpc-signer-lb-testnet" {
-
-  count         = length(var.signer_configs)
-  source        = "../modules/internal_cloudrun_lb"
-  name          = "mpc-prod-signer-${count.index}-testnet"
-  network_id    = data.google_compute_network.prod_network.id
-  subnetwork_id = data.google_compute_subnetwork.prod_subnetwork.id
-  project_id    = var.project
-  region        = "us-east1"
-  service_name  = "mpc-recovery-signer-${count.index}-testnet"
 }
 
 module "mpc-leader-lb-testnet" {

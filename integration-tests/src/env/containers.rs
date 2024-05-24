@@ -456,7 +456,7 @@ impl<'a> Datastore<'a> {
         tracing::info!("Running datastore container...");
         let image = GenericImage::new(
             "gcr.io/google.com/cloudsdktool/google-cloud-cli",
-            "436.0.0-emulators",
+            "464.0.0-emulators",
         )
         .with_wait_for(WaitFor::message_on_stderr("Dev App Server is now running."))
         .with_exposed_port(Self::CONTAINER_PORT)
@@ -477,6 +477,7 @@ impl<'a> Datastore<'a> {
                 "--host-port".to_string(),
                 format!("0.0.0.0:{}", Self::CONTAINER_PORT),
                 "--no-store-on-disk".to_string(),
+                "--consistency=1.0".to_string(),
             ],
         )
             .into();
@@ -517,8 +518,7 @@ impl<'a> LocalStack<'a> {
         s3_region: String,
     ) -> anyhow::Result<LocalStack<'a>> {
         tracing::info!("running LocalStack container...");
-        let image = GenericImage::new("localstack/localstack", "latest")
-            .with_exposed_port(Self::S3_CONTAINER_PORT)
+        let image = GenericImage::new("localstack/localstack", "3.0.0")
             .with_wait_for(WaitFor::message_on_stdout("Running on"));
         let image: RunnableImage<GenericImage> = image.into();
         let image = image.with_network(network);
@@ -554,8 +554,16 @@ impl<'a> LocalStack<'a> {
             .await?;
 
         let s3_address = format!("http://{}:{}", address, Self::S3_CONTAINER_PORT);
-        let s3_host_port = container.get_host_port_ipv4(Self::S3_CONTAINER_PORT);
-        let s3_host_address = format!("http://127.0.0.1:{s3_host_port}");
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let s3_host_address = {
+            let s3_host_port = container.get_host_port_ipv4(Self::S3_CONTAINER_PORT);
+            format!("http://127.0.0.1:{s3_host_port}")
+        };
+        #[cfg(target_arch = "x86_64")]
+        let s3_host_address = {
+            let s3_host_port = container.get_host_port_ipv6(Self::S3_CONTAINER_PORT);
+            format!("http://[::1]:{s3_host_port}")
+        };
 
         tracing::info!(
             s3_address,
@@ -601,7 +609,7 @@ impl<'a> LakeIndexer<'a> {
 
         let image = GenericImage::new(
             "ghcr.io/near/near-lake-indexer",
-            "e6519c922435f3d18b5f2ddac5d1ec171ef4dd6b",
+            "18ef24922fd7b5b8985ea793fdf7a939e57216ba",
         )
         .with_env_var("AWS_ACCESS_KEY_ID", "FAKE_LOCALSTACK_KEY_ID")
         .with_env_var("AWS_SECRET_ACCESS_KEY", "FAKE_LOCALSTACK_ACCESS_KEY")
@@ -712,7 +720,6 @@ impl SignerNode<'_> {
             container,
             address: full_address,
             local_address: format!("http://127.0.0.1:{host_port}"),
-
             env: ctx.env.clone(),
             node_id,
             sk_share: sk_share.clone(),

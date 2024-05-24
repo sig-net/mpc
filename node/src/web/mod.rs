@@ -1,42 +1,38 @@
 mod error;
 
-use self::error::MpcSignError;
+use self::error::Error;
+use crate::protocol::message::SignedMessage;
 use crate::protocol::{MpcMessage, NodeState};
+use crate::web::error::Result;
+use anyhow::Context;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
 use cait_sith::protocol::Participant;
-use near_crypto::InMemorySigner;
-use near_primitives::transaction::{Action, FunctionCallAction};
-use near_primitives::types::AccountId;
+use mpc_keys::hpke::{self, Ciphered};
+use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc::Sender, RwLock};
 
 struct AxumState {
-    mpc_contract_id: AccountId,
-    rpc_client: near_fetch::Client,
-    signer: InMemorySigner,
     sender: Sender<MpcMessage>,
     protocol_state: Arc<RwLock<NodeState>>,
+    cipher_sk: hpke::SecretKey,
 }
 
 pub async fn run(
     port: u16,
-    mpc_contract_id: AccountId,
-    rpc_client: near_fetch::Client,
-    signer: InMemorySigner,
     sender: Sender<MpcMessage>,
+    cipher_sk: hpke::SecretKey,
     protocol_state: Arc<RwLock<NodeState>>,
 ) -> anyhow::Result<()> {
     tracing::debug!("running a node");
     let axum_state = AxumState {
-        mpc_contract_id,
-        rpc_client,
-        signer,
         sender,
         protocol_state,
+        cipher_sk,
     };
 
     let app = Router::new()
@@ -49,8 +45,8 @@ pub async fn run(
             }),
         )
         .route("/msg", post(msg))
-        .route("/join", post(join))
         .route("/state", get(state))
+        .route("/metrics", get(metrics))
         .layer(Extension(Arc::new(axum_state)));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -72,91 +68,101 @@ pub struct MsgRequest {
 #[tracing::instrument(level = "debug", skip_all)]
 async fn msg(
     Extension(state): Extension<Arc<AxumState>>,
-    WithRejection(Json(message), _): WithRejection<Json<MpcMessage>, MpcSignError>,
-) -> StatusCode {
-    tracing::debug!(?message, "received");
-    match state.sender.send(message).await {
-        Ok(()) => StatusCode::OK,
-        Err(e) => {
-            tracing::error!("failed to send a protocol message: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-#[tracing::instrument(level = "debug", skip_all)]
-async fn join(
-    Extension(state): Extension<Arc<AxumState>>,
-    WithRejection(Json(participant), _): WithRejection<Json<Participant>, MpcSignError>,
-) -> StatusCode {
-    let protocol_state = state.protocol_state.read().await;
-    match &*protocol_state {
-        NodeState::Running { .. } => {
-            let args = serde_json::json!({
-                "participant": participant
-            });
-            match state
-                .rpc_client
-                .send_tx(
-                    &state.signer,
-                    &state.mpc_contract_id,
-                    vec![Action::FunctionCall(FunctionCallAction {
-                        method_name: "vote_join".to_string(),
-                        args: serde_json::to_vec(&args).unwrap(),
-                        gas: 300_000_000_000_000,
-                        deposit: 0,
-                    })],
-                )
-                .await
-            {
-                Ok(_) => {
-                    tracing::info!(?participant, "successfully voted for a node to join");
-                    StatusCode::OK
-                }
-                Err(e) => {
-                    tracing::error!(%e, "failed to vote for a new node to join");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                }
+    WithRejection(Json(encrypted), _): WithRejection<Json<Vec<Ciphered>>, Error>,
+) -> Result<()> {
+    for encrypted in encrypted.into_iter() {
+        let message = match SignedMessage::decrypt(
+            &state.cipher_sk,
+            &state.protocol_state,
+            encrypted,
+        )
+        .await
+        {
+            Ok(msg) => msg,
+            Err(err) => {
+                tracing::error!(?err, "failed to decrypt or verify an encrypted message");
+                return Err(err.into());
             }
-        }
-        _ => {
-            tracing::debug!(?participant, "not ready to accept join requests yet");
-            StatusCode::BAD_REQUEST
+        };
+
+        if let Err(err) = state.sender.send(message).await {
+            tracing::error!(?err, "failed to forward an encrypted protocol message");
+            return Err(err.into());
         }
     }
+    Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum StateView {
     Running {
         participants: Vec<Participant>,
         triple_count: usize,
+        triple_mine_count: usize,
+        triple_potential_count: usize,
         presignature_count: usize,
+        presignature_mine_count: usize,
+        presignature_potential_count: usize,
     },
     NotRunning,
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
-async fn state(Extension(state): Extension<Arc<AxumState>>) -> (StatusCode, Json<StateView>) {
+async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
     tracing::debug!("fetching state");
     let protocol_state = state.protocol_state.read().await;
     match &*protocol_state {
         NodeState::Running(state) => {
-            tracing::debug!("not running, state unavailable");
-            (
-                StatusCode::OK,
-                Json(StateView::Running {
-                    participants: state.participants.keys().cloned().collect(),
-                    triple_count: state.triple_manager.len(),
-                    presignature_count: state.presignature_manager.len(),
-                }),
-            )
+            let triple_manager_read = state.triple_manager.read().await;
+            let triple_potential_count = triple_manager_read.potential_len();
+            let triple_count = triple_manager_read.len();
+            let triple_mine_count = triple_manager_read.my_len();
+            let presignature_read = state.presignature_manager.read().await;
+            let presignature_count = presignature_read.len();
+            let presignature_mine_count = presignature_read.my_len();
+            let presignature_potential_count = presignature_read.potential_len();
+            Ok(Json(StateView::Running {
+                participants: state.participants.keys().cloned().collect(),
+                triple_count,
+                triple_mine_count,
+                triple_potential_count,
+                presignature_count,
+                presignature_mine_count,
+                presignature_potential_count,
+            }))
         }
         _ => {
             tracing::debug!("not running, state unavailable");
-            (StatusCode::OK, Json(StateView::NotRunning))
+            Ok(Json(StateView::NotRunning))
+        }
+    }
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn metrics() -> (StatusCode, String) {
+    let grab_metrics = || {
+        let encoder = TextEncoder::new();
+        let mut buffer = vec![];
+        encoder
+            .encode(&prometheus::gather(), &mut buffer)
+            .context("failed to encode metrics")?;
+
+        let response =
+            String::from_utf8(buffer).with_context(|| "failed to convert bytes to string")?;
+
+        Ok::<String, anyhow::Error>(response)
+    };
+
+    match grab_metrics() {
+        Ok(response) => (StatusCode::OK, response),
+        Err(err) => {
+            tracing::error!("failed to generate prometheus metrics: {err}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to generate prometheus metrics".to_string(),
+            )
         }
     }
 }
