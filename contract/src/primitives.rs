@@ -207,3 +207,9 @@ impl PkVotes {
         self.votes.entry(public_key).or_default()
     }
 }
+
+#[derive(BorshDeserialize, BorshSerialize, Debug)]
+pub struct SignResult {
+    pub big_r: String,
+    pub s: String,
+}

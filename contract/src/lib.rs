@@ -5,7 +5,9 @@ use near_sdk::collections::LookupMap;
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, near_bindgen, AccountId, Promise, PromiseOrValue, PublicKey};
 use near_sdk::{log, Gas};
-use primitives::{CandidateInfo, Candidates, ParticipantInfo, Participants, PkVotes, Votes};
+use primitives::{
+    CandidateInfo, Candidates, ParticipantInfo, Participants, PkVotes, SignResult, Votes,
+};
 use std::collections::{BTreeMap, HashSet};
 
 const GAS_FOR_SIGN_CALL: Gas = Gas::from_tgas(250);
@@ -62,19 +64,19 @@ impl Default for VersionedMpcContract {
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct MpcContract {
     protocol_state: ProtocolContractState,
-    pending_requests: LookupMap<[u8; 32], Option<(String, String)>>,
+    pending_requests: LookupMap<[u8; 32], Option<SignResult>>,
     request_counter: u32,
 }
 
 impl MpcContract {
-    fn add_request(&mut self, payload: &[u8; 32], signature: &Option<(String, String)>) {
+    fn add_request(&mut self, payload: &[u8; 32], sign_result: &Option<SignResult>) {
         if self.request_counter > 8 {
             env::panic_str("Too many pending requests. Please, try again later.");
         }
         if !self.pending_requests.contains_key(payload) {
             self.request_counter += 1;
         }
-        self.pending_requests.insert(payload, signature);
+        self.pending_requests.insert(payload, sign_result);
     }
 
     fn remove_request(&mut self, payload: &[u8; 32]) {
@@ -82,9 +84,9 @@ impl MpcContract {
         self.request_counter -= 1;
     }
 
-    fn add_signature(&mut self, payload: &[u8; 32], signature: (String, String)) {
+    fn add_sig_result(&mut self, payload: &[u8; 32], sign_result: SignResult) {
         if self.pending_requests.contains_key(payload) {
-            self.pending_requests.insert(payload, &Some(signature));
+            self.pending_requests.insert(payload, &Some(sign_result));
         }
     }
 
@@ -135,9 +137,9 @@ impl VersionedMpcContract {
             path,
             key_version
         );
-        match self.signature_per_payload(payload) {
+        match self.sign_result(payload) {
             None => {
-                self.add_request(&payload, &None);
+                self.add_sign_request(&payload, &None);
                 log!(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
                 Self::ext(env::current_account_id()).sign_helper(payload, 0)
             }
@@ -172,6 +174,7 @@ impl VersionedMpcContract {
 #[near_bindgen]
 impl VersionedMpcContract {
     pub fn respond(&mut self, payload: [u8; 32], big_r: String, s: String) {
+        // TODO: change to SignResult
         let protocol_state = self.mutable_state();
         if let ProtocolContractState::Running(state) = protocol_state {
             let signer = env::signer_account_id();
@@ -183,7 +186,7 @@ impl VersionedMpcContract {
                     big_r,
                     s
                 );
-                self.add_signature(&payload, (big_r, s));
+                self.add_sign_result(&payload, SignResult { big_r, s });
             } else {
                 env::panic_str("only participants can respond");
             }
@@ -462,12 +465,8 @@ impl VersionedMpcContract {
     }
 
     #[private]
-    pub fn sign_helper(
-        &mut self,
-        payload: [u8; 32],
-        depth: usize,
-    ) -> PromiseOrValue<(String, String)> {
-        if let Some(signature) = self.signature_per_payload(payload) {
+    pub fn sign_helper(&mut self, payload: [u8; 32], depth: usize) -> PromiseOrValue<SignResult> {
+        if let Some(signature) = self.sign_result(payload) {
             match signature {
                 Some(signature) => {
                     log!(
@@ -475,7 +474,7 @@ impl VersionedMpcContract {
                         signature,
                         depth
                     );
-                    self.remove_request(&payload);
+                    self.remove_sign_request(&payload);
                     PromiseOrValue::Value(signature)
                 }
                 None => {
@@ -484,7 +483,7 @@ impl VersionedMpcContract {
                     // We keep one call back so we can cleanup then call panic on the next call
                     // Start cleaning up if there's less than 25 teragas left regardless of how deep you are.
                     if depth > 30 || env::prepaid_gas() < Gas::from_tgas(25) {
-                        self.remove_request(&payload);
+                        self.remove_sign_request(&payload);
                         let self_id = env::current_account_id();
                         PromiseOrValue::Promise(Self::ext(self_id).fail_helper(
                             "Signature was not provided in time. Please, try again.".to_string(),
@@ -556,7 +555,7 @@ impl VersionedMpcContract {
 // Helper functions
 #[near_bindgen]
 impl VersionedMpcContract {
-    fn remove_request(&mut self, payload: &[u8; 32]) {
+    fn remove_sign_request(&mut self, payload: &[u8; 32]) {
         match self {
             Self::V0(mpc_contract) => {
                 mpc_contract.remove_request(payload);
@@ -564,18 +563,18 @@ impl VersionedMpcContract {
         }
     }
 
-    fn add_request(&mut self, payload: &[u8; 32], signature: &Option<(String, String)>) {
+    fn add_sign_request(&mut self, payload: &[u8; 32], sign_result: &Option<SignResult>) {
         match self {
             Self::V0(mpc_contract) => {
-                mpc_contract.add_request(payload, signature);
+                mpc_contract.add_request(payload, sign_result);
             }
         }
     }
 
-    fn add_signature(&mut self, payload: &[u8; 32], signature: (String, String)) {
+    fn add_sign_result(&mut self, payload: &[u8; 32], sign_result: SignResult) {
         match self {
             Self::V0(mpc_contract) => {
-                mpc_contract.add_signature(payload, signature);
+                mpc_contract.add_sig_result(payload, sign_result);
             }
         }
     }
@@ -586,7 +585,7 @@ impl VersionedMpcContract {
         }
     }
 
-    fn signature_per_payload(&self, payload: [u8; 32]) -> Option<Option<(String, String)>> {
+    fn sign_result(&self, payload: [u8; 32]) -> Option<Option<SignResult>> {
         match self {
             Self::V0(mpc_contract) => mpc_contract.pending_requests.get(&payload),
         }
