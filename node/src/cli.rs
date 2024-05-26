@@ -223,7 +223,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
                     let my_address = my_address
                         .map(|mut addr| {
-                            let _ = addr.set_port(Some(web_port));
+                            addr.set_port(Some(web_port)).unwrap();
                             addr
                         })
                         .unwrap_or_else(|| {
