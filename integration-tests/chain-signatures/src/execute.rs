@@ -1,11 +1,7 @@
-use std::path::Path;
+use anyhow::Context;
+use async_process::Child;
 
-use anyhow::{anyhow, Context};
-use async_process::{Child, Command, ExitStatus, Stdio};
-
-const PACKAGE_CONTRACT: &str = "mpc-contract";
 const PACKAGE_MULTICHAIN: &str = "mpc-recovery-node";
-const TARGET_CONTRACT: &str = "wasm32-unknown-unknown";
 
 pub fn target_dir() -> Option<std::path::PathBuf> {
     let mut out_dir = std::path::Path::new(std::env!("OUT_DIR"));
@@ -19,59 +15,6 @@ pub fn target_dir() -> Option<std::path::PathBuf> {
             None => break None, // We've reached the root directory and didn't find "target"
         }
     }
-}
-
-async fn build_package(
-    release: bool,
-    package: &str,
-    target: Option<&str>,
-    target_dir: Option<impl AsRef<Path>>,
-) -> anyhow::Result<ExitStatus> {
-    let mut cmd = Command::new("cargo");
-    cmd.arg("build")
-        .arg("--package")
-        .arg(package)
-        .envs(std::env::vars())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-
-    if release {
-        cmd.arg("--release");
-    }
-
-    if let Some(target) = target {
-        cmd.arg("--target").arg(target);
-    }
-
-    if let Some(target_dir) = target_dir {
-        cmd.arg("--target-dir").arg(target_dir.as_ref().as_os_str());
-    }
-
-    Ok(cmd.spawn()?.status().await?)
-}
-
-pub async fn build_multichain(release: bool) -> anyhow::Result<ExitStatus> {
-    build_package(
-        release,
-        PACKAGE_MULTICHAIN,
-        None,
-        Some(target_dir().ok_or_else(|| anyhow!("could not find /target while building node"))?),
-    )
-    .await
-}
-
-pub async fn build_multichain_contract() -> anyhow::Result<ExitStatus> {
-    // We use a different target directory to stop the different rustflags between targets from clobbering the build cache
-    build_package(
-        true,
-        PACKAGE_CONTRACT,
-        Some(TARGET_CONTRACT),
-        Some(
-            target_dir()
-                .ok_or_else(|| anyhow!("could not find /target while building contract"))?,
-        ),
-    )
-    .await
 }
 
 pub fn executable(release: bool, executable: &str) -> Option<std::path::PathBuf> {
