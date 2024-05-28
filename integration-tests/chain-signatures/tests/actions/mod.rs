@@ -21,6 +21,7 @@ use near_primitives::transaction::{Action, FunctionCallAction, Transaction};
 use near_workspaces::Account;
 use rand::Rng;
 use secp256k1::XOnlyPublicKey;
+use serde::{Deserialize, Serialize};
 
 use std::time::Duration;
 
@@ -30,6 +31,14 @@ use k256::{
     ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
     PublicKey as K256PublicKey,
 };
+
+// TODO: use struct from contract
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SignRequest {
+    pub payload: [u8; 32],
+    pub path: String,
+    pub key_version: u32,
+}
 
 pub async fn request_sign(
     ctx: &MultichainTestContext<'_>,
@@ -48,6 +57,12 @@ pub async fn request_sign(
         .rpc_client
         .fetch_nonce(&signer.account_id, &signer.public_key)
         .await?;
+
+    let request = SignRequest {
+        payload: payload_hashed,
+        path: "test".to_string(),
+        key_version: 0,
+    };
     let tx_hash = ctx
         .jsonrpc_client
         .call(&RpcBroadcastTxAsyncRequest {
@@ -60,9 +75,7 @@ pub async fn request_sign(
                 actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
                     method_name: "sign".to_string(),
                     args: serde_json::to_vec(&serde_json::json!({
-                        "payload": payload_hashed,
-                        "path": "test",
-                        "key_version": 0,
+                        "request": request,
                     }))?,
                     gas: 300_000_000_000_000,
                     deposit: 0,
@@ -118,6 +131,13 @@ pub async fn request_sign_non_random(
         .rpc_client
         .fetch_nonce(&signer.account_id, &signer.public_key)
         .await?;
+
+    let request = SignRequest {
+        payload: payload_hashed,
+        path: "test".to_string(),
+        key_version: 0,
+    };
+
     let tx_hash = ctx
         .jsonrpc_client
         .call(&RpcBroadcastTxAsyncRequest {
@@ -130,9 +150,7 @@ pub async fn request_sign_non_random(
                 actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
                     method_name: "sign".to_string(),
                     args: serde_json::to_vec(&serde_json::json!({
-                        "payload": payload_hashed,
-                        "path": "test",
-                        "key_version": 0,
+                        "request": request,
                     }))?,
                     gas: 300_000_000_000_000,
                     deposit: 0,
