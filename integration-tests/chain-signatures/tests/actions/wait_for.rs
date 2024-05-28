@@ -233,22 +233,19 @@ pub async fn signature_responded(
         let Some(outcome) = outcome_view.final_execution_outcome else {
             anyhow::bail!("final execution outcome not available");
         };
-<<<<<<< HEAD:integration-tests/tests/multichain/actions/wait_for.rs
-        let result: SignResult = serde_json::from_slice(&payload)?;
-        let signature = cait_sith::FullSignature::<Secp256k1> {
-            big_r: result.big_r,
-            s: result.s,
-        };
-=======
+
         let outcome = outcome.into_outcome();
 
         let FinalExecutionStatus::SuccessValue(payload) = outcome.status else {
             anyhow::bail!("tx finished unsuccessfully: {:?}", outcome.status);
         };
 
-        let (big_r, s): (AffinePoint, Scalar) = serde_json::from_slice(&payload)?;
-        let signature = cait_sith::FullSignature::<Secp256k1> { big_r, s };
->>>>>>> develop:integration-tests/chain-signatures/tests/actions/wait_for.rs
+        let result: SignResult = serde_json::from_slice(&payload)?;
+        let signature = cait_sith::FullSignature::<Secp256k1> {
+            big_r: result.big_r,
+            s: result.s,
+        };
+
         Ok(signature)
     };
 
