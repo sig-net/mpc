@@ -1,3 +1,5 @@
+use std::io;
+
 use borsh::{self, BorshDeserialize, BorshSerialize};
 use hpke::{
     aead::{AeadTag, ChaCha20Poly1305},
@@ -85,10 +87,12 @@ impl BorshSerialize for PublicKey {
 }
 
 impl BorshDeserialize for PublicKey {
-    fn deserialize(buf: &mut &[u8]) -> std::io::Result<Self> {
-        Ok(Self::from_bytes(
-            &<Vec<u8> as BorshDeserialize>::deserialize(buf)?,
-        ))
+    fn deserialize_reader<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+        <Vec<u8> as BorshDeserialize>::deserialize_reader(reader).and_then(|buf| {
+            Ok(Self::from_bytes(
+                &<Vec<u8> as BorshDeserialize>::deserialize(&mut buf.as_slice())?,
+            ))
+        })
     }
 }
 
