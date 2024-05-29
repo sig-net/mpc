@@ -3,8 +3,11 @@ pub mod primitives;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
 use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::{env, near_bindgen, AccountId, NearToken, Promise, PromiseOrValue, PublicKey};
-use near_sdk::{log, Gas};
+
+use near_sdk::{
+    env, log, near_bindgen, AccountId, BorshStorageKey, Gas, NearToken, Promise, PromiseOrValue,
+    PublicKey,
+};
 use primitives::{CandidateInfo, Candidates, ParticipantInfo, Participants, PkVotes, Votes};
 use std::collections::{BTreeMap, HashSet};
 
@@ -45,6 +48,11 @@ pub enum ProtocolContractState {
     Initializing(InitializingContractState),
     Running(RunningContractState),
     Resharing(ResharingContractState),
+}
+
+#[derive(BorshSerialize, BorshDeserialize, BorshStorageKey, Hash, Clone, Debug, PartialEq, Eq)]
+pub enum StorageKey {
+    PendingRequests,
 }
 
 #[near_bindgen]
@@ -103,7 +111,7 @@ impl MpcContract {
                 threshold,
                 pk_votes: PkVotes::new(),
             }),
-            pending_requests: LookupMap::new(b"m"),
+            pending_requests: LookupMap::new(StorageKey::PendingRequests),
             request_counter: 0,
         }
     }
@@ -555,7 +563,7 @@ impl VersionedMpcContract {
         }
         Self::V0(MpcContract {
             protocol_state: ProtocolContractState::NotInitialized,
-            pending_requests: LookupMap::new(b"m"),
+            pending_requests: LookupMap::new(StorageKey::PendingRequests),
             request_counter: 0,
         })
     }
