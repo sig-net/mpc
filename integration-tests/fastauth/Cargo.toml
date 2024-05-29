@@ -41,6 +41,11 @@ mpc-recovery = { path = "../../mpc-recovery" }
 [dev-dependencies]
 test-log = { version = "0.2.12", features = ["log", "trace"] }
 
+[build-dependencies]
+anyhow = "1"
+async-process = "1"
+tokio = { version = "1", features = ["full"] }
+
 
 [workspace] # used to ignore higher level workspace
 
