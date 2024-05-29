@@ -185,7 +185,6 @@ impl VersionedMpcContract {
             _ => {
                 (pending_requests - CHEAP_REQUESTS) as u128
                     * NearToken::from_millinear(50).as_yoctonear()
-                    + 1
             }
         }
     }
