@@ -67,6 +67,11 @@ impl Options {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct SignArguments {
+    pub request: ContractSignRequest,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct ContractSignRequest {
     pub payload: [u8; 32],
     pub path: String,
@@ -100,8 +105,8 @@ async fn handle_block(
             };
             if let Some(function_call) = action.as_function_call() {
                 if function_call.method_name() == "sign" {
-                    if let Ok(sign_payload) =
-                        serde_json::from_slice::<'_, ContractSignRequest>(function_call.args())
+                    if let Ok(aruments) =
+                        serde_json::from_slice::<'_, SignArguments>(function_call.args())
                     {
                         if receipt.logs().is_empty() {
                             tracing::warn!("`sign` did not produce entropy");
@@ -116,21 +121,21 @@ async fn handle_block(
                             continue;
                         };
                         let epsilon =
-                            kdf::derive_epsilon(&action.predecessor_id(), &sign_payload.path);
+                            kdf::derive_epsilon(&action.predecessor_id(), &aruments.request.path);
                         let delta = kdf::derive_delta(receipt_id, entropy);
                         tracing::info!(
                             receipt_id = %receipt_id,
                             caller_id = receipt.predecessor_id().to_string(),
                             our_account = ctx.node_account_id.to_string(),
-                            payload = hex::encode(sign_payload.payload),
-                            key_version = sign_payload.key_version,
+                            payload = hex::encode(aruments.request.payload),
+                            key_version = aruments.request.key_version,
                             entropy = hex::encode(entropy),
                             "indexed new `sign` function call"
                         );
                         let mut queue = ctx.queue.write().await;
                         queue.add(SignRequest {
                             receipt_id,
-                            request: sign_payload,
+                            request: aruments.request,
                             epsilon,
                             delta,
                             entropy,
