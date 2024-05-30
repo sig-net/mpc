@@ -41,9 +41,9 @@ near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs",
 near-workspaces = { git = "https://github.com/near/near-workspaces-rs.git", branch = "feat/upgrade-near-deps" }
 
 # local chain-signatures depencencies
-mpc-contract = { path = "../../contract" }
-mpc-keys = { path = "../../keys" }
-mpc-recovery-node = { path = "../../node" }
+mpc-contract = { path = "../../chain-signatures/contract" }
+mpc-keys = { path = "../../chain-signatures/keys" }
+mpc-recovery-node = { path = "../../chain-signatures/node" }
 
 [dev-dependencies]
 backon = "0.4"

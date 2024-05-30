@@ -76,6 +76,10 @@ jobs:
         working-directory: ./node
         run: cargo build --release
 
+      - name: Build Chain-Signatures Integration Tests
+        working-directory: ./integration-tests/chain-signatures
+        run: cargo build --tests
+
       - name: Test
         working-directory: ./integration-tests/chain-signatures
         run: cargo test --jobs 1 -- --test-threads 1
