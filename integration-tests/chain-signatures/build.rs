@@ -71,7 +71,6 @@ async fn build_multichain(release: bool) -> anyhow::Result<ExitStatus> {
 
 async fn build_multichain_contract(release: bool) -> anyhow::Result<ExitStatus> {
     let target_dir = target_dir().context("could not find /target while building contract")?;
-    // We use a different target directory to stop the different rustflags between targets from clobbering the build cache
     build_package(
         release,
         PACKAGE_CONTRACT,
