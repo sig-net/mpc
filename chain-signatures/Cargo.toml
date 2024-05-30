@@ -4,3 +4,4 @@ members = [
     "keys",
     "node",
 ]
+resolver = "2"

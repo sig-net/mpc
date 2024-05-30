@@ -69,13 +69,15 @@ jobs:
           aws --profile default configure set aws_secret_access_key "456"
 
       - name: Compile Chain-Signature Contract
-        working-directory: ./contract
-        run: cargo build --target wasm32-unknown-unknown --release
+        working-directory: ./chain-signatures
+        run: cargo build -p mpc-contract --target wasm32-unknown-unknown --release
 
       - name: Build Chain-Signature Node Binary Locally
-        working-directory: ./node
-        run: cargo build --release
+        working-directory: ./chain-signatures
+        run: cargo build -p mpc-recovery-node --release
 
+      # Build the tests before actually running them to see how long the tests take to run by itself
+      # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
         working-directory: ./integration-tests/chain-signatures
         run: cargo build --tests
