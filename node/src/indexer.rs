@@ -66,11 +66,11 @@ impl Options {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct SignPayload {
-    payload: [u8; 32],
-    path: String,
-    key_version: u32,
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ContractSignRequest {
+    pub payload: [u8; 32],
+    pub path: String,
+    pub key_version: u32,
 }
 
 #[derive(LakeContext)]
@@ -101,7 +101,7 @@ async fn handle_block(
             if let Some(function_call) = action.as_function_call() {
                 if function_call.method_name() == "sign" {
                     if let Ok(sign_payload) =
-                        serde_json::from_slice::<'_, SignPayload>(function_call.args())
+                        serde_json::from_slice::<'_, ContractSignRequest>(function_call.args())
                     {
                         if receipt.logs().is_empty() {
                             tracing::warn!("`sign` did not produce entropy");
@@ -130,7 +130,7 @@ async fn handle_block(
                         let mut queue = ctx.queue.write().await;
                         queue.add(SignRequest {
                             receipt_id,
-                            msg_hash: sign_payload.payload,
+                            request: sign_payload,
                             epsilon,
                             delta,
                             entropy,

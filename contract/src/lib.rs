@@ -182,20 +182,18 @@ impl VersionedMpcContract {
 // MPC Node API
 #[near_bindgen]
 impl VersionedMpcContract {
-    pub fn respond(&mut self, request: SignRequest, big_r: String, s: String) {
-        // TODO: change to SignResult
+    pub fn respond(&mut self, request: SignRequest, result: SignResult) {
         let protocol_state = self.mutable_state();
         if let ProtocolContractState::Running(state) = protocol_state {
             let signer = env::signer_account_id();
             if state.participants.contains_key(&signer) {
                 log!(
-                    "respond: signer={}, request={:?} big_r={} s={}",
+                    "respond: signer={}, request={:?} result:{:?}",
                     signer,
                     request,
-                    big_r,
-                    s
+                    result
                 );
-                self.add_sign_result(&request, SignResult { big_r, s });
+                self.add_sign_result(&request, result);
             } else {
                 env::panic_str("only participants can respond");
             }
