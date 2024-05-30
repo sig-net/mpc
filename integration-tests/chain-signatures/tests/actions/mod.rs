@@ -11,6 +11,7 @@ use k256::elliptic_curve::scalar::FromUintUnchecked;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::elliptic_curve::ProjectivePoint;
 use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
+use mpc_contract::primitives::SignRequest;
 use mpc_contract::RunningContractState;
 use mpc_recovery_node::kdf;
 use mpc_recovery_node::util::ScalarExt;
@@ -21,7 +22,6 @@ use near_primitives::transaction::{Action, FunctionCallAction, Transaction};
 use near_workspaces::Account;
 use rand::Rng;
 use secp256k1::XOnlyPublicKey;
-use serde::{Deserialize, Serialize};
 
 use std::time::Duration;
 
@@ -31,14 +31,6 @@ use k256::{
     ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
     PublicKey as K256PublicKey,
 };
-
-// TODO: use struct from contract
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SignRequest {
-    pub payload: [u8; 32],
-    pub path: String,
-    pub key_version: u32,
-}
 
 pub async fn request_sign(
     ctx: &MultichainTestContext<'_>,

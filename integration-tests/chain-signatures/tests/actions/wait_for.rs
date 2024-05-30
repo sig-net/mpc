@@ -205,7 +205,7 @@ pub async fn has_at_least_mine_presignatures<'a>(
     Ok(state_views)
 }
 
-// TODO: use structur efrom contract one the internal types are the same
+// TODO: use structure from contract when the internal types are the same
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SignResult {
     pub big_r: AffinePoint,

@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::fastauth::primitives::UserSession;
 
-// TODO: declare this struct in one place and reuse it
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SignRequest {
     pub payload: [u8; 32],
