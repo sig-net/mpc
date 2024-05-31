@@ -122,6 +122,9 @@ impl MpcContract {
 impl VersionedMpcContract {
     #[allow(unused_variables)]
     /// `key_version` must be less than or equal to the value at `latest_key_version`
+    /// To avoid overloading the network with too many requests,
+    /// we ask for a small deposit for each signature request.
+    /// The fee changes based on how busy the network is.
     #[payable]
     pub fn sign(&mut self, payload: [u8; 32], path: String, key_version: u32) -> Promise {
         let latest_key_version: u32 = self.latest_key_version();
@@ -169,23 +172,6 @@ impl VersionedMpcContract {
             ProtocolContractState::Running(state) => state.public_key.clone(),
             ProtocolContractState::Resharing(state) => state.public_key.clone(),
             _ => env::panic_str("public key not available (protocol is not running or resharing)"),
-        }
-    }
-
-    /// To avoid overloading the network with too many requests,
-    /// we ask for a small deposit for each signature request.
-    /// The fee changes based on how busy the network is.
-    pub fn signature_deposit(&self) -> u128 {
-        const CHEAP_REQUESTS: u32 = 3;
-        let pending_requests = match self {
-            Self::V0(mpc_contract) => mpc_contract.request_counter,
-        };
-        match pending_requests {
-            0..=CHEAP_REQUESTS => 1,
-            _ => {
-                (pending_requests - CHEAP_REQUESTS) as u128
-                    * NearToken::from_millinear(50).as_yoctonear()
-            }
         }
     }
 
@@ -624,6 +610,20 @@ impl VersionedMpcContract {
     fn signature_per_payload(&self, payload: [u8; 32]) -> Option<Option<(String, String)>> {
         match self {
             Self::V0(mpc_contract) => mpc_contract.pending_requests.get(&payload),
+        }
+    }
+
+    fn signature_deposit(&self) -> u128 {
+        const CHEAP_REQUESTS: u32 = 3;
+        let pending_requests = match self {
+            Self::V0(mpc_contract) => mpc_contract.request_counter,
+        };
+        match pending_requests {
+            0..=CHEAP_REQUESTS => 1,
+            _ => {
+                (pending_requests - CHEAP_REQUESTS) as u128
+                    * NearToken::from_millinear(50).as_yoctonear()
+            }
         }
     }
 }
