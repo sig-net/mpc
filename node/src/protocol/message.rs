@@ -4,6 +4,7 @@ use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
 use crate::gcp::error::SecretStorageError;
 use crate::http_client::SendError;
+use crate::indexer::ContractSignRequest;
 use crate::mesh::Mesh;
 use crate::util;
 
@@ -65,7 +66,7 @@ pub struct SignatureMessage {
     pub receipt_id: CryptoHash,
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
-    pub msg_hash: [u8; 32],
+    pub request: ContractSignRequest,
     pub epsilon: Scalar,
     pub delta: Scalar,
     pub epoch: u64,
@@ -347,7 +348,7 @@ impl MessageHandler for RunningState {
                     *receipt_id,
                     message.proposer,
                     message.presignature_id,
-                    message.msg_hash,
+                    message.request.clone(),
                     message.epsilon,
                     message.delta,
                     &mut presignature_manager,

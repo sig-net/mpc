@@ -9,5 +9,6 @@
     "integration-tests/chain-signatures/Cargo.toml",
     "integration-tests/fastauth/Cargo.toml",
     "mpc-recovery/Cargo.toml",
+    "load-tests/Cargo.toml",
   ],
 }
