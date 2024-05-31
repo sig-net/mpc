@@ -2,7 +2,7 @@ use crate::gcp::GcpService;
 use crate::kdf;
 use crate::protocol::{SignQueue, SignRequest};
 use crate::types::LatestBlockHeight;
-
+use crypto_shared::derive_epsilon;
 use near_account_id::AccountId;
 use near_lake_framework::{LakeBuilder, LakeContext};
 use near_lake_primitives::actions::ActionMetaDataExt;
@@ -66,11 +66,16 @@ impl Options {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct SignPayload {
-    payload: [u8; 32],
-    path: String,
-    key_version: u32,
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct SignArguments {
+    pub request: ContractSignRequest,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ContractSignRequest {
+    pub payload: [u8; 32],
+    pub path: String,
+    pub key_version: u32,
 }
 
 #[derive(LakeContext)]
@@ -100,8 +105,8 @@ async fn handle_block(
             };
             if let Some(function_call) = action.as_function_call() {
                 if function_call.method_name() == "sign" {
-                    if let Ok(sign_payload) =
-                        serde_json::from_slice::<'_, SignPayload>(function_call.args())
+                    if let Ok(arguments) =
+                        serde_json::from_slice::<'_, SignArguments>(function_call.args())
                     {
                         if receipt.logs().is_empty() {
                             tracing::warn!("`sign` did not produce entropy");
@@ -116,21 +121,21 @@ async fn handle_block(
                             continue;
                         };
                         let epsilon =
-                            kdf::derive_epsilon(&action.predecessor_id(), &sign_payload.path);
+                            derive_epsilon(&action.predecessor_id(), &arguments.request.path);
                         let delta = kdf::derive_delta(receipt_id, entropy);
                         tracing::info!(
                             receipt_id = %receipt_id,
                             caller_id = receipt.predecessor_id().to_string(),
                             our_account = ctx.node_account_id.to_string(),
-                            payload = hex::encode(sign_payload.payload),
-                            key_version = sign_payload.key_version,
+                            payload = hex::encode(arguments.request.payload),
+                            key_version = arguments.request.key_version,
                             entropy = hex::encode(entropy),
                             "indexed new `sign` function call"
                         );
                         let mut queue = ctx.queue.write().await;
                         queue.add(SignRequest {
                             receipt_id,
-                            msg_hash: sign_payload.payload,
+                            request: arguments.request,
                             epsilon,
                             delta,
                             entropy,

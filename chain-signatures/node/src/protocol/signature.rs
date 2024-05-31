@@ -1,14 +1,18 @@
 use super::contract::primitives::Participants;
 use super::message::SignatureMessage;
 use super::presignature::{Presignature, PresignatureId, PresignatureManager};
-use crate::kdf;
-use crate::types::{PublicKey, SignatureProtocol};
-use crate::util::{AffinePointExt, ScalarExt};
+use crate::indexer::ContractSignRequest;
+use crate::kdf::into_eth_sig;
+use crate::types::SignatureProtocol;
+use crate::util::AffinePointExt;
 
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{FullSignature, PresignOutput};
 use chrono::Utc;
+use crypto_shared::{derive_key, PublicKey};
+use crypto_shared::{ScalarExt, SerializableScalar};
 use k256::{Scalar, Secp256k1};
+use mpc_contract::SignatureRequest;
 use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
@@ -25,7 +29,7 @@ pub const COMPLETION_EXISTENCE_TIMEOUT: Duration = Duration::from_secs(120 * 60)
 
 pub struct SignRequest {
     pub receipt_id: CryptoHash,
-    pub msg_hash: [u8; 32],
+    pub request: ContractSignRequest,
     pub epsilon: Scalar,
     pub delta: Scalar,
     pub entropy: [u8; 32],
@@ -54,7 +58,7 @@ impl SignQueue {
     pub fn add(&mut self, request: SignRequest) {
         tracing::info!(
             receipt_id = %request.receipt_id,
-            payload = hex::encode(request.msg_hash),
+            payload = hex::encode(request.request.payload),
             entropy = hex::encode(request.entropy),
             "new sign request"
         );
@@ -115,7 +119,7 @@ pub struct SignatureGenerator {
     pub participants: Vec<Participant>,
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
-    pub msg_hash: [u8; 32],
+    pub request: ContractSignRequest,
     pub epsilon: Scalar,
     pub delta: Scalar,
     pub sign_request_timestamp: Instant,
@@ -129,7 +133,7 @@ impl SignatureGenerator {
         participants: Vec<Participant>,
         proposer: Participant,
         presignature_id: PresignatureId,
-        msg_hash: [u8; 32],
+        request: ContractSignRequest,
         epsilon: Scalar,
         delta: Scalar,
         sign_request_timestamp: Instant,
@@ -139,7 +143,7 @@ impl SignatureGenerator {
             participants,
             proposer,
             presignature_id,
-            msg_hash,
+            request,
             epsilon,
             delta,
             sign_request_timestamp,
@@ -163,7 +167,7 @@ impl SignatureGenerator {
 /// for starting up this failed signature once again.
 pub struct GenerationRequest {
     pub proposer: Participant,
-    pub msg_hash: [u8; 32],
+    pub request: ContractSignRequest,
     pub epsilon: Scalar,
     pub delta: Scalar,
     pub sign_request_timestamp: Instant,
@@ -178,7 +182,12 @@ pub struct SignatureManager {
     completed: HashMap<PresignatureId, Instant>,
     /// Generated signatures assigned to the current node that are yet to be published.
     /// Vec<(receipt_id, msg_hash, timestamp, output)>
-    signatures: Vec<(CryptoHash, [u8; 32], Instant, FullSignature<Secp256k1>)>,
+    signatures: Vec<(
+        CryptoHash,
+        SignatureRequest,
+        Instant,
+        FullSignature<Secp256k1>,
+    )>,
     me: Participant,
     public_key: PublicKey,
     epoch: u64,
@@ -216,7 +225,7 @@ impl SignatureManager {
         let participants = participants.keys_vec();
         let GenerationRequest {
             proposer,
-            msg_hash,
+            request,
             epsilon,
             delta,
             sign_request_timestamp,
@@ -231,16 +240,16 @@ impl SignatureManager {
         let protocol = Box::new(cait_sith::sign(
             &participants,
             me,
-            kdf::derive_key(public_key, epsilon),
+            derive_key(public_key, epsilon),
             output,
-            Scalar::from_bytes(&msg_hash),
+            Scalar::from_bytes(&request.payload),
         )?);
         Ok(SignatureGenerator::new(
             protocol,
             participants,
             proposer,
             presignature.id,
-            msg_hash,
+            request,
             epsilon,
             delta,
             sign_request_timestamp,
@@ -268,7 +277,7 @@ impl SignatureManager {
         participants: &Participants,
         receipt_id: CryptoHash,
         presignature: Presignature,
-        msg_hash: [u8; 32],
+        request: ContractSignRequest,
         epsilon: Scalar,
         delta: Scalar,
         sign_request_timestamp: Instant,
@@ -287,7 +296,7 @@ impl SignatureManager {
             presignature,
             GenerationRequest {
                 proposer: self.me,
-                msg_hash,
+                request,
                 epsilon,
                 delta,
                 sign_request_timestamp,
@@ -310,7 +319,7 @@ impl SignatureManager {
         receipt_id: CryptoHash,
         proposer: Participant,
         presignature_id: PresignatureId,
-        msg_hash: [u8; 32],
+        request: ContractSignRequest,
         epsilon: Scalar,
         delta: Scalar,
         presignature_manager: &mut PresignatureManager,
@@ -330,7 +339,7 @@ impl SignatureManager {
                     presignature,
                     GenerationRequest {
                         proposer,
-                        msg_hash,
+                        request,
                         epsilon,
                         delta,
                         sign_request_timestamp: Instant::now(),
@@ -362,7 +371,7 @@ impl SignatureManager {
                                 *receipt_id,
                                 GenerationRequest {
                                     proposer: generator.proposer,
-                                    msg_hash: generator.msg_hash,
+                                    request: generator.request.clone(),
                                     epsilon: generator.epsilon,
                                     delta: generator.delta,
                                     sign_request_timestamp: generator.sign_request_timestamp
@@ -386,7 +395,7 @@ impl SignatureManager {
                                     receipt_id: *receipt_id,
                                     proposer: generator.proposer,
                                     presignature_id: generator.presignature_id,
-                                    msg_hash: generator.msg_hash,
+                                    request: generator.request.clone(),
                                     epsilon: generator.epsilon,
                                     delta: generator.delta,
                                     epoch: self.epoch,
@@ -403,7 +412,7 @@ impl SignatureManager {
                             receipt_id: *receipt_id,
                             proposer: generator.proposer,
                             presignature_id: generator.presignature_id,
-                            msg_hash: generator.msg_hash,
+                            request: generator.request.clone(),
                             epsilon: generator.epsilon,
                             delta: generator.delta,
                             epoch: self.epoch,
@@ -422,9 +431,13 @@ impl SignatureManager {
                             "completed signature generation"
                         );
                         self.completed.insert(generator.presignature_id, Instant::now());
+                        let request = SignatureRequest {
+                            epsilon: SerializableScalar {scalar: generator.epsilon},
+                            payload_hash: generator.request.payload,
+                        };
                         if generator.proposer == self.me {
                             self.signatures
-                                .push((*receipt_id, generator.msg_hash, generator.sign_request_timestamp, output));
+                                .push((*receipt_id, request, generator.sign_request_timestamp, output));
                         }
                         // Do not retain the protocol
                         return false;
@@ -491,7 +504,7 @@ impl SignatureManager {
                 &sig_participants,
                 receipt_id,
                 presignature,
-                my_request.msg_hash,
+                my_request.request,
                 my_request.epsilon,
                 my_request.delta,
                 my_request.time_added,
@@ -514,20 +527,21 @@ impl SignatureManager {
         mpc_contract_id: &AccountId,
         my_account_id: &AccountId,
     ) -> Result<(), near_fetch::Error> {
-        for (receipt_id, payload, time_added, signature) in self.signatures.drain(..) {
-            // TODO: Figure out how to properly serialize the signature
-            // let r_s = signature.big_r.x().concat(signature.s.to_bytes());
-            // let tag =
-            //     ConditionallySelectable::conditional_select(&2u8, &3u8, signature.big_r.y_is_odd());
-            // let signature = r_s.append(tag);
-            // let signature = Secp256K1Signature::try_from(signature.as_slice()).unwrap();
-            // let signature = Signature::SECP256K1(signature);
+        for (receipt_id, request, time_added, signature) in self.signatures.drain(..) {
+            let expected_public_key = derive_key(self.public_key, request.epsilon.scalar);
+            // We do this here, rather than on the client side, so we can use the ecrecover system function on NEAR to validate our signature
+            let signature = into_eth_sig(
+                &expected_public_key,
+                &signature.big_r,
+                &signature.s,
+                Scalar::from_bytes(&request.payload_hash),
+            )
+            .map_err(|_| near_fetch::Error::InvalidArgs("Failed to generate a recovery ID"))?;
             let response = rpc_client
                 .call(signer, mpc_contract_id, "respond")
                 .args_json(serde_json::json!({
-                    "payload": payload,
-                    "big_r": signature.big_r,
-                    "s": signature.s
+                    "request": request,
+                    "response": signature,
                 }))
                 .max_gas()
                 .transact()
@@ -543,7 +557,7 @@ impl SignatureManager {
                     .with_label_values(&[my_account_id.as_str()])
                     .inc();
             }
-            tracing::info!(%receipt_id, big_r = signature.big_r.to_base58(), s = ?signature.s, status = ?response.status(), "published signature response");
+            tracing::info!(%receipt_id, big_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, status = ?response.status(), "published signature response");
         }
         Ok(())
     }

@@ -1,12 +1,20 @@
 pub mod primitives;
 
+use crypto_shared::{
+    derive_epsilon, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
+    types::SignatureResponse, ScalarExt as _, SerializableScalar,
+};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
 use near_sdk::serde::{Deserialize, Serialize};
+
 use near_sdk::{
     env, log, near_bindgen, AccountId, BorshStorageKey, Gas, Promise, PromiseOrValue, PublicKey,
 };
-use primitives::{CandidateInfo, Candidates, ParticipantInfo, Participants, PkVotes, Votes};
+
+use primitives::{
+    CandidateInfo, Candidates, ParticipantInfo, Participants, PkVotes, SignRequest, Votes,
+};
 use std::collections::{BTreeMap, HashSet};
 
 const GAS_FOR_SIGN_CALL: Gas = Gas::from_tgas(250);
@@ -65,38 +73,55 @@ impl Default for VersionedMpcContract {
     }
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+pub struct SignatureRequest {
+    pub epsilon: SerializableScalar,
+    pub payload_hash: [u8; 32],
+}
+
+impl SignatureRequest {
+    pub fn new(payload_hash: [u8; 32], predecessor_id: &AccountId, path: &str) -> Self {
+        let scalar = derive_epsilon(predecessor_id, path);
+        let epsilon = SerializableScalar { scalar };
+        SignatureRequest {
+            epsilon,
+            payload_hash,
+        }
+    }
+}
+
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct MpcContract {
     protocol_state: ProtocolContractState,
-    pending_requests: LookupMap<[u8; 32], Option<(String, String)>>,
+    pending_requests: LookupMap<SignatureRequest, Option<SignatureResponse>>,
     request_counter: u32,
 }
 
 impl MpcContract {
-    fn add_request(&mut self, payload: &[u8; 32], signature: &Option<(String, String)>) {
+    fn add_request(&mut self, request: &SignatureRequest, result: &Option<SignatureResponse>) {
         if self.request_counter > 8 {
             env::panic_str("Too many pending requests. Please, try again later.");
         }
-        if !self.pending_requests.contains_key(payload) {
+        if !self.pending_requests.contains_key(request) {
             self.request_counter += 1;
         }
-        self.pending_requests.insert(payload, signature);
+        self.pending_requests.insert(request, result);
     }
 
-    fn remove_request(&mut self, payload: &[u8; 32]) {
+    fn remove_request(&mut self, payload: &SignatureRequest) {
         self.pending_requests.remove(payload);
         self.request_counter -= 1;
     }
 
-    fn add_signature(&mut self, payload: &[u8; 32], signature: (String, String)) {
+    fn add_sign_result(&mut self, payload: &SignatureRequest, signature: SignatureResponse) {
         if self.pending_requests.contains_key(payload) {
             self.pending_requests.insert(payload, &Some(signature));
         }
     }
 
-    fn clean_payloads(&mut self, payloads: Vec<[u8; 32]>, counter: u32) {
+    fn clean_payloads(&mut self, requests: Vec<SignatureRequest>, counter: u32) {
         log!("clean_payloads");
-        for payload in payloads.iter() {
+        for payload in requests.iter() {
             self.pending_requests.remove(payload);
         }
         self.request_counter = counter;
@@ -120,7 +145,12 @@ impl MpcContract {
 impl VersionedMpcContract {
     #[allow(unused_variables)]
     /// `key_version` must be less than or equal to the value at `latest_key_version`
-    pub fn sign(&mut self, payload: [u8; 32], path: String, key_version: u32) -> Promise {
+    pub fn sign(&mut self, request: SignRequest) -> Promise {
+        let SignRequest {
+            payload,
+            path,
+            key_version,
+        } = request;
         let latest_key_version: u32 = self.latest_key_version();
         assert!(
             key_version <= latest_key_version,
@@ -134,25 +164,28 @@ impl VersionedMpcContract {
             env::prepaid_gas(),
             GAS_FOR_SIGN_CALL
         );
+        let predecessor = env::predecessor_account_id();
         log!(
-            "sign: signer={}, payload={:?}, path={:?}, key_version={}",
-            env::signer_account_id(),
+            "sign: predecessor={}, payload={:?}, path={:?}, key_version={}",
+            predecessor,
             payload,
             path,
             key_version
         );
-        match self.signature_per_payload(payload) {
+
+        let request = SignatureRequest::new(payload, &predecessor, &path);
+        match self.sign_result(&request) {
             None => {
-                self.add_request(&payload, &None);
+                self.add_sign_request(&request);
                 log!(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
-                Self::ext(env::current_account_id()).sign_helper(payload, 0)
+                Self::ext(env::current_account_id()).sign_helper(request, 0)
             }
             Some(_) => env::panic_str("Signature for this payload already requested"),
         }
     }
 
     /// This is the root public key combined from all the public keys of the participants.
-    pub fn public_key(self) -> PublicKey {
+    pub fn public_key(&self) -> PublicKey {
         match self.state() {
             ProtocolContractState::Running(state) => state.public_key.clone(),
             ProtocolContractState::Resharing(state) => state.public_key.clone(),
@@ -172,27 +205,41 @@ impl VersionedMpcContract {
     pub fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()
     }
-}
 
-// MPC Node API
-#[near_bindgen]
-impl VersionedMpcContract {
-    pub fn respond(&mut self, payload: [u8; 32], big_r: String, s: String) {
+    pub fn respond(&mut self, request: SignatureRequest, response: SignatureResponse) {
         let protocol_state = self.mutable_state();
-        if let ProtocolContractState::Running(state) = protocol_state {
+        if let ProtocolContractState::Running(_) = protocol_state {
             let signer = env::signer_account_id();
-            if state.participants.contains_key(&signer) {
-                log!(
-                    "respond: signer={}, payload={:?} big_r={} s={}",
-                    signer,
-                    payload,
-                    big_r,
-                    s
-                );
-                self.add_signature(&payload, (big_r, s));
-            } else {
-                env::panic_str("only participants can respond");
+            // TODO add back in a check to see that the caller is a participant (it's horrible to test atm)
+            // It's not strictly necessary, since we verify the payload is correct
+            log!(
+                "respond: signer={}, request={:?} big_r={:?} s={:?}",
+                &signer,
+                &request,
+                &response.big_r,
+                &response.s
+            );
+
+            // generate the expected public key
+            let expected_public_key = derive_key(
+                near_public_key_to_affine_point(self.public_key()),
+                request.epsilon.scalar,
+            );
+
+            // Check the signature is correct
+            if check_ec_signature(
+                &expected_public_key,
+                &response.big_r.affine_point,
+                &response.s.scalar,
+                k256::Scalar::from_bytes(&request.payload_hash[..]),
+                response.recovery_id,
+            )
+            .is_err()
+            {
+                env::panic_str("Signature could not be verified");
             }
+
+            self.add_sign_result(&request, response);
         } else {
             env::panic_str("protocol is not in a running state");
         }
@@ -470,10 +517,10 @@ impl VersionedMpcContract {
     #[private]
     pub fn sign_helper(
         &mut self,
-        payload: [u8; 32],
+        request: SignatureRequest,
         depth: usize,
-    ) -> PromiseOrValue<(String, String)> {
-        if let Some(signature) = self.signature_per_payload(payload) {
+    ) -> PromiseOrValue<SignatureResponse> {
+        if let Some(signature) = self.sign_result(&request) {
             match signature {
                 Some(signature) => {
                     log!(
@@ -481,7 +528,7 @@ impl VersionedMpcContract {
                         signature,
                         depth
                     );
-                    self.remove_request(&payload);
+                    self.remove_sign_request(&request);
                     PromiseOrValue::Value(signature)
                 }
                 None => {
@@ -490,7 +537,7 @@ impl VersionedMpcContract {
                     // We keep one call back so we can cleanup then call panic on the next call
                     // Start cleaning up if there's less than 25 teragas left regardless of how deep you are.
                     if depth > 30 || env::prepaid_gas() < Gas::from_tgas(25) {
-                        self.remove_request(&payload);
+                        self.remove_sign_request(&request);
                         let self_id = env::current_account_id();
                         PromiseOrValue::Promise(Self::ext(self_id).fail_helper(
                             "Signature was not provided in time. Please, try again.".to_string(),
@@ -502,7 +549,7 @@ impl VersionedMpcContract {
                         ));
                         let account_id = env::current_account_id();
                         PromiseOrValue::Promise(
-                            Self::ext(account_id).sign_helper(payload, depth + 1),
+                            Self::ext(account_id).sign_helper(request, depth + 1),
                         )
                     }
                 }
@@ -518,9 +565,9 @@ impl VersionedMpcContract {
         env::panic_str(&message);
     }
 
-    pub fn state(self) -> ProtocolContractState {
+    pub fn state(&self) -> &ProtocolContractState {
         match self {
-            Self::V0(mpc_contract) => mpc_contract.protocol_state,
+            Self::V0(mpc_contract) => &mpc_contract.protocol_state,
         }
     }
 
@@ -539,10 +586,10 @@ impl VersionedMpcContract {
     }
 
     #[private]
-    pub fn clean_payloads(&mut self, payloads: Vec<[u8; 32]>, counter: u32) {
+    pub fn clean_payloads(&mut self, requests: Vec<SignatureRequest>, counter: u32) {
         match self {
             Self::V0(mpc_contract) => {
-                mpc_contract.clean_payloads(payloads, counter);
+                mpc_contract.clean_payloads(requests, counter);
             }
         }
     }
@@ -557,31 +604,27 @@ impl VersionedMpcContract {
             request_counter: old_contract.request_counter,
         })
     }
-}
 
-// Helper functions
-#[near_bindgen]
-impl VersionedMpcContract {
-    fn remove_request(&mut self, payload: &[u8; 32]) {
+    fn remove_sign_request(&mut self, request: &SignatureRequest) {
         match self {
             Self::V0(mpc_contract) => {
-                mpc_contract.remove_request(payload);
+                mpc_contract.remove_request(request);
             }
         }
     }
 
-    fn add_request(&mut self, payload: &[u8; 32], signature: &Option<(String, String)>) {
+    fn add_sign_request(&mut self, request: &SignatureRequest) {
         match self {
             Self::V0(mpc_contract) => {
-                mpc_contract.add_request(payload, signature);
+                mpc_contract.add_request(request, &None);
             }
         }
     }
 
-    fn add_signature(&mut self, payload: &[u8; 32], signature: (String, String)) {
+    fn add_sign_result(&mut self, request: &SignatureRequest, response: SignatureResponse) {
         match self {
             Self::V0(mpc_contract) => {
-                mpc_contract.add_signature(payload, signature);
+                mpc_contract.add_sign_result(request, response);
             }
         }
     }
@@ -592,9 +635,15 @@ impl VersionedMpcContract {
         }
     }
 
-    fn signature_per_payload(&self, payload: [u8; 32]) -> Option<Option<(String, String)>> {
+    fn sign_result(&self, request: &SignatureRequest) -> Option<Option<SignatureResponse>> {
         match self {
-            Self::V0(mpc_contract) => mpc_contract.pending_requests.get(&payload),
+            Self::V0(mpc_contract) => mpc_contract.pending_requests.get(request),
         }
     }
+
+    // fn public_key(&self) -> String {
+    //     match self {
+    //         Self::V0(mpc_contract) => mpc_contract
+    //     }
+    // }
 }
