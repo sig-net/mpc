@@ -11,6 +11,7 @@ use k256::elliptic_curve::scalar::FromUintUnchecked;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::elliptic_curve::ProjectivePoint;
 use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
+use mpc_contract::primitives::SignRequest;
 use mpc_contract::RunningContractState;
 use mpc_recovery_node::kdf;
 use mpc_recovery_node::util::ScalarExt;
@@ -48,6 +49,12 @@ pub async fn request_sign(
         .rpc_client
         .fetch_nonce(&signer.account_id, &signer.public_key)
         .await?;
+
+    let request = SignRequest {
+        payload: payload_hashed,
+        path: "test".to_string(),
+        key_version: 0,
+    };
     let tx_hash = ctx
         .jsonrpc_client
         .call(&RpcBroadcastTxAsyncRequest {
@@ -60,9 +67,7 @@ pub async fn request_sign(
                 actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
                     method_name: "sign".to_string(),
                     args: serde_json::to_vec(&serde_json::json!({
-                        "payload": payload_hashed,
-                        "path": "test",
-                        "key_version": 0,
+                        "request": request,
                     }))?,
                     gas: 300_000_000_000_000,
                     deposit: 1,
@@ -118,6 +123,13 @@ pub async fn request_sign_non_random(
         .rpc_client
         .fetch_nonce(&signer.account_id, &signer.public_key)
         .await?;
+
+    let request = SignRequest {
+        payload: payload_hashed,
+        path: "test".to_string(),
+        key_version: 0,
+    };
+
     let tx_hash = ctx
         .jsonrpc_client
         .call(&RpcBroadcastTxAsyncRequest {
@@ -130,9 +142,7 @@ pub async fn request_sign_non_random(
                 actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
                     method_name: "sign".to_string(),
                     args: serde_json::to_vec(&serde_json::json!({
-                        "payload": payload_hashed,
-                        "path": "test",
-                        "key_version": 0,
+                        "request": request,
                     }))?,
                     gas: 300_000_000_000_000,
                     deposit: 1,
