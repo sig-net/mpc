@@ -68,11 +68,11 @@ jobs:
           aws --profile default configure set aws_access_key_id "123"
           aws --profile default configure set aws_secret_access_key "456"
 
-      - name: Compile Chain-Signature Contract
+      - name: Build Chain-Signatures Contract
         working-directory: ./chain-signatures
         run: cargo build -p mpc-contract --target wasm32-unknown-unknown --release
 
-      - name: Build Chain-Signature Node Binary Locally
+      - name: Build Chain-Signatures Node
         working-directory: ./chain-signatures
         run: cargo build -p mpc-recovery-node --release
 
