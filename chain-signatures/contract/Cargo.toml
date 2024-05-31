@@ -17,11 +17,3 @@ schemars = "0.8"
 near-workspaces = { git = "https://github.com/near/near-workspaces-rs.git", branch = "feat/upgrade-near-deps" }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0.44"
-
-[profile.release]
-codegen-units = 1
-# Tell `rustc` to optimize for small code size.
-opt-level = "z"
-lto = true
-debug = false
-panic = "abort"
