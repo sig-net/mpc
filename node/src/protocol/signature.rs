@@ -2,14 +2,17 @@ use super::contract::primitives::Participants;
 use super::message::SignatureMessage;
 use super::presignature::{Presignature, PresignatureId, PresignatureManager};
 use crate::indexer::ContractSignRequest;
-use crate::kdf;
-use crate::types::{PublicKey, SignatureProtocol};
-use crate::util::{AffinePointExt, ScalarExt};
+use crate::kdf::into_eth_sig;
+use crate::types::SignatureProtocol;
+use crate::util::AffinePointExt;
 
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{FullSignature, PresignOutput};
 use chrono::Utc;
+use crypto_shared::{derive_key, PublicKey};
+use crypto_shared::{ScalarExt, SerializableScalar};
 use k256::{Scalar, Secp256k1};
+use mpc_contract::SignatureRequest;
 use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
@@ -178,10 +181,10 @@ pub struct SignatureManager {
     /// Set of completed signatures
     completed: HashMap<PresignatureId, Instant>,
     /// Generated signatures assigned to the current node that are yet to be published.
-    /// Vec<(receipt_id, sign_request, timestamp, output)>
+    /// Vec<(receipt_id, msg_hash, timestamp, output)>
     signatures: Vec<(
         CryptoHash,
-        ContractSignRequest,
+        SignatureRequest,
         Instant,
         FullSignature<Secp256k1>,
     )>,
@@ -237,7 +240,7 @@ impl SignatureManager {
         let protocol = Box::new(cait_sith::sign(
             &participants,
             me,
-            kdf::derive_key(public_key, epsilon),
+            derive_key(public_key, epsilon),
             output,
             Scalar::from_bytes(&request.payload),
         )?);
@@ -428,9 +431,13 @@ impl SignatureManager {
                             "completed signature generation"
                         );
                         self.completed.insert(generator.presignature_id, Instant::now());
+                        let request = SignatureRequest {
+                            epsilon: SerializableScalar {scalar: generator.epsilon},
+                            payload_hash: generator.request.payload,
+                        };
                         if generator.proposer == self.me {
                             self.signatures
-                                .push((*receipt_id, generator.request.clone(), generator.sign_request_timestamp, output));
+                                .push((*receipt_id, request, generator.sign_request_timestamp, output));
                         }
                         // Do not retain the protocol
                         return false;
@@ -521,14 +528,20 @@ impl SignatureManager {
         my_account_id: &AccountId,
     ) -> Result<(), near_fetch::Error> {
         for (receipt_id, request, time_added, signature) in self.signatures.drain(..) {
+            let expected_public_key = derive_key(self.public_key, request.epsilon.scalar);
+            // We do this here, rather than on the client side, so we can use the ecrecover system function on NEAR to validate our signature
+            let signature = into_eth_sig(
+                &expected_public_key,
+                &signature.big_r,
+                &signature.s,
+                Scalar::from_bytes(&request.payload_hash),
+            )
+            .map_err(|_| near_fetch::Error::InvalidArgs("Failed to generate a recovery ID"))?;
             let response = rpc_client
                 .call(signer, mpc_contract_id, "respond")
                 .args_json(serde_json::json!({
                     "request": request,
-                    "result": {
-                        "big_r": signature.big_r,
-                        "s": signature.s,
-                    },
+                    "response": signature,
                 }))
                 .max_gas()
                 .transact()
@@ -544,7 +557,7 @@ impl SignatureManager {
                     .with_label_values(&[my_account_id.as_str()])
                     .inc();
             }
-            tracing::info!(%receipt_id, big_r = signature.big_r.to_base58(), s = ?signature.s, status = ?response.status(), "published signature response");
+            tracing::info!(%receipt_id, big_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, status = ?response.status(), "published signature response");
         }
         Ok(())
     }

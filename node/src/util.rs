@@ -1,8 +1,7 @@
-use crate::types::PublicKey;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
-use k256::elliptic_curve::scalar::FromUintUnchecked;
+use crypto_shared::{near_public_key_to_affine_point, PublicKey};
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use k256::{AffinePoint, EncodedPoint, Scalar, U256};
+use k256::{AffinePoint, EncodedPoint};
 use std::env;
 use std::time::Duration;
 
@@ -19,10 +18,7 @@ impl NearPublicKeyExt for String {
 
 impl NearPublicKeyExt for near_sdk::PublicKey {
     fn into_affine_point(self) -> PublicKey {
-        let mut bytes = self.into_bytes();
-        bytes[0] = 0x04;
-        let point = EncodedPoint::from_bytes(bytes).unwrap();
-        PublicKey::from_encoded_point(&point).unwrap()
+        near_public_key_to_affine_point(self)
     }
 }
 
@@ -65,16 +61,6 @@ impl AffinePointExt for AffinePoint {
         )
         .unwrap();
         format!("{:?}", key)
-    }
-}
-
-pub trait ScalarExt {
-    fn from_bytes(bytes: &[u8]) -> Self;
-}
-
-impl ScalarExt for Scalar {
-    fn from_bytes(bytes: &[u8]) -> Self {
-        Scalar::from_uint_unchecked(U256::from_le_slice(bytes))
     }
 }
 
