@@ -1,3 +1,5 @@
+mod state;
+
 use std::str::FromStr;
 
 use crate::actions::{self, wait_for};
@@ -134,6 +136,7 @@ async fn test_signature_large_stockpile() -> anyhow::Result<()> {
         presig_cfg,
         nodes: NODES,
         threshold: THRESHOLD,
+        import_contract: None,
     };
 
     with_multichain_nodes(config, |ctx| {

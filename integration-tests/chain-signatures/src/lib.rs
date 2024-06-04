@@ -1,6 +1,7 @@
 pub mod containers;
 pub mod execute;
 pub mod local;
+pub mod state;
 pub mod utils;
 
 use std::collections::HashMap;
@@ -33,6 +34,7 @@ pub struct MultichainConfig {
     pub threshold: usize,
     pub triple_cfg: TripleConfig,
     pub presig_cfg: PresignatureConfig,
+    pub import_contract: Option<AccountId>,
 }
 
 impl Default for MultichainConfig {
@@ -50,6 +52,7 @@ impl Default for MultichainConfig {
                 min_presignatures: 2,
                 max_presignatures: 20,
             },
+            import_contract: None,
         }
     }
 }
@@ -229,7 +232,10 @@ pub struct Context<'a> {
     pub storage_options: storage::Options,
 }
 
-pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> {
+pub async fn setup(
+    cfg: MultichainConfig,
+    docker_client: &DockerClient,
+) -> anyhow::Result<Context<'_>> {
     let release = true;
     let docker_network = NETWORK;
     docker_client.create_network(docker_network).await?;
@@ -240,14 +246,26 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         worker,
     } = initialize_lake_indexer(docker_client, docker_network).await?;
 
-    let mpc_contract = worker
-        .dev_deploy(&std::fs::read(
-            execute::target_dir()
-                .context("could not find target dir")?
-                .join("wasm32-unknown-unknown/release/mpc_contract.wasm"),
-        )?)
-        .await?;
-    tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
+    let mpc_contract = if let Some(import_contract) = &cfg.import_contract {
+        let contract = worker
+            .import_contract(import_contract, &near_workspaces::testnet().await?)
+            .with_data()
+            .dest_account_id(&"imported-mpc.test.near".parse().unwrap())
+            .transact()
+            .await?;
+        tracing::info!(contract_id = %contract.id(), "imported mpc contract");
+        contract
+    } else {
+        let contract = worker
+            .dev_deploy(&std::fs::read(
+                execute::target_dir()
+                    .context("could not find target dir")?
+                    .join("wasm32-unknown-unknown/release/mpc_contract.wasm"),
+            )?)
+            .await?;
+        tracing::info!(contract_id = %contract.id(), "deployed mpc contract");
+        contract
+    };
 
     let gcp_project_id = "multichain-integration";
     let datastore =
@@ -275,7 +293,7 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
 }
 
 pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
-    let ctx = setup(docker_client).await?;
+    let ctx = setup(cfg.clone(), docker_client).await?;
 
     let accounts =
         futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
@@ -321,7 +339,7 @@ pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyh
 }
 
 pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
-    let ctx = setup(docker_client).await?;
+    let ctx = setup(cfg.clone(), docker_client).await?;
 
     let accounts =
         futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
@@ -357,6 +375,7 @@ pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow
             )
         })
         .collect();
+
     ctx.mpc_contract
         .call("init")
         .args_json(json!({
