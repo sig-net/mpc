@@ -377,7 +377,6 @@ impl VersionedMpcContract {
     pub fn join(
         &mut self,
         url: String,
-        cipher_pk: primitives::hpke::PublicKey,
         sign_pk: PublicKey,
     ) {
         log!(
@@ -452,11 +451,10 @@ impl VersionedMpcContract {
                     });
                     true
                 } else {
-                    false
-                }
             }
             _ => env::panic_str("protocol state can't accept new participants right now"),
         }
+    }
     }
 
     pub fn vote_leave(&mut self, kick: AccountId) -> bool {
