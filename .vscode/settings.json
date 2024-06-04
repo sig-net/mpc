@@ -3,9 +3,7 @@
     "develop"
   ],
   "rust-analyzer.linkedProjects": [
-    "keys/Cargo.toml",
-    "node/Cargo.toml",
-    "contract/Cargo.toml",
+    "chain-signatures/Cargo.toml",
     "integration-tests/chain-signatures/Cargo.toml",
     "integration-tests/fastauth/Cargo.toml",
     "mpc-recovery/Cargo.toml",

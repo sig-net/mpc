@@ -2,7 +2,7 @@ use crate::gcp::GcpService;
 use crate::kdf;
 use crate::protocol::{SignQueue, SignRequest};
 use crate::types::LatestBlockHeight;
-
+use crypto_shared::derive_epsilon;
 use near_account_id::AccountId;
 use near_lake_framework::{LakeBuilder, LakeContext};
 use near_lake_primitives::actions::ActionMetaDataExt;
@@ -105,7 +105,7 @@ async fn handle_block(
             };
             if let Some(function_call) = action.as_function_call() {
                 if function_call.method_name() == "sign" {
-                    if let Ok(aruments) =
+                    if let Ok(arguments) =
                         serde_json::from_slice::<'_, SignArguments>(function_call.args())
                     {
                         if receipt.logs().is_empty() {
@@ -121,21 +121,21 @@ async fn handle_block(
                             continue;
                         };
                         let epsilon =
-                            kdf::derive_epsilon(&action.predecessor_id(), &aruments.request.path);
+                            derive_epsilon(&action.predecessor_id(), &arguments.request.path);
                         let delta = kdf::derive_delta(receipt_id, entropy);
                         tracing::info!(
                             receipt_id = %receipt_id,
                             caller_id = receipt.predecessor_id().to_string(),
                             our_account = ctx.node_account_id.to_string(),
-                            payload = hex::encode(aruments.request.payload),
-                            key_version = aruments.request.key_version,
+                            payload = hex::encode(arguments.request.payload),
+                            key_version = arguments.request.key_version,
                             entropy = hex::encode(entropy),
                             "indexed new `sign` function call"
                         );
                         let mut queue = ctx.queue.write().await;
                         queue.add(SignRequest {
                             receipt_id,
-                            request: aruments.request,
+                            request: arguments.request,
                             epsilon,
                             delta,
                             entropy,
