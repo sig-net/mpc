@@ -236,12 +236,12 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
                     let (protocol, protocol_state) = MpcSignProtocol::init(
                         my_address,
-                        mpc_contract_id.clone(),
+                        mpc_contract_id,
                         account_id,
-                        rpc_client.clone(),
-                        signer.clone(),
+                        rpc_client,
+                        signer,
                         receiver,
-                        sign_queue.clone(),
+                        sign_queue,
                         key_storage,
                         triple_storage,
                         Config {

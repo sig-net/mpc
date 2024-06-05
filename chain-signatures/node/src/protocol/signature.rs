@@ -544,6 +544,7 @@ impl SignatureManager {
                     "response": signature,
                 }))
                 .max_gas()
+                .retry_exponential(10, 5)
                 .transact()
                 .await?;
             crate::metrics::NUM_SIGN_SUCCESS

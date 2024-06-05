@@ -2,7 +2,6 @@ use crate::protocol::ProtocolState;
 
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
-use near_primitives::views::FinalExecutionStatus;
 
 use serde_json::json;
 
@@ -32,12 +31,10 @@ pub async fn vote_for_public_key(
         .max_gas()
         .retry_exponential(10, 5)
         .transact()
-        .await?;
+        .await?
+        .json()?;
 
-    match result.status() {
-        FinalExecutionStatus::SuccessValue(value) => Ok(serde_json::from_slice(value)?),
-        status => anyhow::bail!("unexpected status: {:?}", status),
-    }
+    Ok(result)
 }
 
 pub async fn vote_reshared(
@@ -54,10 +51,8 @@ pub async fn vote_reshared(
         .max_gas()
         .retry_exponential(10, 5)
         .transact()
-        .await?;
+        .await?
+        .json()?;
 
-    match result.status() {
-        FinalExecutionStatus::SuccessValue(value) => Ok(serde_json::from_slice(value)?),
-        status => anyhow::bail!("unexpected status: {:?}", status),
-    }
+    Ok(result)
 }

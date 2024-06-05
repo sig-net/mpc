@@ -26,7 +26,7 @@ use crate::mesh::{Mesh, NetworkConfig};
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{MessageHandler, MpcMessageQueue};
-use crate::rpc_client::{self};
+use crate::rpc_client;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::LockTripleNodeStorageBox;
 
