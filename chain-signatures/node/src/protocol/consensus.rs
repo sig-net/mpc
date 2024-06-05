@@ -59,6 +59,8 @@ pub enum ConsensusError {
     HasBeenKicked,
     #[error("this node errored out during the join process: {0}")]
     CannotJoin(String),
+    #[error("this node errored out while trying to vote: {0}")]
+    CannotVote(String),
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
     #[error("secret storage error: {0}")]
@@ -314,7 +316,14 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         &public_key,
                     )
                     .await
-                    .unwrap();
+                    .map_err(|err| {
+                        tracing::error!(
+                            ?public_key,
+                            ?err,
+                            "failed to vote for the generated public key"
+                        );
+                        ConsensusError::CannotVote(format!("{err:?}"))
+                    })?;
                 }
                 Ok(NodeState::WaitingForConsensus(self))
             }
@@ -433,7 +442,14 @@ impl ConsensusProtocol for WaitingForConsensusState {
                                         self.epoch,
                                     )
                                     .await
-                                    .unwrap();
+                                    .map_err(|err| {
+                                        tracing::error!(
+                                            epoch = self.epoch,
+                                            ?err,
+                                            "failed to vote for resharing"
+                                        );
+                                        ConsensusError::CannotVote(format!("{err:?}"))
+                                    })?;
                                 } else {
                                     tracing::info!(
                                         epoch = self.epoch,
