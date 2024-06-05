@@ -43,7 +43,7 @@ url = { version = "2.4.0", features = ["serde"] }
 
 near-account-id = "1.0.0"
 near-crypto = "0.21.2"
-near-fetch = { git = "https://github.com/ChaoticTempest/fetch.git" }
+near-fetch = "0.3.1"
 near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs", branch = "dmd/bump-dependencies" }
 near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs", branch = "dmd/bump-dependencies" }
 near-primitives = "0.21.2"

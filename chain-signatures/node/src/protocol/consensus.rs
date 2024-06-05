@@ -665,6 +665,7 @@ impl ConsensusProtocol for JoiningState {
                                 "sign_pk": ctx.cfg().network_cfg.sign_sk.public_key(),
                             }))
                             .max_gas()
+                            .retry_exponential(10, 3)
                             .transact()
                             .await
                             .map_err(|err| {

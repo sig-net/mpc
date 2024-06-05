@@ -33,7 +33,7 @@ k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
 # near dependencies
 near-account-id = "1"
 near-crypto = "0.21"
-near-fetch = { git = "https://github.com/ChaoticTempest/fetch.git" }
+near-fetch = "0.3.1"
 near-jsonrpc-client = "0.9"
 near-primitives = "0.21"
 near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs", branch = "dmd/bump-dependencies" }
