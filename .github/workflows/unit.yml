@@ -9,7 +9,7 @@ env:
   RUSTFLAGS: -D warnings
 jobs:
   test:
-    runs-on: warp-ubuntu-2204-x64-4x
+    runs-on: warp-ubuntu-latest-x64-4x
     name: Check & Test
     steps:
       - uses: actions/checkout@v3
