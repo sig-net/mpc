@@ -17,7 +17,7 @@ jobs:
     strategy:
       matrix:
         # FIXME: macos-latest-xl is disabled since colima is erroring out right now
-        os: [ubuntu-latest]
+        os: [warp-ubuntu-2204-x64-4x]
     runs-on: ${{ matrix.os }}
 
     steps:

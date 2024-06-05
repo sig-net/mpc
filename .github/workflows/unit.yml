@@ -9,7 +9,7 @@ env:
   RUSTFLAGS: -D warnings
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: warp-ubuntu-2204-x64-4x
     name: Check & Test
     steps:
       - uses: actions/checkout@v3
@@ -72,16 +72,6 @@ jobs:
         with:
           profile: minimal
           toolchain: stable
-      - uses: WarpBuilds/cache@v1
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}"
-          restore-keys: ${{ runner.os }}-cargo-
       - name: Install Audit
         run: cargo install cargo-audit
       - name: Run Audit (FastAuth)
