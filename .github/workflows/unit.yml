@@ -27,7 +27,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: "${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
       - name: Install Protoc
         uses: arduino/setup-protoc@v1.1.2
@@ -80,7 +80,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: "${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
       - name: Install Audit
         run: cargo install cargo-audit
