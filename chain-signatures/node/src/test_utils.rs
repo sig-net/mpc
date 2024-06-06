@@ -86,7 +86,7 @@ impl TestTripleManagers {
 
     async fn poke(&mut self, index: usize) -> Result<bool, ProtocolError> {
         let mut quiet = true;
-        let messages = self.managers[index].poke().await?;
+        let messages = self.managers[index].poke().await;
         for (
             participant,
             ref tm @ TripleMessage {

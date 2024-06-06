@@ -210,7 +210,18 @@ impl PresignatureManager {
         private_share: &SecretKeyShare,
     ) -> Result<(), InitializationError> {
         let id = rand::random();
-        tracing::info!(id, "starting protocol to generate a new presignature");
+
+        // Check if the `id` is already in the system. Error out and have the next cycle try again.
+        if self.generators.contains_key(&id)
+            || self.presignatures.contains_key(&id)
+            || self.taken.contains_key(&id)
+        {
+            return Err(InitializationError::BadParameters(format!(
+                "id collision: presignature_id={id}"
+            )));
+        }
+
+        tracing::debug!(id, "starting protocol to generate a new presignature");
         let generator = Self::generate_internal(
             participants,
             self.me,
@@ -384,16 +395,16 @@ impl PresignatureManager {
     /// messages to be sent to the respective participant.
     ///
     /// An empty vector means we cannot progress until we receive a new message.
-    pub fn poke(&mut self) -> Result<Vec<(Participant, PresignatureMessage)>, ProtocolError> {
+    pub fn poke(&mut self) -> Vec<(Participant, PresignatureMessage)> {
         let mut messages = Vec::new();
-        let mut result = Ok(());
+        let mut errors = Vec::new();
         self.generators.retain(|id, generator| {
             loop {
                 let action = match generator.poke() {
                     Ok(action) => action,
                     Err(e) => {
                         self.introduced.remove(id);
-                        result = Err(e);
+                        errors.push(e);
                         break false;
                     }
                 };
@@ -467,6 +478,11 @@ impl PresignatureManager {
                 }
             }
         });
-        result.map(|_| messages)
+
+        if !errors.is_empty() {
+            tracing::warn!(?errors, "faled to generate some presignatures");
+        }
+
+        messages
     }
 }

@@ -190,6 +190,17 @@ impl TripleManager {
     /// Starts a new Beaver triple generation protocol.
     pub fn generate(&mut self, participants: &Participants) -> Result<(), InitializationError> {
         let id = rand::random();
+
+        // Check if the `id` is already in the system. Error out and have the next cycle try again.
+        if self.generators.contains_key(&id)
+            || self.triples.contains_key(&id)
+            || self.taken.contains_key(&id)
+        {
+            return Err(InitializationError::BadParameters(format!(
+                "id collision: triple_id={id}"
+            )));
+        }
+
         tracing::debug!(id, "starting protocol to generate a new triple");
         let participants: Vec<_> = participants.keys().cloned().collect();
         let protocol: TripleProtocol = Box::new(cait_sith::triples::generate_triple::<Secp256k1>(
@@ -391,7 +402,7 @@ impl TripleManager {
     /// messages to be sent to the respective participant.
     ///
     /// An empty vector means we cannot progress until we receive a new message.
-    pub async fn poke(&mut self) -> Result<Vec<(Participant, TripleMessage)>, ProtocolError> {
+    pub async fn poke(&mut self) -> Vec<(Participant, TripleMessage)> {
         // Add more protocols to the ongoing pool if there is space.
         let to_generate_len = self.triple_cfg.max_concurrent_generation - self.ongoing.len();
         if !self.queued.is_empty() && to_generate_len > 0 {
@@ -401,8 +412,8 @@ impl TripleManager {
         }
 
         let mut messages = Vec::new();
-        let mut result = Ok(());
         let mut triples_to_insert = Vec::new();
+        let mut errors = Vec::new();
         self.generators.retain(|id, generator| {
             if !self.ongoing.contains(id) {
                 // If the protocol is not ongoing, we should retain it for the next time
@@ -414,7 +425,7 @@ impl TripleManager {
                 let action = match generator.poke() {
                     Ok(action) => action,
                     Err(e) => {
-                        result = Err(e);
+                        errors.push(e);
                         self.failed_triples.insert(*id, Instant::now());
                         self.ongoing.remove(id);
                         self.introduced.remove(id);
@@ -522,7 +533,12 @@ impl TripleManager {
             }
         });
         self.insert_triples_to_storage(triples_to_insert).await;
-        result.map(|_| messages)
+
+        if !errors.is_empty() {
+            tracing::warn!(?errors, "faled to generate some triples");
+        }
+
+        messages
     }
 
     async fn insert_triples_to_storage(&mut self, triples_to_insert: Vec<Triple>) {
