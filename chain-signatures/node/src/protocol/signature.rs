@@ -454,7 +454,7 @@ impl SignatureManager {
         active: &Participants,
         my_requests: &mut HashMap<CryptoHash, SignRequest>,
         presignature_manager: &mut PresignatureManager,
-    ) -> Result<(), super::CryptographicError> {
+    ) {
         let mut failed_presigs = Vec::new();
         while let Some(mut presignature) = {
             if self.failed.is_empty() && my_requests.is_empty() {
@@ -472,18 +472,22 @@ impl SignatureManager {
                 failed_presigs.push(presignature);
                 continue;
             }
+            let presig_id = presignature.id;
 
             // NOTE: this prioritizes old requests first then tries to do new ones if there's enough presignatures.
             // TODO: we need to decide how to prioritize certain requests over others such as with gas or time of
             // when the request made it into the NEAR network.
             // issue: https://github.com/near/mpc-recovery/issues/596
             if let Some((receipt_id, failed_req)) = self.failed.pop_front() {
-                self.retry_failed_generation(
+                if let Err(err) = self.retry_failed_generation(
                     receipt_id,
                     failed_req,
                     presignature,
                     &sig_participants,
-                )?;
+                ) {
+                    tracing::warn!(%receipt_id, presig_id, ?err, "failed to retry signature generation: trashing presignature");
+                    continue;
+                }
 
                 if let Some(another_presignature) = presignature_manager.take_mine() {
                     presignature = another_presignature;
@@ -500,7 +504,7 @@ impl SignatureManager {
                 failed_presigs.push(presignature);
                 continue;
             };
-            self.generate(
+            if let Err(err) = self.generate(
                 &sig_participants,
                 receipt_id,
                 presignature,
@@ -508,7 +512,10 @@ impl SignatureManager {
                 my_request.epsilon,
                 my_request.delta,
                 my_request.time_added,
-            )?;
+            ) {
+                tracing::warn!(%receipt_id, presig_id, ?err, "failed to start signature generation: trashing presignature");
+                continue;
+            }
         }
 
         // add back the failed presignatures that were incompatible to be made into
@@ -516,8 +523,6 @@ impl SignatureManager {
         for presignature in failed_presigs {
             presignature_manager.insert_mine(presignature);
         }
-
-        Ok(())
     }
 
     pub async fn publish<T: SignerExt>(
