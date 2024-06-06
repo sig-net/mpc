@@ -72,9 +72,7 @@ pub async fn has_at_least_triples<'a>(
                 .await?;
 
             match state_view {
-                StateView::Running { triple_count, .. }
-                    if triple_count >= expected_count =>
-                {
+                StateView::Running { triple_count, .. } if triple_count >= expected_count => {
                     Ok(state_view)
                 }
                 StateView::Running { .. } => anyhow::bail!("node does not have enough triples yet"),
@@ -94,7 +92,11 @@ pub async fn has_at_least_triples<'a>(
         let state_view = is_enough_triples(id)
             .retry(&strategy)
             .await
-            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_count}' triples before deadline"))?;
+            .with_context(|| {
+                format!(
+                    "mpc node '{id}' failed to generate '{expected_count}' triples before deadline"
+                )
+            })?;
         state_views.push(state_view);
     }
     Ok(state_views)
@@ -137,7 +139,11 @@ pub async fn has_at_least_mine_triples<'a>(
         let state_view = is_enough_mine_triples(id)
             .retry(&strategy)
             .await
-            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_count}' triples before deadline"))?;
+            .with_context(|| {
+                format!(
+                    "mpc node '{id}' failed to generate '{expected_count}' triples before deadline"
+                )
+            })?;
         state_views.push(state_view);
     }
     Ok(state_views)
@@ -218,10 +224,9 @@ pub async fn has_at_least_mine_presignatures<'a>(
     // Requires at least 2 owned triples per presignature.
     has_at_least_mine_triples(ctx, 2 * expected_count).await?;
 
-    // retries every 5 seconds, up to 2 * expected_count times
     let strategy = ConstantBuilder::default()
         .with_delay(Duration::from_secs(5))
-        .with_max_times(2 * expected_count);
+        .with_max_times(4 * expected_count);
 
     let mut state_views = Vec::new();
     for id in 0..ctx.nodes.len() {
