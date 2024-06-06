@@ -30,8 +30,8 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
             assert!(ctx.remove_participant(None).await.is_ok());
             // make sure signing works after reshare
             let new_state = wait_for::running_mpc(&ctx, None).await?;
-            wait_for::has_at_least_triples(&ctx, 2).await?;
-            wait_for::has_at_least_presignatures(&ctx, 2).await?;
+            wait_for::has_at_least_mine_triples(&ctx, 2).await?;
+            wait_for::has_at_least_mine_presignatures(&ctx, 2).await?;
             actions::single_signature_production(&ctx, &new_state).await
         })
     })
@@ -58,8 +58,8 @@ async fn test_signature_basic() -> anyhow::Result<()> {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
             assert_eq!(state_0.participants.len(), 3);
-            wait_for::has_at_least_triples(&ctx, 2).await?;
-            wait_for::has_at_least_presignatures(&ctx, 2).await?;
+            wait_for::has_at_least_mine_triples(&ctx, 2).await?;
+            wait_for::has_at_least_mine_presignatures(&ctx, 2).await?;
             actions::single_signature_rogue_responder(&ctx, &state_0).await
         })
     })
@@ -140,8 +140,8 @@ async fn test_signature_large_stockpile() -> anyhow::Result<()> {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
             assert_eq!(state_0.participants.len(), NODES);
-            wait_for::has_at_least_triples(&ctx, triple_cfg.min_triples).await?;
-            wait_for::has_at_least_presignatures(&ctx, SIGNATURE_AMOUNT).await?;
+            wait_for::has_at_least_mine_triples(&ctx, triple_cfg.min_triples).await?;
+            wait_for::has_at_least_mine_presignatures(&ctx, SIGNATURE_AMOUNT).await?;
 
             for _ in 0..SIGNATURE_AMOUNT {
                 actions::single_signature_production(&ctx, &state_0).await?;
@@ -158,8 +158,8 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
             assert_eq!(state_0.participants.len(), 3);
-            wait_for::has_at_least_triples(&ctx, 6).await?;
-            wait_for::has_at_least_presignatures(&ctx, 3).await?;
+            wait_for::has_at_least_mine_triples(&ctx, 6).await?;
+            wait_for::has_at_least_mine_presignatures(&ctx, 3).await?;
 
             for _ in 0..3 {
                 let mpc_pk: k256::AffinePoint = state_0.public_key.clone().into_affine_point();

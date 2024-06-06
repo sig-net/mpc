@@ -1,7 +1,10 @@
+use std::time::Duration;
+
 use crate::actions;
 use crate::MultichainTestContext;
 
 use anyhow::Context;
+use backon::ConstantBuilder;
 use backon::ExponentialBuilder;
 use backon::Retryable;
 use cait_sith::FullSignature;
@@ -80,10 +83,16 @@ pub async fn has_at_least_triples<'a>(
         }
     };
 
+    // retries every 5 seconds, up to 10 times the amount of expected min triples, where we expect one network
+    // wide triple taking roughly 10-20 seconds. So roughly `5secs * 4 * total_network_triples`.
+    let strategy = ConstantBuilder::default()
+        .with_delay(Duration::from_secs(5))
+        .with_max_times(4 * expected_triple_count);
+
     let mut state_views = Vec::new();
     for id in 0..ctx.nodes.len() {
         let state_view = is_enough_triples(id)
-            .retry(&ExponentialBuilder::default().with_max_times(6))
+            .retry(&strategy)
             .await
             .with_context(|| format!("mpc node '{id}' failed to generate '{expected_triple_count}' triples before deadline"))?;
         state_views.push(state_view);
@@ -117,10 +126,16 @@ pub async fn has_at_least_mine_triples<'a>(
         }
     };
 
+    // retries every 5 seconds, up to 10 times the amount of expected min triples, where we expect one owned
+    // triple takes roughly 30-50 seconds. So roughly `5secs * 10 * min_triples``.
+    let strategy = ConstantBuilder::default()
+        .with_delay(Duration::from_secs(5))
+        .with_max_times(10 * expected_mine_triple_count);
+
     let mut state_views = Vec::new();
     for id in 0..ctx.nodes.len() {
         let state_view = is_enough_mine_triples(id)
-            .retry(&ExponentialBuilder::default().with_max_times(15))
+            .retry(&strategy)
             .await
             .with_context(|| format!("mpc node '{id}' failed to generate '{expected_mine_triple_count}' triples before deadline"))?;
         state_views.push(state_view);
