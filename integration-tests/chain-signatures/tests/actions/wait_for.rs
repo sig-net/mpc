@@ -59,7 +59,7 @@ pub async fn running_mpc<'a>(
 
 pub async fn has_at_least_triples<'a>(
     ctx: &MultichainTestContext<'a>,
-    expected_triple_count: usize,
+    expected_count: usize,
 ) -> anyhow::Result<Vec<StateView>> {
     let is_enough_triples = |id| {
         move || async move {
@@ -73,7 +73,7 @@ pub async fn has_at_least_triples<'a>(
 
             match state_view {
                 StateView::Running { triple_count, .. }
-                    if triple_count >= expected_triple_count =>
+                    if triple_count >= expected_count =>
                 {
                     Ok(state_view)
                 }
@@ -87,14 +87,14 @@ pub async fn has_at_least_triples<'a>(
     // wide triple taking roughly 10-20 seconds. So roughly `5secs * 4 * total_network_triples`.
     let strategy = ConstantBuilder::default()
         .with_delay(Duration::from_secs(5))
-        .with_max_times(4 * expected_triple_count);
+        .with_max_times(4 * expected_count);
 
     let mut state_views = Vec::new();
     for id in 0..ctx.nodes.len() {
         let state_view = is_enough_triples(id)
             .retry(&strategy)
             .await
-            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_triple_count}' triples before deadline"))?;
+            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_count}' triples before deadline"))?;
         state_views.push(state_view);
     }
     Ok(state_views)
@@ -102,7 +102,7 @@ pub async fn has_at_least_triples<'a>(
 
 pub async fn has_at_least_mine_triples<'a>(
     ctx: &MultichainTestContext<'a>,
-    expected_mine_triple_count: usize,
+    expected_count: usize,
 ) -> anyhow::Result<Vec<StateView>> {
     let is_enough_mine_triples = |id| {
         move || async move {
@@ -117,7 +117,7 @@ pub async fn has_at_least_mine_triples<'a>(
             match state_view {
                 StateView::Running {
                     triple_mine_count, ..
-                } if triple_mine_count >= expected_mine_triple_count => Ok(state_view),
+                } if triple_mine_count >= expected_count => Ok(state_view),
                 StateView::Running { .. } => {
                     anyhow::bail!("node does not have enough mine triples yet")
                 }
@@ -130,14 +130,14 @@ pub async fn has_at_least_mine_triples<'a>(
     // triple takes roughly 30-50 seconds. So roughly `5secs * 10 * min_triples``.
     let strategy = ConstantBuilder::default()
         .with_delay(Duration::from_secs(5))
-        .with_max_times(10 * expected_mine_triple_count);
+        .with_max_times(10 * expected_count);
 
     let mut state_views = Vec::new();
     for id in 0..ctx.nodes.len() {
         let state_view = is_enough_mine_triples(id)
             .retry(&strategy)
             .await
-            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_mine_triple_count}' triples before deadline"))?;
+            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_count}' triples before deadline"))?;
         state_views.push(state_view);
     }
     Ok(state_views)
@@ -145,7 +145,7 @@ pub async fn has_at_least_mine_triples<'a>(
 
 pub async fn has_at_least_presignatures<'a>(
     ctx: &MultichainTestContext<'a>,
-    expected_presignature_count: usize,
+    expected_count: usize,
 ) -> anyhow::Result<Vec<StateView>> {
     let is_enough_presignatures = |id| {
         move || async move {
@@ -160,7 +160,7 @@ pub async fn has_at_least_presignatures<'a>(
             match state_view {
                 StateView::Running {
                     presignature_count, ..
-                } if presignature_count >= expected_presignature_count => Ok(state_view),
+                } if presignature_count >= expected_count => Ok(state_view),
                 StateView::Running { .. } => {
                     anyhow::bail!("node does not have enough presignatures yet")
                 }
@@ -169,12 +169,20 @@ pub async fn has_at_least_presignatures<'a>(
         }
     };
 
+    // Should have 4x the amount of triples in the system before we can expect presignatures.
+    has_at_least_triples(ctx, 4 * expected_count).await?;
+
+    // retries every 5 seconds, up to expected_count times
+    let strategy = ConstantBuilder::default()
+        .with_delay(Duration::from_secs(5))
+        .with_max_times(expected_count);
+
     let mut state_views = Vec::new();
     for id in 0..ctx.nodes.len() {
         let state_view = is_enough_presignatures(id)
-            .retry(&ExponentialBuilder::default().with_max_times(6))
+            .retry(&strategy)
             .await
-            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_presignature_count}' presignatures before deadline"))?;
+            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_count}' presignatures before deadline"))?;
         state_views.push(state_view);
     }
     Ok(state_views)
@@ -182,7 +190,7 @@ pub async fn has_at_least_presignatures<'a>(
 
 pub async fn has_at_least_mine_presignatures<'a>(
     ctx: &MultichainTestContext<'a>,
-    expected_mine_presignature_count: usize,
+    expected_count: usize,
 ) -> anyhow::Result<Vec<StateView>> {
     let is_enough_mine_presignatures = |id| {
         move || async move {
@@ -198,7 +206,7 @@ pub async fn has_at_least_mine_presignatures<'a>(
                 StateView::Running {
                     presignature_mine_count,
                     ..
-                } if presignature_mine_count >= expected_mine_presignature_count => Ok(state_view),
+                } if presignature_mine_count >= expected_count => Ok(state_view),
                 StateView::Running { .. } => {
                     anyhow::bail!("node does not have enough mine presignatures yet")
                 }
@@ -207,12 +215,20 @@ pub async fn has_at_least_mine_presignatures<'a>(
         }
     };
 
+    // Requires at least 2 owned triples per presignature.
+    has_at_least_mine_triples(ctx, 2 * expected_count).await?;
+
+    // retries every 5 seconds, up to 2 * expected_count times
+    let strategy = ConstantBuilder::default()
+        .with_delay(Duration::from_secs(5))
+        .with_max_times(2 * expected_count);
+
     let mut state_views = Vec::new();
     for id in 0..ctx.nodes.len() {
         let state_view = is_enough_mine_presignatures(id)
-            .retry(&ExponentialBuilder::default().with_max_times(6))
+            .retry(&strategy)
             .await
-            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_mine_presignature_count}' presignatures before deadline"))?;
+            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_count}' presignatures before deadline"))?;
         state_views.push(state_view);
     }
     Ok(state_views)
