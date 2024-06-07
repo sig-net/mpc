@@ -248,7 +248,17 @@ impl MessageHandler for RunningState {
             });
 
         for (id, queue) in queue.triple_bins.entry(self.epoch).or_default() {
-            if let Some(protocol) = triple_manager.get_or_generate(*id, participants)? {
+            let protocol = match triple_manager.get_or_generate(*id, participants) {
+                Ok(protocol) => protocol,
+                Err(err) => {
+                    // ignore the message since the generation had bad parameters. Also have the other node who
+                    // initiated the protocol resend the message or have it timeout on their side.
+                    tracing::warn!(?err, "unable to initialize incoming triple protocol");
+                    continue;
+                }
+            };
+
+            if let Some(protocol) = protocol {
                 while let Some(message) = queue.pop_front() {
                     protocol.message(message.from, message.data);
                 }
@@ -281,7 +291,7 @@ impl MessageHandler for RunningState {
                 {
                     Ok(protocol) => protocol.message(message.from, message.data),
                     Err(presignature::GenerationError::AlreadyGenerated) => {
-                        tracing::info!(id, "presignature already generated, nothing left to do")
+                        tracing::debug!(id, "presignature already generated, nothing left to do")
                     }
                     Err(presignature::GenerationError::TripleIsGenerating(_)) => {
                         // Store the message until triple gets generated
@@ -292,7 +302,14 @@ impl MessageHandler for RunningState {
                         leftover_messages.push(message)
                     }
                     Err(presignature::GenerationError::CaitSithInitializationError(error)) => {
-                        return Err(error.into())
+                        // ignore the message since the generation had bad parameters. Also have the other node who
+                        // initiated the protocol resend the message or have it timeout on their side.
+                        tracing::warn!(
+                            presignature_id = id,
+                            ?error,
+                            "unable to initialize incoming presignature protocol"
+                        );
+                        continue;
                     }
                     Err(presignature::GenerationError::DatastoreStorageError(_)) => {
                         // Store the message until we are ready to process it
@@ -320,10 +337,6 @@ impl MessageHandler for RunningState {
                 ) {
                     continue;
                 }
-                tracing::info!(
-                    presignature_id = message.presignature_id,
-                    "new signature message"
-                );
 
                 // TODO: make consistent with presignature manager AlreadyGenerated.
                 if signature_manager.has_completed(&message.presignature_id) {

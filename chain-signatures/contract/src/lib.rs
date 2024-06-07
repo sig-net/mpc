@@ -9,7 +9,8 @@ use near_sdk::collections::LookupMap;
 use near_sdk::serde::{Deserialize, Serialize};
 
 use near_sdk::{
-    env, log, near_bindgen, AccountId, BorshStorageKey, Gas, Promise, PromiseOrValue, PublicKey,
+    env, log, near_bindgen, AccountId, BorshStorageKey, Gas, NearToken, Promise, PromiseOrValue,
+    PublicKey,
 };
 
 use primitives::{
@@ -145,6 +146,10 @@ impl MpcContract {
 impl VersionedMpcContract {
     #[allow(unused_variables)]
     /// `key_version` must be less than or equal to the value at `latest_key_version`
+    /// To avoid overloading the network with too many requests,
+    /// we ask for a small deposit for each signature request.
+    /// The fee changes based on how busy the network is.
+    #[payable]
     pub fn sign(&mut self, request: SignRequest) -> Promise {
         let SignRequest {
             payload,
@@ -157,6 +162,15 @@ impl VersionedMpcContract {
             "This version of the signer contract doesn't support versions greater than {}",
             latest_key_version,
         );
+        // Check deposit
+        let deposit = env::attached_deposit();
+        let required_deposit = self.signature_deposit();
+        if deposit.as_yoctonear() < required_deposit {
+            env::panic_str(&format!(
+                "Attached deposit is {}, required deposit is {}",
+                deposit, required_deposit
+            ));
+        }
         // Make sure sign call will not run out of gas doing recursive calls because the payload will never be removed
         assert!(
             env::prepaid_gas() >= GAS_FOR_SIGN_CALL,
@@ -641,9 +655,17 @@ impl VersionedMpcContract {
         }
     }
 
-    // fn public_key(&self) -> String {
-    //     match self {
-    //         Self::V0(mpc_contract) => mpc_contract
-    //     }
-    // }
+    fn signature_deposit(&self) -> u128 {
+        const CHEAP_REQUESTS: u32 = 3;
+        let pending_requests = match self {
+            Self::V0(mpc_contract) => mpc_contract.request_counter,
+        };
+        match pending_requests {
+            0..=CHEAP_REQUESTS => 1,
+            _ => {
+                (pending_requests - CHEAP_REQUESTS) as u128
+                    * NearToken::from_millinear(50).as_yoctonear()
+            }
+        }
+    }
 }

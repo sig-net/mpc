@@ -69,7 +69,7 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
             }))
             .unwrap(),
             gas: 300_000_000_000_000,
-            deposit: 0,
+            deposit: 1,
         })],
     };
 

@@ -364,8 +364,10 @@ impl CryptographicProtocol for RunningState {
         crate::metrics::MESSAGE_QUEUE_SIZE
             .with_label_values(&[my_account_id.as_str()])
             .set(messages.len() as i64);
-        triple_manager.stockpile(active)?;
-        for (p, msg) in triple_manager.poke().await? {
+        if let Err(err) = triple_manager.stockpile(active) {
+            tracing::warn!(?err, "running: failed to stockpile triples");
+        }
+        for (p, msg) in triple_manager.poke().await {
             let info = self.fetch_participant(&p)?;
             messages.push(info.clone(), MpcMessage::Triple(msg));
         }
@@ -384,16 +386,19 @@ impl CryptographicProtocol for RunningState {
             .set(triple_manager.ongoing.len() as i64);
 
         let mut presignature_manager = self.presignature_manager.write().await;
-        presignature_manager
+        if let Err(err) = presignature_manager
             .stockpile(
                 active,
                 &self.public_key,
                 &self.private_share,
                 &mut triple_manager,
             )
-            .await?;
+            .await
+        {
+            tracing::warn!(?err, "running: failed to stockpile presignatures");
+        }
         drop(triple_manager);
-        for (p, msg) in presignature_manager.poke()? {
+        for (p, msg) in presignature_manager.poke() {
             let info = self.fetch_participant(&p)?;
             messages.push(info.clone(), MpcMessage::Presignature(msg));
         }
@@ -424,7 +429,7 @@ impl CryptographicProtocol for RunningState {
             active,
             my_requests,
             &mut presignature_manager,
-        )?;
+        );
         drop(sign_queue);
         drop(presignature_manager);
 
@@ -432,14 +437,17 @@ impl CryptographicProtocol for RunningState {
             let info = self.fetch_participant(&p)?;
             messages.push(info.clone(), MpcMessage::Signature(msg));
         }
-        signature_manager
+        if let Err(err) = signature_manager
             .publish(
                 ctx.rpc_client(),
                 ctx.signer(),
                 ctx.mpc_contract_id(),
                 &my_account_id,
             )
-            .await?;
+            .await
+        {
+            tracing::warn!(?err, "running: failed to publish signatures");
+        }
         drop(signature_manager);
         let failures = messages
             .send_encrypted(

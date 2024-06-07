@@ -72,7 +72,7 @@ pub async fn request_sign(
                         "request": request,
                     }))?,
                     gas: 300_000_000_000_000,
-                    deposit: 0,
+                    deposit: 1,
                 }))],
             }
             .sign(&signer),
@@ -242,7 +242,7 @@ pub async fn request_sign_non_random(
                         "request": request,
                     }))?,
                     gas: 300_000_000_000_000,
-                    deposit: 0,
+                    deposit: 1,
                 }))],
             }
             .sign(&signer),
