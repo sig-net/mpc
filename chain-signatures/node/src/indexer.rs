@@ -87,10 +87,22 @@ struct Context {
     latest_block_height: Arc<RwLock<LatestBlockHeight>>,
 }
 
+// TODO:
+// 1. Spin LC docker image in tests, propagate IP address
+// 2. Get a result from it in code
+// 3. Make sure the flow is valid and actually making sure data is fine
+// 4. Add Terraform config and other staff to run it in VMs
+
 async fn handle_block(
     mut block: near_lake_primitives::block::Block,
     ctx: &Context,
 ) -> anyhow::Result<()> {
+    // Check block integrity/hash
+    // TODO
+    // Get proof using light client (internally - RPC): /proof TransactionOrReceiptId -> head_block_root: CryptoHash, proof: Box<BasicProof>, (proof is RpcLightClientExecutionProofResponse)
+    // TODO
+    // Verify proof: /proof/verify head_block_root: CryptoHash, proof: Box<BasicProof> -> bool
+    // TODO
     for action in block.actions().cloned().collect::<Vec<_>>() {
         if action.receiver_id() == ctx.mpc_contract_id {
             let receipt =
