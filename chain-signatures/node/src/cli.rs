@@ -26,6 +26,13 @@ pub enum Cli {
             default_value("https://rpc.testnet.near.org")
         )]
         near_rpc: String,
+        /// Light client address
+        #[arg(
+            long,
+            env("MPC_RECOVERY_LIGHT_CLIENT_ADDR"),
+            default_value("http://localhost:3030")
+        )]
+        light_client_addr: String,
         /// MPC contract id
         #[arg(
             long,
@@ -101,6 +108,7 @@ impl Cli {
         match self {
             Cli::Start {
                 near_rpc,
+                light_client_addr,
                 account_id,
                 mpc_contract_id,
                 account_sk,
@@ -122,6 +130,8 @@ impl Cli {
                     "start".to_string(),
                     "--near-rpc".to_string(),
                     near_rpc,
+                    "--light-client-addr".to_string(),
+                    light_client_addr,
                     "--mpc-contract-id".to_string(),
                     mpc_contract_id.to_string(),
                     "--account-id".to_string(),
@@ -178,6 +188,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
         Cli::Start {
             near_rpc,
             web_port,
+            light_client_addr,
             mpc_contract_id,
             account_id,
             account_sk,
@@ -208,7 +219,17 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                         let account_id = account_id.clone();
                         let sign_queue = sign_queue.clone();
                         let gcp = gcp_service.clone();
-                        move || indexer::run(options, mpc_id, account_id, sign_queue, gcp).unwrap()
+                        move || {
+                            indexer::run(
+                                options,
+                                mpc_id,
+                                account_id,
+                                Url::parse(&light_client_addr).unwrap(),
+                                sign_queue,
+                                gcp,
+                            )
+                            .unwrap()
+                        }
                     });
 
                     let key_storage = storage::secret_storage::init(

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
+use url::Url;
 
 /// Configures indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -82,6 +83,7 @@ pub struct ContractSignRequest {
 struct Context {
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
+    light_client_addr: Url,
     gcp_service: GcpService,
     queue: Arc<RwLock<SignQueue>>,
     latest_block_height: Arc<RwLock<LatestBlockHeight>>,
@@ -97,6 +99,8 @@ async fn handle_block(
     mut block: near_lake_primitives::block::Block,
     ctx: &Context,
 ) -> anyhow::Result<()> {
+    // log light client address
+    tracing::info!(light_client_addr = ctx.light_client_addr.as_str(), "lignt client address");
     // Check block integrity/hash
     // TODO
     // Get proof using light client (internally - RPC): /proof TransactionOrReceiptId -> head_block_root: CryptoHash, proof: Box<BasicProof>, (proof is RpcLightClientExecutionProofResponse)
@@ -184,6 +188,7 @@ pub fn run(
     options: Options,
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
+    light_client_addr: Url,
     queue: Arc<RwLock<SignQueue>>,
     gcp_service: crate::gcp::GcpService,
 ) -> anyhow::Result<()> {
@@ -230,6 +235,7 @@ pub fn run(
     let context = Context {
         mpc_contract_id,
         node_account_id,
+        light_client_addr,
         gcp_service,
         queue,
         latest_block_height: Arc::new(RwLock::new(latest_block_height)),
