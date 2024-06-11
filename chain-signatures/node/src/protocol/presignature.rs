@@ -1,6 +1,5 @@
 use super::message::PresignatureMessage;
 use super::triple::{Triple, TripleConfig, TripleId, TripleManager};
-use crate::gcp::error::DatastoreStorageError;
 use crate::protocol::contract::primitives::Participants;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
@@ -87,8 +86,6 @@ pub enum GenerationError {
     TripleIsMissing(TripleId),
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
-    #[error("datastore storage error: {0}")]
-    DatastoreStorageError(#[from] DatastoreStorageError),
     #[error("triple {0} is generating")]
     TripleIsGenerating(TripleId),
 }
