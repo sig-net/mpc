@@ -11,6 +11,7 @@ use crate::containers::LocalStack;
 
 use anyhow::Context as _;
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use containers::LightClient;
 use futures::StreamExt;
 use mpc_contract::primitives::CandidateInfo;
 use mpc_recovery_node::gcp::GcpService;
@@ -227,6 +228,7 @@ pub struct Context<'a> {
     pub mpc_contract: Contract,
     pub datastore: crate::containers::Datastore<'a>,
     pub storage_options: storage::Options,
+    pub light_client: LightClient<'a>,
 }
 
 pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> {
@@ -239,6 +241,14 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         lake_indexer,
         worker,
     } = initialize_lake_indexer(docker_client, docker_network).await?;
+
+    // TODO: should it be moved to LakeIndexerCtx?
+    let light_client = LightClient::run(
+        docker_client,
+        docker_network,
+        "bucket name".to_owned(),
+        "region".to_owned()
+    ).await?;
 
     let mpc_contract = worker
         .dev_deploy(&std::fs::read(
@@ -271,6 +281,7 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         mpc_contract,
         datastore,
         storage_options,
+        light_client,
     })
 }
 
