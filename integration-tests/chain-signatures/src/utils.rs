@@ -1,6 +1,5 @@
 use anyhow::Context;
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
-use near_lake_primitives::CryptoHash;
 use near_primitives::types::TransactionOrReceiptId;
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::{Account, AccountId};
@@ -102,11 +101,12 @@ pub async fn ping_until_ok(addr: &str, timeout: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-// TODO: Declare simlified types or import them from protocol trait
-// pub async fn get_proof(addr: &str, id: TransactionOrReceiptId) -> anyhow::Result<Proof> {
-//     todo!()
-// }
+pub struct Proof {}
 
-// pub async fn verify_proof(addr: &str, proof: Proof) -> anyhow::Result<bool> {
-//     todo!()
-// }
+pub async fn get_proof(_addr: &str, _id: TransactionOrReceiptId) -> anyhow::Result<Proof> {
+    todo!()
+}
+
+pub async fn verify_proof(_addr: &str, _proof: Proof) -> anyhow::Result<bool> {
+    todo!()
+}

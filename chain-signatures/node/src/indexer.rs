@@ -100,7 +100,10 @@ async fn handle_block(
     ctx: &Context,
 ) -> anyhow::Result<()> {
     // log light client address
-    tracing::info!(light_client_addr = ctx.light_client_addr.as_str(), "lignt client address");
+    tracing::info!(
+        light_client_addr = ctx.light_client_addr.as_str(),
+        "lignt client address"
+    );
     // Check block integrity/hash
     // TODO
     // Get proof using light client (internally - RPC): /proof TransactionOrReceiptId -> head_block_root: CryptoHash, proof: Box<BasicProof>, (proof is RpcLightClientExecutionProofResponse)

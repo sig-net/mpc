@@ -55,6 +55,7 @@ impl<'a> Node<'a> {
         };
         let args = mpc_recovery_node::cli::Cli::Start {
             near_rpc: near_rpc.clone(),
+            light_client_addr: ctx.light_client.address.clone(),
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
             account_sk: account_sk.to_string().parse()?,
@@ -142,6 +143,7 @@ impl<'a> Node<'a> {
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
         let args = mpc_recovery_node::cli::Cli::Start {
             near_rpc: near_rpc.clone(),
+            light_client_addr: ctx.light_client.address.clone(),
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
             account_sk: account_sk.to_string().parse()?,
@@ -355,7 +357,7 @@ impl<'a> LakeIndexer<'a> {
 pub struct LightClient<'a> {
     pub container: Container<'a, GenericImage>,
     pub bucket_name: String, // TODO: Do we need this?
-    pub region: String, // TODO: Do we need this?
+    pub region: String,      // TODO: Do we need this?
     pub address: String,
     pub host_address: String,
     // TODO: any additional fields?
@@ -377,11 +379,14 @@ impl<'a> LightClient<'a> {
             "running LightClient container..."
         );
 
-        let image = GenericImage::new("ghcr.io/near/near-light-client/light-client", "f4ce326d9c2a6728e8bc39b4d8720f81be87dc43") // TODO: deploy and update docker image version
-            // .with_env_var("AWS_ACCESS_KEY_ID", "FAKE_LOCALSTACK_KEY_ID") // Replace with LightCLient specific env vars if any
-            // .with_env_var("AWS_SECRET_ACCESS_KEY", "FAKE_LOCALSTACK_ACCESS_KEY")
-            .with_wait_for(WaitFor::message_on_stderr("Starting Streamer")) // TODO: replace with message from LightClient
-            .with_exposed_port(Self::CONTAINER_RPC_PORT);
+        let image = GenericImage::new(
+            "ghcr.io/near/near-light-client/light-client",
+            "f4ce326d9c2a6728e8bc39b4d8720f81be87dc43",
+        ) // TODO: deploy and update docker image version
+        // .with_env_var("AWS_ACCESS_KEY_ID", "FAKE_LOCALSTACK_KEY_ID") // Replace with LightCLient specific env vars if any
+        // .with_env_var("AWS_SECRET_ACCESS_KEY", "FAKE_LOCALSTACK_ACCESS_KEY")
+        .with_wait_for(WaitFor::message_on_stderr("Starting Streamer")) // TODO: replace with message from LightClient
+        .with_exposed_port(Self::CONTAINER_RPC_PORT);
         let image: RunnableImage<GenericImage> = (
             image,
             vec![

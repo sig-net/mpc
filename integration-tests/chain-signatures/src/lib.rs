@@ -247,8 +247,9 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         docker_client,
         docker_network,
         "bucket name".to_owned(),
-        "region".to_owned()
-    ).await?;
+        "region".to_owned(),
+    )
+    .await?;
 
     let mpc_contract = worker
         .dev_deploy(&std::fs::read(
