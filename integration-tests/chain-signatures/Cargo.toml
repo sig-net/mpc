@@ -20,6 +20,7 @@ serde = "1"
 serde_json = "1"
 testcontainers = { version = "0.15", features = ["experimental"] }
 tokio = { version = "1.28", features = ["full"] }
+toxiproxy_rust = "0.1.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

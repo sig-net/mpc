@@ -1,5 +1,5 @@
-use super::{local::NodeConfig, MultichainConfig};
-use anyhow::anyhow;
+use super::{local::NodeConfig, MultichainConfig, utils};
+use anyhow::{anyhow, Error};
 use bollard::exec::CreateExecOptions;
 use bollard::{container::LogsOptions, network::CreateNetworkOptions, service::Ipam, Docker};
 use futures::{lock::Mutex, StreamExt};
@@ -13,6 +13,9 @@ use testcontainers::{
     Container, GenericImage, RunnableImage,
 };
 use tokio::io::AsyncWriteExt;
+use toxiproxy_rust::client::Client;
+use toxiproxy_rust::proxy::ProxyPack;
+use toxiproxy_rust::TOXIPROXY;
 use tracing;
 
 static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
@@ -45,7 +48,8 @@ impl<'a> Node<'a> {
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
         let sign_pk = sign_sk.public_key();
         let storage_options = ctx.storage_options.clone();
-        let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
+        // Use proxied address to mock slow, congested or unstable rpc connection
+        let near_rpc = ctx.lake_indexer.rpc_host_address_proxied.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let indexer_options = mpc_recovery_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
@@ -130,7 +134,7 @@ impl<'a> Node<'a> {
         let account_id = config.account_id;
         let account_sk = config.account_sk;
         let storage_options = ctx.storage_options.clone();
-        let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
+        let near_rpc = ctx.lake_indexer.rpc_host_address_proxied.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let indexer_options = mpc_recovery_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
@@ -287,6 +291,7 @@ pub struct LakeIndexer<'a> {
     pub region: String,
     pub rpc_address: String,
     pub rpc_host_address: String,
+    pub rpc_host_address_proxied: String,
 }
 
 impl<'a> LakeIndexer<'a> {
@@ -334,12 +339,24 @@ impl<'a> LakeIndexer<'a> {
         let rpc_address = format!("http://{}:{}", address, Self::CONTAINER_RPC_PORT);
         let rpc_host_port = container.get_host_port_ipv4(Self::CONTAINER_RPC_PORT);
         let rpc_host_address = format!("http://127.0.0.1:{rpc_host_port}");
+        let proxied_port = utils::pick_unused_port().await?;
+        let rpc_host_address_proxied = format!("http://127.0.0.1:{proxied_port}");
+        tracing::info!("initializing toxi proxy");
+        // doesn't work yet, toxi_proxy uses blocking http client, not allowed by tokio, need to be replaced by all async
+        TOXIPROXY.populate(vec![
+            ProxyPack::new(
+                "lake-rpc".into(),
+                rpc_host_address_proxied.clone(),
+                rpc_host_address.clone(),
+            )
+        ]).map_err(|e| Error::msg(e))?;
 
         tracing::info!(
             bucket_name,
             region,
             rpc_address,
             rpc_host_address,
+            rpc_host_address_proxied,
             "NEAR Lake Indexer container is running"
         );
         Ok(LakeIndexer {
@@ -348,6 +365,7 @@ impl<'a> LakeIndexer<'a> {
             region,
             rpc_address,
             rpc_host_address,
+            rpc_host_address_proxied
         })
     }
 }

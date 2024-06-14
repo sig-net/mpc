@@ -315,3 +315,17 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
     })
     .await
 }
+
+#[test(tokio::test)]
+async fn test_rpc_congestion() -> anyhow::Result<()> {
+    with_multichain_nodes(MultichainConfig::default(), |mut ctx| {
+        Box::pin(async move {
+            let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
+            assert_eq!(state_0.participants.len(), 3);
+
+            // TODO add some toxi to toxi_proxy and test signature request etc.
+
+            Ok(())
+        })
+    }).await
+}
