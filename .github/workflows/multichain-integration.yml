@@ -68,11 +68,10 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install and start toxiproxy-server
+      - name: Install toxiproxy-server
         run: |
-          wget -O toxiproxy-2.1.4.deb https://github.com/Shopify/toxiproxy/releases/download/v2.1.4/toxiproxy_2.1.4_amd64.deb
-          sudo dpkg -i toxiproxy-2.1.4.deb
-          sudo service toxiproxy start
+          wget -O toxiproxy-2.9.0_linux_amd64.deb https://github.com/Shopify/toxiproxy/releases/download/v2.9.0/toxiproxy_2.9.0_linux_amd64.deb
+          sudo dpkg -i toxiproxy-2.9.0_linux_amd64.deb
 
       - name: Configure AWS
         run: |

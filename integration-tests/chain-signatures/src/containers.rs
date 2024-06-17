@@ -343,7 +343,7 @@ impl<'a> LakeIndexer<'a> {
         let rpc_host_port = container.get_host_port_ipv4(Self::CONTAINER_RPC_PORT);
         let rpc_host_address = format!("http://127.0.0.1:{rpc_host_port}");
 
-        let toxi_server = async_process::Command::new("/opt/homebrew/opt/toxiproxy/bin/toxiproxy-server")
+        let toxi_server = async_process::Command::new("toxiproxy-server")
             .kill_on_drop(true)
             .spawn()
             .with_context(|| "failed to run toxiproxy-server")?;
