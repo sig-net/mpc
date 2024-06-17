@@ -342,14 +342,16 @@ impl<'a> LakeIndexer<'a> {
         let proxied_port = utils::pick_unused_port().await?;
         let rpc_host_address_proxied = format!("http://127.0.0.1:{proxied_port}");
         tracing::info!("initializing toxi proxy");
-        // doesn't work yet, toxi_proxy uses blocking http client, not allowed by tokio, need to be replaced by all async
-        TOXIPROXY.populate(vec![
-            ProxyPack::new(
-                "lake-rpc".into(),
-                rpc_host_address_proxied.clone(),
-                rpc_host_address.clone(),
-            )
-        ]).map_err(|e| Error::msg(e))?;
+        let proxies =  vec![ProxyPack::new(
+            "lake-rpc".into(),
+            format!("127.0.0.1:{}", proxied_port), // must without http://
+            format!("127.0.0.1:{}", rpc_host_port),
+        )];
+        let proxies_json = serde_json::to_string(&proxies).unwrap();
+        let toxiproxy_client = reqwest::Client::default();
+        toxiproxy_client.post("http://localhost:8474/populate")
+            .header("Content-Type", "application/json")
+            .body(proxies_json).send().await?;
 
         tracing::info!(
             bucket_name,
