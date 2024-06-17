@@ -1,5 +1,6 @@
 use super::{local::NodeConfig, MultichainConfig, utils};
-use anyhow::{anyhow, Error};
+use anyhow::{anyhow, Context, Error};
+use async_process::Child;
 use bollard::exec::CreateExecOptions;
 use bollard::{container::LogsOptions, network::CreateNetworkOptions, service::Ipam, Docker};
 use futures::{lock::Mutex, StreamExt};
@@ -17,6 +18,7 @@ use toxiproxy_rust::client::Client;
 use toxiproxy_rust::proxy::ProxyPack;
 use toxiproxy_rust::TOXIPROXY;
 use tracing;
+use crate::execute::executable;
 
 static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 
@@ -292,6 +294,7 @@ pub struct LakeIndexer<'a> {
     pub rpc_address: String,
     pub rpc_host_address: String,
     pub rpc_host_address_proxied: String,
+    pub toxi_server: Child,
 }
 
 impl<'a> LakeIndexer<'a> {
@@ -339,6 +342,13 @@ impl<'a> LakeIndexer<'a> {
         let rpc_address = format!("http://{}:{}", address, Self::CONTAINER_RPC_PORT);
         let rpc_host_port = container.get_host_port_ipv4(Self::CONTAINER_RPC_PORT);
         let rpc_host_address = format!("http://127.0.0.1:{rpc_host_port}");
+
+        let toxi_server = async_process::Command::new("/opt/homebrew/opt/toxiproxy/bin/toxiproxy-server")
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| "failed to run toxiproxy-server")?;
+        let toxi_server_address = "http://localhost:8474";
+        utils::ping_until_ok(&format!("{}/version", toxi_server_address), 10).await?;
         let proxied_port = utils::pick_unused_port().await?;
         let rpc_host_address_proxied = format!("http://127.0.0.1:{proxied_port}");
         tracing::info!("initializing toxi proxy");
@@ -349,7 +359,7 @@ impl<'a> LakeIndexer<'a> {
         )];
         let proxies_json = serde_json::to_string(&proxies).unwrap();
         let toxiproxy_client = reqwest::Client::default();
-        toxiproxy_client.post("http://localhost:8474/populate")
+        toxiproxy_client.post(format!("{}/populate", toxi_server_address))
             .header("Content-Type", "application/json")
             .body(proxies_json).send().await?;
 
@@ -367,7 +377,8 @@ impl<'a> LakeIndexer<'a> {
             region,
             rpc_address,
             rpc_host_address,
-            rpc_host_address_proxied
+            rpc_host_address_proxied,
+            toxi_server
         })
     }
 }
