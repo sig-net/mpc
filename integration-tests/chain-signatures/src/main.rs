@@ -1,4 +1,3 @@
-use tokio::io::{stdin, AsyncReadExt};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug)]
@@ -12,7 +11,6 @@ async fn main() -> anyhow::Result<()> {
         .with_thread_ids(true)
         .with_env_filter(EnvFilter::from_default_env());
     subscriber.init();
-
 
     Ok(())
 }

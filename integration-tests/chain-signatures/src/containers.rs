@@ -1,5 +1,5 @@
-use super::{local::NodeConfig, MultichainConfig, utils};
-use anyhow::{anyhow, Context, Error};
+use super::{local::NodeConfig, utils, MultichainConfig};
+use anyhow::{anyhow, Context};
 use async_process::Child;
 use bollard::exec::CreateExecOptions;
 use bollard::{container::LogsOptions, network::CreateNetworkOptions, service::Ipam, Docker};
@@ -7,6 +7,7 @@ use futures::{lock::Mutex, StreamExt};
 use mpc_keys::hpke;
 use near_workspaces::AccountId;
 use once_cell::sync::Lazy;
+use serde_json::json;
 use testcontainers::clients::Cli;
 use testcontainers::Image;
 use testcontainers::{
@@ -14,11 +15,7 @@ use testcontainers::{
     Container, GenericImage, RunnableImage,
 };
 use tokio::io::AsyncWriteExt;
-use toxiproxy_rust::client::Client;
-use toxiproxy_rust::proxy::ProxyPack;
-use toxiproxy_rust::TOXIPROXY;
 use tracing;
-use crate::execute::executable;
 
 static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 
@@ -347,21 +344,24 @@ impl<'a> LakeIndexer<'a> {
             .kill_on_drop(true)
             .spawn()
             .with_context(|| "failed to run toxiproxy-server")?;
-        let toxi_server_address = "http://localhost:8474";
+        let toxi_server_address = "http://127.0.0.1:8474";
         utils::ping_until_ok(&format!("{}/version", toxi_server_address), 10).await?;
         let proxied_port = utils::pick_unused_port().await?;
         let rpc_host_address_proxied = format!("http://127.0.0.1:{proxied_port}");
         tracing::info!("initializing toxi proxy");
-        let proxies =  vec![ProxyPack::new(
-            "lake-rpc".into(),
-            format!("127.0.0.1:{}", proxied_port), // must without http://
-            format!("127.0.0.1:{}", rpc_host_port),
-        )];
+        let proxies = json!([{
+            "name": "lake-rpc",
+            "listen": format!("127.0.0.1:{}", proxied_port), // must without http://
+            "upstream": format!("127.0.0.1:{}", rpc_host_port)
+        }]);
         let proxies_json = serde_json::to_string(&proxies).unwrap();
         let toxiproxy_client = reqwest::Client::default();
-        toxiproxy_client.post(format!("{}/populate", toxi_server_address))
+        toxiproxy_client
+            .post(format!("{}/populate", toxi_server_address))
             .header("Content-Type", "application/json")
-            .body(proxies_json).send().await?;
+            .body(proxies_json)
+            .send()
+            .await?;
 
         tracing::info!(
             bucket_name,
@@ -378,7 +378,7 @@ impl<'a> LakeIndexer<'a> {
             rpc_address,
             rpc_host_address,
             rpc_host_address_proxied,
-            toxi_server
+            toxi_server,
         })
     }
 }

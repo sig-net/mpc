@@ -33,6 +33,7 @@ use k256::{
     ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
     PublicKey as K256PublicKey,
 };
+use serde_json::json;
 
 pub async fn request_sign(
     ctx: &MultichainTestContext<'_>,
@@ -270,6 +271,46 @@ pub async fn single_payload_signature_production(
     )
     .await;
 
+    Ok(())
+}
+
+// add one of toxic to the toxiproxy-server to make indexer rpc slow down, congested, or unstable
+// available toxics and params: https://github.com/Shopify/toxiproxy?tab=readme-ov-file#toxic-fields
+pub async fn add_toxic(toxic: serde_json::Value) -> anyhow::Result<()> {
+    let toxi_server_address = "http://127.0.0.1:8474";
+    let toxiproxy_client = reqwest::Client::default();
+    toxiproxy_client
+        .post(format!("{}/proxies/lake-rpc/toxics", toxi_server_address))
+        .header("Content-Type", "application/json")
+        .body(toxic.to_string())
+        .send()
+        .await?;
+    Ok(())
+}
+
+// Add a delay to all data going through the proxy. The delay is equal to latency +/- jitter.
+pub async fn add_latency(probability: f32, latency: u32, jitter: u32) -> anyhow::Result<()> {
+    add_toxic(json!({
+        "type": "latency",
+        "toxicity": probability,
+        "attributes": {
+            "latency": latency,
+            "jitter": jitter
+        }
+    }))
+    .await
+}
+
+// clear all toxics. Does not need to be called between tests since each test will drop toxiproxy-server
+// Only need if you want to clear all toxics in middle of a test
+#[allow(dead_code)]
+pub async fn clear_toxics() -> anyhow::Result<()> {
+    let toxi_server_address = "http://127.0.0.1:8474";
+    let toxiproxy_client = reqwest::Client::default();
+    toxiproxy_client
+        .post(format!("{}/reset", toxi_server_address))
+        .send()
+        .await?;
     Ok(())
 }
 

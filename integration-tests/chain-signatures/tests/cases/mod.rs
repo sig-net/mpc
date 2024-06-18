@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::actions::{self, wait_for};
+use crate::actions::{self, add_latency, wait_for};
 use crate::with_multichain_nodes;
 
 use crypto_shared::{self, derive_epsilon, derive_key, x_coordinate, ScalarExt};
@@ -318,14 +318,19 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_rpc_congestion() -> anyhow::Result<()> {
-    with_multichain_nodes(MultichainConfig::default(), |mut ctx| {
+    with_multichain_nodes(MultichainConfig::default(), |ctx| {
         Box::pin(async move {
+            // Currently, with a 10+-1 latency it cannot generate enough tripplets in time
+            // with a 5+-1 latency it fails to wait for signature response
+            add_latency(1.0, 2_000, 200).await?;
+
             let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
             assert_eq!(state_0.participants.len(), 3);
-
-            // TODO add some toxi to toxi_proxy and test signature request etc.
-
+            wait_for::has_at_least_triples(&ctx, 2).await?;
+            wait_for::has_at_least_presignatures(&ctx, 2).await?;
+            actions::single_signature_rogue_responder(&ctx, &state_0).await?;
             Ok(())
         })
-    }).await
+    })
+    .await
 }
