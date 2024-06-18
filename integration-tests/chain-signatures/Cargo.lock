@@ -4008,7 +4008,6 @@ dependencies = [
  "test-log",
  "testcontainers",
  "tokio",
- "toxiproxy_rust",
  "tracing",
  "tracing-subscriber",
  "web3",
@@ -8660,19 +8659,6 @@ name = "tower-service"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6bc1c9ce2b5135ac7f93c72918fc37feb872bdc6a5533a8b85eb4b86bfdae52"
-
-[[package]]
-name = "toxiproxy_rust"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a21a06f072bf5df4ea301d1baab27f8b986d64350940562f546aa2cd6aeff694"
-dependencies = [
- "http 0.2.12",
- "lazy_static",
- "reqwest",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "tracing"
