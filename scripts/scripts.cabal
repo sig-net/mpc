@@ -1,0 +1,22 @@
+cabal-version:   3.4
+name:            scripts
+version:         0.1.0.0
+license:         MIT
+license-file:    LICENSE
+maintainer:      david@near.org
+author:          David Millar-Durrant
+homepage:        near.org
+build-type:      Simple
+extra-doc-files: CHANGELOG.md
+
+executable scripts
+    main-is:          Main.hs
+    hs-source-dirs:   app
+    default-language: GHC2021
+    other-extensions: OverloadedRecordDot
+    ghc-options:      -Wall, -pgml /usr/bin/cc
+
+    build-depends:
+        base ^>=4.18.2.1,
+        shake ^>=0.19.8,
+        text ^>=2.1.1

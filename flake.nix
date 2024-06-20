@@ -56,6 +56,15 @@
               cargo-audit
               cargo-make
 
+              # For David's scripts
+              haskellPackages.cabal-fmt
+              haskellPackages.cabal-install
+              haskellPackages.haskell-language-server
+              haskellPackages.hlint
+              ghc
+
+              clang
+
               # TODO Add podman + docker image dependencies
               # TODO Add AWS-CLI and dummy credentials
             ] ++
