@@ -276,11 +276,11 @@ pub async fn single_payload_signature_production(
 
 // add one of toxic to the toxiproxy-server to make indexer rpc slow down, congested, or unstable
 // available toxics and params: https://github.com/Shopify/toxiproxy?tab=readme-ov-file#toxic-fields
-pub async fn add_toxic(toxic: serde_json::Value) -> anyhow::Result<()> {
+pub async fn add_toxic(proxy: &str, toxic: serde_json::Value) -> anyhow::Result<()> {
     let toxi_server_address = "http://127.0.0.1:8474";
     let toxiproxy_client = reqwest::Client::default();
     toxiproxy_client
-        .post(format!("{}/proxies/lake-rpc/toxics", toxi_server_address))
+        .post(format!("{}/proxies/{}/toxics", toxi_server_address, proxy))
         .header("Content-Type", "application/json")
         .body(toxic.to_string())
         .send()
@@ -289,8 +289,8 @@ pub async fn add_toxic(toxic: serde_json::Value) -> anyhow::Result<()> {
 }
 
 // Add a delay to all data going through the proxy. The delay is equal to latency +/- jitter.
-pub async fn add_latency(probability: f32, latency: u32, jitter: u32) -> anyhow::Result<()> {
-    add_toxic(json!({
+pub async fn add_latency(proxy: &str, probability: f32, latency: u32, jitter: u32) -> anyhow::Result<()> {
+    add_toxic(proxy,json!({
         "type": "latency",
         "toxicity": probability,
         "attributes": {

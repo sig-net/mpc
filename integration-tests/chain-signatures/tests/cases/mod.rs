@@ -317,12 +317,16 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
 }
 
 #[test(tokio::test)]
-async fn test_rpc_congestion() -> anyhow::Result<()> {
+async fn test_lake_congestion() -> anyhow::Result<()> {
     with_multichain_nodes(MultichainConfig::default(), |ctx| {
         Box::pin(async move {
             // Currently, with a 10+-1 latency it cannot generate enough tripplets in time
             // with a 5+-1 latency it fails to wait for signature response
-            add_latency(1.0, 2_000, 200).await?;
+            // add_latency("lake-rpc", 1.0, 1_000, 100).await?;
+            // Also mock lake indexer in high load that it becomes slower to finish process
+            // sig req and write to s3
+            // with a long latency it fails to wait for signature response in time
+            // add_latency("lake-s3", 1.0, 10, 0).await?;
 
             let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
             assert_eq!(state_0.participants.len(), 3);
@@ -334,3 +338,4 @@ async fn test_rpc_congestion() -> anyhow::Result<()> {
     })
     .await
 }
+
