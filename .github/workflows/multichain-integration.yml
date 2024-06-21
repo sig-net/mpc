@@ -17,7 +17,7 @@ jobs:
     strategy:
       matrix:
         # FIXME: macos-latest-xl is disabled since colima is erroring out right now
-        os: [ubuntu-22.04-4core]
+        os: [warp-ubuntu-latest-x64-4x]
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -52,7 +52,16 @@ jobs:
           toolchain: stable
           target: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v1
+      - uses: WarpBuilds/cache@v1
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
+          restore-keys: ${{ runner.os }}-cargo-
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v1.1.2
@@ -84,5 +93,5 @@ jobs:
         working-directory: ./integration-tests/chain-signatures
         run: cargo test --jobs 1 -- --test-threads 1
         env:
-          RUST_LOG: INFO
+          RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
