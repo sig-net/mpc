@@ -322,11 +322,11 @@ async fn test_lake_congestion() -> anyhow::Result<()> {
         Box::pin(async move {
             // Currently, with a 10+-1 latency it cannot generate enough tripplets in time
             // with a 5+-1 latency it fails to wait for signature response
-            // add_latency("lake-rpc", 1.0, 1_000, 100).await?;
+            add_latency("lake-rpc", true, 1.0, 2_000, 200).await?;
             // Also mock lake indexer in high load that it becomes slower to finish process
             // sig req and write to s3
-            // with a long latency it fails to wait for signature response in time
-            // add_latency("lake-s3", 1.0, 10, 0).await?;
+            // with a 1s latency it fails to wait for signature response in time
+            add_latency("lake-s3", false, 1.0, 100, 10).await?;
 
             let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
             assert_eq!(state_0.participants.len(), 3);
@@ -338,4 +338,3 @@ async fn test_lake_congestion() -> anyhow::Result<()> {
     })
     .await
 }
-

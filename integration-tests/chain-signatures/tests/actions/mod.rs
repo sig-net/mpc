@@ -29,6 +29,7 @@ use std::time::Duration;
 
 const CHAIN_ID_ETH: u64 = 31337;
 
+use integration_tests_chain_signatures::containers::LakeIndexer;
 use k256::{
     ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
     PublicKey as K256PublicKey,
@@ -276,8 +277,12 @@ pub async fn single_payload_signature_production(
 
 // add one of toxic to the toxiproxy-server to make indexer rpc slow down, congested, or unstable
 // available toxics and params: https://github.com/Shopify/toxiproxy?tab=readme-ov-file#toxic-fields
-pub async fn add_toxic(proxy: &str, toxic: serde_json::Value) -> anyhow::Result<()> {
-    let toxi_server_address = "http://127.0.0.1:8474";
+pub async fn add_toxic(proxy: &str, host: bool, toxic: serde_json::Value) -> anyhow::Result<()> {
+    let toxi_server_address = if host {
+        LakeIndexer::TOXI_SERVER_PROCESS_ADDRESS
+    } else {
+        LakeIndexer::TOXI_SERVER_EXPOSE_ADDRESS
+    };
     let toxiproxy_client = reqwest::Client::default();
     toxiproxy_client
         .post(format!("{}/proxies/{}/toxics", toxi_server_address, proxy))
@@ -289,15 +294,25 @@ pub async fn add_toxic(proxy: &str, toxic: serde_json::Value) -> anyhow::Result<
 }
 
 // Add a delay to all data going through the proxy. The delay is equal to latency +/- jitter.
-pub async fn add_latency(proxy: &str, probability: f32, latency: u32, jitter: u32) -> anyhow::Result<()> {
-    add_toxic(proxy,json!({
-        "type": "latency",
-        "toxicity": probability,
-        "attributes": {
-            "latency": latency,
-            "jitter": jitter
-        }
-    }))
+pub async fn add_latency(
+    proxy: &str,
+    host: bool,
+    probability: f32,
+    latency: u32,
+    jitter: u32,
+) -> anyhow::Result<()> {
+    add_toxic(
+        proxy,
+        host,
+        json!({
+            "type": "latency",
+            "toxicity": probability,
+            "attributes": {
+                "latency": latency,
+                "jitter": jitter
+            }
+        }),
+    )
     .await
 }
 
