@@ -31,9 +31,11 @@ async fn main() -> anyhow::Result<()> {
                 "Setting up an environment with {} nodes, {} threshold ...",
                 nodes, threshold
             );
-            let mut config = MultichainConfig::default();
-            config.nodes = nodes;
-            config.threshold = threshold;
+            let config = MultichainConfig {
+                nodes,
+                threshold,
+                ..Default::default()
+            };
             println!("Full config: {:?}", config);
             let nodes = run(config.clone(), &docker_client).await?;
             let ctx = nodes.ctx();
