@@ -6,14 +6,14 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 enum Cli {
-    /// Spin up dependant services and mpc nodes
+    /// Spin up dependent services and mpc nodes
     SetupEnv {
         #[arg(short, long, default_value_t = 3)]
         nodes: usize,
         #[arg(short, long, default_value_t = 2)]
         threshold: usize,
     },
-    /// Spin up dependant services but not mpc nodes
+    /// Spin up dependent services but not mpc nodes
     DepServices,
 }
 

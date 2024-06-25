@@ -5,7 +5,6 @@ use crate::actions::wait_for;
 
 use anyhow::anyhow;
 use futures::future::BoxFuture;
-use glob::glob;
 use integration_tests_chain_signatures::containers::DockerClient;
 use integration_tests_chain_signatures::utils::{vote_join, vote_leave};
 use integration_tests_chain_signatures::{run, utils, MultichainConfig, Nodes};
@@ -13,7 +12,6 @@ use near_jsonrpc_client::JsonRpcClient;
 
 use near_workspaces::{Account, AccountId};
 
-use std::fs;
 use std::str::FromStr;
 
 pub struct MultichainTestContext<'a> {
