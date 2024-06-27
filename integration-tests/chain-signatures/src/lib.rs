@@ -454,6 +454,8 @@ pub async fn initialize_lake_indexer<'a>(
 
     tracing::info!("initializing sandbox worker");
     let worker = near_workspaces::sandbox()
+        // use not proxied rpc address because workspace is used in setup (create dev account, deploy
+        // contract which we can assume succeed
         .rpc_addr(&lake_indexer.rpc_host_address)
         .validator_key(ValidatorKey::Known(
             validator_key.account_id.to_string().parse()?,

@@ -46,7 +46,7 @@ impl Node {
             s3_url: Some(ctx.localstack.s3_host_address.clone()),
             start_block_height: 0,
         };
-        let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
+        let near_rpc = ctx.lake_indexer.rpc_host_address_proxied.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = mpc_recovery_node::cli::Cli::Start {
             near_rpc: near_rpc.clone(),
@@ -104,7 +104,7 @@ impl Node {
         };
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
-        let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
+        let near_rpc = ctx.lake_indexer.rpc_host_address_proxied.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = mpc_recovery_node::cli::Cli::Start {
             near_rpc: near_rpc.clone(),
