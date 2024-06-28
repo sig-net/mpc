@@ -5,15 +5,13 @@ use crate::actions::wait_for;
 
 use anyhow::anyhow;
 use futures::future::BoxFuture;
-use glob::glob;
 use integration_tests_chain_signatures::containers::DockerClient;
 use integration_tests_chain_signatures::utils::{vote_join, vote_leave};
-use integration_tests_chain_signatures::{run, MultichainConfig, Nodes};
+use integration_tests_chain_signatures::{run, utils, MultichainConfig, Nodes};
 use near_jsonrpc_client::JsonRpcClient;
 
 use near_workspaces::{Account, AccountId};
 
-use std::fs;
 use std::str::FromStr;
 
 pub struct MultichainTestContext<'a> {
@@ -150,26 +148,7 @@ where
         cfg,
     })
     .await;
-    clear_local_sk_shares(sk_local_path).await?;
+    utils::clear_local_sk_shares(sk_local_path).await?;
 
     result
-}
-
-pub async fn clear_local_sk_shares(sk_local_path: Option<String>) -> anyhow::Result<()> {
-    if let Some(sk_share_local_path) = sk_local_path {
-        let pattern = format!("{sk_share_local_path}*");
-        for entry in glob(&pattern).expect("Failed to read glob pattern") {
-            match entry {
-                Ok(path) => {
-                    if path.is_file() {
-                        if let Err(e) = fs::remove_file(&path) {
-                            eprintln!("Failed to delete file {:?}: {}", path.display(), e);
-                        }
-                    }
-                }
-                Err(e) => eprintln!("{:?}", e),
-            }
-        }
-    }
-    Ok(())
 }

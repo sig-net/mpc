@@ -46,6 +46,7 @@ crypto-shared = { path = "../../chain-signatures/crypto-shared" }
 mpc-contract = { path = "../../chain-signatures/contract" }
 mpc-keys = { path = "../../chain-signatures/keys" }
 mpc-recovery-node = { path = "../../chain-signatures/node" }
+clap = { version = "4.5.4", features = ["derive"] }
 lazy_static = "1.4.0"
 
 [dev-dependencies]

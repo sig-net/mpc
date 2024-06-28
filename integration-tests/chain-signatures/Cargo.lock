@@ -3978,6 +3978,7 @@ dependencies = [
  "backon",
  "bollard",
  "cait-sith",
+ "clap",
  "crypto-shared",
  "ecdsa 0.16.9",
  "elliptic-curve 0.13.8",
