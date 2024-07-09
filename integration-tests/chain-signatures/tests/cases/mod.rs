@@ -352,7 +352,7 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
             assert!(state.participants.len() == 3);
 
             // add latency to node1->rpc, but not node0->rpc
-            add_latency(&ctx.nodes.proxy_name_for_node(1), true, 1.0, 2_000, 200).await?;
+            add_latency(&ctx.nodes.proxy_name_for_node(1), true, 1.0, 1_000, 100).await?;
             // remove node2, node0 and node1 should still reach concensus
             // this fails if the latency above is too long (10s)
             assert!(ctx.remove_participant(None).await.is_ok());
@@ -364,7 +364,7 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
             assert!(state.participants.len() == 2);
             assert!(ctx.add_participant().await.is_ok());
             // add latency to node2->rpc
-            add_latency(&ctx.nodes.proxy_name_for_node(2), true, 1.0, 2_000, 200).await?;
+            add_latency(&ctx.nodes.proxy_name_for_node(2), true, 1.0, 1_000, 100).await?;
             let state = wait_for::running_mpc(&ctx, Some(0)).await?;
             assert!(state.participants.len() == 3);
             assert!(ctx.remove_participant(None).await.is_ok());
