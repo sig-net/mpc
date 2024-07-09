@@ -128,11 +128,11 @@ pub async fn has_at_least_mine_triples<'a>(
         }
     };
 
-    // retries every 5 seconds, up to 10 times the amount of expected min triples, where we expect one owned
-    // triple takes roughly 30-50 seconds. So roughly `5secs * 10 * min_triples``.
+    // retries every 5 seconds, up to 20 times the amount of expected min triples, where we expect one owned
+    // triple takes roughly 30-100 seconds due to randomness. So roughly `5secs * 20 * min_triples`.
     let strategy = ConstantBuilder::default()
         .with_delay(Duration::from_secs(5))
-        .with_max_times(10 * expected_count);
+        .with_max_times(20 * expected_count);
 
     let mut state_views = Vec::new();
     for id in 0..ctx.nodes.len() {

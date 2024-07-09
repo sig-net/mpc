@@ -272,7 +272,6 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
             assert_eq!(state_0.participants.len(), 3);
-            wait_for::has_at_least_triples(&ctx, 6).await?;
             wait_for::has_at_least_mine_triples(&ctx, 2).await?;
 
             // Kill the node then have presignature and signature generation only use the active set of nodes
@@ -293,7 +292,7 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
             // comes in for resumeable MPC.
             if presig_res.is_err() || sig_res.is_err() {
                 // Retry if the first attempt failed.
-                wait_for::has_at_least_mine_presignatures(&ctx, 1).await?;
+                wait_for::has_at_least_mine_presignatures(&ctx, 2).await?;
                 actions::single_signature_production(&ctx, &state_0).await?;
             }
 
