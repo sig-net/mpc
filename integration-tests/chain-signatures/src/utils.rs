@@ -2,6 +2,7 @@ use anyhow::Context;
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::{Account, AccountId};
+use std::fs;
 
 pub async fn vote_join(
     accounts: Vec<Account>,
@@ -80,7 +81,7 @@ where
 pub async fn pick_unused_port() -> anyhow::Result<u16> {
     // Port 0 means the OS gives us an unused port
     // Important to use localhost as using 0.0.0.0 leads to users getting brief firewall popups to
-    // allow inbound connections on MacOS.
+    // allow inbound connections on macOS
     let addr = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let port = listener.local_addr()?.port();
@@ -97,5 +98,24 @@ pub async fn ping_until_ok(addr: &str, timeout: u64) -> anyhow::Result<()> {
         }
     })
     .await?;
+    Ok(())
+}
+
+pub async fn clear_local_sk_shares(sk_local_path: Option<String>) -> anyhow::Result<()> {
+    if let Some(sk_share_local_path) = sk_local_path {
+        let pattern = format!("{sk_share_local_path}*");
+        for entry in glob::glob(&pattern).expect("Failed to read glob pattern") {
+            match entry {
+                Ok(path) => {
+                    if path.is_file() {
+                        if let Err(e) = fs::remove_file(&path) {
+                            eprintln!("Failed to delete file {:?}: {}", path.display(), e);
+                        }
+                    }
+                }
+                Err(e) => eprintln!("{:?}", e),
+            }
+        }
+    }
     Ok(())
 }

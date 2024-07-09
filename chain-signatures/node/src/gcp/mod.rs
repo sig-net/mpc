@@ -280,31 +280,40 @@ impl DatastoreService {
             )
         })?;
 
-        batch.entity_results.ok_or_else(|| {
-            DatastoreStorageError::FetchEntitiesError(
-                "Could not retrieve entity results while fetching entities".to_string(),
-            )
-        })
+        // NOTE: if entity_results is None, we return an empty Vec since the fetch query
+        // could not find any entities in the DB.
+        Ok(batch.entity_results.unwrap_or_default())
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn delete<T: Keyable>(&self, keyable: T) -> DatastoreResult<()> {
-        let mut key = keyable.key();
-        if let Some(path) = key.path.as_mut().and_then(|p| p.first_mut()) {
-            path.kind = Some(format!("{}-{}", T::kind(), self.env));
-        }
+        self.delete_many(&[keyable]).await
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn delete_many<T: Keyable>(&self, keyables: &[T]) -> DatastoreResult<()> {
+        let mutations = keyables
+            .iter()
+            .map(|keyable| {
+                let mut key = keyable.key();
+                if let Some(path) = key.path.as_mut().and_then(|p| p.first_mut()) {
+                    path.kind = Some(format!("{}-{}", T::kind(), self.env));
+                }
+                Mutation {
+                    insert: None,
+                    delete: Some(key),
+                    update: None,
+                    base_version: None,
+                    upsert: None,
+                    update_time: None,
+                }
+            })
+            .collect::<Vec<_>>();
 
         let request = CommitRequest {
             database_id: Some("".to_string()),
             mode: Some(String::from("NON_TRANSACTIONAL")),
-            mutations: Some(vec![Mutation {
-                insert: None,
-                delete: Some(key),
-                update: None,
-                base_version: None,
-                upsert: None,
-                update_time: None,
-            }]),
+            mutations: Some(mutations),
             single_use_transaction: None,
             transaction: None,
         };

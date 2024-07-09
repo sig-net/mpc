@@ -254,9 +254,7 @@ pub async fn signature_responded(
                 wait_until: near_primitives::views::TxExecutionStatus::Final,
             })
             .await?;
-        // let FinalExecutionStatus::SuccessValue(payload) = outcome_view.status else {
-        //     anyhow::bail!("tx finished unsuccessfully: {:?}", outcome_view.status);
-        // };
+
         let Some(outcome) = outcome_view.final_execution_outcome else {
             anyhow::bail!("final execution outcome not available");
         };

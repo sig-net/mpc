@@ -3978,6 +3978,7 @@ dependencies = [
  "backon",
  "bollard",
  "cait-sith",
+ "clap",
  "crypto-shared",
  "ecdsa 0.16.9",
  "elliptic-curve 0.13.8",
@@ -3988,6 +3989,7 @@ dependencies = [
  "hex 0.4.3",
  "hyper",
  "k256",
+ "lazy_static",
  "mpc-contract",
  "mpc-keys",
  "mpc-recovery-node",
@@ -3995,8 +3997,8 @@ dependencies = [
  "near-crypto 0.21.2",
  "near-fetch",
  "near-jsonrpc-client 0.9.0",
- "near-lake-framework",
- "near-lake-primitives",
+ "near-lake-framework 0.8.0-beta.3 (git+https://github.com/near/near-lake-framework-rs?branch=dmd/bump-dependencies)",
+ "near-lake-primitives 0.8.0-beta.3 (git+https://github.com/near/near-lake-framework-rs?branch=dmd/bump-dependencies)",
  "near-primitives 0.21.2",
  "near-workspaces",
  "once_cell",
@@ -4611,8 +4613,8 @@ dependencies = [
  "near-account-id",
  "near-crypto 0.21.2",
  "near-fetch",
- "near-lake-framework",
- "near-lake-primitives",
+ "near-lake-framework 0.8.0-beta.3 (git+https://github.com/near/near-lake-framework-rs?rev=e0b28590ffe6b6441987d302843d45bef55ef50e)",
+ "near-lake-primitives 0.8.0-beta.3 (git+https://github.com/near/near-lake-framework-rs?rev=e0b28590ffe6b6441987d302843d45bef55ef50e)",
  "near-primitives 0.21.2",
  "near-sdk",
  "once_cell",
@@ -4908,8 +4910,9 @@ dependencies = [
 
 [[package]]
 name = "near-fetch"
-version = "0.2.0"
-source = "git+https://github.com/ChaoticTempest/fetch.git#20c8825f47cb88b61a961be3ccbfc262bff45db9"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc473b6bf35836eebc23457fb1a3747ab956022e04a9238fcb510b5912a9f0fe"
 dependencies = [
  "base64 0.22.1",
  "near-account-id",
@@ -5047,6 +5050,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "near-lake-context-derive"
+version = "0.8.0-beta.3"
+source = "git+https://github.com/near/near-lake-framework-rs?rev=e0b28590ffe6b6441987d302843d45bef55ef50e#e0b28590ffe6b6441987d302843d45bef55ef50e"
+dependencies = [
+ "quote",
+ "syn 2.0.65",
+]
+
+[[package]]
 name = "near-lake-framework"
 version = "0.8.0-beta.3"
 source = "git+https://github.com/near/near-lake-framework-rs?branch=dmd/bump-dependencies#e4eaa0c1b1c1d63c45963474db7ee82c38557d54"
@@ -5059,8 +5071,31 @@ dependencies = [
  "aws-types",
  "derive_builder",
  "futures",
- "near-lake-context-derive",
- "near-lake-primitives",
+ "near-lake-context-derive 0.8.0-beta.3 (git+https://github.com/near/near-lake-framework-rs?branch=dmd/bump-dependencies)",
+ "near-lake-primitives 0.8.0-beta.3 (git+https://github.com/near/near-lake-framework-rs?branch=dmd/bump-dependencies)",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "near-lake-framework"
+version = "0.8.0-beta.3"
+source = "git+https://github.com/near/near-lake-framework-rs?rev=e0b28590ffe6b6441987d302843d45bef55ef50e#e0b28590ffe6b6441987d302843d45bef55ef50e"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-s3",
+ "aws-types",
+ "derive_builder",
+ "futures",
+ "near-lake-context-derive 0.8.0-beta.3 (git+https://github.com/near/near-lake-framework-rs?rev=e0b28590ffe6b6441987d302843d45bef55ef50e)",
+ "near-lake-primitives 0.8.0-beta.3 (git+https://github.com/near/near-lake-framework-rs?rev=e0b28590ffe6b6441987d302843d45bef55ef50e)",
  "serde",
  "serde_json",
  "thiserror",
@@ -5073,6 +5108,22 @@ dependencies = [
 name = "near-lake-primitives"
 version = "0.8.0-beta.3"
 source = "git+https://github.com/near/near-lake-framework-rs?branch=dmd/bump-dependencies#e4eaa0c1b1c1d63c45963474db7ee82c38557d54"
+dependencies = [
+ "anyhow",
+ "near-crypto 0.21.2",
+ "near-indexer-primitives",
+ "near-primitives 0.21.2",
+ "near-primitives-core 0.21.2",
+ "paste",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "near-lake-primitives"
+version = "0.8.0-beta.3"
+source = "git+https://github.com/near/near-lake-framework-rs?rev=e0b28590ffe6b6441987d302843d45bef55ef50e#e0b28590ffe6b6441987d302843d45bef55ef50e"
 dependencies = [
  "anyhow",
  "near-crypto 0.21.2",

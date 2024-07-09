@@ -65,7 +65,14 @@ impl SecretNodeStorage for SecretManagerNodeStorage {
             .load_secret(&self.sk_share_secret_id)
             .await?;
         match raw_data {
-            Some(data) if data.len() > 1 => Ok(Some(serde_json::from_slice(&data)?)),
+            Some(data) if data.len() > 1 => {
+                if let Ok(persistent_node_data) = serde_json::from_slice(&data) {
+                    Ok(Some(persistent_node_data))
+                } else {
+                    tracing::info!("failed to convert stored data to key share, presuming it is missing");
+                    Ok(None)
+                }
+            },
             _ => {
                 tracing::info!("failed to load existing key share, presuming it is missing");
                 Ok(None)
@@ -100,7 +107,7 @@ impl SecretNodeStorage for DiskNodeStorage {
     }
 
     async fn load(&self) -> SecretResult<Option<PersistentNodeData>> {
-        println!("loading PersistentNodeData using DiskNodeStorage");
+        tracing::info!("loading PersistentNodeData using DiskNodeStorage");
         // Open the file asynchronously
         let file_res = File::open(self.path.as_os_str()).await;
 
@@ -108,10 +115,10 @@ impl SecretNodeStorage for DiskNodeStorage {
             Ok(mut file) => {
                 let mut contents = Vec::new();
                 // Read the contents of the file into the vector
-                println!("loading PersistentNodeData using DiskNodeStorage: reading");
+                tracing::debug!("loading PersistentNodeData using DiskNodeStorage: reading");
                 file.read_to_end(&mut contents).await?;
 
-                println!("loading PersistentNodeData using DiskNodeStorage: read done");
+                tracing::debug!("loading PersistentNodeData using DiskNodeStorage: read done");
                 // Deserialize the JSON content to a PersistentNodeData object
                 let data: PersistentNodeData = serde_json::from_slice(&contents)?;
 

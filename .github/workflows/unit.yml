@@ -9,7 +9,7 @@ env:
   RUSTFLAGS: -D warnings
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: warp-ubuntu-latest-x64-4x
     name: Check & Test
     steps:
       - uses: actions/checkout@v3
@@ -19,7 +19,16 @@ jobs:
           profile: minimal
           toolchain: stable
           target: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v1
+      - uses: WarpBuilds/cache@v1
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: "${{ runner.os }}-cargo-${{ hashFiles('mpc-recovery/Cargo.lock') }}"
+          restore-keys: ${{ runner.os }}-cargo-
       - name: Install Protoc
         uses: arduino/setup-protoc@v1.1.2
         with:
@@ -63,7 +72,6 @@ jobs:
         with:
           profile: minimal
           toolchain: stable
-      - uses: Swatinem/rust-cache@v1
       - name: Install Audit
         run: cargo install cargo-audit
       - name: Run Audit (FastAuth)

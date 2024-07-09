@@ -59,6 +59,8 @@ pub enum ConsensusError {
     HasBeenKicked,
     #[error("this node errored out during the join process: {0}")]
     CannotJoin(String),
+    #[error("this node errored out while trying to vote: {0}")]
+    CannotVote(String),
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
     #[error("secret storage error: {0}")]
@@ -314,7 +316,14 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         &public_key,
                     )
                     .await
-                    .unwrap();
+                    .map_err(|err| {
+                        tracing::error!(
+                            ?public_key,
+                            ?err,
+                            "failed to vote for the generated public key"
+                        );
+                        ConsensusError::CannotVote(format!("{err:?}"))
+                    })?;
                 }
                 Ok(NodeState::WaitingForConsensus(self))
             }
@@ -348,6 +357,12 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         .participants
                         .find_participant(ctx.my_account_id())
                         .unwrap();
+
+                    // Clear triples from storage before starting the new epoch. This is necessary if the node has accumulated
+                    // triples from previous epochs. If it was not able to clear the previous triples, we'll leave them as-is
+                    if let Err(err) = ctx.triple_storage().write().await.clear().await {
+                        tracing::warn!(?err, "failed to clear triples from storage");
+                    }
 
                     let triple_manager = TripleManager::new(
                         me,
@@ -433,7 +448,14 @@ impl ConsensusProtocol for WaitingForConsensusState {
                                         self.epoch,
                                     )
                                     .await
-                                    .unwrap();
+                                    .map_err(|err| {
+                                        tracing::error!(
+                                            epoch = self.epoch,
+                                            ?err,
+                                            "failed to vote for resharing"
+                                        );
+                                        ConsensusError::CannotVote(format!("{err:?}"))
+                                    })?;
                                 } else {
                                     tracing::info!(
                                         epoch = self.epoch,
@@ -649,6 +671,7 @@ impl ConsensusProtocol for JoiningState {
                                 "sign_pk": ctx.cfg().network_cfg.sign_sk.public_key(),
                             }))
                             .max_gas()
+                            .retry_exponential(10, 3)
                             .transact()
                             .await
                             .map_err(|err| {
@@ -708,8 +731,7 @@ async fn load_triples<C: ConsensusCtx + Send + Sync>(
     let mut retries = 3;
     let mut error = None;
     while retries > 0 {
-        let read_lock = triple_storage.read().await;
-        match read_lock.load().await {
+        match triple_storage.read().await.load().await {
             Err(DatastoreStorageError::FetchEntitiesError(_)) => {
                 tracing::info!("There are no triples persisted.");
                 return Ok(vec![]);
