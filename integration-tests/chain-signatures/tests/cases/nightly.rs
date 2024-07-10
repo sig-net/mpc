@@ -9,7 +9,7 @@ use crate::with_multichain_nodes;
 #[test(tokio::test)]
 #[ignore = "This is triggered by the nightly Github Actions pipeline"]
 async fn test_nightly_signature_production() -> anyhow::Result<()> {
-    const SIGNATURE_AMOUNT: usize = 10;
+    const SIGNATURE_AMOUNT: usize = 1000;
     const NODES: usize = 8;
     const THRESHOLD: usize = 4;
     const MIN_TRIPLES: usize = 10;
