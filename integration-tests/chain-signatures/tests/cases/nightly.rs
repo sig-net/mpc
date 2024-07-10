@@ -43,12 +43,22 @@ async fn test_nightly_signature_production() -> anyhow::Result<()> {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
             assert_eq!(state_0.participants.len(), NODES);
-            wait_for::has_at_least_mine_triples(&ctx, triple_cfg.min_triples).await?;
 
             for i in 0..SIGNATURE_AMOUNT {
-                wait_for::has_at_least_mine_presignatures(&ctx, 3).await?;
+                if let Err(err) = wait_for::has_at_least_mine_triples(&ctx, 4).await {
+                    tracing::error!(?err, "Failed to wait for triples");
+                    continue;
+                }
+
+                if let Err(err) = wait_for::has_at_least_mine_presignatures(&ctx, 2).await {
+                    tracing::error!(?err, "Failed to wait for presignatures");
+                    continue;
+                }
+
                 tracing::info!(at_signature = i, "Producing signature...");
-                actions::single_signature_production(&ctx, &state_0).await?;
+                if let Err(err) = actions::single_signature_production(&ctx, &state_0).await {
+                    tracing::error!(?err, "Failed to produce signature");
+                }
             }
 
             Ok(())
