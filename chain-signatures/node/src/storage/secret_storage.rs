@@ -71,7 +71,7 @@ impl SecretNodeStorage for SecretManagerNodeStorage {
                     tracing::warn!(%err, data_len = data.len(), "failed to convert stored data to key share, presuming it is missing");
                     Ok(None)
                 }
-            }
+            },
             _ => {
                 tracing::warn!("failed to load existing key share, presuming it is missing");
                 Ok(None)
