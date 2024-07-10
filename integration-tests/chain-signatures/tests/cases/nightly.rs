@@ -45,8 +45,9 @@ async fn test_nightly_signature_production() -> anyhow::Result<()> {
             assert_eq!(state_0.participants.len(), NODES);
             wait_for::has_at_least_mine_triples(&ctx, triple_cfg.min_triples).await?;
 
-            for _ in 0..SIGNATURE_AMOUNT {
+            for i in 0..SIGNATURE_AMOUNT {
                 wait_for::has_at_least_mine_presignatures(&ctx, 3).await?;
+                tracing::info!(at_signature = i, "Producing signature...");
                 actions::single_signature_production(&ctx, &state_0).await?;
             }
 
