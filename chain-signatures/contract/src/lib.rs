@@ -223,6 +223,16 @@ impl VersionedMpcContract {
                         .expect("conversion to CryptoHash failed");
                     mpc_contract.add_request(&request, data_id);
 
+                    mpc_contract.add_request(&request, &Some(data_id));
+                    mpc_contract.add_yield_resume_request(
+                        index,
+                        YieldResumeRequest {
+                            data_id,
+                            account_id: env::signer_account_id(),
+                            signature_request: request,
+                        },
+                    );
+
                     log!(
                         "sign: predecessor={predecessor}, payload={payload:?}, path={path:?}, key_version={key_version}, data_id={data_id:?}",
                     );
