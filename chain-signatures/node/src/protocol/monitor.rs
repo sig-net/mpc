@@ -1,16 +1,22 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use super::triple::{TripleId, TripleManager};
 
-/// Amount of iterations before we can say that the protocol is stuck.
-const ADVANCEMENT_THRESHOLD: usize = 20;
+/// Amount of time to wait before we can say that the protocol is stuck.
+const STUCK_TIMEOUT_THRESHOLD: Duration = Duration::from_secs(120);
+
+/// While being stuck, report the stuck every interval. This should not be higher than STUCK_TIMEOUT_THRESHOLD
+/// due to how they're coupled in the following code.
+const STUCK_COUNT_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct StuckMonitor {
     triple_manager: Arc<RwLock<TripleManager>>,
     last_checked_triples: HashSet<TripleId>,
-    last_changed_count: usize,
+    last_changed_timestamp: Instant,
+    stuck_interval_timestamp: Instant,
 }
 
 impl StuckMonitor {
@@ -24,11 +30,12 @@ impl StuckMonitor {
                 .keys()
                 .cloned()
                 .collect(),
-            last_changed_count: 0,
+            last_changed_timestamp: Instant::now(),
+            stuck_interval_timestamp: Instant::now(),
         }
     }
 
-    pub async fn advance_then_check(&mut self) {
+    pub async fn check(&mut self) {
         let triple_manager = self.triple_manager.read().await;
         let latest_triples: HashSet<_> = triple_manager.triples.keys().cloned().collect();
         if triple_manager.has_min_triples() {
@@ -46,29 +53,25 @@ impl StuckMonitor {
             return;
         }
 
-        self.last_changed_count += 1;
-        if self.last_changed_count == ADVANCEMENT_THRESHOLD {
+        if self.last_changed_timestamp.elapsed() >= STUCK_TIMEOUT_THRESHOLD
+            && self.stuck_interval_timestamp.elapsed() >= STUCK_COUNT_REPORT_INTERVAL
+        {
+            self.stuck_interval_timestamp = Instant::now();
+
             tracing::warn!(
                 // ?latest_triples,
                 // generators = ?triple_manager.generators.keys().collect::<Vec<_>>(),
                 // queued = ?triple_manager.queued,
                 // ongoing = ?triple_manager.ongoing,
-                ?diff,
                 ?triple_manager,
-                "protocol is stuck for the last {} iterations",
-                self.last_changed_count
-            );
-        } else if self.last_changed_count > ADVANCEMENT_THRESHOLD {
-            tracing::error!(
-                ?diff,
-                "protocol is stuck for the last {} iterations",
-                self.last_changed_count
+                "protocol is stuck for the last {} seconds",
+                self.last_changed_timestamp.elapsed().as_secs(),
             );
         }
     }
 
     fn reset(&mut self, latest_triples: HashSet<TripleId>) {
         self.last_checked_triples = latest_triples;
-        self.last_changed_count = 0;
+        self.last_changed_timestamp = Instant::now();
     }
 }
