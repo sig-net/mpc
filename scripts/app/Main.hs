@@ -5,9 +5,6 @@ import Development.Shake.Command
 import Development.Shake.FilePath
 import Development.Shake.Util
 
-main :: IO ()
-main = putStrLn "Hello"
-
 data Package = Package {_manifest_path :: FilePath, _package :: String}
 
 cargo :: (CmdResult r) => String -> [String] -> [String] -> Package -> Action r
@@ -60,3 +57,29 @@ clippy, fmt, check :: CmdResult r => Package -> Action r
 clippy = cargo "clippy" ["--tests"] ["-Dclippy:all"]
 fmt = cargo "fmt" ["--tests"] ["--check"]
 check = cargo "check" ["--tests"] []
+
+targetDir, contractDir, contractPath, nodeDir, nodePath :: FilePath
+targetDir = "target"
+contractDir = targetDir </> "wasm"
+contractPath = contractDir </> "wasm32-unknown-unknown" </> "release" </> "mpc_contract.wasm"
+
+nodeDir = targetDir </> "native"
+nodePath = nodeDir </> "release" </> "mpc-recovery-node"
+
+buildNode, buildContract :: CmdResult r => Action r
+buildNode = cargo "build" ["--release", "--target-dir", nodeDir] [] node
+buildContract = cargo "build" ["--release", "--target-dir", contractDir, "--target", "wasm32-unknown-unknown"] [] contract
+
+chainSignaturesIntegration :: CmdResult r => Action r
+chainSignaturesIntegration =
+  cargo "test" [] ["--test-threads", "1", "--targetDir", targetDir </> "testing"] chainSignauturesTest
+
+main :: IO ()
+main = shake shakeOptions $ do
+  want ["result"]
+
+  nodePath %> const buildNode
+  contractPath %> const buildContract
+  "result" %> \_ -> do
+    need [nodePath, contractPath]
+    chainSignaturesIntegration
