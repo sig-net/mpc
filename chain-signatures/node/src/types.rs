@@ -98,8 +98,13 @@ impl ReshareProtocol {
         contract_state: &ResharingContractState,
     ) -> Result<Self, InitializationError> {
         let old_participants = contract_state.old_participants.keys_vec();
-        let new_participants = contract_state.new_participants.keys_vec();
-
+        let mut new_participants = contract_state.new_participants.keys_vec();
+        tracing::info!(
+            "reshare protocol new old participants {:?} new participants {:?} me {:?}",
+            old_participants,
+            new_participants,
+            me
+        );
         Ok(Self {
             protocol: Arc::new(RwLock::new(Box::new(cait_sith::reshare::<Secp256k1>(
                 &old_participants,
@@ -120,6 +125,12 @@ impl ReshareProtocol {
     }
 
     pub async fn refresh(&mut self) -> Result<(), InitializationError> {
+        tracing::info!(
+            "reshare protocol refresh old participants {:?} new participants {:?} me {:?}",
+            self.old_participants,
+            self.new_participants,
+            self.me
+        );
         *self.write().await = Box::new(cait_sith::reshare::<Secp256k1>(
             &self.old_participants,
             self.threshold,

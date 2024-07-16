@@ -298,6 +298,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
         ctx: C,
         contract_state: ProtocolState,
     ) -> Result<NodeState, ConsensusError> {
+        tracing::warn!("WaitingForConsensusState advance");
         match contract_state {
             ProtocolState::Initializing(contract_state) => {
                 tracing::debug!("waiting(initializing): waiting for consensus, contract state has not been finalized yet");
@@ -399,6 +400,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                 }
             },
             ProtocolState::Resharing(contract_state) => {
+                tracing::warn!("Potential call vote_reshared {:?}", contract_state);
                 match (contract_state.old_epoch + 1).cmp(&self.epoch) {
                     Ordering::Greater if contract_state.old_epoch + 2 == self.epoch => {
                         tracing::info!("waiting(resharing): contract state is resharing, joining");
@@ -529,6 +531,7 @@ impl ConsensusProtocol for RunningState {
                     Ordering::Less => Err(ConsensusError::EpochRollback),
                     Ordering::Equal => {
                         tracing::info!("running(resharing): contract is resharing");
+                        tracing::info!("=== {:?}", contract_state);
                         let is_in_old_participant_set = contract_state
                             .old_participants
                             .contains_account_id(ctx.my_account_id());
@@ -754,7 +757,7 @@ async fn start_resharing<C: ConsensusCtx>(
     contract_state: ResharingContractState,
 ) -> Result<NodeState, ConsensusError> {
     let me = contract_state
-        .new_participants
+        .old_participants
         .find_participant(ctx.my_account_id())
         .unwrap();
     let protocol = ReshareProtocol::new(private_share, me, &contract_state)?;

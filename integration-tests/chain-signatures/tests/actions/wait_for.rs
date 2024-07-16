@@ -22,13 +22,14 @@ pub async fn running_mpc<'a>(
     epoch: Option<u64>,
 ) -> anyhow::Result<RunningContractState> {
     let is_running = || async {
+        tracing::info!("running_mpc get state");
         let state: ProtocolContractState = ctx
             .rpc_client
             .view(ctx.nodes.ctx().mpc_contract.id(), "state")
             .await
             .map_err(|err| anyhow::anyhow!("could not view state {err:?}"))?
             .json()?;
-
+        tracing::info!("running_mpc new state {:?}", state);
         match state {
             ProtocolContractState::Running(running) => match epoch {
                 None => Ok(running),

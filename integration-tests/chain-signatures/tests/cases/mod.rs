@@ -379,3 +379,41 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
     })
     .await
 }
+
+#[test(tokio::test)]
+async fn test_multichain_reshare_with_node_leave() -> anyhow::Result<()> {
+    let config = MultichainConfig::default();
+    with_multichain_nodes(config.clone(), |mut ctx| {
+        Box::pin(async move {
+            let state = wait_for::running_mpc(&ctx, Some(0)).await?;
+            assert!(state.threshold == 2);
+            assert!(state.participants.len() == 3);
+
+            // node_0 goes offline
+            let account_0 = near_workspaces::types::AccountId::from_str(
+                state.participants.keys().nth(0).unwrap().clone().as_ref(),
+            )
+            .unwrap();
+            // ctx.nodes.kill_node(&account_0).await?;
+
+            let state = wait_for::running_mpc(&ctx, Some(0)).await?;
+            assert!(state.threshold == 2);
+            assert!(state.participants.len() == 3);
+
+            // two node vote to kick it
+            assert!(ctx.remove_participant(Some(&account_0)).await.is_ok());
+
+            // during this process, one node went offline
+            // the only one node should wait until it back online
+            // one node back online, reshare should work0
+            // make sure signing works after reshare
+            let new_state = wait_for::running_mpc(&ctx, None).await?;
+            assert!(new_state.threshold == 2);
+            assert!(new_state.participants.len() == 2);
+            wait_for::has_at_least_triples(&ctx, 2).await?;
+            wait_for::has_at_least_presignatures(&ctx, 2).await?;
+            actions::single_signature_production(&ctx, &new_state).await
+        })
+    })
+    .await
+}

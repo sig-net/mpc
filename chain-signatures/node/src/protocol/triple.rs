@@ -438,7 +438,7 @@ impl TripleManager {
 
                 match action {
                     Action::Wait => {
-                        tracing::debug!("waiting");
+                        tracing::trace!("waiting");
                         // Retain protocol until we are finished
                         break true;
                     }

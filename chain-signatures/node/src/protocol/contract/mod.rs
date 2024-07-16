@@ -5,9 +5,15 @@ use crypto_shared::PublicKey;
 use mpc_contract::ProtocolContractState;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::{collections::HashSet, str::FromStr};
 
 use self::primitives::{Candidates, Participants, PkVotes, Votes};
+use crate::protocol::ParticipantInfo;
+use cait_sith::protocol::Participant;
+use mpc_keys::hpke;
+use near_primitives::borsh::BorshDeserialize;
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InitializingContractState {
@@ -63,10 +69,48 @@ pub struct ResharingContractState {
 
 impl From<mpc_contract::ResharingContractState> for ResharingContractState {
     fn from(contract_state: mpc_contract::ResharingContractState) -> Self {
+        let contract_old_participants: mpc_contract::primitives::Participants =
+            contract_state.old_participants;
+        let contract_new_participants: mpc_contract::primitives::Participants =
+            contract_state.new_participants;
+        let protocol_old_participants: Participants = contract_old_participants.clone().into();
+        let mut next_id: u32 = contract_old_participants.len().try_into().unwrap();
+        let mut protocol_new_participants: Participants = Participants {
+            participants: BTreeMap::new(),
+        };
+        let accountToParticipant: HashMap<_, _> = contract_old_participants
+            .participants
+            .into_iter()
+            .enumerate()
+            .map(|(id, (account_id, _))| (account_id, id))
+            .collect();
+        for (account_id, participant_info) in
+            contract_new_participants.clone().participants.into_iter()
+        {
+            let id = accountToParticipant.get(&account_id);
+            if id.is_some() {
+                let id: u32 = (*id.unwrap()).try_into().unwrap();
+                protocol_new_participants.participants.insert(
+                    Participant::from(id),
+                    ParticipantInfo::from_contract_participant_info(id, participant_info),
+                );
+            } else {
+                protocol_new_participants.participants.insert(
+                    Participant::from(next_id),
+                    ParticipantInfo::from_contract_participant_info(next_id, participant_info),
+                );
+                next_id += 1;
+            }
+        }
+        tracing::info!(
+            "/// from new participants {:?} to new participants {:?}",
+            contract_new_participants,
+            protocol_new_participants
+        );
         ResharingContractState {
             old_epoch: contract_state.old_epoch,
-            old_participants: contract_state.old_participants.into(),
-            new_participants: contract_state.new_participants.into(),
+            old_participants: protocol_old_participants,
+            new_participants: protocol_new_participants,
             threshold: contract_state.threshold,
             public_key: contract_state.public_key.into_affine_point(),
             finished_votes: contract_state

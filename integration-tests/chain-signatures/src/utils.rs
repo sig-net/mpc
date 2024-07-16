@@ -41,6 +41,7 @@ pub async fn vote_leave(
     mpc_contract: &AccountId,
     account_id: &AccountId,
 ) -> Vec<Result<ExecutionFinalResult, near_workspaces::error::Error>> {
+    tracing::info!("vote_leave");
     let vote_futures = accounts
         .iter()
         .filter(|account| account.id() != account_id)
@@ -53,8 +54,10 @@ pub async fn vote_leave(
                 .transact()
         })
         .collect::<Vec<_>>();
-
-    futures::future::join_all(vote_futures).await
+    tracing::info!("vote_leave created");
+    let ret = futures::future::join_all(vote_futures).await;
+    tracing::info!("vote_leave finish, {:?}", ret);
+    ret
 }
 
 pub async fn get<U>(uri: U) -> anyhow::Result<StatusCode>
