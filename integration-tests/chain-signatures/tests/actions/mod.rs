@@ -113,7 +113,7 @@ pub async fn single_signature_rogue_responder(
 
     assert_eq!(
         err,
-        "Smart contract panicked: Signature could not be verified".to_string()
+        "Smart contract panicked: signature tx error: Signature could not be verified.".to_string()
     );
 
     let signature = wait_for::signature_responded(ctx, tx_hash).await?;

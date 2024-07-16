@@ -8,6 +8,7 @@ use k256::Scalar;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
 use near_sdk::serde::{Deserialize, Serialize};
+use near_sdk::FunctionError;
 
 use near_sdk::{
     env, log, near_bindgen, AccountId, BorshStorageKey, CryptoHash, Gas, GasWeight, NearToken,
@@ -110,21 +111,45 @@ pub enum SignatureError {
     #[error("No promise yield has been created for this request.")]
     RequestNotInYieldResume,
     #[error("Signature could not be verified.")]
-    SignatureNotVerified
+    SignatureNotVerified,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolStateError {
     #[error("Protocol state is not expected: {0}.")]
-    NotExpectedState(String)
+    NotExpectedState(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum VoteError {
+    #[error("Voting account is not not in the participant set.")]
+    VoterNotParticipant,
+    #[error("Account to be kicked is not not in the participant set.")]
+    KickNotParticipant,
+    #[error("Account to join is not not in the candidates set.")]
+    JoinNotCandidate,
+    #[error("Account to join is already in the participant set.")]
+    JoinAlreadyParticipant,
+    #[error("Mismatched epoch.")]
+    MismatchedEpoch,
+    #[error("Number of participants cannot go below threshold.")]
+    ParticipantsBelowThreshold,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum MpcContractError {
     #[error("signature tx error: {0}")]
-    SignatureError(SignatureError)
+    SignatureError(SignatureError),
     #[error("Protocol state error: {0}")]
-    ProtocolStateError(ProtocolStateError)
+    ProtocolStateError(ProtocolStateError),
+    #[error("vote error: {0}")]
+    VoteError(VoteError),
+}
+
+impl FunctionError for MpcContractError {
+    fn panic(&self) -> ! {
+        crate::env::panic_str(&self.to_string())
+    }
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
@@ -171,7 +196,9 @@ impl MpcContract {
             self.request_counter -= 1;
             Ok(())
         } else {
-            Err(MpcContractError::SignatureError(SignatureError::RequestNotInYieldResume))
+            Err(MpcContractError::SignatureError(
+                SignatureError::RequestNotInYieldResume,
+            ))
         }
     }
 
@@ -217,10 +244,12 @@ impl VersionedMpcContract {
         let deposit = env::attached_deposit();
         let required_deposit = self.signature_deposit();
         if deposit.as_yoctonear() < required_deposit {
-            return Err(MpcContractError::SignatureError(SignatureError::InsufficientDeposit(format!(
-                "Attached deposit is {}, required deposit is {}",
-                deposit, required_deposit
-            ))))
+            return Err(MpcContractError::SignatureError(
+                SignatureError::InsufficientDeposit(format!(
+                    "Attached deposit is {}, required deposit is {}",
+                    deposit, required_deposit
+                )),
+            ));
         }
         // Make sure sign call will not run out of gas doing recursive calls because the payload will never be removed
         assert!(
@@ -282,7 +311,9 @@ impl VersionedMpcContract {
                 }
             }
         } else {
-            Err(MpcContractError::SignatureError(SignatureError::PayloadCollision))
+            Err(MpcContractError::SignatureError(
+                SignatureError::PayloadCollision,
+            ))
         }
     }
 
@@ -322,7 +353,11 @@ impl VersionedMpcContract {
     }
 
     #[handle_result]
-    pub fn respond(&mut self, request: SignatureRequest, response: SignatureResponse) -> Result<(), MpcContractError> {
+    pub fn respond(
+        &mut self,
+        request: SignatureRequest,
+        response: SignatureResponse,
+    ) -> Result<(), MpcContractError> {
         let protocol_state = self.mutable_state();
 
         if let ProtocolContractState::Running(_) = protocol_state {
@@ -337,7 +372,7 @@ impl VersionedMpcContract {
 
             // generate the expected public key
             let expected_public_key = derive_key(
-                near_public_key_to_affine_point(self.public_key()),
+                near_public_key_to_affine_point(self.public_key()?),
                 request.epsilon.scalar,
             );
 
@@ -351,7 +386,9 @@ impl VersionedMpcContract {
             )
             .is_err()
             {
-                return Err(MpcContractError::SignatureError(SignatureError::SignatureNotVerified))
+                return Err(MpcContractError::SignatureError(
+                    SignatureError::SignatureNotVerified,
+                ));
             }
 
             match self {
@@ -365,12 +402,16 @@ impl VersionedMpcContract {
                         );
                         Ok(())
                     } else {
-                        Err(MpcContractError::SignatureError(SignatureError::RequestNotInPending))
+                        Err(MpcContractError::SignatureError(
+                            SignatureError::RequestNotInPending,
+                        ))
                     }
                 }
             }
         } else {
-            Err(MpcContractError::ProtocolStateError(ProtocolStateError::NotExpectedState("running".to_string())))
+            Err(MpcContractError::ProtocolStateError(
+                ProtocolStateError::NotExpectedState("running".to_string()),
+            ))
         }
     }
 
@@ -380,7 +421,9 @@ impl VersionedMpcContract {
         match self.state() {
             ProtocolContractState::Running(state) => Ok(state.public_key.clone()),
             ProtocolContractState::Resharing(state) => Ok(state.public_key.clone()),
-            _ => Err(MpcContractError::ProtocolStateError(ProtocolStateError::NotExpectedState("running or resharing".to_string()))),
+            _ => Err(MpcContractError::ProtocolStateError(
+                ProtocolStateError::NotExpectedState("running or resharing".to_string()),
+            )),
         }
     }
 
@@ -433,7 +476,9 @@ impl VersionedMpcContract {
             }) => {
                 let signer_account_id = env::signer_account_id();
                 if participants.contains_key(&signer_account_id) {
-                    env::panic_str("this participant is already in the participant set");
+                    return Err(MpcContractError::VoteError(
+                        VoteError::JoinAlreadyParticipant,
+                    ));
                 }
                 candidates.insert(
                     signer_account_id.clone(),
@@ -446,7 +491,9 @@ impl VersionedMpcContract {
                 );
                 Ok(())
             }
-            _ => Err(MpcContractError::ProtocolStateError(ProtocolStateError::NotExpectedState("running".to_string()))),
+            _ => Err(MpcContractError::ProtocolStateError(
+                ProtocolStateError::NotExpectedState("running".to_string()),
+            )),
         }
     }
 
@@ -470,11 +517,11 @@ impl VersionedMpcContract {
             }) => {
                 let signer_account_id = env::signer_account_id();
                 if !participants.contains_key(&signer_account_id) {
-                    env::panic_str("calling account is not in the participant set");
+                    return Err(MpcContractError::VoteError(VoteError::VoterNotParticipant));
                 }
                 let candidate_info = candidates
                     .get(&candidate_account_id)
-                    .unwrap_or_else(|| env::panic_str("candidate is not registered"));
+                    .ok_or(MpcContractError::VoteError(VoteError::JoinNotCandidate))?;
                 let voted = join_votes.entry(candidate_account_id.clone());
                 voted.insert(signer_account_id);
                 if voted.len() >= *threshold {
@@ -492,7 +539,9 @@ impl VersionedMpcContract {
                     Ok(true)
                 } else {
             }
-            _ => Err(MpcContractError::ProtocolStateError(ProtocolStateError::NotExpectedState("running".to_string()))),
+            _ => Err(MpcContractError::ProtocolStateError(
+                ProtocolStateError::NotExpectedState("running".to_string()),
+            )),
         }
     }
     }
@@ -516,13 +565,15 @@ impl VersionedMpcContract {
             }) => {
                 let signer_account_id = env::signer_account_id();
                 if !participants.contains_key(&signer_account_id) {
-                    env::panic_str("calling account is not in the participant set");
+                    return Err(MpcContractError::VoteError(VoteError::VoterNotParticipant));
                 }
                 if !participants.contains_key(&kick) {
-                    env::panic_str("account to leave is not in the participant set");
+                    return Err(MpcContractError::VoteError(VoteError::KickNotParticipant));
                 }
                 if participants.len() <= *threshold {
-                    env::panic_str("the number of participants can not go below the threshold");
+                    return Err(MpcContractError::VoteError(
+                        VoteError::ParticipantsBelowThreshold,
+                    ));
                 }
                 let voted = leave_votes.entry(kick.clone());
                 voted.insert(signer_account_id);
@@ -542,7 +593,9 @@ impl VersionedMpcContract {
                     Ok(false)
                 }
             }
-            _ => Err(MpcContractError::ProtocolStateError(ProtocolStateError::NotExpectedState("running".to_string()))),
+            _ => Err(MpcContractError::ProtocolStateError(
+                ProtocolStateError::NotExpectedState("running".to_string()),
+            )),
         }
     }
 
@@ -562,7 +615,7 @@ impl VersionedMpcContract {
             }) => {
                 let signer_account_id = env::signer_account_id();
                 if !candidates.contains_key(&signer_account_id) {
-                    env::panic_str("calling account is not in the participant set");
+                    return Err(MpcContractError::VoteError(VoteError::VoterNotParticipant));
                 }
                 let voted = pk_votes.entry(public_key.clone());
                 voted.insert(signer_account_id);
@@ -583,11 +636,16 @@ impl VersionedMpcContract {
             }
             ProtocolContractState::Running(state) if state.public_key == public_key => Ok(true),
             ProtocolContractState::Resharing(state) if state.public_key == public_key => Ok(true),
-            _ => Err(MpcContractError::ProtocolStateError(ProtocolStateError::NotExpectedState("initializing or running/resharing with the same public key".to_string()))),
+            _ => Err(MpcContractError::ProtocolStateError(
+                ProtocolStateError::NotExpectedState(
+                    "initializing or running/resharing with the same public key".to_string(),
+                ),
+            )),
         }
     }
 
-    pub fn vote_reshared(&mut self, epoch: u64) -> bool {
+    #[handle_result]
+    pub fn vote_reshared(&mut self, epoch: u64) -> Result<bool, MpcContractError> {
         log!(
             "vote_reshared: signer={}, epoch={}",
             env::signer_account_id(),
@@ -604,11 +662,11 @@ impl VersionedMpcContract {
                 finished_votes,
             }) => {
                 if *old_epoch + 1 != epoch {
-                    env::panic_str("mismatched epochs");
+                    return Err(MpcContractError::VoteError(VoteError::MismatchedEpoch));
                 }
                 let signer_account_id = env::signer_account_id();
                 if !old_participants.contains_key(&signer_account_id) {
-                    env::panic_str("calling account is not in the old participant set");
+                    return Err(MpcContractError::VoteError(VoteError::VoterNotParticipant));
                 }
                 finished_votes.insert(signer_account_id);
                 if finished_votes.len() >= *threshold {
@@ -621,19 +679,23 @@ impl VersionedMpcContract {
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
                     });
-                    true
+                    Ok(true)
                 } else {
-                    false
+                    Ok(false)
                 }
             }
             ProtocolContractState::Running(state) => {
                 if state.epoch == epoch {
-                    true
+                    Ok(true)
                 } else {
-                    env::panic_str("protocol is not resharing right now")
+                    Err(MpcContractError::ProtocolStateError(
+                        ProtocolStateError::NotExpectedState("resharing".to_string()),
+                    ))
                 }
             }
-            _ => env::panic_str("protocol is not resharing right now"),
+            _ => Err(MpcContractError::ProtocolStateError(
+                ProtocolStateError::NotExpectedState("resharing".to_string()),
+            )),
         }
     }
 }
