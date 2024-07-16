@@ -95,6 +95,38 @@ pub struct YieldIndex {
     data_id: CryptoHash,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SignatureError {
+    #[error("Too many pending requests. Please, try again later.")]
+    RequestLimitExceeded,
+    #[error("Payload for this request is already requested.")]
+    PayloadCollision,
+    #[error("Attached deposit is insufficent: {0}.")]
+    InsufficientDeposit(String),
+    #[error("Signature request has timed out.")]
+    Timeout,
+    #[error("This sign request was removed from pending requests: timed out or completed.")]
+    RequestNotInPending,
+    #[error("No promise yield has been created for this request.")]
+    RequestNotInYieldResume,
+    #[error("Signature could not be verified.")]
+    SignatureNotVerified
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolStateError {
+    #[error("Protocol state is not expected: {0}.")]
+    NotExpectedState(String)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MpcContractError {
+    #[error("signature tx error: {0}")]
+    SignatureError(SignatureError)
+    #[error("Protocol state error: {0}")]
+    ProtocolStateError(ProtocolStateError)
+}
+
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct SignatureRequest {
@@ -137,8 +169,9 @@ impl MpcContract {
     fn remove_request(&mut self, request: SignatureRequest) {
         if self.pending_requests.remove(&request).is_some() {
             self.request_counter -= 1;
+            Ok(())
         } else {
-            env::panic_str("yield resume requests do not contain this request.")
+            Err(MpcContractError::SignatureError(SignatureError::RequestNotInYieldResume))
         }
     }
 
@@ -164,7 +197,8 @@ impl VersionedMpcContract {
     /// we ask for a small deposit for each signature request.
     /// The fee changes based on how busy the network is.
     #[payable]
-    pub fn sign(&mut self, request: SignRequest) {
+    #[handle_result]
+    pub fn sign(&mut self, request: SignRequest) -> Result<(), MpcContractError> {
         let SignRequest {
             payload,
             path,
@@ -183,10 +217,10 @@ impl VersionedMpcContract {
         let deposit = env::attached_deposit();
         let required_deposit = self.signature_deposit();
         if deposit.as_yoctonear() < required_deposit {
-            env::panic_str(&format!(
+            return Err(MpcContractError::SignatureError(SignatureError::InsufficientDeposit(format!(
                 "Attached deposit is {}, required deposit is {}",
                 deposit, required_deposit
-            ));
+            ))))
         }
         // Make sure sign call will not run out of gas doing recursive calls because the payload will never be removed
         assert!(
@@ -221,17 +255,8 @@ impl VersionedMpcContract {
                         .expect("read_register failed")
                         .try_into()
                         .expect("conversion to CryptoHash failed");
-                    mpc_contract.add_request(&request, data_id);
 
-                    mpc_contract.add_request(&request, &Some(data_id));
-                    mpc_contract.add_yield_resume_request(
-                        index,
-                        YieldResumeRequest {
-                            data_id,
-                            account_id: env::signer_account_id(),
-                            signature_request: request,
-                        },
-                    );
+                    mpc_contract.add_request(&request, data_id);
 
                     log!(
                         "sign: predecessor={predecessor}, payload={payload:?}, path={path:?}, key_version={key_version}, data_id={data_id:?}",
@@ -253,49 +278,51 @@ impl VersionedMpcContract {
                     );
                     // The return value for this function call will be the value
                     // returned by the `sign_on_finish` callback.
-                    env::promise_return(final_yield_promise);
+                    Ok(env::promise_return(final_yield_promise))
                 }
             }
         } else {
-            env::panic_str("Signature for this payload already requested")
+            Err(MpcContractError::SignatureError(SignatureError::PayloadCollision))
         }
     }
 
     #[private]
+    #[handle_result]
     pub fn return_signature_on_finish(
         &mut self,
         #[callback_unwrap] signature: SignatureResult<SignatureResponse, SignaturePromiseError>,
-    ) -> SignatureResponse {
+    ) -> Result<SignatureResponse, MpcContractError> {
         match self {
             Self::V0(_) => match signature {
-                SignatureResult::Ok(signature) => signature,
+                SignatureResult::Ok(signature) => Ok(signature),
                 SignatureResult::Err(_) => {
-                    env::panic_str("Signature has timed out");
+                    Err(MpcContractError::SignatureError(SignatureError::Timeout))
                 }
             },
         }
     }
 
     #[private]
+    #[handle_result]
     pub fn clear_state_on_finish(
         &mut self,
         request: SignatureRequest,
         #[callback_result] signature: Result<SignatureResponse, PromiseError>,
-    ) -> SignatureResult<SignatureResponse, SignaturePromiseError> {
+    ) -> Result<SignatureResult<SignatureResponse, SignaturePromiseError>, MpcContractError> {
         match self {
             Self::V0(mpc_contract) => {
                 // Clean up the local state
-                mpc_contract.remove_request(request);
-
+                mpc_contract.remove_request(request)?;
                 match signature {
-                    Ok(signature) => SignatureResult::Ok(signature),
-                    Err(_) => SignatureResult::Err(SignaturePromiseError::Failed),
+                    Ok(signature) => Ok(SignatureResult::Ok(signature)),
+                    Err(_) => Ok(SignatureResult::Err(SignaturePromiseError::Failed)),
                 }
             }
         }
     }
 
-    pub fn respond(&mut self, request: SignatureRequest, response: SignatureResponse) {
+    #[handle_result]
+    pub fn respond(&mut self, request: SignatureRequest, response: SignatureResponse) -> Result<(), MpcContractError> {
         let protocol_state = self.mutable_state();
 
         if let ProtocolContractState::Running(_) = protocol_state {
@@ -324,7 +351,7 @@ impl VersionedMpcContract {
             )
             .is_err()
             {
-                env::panic_str("Signature could not be verified");
+                return Err(MpcContractError::SignatureError(SignatureError::SignatureNotVerified))
             }
 
             match self {
@@ -336,24 +363,24 @@ impl VersionedMpcContract {
                             &data_id,
                             &serde_json::to_vec(&response).unwrap(),
                         );
+                        Ok(())
                     } else {
-                        env::panic_str(
-                            "this sign request was removed from pending requests: timed out or completed.",
-                        )
+                        Err(MpcContractError::SignatureError(SignatureError::RequestNotInPending))
                     }
                 }
             }
         } else {
-            env::panic_str("protocol is not in a running state");
+            Err(MpcContractError::ProtocolStateError(ProtocolStateError::NotExpectedState("running".to_string())))
         }
     }
 
     /// This is the root public key combined from all the public keys of the participants.
-    pub fn public_key(&self) -> PublicKey {
+    #[handle_result]
+    pub fn public_key(&self) -> Result<PublicKey, MpcContractError> {
         match self.state() {
-            ProtocolContractState::Running(state) => state.public_key.clone(),
-            ProtocolContractState::Resharing(state) => state.public_key.clone(),
-            _ => env::panic_str("public key not available (protocol is not running or resharing)"),
+            ProtocolContractState::Running(state) => Ok(state.public_key.clone()),
+            ProtocolContractState::Resharing(state) => Ok(state.public_key.clone()),
+            _ => Err(MpcContractError::ProtocolStateError(ProtocolStateError::NotExpectedState("running or resharing".to_string()))),
         }
     }
 
@@ -384,11 +411,12 @@ impl VersionedMpcContract {
         env!("CARGO_PKG_VERSION").to_string()
     }
 
+    #[handle_result]
     pub fn join(
         &mut self,
         url: String,
         sign_pk: PublicKey,
-    ) {
+    ) -> Result<(), MpcContractError> {
         log!(
             "join: signer={}, url={}, cipher_pk={:?}, sign_pk={:?}",
             env::signer_account_id(),
@@ -416,12 +444,14 @@ impl VersionedMpcContract {
                         sign_pk,
                     },
                 );
+                Ok(())
             }
-            _ => env::panic_str("protocol state can't accept new participants right now"),
+            _ => Err(MpcContractError::ProtocolStateError(ProtocolStateError::NotExpectedState("running".to_string()))),
         }
     }
 
-    pub fn vote_join(&mut self, candidate_account_id: AccountId) -> bool {
+    #[handle_result]
+    pub fn vote_join(&mut self, candidate_account_id: AccountId) -> Result<bool, MpcContractError> {
         log!(
             "vote_join: signer={}, candidate_account_id={}",
             env::signer_account_id(),
@@ -459,15 +489,16 @@ impl VersionedMpcContract {
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
                     });
-                    true
+                    Ok(true)
                 } else {
             }
-            _ => env::panic_str("protocol state can't accept new participants right now"),
+            _ => Err(MpcContractError::ProtocolStateError(ProtocolStateError::NotExpectedState("running".to_string()))),
         }
     }
     }
 
-    pub fn vote_leave(&mut self, kick: AccountId) -> bool {
+    #[handle_result]
+    pub fn vote_leave(&mut self, kick: AccountId) -> Result<bool, MpcContractError> {
         log!(
             "vote_leave: signer={}, kick={}",
             env::signer_account_id(),
@@ -506,16 +537,17 @@ impl VersionedMpcContract {
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
                     });
-                    true
+                    Ok(true)
                 } else {
-                    false
+                    Ok(false)
                 }
             }
-            _ => env::panic_str("protocol state can't kick participants right now"),
+            _ => Err(MpcContractError::ProtocolStateError(ProtocolStateError::NotExpectedState("running".to_string()))),
         }
     }
 
-    pub fn vote_pk(&mut self, public_key: PublicKey) -> bool {
+    #[handle_result]
+    pub fn vote_pk(&mut self, public_key: PublicKey) -> Result<bool, MpcContractError> {
         log!(
             "vote_pk: signer={}, public_key={:?}",
             env::signer_account_id(),
@@ -544,14 +576,14 @@ impl VersionedMpcContract {
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
                     });
-                    true
+                    Ok(true)
                 } else {
-                    false
+                    Ok(false)
                 }
             }
-            ProtocolContractState::Running(state) if state.public_key == public_key => true,
-            ProtocolContractState::Resharing(state) if state.public_key == public_key => true,
-            _ => env::panic_str("can't change public key anymore"),
+            ProtocolContractState::Running(state) if state.public_key == public_key => Ok(true),
+            ProtocolContractState::Resharing(state) if state.public_key == public_key => Ok(true),
+            _ => Err(MpcContractError::ProtocolStateError(ProtocolStateError::NotExpectedState("initializing or running/resharing with the same public key".to_string()))),
         }
     }
 
