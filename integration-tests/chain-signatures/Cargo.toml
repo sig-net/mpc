@@ -23,6 +23,7 @@ testcontainers = { version = "0.15", features = ["experimental"] }
 tokio = { version = "1.28", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
 
 # crypto dependencies
 cait-sith = { git = "https://github.com/LIT-Protocol/cait-sith.git", features = [
@@ -33,13 +34,13 @@ k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
 
 # near dependencies
 near-account-id = "1"
-near-crypto = "0.21"
-near-fetch = "0.3.1"
-near-jsonrpc-client = "0.9"
-near-primitives = "0.21"
-near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs", branch = "dmd/bump-dependencies" }
-near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs", branch = "dmd/bump-dependencies" }
-near-workspaces = { git = "https://github.com/near/near-workspaces-rs.git", branch = "feat/upgrade-near-deps" }
+near-crypto = "0.23.0"
+near-fetch = "0.5.0"
+near-jsonrpc-client = "0.10.1"
+near-primitives = "0.23.0"
+near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/1.40" }
+near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/1.40" }
+near-workspaces = { git = "https://github.com/near/near-workspaces-rs", branch = "node/1.40" }
 
 # local chain-signatures depencencies
 crypto-shared = { path = "../../chain-signatures/crypto-shared" }
