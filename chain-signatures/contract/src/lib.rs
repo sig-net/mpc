@@ -117,6 +117,13 @@ pub enum ProtocolStateError {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum ThresholdError {
+    #[error("Threshold cannot be greater than the number of candidates")]
+    TooHigh,
+}
+
+
+#[derive(Debug, thiserror::Error)]
 pub enum VoteError {
     #[error("Voting account is not not in the participant set.")]
     VoterNotParticipant,
@@ -140,6 +147,8 @@ pub enum MpcContractError {
     ProtocolStateError(ProtocolStateError),
     #[error("vote error: {0}")]
     VoteError(VoteError),
+    #[error("threshold error: {0}")]
+    ThresholdError(ThresholdError),
 }
 
 impl FunctionError for MpcContractError {
@@ -694,8 +703,9 @@ impl VersionedMpcContract {
 // Contract developer helper API
 #[near_bindgen]
 impl VersionedMpcContract {
+    #[handle_result]
     #[init]
-    pub fn init(threshold: usize, candidates: BTreeMap<AccountId, CandidateInfo>) -> Self {
+    pub fn init(threshold: usize, candidates: BTreeMap<AccountId, CandidateInfo>) -> Result<Self, MpcContractError> {
         log!(
             "init: signer={}, threshold={}, candidates={}",
             env::signer_account_id(),
@@ -704,10 +714,10 @@ impl VersionedMpcContract {
         );
 
         if threshold > candidates.len() {
-            env::panic_str("threshold cannot be greater than the number of candidates");
+            return Err(MpcContractError::ThresholdError(ThresholdError::TooHigh))
         }
 
-        Self::V0(MpcContract::init(threshold, candidates))
+        Ok(Self::V0(MpcContract::init(threshold, candidates)))
     }
 
     // This function can be used to transfer the MPC network to a new contract.
@@ -718,7 +728,7 @@ impl VersionedMpcContract {
         participants: BTreeMap<AccountId, ParticipantInfo>,
         threshold: usize,
         public_key: PublicKey,
-    ) -> Self {
+    ) -> Result<Self, MpcContractError> {
         log!(
             "init_running: signer={}, epoch={}, participants={}, threshold={}, public_key={:?}",
             env::signer_account_id(),
@@ -729,10 +739,10 @@ impl VersionedMpcContract {
         );
 
         if threshold > participants.len() {
-            env::panic_str("threshold cannot be greater than the number of participants");
+            return Err(MpcContractError::ThresholdError(ThresholdError::TooHigh))
         }
 
-        Self::V0(MpcContract {
+        Ok(Self::V0(MpcContract {
             protocol_state: ProtocolContractState::Running(RunningContractState {
                 epoch,
                 participants: Participants { participants },

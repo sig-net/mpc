@@ -252,7 +252,7 @@ async fn test_contract_sign_request() -> anyhow::Result<()> {
     let err = sign_and_validate(&request, None, &contract)
         .await
         .expect_err("should have failed with timeout");
-    assert!(err.to_string().contains("Signature has timed out"));
+    assert!(err.to_string().contains("Signature request has timed out"));
 
     Ok(())
 }
@@ -307,7 +307,7 @@ async fn test_contract_sign_request_deposits() -> anyhow::Result<()> {
         .into_result()
         .unwrap_err()
         .to_string()
-        .contains("required deposit is 1"));
+        .contains("required deposit: 1"));
 
     Ok(())
 }
