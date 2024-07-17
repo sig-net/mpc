@@ -100,10 +100,6 @@ pub struct YieldIndex {
 pub enum SignatureError {
     #[error("Too many pending requests. Please, try again later.")]
     RequestLimitExceeded,
-    #[error("Payload for this request is already requested.")]
-    PayloadCollision,
-    #[error("Attached deposit is insufficent: {0}.")]
-    InsufficientDeposit(String),
     #[error("Signature request has timed out.")]
     Timeout,
     #[error("This sign request was removed from pending requests: timed out or completed.")]
@@ -224,8 +220,7 @@ impl VersionedMpcContract {
     /// we ask for a small deposit for each signature request.
     /// The fee changes based on how busy the network is.
     #[payable]
-    #[handle_result]
-    pub fn sign(&mut self, request: SignRequest) -> Result<(), MpcContractError> {
+    pub fn sign(&mut self, request: SignRequest) {
         let SignRequest {
             payload,
             path,
@@ -243,14 +238,12 @@ impl VersionedMpcContract {
         // Check deposit
         let deposit = env::attached_deposit();
         let required_deposit = self.signature_deposit();
-        if deposit.as_yoctonear() < required_deposit {
-            return Err(MpcContractError::SignatureError(
-                SignatureError::InsufficientDeposit(format!(
-                    "Attached deposit is {}, required deposit is {}",
-                    deposit, required_deposit
-                )),
-            ));
-        }
+        assert!(
+            deposit.as_yoctonear() >= required_deposit,
+            "Insufficient deposit attached. Attached deposit: {}, required deposit: {}",
+            deposit, 
+            required_deposit
+        );
         // Make sure sign call will not run out of gas doing recursive calls because the payload will never be removed
         assert!(
             env::prepaid_gas() >= GAS_FOR_SIGN_CALL,
@@ -279,11 +272,11 @@ impl VersionedMpcContract {
                         DATA_ID_REGISTER,
                     );
 
-                    // Store the request in the contract's local state
-                    let data_id: CryptoHash = env::read_register(DATA_ID_REGISTER)
-                        .expect("read_register failed")
-                        .try_into()
-                        .expect("conversion to CryptoHash failed");
+                // Store the request in the contract's local state
+                let data_id: CryptoHash = env::read_register(DATA_ID_REGISTER)
+                    .expect("read_register failed")
+                    .try_into()
+                    .expect("conversion to CryptoHash failed");
 
                     mpc_contract.add_request(&request, data_id);
 
@@ -310,10 +303,6 @@ impl VersionedMpcContract {
                     Ok(env::promise_return(final_yield_promise))
                 }
             }
-        } else {
-            Err(MpcContractError::SignatureError(
-                SignatureError::PayloadCollision,
-            ))
         }
     }
 
@@ -458,6 +447,7 @@ impl VersionedMpcContract {
     pub fn join(
         &mut self,
         url: String,
+        cipher_pk: primitives::hpke::PublicKey,
         sign_pk: PublicKey,
     ) -> Result<(), MpcContractError> {
         log!(
@@ -538,12 +528,13 @@ impl VersionedMpcContract {
                     });
                     Ok(true)
                 } else {
+                    Ok(false)
+                }
             }
             _ => Err(MpcContractError::ProtocolStateError(
                 ProtocolStateError::NotExpectedState("running".to_string()),
             )),
         }
-    }
     }
 
     #[handle_result]
