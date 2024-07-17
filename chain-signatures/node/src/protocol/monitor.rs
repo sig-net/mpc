@@ -51,7 +51,7 @@ impl StuckMonitor {
         let diff = latest_triples
             .difference(&self.last_checked_triples)
             .collect::<HashSet<_>>();
-        if diff.len() > 0 {
+        if !diff.is_empty() {
             drop(triple_manager);
             self.reset(latest_triples);
             return false;
