@@ -1,7 +1,7 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, PublicKey};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, HashMap};
 
 pub mod hpke {
     pub type PublicKey = [u8; 32];
@@ -64,7 +64,9 @@ pub struct CandidateInfo {
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct Participants {
+    pub next_id: u32,
     pub participants: BTreeMap<AccountId, ParticipantInfo>,
+    pub account_to_participant_id: HashMap<AccountId, u32>,
 }
 
 impl Default for Participants {
@@ -86,7 +88,17 @@ impl From<Candidates> for Participants {
 impl Participants {
     pub fn new() -> Self {
         Participants {
+            next_id: 0u32,
             participants: BTreeMap::new(),
+            account_to_participant_id: HashMap::new(),
+        }
+    }
+
+    pub fn from_init_participants(participants: BTreeMap<AccountId, ParticipantInfo>) -> Self {
+        Participants{
+            participants: participants.clone(),
+            next_id: participants.len().try_into().unwrap(),
+            account_to_participant_id: participants.into_iter().enumerate().map(|(i, (account_id, _))| (account_id, i.try_into().unwrap())).collect()
         }
     }
 
@@ -95,6 +107,10 @@ impl Participants {
     }
 
     pub fn insert(&mut self, account_id: AccountId, participant_info: ParticipantInfo) {
+        if !self.account_to_participant_id.contains_key(&account_id) {
+            self.account_to_participant_id.insert(account_id.clone(), self.next_id);
+            self.next_id += 1;
+        }
         self.participants.insert(account_id, participant_info);
     }
 

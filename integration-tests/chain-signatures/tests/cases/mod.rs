@@ -391,7 +391,7 @@ async fn test_multichain_reshare_with_node_leave() -> anyhow::Result<()> {
 
             // node_0 goes offline
             let account_0 = near_workspaces::types::AccountId::from_str(
-                state.participants.keys().nth(0).unwrap().clone().as_ref(),
+                state.participants.keys().nth(1).unwrap().clone().as_ref(),
             )
             .unwrap();
             // ctx.nodes.kill_node(&account_0).await?;

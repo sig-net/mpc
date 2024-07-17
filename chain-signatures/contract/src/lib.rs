@@ -517,7 +517,7 @@ impl VersionedMpcContract {
         Self::V0(MpcContract {
             protocol_state: ProtocolContractState::Running(RunningContractState {
                 epoch,
-                participants: Participants { participants },
+                participants: Participants::from_init_participants(participants),
                 threshold,
                 public_key,
                 candidates: Candidates::new(),
