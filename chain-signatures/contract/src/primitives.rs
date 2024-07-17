@@ -1,7 +1,7 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, PublicKey};
-use std::collections::{BTreeMap, HashSet, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub mod hpke {
     pub type PublicKey = [u8; 32];
@@ -95,10 +95,14 @@ impl Participants {
     }
 
     pub fn from_init_participants(participants: BTreeMap<AccountId, ParticipantInfo>) -> Self {
-        Participants{
+        Participants {
             participants: participants.clone(),
             next_id: participants.len().try_into().unwrap(),
-            account_to_participant_id: participants.into_iter().enumerate().map(|(i, (account_id, _))| (account_id, i.try_into().unwrap())).collect()
+            account_to_participant_id: participants
+                .into_iter()
+                .enumerate()
+                .map(|(i, (account_id, _))| (account_id, i.try_into().unwrap()))
+                .collect(),
         }
     }
 
@@ -108,7 +112,8 @@ impl Participants {
 
     pub fn insert(&mut self, account_id: AccountId, participant_info: ParticipantInfo) {
         if !self.account_to_participant_id.contains_key(&account_id) {
-            self.account_to_participant_id.insert(account_id.clone(), self.next_id);
+            self.account_to_participant_id
+                .insert(account_id.clone(), self.next_id);
             self.next_id += 1;
         }
         self.participants.insert(account_id, participant_info);

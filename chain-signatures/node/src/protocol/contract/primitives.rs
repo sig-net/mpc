@@ -58,7 +58,10 @@ impl From<mpc_contract::primitives::Participants> for Participants {
                 .participants
                 .into_iter()
                 .map(|(account_id, contract_participant_info)| {
-                    let participant_id = *contract_participants.account_to_participant_id.get(&account_id).unwrap();
+                    let participant_id = *contract_participants
+                        .account_to_participant_id
+                        .get(&account_id)
+                        .unwrap();
                     (
                         Participant::from(participant_id),
                         ParticipantInfo {

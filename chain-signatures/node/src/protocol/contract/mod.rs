@@ -5,15 +5,9 @@ use crypto_shared::PublicKey;
 use mpc_contract::ProtocolContractState;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::{collections::HashSet, str::FromStr};
 
 use self::primitives::{Candidates, Participants, PkVotes, Votes};
-use crate::protocol::ParticipantInfo;
-use cait_sith::protocol::Participant;
-use mpc_keys::hpke;
-use near_primitives::borsh::BorshDeserialize;
-use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InitializingContractState {

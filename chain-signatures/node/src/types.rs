@@ -98,7 +98,7 @@ impl ReshareProtocol {
         contract_state: &ResharingContractState,
     ) -> Result<Self, InitializationError> {
         let old_participants = contract_state.old_participants.keys_vec();
-        let mut new_participants = contract_state.new_participants.keys_vec();
+        let new_participants = contract_state.new_participants.keys_vec();
         tracing::info!(
             "reshare protocol new old participants {:?} new participants {:?} me {:?}",
             old_participants,
