@@ -723,6 +723,7 @@ impl VersionedMpcContract {
     // This function can be used to transfer the MPC network to a new contract.
     #[private]
     #[init(ignore_state)]
+    #[handle_result]
     pub fn init_running(
         epoch: u64,
         participants: BTreeMap<AccountId, ParticipantInfo>,
