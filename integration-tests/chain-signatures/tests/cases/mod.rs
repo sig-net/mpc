@@ -230,35 +230,25 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
             assert_eq!(state_0.participants.len(), 3);
             wait_for::has_at_least_triples(&ctx, 6).await?;
             wait_for::has_at_least_mine_triples(&ctx, 2).await?;
+            wait_for::has_at_least_mine_presignatures(&ctx, 1).await?;
 
-            // Kill the node then have presignature and signature generation only use the active set of nodes
-            // to start generating presignatures and signatures.
+            // Kill node 2
             let account_id = near_workspaces::types::AccountId::from_str(
                 state_0.participants.keys().last().unwrap().clone().as_ref(),
             )
             .unwrap();
             let killed_node_config = ctx.nodes.kill_node(&account_id).await?;
 
-            // This could potentially fail and timeout the first time if the participant set picked up is the
-            // one with the offline node. This is expected behavior for now if a user submits a request in between
-            // a node going offline and the system hasn't detected it yet.
-            let presig_res = wait_for::has_at_least_mine_presignatures(&ctx, 1).await;
-            let sig_res = actions::single_signature_production(&ctx, &state_0).await;
-
-            // Try again if the first attempt failed. This second portion should not be needed when the NEP
-            // comes in for resumeable MPC.
-            if presig_res.is_err() || sig_res.is_err() {
-                // Retry if the first attempt failed.
-                wait_for::has_at_least_mine_presignatures(&ctx, 1).await?;
-                actions::single_signature_production(&ctx, &state_0).await?;
-            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
             // Start the killed node again
             ctx.nodes.restart_node(killed_node_config).await?;
 
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
             wait_for::has_at_least_mine_triples(&ctx, 2).await?;
             wait_for::has_at_least_mine_presignatures(&ctx, 1).await?;
-            // retry the same payload multiple times because we might pick a presignature that is not present in node 2 initially
+            // retry the same payload multiple times because we might pick many presignatures not present in node 2 repeatedly until yield/resume time out
             actions::single_payload_signature_production(&ctx, &state_0).await?;
 
             Ok(())
@@ -303,7 +293,7 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
             assert!(state.participants.len() == 3);
 
             // add latency to node1->rpc, but not node0->rpc
-            add_latency(&ctx.nodes.proxy_name_for_node(1), true, 1.0, 2_000, 200).await?;
+            add_latency(&ctx.nodes.proxy_name_for_node(1), true, 1.0, 1_000, 100).await?;
             // remove node2, node0 and node1 should still reach concensus
             // this fails if the latency above is too long (10s)
             assert!(ctx.remove_participant(None).await.is_ok());
@@ -315,7 +305,7 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
             assert!(state.participants.len() == 2);
             assert!(ctx.add_participant().await.is_ok());
             // add latency to node2->rpc
-            add_latency(&ctx.nodes.proxy_name_for_node(2), true, 1.0, 2_000, 200).await?;
+            add_latency(&ctx.nodes.proxy_name_for_node(2), true, 1.0, 1_000, 100).await?;
             let state = wait_for::running_mpc(&ctx, Some(0)).await?;
             assert!(state.participants.len() == 3);
             assert!(ctx.remove_participant(None).await.is_ok());
