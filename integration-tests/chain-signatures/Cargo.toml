@@ -70,6 +70,3 @@ tokio = { version = "1", features = ["full"] }
 [features]
 default = []
 docker-test = []
-
-[patch."https://github.com/LIT-Protocol/cait-sith.git"]
-cait-sith = { path = "/Users/bo/workspace/cait-sith" }
