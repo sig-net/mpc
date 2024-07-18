@@ -98,14 +98,10 @@ pub struct YieldIndex {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignatureError {
-    #[error("Too many pending requests. Please, try again later.")]
-    RequestLimitExceeded,
     #[error("Signature request has timed out.")]
     Timeout,
     #[error("This sign request was removed from pending requests: timed out or completed.")]
     RequestNotInPending,
-    #[error("No promise yield has been created for this request.")]
-    RequestNotInYieldResume,
     #[error("Signature could not be verified.")]
     SignatureNotVerified,
 }
@@ -195,13 +191,13 @@ impl MpcContract {
         }
     }
 
-    fn remove_request(&mut self, request: SignatureRequest) {
+    fn remove_request(&mut self, request: SignatureRequest) -> Result<(), MpcContractError> {
         if self.pending_requests.remove(&request).is_some() {
             self.request_counter -= 1;
             Ok(())
         } else {
             Err(MpcContractError::SignatureError(
-                SignatureError::RequestNotInYieldResume,
+                SignatureError::RequestNotInPending,
             ))
         }
     }
@@ -280,11 +276,11 @@ impl VersionedMpcContract {
                         DATA_ID_REGISTER,
                     );
 
-                // Store the request in the contract's local state
-                let data_id: CryptoHash = env::read_register(DATA_ID_REGISTER)
-                    .expect("read_register failed")
-                    .try_into()
-                    .expect("conversion to CryptoHash failed");
+                    // Store the request in the contract's local state
+                    let data_id: CryptoHash = env::read_register(DATA_ID_REGISTER)
+                        .expect("read_register failed")
+                        .try_into()
+                        .expect("conversion to CryptoHash failed");
 
                     mpc_contract.add_request(&request, data_id);
 
@@ -308,7 +304,7 @@ impl VersionedMpcContract {
                     );
                     // The return value for this function call will be the value
                     // returned by the `sign_on_finish` callback.
-                    Ok(env::promise_return(final_yield_promise))
+                    env::promise_return(final_yield_promise);
                 }
             }
         }
@@ -426,16 +422,21 @@ impl VersionedMpcContract {
 
     /// This is the derived public key of the caller given path and predecessor
     /// if predecessor is not provided, it will be the caller of the contract
-    pub fn derived_public_key(&self, path: String, predecessor: Option<AccountId>) -> PublicKey {
+    #[handle_result]
+    pub fn derived_public_key(
+        &self,
+        path: String,
+        predecessor: Option<AccountId>,
+    ) -> Result<PublicKey, MpcContractError> {
         let predecessor = predecessor.unwrap_or_else(env::predecessor_account_id);
         let epsilon = derive_epsilon(&predecessor, &path);
         let derived_public_key =
-            derive_key(near_public_key_to_affine_point(self.public_key()), epsilon);
+            derive_key(near_public_key_to_affine_point(self.public_key()?), epsilon);
         let encoded_point = derived_public_key.to_encoded_point(false);
         let slice: &[u8] = &encoded_point.as_bytes()[1..65];
         let mut data: Vec<u8> = vec![near_sdk::CurveType::SECP256K1 as u8];
         data.extend(slice.to_vec());
-        PublicKey::try_from(data).unwrap()
+        Ok(PublicKey::try_from(data).unwrap())
     }
 
     /// Key versions refer new versions of the root key that we may choose to generate on cohort changes
@@ -757,7 +758,7 @@ impl VersionedMpcContract {
             }),
             pending_requests: LookupMap::new(StorageKey::PendingRequests),
             request_counter: 0,
-        })
+        }))
     }
 
     pub fn state(&self) -> &ProtocolContractState {
