@@ -13,6 +13,7 @@ use near_sdk::{
     PromiseError, PublicKey,
 };
 
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use primitives::{
     CandidateInfo, Candidates, ParticipantInfo, Participants, PkVotes, SignRequest,
     SignaturePromiseError, SignatureResult, Votes,
@@ -371,6 +372,20 @@ impl VersionedMpcContract {
             ProtocolContractState::Resharing(state) => state.public_key.clone(),
             _ => env::panic_str("public key not available (protocol is not running or resharing)"),
         }
+    }
+
+    /// This is the derived public key of the caller given path and predecessor
+    /// if predecessor is not provided, it will be the caller of the contract
+    pub fn derived_public_key(&self, path: String, predecessor: Option<AccountId>) -> PublicKey {
+        let predecessor = predecessor.unwrap_or_else(env::predecessor_account_id);
+        let epsilon = derive_epsilon(&predecessor, &path);
+        let derived_public_key =
+            derive_key(near_public_key_to_affine_point(self.public_key()), epsilon);
+        let encoded_point = derived_public_key.to_encoded_point(false);
+        let slice: &[u8] = &encoded_point.as_bytes()[1..65];
+        let mut data: Vec<u8> = vec![near_sdk::CurveType::SECP256K1 as u8];
+        data.extend(slice.to_vec());
+        PublicKey::try_from(data).unwrap()
     }
 
     /// Key versions refer new versions of the root key that we may choose to generate on cohort changes
