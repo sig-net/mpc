@@ -757,7 +757,7 @@ async fn start_resharing<C: ConsensusCtx>(
     contract_state: ResharingContractState,
 ) -> Result<NodeState, ConsensusError> {
     let me = contract_state
-        .old_participants
+        .new_participants
         .find_participant(ctx.my_account_id())
         .unwrap();
     let protocol = ReshareProtocol::new(private_share, me, &contract_state)?;
