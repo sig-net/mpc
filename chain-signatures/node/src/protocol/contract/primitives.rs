@@ -30,20 +30,6 @@ impl ParticipantInfo {
             sign_pk: near_crypto::PublicKey::empty(near_crypto::KeyType::ED25519),
         }
     }
-
-    pub fn from_contract_participant_info(
-        id: u32,
-        contract_participant_info: mpc_contract::primitives::ParticipantInfo,
-    ) -> Self {
-        Self {
-            id,
-            account_id: AccountId::from_str(contract_participant_info.account_id.as_ref()).unwrap(),
-            url: contract_participant_info.url,
-            cipher_pk: hpke::PublicKey::from_bytes(&contract_participant_info.cipher_pk),
-            sign_pk: BorshDeserialize::try_from_slice(contract_participant_info.sign_pk.as_bytes())
-                .unwrap(),
-        }
-    }
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
