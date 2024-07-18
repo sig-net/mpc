@@ -17,8 +17,8 @@ use tokio::sync::RwLock;
 // Constants to be used for testing.
 const STARTING_EPOCH: u64 = 0;
 const TRIPLE_CFG: TripleConfig = TripleConfig {
-    min_triples: 2,
-    max_triples: 10,
+    min_triples: 50,
+    max_triples: 2000,
     max_concurrent_introduction: 4,
     max_concurrent_generation: 16,
 };
@@ -163,6 +163,22 @@ impl TestTripleManagers {
 
     fn triple_storage(&self, index: usize) -> LockTripleNodeStorageBox {
         self.managers[index].triple_storage.clone()
+    }
+}
+
+#[tokio::test]
+
+pub async fn test_triple_gen() {
+    const NODES: u32 = 8;
+    // Generate 5 triples
+    let mut tm = TestTripleManagers::new(NODES, None).await;
+    for _ in 0..1024 {
+        tm.generate(0).unwrap();
+    }
+    tm.poke_until_quiet().await.unwrap();
+
+    for (me, mine_len) in tm.managers.iter().map(|m| (m.me, m.my_len())) {
+        println!("Node {me:?} has {mine_len} triples");
     }
 }
 
