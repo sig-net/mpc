@@ -122,7 +122,6 @@ pub enum ThresholdError {
     TooHigh,
 }
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum VoteError {
     #[error("Voting account is not not in the participant set.")]
@@ -250,7 +249,7 @@ impl VersionedMpcContract {
         assert!(
             deposit.as_yoctonear() >= required_deposit,
             "Insufficient deposit attached. Attached deposit: {}, required deposit: {}",
-            deposit, 
+            deposit,
             required_deposit
         );
         // Make sure sign call will not run out of gas doing recursive calls because the payload will never be removed
@@ -705,7 +704,10 @@ impl VersionedMpcContract {
 impl VersionedMpcContract {
     #[handle_result]
     #[init]
-    pub fn init(threshold: usize, candidates: BTreeMap<AccountId, CandidateInfo>) -> Result<Self, MpcContractError> {
+    pub fn init(
+        threshold: usize,
+        candidates: BTreeMap<AccountId, CandidateInfo>,
+    ) -> Result<Self, MpcContractError> {
         log!(
             "init: signer={}, threshold={}, candidates={}",
             env::signer_account_id(),
@@ -714,7 +716,7 @@ impl VersionedMpcContract {
         );
 
         if threshold > candidates.len() {
-            return Err(MpcContractError::ThresholdError(ThresholdError::TooHigh))
+            return Err(MpcContractError::ThresholdError(ThresholdError::TooHigh));
         }
 
         Ok(Self::V0(MpcContract::init(threshold, candidates)))
@@ -740,7 +742,7 @@ impl VersionedMpcContract {
         );
 
         if threshold > participants.len() {
-            return Err(MpcContractError::ThresholdError(ThresholdError::TooHigh))
+            return Err(MpcContractError::ThresholdError(ThresholdError::TooHigh));
         }
 
         Ok(Self::V0(MpcContract {
