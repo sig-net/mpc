@@ -331,7 +331,7 @@ async fn test_multichain_reshare_with_first_node_leave() -> anyhow::Result<()> {
             assert!(state.participants.len() == 3);
 
             let account_0 = near_workspaces::types::AccountId::from_str(
-                state.participants.keys().nth(0).unwrap().clone().as_ref(),
+                state.participants.keys().next().unwrap().clone().as_ref(),
             )
             .unwrap();
             // two node vote to kick node 0
