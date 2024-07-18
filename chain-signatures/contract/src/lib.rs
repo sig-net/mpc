@@ -149,19 +149,12 @@ impl MpcContract {
             signature_request,
         }) = self.yield_resume_requests.remove(&index)
         {
-            self.pending_requests.remove(&signature_request);
-            self.request_counter -= 1;
+            if self.pending_requests.remove(&signature_request).is_some() {
+                self.request_counter -= 1;
+            }
         } else {
             env::panic_str("yield resume requests do not contain this request.")
         }
-    }
-
-    fn clean_payloads(&mut self, requests: Vec<SignatureRequest>, counter: u32) {
-        log!("clean_payloads");
-        for payload in requests.iter() {
-            self.pending_requests.remove(payload);
-        }
-        self.request_counter = counter;
     }
 
     pub fn init(threshold: usize, candidates: BTreeMap<AccountId, CandidateInfo>) -> Self {
@@ -703,15 +696,6 @@ impl VersionedMpcContract {
             yield_resume_requests: LookupMap::new(StorageKey::YieldResumeRequests),
             next_available_yield_resume_request_index: 0u64,
         })
-    }
-
-    #[private]
-    pub fn clean_payloads(&mut self, requests: Vec<SignatureRequest>, counter: u32) {
-        match self {
-            Self::V0(mpc_contract) => {
-                mpc_contract.clean_payloads(requests, counter);
-            }
-        }
     }
 
     fn mutable_state(&mut self) -> &mut ProtocolContractState {
