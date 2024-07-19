@@ -11,7 +11,6 @@ pub trait ScalarExt {
     fn from_bytes(bytes: &[u8]) -> Self;
 }
 
-// TODO prevent bad scalars from beind sent
 impl ScalarExt for Scalar {
     fn from_bytes(bytes: &[u8]) -> Self {
         let bytes = U256::from_be_slice(bytes);
