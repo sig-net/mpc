@@ -118,7 +118,6 @@ pub async fn single_signature_rogue_responder(
 
     let signature = wait_for::signature_responded(ctx, tx_hash).await?;
 
-
     let mut mpc_pk_bytes = vec![0x04];
     mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
 
