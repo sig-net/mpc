@@ -122,13 +122,14 @@ pub async fn single_signature_rogue_responder(
     let mut mpc_pk_bytes = vec![0x04];
     mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
 
-    dbg!(
-        hex::encode(signature.big_r.to_encoded_point(true).to_bytes()),
-        hex::encode(signature.s.to_bytes()),
-        hex::encode(&mpc_pk_bytes),
-        hex::encode(&payload_hash),
-        account.id(),
-    );
+    // Useful for populating the "signatures_havent_changed" test's hardcoded values
+    // dbg!(
+    //     hex::encode(signature.big_r.to_encoded_point(true).to_bytes()),
+    //     hex::encode(signature.s.to_bytes()),
+    //     hex::encode(&mpc_pk_bytes),
+    //     hex::encode(&payload_hash),
+    //     account.id(),
+    // );
     assert_signature(account.id(), &mpc_pk_bytes, &payload_hash, &signature).await;
 
     Ok(())
