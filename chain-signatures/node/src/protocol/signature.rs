@@ -182,15 +182,36 @@ pub struct SignatureManager {
     completed: HashMap<PresignatureId, Instant>,
     /// Generated signatures assigned to the current node that are yet to be published.
     /// Vec<(receipt_id, msg_hash, timestamp, output)>
-    signatures: Vec<(
-        CryptoHash,
-        SignatureRequest,
-        Instant,
-        FullSignature<Secp256k1>,
-    )>,
+    signatures: Vec<ToPublish>,
     me: Participant,
     public_key: PublicKey,
     epoch: u64,
+}
+
+pub const MAX_RETRY: u8 = 10;
+pub struct ToPublish {
+    receipt_id: CryptoHash,
+    request: SignatureRequest,
+    time_added: Instant,
+    signature: FullSignature<Secp256k1>,
+    retry_count: u8,
+}
+
+impl ToPublish {
+    pub fn new(
+        receipt_id: CryptoHash,
+        request: SignatureRequest,
+        time_added: Instant,
+        signature: FullSignature<Secp256k1>,
+    ) -> ToPublish {
+        ToPublish {
+            receipt_id,
+            request,
+            time_added,
+            signature,
+            retry_count: 0,
+        }
+    }
 }
 
 impl SignatureManager {
@@ -453,7 +474,7 @@ impl SignatureManager {
                         };
                         if generator.proposer == self.me {
                             self.signatures
-                                .push((*receipt_id, request, generator.sign_request_timestamp, output));
+                                .push(ToPublish::new(*receipt_id, request, generator.sign_request_timestamp, output));
                         }
                         // Do not retain the protocol
                         return false;
@@ -547,18 +568,29 @@ impl SignatureManager {
         signer: &T,
         mpc_contract_id: &AccountId,
         my_account_id: &AccountId,
-    ) -> Result<(), near_fetch::Error> {
-        for (receipt_id, request, time_added, signature) in self.signatures.drain(..) {
+    ) {
+        let mut to_retry: Vec<ToPublish> = Vec::new();
+
+        for mut to_publish in self.signatures.drain(..) {
+            let ToPublish {
+                receipt_id,
+                request,
+                time_added,
+                signature,
+                ..
+            } = &to_publish;
             let expected_public_key = derive_key(self.public_key, request.epsilon.scalar);
             // We do this here, rather than on the client side, so we can use the ecrecover system function on NEAR to validate our signature
-            let signature = into_eth_sig(
+            let Ok(signature) = into_eth_sig(
                 &expected_public_key,
                 &signature.big_r,
                 &signature.s,
                 Scalar::from_bytes(&request.payload_hash),
-            )
-            .map_err(|_| near_fetch::Error::InvalidArgs("Failed to generate a recovery ID"))?;
-            let response = rpc_client
+            ) else {
+                tracing::error!(%receipt_id, "Failed to generate a recovery ID");
+                continue;
+            };
+            let response = match rpc_client
                 .call(signer, mpc_contract_id, "respond")
                 .args_json(serde_json::json!({
                     "request": request,
@@ -567,7 +599,30 @@ impl SignatureManager {
                 .max_gas()
                 .retry_exponential(10, 5)
                 .transact()
-                .await?;
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    tracing::error!(%receipt_id, error = ?err, "Failed to publish transaction");
+                    // Push the response to the back of the queue if it hasn't been retried the max number of times
+                    if to_publish.retry_count < MAX_RETRY {
+                        to_publish.retry_count += 1;
+                        to_retry.push(to_publish);
+                    }
+                    continue;
+                }
+            };
+
+            match response.json() {
+                Ok(()) => {
+                    tracing::info!(%receipt_id, bi_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, "published signature sucessfully")
+                }
+                Err(err) => {
+                    tracing::error!(%receipt_id, bi_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, error = ?err, "smart contract threw error");
+                    continue;
+                }
+            };
+
             crate::metrics::NUM_SIGN_SUCCESS
                 .with_label_values(&[my_account_id.as_str()])
                 .inc();
@@ -579,9 +634,9 @@ impl SignatureManager {
                     .with_label_values(&[my_account_id.as_str()])
                     .inc();
             }
-            tracing::info!(%receipt_id, big_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, status = ?response.status(), "published signature response");
         }
-        Ok(())
+        // Put the failed requests at the back of the queue
+        self.signatures.extend(to_retry);
     }
 
     /// Garbage collect all the completed signatures.
