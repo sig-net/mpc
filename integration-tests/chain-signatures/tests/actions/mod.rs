@@ -120,6 +120,15 @@ pub async fn single_signature_rogue_responder(
 
     let mut mpc_pk_bytes = vec![0x04];
     mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
+
+    // Useful for populating the "signatures_havent_changed" test's hardcoded values
+    // dbg!(
+    //     hex::encode(signature.big_r.to_encoded_point(true).to_bytes()),
+    //     hex::encode(signature.s.to_bytes()),
+    //     hex::encode(&mpc_pk_bytes),
+    //     hex::encode(&payload_hash),
+    //     account.id(),
+    // );
     assert_signature(account.id(), &mpc_pk_bytes, &payload_hash, &signature).await;
 
     Ok(())
@@ -347,22 +356,21 @@ pub async fn clear_toxics() -> anyhow::Result<()> {
     Ok(())
 }
 
+// This test hardcodes the output of the signing process and checks that everything verifies as expected
+// If you find yourself changing the constants in this test you are likely breaking backwards compatibility
 #[tokio::test]
-async fn test_signatures_verify() {
-    let big_r = "03d6d674dae94517646708cfde6e2e46a2e666e06b92eba19290eb0ca11d5e45dc";
-    let s = "2a5f2bff1b8e7da4257d480c5610d0d2c35426ee12abb87ff9c3141fe448ab27";
-    let mpc_key = "04cc5ed2a876b6fc54176bcde0805e469ac7eca43a97bfff90acd5babbef3a33b10d14fed35065a06a67b9a243169f33ab20bf9dab49cf6c1466a15349c011ca2b";
-    let account_id = "dev-20240717130550-33209224232133.test.near";
+async fn signatures_havent_changed() {
+    let big_r = "03f13a99141ce0a4043a7c02afdec6d52f25c6b3de01967acc5cf4a3fa43801589";
+    let s = "39e5631fcc06ffccf8469a3cdcdce0651ebafd998a4280ebbf5dc24a749c98fb";
+    let mpc_key = "04b5695a882aeaf36bf3933e21911b5cbcceae7fd7cb424f3ea221c7e8d390aad4ad2c1a427faec960f22a5442739c0a04fd64ab7ce4c93980417bd3d1d8bc04ea";
+    let account_id = "dev-20240719125040-80075249096169.test.near";
     let payload_hash: [u8; 32] =
-        hex::decode("7be9d96ac6895be4c59e59bb67c015f28cb94669657ddb00e8aa063f62e18031")
+        hex::decode("49f32740939bfdcbd8d1786075df7aca384381ec203975c3a6c1fd80acddcd4c")
             .unwrap()
             .try_into()
             .unwrap();
 
     let payload_hash_scalar = Scalar::from_bytes(&payload_hash);
-
-    println!("payload_hash: {payload_hash:?}");
-    println!("payload_hash_scallar: {payload_hash_scalar:#?}");
 
     // Derive and convert user pk
     let mpc_pk = hex::decode(mpc_key).unwrap();
@@ -396,12 +404,6 @@ async fn test_signatures_verify() {
 
     let signature = cait_sith::FullSignature::<Secp256k1> { big_r, s };
 
-    println!("R: {big_r:#?}");
-    println!("r: {r:#?}");
-    println!("y parity: {}", big_r_y_parity);
-    println!("s: {s:#?}");
-    println!("epsilon: {derivation_epsilon:#?}");
-
     let multichain_sig = into_eth_sig(
         &user_pk,
         &signature.big_r,
@@ -409,7 +411,6 @@ async fn test_signatures_verify() {
         payload_hash_scalar,
     )
     .unwrap();
-    println!("{multichain_sig:#?}");
 
     // Check signature using cait-sith tooling
     let is_signature_valid_for_user_pk = signature.verify(&user_pk, &payload_hash_scalar);
