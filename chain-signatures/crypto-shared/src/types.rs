@@ -1,6 +1,6 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use k256::{
-    elliptic_curve::{scalar::FromUintUnchecked, CurveArithmetic},
+    elliptic_curve::{bigint::ArrayEncoding, CurveArithmetic, PrimeField},
     AffinePoint, Scalar, Secp256k1, U256,
 };
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,8 @@ pub trait ScalarExt {
 // TODO prevent bad scalars from beind sent
 impl ScalarExt for Scalar {
     fn from_bytes(bytes: &[u8]) -> Self {
-        Scalar::from_uint_unchecked(U256::from_be_slice(bytes))
+        let bytes = U256::from_be_slice(bytes);
+        Scalar::from_repr(bytes.to_be_byte_array()).expect("Byte conversion to scalar failed")
     }
 }
 
