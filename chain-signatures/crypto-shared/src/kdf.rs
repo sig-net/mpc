@@ -3,10 +3,10 @@ use anyhow::Context;
 use k256::{
     ecdsa::{RecoveryId, Signature, VerifyingKey},
     elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
-    sha2::{Digest, Sha256},
     Scalar, Secp256k1, SecretKey,
 };
 use near_account_id::AccountId;
+use sha3::{Digest, Sha3_256};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // near-mpc-recovery with key derivation protocol vX.Y.Z.
@@ -20,7 +20,7 @@ pub fn derive_epsilon(predecessor_id: &AccountId, path: &str) -> Scalar {
     // of the accound id in the trie key. We reuse the same constant to
     // indicate the end of the account id in derivation path.
     let derivation_path = format!("{EPSILON_DERIVATION_PREFIX}{},{}", predecessor_id, path);
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha3_256::new();
     hasher.update(derivation_path);
     Scalar::from_bytes(&hasher.finalize())
 }
