@@ -9,7 +9,7 @@ use k256::elliptic_curve::point::DecompressPoint;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{AffinePoint, FieldBytes, Scalar, Secp256k1};
 use mpc_contract::primitives::{CandidateInfo, ParticipantInfo, SignRequest};
-use mpc_contract::SignatureRequest;
+use mpc_contract::{errors, SignatureRequest};
 use near_sdk::NearToken;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{AccountId, Contract, Worker};
@@ -252,7 +252,9 @@ async fn test_contract_sign_request() -> anyhow::Result<()> {
     let err = sign_and_validate(&request, None, &contract)
         .await
         .expect_err("should have failed with timeout");
-    assert!(err.to_string().contains("Signature request has timed out"));
+    assert!(err
+        .to_string()
+        .contains(&errors::MpcContractError::SignError(errors::SignError::Timeout).to_string()));
 
     Ok(())
 }
@@ -295,19 +297,19 @@ async fn test_contract_sign_request_deposits() -> anyhow::Result<()> {
         .transact()
         .await?;
     dbg!(&respond);
-    assert!(respond
-        .into_result()
-        .unwrap_err()
-        .to_string()
-        .contains("timed out or completed"));
+    assert!(respond.into_result().unwrap_err().to_string().contains(
+        &errors::MpcContractError::RespondError(errors::RespondError::RequestNotInPending)
+            .to_string()
+    ));
 
     let execution = status.await?;
     dbg!(&execution);
-    assert!(execution
-        .into_result()
-        .unwrap_err()
+    assert!(execution.into_result().unwrap_err().to_string().contains(
+        &errors::MpcContractError::SignError(errors::SignError::DepositInsufficient(
+            "1".to_string()
+        ))
         .to_string()
-        .contains("required deposit: 1"));
+    ));
 
     Ok(())
 }
