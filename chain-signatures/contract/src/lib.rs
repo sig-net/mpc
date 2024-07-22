@@ -630,7 +630,7 @@ impl VersionedMpcContract {
     #[init(ignore_state)]
     pub fn init_running(
         epoch: u64,
-        participants: BTreeMap<AccountId, ParticipantInfo>,
+        participants: Participants,
         threshold: usize,
         public_key: PublicKey,
     ) -> Self {
@@ -646,7 +646,7 @@ impl VersionedMpcContract {
         Self::V0(MpcContract {
             protocol_state: ProtocolContractState::Running(RunningContractState {
                 epoch,
-                participants: Participants::from_init_participants(participants),
+                participants: participants,
                 threshold,
                 public_key,
                 candidates: Candidates::new(),

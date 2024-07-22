@@ -94,18 +94,6 @@ impl Participants {
         }
     }
 
-    pub fn from_init_participants(participants: BTreeMap<AccountId, ParticipantInfo>) -> Self {
-        Participants {
-            participants: participants.clone(),
-            next_id: participants.len().try_into().unwrap(),
-            account_to_participant_id: participants
-                .into_iter()
-                .enumerate()
-                .map(|(i, (account_id, _))| (account_id, i.try_into().unwrap()))
-                .collect(),
-        }
-    }
-
     pub fn contains_key(&self, account_id: &AccountId) -> bool {
         self.participants.contains_key(account_id)
     }
