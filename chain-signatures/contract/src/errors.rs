@@ -1,36 +1,40 @@
+use near_sdk::Gas;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SignError {
     #[error("Signature request has timed out.")]
     Timeout,
-    #[error("Signature request has already been submitted. Please, try again later.")]
+    #[error("Signature request has already been submitted. Please try again later.")]
     PayloadCollision,
-    #[error("Payload hash cannot be convereted to Scalar.")]
-    PayloadMalform,
-    #[error("Contract version is greater than allowed.")]
-    VersionTooHigh,
-    #[error("Attached deposit is lower than required: {0}.")]
-    DepositInsufficient(String),
-    #[error("Provided gas is lower than required: {0}.")]
-    GasInsufficient(String),
-    #[error("Too many pending requests. Please, try again later.")]
+    #[error("Malformed payload: {0}")]
+    MalformedPayload(String),
+    #[error(
+        "This key version is not supported. Call latest_key_version() to get the latest supported version."
+    )]
+    UnsupportedKeyVersion,
+    #[error("Attached deposit is lower than required. Attached: {0}, Required: {1}.")]
+    InsufficientDeposit(u128, u128),
+    #[error("Provided gas is lower than required. Provided: {0}, required {1}.")]
+    InsufficientGas(Gas, Gas),
+    #[error("Too many pending requests. Please try again later.")]
     RequestLimitExceeded,
-    #[error("This sign request was removed from pending requests: timed out or completed.")]
-    RequestNotInPending,
+    #[error("This sign request has timed out, was completed, or never existed.")]
+    RequestNotFound,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum RespondError {
-    #[error("This sign request was removed from pending requests: timed out or completed.")]
-    RequestNotInPending,
-    #[error("Signature could not be verified.")]
-    SignatureNotVerified,
-    #[error("Protocol state is not running.")]
-    ProtocolStateNotRunning,
+    #[error("This sign request has timed out, was completed, or never existed.")]
+    RequestNotFound,
+    #[error("The provided signature is invalid.")]
+    InvalidSignature,
+    #[error("The protocol is not Running.")]
+    ProtocolNotInRunningState,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum JoinError {
-    #[error("Protocol state is not running")]
+    #[error("The protocol is not Running.")]
     ProtocolStateNotRunning,
 }
 
@@ -50,20 +54,20 @@ pub enum InitError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum VoteError {
-    #[error("Voting account is not not in the participant set.")]
+    #[error("Voting account is not in the participant set.")]
     VoterNotParticipant,
-    #[error("Account to be kicked is not not in the participant set.")]
+    #[error("Account to be kicked is not in the participant set.")]
     KickNotParticipant,
-    #[error("Account to join is not not in the candidates set.")]
+    #[error("Account to join is not in the candidate set.")]
     JoinNotCandidate,
     #[error("Account to join is already in the participant set.")]
     JoinAlreadyParticipant,
     #[error("Mismatched epoch.")]
-    MismatchedEpoch,
+    EpochMismatch,
     #[error("Number of participants cannot go below threshold.")]
     ParticipantsBelowThreshold,
-    #[error("Protocol state is not the expected: {0}")]
-    ProtocolStateNotExpected(String),
+    #[error("Unexpected protocol state: {0}")]
+    UnexpectedProtocolState(String),
 }
 
 #[derive(Debug, thiserror::Error)]
