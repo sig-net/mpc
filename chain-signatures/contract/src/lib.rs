@@ -14,8 +14,8 @@ use near_sdk::{
 };
 
 use primitives::{
-    CandidateInfo, Candidates, ParticipantInfo, Participants, PkVotes, SignRequest,
-    SignaturePromiseError, SignatureResult, Votes,
+    CandidateInfo, Candidates, Participants, PkVotes, SignRequest, SignaturePromiseError,
+    SignatureResult, Votes,
 };
 use std::collections::{BTreeMap, HashSet};
 
