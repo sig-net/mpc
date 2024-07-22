@@ -8,7 +8,7 @@ use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::point::DecompressPoint;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{AffinePoint, FieldBytes, Scalar, Secp256k1};
-use mpc_contract::primitives::{CandidateInfo, ParticipantInfo, SignRequest};
+use mpc_contract::primitives::{CandidateInfo, ParticipantInfo, Participants, SignRequest};
 use mpc_contract::SignatureRequest;
 use near_sdk::NearToken;
 use near_workspaces::network::Sandbox;
@@ -16,7 +16,7 @@ use near_workspaces::{AccountId, Contract, Worker};
 use signature::digest::{Digest, FixedOutput};
 use signature::DigestSigner;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
 const CONTRACT_FILE_PATH: &str = "../../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
@@ -52,10 +52,19 @@ async fn init_with_candidates(pk: Option<near_crypto::PublicKey>) -> (Worker<San
     let candidates = candidates();
 
     let init = if let Some(pk) = pk {
-        let participants = candidates
+        let participants_map = candidates
             .into_iter()
             .map(|(k, v)| (k, Into::<ParticipantInfo>::into(v)))
-            .collect::<HashMap<_, _>>();
+            .collect::<BTreeMap<_, _>>();
+        let participants = Participants {
+            next_id: participants_map.len().try_into().unwrap(),
+            participants: participants_map.clone(),
+            account_to_participant_id: participants_map
+                .into_iter()
+                .enumerate()
+                .map(|(id, (account_id, _))| (account_id, id.try_into().unwrap()))
+                .collect(),
+        };
         contract
             .call("init_running")
             .args_json(serde_json::json!({
