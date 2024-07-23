@@ -20,8 +20,8 @@ use errors::{
 };
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use primitives::{
-    CandidateInfo, Candidates, ParticipantInfo, Participants, PkVotes, SignRequest,
-    SignaturePromiseError, SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex,
+    CandidateInfo, Candidates, Participants, PkVotes, SignRequest, SignaturePromiseError,
+    SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex,
 };
 use std::collections::{BTreeMap, HashSet};
 

@@ -9,7 +9,9 @@ use k256::elliptic_curve::point::DecompressPoint;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{AffinePoint, FieldBytes, Scalar, Secp256k1};
 use mpc_contract::errors;
-use mpc_contract::primitives::{CandidateInfo, ParticipantInfo, Participants, SignRequest, SignatureRequest};
+use mpc_contract::primitives::{
+    CandidateInfo, ParticipantInfo, Participants, SignRequest, SignatureRequest,
+};
 use near_sdk::NearToken;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{AccountId, Contract, Worker};
