@@ -516,7 +516,7 @@ impl PresignatureManager {
         });
 
         if !errors.is_empty() {
-            tracing::warn!(?errors, "faled to generate some presignatures");
+            tracing::warn!(?errors, "failed to generate some presignatures");
         }
 
         messages

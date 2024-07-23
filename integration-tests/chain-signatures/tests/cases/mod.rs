@@ -32,7 +32,7 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
             let new_state = wait_for::running_mpc(&ctx, None).await?;
             wait_for::has_at_least_triples(&ctx, 2).await?;
             wait_for::has_at_least_presignatures(&ctx, 2).await?;
-            actions::single_signature_production(&ctx, &new_state).await
+            actions::single_payload_signature_production(&ctx, &new_state).await
         })
     })
     .await
@@ -315,7 +315,7 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
             let new_state = wait_for::running_mpc(&ctx, None).await?;
             wait_for::has_at_least_triples(&ctx, 2).await?;
             wait_for::has_at_least_presignatures(&ctx, 2).await?;
-            actions::single_signature_production(&ctx, &new_state).await
+            actions::single_payload_signature_production(&ctx, &new_state).await
         })
     })
     .await
