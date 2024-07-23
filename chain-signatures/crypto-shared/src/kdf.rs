@@ -26,6 +26,25 @@ pub fn derive_epsilon(predecessor_id: &AccountId, path: &str) -> Scalar {
     Scalar::from_non_biased(hash)
 }
 
+#[test]
+fn epsilon_is_unhanged() {
+    use std::str::FromStr;
+    let found = derive_epsilon(&AccountId::from_str("daveo.near").unwrap(), "path").to_bytes();
+    let expected = [
+        139, 59, 134, 24, 230, 75, 108, 230, 121, 119, 247, 29, 39, 55, 107, 133, 88, 9, 172, 193,
+        188, 48, 221, 147, 235, 30, 83, 15, 248, 85, 68, 95,
+    ];
+    assert_eq!(found, expected.into());
+}
+
+pub fn fee_epsilon() -> Scalar {
+    const FEE_DERIVATION_PATH: &str = "near-mpc-recovery v0.1.0 fees:";
+    let mut hasher = Sha3_256::new();
+    hasher.update(FEE_DERIVATION_PATH);
+    let hash: [u8; 32] = hasher.finalize().into();
+    Scalar::from_non_biased(hash)
+}
+
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
     (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key).to_affine()
 }
