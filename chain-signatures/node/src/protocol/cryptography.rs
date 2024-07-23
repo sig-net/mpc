@@ -90,7 +90,7 @@ impl CryptographicProtocol for GeneratingState {
             match action {
                 Action::Wait => {
                     drop(protocol);
-                    tracing::debug!("generating: waiting");
+                    tracing::trace!("generating: waiting");
                     let failures = self
                         .messages
                         .write()
@@ -232,16 +232,18 @@ impl CryptographicProtocol for ResharingState {
                 Ok(action) => action,
                 Err(err) => {
                     drop(protocol);
+                    tracing::debug!("got action fail, {}", err);
                     if let Err(refresh_err) = self.protocol.refresh().await {
                         tracing::warn!(?refresh_err, "unable to refresh reshare protocol");
                     }
                     return Err(err)?;
                 }
             };
+            tracing::debug!("got action ok");
             match action {
                 Action::Wait => {
                     drop(protocol);
-                    tracing::debug!("resharing: waiting");
+                    tracing::trace!("resharing: waiting");
                     let failures = self
                         .messages
                         .write()

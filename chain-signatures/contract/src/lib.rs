@@ -20,8 +20,8 @@ use errors::{
 };
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use primitives::{
-    CandidateInfo, Candidates, ParticipantInfo, Participants, PkVotes, SignRequest,
-    SignaturePromiseError, SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex,
+    CandidateInfo, Candidates, Participants, PkVotes, SignRequest, SignaturePromiseError,
+    SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex,
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -573,7 +573,7 @@ impl VersionedMpcContract {
     #[handle_result]
     pub fn init_running(
         epoch: u64,
-        participants: BTreeMap<AccountId, ParticipantInfo>,
+        participants: Participants,
         threshold: usize,
         public_key: PublicKey,
     ) -> Result<Self, MpcContractError> {
@@ -593,7 +593,7 @@ impl VersionedMpcContract {
         Ok(Self::V0(MpcContract {
             protocol_state: ProtocolContractState::Running(RunningContractState {
                 epoch,
-                participants: Participants { participants },
+                participants,
                 threshold,
                 public_key,
                 candidates: Candidates::new(),
