@@ -1,0 +1,71 @@
+#+title: Chain Signatures Deep Dive
+#+bibliography: Papers.bib
+
+* Who is this for
+
+This is for people who want to know how Chain Signature's works, not how to use it. If you want to know how to use it please refer to our API Documentation, our set of use cases or our announcement post. [Insert links]
+
+* What is Chain Signatures
+
+Chain signatures is three things
+
+* Signing Protocol
+
+The signing protocol is based on a slightly modified version of [[https://github.com/LIT-Protocol/cait-sith][Cait-Sith]]. First I'd like to thank the great work that Lúcás Meier and the Lit protocol team have done writing, documenting and supporting us using that library.
+
+** Distributed Key Generation
+
+** Beaver triples & Presignatures
+
+A strength of this protocol is that the bulk of the work for a signature can be done before a signing request is sent.
+
+** Signatures
+
+** Key Derivation
+
+*** How
+
+The key derivation scheme is as follows.
+
+First [[https://github.com/near/mpc-recovery/blob/ce157c4f4095c3ff1d5c5dc49455da3ee3799410/chain-signatures/crypto-shared/src/kdf.rs#L15-L27][generate a scalar ϵ]] in the field of secp256k1
+
+#+begin_src
+derivation_path : String = "{EPSILON_DERIVATION_PREFIX}{predecessor_id},{path}";
+hash : [u8; 32] = sha3_256(derivation_path);
+ϵ : secp256k1::Scalar = from_big_endian(hash)
+#+end_src
+
+When generating the private key, [[https://github.com/near/mpc-recovery/blob/ce157c4f4095c3ff1d5c5dc49455da3ee3799410/chain-signatures/crypto-shared/src/kdf.rs#L33-L35][we perform a homomorphic addition]] over secp256k1 across T nodes
+
+#+begin_src
+derived_key = secret_key + ϵ
+#+end_src
+
+Since the public key can be derived using the generator point G
+
+#+begin_src
+public_key = G * secret_key
+#+end_src
+
+Therefore the [[https://github.com/near/mpc-recovery/tree/ce157c4f4095c3ff1d5c5dc49455da3ee3799410/chain-signatures/crypto-shared/src/kdf.rs][derived public key can be calculated]] without the secret key
+
+#+begin_src
+derived_public_key
+    = G * derived_key
+    = G * (secret_key + ϵ)
+    = public_key + G * e
+#+end_src
+
+There exists a proof of the security of a model of additive key derivation with presignatures in [cite:@GrothAndShoup]. That isn't quite our model, but the proof mostly translates since we have both of those properties. To avoid the attacks described in the paper we use re-randomization of the presignatures using a delta value.
+
+The properties we require for a delta value are:
+1) It must be unpredictable at the point of the creation of the signature request
+2) It must be unique for each request
+
+We use a combination of the NEAR networks VRF, a hash of the request (which is guaranteed to be unique) and the presignature R value to generate this delta tweak. Collectively they follow both of these properties.
+
+** Key Resharing
+
+* Node Operators
+
+* The Signing Contract
