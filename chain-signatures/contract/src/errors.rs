@@ -36,6 +36,8 @@ pub enum RespondError {
 pub enum JoinError {
     #[error("The protocol is not Running.")]
     ProtocolStateNotRunning,
+    #[error("Account to join is already in the participant set.")]
+    JoinAlreadyParticipant,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -62,8 +64,6 @@ pub enum VoteError {
     KickNotParticipant,
     #[error("Account to join is not in the candidate set.")]
     JoinNotCandidate,
-    #[error("Account to join is already in the participant set.")]
-    JoinAlreadyParticipant,
     #[error("Mismatched epoch.")]
     EpochMismatch,
     #[error("Number of participants cannot go below threshold.")]
@@ -78,30 +78,24 @@ pub enum VoteError {
     Unexpected(String),
 }
 
-impl near_sdk::FunctionError for VoteError {
-    fn panic(&self) -> ! {
-        crate::env::panic_str(&self.to_string())
-    }
+// Macro to implement near_sdk::FunctionError
+macro_rules! impl_function_error {
+    ($($error_type:ty),*) => {
+        $(
+            impl near_sdk::FunctionError for $error_type {
+                fn panic(&self) -> ! {
+                    crate::env::panic_str(&self.to_string())
+                }
+            }
+        )*
+    };
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum MpcContractError {
-    #[error("sign fn error: {0}")]
-    SignError(SignError),
-    #[error("respond fn error: {0}")]
-    RespondError(RespondError),
-    #[error("vote_* fn error: {0}")]
-    VoteError(#[from] VoteError),
-    #[error("init fn error: {0}")]
-    InitError(InitError),
-    #[error("join fn error: {0}")]
-    JoinError(JoinError),
-    #[error("public_key fn error: {0}")]
-    PublicKeyError(PublicKeyError),
-}
-
-impl near_sdk::FunctionError for MpcContractError {
-    fn panic(&self) -> ! {
-        crate::env::panic_str(&self.to_string())
-    }
-}
+impl_function_error!(
+    SignError,
+    RespondError,
+    JoinError,
+    PublicKeyError,
+    InitError,
+    VoteError
+);

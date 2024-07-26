@@ -113,7 +113,7 @@ pub async fn single_signature_rogue_responder(
     let err = wait_for::rogue_message_responded(ctx, rogue_hash).await?;
 
     assert!(err.contains(
-        &errors::MpcContractError::RespondError(errors::RespondError::InvalidSignature).to_string()
+        &errors::RespondError::InvalidSignature.to_string()
     ));
 
     let signature = wait_for::signature_responded(ctx, tx_hash).await?;

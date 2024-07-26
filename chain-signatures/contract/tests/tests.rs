@@ -9,7 +9,7 @@ use k256::elliptic_curve::point::DecompressPoint;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{AffinePoint, FieldBytes, Scalar, Secp256k1};
 use mpc_contract::config::{Config, ProtocolConfig};
-use mpc_contract::errors::{self, MpcContractError};
+use mpc_contract::errors;
 use mpc_contract::primitives::{
     CandidateInfo, ParticipantInfo, Participants, SignRequest, SignatureRequest,
 };
@@ -291,7 +291,7 @@ async fn test_contract_sign_request() -> anyhow::Result<()> {
         .expect_err("should have failed with timeout");
     assert!(err
         .to_string()
-        .contains(&errors::MpcContractError::SignError(errors::SignError::Timeout).to_string()));
+        .contains(&errors::SignError::Timeout.to_string()));
 
     Ok(())
 }
@@ -334,16 +334,19 @@ async fn test_contract_sign_request_deposits() -> anyhow::Result<()> {
         .transact()
         .await?;
     dbg!(&respond);
-    assert!(respond.into_result().unwrap_err().to_string().contains(
-        &errors::MpcContractError::RespondError(errors::RespondError::RequestNotFound).to_string()
-    ));
+    assert!(respond
+        .into_result()
+        .unwrap_err()
+        .to_string()
+        .contains(&errors::RespondError::RequestNotFound.to_string()));
 
     let execution = status.await?;
     dbg!(&execution);
-    assert!(execution.into_result().unwrap_err().to_string().contains(
-        &errors::MpcContractError::SignError(errors::SignError::InsufficientDeposit(0, 1))
-            .to_string()
-    ));
+    assert!(execution
+        .into_result()
+        .unwrap_err()
+        .to_string()
+        .contains(&errors::SignError::InsufficientDeposit(0, 1).to_string()));
 
     Ok(())
 }
@@ -423,7 +426,7 @@ async fn test_propose_update_config(contract: &Contract, accounts: &[Account]) {
         .into_result()
         .unwrap_err()
         .to_string()
-        .contains(&MpcContractError::from(errors::VoteError::VoterNotParticipant).to_string()));
+        .contains(&errors::VoteError::VoterNotParticipant.to_string()));
 
     // have each participant propose a new update:
     let new_config = serde_json::json!(Config {
