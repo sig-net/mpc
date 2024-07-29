@@ -40,3 +40,11 @@ jobs:
         env:
           RUST_LOG: INFO
           RUST_BACKTRACE: 1
+
+      - name: Build Deploy Checker
+        working-directory: infra/scripts/deploy
+        run: cargo build --release
+
+      - name: Run Deploy Checker
+        working-directory: infra/scripts/deploy
+        run: cargo run --release -- check --network testnet --mpc-contract-id "v5.multichain-mpc-dev.testnet"

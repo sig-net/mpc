@@ -660,6 +660,34 @@ impl VersionedMpcContract {
     #[init(ignore_state)]
     #[handle_result]
     pub fn migrate() -> Result<Self, MpcContractError> {
+        if cfg!(feature = "dev") {
+            // try to load state, if it doesn't work, then we need to do migration for dev.
+            // NOTE: that since we're in dev, there will be many changes. If state was able
+            // to be loaded successfully, then that means a migration was not necessary and
+            // the developer did not change the contract state.
+            let data = env::storage_read(b"STATE")
+                .ok_or_else(|| MpcContractError::InitError(InitError::ContractStateIsMissing))?;
+
+            let Ok(loaded) = MpcContract::try_from_slice(&data) else {
+                // NOTE: for any PRs that have this error, change the code in this block so we can keep
+                // our dev environment not broken.
+
+                return Err(MpcContractError::InitError(
+                    InitError::ContractStateIsBroken,
+                ));
+            };
+
+            return Ok(VersionedMpcContract::V0(loaded));
+        }
+
+        if cfg!(feature = "testnet") {
+            // Future state breaking changes for testnet should be here
+            return Err(MpcContractError::InitError(
+                InitError::ContractStateIsBroken,
+            ));
+        }
+
+        // Future state breaking changes for testnet and mainnet should be here
         let old: MpcContract = env::state_read().ok_or(MpcContractError::InitError(
             InitError::ContractStateIsMissing,
         ))?;
