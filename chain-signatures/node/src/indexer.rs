@@ -150,61 +150,80 @@ async fn handle_block(
     let mut pending_requests = Vec::new();
     for action in block.actions().cloned().collect::<Vec<_>>() {
         if action.receiver_id() == ctx.mpc_contract_id {
-            let receipt =
-                anyhow::Context::with_context(block.receipt_by_id(&action.receipt_id()), || {
-                    format!(
-                        "indexer unable to find block for receipt_id={}",
-                        action.receipt_id()
-                    )
-                })?;
+            // let receipt =
+            //     anyhow::Context::with_context(block.receipt_by_id(&action.receipt_id()), || {
+            //         format!(
+            //             "indexer unable to find block for receipt_id={}",
+            //             action.receipt_id()
+            //         )
+            //     })?;
+            let Some(receipt) = block.receipt_by_id(&action.receipt_id()) else {
+                tracing::warn!(hash = ?action.receipt_id(), "unable to process block");
+                continue;
+            };
+
             let ExecutionStatus::SuccessReceiptId(receipt_id) = receipt.status() else {
                 continue;
             };
             if let Some(function_call) = action.as_function_call() {
                 if function_call.method_name() == "sign" {
-                    if let Ok(arguments) =
-                        serde_json::from_slice::<'_, SignArguments>(function_call.args())
-                    {
-                        if receipt.logs().is_empty() {
-                            tracing::warn!("`sign` did not produce entropy");
-                            continue;
-                        }
-                        let payload = Scalar::from_bytes(arguments.request.payload)
-                            .context("Payload cannot be converted to scalar, not in k256 field")?;
-                        let Ok(entropy) = serde_json::from_str::<'_, [u8; 32]>(&receipt.logs()[1])
-                        else {
+                    let parsed = serde_json::from_slice::<'_, SignArguments>(function_call.args());
+                    let arguments = match parsed {
+                        Ok(arguments) => arguments,
+                        Err(err) => {
                             tracing::warn!(
-                                "`sign` did not produce entropy correctly: {:?}",
-                                receipt.logs()[0]
+                                "failed to parse `sign` arguments: {:?} error: {:?}",
+                                function_call.args(),
+                                err
                             );
                             continue;
-                        };
-                        let epsilon =
-                            derive_epsilon(&action.predecessor_id(), &arguments.request.path);
-                        let delta = kdf::derive_delta(receipt_id, entropy);
-                        tracing::info!(
-                            receipt_id = %receipt_id,
-                            caller_id = receipt.predecessor_id().to_string(),
-                            our_account = ctx.node_account_id.to_string(),
-                            payload = hex::encode(arguments.request.payload),
-                            key_version = arguments.request.key_version,
-                            entropy = hex::encode(entropy),
-                            "indexed new `sign` function call"
-                        );
-                        let request = ContractSignRequest {
-                            payload,
-                            path: arguments.request.path,
-                            key_version: arguments.request.key_version,
-                        };
-                        pending_requests.push(SignRequest {
-                            receipt_id,
-                            request,
-                            epsilon,
-                            delta,
-                            entropy,
-                            time_added: Instant::now(),
-                        });
+                        }
+                    };
+
+                    if receipt.logs().is_empty() {
+                        tracing::warn!("`sign` did not produce entropy");
+                        continue;
                     }
+                    let Some(payload) = Scalar::from_bytes(arguments.request.payload) else {
+                        tracing::warn!(
+                            "`sign` did not produce payload correctly: {:?}",
+                            arguments.request.payload,
+                        );
+                        continue;
+                    };
+                    // .context("Payload cannot be converted to scalar, not in k256 field")?;
+                    let Ok(entropy) = serde_json::from_str::<'_, [u8; 32]>(&receipt.logs()[1])
+                    else {
+                        tracing::warn!(
+                            "`sign` did not produce entropy correctly: {:?}",
+                            receipt.logs()[0]
+                        );
+                        continue;
+                    };
+                    let epsilon = derive_epsilon(&action.predecessor_id(), &arguments.request.path);
+                    let delta = kdf::derive_delta(receipt_id, entropy);
+                    tracing::info!(
+                        receipt_id = %receipt_id,
+                        caller_id = receipt.predecessor_id().to_string(),
+                        our_account = ctx.node_account_id.to_string(),
+                        payload = hex::encode(arguments.request.payload),
+                        key_version = arguments.request.key_version,
+                        entropy = hex::encode(entropy),
+                        "indexed new `sign` function call"
+                    );
+                    let request = ContractSignRequest {
+                        payload,
+                        path: arguments.request.path,
+                        key_version: arguments.request.key_version,
+                    };
+                    pending_requests.push(SignRequest {
+                        receipt_id,
+                        request,
+                        epsilon,
+                        delta,
+                        entropy,
+                        time_added: Instant::now(),
+                    });
                 }
             }
         }
@@ -229,7 +248,7 @@ async fn handle_block(
     }
     drop(queue);
 
-    if block.block_height() % 1000 == 0 {
+    if block.block_height() % 200 == 0 {
         tracing::info!(block_height = block.block_height(), "indexed block");
     }
     Ok(())

@@ -100,6 +100,35 @@ async fn test_signature_basic() -> anyhow::Result<()> {
 }
 
 #[test(tokio::test)]
+async fn test_signature_multiple_requests() -> anyhow::Result<()> {
+    with_multichain_nodes(MultichainConfig::default(), |ctx| {
+        Box::pin(async move {
+            let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
+            assert_eq!(state_0.participants.len(), 3);
+            wait_for::has_at_least_mine_presignatures(&ctx, 5).await?;
+            actions::signature_production(&ctx, &state_0, 5).await?;
+
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[test(tokio::test)]
+async fn test_signature_multiple_requests_sign_first() -> anyhow::Result<()> {
+    with_multichain_nodes(MultichainConfig::default(), |ctx| {
+        Box::pin(async move {
+            let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
+            assert_eq!(state_0.participants.len(), 3);
+
+            actions::signature_production(&ctx, &state_0, 3).await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[test(tokio::test)]
 async fn test_signature_offline_node() -> anyhow::Result<()> {
     with_multichain_nodes(MultichainConfig::default(), |mut ctx| {
         Box::pin(async move {
@@ -147,7 +176,8 @@ async fn test_key_derivation() -> anyhow::Result<()> {
 
             for _ in 0..3 {
                 let mpc_pk: k256::AffinePoint = state_0.public_key.clone().into_affine_point();
-                let (_, payload_hashed, account, tx_hash) = actions::request_sign(&ctx).await?;
+                let (account, signer) = actions::new_account(&ctx).await?;
+                let (_, payload_hashed, tx_hash) = actions::request_sign(&ctx, &signer).await?;
                 let sig = wait_for::signature_responded(&ctx, tx_hash).await?;
 
                 let hd_path = "test";

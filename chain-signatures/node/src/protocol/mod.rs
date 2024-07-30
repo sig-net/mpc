@@ -214,7 +214,6 @@ impl MpcSignProtocol {
 
         loop {
             let protocol_time = Instant::now();
-            tracing::debug!("trying to advance chain signatures protocol");
             loop {
                 let msg_result = self.receiver.try_recv();
                 match msg_result {
@@ -283,16 +282,14 @@ impl MpcSignProtocol {
                 guard.clone()
             };
 
+            let view = crate::web::StateView::from(&state).await;
+            tracing::debug!("current view: {view:#?}");
+
             let crypto_time = Instant::now();
-            tracing::debug!("State progress. Node state: {}", state);
             let mut state = match state.progress(&mut self).await {
-                Ok(state) => {
-                    tracing::debug!("Progress ok. New state: {}", state);
-                    state
-                }
+                Ok(state) => state,
                 Err(err) => {
-                    tracing::debug!("Progress error. State not changed");
-                    tracing::info!("protocol unable to progress: {err:?}");
+                    tracing::warn!("protocol unable to progress: {err:?}");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
@@ -303,19 +300,14 @@ impl MpcSignProtocol {
 
             let consensus_time = Instant::now();
             if let Some(contract_state) = contract_state {
-                tracing::debug!(
-                    "State advance. Node state: {}, contract state: {:?}",
-                    state,
-                    contract_state
-                );
+                // let from_state = format!("{state}");
                 state = match state.advance(&mut self, contract_state).await {
                     Ok(state) => {
-                        tracing::debug!("Advance ok. New node state: {}", state);
+                        // tracing::debug!("advance ok. {from_state} => {state}");
                         state
                     }
                     Err(err) => {
-                        tracing::debug!("Advance error. State not changed");
-                        tracing::info!("protocol unable to advance: {err:?}");
+                        tracing::warn!("protocol unable to advance: {err:?}");
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }

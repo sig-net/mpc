@@ -127,9 +127,56 @@ pub enum StateView {
     NotRunning,
 }
 
+impl StateView {
+    pub async fn from(state: &NodeState) -> Option<Self> {
+        match state {
+            NodeState::Running(state) => {
+                let triple_manager_read = state.triple_manager.read().await;
+                let triple_potential_count = triple_manager_read.potential_len();
+                let triple_count = triple_manager_read.len();
+                let triple_mine_count = triple_manager_read.my_len();
+                let presignature_read = state.presignature_manager.read().await;
+                let presignature_count = presignature_read.len();
+                let presignature_mine_count = presignature_read.my_len();
+                let presignature_potential_count = presignature_read.potential_len();
+                let participants = state.participants.keys_vec();
+
+                Some(StateView::Running {
+                    participants,
+                    triple_count,
+                    triple_mine_count,
+                    triple_potential_count,
+                    presignature_count,
+                    presignature_mine_count,
+                    presignature_potential_count,
+                    latest_block_height: 0,
+                    is_stable: true,
+                })
+            }
+            NodeState::Resharing(state) => {
+                let old_participants = state.old_participants.keys_vec();
+                let new_participants = state.new_participants.keys_vec();
+                Some(StateView::Resharing {
+                    old_participants,
+                    new_participants,
+                    latest_block_height: 0,
+                    is_stable: true,
+                })
+            }
+            NodeState::Joining(state) => {
+                let participants = state.participants.keys_vec();
+                Some(StateView::Joining {
+                    participants,
+                    latest_block_height: 0,
+                })
+            }
+            _ => Some(StateView::NotRunning),
+        }
+    }
+}
+
 #[tracing::instrument(level = "debug", skip_all)]
 async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
-    tracing::debug!("fetching state");
     let latest_block_height = state.indexer.latest_block_height().await;
     let is_stable = state.indexer.is_on_track().await;
     let protocol_state = state.protocol_state.read().await;
