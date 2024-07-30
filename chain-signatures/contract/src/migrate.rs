@@ -11,6 +11,10 @@ use crate::errors::{InitError, MpcContractError};
 use crate::primitives::{SignatureRequest, YieldIndex};
 use crate::{update, MpcContract, ProtocolContractState, VersionedMpcContract};
 
+// NOTE: All the custom `BorshDeserialize` implementations are necessary for debugging purposes
+// in case the migration fails. This way we can log the error and get details about what went wrong
+// during the deserialization step.
+
 #[derive(BorshDeserialize)]
 pub struct OldConfig {
     pub triple_timeout: u64,
@@ -29,13 +33,7 @@ pub struct OldUpdateId(pub(crate) u64);
 
 impl BorshDeserialize for OldUpdateId {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let id = match u64::deserialize_reader(reader) {
-            Ok(state) => state,
-            Err(err) => {
-                env::log_str(&format!("Error deserializing update id: {:?}", err));
-                return Err(err);
-            }
-        };
+        let id = deserialize_or_log(reader, "OldUpdateId.u64")?;
         Ok(OldUpdateId(id))
     }
 }
@@ -48,27 +46,9 @@ pub struct OldProposedUpdates {
 
 impl BorshDeserialize for OldProposedUpdates {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let updates = match HashMap::deserialize_reader(reader) {
-            Ok(state) => state,
-            Err(err) => {
-                env::log_str(&format!("Error deserializing updates: {:?}", err));
-                return Err(err);
-            }
-        };
-        let votes = match HashMap::deserialize_reader(reader) {
-            Ok(state) => state,
-            Err(err) => {
-                env::log_str(&format!("Error deserializing votes: {:?}", err));
-                return Err(err);
-            }
-        };
-        let next_id = match u64::deserialize_reader(reader) {
-            Ok(state) => state,
-            Err(err) => {
-                env::log_str(&format!("Error deserializing next_id: {:?}", err));
-                return Err(err);
-            }
-        };
+        let updates = deserialize_or_log(reader, "OldProposedUpdates.updates")?;
+        let votes = deserialize_or_log(reader, "OldProposedUpdates.votes")?;
+        let next_id = deserialize_or_log(reader, "OldProposedUpdates.next_id")?;
         Ok(OldProposedUpdates {
             updates,
             votes,
@@ -87,48 +67,11 @@ pub struct OldContract {
 
 impl BorshDeserialize for OldContract {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let protocol_state = match ProtocolContractState::deserialize_reader(reader) {
-            Ok(state) => state,
-            Err(err) => {
-                env::log_str(&format!("Error deserializing protocol state: {:?}", err));
-                return Err(err);
-            }
-        };
-
-        let pending_requests = match LookupMap::deserialize_reader(reader) {
-            Ok(state) => state,
-            Err(err) => {
-                env::log_str(&format!(
-                    "Error deserializing pending requests state: {:?}",
-                    err
-                ));
-                return Err(err);
-            }
-        };
-        let request_counter = match u32::deserialize_reader(reader) {
-            Ok(state) => state,
-            Err(err) => {
-                env::log_str(&format!("Error deserializing request counter: {:?}", err));
-                return Err(err);
-            }
-        };
-        let proposed_updates = match OldProposedUpdates::deserialize_reader(reader) {
-            Ok(state) => state,
-            Err(err) => {
-                env::log_str(&format!(
-                    "Error deserializing propose updates state: {:?}",
-                    err
-                ));
-                return Err(err);
-            }
-        };
-        let config = match OldConfig::deserialize_reader(reader) {
-            Ok(state) => state,
-            Err(err) => {
-                env::log_str(&format!("Error deserializing config state: {:?}", err));
-                return Err(err);
-            }
-        };
+        let protocol_state = deserialize_or_log(reader, "OldContract.protocol_state")?;
+        let pending_requests = deserialize_or_log(reader, "OldContract.pending_requests")?;
+        let request_counter = deserialize_or_log(reader, "OldContract.request_counter")?;
+        let proposed_updates = deserialize_or_log(reader, "OldContract.proposed_updates")?;
+        let config = deserialize_or_log(reader, "OldContract.config")?;
         Ok(OldContract {
             protocol_state,
             pending_requests,
@@ -163,6 +106,8 @@ pub fn migrate_testnet_dev() -> Result<VersionedMpcContract, MpcContractError> {
     let mut old = match old {
         OldVersionedMpcContract::V0(old) => old,
     };
+
+    // Migrate old proposed updates to new proposed updates.
     let mut new_updates = update::ProposedUpdates::default();
     for (id, updates) in old.proposed_updates.updates {
         let updates: Vec<_> = updates
@@ -196,14 +141,12 @@ pub fn migrate_testnet_dev() -> Result<VersionedMpcContract, MpcContractError> {
 fn deserialize_or_log<T: BorshDeserialize, R: borsh::io::Read>(
     reader: &mut R,
     which_state: &str,
-) -> Result<T, MpcContractError> {
+) -> borsh::io::Result<T> {
     match T::deserialize_reader(reader) {
         Ok(state) => Ok(state),
         Err(err) => {
             env::log_str(&format!("Error deserializing {which_state} state: {err:?}"));
-            Err(MpcContractError::InitError(
-                InitError::ContractStateIsBroken,
-            ))
+            Err(err)
         }
     }
 }
