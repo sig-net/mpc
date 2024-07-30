@@ -33,5 +33,7 @@ near-workspaces = { git = "https://github.com/near/near-workspaces-rs", branch =
 
 [features]
 default = []
-dev = []
-testnet = []
+
+migrate = []
+dev = ["migrate"]
+testnet = ["migrate"]

@@ -92,8 +92,9 @@ pub fn migrate_testnet_dev() -> Result<VersionedMpcContract, MpcContractError> {
     // NOTE: that since we're in dev, there will be many changes. If state was able
     // to be loaded successfully, then that means a migration was not necessary and
     // the developer did not change the contract state.
-    let data = env::storage_read(b"STATE")
-        .ok_or_else(|| MpcContractError::InitError(InitError::ContractStateIsMissing))?;
+    let data = env::storage_read(b"STATE").ok_or(MpcContractError::InitError(
+        InitError::ContractStateIsMissing,
+    ))?;
 
     if let Ok(loaded) = MpcContract::try_from_slice(&data) {
         return Ok(VersionedMpcContract::V0(loaded));
@@ -103,9 +104,7 @@ pub fn migrate_testnet_dev() -> Result<VersionedMpcContract, MpcContractError> {
     // our dev environment not broken.
 
     let old = OldVersionedMpcContract::try_from_slice(&data).unwrap();
-    let mut old = match old {
-        OldVersionedMpcContract::V0(old) => old,
-    };
+    let OldVersionedMpcContract::V0(mut old) = old;
 
     // Migrate old proposed updates to new proposed updates.
     let mut new_updates = update::ProposedUpdates::default();
@@ -134,8 +133,7 @@ pub fn migrate_testnet_dev() -> Result<VersionedMpcContract, MpcContractError> {
         proposed_updates: new_updates,
         config: Config::default(),
     });
-
-    return Ok(migrated);
+    Ok(migrated)
 }
 
 fn deserialize_or_log<T: BorshDeserialize, R: borsh::io::Read>(

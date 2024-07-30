@@ -33,7 +33,7 @@ jobs:
       - uses: Swatinem/rust-cache@v1
 
       - name: Compile Contract
-        run: cd ./chain-signatures && cargo build -p mpc-contract --target wasm32-unknown-unknown --release --features dev
+        run: cd ./chain-signatures && cargo build -p mpc-contract --target wasm32-unknown-unknown --release
 
       - name: Test Contract
         run: cd ./chain-signatures && cargo test -p mpc-contract --target x86_64-unknown-linux-gnu --release
@@ -41,10 +41,9 @@ jobs:
           RUST_LOG: INFO
           RUST_BACKTRACE: 1
 
-      - name: Build Deploy Checker
-        working-directory: infra/scripts/deploy
-        run: cargo build --release --features dev
+      - name: Compile Contract (dev)
+        run: cd ./chain-signatures && cargo build -p mpc-contract --target wasm32-unknown-unknown --release --features dev
 
       - name: Run Deploy Checker
         working-directory: infra/scripts/deploy
-        run: cargo test --release -- run_dev
+        run: cargo test -- run_dev
