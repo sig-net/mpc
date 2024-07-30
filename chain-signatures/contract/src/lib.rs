@@ -790,7 +790,7 @@ impl VersionedMpcContract {
         }
     }
 
-    fn signature_deposit(&self) -> u128 {
+    pub fn signature_deposit(&self) -> u128 {
         const CHEAP_REQUESTS: u32 = 3;
         let pending_requests = match self {
             Self::V0(mpc_contract) => mpc_contract.request_counter,
