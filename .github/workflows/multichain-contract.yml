@@ -43,8 +43,8 @@ jobs:
 
       - name: Build Deploy Checker
         working-directory: infra/scripts/deploy
-        run: cargo build --release
+        run: cargo build --release --features dev
 
       - name: Run Deploy Checker
         working-directory: infra/scripts/deploy
-        run: cargo run --release -- check --network testnet --mpc-contract-id "v5.multichain-mpc-dev.testnet"
+        run: cargo test --release -- run_dev

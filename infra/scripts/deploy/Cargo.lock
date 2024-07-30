@@ -2794,7 +2794,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "mpc-check-deploy"
+name = "mpc-contract"
+version = "1.0.0-rc.1"
+dependencies = [
+ "borsh",
+ "crypto-shared",
+ "k256",
+ "near-gas",
+ "near-sdk",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "mpc-deploy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2809,21 +2824,6 @@ dependencies = [
  "serde_json",
  "signature 2.2.0",
  "tokio",
-]
-
-[[package]]
-name = "mpc-contract"
-version = "1.0.0-rc.1"
-dependencies = [
- "borsh",
- "crypto-shared",
- "k256",
- "near-gas",
- "near-sdk",
- "schemars",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

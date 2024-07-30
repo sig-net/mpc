@@ -672,9 +672,179 @@ impl VersionedMpcContract {
                 // NOTE: for any PRs that have this error, change the code in this block so we can keep
                 // our dev environment not broken.
 
-                return Err(MpcContractError::InitError(
-                    InitError::ContractStateIsBroken,
+                #[derive(borsh::BorshDeserialize)]
+                pub struct OldConfig {
+                    /// Timeout for triple generation in milliseconds.
+                    pub triple_timeout: u64,
+                    /// Timeout for presignature generation in milliseconds.
+                    pub presignature_timeout: u64,
+                    /// Timeout for signature generation in milliseconds.
+                    pub signature_timeout: u64,
+                }
+
+                #[derive(borsh::BorshDeserialize)]
+                enum OldUpdate {
+                    Config(OldConfig),
+                    Contract(Vec<u8>),
+                }
+
+                // RC1 changes:
+                pub struct OldProposedUpdates {
+                    // updates: std::collections::HashMap<u64, Vec<OldUpdate>>,
+                    // votes: std::collections::HashMap<u64, HashSet<AccountId>>,
+                    entries: std::collections::HashMap<UpdateId, update::UpdateEntry>,
+                    next_id: u64,
+                }
+
+                impl BorshDeserialize for OldProposedUpdates {
+                    fn deserialize_reader<R: borsh::io::Read>(
+                        reader: &mut R,
+                    ) -> borsh::io::Result<Self> {
+                        let updates = match std::collections::HashMap::deserialize_reader(reader) {
+                            Ok(state) => state,
+                            Err(err) => {
+                                env::log_str(&format!("Error deserializing updates: {:?}", err));
+                                return Err(err);
+                            }
+                        };
+                        // let votes = match std::collections::HashMap::deserialize_reader(reader) {
+                        //     Ok(state) => state,
+                        //     Err(err) => {
+                        //         env::log_str(&format!("Error deserializing votes: {:?}", err));
+                        //         return Err(err);
+                        //     }
+                        // };
+                        let next_id = match u64::deserialize_reader(reader) {
+                            Ok(state) => state,
+                            Err(err) => {
+                                env::log_str(&format!("Error deserializing next_id: {:?}", err));
+                                return Err(err);
+                            }
+                        };
+                        Ok(OldProposedUpdates {
+                            // updates,
+                            // votes,
+                            entries: updates,
+                            next_id,
+                        })
+                    }
+                }
+
+                pub struct OldContract {
+                    protocol_state: ProtocolContractState,
+                    pending_requests: LookupMap<SignatureRequest, YieldIndex>,
+                    request_counter: u32,
+                    proposed_updates: OldProposedUpdates,
+                    config: OldConfig,
+                }
+
+                impl BorshDeserialize for OldContract {
+                    fn deserialize_reader<R: borsh::io::Read>(
+                        reader: &mut R,
+                    ) -> borsh::io::Result<Self> {
+                        let protocol_state = match ProtocolContractState::deserialize_reader(reader)
+                        {
+                            Ok(state) => state,
+                            Err(err) => {
+                                env::log_str(&format!(
+                                    "Error deserializing protocol state: {:?}",
+                                    err
+                                ));
+                                return Err(err);
+                            }
+                        };
+                        let pending_requests = match LookupMap::deserialize_reader(reader) {
+                            Ok(state) => state,
+                            Err(err) => {
+                                env::log_str(&format!(
+                                    "Error deserializing pending requests state: {:?}",
+                                    err
+                                ));
+                                return Err(err);
+                            }
+                        };
+                        let request_counter = match u32::deserialize_reader(reader) {
+                            Ok(state) => state,
+                            Err(err) => {
+                                env::log_str(&format!(
+                                    "Error deserializing request counter: {:?}",
+                                    err
+                                ));
+                                return Err(err);
+                            }
+                        };
+                        let proposed_updates = match OldProposedUpdates::deserialize_reader(reader)
+                        {
+                            Ok(state) => state,
+                            Err(err) => {
+                                env::log_str(&format!(
+                                    "Error deserializing propose updates state: {:?}",
+                                    err
+                                ));
+                                return Err(err);
+                            }
+                        };
+                        let config = match OldConfig::deserialize_reader(reader) {
+                            Ok(state) => state,
+                            Err(err) => {
+                                env::log_str(&format!(
+                                    "Error deserializing config state: {:?}",
+                                    err
+                                ));
+                                return Err(err);
+                            }
+                        };
+                        Ok(OldContract {
+                            protocol_state,
+                            pending_requests,
+                            request_counter,
+                            proposed_updates,
+                            config,
+                        })
+                    }
+                }
+                env::log_str(&format!("len of contract state: {}", data.len()));
+                env::log_str(&format!(
+                    "old contract size: {}",
+                    std::mem::size_of::<OldContract>()
                 ));
+
+                let Ok(mut old) = OldContract::try_from_slice(&data) else {
+                    return Err(MpcContractError::InitError(
+                        InitError::ContractStateIsBroken,
+                    ));
+                };
+                // let mut entries: HashMap<UpdateId, UpdateEntry> = HashMap::default();
+                let mut new_updates = update::ProposedUpdates::default();
+                // for (id, updates) in old.proposed_updates.updates {
+                for (id, updates) in old.proposed_updates.entries {
+                    new_updates.entries.insert(id, updates);
+                    // let updates: Vec<_> = updates
+                    //     .into_iter()
+                    //     .map(|update| match update {
+                    //         OldUpdate::Config(_) => update::Update::Config(Config::default()),
+                    //         OldUpdate::Contract(contract) => update::Update::Contract(contract),
+                    //     })
+                    //     .collect();
+
+                    // let entry = update::UpdateEntry {
+                    //     bytes_used: update::bytes_used_updates(&updates),
+                    //     updates,
+                    //     votes: old.proposed_updates.votes.remove(&id).unwrap(),
+                    // };
+                    // new_updates.entries.insert(UpdateId(id), entry);
+                }
+                new_updates.id = update::UpdateId(old.proposed_updates.next_id);
+
+                let migrated = VersionedMpcContract::V0(MpcContract {
+                    protocol_state: old.protocol_state,
+                    pending_requests: old.pending_requests,
+                    request_counter: old.request_counter,
+                    proposed_updates: new_updates,
+                    config: Config::default(),
+                });
+
+                return Ok(migrated);
             };
 
             return Ok(VersionedMpcContract::V0(loaded));

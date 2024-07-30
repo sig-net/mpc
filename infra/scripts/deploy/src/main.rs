@@ -9,7 +9,7 @@ pub enum Cli {
     Check {
         #[arg(long, default_value("testnet"))]
         network: String,
-        #[arg(long, default_value("v5.multichain-mpc-dev.testnet"))]
+        #[arg(long, default_value("v1.signer-dev.testnet"))]
         mpc_contract_id: AccountId,
     },
 }
@@ -26,7 +26,17 @@ fn main() -> anyhow::Result<()> {
 fn run_dev() {
     run(Cli::Check {
         network: "testnet".to_string(),
-        mpc_contract_id: "v5.multichain-mpc-dev.testnet".parse().unwrap(),
+        mpc_contract_id: "v1.signer-dev.testnet".parse().unwrap(),
+    })
+    .unwrap();
+}
+
+// Can directly call `cargo test` to run this script instead of getting the binary and passing in params:
+#[test]
+fn run_testnet() {
+    run(Cli::Check {
+        network: "testnet".to_string(),
+        mpc_contract_id: "v1.signer-prod.testnet".parse().unwrap(),
     })
     .unwrap();
 }
