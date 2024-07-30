@@ -82,7 +82,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
                 // Check the contract state is viewable:
                 let view = new_contract.view("state").await.unwrap();
-                dbg!(&view);
                 let state: mpc_contract::ProtocolContractState = view.json()?;
                 println!("Contract state: {state:#?}");
 
