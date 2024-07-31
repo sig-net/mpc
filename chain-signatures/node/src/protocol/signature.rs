@@ -295,7 +295,7 @@ impl SignatureManager {
         presignature: Presignature,
         req: GenerationRequest,
         cfg: &ProtocolConfig,
-    ) -> Result<SignatureGenerator, InitializationError> {
+    ) -> Result<SignatureGenerator, (Presignature, InitializationError)> {
         let participants = participants.keys_vec();
         let GenerationRequest {
             proposer,
@@ -311,18 +311,22 @@ impl SignatureManager {
             k: k * delta.invert().unwrap(),
             sigma: (sigma + epsilon * k) * delta.invert().unwrap(),
         };
-        let protocol = Box::new(cait_sith::sign(
-            &participants,
-            me,
-            derive_key(public_key, epsilon),
-            output,
-            request.payload,
-        )?);
+        let presignature_id = presignature.id;
+        let protocol = Box::new(
+            cait_sith::sign(
+                &participants,
+                me,
+                derive_key(public_key, epsilon),
+                output,
+                request.payload,
+            )
+            .map_err(|err| (presignature, err))?,
+        );
         Ok(SignatureGenerator::new(
             protocol,
             participants,
             proposer,
-            presignature.id,
+            presignature_id,
             request,
             epsilon,
             delta,
@@ -338,7 +342,7 @@ impl SignatureManager {
         presignature: Presignature,
         participants: &Participants,
         cfg: &ProtocolConfig,
-    ) -> Result<(), InitializationError> {
+    ) -> Result<(), (Presignature, InitializationError)> {
         tracing::info!(receipt_id = %receipt_id, participants = ?participants.keys_vec(), "restarting failed protocol to generate signature");
         let generator = Self::generate_internal(
             participants,
@@ -364,7 +368,7 @@ impl SignatureManager {
         delta: Scalar,
         sign_request_timestamp: Instant,
         cfg: &ProtocolConfig,
-    ) -> Result<(), InitializationError> {
+    ) -> Result<(), (Presignature, InitializationError)> {
         tracing::info!(
             %receipt_id,
             me = ?self.me,
@@ -433,7 +437,7 @@ impl SignatureManager {
                     Err(err) => return Err(err),
                 };
                 tracing::info!(me = ?self.me, presignature_id, "found presignature: ready to start signature generation");
-                let generator = Self::generate_internal(
+                let generator = match Self::generate_internal(
                     participants,
                     self.me,
                     self.public_key,
@@ -446,7 +450,14 @@ impl SignatureManager {
                         sign_request_timestamp: Instant::now(),
                     },
                     cfg,
-                )?;
+                ) {
+                    Ok(generator) => generator,
+                    Err((presignature, err @ InitializationError::BadParameters(_))) => {
+                        presignature_manager.insert_mine(presignature);
+                        tracing::warn!(%receipt_id, presignature_id, ?err, "failed to start signature generation");
+                        return Err(GenerationError::CaitSithInitializationError(err));
+                    }
+                };
                 let generator = entry.insert(generator);
                 Ok(&mut generator.protocol)
             }
@@ -465,23 +476,25 @@ impl SignatureManager {
                 let action = match generator.poke() {
                     Ok(action) => action,
                     Err(err) => {
-                        if generator.proposer == self.me && generator.sign_request_timestamp.elapsed() < generator.timeout_total {
-                            tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
-                            // only retry the signature generation if it was initially proposed by us. We do not
-                            // want any nodes to be proposing the same signature multiple times.
-                            self.failed.push_back((
-                                *receipt_id,
-                                GenerationRequest {
-                                    proposer: generator.proposer,
-                                    request: generator.request.clone(),
-                                    epsilon: generator.epsilon,
-                                    delta: generator.delta,
-                                    sign_request_timestamp: generator.sign_request_timestamp
-                                },
-                            ));
-                        } else {
-                            self.completed.insert(*receipt_id, Instant::now());
-                            tracing::warn!(?err, "signature failed to be produced; trashing request");
+                        if generator.proposer == self.me {
+                            if generator.sign_request_timestamp.elapsed() < generator.timeout_total {
+                                tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
+                                // only retry the signature generation if it was initially proposed by us. We do not
+                                // want any nodes to be proposing the same signature multiple times.
+                                self.failed.push_back((
+                                    *receipt_id,
+                                    GenerationRequest {
+                                        proposer: generator.proposer,
+                                        request: generator.request.clone(),
+                                        epsilon: generator.epsilon,
+                                        delta: generator.delta,
+                                        sign_request_timestamp: generator.sign_request_timestamp
+                                    },
+                                ));
+                            } else {
+                                self.completed.insert(*receipt_id, Instant::now());
+                                tracing::warn!(?err, "signature failed to be produced; trashing request");
+                            }
                         }
                         break false;
                     }
@@ -594,15 +607,17 @@ impl SignatureManager {
             // when the request made it into the NEAR network.
             // issue: https://github.com/near/mpc-recovery/issues/596
             if let Some((receipt_id, failed_req)) = self.failed.pop_front() {
-                if let Err(err) = self.retry_failed_generation(
-                    receipt_id,
-                    failed_req,
-                    presignature,
-                    &sig_participants,
-                    cfg,
-                ) {
+                if let Err((presignature, InitializationError::BadParameters(err))) = self
+                    .retry_failed_generation(
+                        receipt_id,
+                        failed_req,
+                        presignature,
+                        &sig_participants,
+                        cfg,
+                    )
+                {
                     tracing::warn!(%receipt_id, presig_id, ?err, "failed to retry signature generation: trashing presignature");
-                    self.completed.insert(receipt_id, Instant::now());
+                    failed_presigs.push(presignature);
                     continue;
                 }
 
@@ -617,7 +632,7 @@ impl SignatureManager {
                 failed_presigs.push(presignature);
                 continue;
             };
-            if let Err(err) = self.generate(
+            if let Err((presignature, InitializationError::BadParameters(err))) = self.generate(
                 &sig_participants,
                 receipt_id,
                 presignature,
@@ -627,6 +642,7 @@ impl SignatureManager {
                 my_request.time_added,
                 cfg,
             ) {
+                failed_presigs.push(presignature);
                 tracing::warn!(%receipt_id, presig_id, ?err, "failed to start signature generation: trashing presignature");
                 continue;
             }
