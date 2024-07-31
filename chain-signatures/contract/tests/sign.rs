@@ -5,6 +5,8 @@ use mpc_contract::errors;
 use mpc_contract::primitives::{CandidateInfo, SignRequest};
 use near_workspaces::types::AccountId;
 
+use crypto_shared::SignatureResponse;
+use near_sdk::NearToken;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -53,6 +55,124 @@ async fn test_contract_sign_request() -> anyhow::Result<()> {
     assert!(err
         .to_string()
         .contains(&errors::MpcContractError::SignError(errors::SignError::Timeout).to_string()));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
+    let (worker, contract, _, sk) = init_env().await;
+    let alice = worker.dev_create_account().await?;
+    let balance = alice.view_account().await?.balance;
+
+    let path = "test";
+
+    let msg = "hello world!";
+    println!("submitting: {msg}");
+    let (payload_hash, respond_req, respond_resp) =
+        create_response(alice.id(), msg, path, &sk).await;
+    let request = SignRequest {
+        payload: payload_hash,
+        path: path.into(),
+        key_version: 0,
+    };
+
+    let status = alice
+        .call(contract.id(), "sign")
+        .args_json(serde_json::json!({
+            "request": request,
+        }))
+        .deposit(NearToken::from_near(1))
+        .max_gas()
+        .transact_async()
+        .await?;
+    dbg!(&status);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Call `respond` as if we are the MPC network itself.
+    let respond = contract
+        .call("respond")
+        .args_json(serde_json::json!({
+            "request": respond_req,
+            "response": respond_resp
+        }))
+        .max_gas()
+        .transact()
+        .await?;
+    dbg!(&respond);
+
+    let execution = status.await?;
+    dbg!(&execution);
+
+    let execution = execution.into_result()?;
+
+    // Finally wait the result:
+    let returned_resp: SignatureResponse = execution.json()?;
+    assert_eq!(
+        returned_resp, respond_resp,
+        "Returned signature request does not match"
+    );
+
+    let new_balance = alice.view_account().await?.balance;
+    assert!(
+        balance.as_millinear() - new_balance.as_millinear() < 10,
+        "refund should happen"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_contract_sign_fail_refund() -> anyhow::Result<()> {
+    let (worker, contract, _, sk) = init_env().await;
+    let alice = worker.dev_create_account().await?;
+    let balance = alice.view_account().await?.balance;
+
+    let path = "test";
+
+    let msg = "hello world!";
+    println!("submitting: {msg}");
+    let (payload_hash, _, _) = create_response(alice.id(), msg, path, &sk).await;
+    let request = SignRequest {
+        payload: payload_hash,
+        path: path.into(),
+        key_version: 0,
+    };
+
+    let status = alice
+        .call(contract.id(), "sign")
+        .args_json(serde_json::json!({
+            "request": request,
+        }))
+        .deposit(NearToken::from_near(1))
+        .max_gas()
+        .transact_async()
+        .await?;
+    dbg!(&status);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // we do not respond, sign will fail due to timeout
+    let execution = status.await;
+    dbg!(&execution);
+    let err = execution
+        .unwrap()
+        .into_result()
+        .expect_err("should have failed with timeout");
+    assert!(err
+        .to_string()
+        .contains(&errors::MpcContractError::SignError(errors::SignError::Timeout).to_string()));
+
+    let new_balance = alice.view_account().await?.balance;
+    println!(
+        "{} {} {}",
+        balance.as_millinear(),
+        new_balance.as_millinear(),
+        contract.view_account().await?.balance
+    );
+    assert!(
+        balance.as_millinear() - new_balance.as_millinear() < 10,
+        "refund should happen"
+    );
 
     Ok(())
 }

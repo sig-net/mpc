@@ -133,11 +133,11 @@ impl VersionedMpcContract {
             ));
         }
         // Check deposit
-        let deposit = env::attached_deposit();
+        let deposit = env::attached_deposit().as_yoctonear();
         let required_deposit = self.signature_deposit();
-        if deposit.as_yoctonear() < required_deposit {
+        if deposit < required_deposit {
             return Err(MpcContractError::SignError(SignError::InsufficientDeposit(
-                deposit.as_yoctonear(),
+                deposit,
                 required_deposit,
             )));
         }
@@ -158,12 +158,22 @@ impl VersionedMpcContract {
         }
         let predecessor = env::predecessor_account_id();
         let request = SignatureRequest::new(payload, &predecessor, &path);
+        log!("request: {request:?}");
         if !self.request_already_exists(&request) {
             log!(
                 "sign: predecessor={predecessor}, payload={payload:?}, path={path:?}, key_version={key_version}",
             );
             env::log_str(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
-            Ok(Self::ext(env::current_account_id()).sign_helper(request))
+            if deposit > required_deposit {
+                let refund = deposit - required_deposit;
+                log!("refund more than required deposit {refund} to {predecessor}");
+                Promise::new(predecessor.clone()).transfer(NearToken::from_yoctonear(refund));
+            }
+            Ok(Self::ext(env::current_account_id()).sign_helper(
+                request,
+                predecessor,
+                required_deposit,
+            ))
         } else {
             Err(MpcContractError::SignError(SignError::PayloadCollision))
         }
@@ -684,12 +694,16 @@ impl VersionedMpcContract {
     }
 
     #[private]
-    pub fn sign_helper(&mut self, request: SignatureRequest) {
+    pub fn sign_helper(&mut self, request: SignatureRequest, requester: AccountId, deposit: u128) {
         match self {
             Self::V0(mpc_contract) => {
+                // refund must happen in clear_state_on_finish, because regardless of this success or fail
+                // the promise created by clear_state_on_finish is executed, because of callback_unwrap and
+                // promise_then. but if return_signature_on_finish fail (returns error), the promise created
+                // by it won't execute.
                 let yield_promise = env::promise_yield_create(
                     "clear_state_on_finish",
-                    &serde_json::to_vec(&(&request,)).unwrap(),
+                    &serde_json::to_vec(&(&request, &requester, deposit)).unwrap(),
                     CLEAR_STATE_ON_FINISH_CALL_GAS,
                     GasWeight(0),
                     DATA_ID_REGISTER,
@@ -739,15 +753,28 @@ impl VersionedMpcContract {
     pub fn clear_state_on_finish(
         &mut self,
         request: SignatureRequest,
+        refund_to_on_fail: AccountId,
+        refund_amount_on_fail: u128,
         #[callback_result] signature: Result<SignatureResponse, PromiseError>,
     ) -> Result<SignatureResult<SignatureResponse, SignaturePromiseError>, MpcContractError> {
         match self {
             Self::V0(mpc_contract) => {
                 // Clean up the local state
-                mpc_contract.remove_request(request)?;
+                let result = mpc_contract.remove_request(request);
+                if result.is_err() {
+                    log!("refund {refund_amount_on_fail} to {refund_to_on_fail} due to fail");
+                    Promise::new(refund_to_on_fail.clone())
+                        .transfer(NearToken::from_yoctonear(refund_amount_on_fail));
+                    result?;
+                }
                 match signature {
                     Ok(signature) => Ok(SignatureResult::Ok(signature)),
-                    Err(_) => Ok(SignatureResult::Err(SignaturePromiseError::Failed)),
+                    Err(_) => {
+                        log!("refund {refund_amount_on_fail} to {refund_to_on_fail} due to fail");
+                        Promise::new(refund_to_on_fail)
+                            .transfer(NearToken::from_yoctonear(refund_amount_on_fail));
+                        Ok(SignatureResult::Err(SignaturePromiseError::Failed))
+                    }
                 }
             }
         }
