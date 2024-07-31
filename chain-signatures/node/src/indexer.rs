@@ -95,6 +95,7 @@ pub struct Indexer {
 
 impl Indexer {
     const BEHIND_THRESHOLD: Duration = Duration::from_secs(60);
+    const RUNNING_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 
     fn new(latest_block_height: LatestBlockHeight) -> Self {
         Self {
@@ -111,6 +112,11 @@ impl Indexer {
     /// Check whether the indexer is on track with the latest block height from the chain.
     pub async fn is_on_track(&self) -> bool {
         self.last_updated_timestamp.read().await.elapsed() <= Self::BEHIND_THRESHOLD
+    }
+
+    /// Check whether the indexer is on track with the latest block height from the chain.
+    pub async fn is_running(&self) -> bool {
+        self.last_updated_timestamp.read().await.elapsed() <= Self::RUNNING_THRESHOLD
     }
 
     /// Check whether the indexer is behind with the latest block height from the chain.
@@ -330,10 +336,10 @@ pub fn run(
                 rt.spawn(async move { lake.run_with_context_async(handle_block, &context).await })
             };
             let outcome = rt.block_on(async {
-                // while on track, we will keep the task spinning, and check every so often if
+                // while running, we will keep the task spinning, and check every so often if
                 // the indexer has errored out.
-                while context.indexer.is_on_track().await {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                while context.indexer.is_running().await {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
                     if join_handle.is_finished() {
                         break;
                     }
