@@ -12,7 +12,7 @@ use crate::containers::LocalStack;
 use anyhow::Context as _;
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use futures::StreamExt;
-use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
+use mpc_contract::config::ProtocolConfig;
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
 use mpc_node::storage;

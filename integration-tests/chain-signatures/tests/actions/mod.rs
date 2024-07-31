@@ -38,7 +38,9 @@ use k256::{
 };
 use serde_json::json;
 
-pub async fn new_account(ctx: &MultichainTestContext<'_>) -> anyhow::Result<(Account, InMemorySigner)> {
+pub async fn new_account(
+    ctx: &MultichainTestContext<'_>,
+) -> anyhow::Result<(Account, InMemorySigner)> {
     let worker = &ctx.nodes.ctx().worker;
     let account = worker.dev_create_account().await?;
     let signer = InMemorySigner {
@@ -99,7 +101,7 @@ pub async fn request_sign_multiple(
 ) -> anyhow::Result<Vec<([u8; 32], CryptoHash)>> {
     let mut results = Vec::with_capacity(amount);
     for _ in 0..amount {
-        let (payload, payload_hashed, tx_hash) = request_sign(ctx, &signer).await?;
+        let (_payload, payload_hashed, tx_hash) = request_sign(ctx, signer).await?;
         results.push((payload_hashed, tx_hash));
     }
     Ok(results)
@@ -162,18 +164,6 @@ pub async fn single_signature_production(
     let mut mpc_pk_bytes = vec![0x04];
     mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
     assert_signature(account.id(), &mpc_pk_bytes, payload_hash, &signature).await;
-
-    Ok(())
-}
-
-pub async fn signature_production(
-    ctx: &MultichainTestContext<'_>,
-    state: &RunningContractState,
-    amount: usize,
-) -> anyhow::Result<()> {
-    let (_, signer) = new_account(ctx).await?;
-    let (payload_hashes, tx_hashes): (Vec<_>, Vec<_>) = request_sign_multiple(ctx, &signer, amount).await?.into_iter().unzip();
-    let signatures = wait_for::signatures_responded(ctx, &tx_hashes).await?;
 
     Ok(())
 }
