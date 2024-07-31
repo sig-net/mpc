@@ -288,6 +288,7 @@ impl SignatureManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)]
     fn generate_internal(
         participants: &Participants,
         me: Participant,
@@ -335,6 +336,7 @@ impl SignatureManager {
         ))
     }
 
+    #[allow(clippy::result_large_err)]
     fn retry_failed_generation(
         &mut self,
         receipt_id: ReceiptId,
@@ -358,6 +360,7 @@ impl SignatureManager {
 
     /// Starts a new presignature generation protocol.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)]
     pub fn generate(
         &mut self,
         participants: &Participants,
