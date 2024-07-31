@@ -90,7 +90,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_CONTRACT_ID"
-      value = "v2.multichain-mpc.testnet"
+      value = "v1.signer-prod.testnet"
     },
     {
       name  = "MPC_INDEXER_S3_BUCKET"
