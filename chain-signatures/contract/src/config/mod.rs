@@ -83,6 +83,8 @@ pub struct PresignatureConfig {
 pub struct SignatureConfig {
     /// Timeout for signature generation in milliseconds.
     pub generation_timeout: u64,
+    /// Garbage collection timeout in milliseconds for signatures generated.
+    pub garbage_timeout: u64,
 
     /// The remaining entries that can be present in future forms of the configuration.
     #[serde(flatten)]
@@ -95,35 +97,6 @@ mod tests {
 
     #[test]
     fn test_load_config() {
-        let config_str: serde_json::Value = serde_json::from_str(
-            r#"{
-                "protocol": {
-                    "message_timeout": 10000,
-                    "garbage_timeout": 20000,
-                    "max_concurrent_introduction": 10,
-                    "max_concurrent_generation": 10,
-                    "triple": {
-                        "min_triples": 10,
-                        "max_triples": 100,
-                        "generation_timeout": 10000
-                    },
-                    "presignature": {
-                        "min_presignatures": 10,
-                        "max_presignatures": 100,
-                        "generation_timeout": 10000
-                    },
-                    "signature": {
-                        "generation_timeout": 10000
-                    },
-                    "string": "value",
-                    "integer": 1000
-                },
-                "string": "value2",
-                "integer": 20
-            }"#,
-        )
-        .unwrap();
-
         let config_macro = serde_json::json!({
             "protocol": {
                 "message_timeout": 10000,
@@ -141,7 +114,8 @@ mod tests {
                     "generation_timeout": 10000
                 },
                 "signature": {
-                    "generation_timeout": 10000
+                    "generation_timeout": 10000,
+                    "garbage_timeout": 10000000
                 },
                 "string": "value",
                 "integer": 1000
@@ -149,8 +123,6 @@ mod tests {
             "string": "value2",
             "integer": 20
         });
-
-        assert_eq!(config_str, config_macro);
 
         let config: Config = serde_json::from_value(config_macro).unwrap();
         assert_eq!(config.protocol.message_timeout, 10000);

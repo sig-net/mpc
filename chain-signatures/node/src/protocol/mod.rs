@@ -199,7 +199,19 @@ impl MpcSignProtocol {
             .set(node_version());
         let mut queue = MpcMessageQueue::default();
         let mut last_state_update = Instant::now();
+        let mut last_config_update = Instant::now();
         let mut last_pinged = Instant::now();
+
+        // Sets the latest configurations from the contract:
+        if let Err(err) = self
+            .ctx
+            .cfg
+            .fetch_inplace(&self.ctx.rpc_client, &self.ctx.mpc_contract_id)
+            .await
+        {
+            tracing::warn!("could not fetch contract's config on startup: {err:?}");
+        }
+
         loop {
             let protocol_time = Instant::now();
             tracing::debug!("trying to advance chain signatures protocol");
@@ -237,22 +249,6 @@ impl MpcSignProtocol {
                 };
                 tracing::debug!(?contract_state);
 
-                // Sets the latest configurations from the contract:
-                self.ctx.cfg = match rpc_client::fetch_mpc_config(
-                    &self.ctx.rpc_client,
-                    &self.ctx.mpc_contract_id,
-                    &self.ctx.cfg,
-                )
-                .await
-                {
-                    Ok(config) => config,
-                    Err(e) => {
-                        tracing::error!("could not fetch contract's config: {e}");
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        continue;
-                    }
-                };
-
                 // Establish the participants for this current iteration of the protocol loop. This will
                 // set which participants are currently active in the protocol and determines who will be
                 // receiving messages.
@@ -263,6 +259,19 @@ impl MpcSignProtocol {
             } else {
                 None
             };
+
+            if last_config_update.elapsed() > Duration::from_secs(5 * 60) {
+                // Sets the latest configurations from the contract:
+                if let Err(err) = self
+                    .ctx
+                    .cfg
+                    .fetch_inplace(&self.ctx.rpc_client, &self.ctx.mpc_contract_id)
+                    .await
+                {
+                    tracing::warn!("could not fetch contract's config: {err:?}");
+                }
+                last_config_update = Instant::now();
+            }
 
             if last_pinged.elapsed() > Duration::from_millis(300) {
                 self.ctx.mesh.ping().await;
@@ -361,7 +370,13 @@ async fn get_my_participant(protocol: &MpcSignProtocol) -> Participant {
     participant_info.id.into()
 }
 
+/// our release versions take the form of "1.0.0-rc.2"
 fn node_version() -> i64 {
     let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
-    (version.patch + version.minor * 1000 + version.major * 1000000) as i64
+    let rc_num = if let Some(rc_str) = version.pre.split('.').nth(1) {
+        rc_str.parse::<u64>().unwrap_or(0)
+    } else {
+        0
+    };
+    (rc_num + version.patch * 1000 + version.minor * 1000000 + version.major * 1000000000) as i64
 }

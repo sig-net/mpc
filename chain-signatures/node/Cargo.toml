@@ -1,6 +1,6 @@
 [package]
 name = "mpc-node"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 edition = "2021"
 
 [[bin]]
@@ -46,8 +46,8 @@ url = { version = "2.4.0", features = ["serde"] }
 near-account-id = "1.0.0"
 near-crypto = "0.23.0"
 near-fetch = "0.5.0"
-near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/1.40" }
-near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/1.40" }
+near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/1.40-and-async-run" }
+near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/1.40-and-async-run" }
 near-primitives = "0.23.0"
 near-sdk = { version = "5.2.1", features = ["legacy", "unit-testing"] }
 
@@ -56,5 +56,6 @@ mpc-keys = { path = "../keys" }
 crypto-shared = { path = "../crypto-shared" }
 
 itertools = "0.12.0"
+http = "1.1.0"
 prometheus = { version = "0.13.3" }
 once_cell = "1.13.1"

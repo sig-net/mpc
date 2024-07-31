@@ -93,7 +93,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_CONTRACT_ID"
-      value = "v2.multichain-mpc.testnet"
+      value = "v1.signer.near"
     },
     {
       name  = "MPC_INDEXER_S3_BUCKET"
@@ -101,7 +101,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_INDEXER_START_BLOCK_HEIGHT"
-      value = 124092099
+      value = 124647189
     },
     {
       name  = "AWS_DEFAULT_REGION"
@@ -117,11 +117,15 @@ variable "static_env" {
     },
     {
       name  = "RUST_LOG"
-      value = "mpc_node=debug"
+      value = "mpc_node=info"
     },
     {
       name  = "MPC_INDEXER_S3_REGION"
       value = "eu-central-1"
+    },
+    {
+      name  = "MPC_CLIENT_HEADER_REFERER"
+      value = "https://multichain-partner-mainnet-pagoda.api.pagoda.co"
     }
   ]
 }
@@ -133,4 +137,5 @@ variable "create_network" {
 
 variable "domain" {
   description = "DNS name for your node"
+  default = ""
 }

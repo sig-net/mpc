@@ -54,7 +54,7 @@ async fn test_contract_sign_request() -> anyhow::Result<()> {
         .expect_err("should have failed with timeout");
     assert!(err
         .to_string()
-        .contains(&errors::MpcContractError::SignError(errors::SignError::Timeout).to_string()));
+        .contains(&errors::SignError::Timeout.to_string()));
 
     Ok(())
 }
@@ -160,7 +160,7 @@ async fn test_contract_sign_fail_refund() -> anyhow::Result<()> {
         .expect_err("should have failed with timeout");
     assert!(err
         .to_string()
-        .contains(&errors::MpcContractError::SignError(errors::SignError::Timeout).to_string()));
+        .contains(&errors::SignError::Timeout.to_string()));
 
     let new_balance = alice.view_account().await?.balance;
     println!(
@@ -215,16 +215,19 @@ async fn test_contract_sign_request_deposits() -> anyhow::Result<()> {
         .transact()
         .await?;
     dbg!(&respond);
-    assert!(respond.into_result().unwrap_err().to_string().contains(
-        &errors::MpcContractError::RespondError(errors::RespondError::RequestNotFound).to_string()
-    ));
+    assert!(respond
+        .into_result()
+        .unwrap_err()
+        .to_string()
+        .contains(&errors::InvalidParameters::RequestNotFound.to_string()));
 
     let execution = status.await?;
     dbg!(&execution);
-    assert!(execution.into_result().unwrap_err().to_string().contains(
-        &errors::MpcContractError::SignError(errors::SignError::InsufficientDeposit(0, 1))
-            .to_string()
-    ));
+    assert!(execution
+        .into_result()
+        .unwrap_err()
+        .to_string()
+        .contains(&errors::InvalidParameters::InsufficientDeposit.to_string()));
 
     Ok(())
 }
