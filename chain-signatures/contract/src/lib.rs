@@ -139,8 +139,7 @@ impl VersionedMpcContract {
         if deposit < required_deposit {
             return Err(InvalidParameters::InsufficientDeposit.message(format!(
                 "Attached {}, Required {}",
-                deposit,
-                required_deposit,
+                deposit, required_deposit,
             )));
         }
         // Make sure sign call will not run out of gas doing recursive calls because the payload will never be removed
