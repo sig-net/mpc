@@ -3,6 +3,7 @@ use crate::{execute, utils, MultichainConfig};
 use crate::containers::LakeIndexer;
 use async_process::Child;
 use mpc_keys::hpke;
+use mpc_node::config::OverrideConfig;
 use near_workspaces::AccountId;
 
 pub struct Node {
@@ -44,7 +45,7 @@ impl Node {
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
-        let indexer_options = mpc_recovery_node::indexer::Options {
+        let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
             s3_region: ctx.localstack.s3_region.clone(),
             s3_url: Some(ctx.localstack.s3_host_address.clone()),
@@ -65,7 +66,7 @@ impl Node {
         LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc).await?;
 
         let mpc_contract_id = ctx.mpc_contract.id().clone();
-        let cli = mpc_recovery_node::cli::Cli::Start {
+        let cli = mpc_node::cli::Cli::Start {
             near_rpc: rpc_address_proxied.clone(),
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
@@ -77,12 +78,10 @@ impl Node {
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
-            min_triples: cfg.triple_cfg.min_triples,
-            max_triples: cfg.triple_cfg.max_triples,
-            max_concurrent_introduction: cfg.triple_cfg.max_concurrent_introduction,
-            max_concurrent_generation: cfg.triple_cfg.max_concurrent_generation,
-            min_presignatures: cfg.presig_cfg.min_presignatures,
-            max_presignatures: cfg.presig_cfg.max_presignatures,
+            override_config: Some(OverrideConfig::new(serde_json::to_value(
+                cfg.protocol.clone(),
+            )?)),
+            client_header_referer: None,
         };
 
         let mpc_node_id = format!("multichain/{account_id}", account_id = account_id);
@@ -113,7 +112,7 @@ impl Node {
         let account_id = config.account_id;
         let account_sk = config.account_sk;
         let storage_options = ctx.storage_options.clone();
-        let indexer_options = mpc_recovery_node::indexer::Options {
+        let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
             s3_region: ctx.localstack.s3_region.clone(),
             s3_url: Some(ctx.localstack.s3_host_address.clone()),
@@ -123,7 +122,7 @@ impl Node {
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
         let near_rpc = config.near_rpc;
         let mpc_contract_id = ctx.mpc_contract.id().clone();
-        let cli = mpc_recovery_node::cli::Cli::Start {
+        let cli = mpc_node::cli::Cli::Start {
             near_rpc: near_rpc.clone(),
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
@@ -135,12 +134,10 @@ impl Node {
             indexer_options: indexer_options.clone(),
             my_address: None,
             storage_options: storage_options.clone(),
-            min_triples: cfg.triple_cfg.min_triples,
-            max_triples: cfg.triple_cfg.max_triples,
-            max_concurrent_introduction: cfg.triple_cfg.max_concurrent_introduction,
-            max_concurrent_generation: cfg.triple_cfg.max_concurrent_generation,
-            min_presignatures: cfg.presig_cfg.min_presignatures,
-            max_presignatures: cfg.presig_cfg.max_presignatures,
+            override_config: Some(OverrideConfig::new(serde_json::to_value(
+                cfg.protocol.clone(),
+            )?)),
+            client_header_referer: None,
         };
 
         let mpc_node_id = format!("multichain/{account_id}", account_id = account_id);

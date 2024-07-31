@@ -8,13 +8,17 @@ use crypto_shared::{
     derive_epsilon, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     types::SignatureResponse, ScalarExt as _,
 };
+use errors::{
+    ConversionError, InitError, InvalidParameters, InvalidState, JoinError, PublicKeyError,
+    RespondError, SignError, VoteError,
+};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
 use near_sdk::{
-    env, log, near_bindgen, AccountId, CryptoHash, Gas, GasWeight, NearToken, PromiseError,
-    PublicKey,
+    env, log, near_bindgen, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise,
+    PromiseError, PublicKey,
 };
 use primitives::{
     CandidateInfo, Candidates, Participants, PkVotes, SignRequest, SignaturePromiseError,
@@ -23,10 +27,8 @@ use primitives::{
 use std::collections::{BTreeMap, HashSet};
 
 use crate::config::Config;
-use crate::errors::{
-    InitError, JoinError, MpcContractError, PublicKeyError, RespondError, SignError, VoteError,
-};
-use crate::update::{ProposedUpdates, UpdateId};
+use crate::errors::Error;
+use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
 
 pub use state::{
     InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
@@ -78,16 +80,20 @@ impl MpcContract {
         }
     }
 
-    fn remove_request(&mut self, request: SignatureRequest) -> Result<(), MpcContractError> {
+    fn remove_request(&mut self, request: SignatureRequest) -> Result<(), Error> {
         if self.pending_requests.remove(&request).is_some() {
             self.request_counter -= 1;
             Ok(())
         } else {
-            Err(MpcContractError::SignError(SignError::RequestNotFound))
+            Err(InvalidParameters::RequestNotFound.into())
         }
     }
 
-    pub fn init(threshold: usize, candidates: BTreeMap<AccountId, CandidateInfo>) -> Self {
+    pub fn init(
+        threshold: usize,
+        candidates: BTreeMap<AccountId, CandidateInfo>,
+        config: Option<Config>,
+    ) -> Self {
         MpcContract {
             protocol_state: ProtocolContractState::Initializing(InitializingContractState {
                 candidates: Candidates { candidates },
@@ -97,7 +103,7 @@ impl MpcContract {
             pending_requests: LookupMap::new(StorageKey::PendingRequests),
             request_counter: 0,
             proposed_updates: ProposedUpdates::default(),
-            config: Config::default(),
+            config: config.unwrap_or_default(),
         }
     }
 }
@@ -109,10 +115,9 @@ impl VersionedMpcContract {
     /// To avoid overloading the network with too many requests,
     /// we ask for a small deposit for each signature request.
     /// The fee changes based on how busy the network is.
-    #[allow(unused_variables)]
     #[handle_result]
     #[payable]
-    pub fn sign(&mut self, request: SignRequest) -> Result<near_sdk::Promise, MpcContractError> {
+    pub fn sign(&mut self, request: SignRequest) -> Result<near_sdk::Promise, Error> {
         let SignRequest {
             payload,
             path,
@@ -121,35 +126,36 @@ impl VersionedMpcContract {
         let latest_key_version: u32 = self.latest_key_version();
         // It's important we fail here because the MPC nodes will fail in an identical way.
         // This allows users to get the error message
-        let payload = Scalar::from_bytes(payload).ok_or(MpcContractError::SignError(
-            SignError::MalformedPayload("Payload hash cannot be convereted to Scalar".to_string()),
-        ))?;
+        let payload = Scalar::from_bytes(payload).ok_or(
+            InvalidParameters::MalformedPayload
+                .message("Payload hash cannot be convereted to Scalar"),
+        )?;
         if key_version > latest_key_version {
-            return Err(MpcContractError::SignError(
-                SignError::UnsupportedKeyVersion,
-            ));
+            return Err(SignError::UnsupportedKeyVersion.into());
         }
         // Check deposit
         let deposit = env::attached_deposit();
         let required_deposit = self.signature_deposit();
         if deposit.as_yoctonear() < required_deposit {
-            return Err(MpcContractError::SignError(SignError::InsufficientDeposit(
+            return Err(InvalidParameters::InsufficientDeposit.message(format!(
+                "Attached {}, Required {}",
                 deposit.as_yoctonear(),
-                required_deposit,
+                required_deposit
             )));
         }
         // Make sure sign call will not run out of gas doing recursive calls because the payload will never be removed
         if env::prepaid_gas() < GAS_FOR_SIGN_CALL {
-            return Err(MpcContractError::SignError(SignError::InsufficientGas(
+            return Err(InvalidParameters::InsufficientGas.message(format!(
+                "Provided: {}, required: {}",
                 env::prepaid_gas(),
-                GAS_FOR_SIGN_CALL,
+                GAS_FOR_SIGN_CALL
             )));
         }
 
         match self {
             Self::V0(mpc_contract) => {
-                if mpc_contract.request_counter > 8 {
-                    return Err(MpcContractError::SignError(SignError::RequestLimitExceeded));
+                if mpc_contract.request_counter > 16 {
+                    return Err(SignError::RequestLimitExceeded.into());
                 }
             }
         }
@@ -162,19 +168,17 @@ impl VersionedMpcContract {
             env::log_str(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
             Ok(Self::ext(env::current_account_id()).sign_helper(request))
         } else {
-            Err(MpcContractError::SignError(SignError::PayloadCollision))
+            Err(SignError::PayloadCollision.into())
         }
     }
 
     /// This is the root public key combined from all the public keys of the participants.
     #[handle_result]
-    pub fn public_key(&self) -> Result<PublicKey, MpcContractError> {
+    pub fn public_key(&self) -> Result<PublicKey, Error> {
         match self.state() {
             ProtocolContractState::Running(state) => Ok(state.public_key.clone()),
             ProtocolContractState::Resharing(state) => Ok(state.public_key.clone()),
-            _ => Err(MpcContractError::PublicKeyError(
-                PublicKeyError::ProtocolStateNotRunningOrResharing,
-            )),
+            _ => Err(InvalidState::ProtocolStateNotRunningOrResharing.into()),
         }
     }
 
@@ -185,7 +189,7 @@ impl VersionedMpcContract {
         &self,
         path: String,
         predecessor: Option<AccountId>,
-    ) -> Result<PublicKey, MpcContractError> {
+    ) -> Result<PublicKey, Error> {
         let predecessor = predecessor.unwrap_or_else(env::predecessor_account_id);
         let epsilon = derive_epsilon(&predecessor, &path);
         let derived_public_key =
@@ -194,9 +198,7 @@ impl VersionedMpcContract {
         let slice: &[u8] = &encoded_point.as_bytes()[1..65];
         let mut data: Vec<u8> = vec![near_sdk::CurveType::SECP256K1 as u8];
         data.extend(slice.to_vec());
-        PublicKey::try_from(data).map_err(|_| {
-            MpcContractError::PublicKeyError(PublicKeyError::DerivedKeyConversionFailed)
-        })
+        PublicKey::try_from(data).map_err(|_| PublicKeyError::DerivedKeyConversionFailed.into())
     }
 
     /// Key versions refer new versions of the root key that we may choose to generate on cohort changes
@@ -216,7 +218,7 @@ impl VersionedMpcContract {
         &mut self,
         request: SignatureRequest,
         response: SignatureResponse,
-    ) -> Result<(), MpcContractError> {
+    ) -> Result<(), Error> {
         let protocol_state = self.mutable_state();
 
         if let ProtocolContractState::Running(_) = protocol_state {
@@ -244,9 +246,7 @@ impl VersionedMpcContract {
             )
             .is_err()
             {
-                return Err(MpcContractError::RespondError(
-                    RespondError::InvalidSignature,
-                ));
+                return Err(RespondError::InvalidSignature.into());
             }
 
             match self {
@@ -260,16 +260,12 @@ impl VersionedMpcContract {
                         );
                         Ok(())
                     } else {
-                        Err(MpcContractError::RespondError(
-                            RespondError::RequestNotFound,
-                        ))
+                        Err(InvalidParameters::RequestNotFound.into())
                     }
                 }
             }
         } else {
-            Err(MpcContractError::RespondError(
-                RespondError::ProtocolNotInRunningState,
-            ))
+            Err(InvalidState::ProtocolStateNotRunning.into())
         }
     }
 
@@ -279,7 +275,7 @@ impl VersionedMpcContract {
         url: String,
         cipher_pk: primitives::hpke::PublicKey,
         sign_pk: PublicKey,
-    ) -> Result<(), MpcContractError> {
+    ) -> Result<(), Error> {
         log!(
             "join: signer={}, url={}, cipher_pk={:?}, sign_pk={:?}",
             env::signer_account_id(),
@@ -296,9 +292,7 @@ impl VersionedMpcContract {
             }) => {
                 let signer_account_id = env::signer_account_id();
                 if participants.contains_key(&signer_account_id) {
-                    return Err(MpcContractError::VoteError(
-                        VoteError::JoinAlreadyParticipant,
-                    ));
+                    return Err(JoinError::JoinAlreadyParticipant.into());
                 }
                 candidates.insert(
                     signer_account_id.clone(),
@@ -311,14 +305,12 @@ impl VersionedMpcContract {
                 );
                 Ok(())
             }
-            _ => Err(MpcContractError::JoinError(
-                JoinError::ProtocolStateNotRunning,
-            )),
+            _ => Err(InvalidState::ProtocolStateNotRunning.into()),
         }
     }
 
     #[handle_result]
-    pub fn vote_join(&mut self, candidate_account_id: AccountId) -> Result<bool, MpcContractError> {
+    pub fn vote_join(&mut self, candidate_account_id: AccountId) -> Result<bool, Error> {
         log!(
             "vote_join: signer={}, candidate_account_id={}",
             env::signer_account_id(),
@@ -338,7 +330,7 @@ impl VersionedMpcContract {
             }) => {
                 let candidate_info = candidates
                     .get(&candidate_account_id)
-                    .ok_or(MpcContractError::VoteError(VoteError::JoinNotCandidate))?;
+                    .ok_or(VoteError::JoinNotCandidate)?;
                 let voted = join_votes.entry(candidate_account_id.clone());
                 voted.insert(voter);
                 if voted.len() >= *threshold {
@@ -358,14 +350,12 @@ impl VersionedMpcContract {
                     Ok(false)
                 }
             }
-            _ => Err(MpcContractError::VoteError(
-                VoteError::UnexpectedProtocolState("running".to_string()),
-            )),
+            _ => Err(InvalidState::UnexpectedProtocolState.message("running")),
         }
     }
 
     #[handle_result]
-    pub fn vote_leave(&mut self, kick: AccountId) -> Result<bool, MpcContractError> {
+    pub fn vote_leave(&mut self, kick: AccountId) -> Result<bool, Error> {
         log!(
             "vote_leave: signer={}, kick={}",
             env::signer_account_id(),
@@ -383,15 +373,13 @@ impl VersionedMpcContract {
             }) => {
                 let signer_account_id = env::signer_account_id();
                 if !participants.contains_key(&signer_account_id) {
-                    return Err(MpcContractError::VoteError(VoteError::VoterNotParticipant));
+                    return Err(VoteError::VoterNotParticipant.into());
                 }
                 if !participants.contains_key(&kick) {
-                    return Err(MpcContractError::VoteError(VoteError::KickNotParticipant));
+                    return Err(VoteError::KickNotParticipant.into());
                 }
                 if participants.len() <= *threshold {
-                    return Err(MpcContractError::VoteError(
-                        VoteError::ParticipantsBelowThreshold,
-                    ));
+                    return Err(VoteError::ParticipantsBelowThreshold.into());
                 }
                 let voted = leave_votes.entry(kick.clone());
                 voted.insert(signer_account_id);
@@ -411,14 +399,12 @@ impl VersionedMpcContract {
                     Ok(false)
                 }
             }
-            _ => Err(MpcContractError::VoteError(
-                VoteError::UnexpectedProtocolState("running".to_string()),
-            )),
+            _ => Err(InvalidState::UnexpectedProtocolState.message("running")),
         }
     }
 
     #[handle_result]
-    pub fn vote_pk(&mut self, public_key: PublicKey) -> Result<bool, MpcContractError> {
+    pub fn vote_pk(&mut self, public_key: PublicKey) -> Result<bool, Error> {
         log!(
             "vote_pk: signer={}, public_key={:?}",
             env::signer_account_id(),
@@ -451,16 +437,13 @@ impl VersionedMpcContract {
             }
             ProtocolContractState::Running(state) if state.public_key == public_key => Ok(true),
             ProtocolContractState::Resharing(state) if state.public_key == public_key => Ok(true),
-            _ => Err(MpcContractError::VoteError(
-                VoteError::UnexpectedProtocolState(
-                    "initializing or running/resharing with the same public key".to_string(),
-                ),
-            )),
+            _ => Err(InvalidState::UnexpectedProtocolState
+                .message("initializing or running/resharing with the same public key")),
         }
     }
 
     #[handle_result]
-    pub fn vote_reshared(&mut self, epoch: u64) -> Result<bool, MpcContractError> {
+    pub fn vote_reshared(&mut self, epoch: u64) -> Result<bool, Error> {
         log!(
             "vote_reshared: signer={}, epoch={}",
             env::signer_account_id(),
@@ -478,7 +461,7 @@ impl VersionedMpcContract {
                 finished_votes,
             }) => {
                 if *old_epoch + 1 != epoch {
-                    return Err(MpcContractError::VoteError(VoteError::EpochMismatch));
+                    return Err(InvalidState::EpochMismatch.into());
                 }
                 finished_votes.insert(voter);
                 if finished_votes.len() >= *threshold {
@@ -500,59 +483,71 @@ impl VersionedMpcContract {
                 if state.epoch == epoch {
                     Ok(true)
                 } else {
-                    Err(MpcContractError::VoteError(
-                        VoteError::UnexpectedProtocolState("Running".to_string()),
-                    ))
+                    Err(InvalidState::UnexpectedProtocolState.message("Running: invalid epoch"))
                 }
             }
-            _ => Err(MpcContractError::VoteError(
-                VoteError::UnexpectedProtocolState("Running".to_string()),
-            )),
+            ProtocolContractState::NotInitialized => {
+                Err(InvalidState::UnexpectedProtocolState.message("NotInitialized"))
+            }
+            ProtocolContractState::Initializing(_) => {
+                Err(InvalidState::UnexpectedProtocolState.message("Initializing"))
+            }
         }
     }
 
     /// Propose an update to the contract. [`Update`] are all the possible updates that can be proposed.
     ///
     /// returns Some(id) if the proposal was successful, None otherwise
+    #[payable]
     #[handle_result]
     pub fn propose_update(
         &mut self,
-        code: Option<Vec<u8>>,
-        config: Option<Config>,
-    ) -> Result<UpdateId, VoteError> {
+        #[serializer(borsh)] args: ProposeUpdateArgs,
+    ) -> Result<UpdateId, Error> {
         // Only voters can propose updates:
-        self.voter()?;
+        let proposer = self.voter()?;
 
-        let Some(id) = self.proposed_updates().propose(code, config) else {
-            return Err(VoteError::Unexpected(
-                "cannot propose update due to incorrect parameters".into(),
-            ));
+        let attached = env::attached_deposit();
+        let required = ProposedUpdates::required_deposit(&args.code, &args.config);
+        if attached < required {
+            return Err(InvalidParameters::InsufficientDeposit.message(format!(
+                "Attached {}, Required {}",
+                attached.as_yoctonear(),
+                required.as_yoctonear(),
+            )));
+        }
+
+        let Some(id) = self.proposed_updates().propose(args.code, args.config) else {
+            return Err(ConversionError::DataConversion
+                .message("Cannot propose update due to incorrect parameters."));
         };
 
-        env::log_str(&format!("id={id:?}"));
+        // Refund the difference if the propser attached more than required.
+        if let Some(diff) = attached.checked_sub(required) {
+            if diff > NearToken::from_yoctonear(0) {
+                Promise::new(proposer).transfer(diff);
+            }
+        }
+
         Ok(id)
     }
 
     /// Vote for a proposed update given the [`UpdateId`] of the update.
     ///
-    /// Returns Ok(true) if the amount of participants surpassed the threshold and the update was executed.
+    /// Returns Ok(true) if the amount of voters surpassed the threshold and the update was executed.
+    /// Returns Ok(false) if the amount of voters did not surpass the threshold. Returns Err if the update
+    /// was not found or if the voter is not a participant in the protocol.
     #[handle_result]
-    pub fn vote_update(&mut self, id: UpdateId) -> Result<bool, MpcContractError> {
-        let threshold = match self {
-            Self::V0(contract) => match &contract.protocol_state {
-                ProtocolContractState::Running(state) => state.threshold,
-                ProtocolContractState::Resharing(state) => state.threshold,
-                _ => {
-                    return Err(MpcContractError::VoteError(
-                        VoteError::UnexpectedProtocolState("Initialized or NotInitialized".into()),
-                    ))
-                }
-            },
-        };
-
+    pub fn vote_update(&mut self, id: UpdateId) -> Result<bool, Error> {
+        log!(
+            "vote_update: signer={}, id={:?}",
+            env::signer_account_id(),
+            id,
+        );
+        let threshold = self.threshold()?;
         let voter = self.voter()?;
         let Some(votes) = self.proposed_updates().vote(&id, voter) else {
-            return Err(MpcContractError::VoteError(VoteError::UpdateNotFound));
+            return Err(InvalidParameters::UpdateNotFound.into());
         };
 
         // Not enough votes, wait for more.
@@ -560,11 +555,8 @@ impl VersionedMpcContract {
             return Ok(false);
         }
 
-        let Some(_promise) =
-            self.proposed_updates()
-                .do_update(&id, "update_config", UPDATE_CONFIG_GAS)
-        else {
-            return Err(MpcContractError::VoteError(VoteError::UpdateNotFound));
+        let Some(_promise) = self.proposed_updates().do_update(&id, UPDATE_CONFIG_GAS) else {
+            return Err(InvalidParameters::UpdateNotFound.into());
         };
 
         Ok(true)
@@ -579,7 +571,8 @@ impl VersionedMpcContract {
     pub fn init(
         threshold: usize,
         candidates: BTreeMap<AccountId, CandidateInfo>,
-    ) -> Result<Self, MpcContractError> {
+        config: Option<Config>,
+    ) -> Result<Self, Error> {
         log!(
             "init: signer={}, threshold={}, candidates={}",
             env::signer_account_id(),
@@ -588,10 +581,10 @@ impl VersionedMpcContract {
         );
 
         if threshold > candidates.len() {
-            return Err(MpcContractError::InitError(InitError::ThresholdTooHigh));
+            return Err(InitError::ThresholdTooHigh.into());
         }
 
-        Ok(Self::V0(MpcContract::init(threshold, candidates)))
+        Ok(Self::V0(MpcContract::init(threshold, candidates, config)))
     }
 
     // This function can be used to transfer the MPC network to a new contract.
@@ -603,7 +596,8 @@ impl VersionedMpcContract {
         participants: Participants,
         threshold: usize,
         public_key: PublicKey,
-    ) -> Result<Self, MpcContractError> {
+        config: Option<Config>,
+    ) -> Result<Self, Error> {
         log!(
             "init_running: signer={}, epoch={}, participants={}, threshold={}, public_key={:?}",
             env::signer_account_id(),
@@ -614,7 +608,7 @@ impl VersionedMpcContract {
         );
 
         if threshold > participants.len() {
-            return Err(MpcContractError::InitError(InitError::ThresholdTooHigh));
+            return Err(InitError::ThresholdTooHigh.into());
         }
 
         Ok(Self::V0(MpcContract {
@@ -630,8 +624,22 @@ impl VersionedMpcContract {
             pending_requests: LookupMap::new(StorageKey::PendingRequests),
             request_counter: 0,
             proposed_updates: ProposedUpdates::default(),
-            config: Config::default(),
+            config: config.unwrap_or_default(),
         }))
+    }
+
+    /// This will be called internally by the contract to migrate the state when a new contract
+    /// is deployed. This function should be changed every time state is changed to do the proper
+    /// migrate flow.
+    ///
+    /// If nothing is changed, then this function will just return the current state. If it fails
+    /// to read the state, then it will return an error.
+    #[private]
+    #[init(ignore_state)]
+    #[handle_result]
+    pub fn migrate() -> Result<Self, Error> {
+        let old: MpcContract = env::state_read().ok_or(InvalidState::ContractStateIsMissing)?;
+        Ok(VersionedMpcContract::V0(old))
     }
 
     pub fn state(&self) -> &ProtocolContractState {
@@ -693,11 +701,14 @@ impl VersionedMpcContract {
     pub fn return_signature_on_finish(
         &mut self,
         #[callback_unwrap] signature: SignatureResult<SignatureResponse, SignaturePromiseError>,
-    ) -> Result<SignatureResponse, MpcContractError> {
+    ) -> Result<SignatureResponse, Error> {
         match self {
             Self::V0(_) => match signature {
-                SignatureResult::Ok(signature) => Ok(signature),
-                SignatureResult::Err(_) => Err(MpcContractError::SignError(SignError::Timeout)),
+                SignatureResult::Ok(signature) => {
+                    log!("Signature is ready.");
+                    Ok(signature)
+                }
+                SignatureResult::Err(_) => Err(SignError::Timeout.into()),
             },
         }
     }
@@ -708,7 +719,7 @@ impl VersionedMpcContract {
         &mut self,
         request: SignatureRequest,
         #[callback_result] signature: Result<SignatureResponse, PromiseError>,
-    ) -> Result<SignatureResult<SignatureResponse, SignaturePromiseError>, MpcContractError> {
+    ) -> Result<SignatureResult<SignatureResponse, SignaturePromiseError>, Error> {
         match self {
             Self::V0(mpc_contract) => {
                 // Clean up the local state
@@ -772,33 +783,48 @@ impl VersionedMpcContract {
         }
     }
 
+    fn threshold(&self) -> Result<usize, Error> {
+        match self {
+            Self::V0(contract) => match &contract.protocol_state {
+                ProtocolContractState::Initializing(state) => Ok(state.threshold),
+                ProtocolContractState::Running(state) => Ok(state.threshold),
+                ProtocolContractState::Resharing(state) => Ok(state.threshold),
+                ProtocolContractState::NotInitialized => {
+                    Err(InvalidState::UnexpectedProtocolState.message("NotInitialized"))
+                }
+            },
+        }
+    }
+
     fn proposed_updates(&mut self) -> &mut ProposedUpdates {
         match self {
             Self::V0(contract) => &mut contract.proposed_updates,
         }
     }
 
-    fn voter(&self) -> Result<AccountId, VoteError> {
+    /// Get our own account id as a voter. Check to see if we are a participant in the protocol.
+    /// If we are not a participant, return an error.
+    fn voter(&self) -> Result<AccountId, Error> {
         let voter = env::signer_account_id();
         match self {
             Self::V0(contract) => match &contract.protocol_state {
                 ProtocolContractState::Initializing(state) => {
                     if !state.candidates.contains_key(&voter) {
-                        return Err(VoteError::VoterNotParticipant);
+                        return Err(VoteError::VoterNotParticipant.into());
                     }
                 }
                 ProtocolContractState::Running(state) => {
                     if !state.participants.contains_key(&voter) {
-                        return Err(VoteError::VoterNotParticipant);
+                        return Err(VoteError::VoterNotParticipant.into());
                     }
                 }
                 ProtocolContractState::Resharing(state) => {
                     if !state.old_participants.contains_key(&voter) {
-                        return Err(VoteError::VoterNotParticipant);
+                        return Err(VoteError::VoterNotParticipant.into());
                     }
                 }
                 ProtocolContractState::NotInitialized => {
-                    return Err(VoteError::UnexpectedProtocolState("NotInitialized".into()))
+                    return Err(InvalidState::UnexpectedProtocolState.message("NotInitialized"))
                 }
             },
         }

@@ -1,8 +1,6 @@
+use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::mesh::NetworkConfig;
-use crate::protocol::presignature::PresignatureConfig;
-use crate::protocol::triple::TripleConfig;
-use crate::protocol::{Config, MpcSignProtocol, SignQueue};
+use crate::protocol::{MpcSignProtocol, SignQueue};
 use crate::storage::triple_storage::LockTripleNodeStorageBox;
 use crate::{indexer, storage, web};
 use clap::Parser;
@@ -22,77 +20,47 @@ pub enum Cli {
         /// NEAR RPC address
         #[arg(
             long,
-            env("MPC_RECOVERY_NEAR_RPC"),
+            env("MPC_NEAR_RPC"),
             default_value("https://rpc.testnet.near.org")
         )]
         near_rpc: String,
         /// MPC contract id
-        #[arg(
-            long,
-            env("MPC_RECOVERY_CONTRACT_ID"),
-            default_value("v5.multichain-mpc-dev.testnet")
-        )]
+        #[arg(long, env("MPC_CONTRACT_ID"), default_value("v1.signer-dev.testnet"))]
         mpc_contract_id: AccountId,
         /// This node's account id
-        #[arg(long, env("MPC_RECOVERY_ACCOUNT_ID"))]
+        #[arg(long, env("MPC_ACCOUNT_ID"))]
         account_id: AccountId,
         /// This node's account ed25519 secret key
-        #[arg(long, env("MPC_RECOVERY_ACCOUNT_SK"))]
+        #[arg(long, env("MPC_ACCOUNT_SK"))]
         account_sk: SecretKey,
         /// The web port for this server
-        #[arg(long, env("MPC_RECOVERY_WEB_PORT"))]
+        #[arg(long, env("MPC_WEB_PORT"))]
         web_port: u16,
         // TODO: need to add in CipherPK type for parsing.
         /// The cipher public key used to encrypt messages between nodes.
-        #[arg(long, env("MPC_RECOVERY_CIPHER_PK"))]
+        #[arg(long, env("MPC_CIPHER_PK"))]
         cipher_pk: String,
         /// The cipher secret key used to decrypt messages between nodes.
-        #[arg(long, env("MPC_RECOVERY_CIPHER_SK"))]
+        #[arg(long, env("MPC_CIPHER_SK"))]
         cipher_sk: String,
         /// The secret key used to sign messages to be sent between nodes.
-        #[arg(long, env("MPC_RECOVERY_SIGN_SK"))]
+        #[arg(long, env("MPC_SIGN_SK"))]
         sign_sk: Option<SecretKey>,
         /// NEAR Lake Indexer options
         #[clap(flatten)]
         indexer_options: indexer::Options,
         /// Local address that other peers can use to message this node.
-        #[arg(long, env("MPC_RECOVERY_LOCAL_ADDRESS"))]
+        #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
         /// Storage options
         #[clap(flatten)]
         storage_options: storage::Options,
-        /// At minimum, how many triples to stockpile on this node.
-        #[arg(long, env("MPC_RECOVERY_MIN_TRIPLES"), default_value("20"))]
-        min_triples: usize,
-        /// At maximum, how many triples to stockpile on this node.
-        #[arg(long, env("MPC_RECOVERY_MAX_TRIPLES"), default_value("640"))]
-        max_triples: usize,
-
-        /// At maximum, how many triple protocols can this current node introduce
-        /// at the same time. This should be something like `max_concurrent_gen / num_nodes`
-        #[arg(
-            long,
-            env("MPC_RECOVERY_MAX_CONCURRENT_INTRODUCTION"),
-            default_value("2")
-        )]
-        max_concurrent_introduction: usize,
-
-        /// At maximum, how many ongoing protocols for triples to be running
-        /// at the same time. The rest will be queued up.
-        #[arg(
-            long,
-            env("MPC_RECOVERY_MAX_CONCURRENT_GENERATION"),
-            default_value("16")
-        )]
-        max_concurrent_generation: usize,
-
-        /// At minimum, how many presignatures to stockpile on this node.
-        #[arg(long, env("MPC_RECOVERY_MIN_PRESIGNATURES"), default_value("10"))]
-        min_presignatures: usize,
-
-        /// At maximum, how many presignatures to stockpile on the network.
-        #[arg(long, env("MPC_RECOVERY_MAX_PRESIGNATURES"), default_value("320"))]
-        max_presignatures: usize,
+        /// The set of configurations that we will use to override contract configurations.
+        #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
+        override_config: Option<OverrideConfig>,
+        /// referer header for mainnet whitelist
+        #[arg(long, env("MPC_CLIENT_HEADER_REFERER"), default_value(None))]
+        client_header_referer: Option<String>,
     },
 }
 
@@ -111,12 +79,8 @@ impl Cli {
                 indexer_options,
                 my_address,
                 storage_options,
-                min_triples,
-                max_triples,
-                max_concurrent_introduction,
-                max_concurrent_generation,
-                min_presignatures,
-                max_presignatures,
+                override_config,
+                client_header_referer,
             } => {
                 let mut args = vec![
                     "start".to_string(),
@@ -134,18 +98,6 @@ impl Cli {
                     cipher_pk,
                     "--cipher-sk".to_string(),
                     cipher_sk,
-                    "--min-triples".to_string(),
-                    min_triples.to_string(),
-                    "--max-triples".to_string(),
-                    max_triples.to_string(),
-                    "--max-concurrent-introduction".to_string(),
-                    max_concurrent_introduction.to_string(),
-                    "--max-concurrent-generation".to_string(),
-                    max_concurrent_generation.to_string(),
-                    "--min-presignatures".to_string(),
-                    min_presignatures.to_string(),
-                    "--max-presignatures".to_string(),
-                    max_presignatures.to_string(),
                 ];
                 if let Some(sign_sk) = sign_sk {
                     args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
@@ -153,6 +105,17 @@ impl Cli {
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
                 }
+                if let Some(override_config) = override_config {
+                    args.extend([
+                        "--override-config".to_string(),
+                        serde_json::to_string(&override_config).unwrap(),
+                    ]);
+                }
+
+                if let Some(client_header_referer) = client_header_referer {
+                    args.extend(["--client-header-referer".to_string(), client_header_referer]);
+                }
+
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args
@@ -204,12 +167,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             indexer_options,
             my_address,
             storage_options,
-            min_triples,
-            max_triples,
-            max_concurrent_introduction,
-            max_concurrent_generation,
-            min_presignatures,
-            max_presignatures,
+            override_config,
+            client_header_referer,
         } => {
             let sign_queue = Arc::new(RwLock::new(SignQueue::new()));
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -246,7 +205,12 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let (sender, receiver) = mpsc::channel(16384);
 
             tracing::info!(%my_address, "address detected");
-            let rpc_client = near_fetch::Client::new(&near_rpc);
+            let mut rpc_client = near_fetch::Client::new(&near_rpc);
+            if let Some(referer_param) = client_header_referer {
+                let client_headers = rpc_client.inner_mut().headers_mut();
+                client_headers.insert(http::header::REFERER, referer_param.parse().unwrap());
+            }
+
             tracing::debug!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let (protocol, protocol_state) = MpcSignProtocol::init(
@@ -259,22 +223,13 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_queue,
                 key_storage,
                 triple_storage,
-                Config {
-                    triple_cfg: TripleConfig {
-                        min_triples,
-                        max_triples,
-                        max_concurrent_introduction,
-                        max_concurrent_generation,
-                    },
-                    presig_cfg: PresignatureConfig {
-                        min_presignatures,
-                        max_presignatures,
-                    },
-                    network_cfg: NetworkConfig {
+                Config::new(LocalConfig {
+                    over: override_config.unwrap_or_else(Default::default),
+                    network: NetworkConfig {
                         cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
                         sign_sk,
                     },
-                },
+                }),
             );
 
             rt.block_on(async {

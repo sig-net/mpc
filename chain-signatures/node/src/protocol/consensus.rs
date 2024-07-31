@@ -137,13 +137,11 @@ impl ConsensusProtocol for StartedState {
                                         contract_state.threshold,
                                         epoch,
                                         ctx.my_account_id(),
-                                        &ctx.cfg().presig_cfg,
                                     );
                                     let triple_manager = Arc::new(RwLock::new(TripleManager::new(
                                         me,
                                         contract_state.threshold,
                                         epoch,
-                                        &ctx.cfg().triple_cfg,
                                         self.triple_data,
                                         ctx.triple_storage(),
                                         ctx.my_account_id(),
@@ -336,10 +334,10 @@ impl ConsensusProtocol for WaitingForConsensusState {
             ProtocolState::Running(contract_state) => match contract_state.epoch.cmp(&self.epoch) {
                 Ordering::Greater => {
                     tracing::warn!(
-                            "waiting(running): our current epoch is {} while contract state's is {}, trying to rejoin as a new participant",
-                            self.epoch,
-                            contract_state.epoch
-                        );
+                        "waiting(running): our current epoch is {} while contract state's is {}, trying to rejoin as a new participant",
+                        self.epoch,
+                        contract_state.epoch
+                    );
 
                     Ok(NodeState::Joining(JoiningState {
                         participants: contract_state.participants,
@@ -374,7 +372,6 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         me,
                         self.threshold,
                         self.epoch,
-                        &ctx.cfg().triple_cfg,
                         vec![],
                         ctx.triple_storage(),
                         ctx.my_account_id(),
@@ -396,7 +393,6 @@ impl ConsensusProtocol for WaitingForConsensusState {
                             self.threshold,
                             self.epoch,
                             ctx.my_account_id(),
-                            &ctx.cfg().presig_cfg,
                         ))),
                         signature_manager: Arc::new(RwLock::new(SignatureManager::new(
                             me,
@@ -676,8 +672,8 @@ impl ConsensusProtocol for JoiningState {
                             .call(ctx.signer(), ctx.mpc_contract_id(), "join")
                             .args_json(json!({
                                 "url": ctx.my_address(),
-                                "cipher_pk": ctx.cfg().network_cfg.cipher_pk.to_bytes(),
-                                "sign_pk": ctx.cfg().network_cfg.sign_sk.public_key(),
+                                "cipher_pk": ctx.cfg().local.network.cipher_pk.to_bytes(),
+                                "sign_pk": ctx.cfg().local.network.sign_sk.public_key(),
                             }))
                             .max_gas()
                             .retry_exponential(10, 3)

@@ -23,6 +23,7 @@ use tokio::sync::RwLock;
 pub trait MessageCtx {
     async fn me(&self) -> Participant;
     fn mesh(&self) -> &Mesh;
+    fn cfg(&self) -> &crate::config::Config;
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -230,6 +231,7 @@ impl MessageHandler for RunningState {
         ctx: C,
         queue: &mut MpcMessageQueue,
     ) -> Result<(), MessageHandleError> {
+        let protocol_cfg = &ctx.cfg().protocol;
         let participants = ctx.mesh().active_participants();
         let mut triple_manager = self.triple_manager.write().await;
 
@@ -241,7 +243,7 @@ impl MessageHandler for RunningState {
                 || queue.iter().any(|msg| {
                     util::is_elapsed_longer_than_timeout(
                         msg.timestamp,
-                        crate::types::PROTOCOL_TRIPLE_TIMEOUT,
+                        protocol_cfg.triple.generation_timeout,
                     )
                 })
             {
@@ -253,7 +255,7 @@ impl MessageHandler for RunningState {
             !triple_manager.refresh_gc(id)
         });
         for (id, queue) in triple_messages {
-            let protocol = match triple_manager.get_or_generate(*id, participants) {
+            let protocol = match triple_manager.get_or_generate(*id, participants, protocol_cfg) {
                 Ok(protocol) => protocol,
                 Err(err) => {
                     // ignore the message since the generation had bad parameters. Also have the other node who
@@ -278,7 +280,7 @@ impl MessageHandler for RunningState {
                 || queue.iter().any(|msg| {
                     util::is_elapsed_longer_than_timeout(
                         msg.timestamp,
-                        crate::types::PROTOCOL_PRESIG_TIMEOUT,
+                        protocol_cfg.presignature.generation_timeout,
                     )
                 })
             {
@@ -314,6 +316,7 @@ impl MessageHandler for RunningState {
                     &mut triple_manager,
                     &self.public_key,
                     &self.private_share,
+                    protocol_cfg,
                 )
                 .await
             {
@@ -362,19 +365,20 @@ impl MessageHandler for RunningState {
 
         let mut signature_manager = self.signature_manager.write().await;
         let signature_messages = queue.signature_bins.entry(self.epoch).or_default();
-        signature_messages.retain(|_, queue| {
+        signature_messages.retain(|receipt_id, queue| {
             // Skip message if it already timed out
             if queue.is_empty()
                 || queue.iter().any(|msg| {
                     util::is_elapsed_longer_than_timeout(
                         msg.timestamp,
-                        crate::types::PROTOCOL_SIGNATURE_TIMEOUT,
+                        protocol_cfg.signature.generation_timeout,
                     )
                 })
             {
                 return false;
             }
-            true
+
+            !signature_manager.refresh_gc(receipt_id)
         });
         for (receipt_id, queue) in signature_messages {
             // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
@@ -416,6 +420,7 @@ impl MessageHandler for RunningState {
                 *epsilon,
                 *delta,
                 &mut presignature_manager,
+                protocol_cfg,
             ) {
                 Ok(protocol) => protocol,
                 Err(GenerationError::PresignatureIsGenerating(_)) => {
@@ -462,9 +467,9 @@ impl MessageHandler for RunningState {
                 protocol.message(message.from, message.data);
             }
         }
-        triple_manager.garbage_collect();
-        presignature_manager.garbage_collect();
-        signature_manager.garbage_collect();
+        triple_manager.garbage_collect(protocol_cfg);
+        presignature_manager.garbage_collect(protocol_cfg);
+        signature_manager.garbage_collect(protocol_cfg);
         Ok(())
     }
 }

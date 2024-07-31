@@ -12,12 +12,11 @@ use crate::containers::LocalStack;
 use anyhow::Context as _;
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use futures::StreamExt;
+use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
-use mpc_recovery_node::gcp::GcpService;
-use mpc_recovery_node::protocol::presignature::PresignatureConfig;
-use mpc_recovery_node::protocol::triple::TripleConfig;
-use mpc_recovery_node::storage;
-use mpc_recovery_node::storage::triple_storage::TripleNodeStorageBox;
+use mpc_node::gcp::GcpService;
+use mpc_node::storage;
+use mpc_node::storage::triple_storage::TripleNodeStorageBox;
 use near_crypto::KeyFile;
 use near_workspaces::network::{Sandbox, ValidatorKey};
 use near_workspaces::types::SecretKey;
@@ -31,8 +30,7 @@ const NETWORK: &str = "mpc_it_network";
 pub struct MultichainConfig {
     pub nodes: usize,
     pub threshold: usize,
-    pub triple_cfg: TripleConfig,
-    pub presig_cfg: PresignatureConfig,
+    pub protocol: ProtocolConfig,
 }
 
 impl Default for MultichainConfig {
@@ -40,15 +38,18 @@ impl Default for MultichainConfig {
         Self {
             nodes: 3,
             threshold: 2,
-            triple_cfg: TripleConfig {
-                min_triples: 8,
-                max_triples: 80,
-                max_concurrent_introduction: 8,
-                max_concurrent_generation: 24,
-            },
-            presig_cfg: PresignatureConfig {
-                min_presignatures: 2,
-                max_presignatures: 20,
+            protocol: ProtocolConfig {
+                triple: TripleConfig {
+                    min_triples: 8,
+                    max_triples: 80,
+                    ..Default::default()
+                },
+                presignature: PresignatureConfig {
+                    min_presignatures: 2,
+                    max_presignatures: 20,
+                    ..Default::default()
+                },
+                ..Default::default()
             },
         }
     }
@@ -278,7 +279,7 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         crate::containers::Datastore::run(docker_client, docker_network, gcp_project_id).await?;
 
     let sk_share_local_path = "multichain-integration-secret-manager".to_string();
-    let storage_options = mpc_recovery_node::storage::Options {
+    let storage_options = mpc_node::storage::Options {
         env: "local-test".to_string(),
         gcp_project_id: "multichain-integration".to_string(),
         sk_share_secret_id: None,
