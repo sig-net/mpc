@@ -83,6 +83,10 @@ pub struct PresignatureConfig {
 pub struct SignatureConfig {
     /// Timeout for signature generation in milliseconds.
     pub generation_timeout: u64,
+    /// Timeout for signature generation in milliseconds. This is the total timeout for
+    /// the signature generation process. Mainly used to include the whole generation of
+    /// signatures including their retries up till this timeout.
+    pub generation_timeout_total: u64,
     /// Garbage collection timeout in milliseconds for signatures generated.
     pub garbage_timeout: u64,
 

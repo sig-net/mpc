@@ -133,6 +133,7 @@ pub struct SignatureGenerator {
     pub sign_request_timestamp: Instant,
     pub generator_timestamp: Instant,
     pub timeout: Duration,
+    pub timeout_total: Duration,
 }
 
 impl SignatureGenerator {
@@ -146,7 +147,7 @@ impl SignatureGenerator {
         epsilon: Scalar,
         delta: Scalar,
         sign_request_timestamp: Instant,
-        timeout: u64,
+        cfg: &ProtocolConfig,
     ) -> Self {
         Self {
             protocol,
@@ -158,15 +159,22 @@ impl SignatureGenerator {
             delta,
             sign_request_timestamp,
             generator_timestamp: Instant::now(),
-            timeout: Duration::from_millis(timeout),
+            timeout: Duration::from_millis(cfg.signature.generation_timeout),
+            timeout_total: Duration::from_millis(cfg.signature.generation_timeout_total),
         }
     }
 
     pub fn poke(&mut self) -> Result<Action<FullSignature<Secp256k1>>, ProtocolError> {
-        if self.generator_timestamp.elapsed() > self.timeout {
-            tracing::info!(self.presignature_id, "signature protocol timed out");
+        if self.sign_request_timestamp.elapsed() > self.timeout_total {
             return Err(ProtocolError::Other(
-                anyhow::anyhow!("signature protocol timed out").into(),
+                anyhow::anyhow!("signature protocol timeout completely").into(),
+            ));
+        }
+
+        if self.generator_timestamp.elapsed() > self.timeout {
+            tracing::warn!(self.presignature_id, "signature protocol timed out");
+            return Err(ProtocolError::Other(
+                anyhow::anyhow!("signature protocol timeout").into(),
             ));
         }
 
@@ -253,7 +261,7 @@ impl SignatureManager {
         public_key: PublicKey,
         presignature: Presignature,
         req: GenerationRequest,
-        timeout: u64,
+        cfg: &ProtocolConfig,
     ) -> Result<SignatureGenerator, InitializationError> {
         let participants = participants.keys_vec();
         let GenerationRequest {
@@ -286,7 +294,7 @@ impl SignatureManager {
             epsilon,
             delta,
             sign_request_timestamp,
-            timeout,
+            cfg,
         ))
     }
 
@@ -296,7 +304,7 @@ impl SignatureManager {
         req: GenerationRequest,
         presignature: Presignature,
         participants: &Participants,
-        timeout: u64,
+        cfg: &ProtocolConfig,
     ) -> Result<(), InitializationError> {
         tracing::info!(receipt_id = %receipt_id, participants = ?participants.keys_vec(), "restarting failed protocol to generate signature");
         let generator = Self::generate_internal(
@@ -305,7 +313,7 @@ impl SignatureManager {
             self.public_key,
             presignature,
             req,
-            timeout,
+            cfg,
         )?;
         self.generators.insert(receipt_id, generator);
         Ok(())
@@ -322,7 +330,7 @@ impl SignatureManager {
         epsilon: Scalar,
         delta: Scalar,
         sign_request_timestamp: Instant,
-        timeout: u64,
+        cfg: &ProtocolConfig,
     ) -> Result<(), InitializationError> {
         tracing::info!(
             %receipt_id,
@@ -343,7 +351,7 @@ impl SignatureManager {
                 delta,
                 sign_request_timestamp,
             },
-            timeout,
+            cfg,
         )?;
         self.generators.insert(receipt_id, generator);
         Ok(())
@@ -404,7 +412,7 @@ impl SignatureManager {
                         delta,
                         sign_request_timestamp: Instant::now(),
                     },
-                    cfg.signature.generation_timeout,
+                    cfg,
                 )?;
                 let generator = entry.insert(generator);
                 Ok(&mut generator.protocol)
@@ -424,8 +432,8 @@ impl SignatureManager {
                 let action = match generator.poke() {
                     Ok(action) => action,
                     Err(err) => {
-                        tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
-                        if generator.proposer == self.me {
+                        if generator.proposer == self.me && generator.sign_request_timestamp.elapsed() < generator.timeout_total {
+                            tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
                             // only retry the signature generation if it was initially proposed by us. We do not
                             // want any nodes to be proposing the same signature multiple times.
                             self.failed.push_back((
@@ -438,6 +446,9 @@ impl SignatureManager {
                                     sign_request_timestamp: generator.sign_request_timestamp
                                 },
                             ));
+                        } else {
+                            self.completed.insert(*receipt_id, Instant::now());
+                            tracing::warn!(?err, "signature failed to be produced; trashing request");
                         }
                         break false;
                     }
@@ -555,9 +566,10 @@ impl SignatureManager {
                     failed_req,
                     presignature,
                     &sig_participants,
-                    cfg.signature.generation_timeout,
+                    cfg,
                 ) {
                     tracing::warn!(%receipt_id, presig_id, ?err, "failed to retry signature generation: trashing presignature");
+                    self.completed.insert(receipt_id, Instant::now());
                     continue;
                 }
 
@@ -584,7 +596,7 @@ impl SignatureManager {
                 my_request.epsilon,
                 my_request.delta,
                 my_request.time_added,
-                cfg.signature.generation_timeout,
+                cfg,
             ) {
                 tracing::warn!(%receipt_id, presig_id, ?err, "failed to start signature generation: trashing presignature");
                 continue;
