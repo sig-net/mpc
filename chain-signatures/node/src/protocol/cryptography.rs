@@ -432,8 +432,10 @@ impl CryptographicProtocol for RunningState {
         crate::metrics::SIGN_QUEUE_SIZE
             .with_label_values(&[my_account_id.as_str()])
             .set(sign_queue.len() as i64);
-        sign_queue.organize(self.threshold, &stable, ctx.me().await, &my_account_id);
-        let my_requests = sign_queue.my_requests(ctx.me().await);
+        let me = ctx.me().await;
+        sign_queue.organize(self.threshold, &stable, me, &my_account_id);
+
+        let my_requests = sign_queue.my_requests(me);
         crate::metrics::SIGN_QUEUE_MINE_SIZE
             .with_label_values(&[my_account_id.as_str()])
             .set(my_requests.len() as i64);
