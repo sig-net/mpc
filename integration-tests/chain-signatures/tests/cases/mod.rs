@@ -11,6 +11,7 @@ use mpc_node::kdf::into_eth_sig;
 use mpc_node::test_utils;
 use mpc_node::types::LatestBlockHeight;
 use mpc_node::util::NearPublicKeyExt;
+use rand::{Rng, SeedableRng};
 use test_log::test;
 
 pub mod nightly;
@@ -100,6 +101,33 @@ async fn test_signature_basic() -> anyhow::Result<()> {
 }
 
 #[test(tokio::test)]
+async fn test_signature_multiple_requests() -> anyhow::Result<()> {
+    let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
+
+    with_multichain_nodes(MultichainConfig::default(), |ctx| {
+        Box::pin(async move {
+            let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
+            assert_eq!(state_0.participants.len(), 3);
+
+            for i in 0..10 {
+                let random_secs: u32 = rng.gen_range(1, 40);
+                tokio::time::sleep(std::time::Duration::from_secs(random_secs as u64)).await;
+                let (account, signer) = actions::new_account(&ctx).await.unwrap();
+                let (_, payload_hash, tx_hash) =
+                    actions::request_sign(&ctx, &signer).await.unwrap();
+                match wait_for::signature_responded(&ctx, tx_hash).await {
+                    Ok(sig) => tracing::info!(tx_hash, "got signature"),
+                    Err(err) => tracing::error!("unable to produce signature in time: {err:?}"),
+                }
+            }
+
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[test(tokio::test)]
 async fn test_signature_offline_node() -> anyhow::Result<()> {
     with_multichain_nodes(MultichainConfig::default(), |mut ctx| {
         Box::pin(async move {
@@ -147,7 +175,8 @@ async fn test_key_derivation() -> anyhow::Result<()> {
 
             for _ in 0..3 {
                 let mpc_pk: k256::AffinePoint = state_0.public_key.clone().into_affine_point();
-                let (_, payload_hashed, account, tx_hash) = actions::request_sign(&ctx).await?;
+                let (account, signer) = actions::new_account(&ctx).await?;
+                let (_, payload_hashed, tx_hash) = actions::request_sign(&ctx, &signer).await?;
                 let sig = wait_for::signature_responded(&ctx, tx_hash).await?;
 
                 let hd_path = "test";
