@@ -228,9 +228,17 @@ async fn handle_block(
         }
     }
 
-    ctx.indexer
+    if let Err(err) = ctx
+        .indexer
         .update_block_height(block.block_height(), &ctx.gcp_service)
-        .await?;
+        .await
+    {
+        tracing::warn!(
+            height = block.block_height(),
+            ?err,
+            "Unable to store latest block height to GCP"
+        );
+    }
 
     crate::metrics::LATEST_BLOCK_HEIGHT
         .with_label_values(&[ctx.gcp_service.account_id.as_str()])
