@@ -35,10 +35,43 @@ pub struct SignRequest {
     pub time_added: Instant,
 }
 
+/// Type that preserves the insertion order of requests.
+#[derive(Default)]
+pub struct ParticipantRequests {
+    requests: HashMap<ReceiptId, SignRequest>,
+    order: VecDeque<ReceiptId>,
+}
+
+impl ParticipantRequests {
+    fn insert(&mut self, receipt_id: ReceiptId, request: SignRequest) {
+        self.requests.insert(receipt_id, request);
+        self.order.push_back(receipt_id);
+    }
+
+    fn contains_key(&self, receipt_id: &ReceiptId) -> bool {
+        self.requests.contains_key(receipt_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.requests.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn pop_front(&mut self) -> Option<(ReceiptId, SignRequest)> {
+        let receipt_id = self.order.pop_front()?;
+        self.requests
+            .remove(&receipt_id)
+            .map(|req| (receipt_id, req))
+    }
+}
+
 #[derive(Default)]
 pub struct SignQueue {
     unorganized_requests: Vec<SignRequest>,
-    requests: HashMap<Participant, HashMap<ReceiptId, SignRequest>>,
+    requests: HashMap<Participant, ParticipantRequests>,
 }
 
 impl SignQueue {
@@ -116,7 +149,7 @@ impl SignQueue {
         participant_requests.contains_key(&receipt_id)
     }
 
-    pub fn my_requests(&mut self, me: Participant) -> &mut HashMap<ReceiptId, SignRequest> {
+    pub fn my_requests(&mut self, me: Participant) -> &mut ParticipantRequests {
         self.requests.entry(me).or_default()
     }
 }
@@ -524,7 +557,7 @@ impl SignatureManager {
         &mut self,
         threshold: usize,
         stable: &Participants,
-        my_requests: &mut HashMap<ReceiptId, SignRequest>,
+        my_requests: &mut ParticipantRequests,
         presignature_manager: &mut PresignatureManager,
         cfg: &ProtocolConfig,
     ) {
@@ -580,11 +613,7 @@ impl SignatureManager {
                 }
             }
 
-            let Some(receipt_id) = my_requests.keys().next().cloned() else {
-                failed_presigs.push(presignature);
-                continue;
-            };
-            let Some(my_request) = my_requests.remove(&receipt_id) else {
+            let Some((receipt_id, my_request)) = my_requests.pop_front() else {
                 failed_presigs.push(presignature);
                 continue;
             };
