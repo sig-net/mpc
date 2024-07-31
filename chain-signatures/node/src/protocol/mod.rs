@@ -201,6 +201,7 @@ impl MpcSignProtocol {
         let mut last_state_update = Instant::now();
         let mut last_config_update = Instant::now();
         let mut last_pinged = Instant::now();
+        let mut last_state = Instant::now();
 
         // Sets the latest configurations from the contract:
         if let Err(err) = self
@@ -282,8 +283,21 @@ impl MpcSignProtocol {
                 guard.clone()
             };
 
-            let view = crate::web::StateView::from(&state).await;
-            tracing::debug!("current view: {view:#?}");
+            // let me = {
+            //     let my_near_acc_id = &self.ctx.account_id;
+            //     let me = state
+            //         .find_participant_info(my_near_acc_id)
+            //         .unwrap_or_else(|| {
+            //             tracing::error!("could not find participant info for {my_near_acc_id}");
+            //             panic!("could not find participant info for {my_near_acc_id}");
+            //         });
+            //     me.id
+            // };
+            if last_state.elapsed() >= Duration::from_secs(1) {
+                let view = crate::web::StateView::from(&state).await;
+                tracing::debug!("current view: {view:#?}");
+                last_state = Instant::now();
+            }
 
             let crypto_time = Instant::now();
             let mut state = match state.progress(&mut self).await {

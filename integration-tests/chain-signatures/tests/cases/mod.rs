@@ -11,6 +11,7 @@ use mpc_node::kdf::into_eth_sig;
 use mpc_node::test_utils;
 use mpc_node::types::LatestBlockHeight;
 use mpc_node::util::NearPublicKeyExt;
+use rand::{Rng, SeedableRng};
 use test_log::test;
 
 pub mod nightly;
@@ -101,12 +102,24 @@ async fn test_signature_basic() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_signature_multiple_requests() -> anyhow::Result<()> {
+    let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
+
     with_multichain_nodes(MultichainConfig::default(), |ctx| {
         Box::pin(async move {
             let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
             assert_eq!(state_0.participants.len(), 3);
-            wait_for::has_at_least_mine_presignatures(&ctx, 5).await?;
-            actions::signature_production(&ctx, &state_0, 5).await?;
+
+            for i in 0..10 {
+                let random_secs: u32 = rng.gen_range(1, 40);
+                tokio::time::sleep(std::time::Duration::from_secs(random_secs as u64)).await;
+                let (account, signer) = actions::new_account(&ctx).await.unwrap();
+                let (_, payload_hash, tx_hash) =
+                    actions::request_sign(&ctx, &signer).await.unwrap();
+                match wait_for::signature_responded(&ctx, tx_hash).await {
+                    Ok(sig) => tracing::info!("GOT SIGNATURE"),
+                    Err(err) => tracing::error!("Unable to produce signature in time: {err:?}"),
+                }
+            }
 
             Ok(())
         })

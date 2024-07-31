@@ -139,10 +139,10 @@ impl StateView {
                 let presignature_count = presignature_read.len();
                 let presignature_mine_count = presignature_read.my_len();
                 let presignature_potential_count = presignature_read.potential_len();
-                let participants = state.participants.keys_vec();
+                // let participants = state.participants.keys_vec();
 
                 Some(StateView::Running {
-                    participants,
+                    participants: vec![],
                     triple_count,
                     triple_mine_count,
                     triple_potential_count,

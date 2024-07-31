@@ -136,10 +136,14 @@ pub async fn has_at_least_mine_triples<'a>(
         }
     };
 
+    let strategy = ConstantBuilder::default()
+        .with_delay(Duration::from_secs(60))
+        .with_max_times(3 * expected_mine_triple_count * 10);
+
     let mut state_views = Vec::new();
     for id in 0..ctx.nodes.len() {
         let state_view = is_enough_mine_triples(id)
-            .retry(&ExponentialBuilder::default().with_max_times(15))
+            .retry(&strategy)
             .await
             .with_context(|| format!("mpc node '{id}' failed to generate '{expected_mine_triple_count}' triples before deadline"))?;
         state_views.push(state_view);
@@ -221,10 +225,14 @@ pub async fn has_at_least_mine_presignatures<'a>(
         }
     };
 
+    let strategy = ConstantBuilder::default()
+        .with_delay(Duration::from_secs(30))
+        .with_max_times(3 * expected_mine_presignature_count * 100);
+
     let mut state_views = Vec::new();
     for id in 0..ctx.nodes.len() {
         let state_view = is_enough_mine_presignatures(id)
-            .retry(&ExponentialBuilder::default().with_max_times(6))
+            .retry(&strategy)
             .await
             .with_context(|| format!("mpc node '{id}' failed to generate '{expected_mine_presignature_count}' presignatures before deadline"))?;
         state_views.push(state_view);

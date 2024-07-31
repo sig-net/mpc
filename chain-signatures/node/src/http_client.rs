@@ -40,7 +40,7 @@ async fn send_encrypted<U: IntoUrl>(
     let _span = tracing::info_span!("message_request");
     let mut url = url.into_url()?;
     url.set_path("msg");
-    tracing::debug!(?from, to = %url, "making http request: sending encrypted message");
+    // tracing::debug!(?from, to = %url, "making http request: sending encrypted message");
     let action = || async {
         let response = client
             .post(url.clone())
@@ -168,14 +168,14 @@ impl MessageQueue {
             }
         }
 
-        if uncompacted > 0 {
-            tracing::debug!(
-                uncompacted,
-                compacted,
-                "{from:?} sent messages in {:?};",
-                outer.elapsed()
-            );
-        }
+        // if uncompacted > 0 {
+        //     tracing::debug!(
+        //         uncompacted,
+        //         compacted,
+        //         "{from:?} sent messages in {:?};",
+        //         outer.elapsed()
+        //     );
+        // }
         // only add the participant count if it hasn't been seen before.
         let counts = format!("{participant_counter:?}");
         if !participant_counter.is_empty() && self.seen_counts.insert(counts.clone()) {
