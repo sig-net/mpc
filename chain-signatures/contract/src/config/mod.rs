@@ -119,6 +119,7 @@ mod tests {
                 },
                 "signature": {
                     "generation_timeout": 10000,
+                    "generation_timeout_total": 1000000,
                     "garbage_timeout": 10000000
                 },
                 "string": "value",
