@@ -21,8 +21,8 @@ use near_sdk::{
     PromiseError, PublicKey,
 };
 use primitives::{
-    CandidateInfo, Candidates, Participants, PkVotes, SignRequest, SignaturePromiseError,
-    SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex, ContractSignatureRequest
+    CandidateInfo, Candidates, ContractSignatureRequest, Participants, PkVotes, SignRequest,
+    SignaturePromiseError, SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex,
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -160,11 +160,7 @@ impl VersionedMpcContract {
             }
         }
         let predecessor = env::predecessor_account_id();
-        let request = SignatureRequest::new(
-            payload,
-            &predecessor,
-            &path,
-        );
+        let request = SignatureRequest::new(payload, &predecessor, &path);
         if !self.request_already_exists(&request) {
             log!(
                 "sign: predecessor={predecessor}, payload={payload:?}, path={path:?}, key_version={key_version}",
@@ -696,7 +692,7 @@ impl VersionedMpcContract {
                 // by it won't execute.
                 let yield_promise = env::promise_yield_create(
                     "clear_state_on_finish",
-                    &serde_json::to_vec(&(&contract_signature_request)).unwrap(),
+                    &serde_json::to_vec(&(&contract_signature_request,)).unwrap(),
                     CLEAR_STATE_ON_FINISH_CALL_GAS,
                     GasWeight(0),
                     DATA_ID_REGISTER,
@@ -773,7 +769,8 @@ impl VersionedMpcContract {
         match self {
             Self::V0(mpc_contract) => {
                 // Clean up the local state
-                let result = mpc_contract.remove_request(contract_signature_request.request.clone());
+                let result =
+                    mpc_contract.remove_request(contract_signature_request.request.clone());
                 if result.is_err() {
                     Self::refund_on_fail(&contract_signature_request);
                     result?;

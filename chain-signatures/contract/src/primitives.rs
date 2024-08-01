@@ -41,11 +41,7 @@ pub struct ContractSignatureRequest {
 }
 
 impl SignatureRequest {
-    pub fn new(
-        payload_hash: Scalar,
-        predecessor_id: &AccountId,
-        path: &str,
-    ) -> Self {
+    pub fn new(payload_hash: Scalar, predecessor_id: &AccountId, path: &str) -> Self {
         let epsilon = derive_epsilon(predecessor_id, path);
         let epsilon = SerializableScalar { scalar: epsilon };
         let payload_hash = SerializableScalar {
