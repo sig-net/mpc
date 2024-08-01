@@ -93,7 +93,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_CONTRACT_ID"
-      value = "v1.signer.near"
+      value = "v1.signer"
     },
     {
       name  = "MPC_INDEXER_S3_BUCKET"
