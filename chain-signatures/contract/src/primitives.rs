@@ -2,7 +2,7 @@ use crypto_shared::{derive_epsilon, SerializableScalar};
 use k256::Scalar;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::{AccountId, BorshStorageKey, CryptoHash, PublicKey};
+use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub mod hpke {
@@ -29,10 +29,19 @@ pub struct YieldIndex {
 pub struct SignatureRequest {
     pub epsilon: SerializableScalar,
     pub payload_hash: SerializableScalar,
+    pub requester: AccountId,
+    pub deposit: NearToken,
+    pub required_deposit: NearToken,
 }
 
 impl SignatureRequest {
-    pub fn new(payload_hash: Scalar, predecessor_id: &AccountId, path: &str) -> Self {
+    pub fn new(
+        payload_hash: Scalar,
+        predecessor_id: &AccountId,
+        path: &str,
+        deposit: NearToken,
+        required_deposit: NearToken,
+    ) -> Self {
         let epsilon = derive_epsilon(predecessor_id, path);
         let epsilon = SerializableScalar { scalar: epsilon };
         let payload_hash = SerializableScalar {
@@ -41,6 +50,9 @@ impl SignatureRequest {
         SignatureRequest {
             epsilon,
             payload_hash,
+            requester: predecessor_id.clone(),
+            deposit,
+            required_deposit,
         }
     }
 }
