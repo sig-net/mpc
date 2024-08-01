@@ -180,8 +180,6 @@ pub async fn create_response(
         payload_hash_s,
         predecessor_id,
         path,
-        NearToken::from_near(0),
-        NearToken::from_near(0),
     );
     let big_r =
         AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0)).unwrap();

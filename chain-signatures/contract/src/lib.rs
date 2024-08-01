@@ -22,7 +22,7 @@ use near_sdk::{
 };
 use primitives::{
     CandidateInfo, Candidates, Participants, PkVotes, SignRequest, SignaturePromiseError,
-    SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex,
+    SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex, ContractSignatureRequest
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -164,15 +164,19 @@ impl VersionedMpcContract {
             payload,
             &predecessor,
             &path,
-            deposit,
-            NearToken::from_yoctonear(required_deposit),
         );
         if !self.request_already_exists(&request) {
             log!(
                 "sign: predecessor={predecessor}, payload={payload:?}, path={path:?}, key_version={key_version}",
             );
             env::log_str(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
-            Ok(Self::ext(env::current_account_id()).sign_helper(request))
+            let contract_signature_request = ContractSignatureRequest {
+                request,
+                requester: predecessor,
+                deposit,
+                required_deposit: NearToken::from_yoctonear(required_deposit),
+            };
+            Ok(Self::ext(env::current_account_id()).sign_helper(contract_signature_request))
         } else {
             Err(SignError::PayloadCollision.into())
         }
@@ -683,7 +687,7 @@ impl VersionedMpcContract {
     }
 
     #[private]
-    pub fn sign_helper(&mut self, request: SignatureRequest) {
+    pub fn sign_helper(&mut self, contract_signature_request: ContractSignatureRequest) {
         match self {
             Self::V0(mpc_contract) => {
                 // refund must happen in clear_state_on_finish, because regardless of this success or fail
@@ -692,7 +696,7 @@ impl VersionedMpcContract {
                 // by it won't execute.
                 let yield_promise = env::promise_yield_create(
                     "clear_state_on_finish",
-                    &serde_json::to_vec(&(&request)).unwrap(),
+                    &serde_json::to_vec(&(&contract_signature_request)).unwrap(),
                     CLEAR_STATE_ON_FINISH_CALL_GAS,
                     GasWeight(0),
                     DATA_ID_REGISTER,
@@ -704,7 +708,7 @@ impl VersionedMpcContract {
                     .try_into()
                     .expect("conversion to CryptoHash failed");
 
-                mpc_contract.add_request(&request, data_id);
+                mpc_contract.add_request(&contract_signature_request.request, data_id);
 
                 // NOTE: there's another promise after the clear_state_on_finish to avoid any errors
                 // that would rollback the state.
@@ -740,14 +744,14 @@ impl VersionedMpcContract {
         }
     }
 
-    fn refund_on_fail(request: &SignatureRequest) {
+    fn refund_on_fail(request: &ContractSignatureRequest) {
         let amount = request.deposit;
         let to = request.requester.clone();
         log!("refund {amount} to {to} due to fail");
         Promise::new(to).transfer(amount);
     }
 
-    fn refund_on_success(request: &SignatureRequest) {
+    fn refund_on_success(request: &ContractSignatureRequest) {
         let deposit = request.deposit;
         let required = request.required_deposit;
         if let Some(diff) = deposit.checked_sub(required) {
@@ -763,24 +767,24 @@ impl VersionedMpcContract {
     #[handle_result]
     pub fn clear_state_on_finish(
         &mut self,
-        request: SignatureRequest,
+        contract_signature_request: ContractSignatureRequest,
         #[callback_result] signature: Result<SignatureResponse, PromiseError>,
     ) -> Result<SignatureResult<SignatureResponse, SignaturePromiseError>, Error> {
         match self {
             Self::V0(mpc_contract) => {
                 // Clean up the local state
-                let result = mpc_contract.remove_request(request.clone());
+                let result = mpc_contract.remove_request(contract_signature_request.request.clone());
                 if result.is_err() {
-                    Self::refund_on_fail(&request);
+                    Self::refund_on_fail(&contract_signature_request);
                     result?;
                 }
                 match signature {
                     Ok(signature) => {
-                        Self::refund_on_success(&request);
+                        Self::refund_on_success(&contract_signature_request);
                         Ok(SignatureResult::Ok(signature))
                     }
                     Err(_) => {
-                        Self::refund_on_fail(&request);
+                        Self::refund_on_fail(&contract_signature_request);
                         Ok(SignatureResult::Err(SignaturePromiseError::Failed))
                     }
                 }

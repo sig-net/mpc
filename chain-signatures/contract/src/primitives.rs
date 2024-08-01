@@ -29,6 +29,12 @@ pub struct YieldIndex {
 pub struct SignatureRequest {
     pub epsilon: SerializableScalar,
     pub payload_hash: SerializableScalar,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct ContractSignatureRequest {
+    pub request: SignatureRequest,
     pub requester: AccountId,
     pub deposit: NearToken,
     pub required_deposit: NearToken,
@@ -39,8 +45,6 @@ impl SignatureRequest {
         payload_hash: Scalar,
         predecessor_id: &AccountId,
         path: &str,
-        deposit: NearToken,
-        required_deposit: NearToken,
     ) -> Self {
         let epsilon = derive_epsilon(predecessor_id, path);
         let epsilon = SerializableScalar { scalar: epsilon };
@@ -50,9 +54,6 @@ impl SignatureRequest {
         SignatureRequest {
             epsilon,
             payload_hash,
-            requester: predecessor_id.clone(),
-            deposit,
-            required_deposit,
         }
     }
 }
