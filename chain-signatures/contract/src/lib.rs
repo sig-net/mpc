@@ -686,10 +686,6 @@ impl VersionedMpcContract {
     pub fn sign_helper(&mut self, contract_signature_request: ContractSignatureRequest) {
         match self {
             Self::V0(mpc_contract) => {
-                // refund must happen in clear_state_on_finish, because regardless of this success or fail
-                // the promise created by clear_state_on_finish is executed, because of callback_unwrap and
-                // promise_then. but if return_signature_on_finish fail (returns error), the promise created
-                // by it won't execute.
                 let yield_promise = env::promise_yield_create(
                     "clear_state_on_finish",
                     &serde_json::to_vec(&(&contract_signature_request,)).unwrap(),
@@ -772,6 +768,10 @@ impl VersionedMpcContract {
                 let result =
                     mpc_contract.remove_request(contract_signature_request.request.clone());
                 if result.is_err() {
+                    // refund must happen in clear_state_on_finish, because regardless of this success or fail
+                    // the promise created by clear_state_on_finish is executed, because of callback_unwrap and
+                    // promise_then. but if return_signature_on_finish fail (returns error), the promise created
+                    // by it won't execute.
                     Self::refund_on_fail(&contract_signature_request);
                     result?;
                 }
