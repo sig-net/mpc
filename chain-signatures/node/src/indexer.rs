@@ -3,7 +3,6 @@ use crate::gcp::GcpService;
 use crate::kdf;
 use crate::protocol::{SignQueue, SignRequest};
 use crate::types::LatestBlockHeight;
-use anyhow::Context as _;
 use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
 use near_account_id::AccountId;
@@ -96,6 +95,7 @@ pub struct Indexer {
 
 impl Indexer {
     const BEHIND_THRESHOLD: Duration = Duration::from_secs(60);
+    const RUNNING_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 
     fn new(latest_block_height: LatestBlockHeight) -> Self {
         Self {
@@ -112,6 +112,11 @@ impl Indexer {
     /// Check whether the indexer is on track with the latest block height from the chain.
     pub async fn is_on_track(&self) -> bool {
         self.last_updated_timestamp.read().await.elapsed() <= Self::BEHIND_THRESHOLD
+    }
+
+    /// Check whether the indexer is on track with the latest block height from the chain.
+    pub async fn is_running(&self) -> bool {
+        self.last_updated_timestamp.read().await.elapsed() <= Self::RUNNING_THRESHOLD
     }
 
     /// Check whether the indexer is behind with the latest block height from the chain.
@@ -150,62 +155,75 @@ async fn handle_block(
     let mut pending_requests = Vec::new();
     for action in block.actions().cloned().collect::<Vec<_>>() {
         if action.receiver_id() == ctx.mpc_contract_id {
-            let receipt =
-                anyhow::Context::with_context(block.receipt_by_id(&action.receipt_id()), || {
-                    format!(
-                        "indexer unable to find block for receipt_id={}",
-                        action.receipt_id()
-                    )
-                })?;
+            let Some(receipt) = block.receipt_by_id(&action.receipt_id()) else {
+                let err = format!(
+                    "indexer unable to find block for receipt_id={}",
+                    action.receipt_id()
+                );
+                tracing::warn!("{err}");
+                anyhow::bail!(err);
+            };
             let ExecutionStatus::SuccessReceiptId(receipt_id) = receipt.status() else {
                 continue;
             };
-            if let Some(function_call) = action.as_function_call() {
-                if function_call.method_name() == "sign" {
-                    if let Ok(arguments) =
-                        serde_json::from_slice::<'_, SignArguments>(function_call.args())
-                    {
-                        if receipt.logs().is_empty() {
-                            tracing::warn!("`sign` did not produce entropy");
+            let Some(function_call) = action.as_function_call() else {
+                continue;
+            };
+            if function_call.method_name() == "sign" {
+                let arguments =
+                    match serde_json::from_slice::<'_, SignArguments>(function_call.args()) {
+                        Ok(arguments) => arguments,
+                        Err(err) => {
+                            tracing::warn!(%err, "failed to parse `sign` arguments");
                             continue;
                         }
-                        let payload = Scalar::from_bytes(arguments.request.payload)
-                            .context("Payload cannot be converted to scalar, not in k256 field")?;
-                        let Ok(entropy) = serde_json::from_str::<'_, [u8; 32]>(&receipt.logs()[1])
-                        else {
-                            tracing::warn!(
-                                "`sign` did not produce entropy correctly: {:?}",
-                                receipt.logs()[0]
-                            );
-                            continue;
-                        };
-                        let epsilon =
-                            derive_epsilon(&action.predecessor_id(), &arguments.request.path);
-                        let delta = kdf::derive_delta(receipt_id, entropy);
-                        tracing::info!(
-                            receipt_id = %receipt_id,
-                            caller_id = receipt.predecessor_id().to_string(),
-                            our_account = ctx.node_account_id.to_string(),
-                            payload = hex::encode(arguments.request.payload),
-                            key_version = arguments.request.key_version,
-                            entropy = hex::encode(entropy),
-                            "indexed new `sign` function call"
-                        );
-                        let request = ContractSignRequest {
-                            payload,
-                            path: arguments.request.path,
-                            key_version: arguments.request.key_version,
-                        };
-                        pending_requests.push(SignRequest {
-                            receipt_id,
-                            request,
-                            epsilon,
-                            delta,
-                            entropy,
-                            time_added: Instant::now(),
-                        });
-                    }
+                    };
+
+                if receipt.logs().is_empty() {
+                    tracing::warn!("`sign` did not produce entropy");
+                    continue;
                 }
+
+                let Some(payload) = Scalar::from_bytes(arguments.request.payload) else {
+                    tracing::warn!(
+                        "`sign` did not produce payload correctly: {:?}",
+                        arguments.request.payload,
+                    );
+                    continue;
+                };
+
+                let Ok(entropy) = serde_json::from_str::<'_, [u8; 32]>(&receipt.logs()[1]) else {
+                    tracing::warn!(
+                        "`sign` did not produce entropy correctly: {:?}",
+                        receipt.logs()[0]
+                    );
+                    continue;
+                };
+                let epsilon = derive_epsilon(&action.predecessor_id(), &arguments.request.path);
+                let delta = kdf::derive_delta(receipt_id, entropy);
+                tracing::info!(
+                    receipt_id = %receipt_id,
+                    caller_id = receipt.predecessor_id().to_string(),
+                    our_account = ctx.node_account_id.to_string(),
+                    payload = hex::encode(arguments.request.payload),
+                    key_version = arguments.request.key_version,
+                    entropy = hex::encode(entropy),
+                    "indexed new `sign` function call"
+                );
+                let request = ContractSignRequest {
+                    payload,
+                    path: arguments.request.path,
+                    key_version: arguments.request.key_version,
+                };
+                pending_requests.push(SignRequest {
+                    receipt_id,
+                    request,
+                    epsilon,
+                    delta,
+                    entropy,
+                    // TODO: use indexer timestamp instead.
+                    time_added: Instant::now(),
+                });
             }
         }
     }
@@ -318,10 +336,10 @@ pub fn run(
                 rt.spawn(async move { lake.run_with_context_async(handle_block, &context).await })
             };
             let outcome = rt.block_on(async {
-                // while on track, we will keep the task spinning, and check every so often if
+                // while running, we will keep the task spinning, and check every so often if
                 // the indexer has errored out.
-                while context.indexer.is_on_track().await {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                while context.indexer.is_running().await {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
                     if join_handle.is_finished() {
                         break;
                     }

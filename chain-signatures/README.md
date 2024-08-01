@@ -44,12 +44,18 @@ Key versions refer new versions of the root key that we may choose to generate o
 pub const fn latest_key_version(&self) -> u32
 ```
 
+## `experimantal_signature_deposit()`
+This experimantal function calculates the fee for a signature request. The fee is volatile and depends on the number of pending requests. If used on a client side, it can give outdate results.
+```rust
+pub fn experimantal_signature_deposit(&self) -> u128
+```
+
 For more details check `User contract API` impl block in the [chain-signatures/contracts/src/lib.rs](./chain-signatures/contracts/src/lib.rs) file.
 
 # Environments
 Currently, we have 3 environments:
-1. Mainnet: `v1.signer.near` // TODO: set when available
+1. Mainnet: `v1.signer`
 2. Testnet: `v1.sigenr-prod.testnet`
-3. Dev: `v1.signer-dev.testnet`
+3. Dev (unstable): `v1.signer-dev.testnet`
 
 Contracts can be changed from v1 to v2, etc. Older contracts should continue functioning.

@@ -74,6 +74,7 @@ resource "google_project_iam_member" "sa-roles" {
       "roles/secretmanager.admin",
       "roles/storage.objectAdmin",
       "roles/iam.serviceAccountAdmin",
+      "roles/logging.logWriter"
   ])
 
   role    = each.key
