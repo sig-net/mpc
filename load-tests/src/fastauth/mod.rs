@@ -35,20 +35,23 @@ use utils::build_send_and_check_request;
 pub async fn prepare_user_credentials(user: &mut GooseUser) -> TransactionResult {
     tracing::info!("prepare_user_credentials");
 
+    // Config
+    let account_creator = "dev-1660670387515-45063246810397".to_string();
+    let sk = "ed25519:4hc3qA3nTE8M63DB8jEZx9ZbHVUPdkMjUAoa11m4xtET7F6w4bk51TwQ3RzEcFhBtXvF6NYzFdiJduaGdJUvynAi";
+    let sub_account_init_balance = NearToken::from_near(1);
+
     let worker = near_workspaces::testnet().await.unwrap();
 
     let root_account = Account::from_secret_key(
-        near_workspaces::types::AccountId::try_from("dev-1660670387515-45063246810397".to_string()).unwrap(),
-        near_workspaces::types::SecretKey::from_str(
-            "ed25519:4hc3qA3nTE8M63DB8jEZx9ZbHVUPdkMjUAoa11m4xtET7F6w4bk51TwQ3RzEcFhBtXvF6NYzFdiJduaGdJUvynAi"
-        ).unwrap(),
-        &worker
+        near_workspaces::types::AccountId::try_from(account_creator).unwrap(),
+        near_workspaces::types::SecretKey::from_str(sk).unwrap(),
+        &worker,
     );
 
     let subaccount = root_account
         .create_subaccount(&format!("user-{}", rand::random::<u64>()))
         // Balance this values depending on how many users you want to create and available balance
-        .initial_balance(NearToken::from_near(1))
+        .initial_balance(sub_account_init_balance)
         .transact()
         .await
         .unwrap()
