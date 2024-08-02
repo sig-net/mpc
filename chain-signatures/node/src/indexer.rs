@@ -396,13 +396,7 @@ pub fn run(
 }
 
 fn backoff(i: u32, multiplier: u32, max: u64) {
-    let mut delay: u64 = 1;
     // Exponential backoff with max delay of max seconds
-    delay = if delay < max {
-        2u64.pow(i).mul(multiplier as u64)
-    } else {
-        // Max out at max seconds
-        max
-    };
+    let delay: u64 = std::cmp::min(2u64.pow(i).mul(multiplier as u64), max);
     std::thread::sleep(std::time::Duration::from_secs(delay));
 }
