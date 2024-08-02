@@ -64,7 +64,7 @@ async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
     let (worker, contract, _, sk) = init_env().await;
     let alice = worker.dev_create_account().await?;
     let balance = alice.view_account().await?.balance;
-
+    let contract_balance = contract.view_account().await?.balance;
     let path = "test";
 
     let msg = "hello world!";
@@ -114,9 +114,21 @@ async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
     );
 
     let new_balance = alice.view_account().await?.balance;
+    let new_contract_balance = contract.view_account().await?.balance;
     assert!(
         balance.as_millinear() - new_balance.as_millinear() < 10,
         "refund should happen"
+    );
+    println!(
+        "{} {} {} {}",
+        balance.as_millinear(),
+        new_balance.as_millinear(),
+        contract_balance.as_millinear(),
+        new_contract_balance.as_millinear(),
+    );
+    assert!(
+        contract_balance.as_millinear() - new_contract_balance.as_millinear() < 20,
+        "respond should take less than 0.02 NEAR"
     );
 
     Ok(())
@@ -127,7 +139,7 @@ async fn test_contract_sign_fail_refund() -> anyhow::Result<()> {
     let (worker, contract, _, sk) = init_env().await;
     let alice = worker.dev_create_account().await?;
     let balance = alice.view_account().await?.balance;
-
+    let contract_balance = contract.view_account().await?.balance;
     let path = "test";
 
     let msg = "hello world!";
@@ -163,15 +175,21 @@ async fn test_contract_sign_fail_refund() -> anyhow::Result<()> {
         .contains(&errors::SignError::Timeout.to_string()));
 
     let new_balance = alice.view_account().await?.balance;
+    let new_contract_balance = contract.view_account().await?.balance;
     println!(
-        "{} {} {}",
+        "{} {} {} {}",
         balance.as_millinear(),
         new_balance.as_millinear(),
-        contract.view_account().await?.balance
+        contract_balance.as_yoctonear(),
+        new_contract_balance.as_yoctonear(),
     );
     assert!(
         balance.as_millinear() - new_balance.as_millinear() < 10,
         "refund should happen"
+    );
+    assert!(
+        contract_balance.as_millinear() - new_contract_balance.as_millinear() <= 1,
+        "refund transfer should take less than 0.001 NEAR"
     );
 
     Ok(())
