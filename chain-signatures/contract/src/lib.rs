@@ -584,7 +584,6 @@ impl VersionedMpcContract {
 #[near_bindgen]
 impl VersionedMpcContract {
     #[handle_result]
-    #[init(ignore_state)]
     #[init]
     pub fn init(
         threshold: usize,
