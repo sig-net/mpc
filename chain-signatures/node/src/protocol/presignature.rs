@@ -89,6 +89,8 @@ pub enum GenerationError {
     TripleIsGenerating(TripleId),
     #[error("triple {0} is in garbage collection")]
     TripleIsGarbageCollected(TripleId),
+    #[error("there is not enough in the triple stockpile: len={0}")]
+    TripleNotEnoughStockpiled(usize),
     #[error("presignature {0} is generating")]
     PresignatureIsGenerating(PresignatureId),
     #[error("presignature {0} is missing")]
@@ -274,32 +276,15 @@ impl PresignatureManager {
             // To ensure there is no contention between different nodes we are only using triples
             // that we proposed. This way in a non-BFT environment we are guaranteed to never try
             // to use the same triple as any other node.
-            if let Some((triple0, triple1)) = triple_manager.take_two_mine().await {
-                let presig_participants = active
-                    .intersection(&[&triple0.public.participants, &triple1.public.participants]);
-                if presig_participants.len() < self.threshold {
-                    tracing::debug!(
-                        participants = ?presig_participants.keys_vec(),
-                        "running: we don't have enough participants to generate a presignature"
-                    );
-
-                    // Insert back the triples to be used later since this active set of
-                    // participants were not able to make use of these triples.
-                    triple_manager.insert_mine(triple0).await;
-                    triple_manager.insert_mine(triple1).await;
-                } else {
-                    self.generate(
-                        &presig_participants,
-                        triple0,
-                        triple1,
-                        pk,
-                        sk_share,
-                        cfg.presignature.generation_timeout,
-                    )?;
-                }
-            } else {
-                tracing::debug!("running: we don't have enough triples to generate a presignature");
-            }
+            let (presig_participants, triple0, triple1) = triple_manager.take_two_mine_intersection(active).await?;
+            self.generate(
+                &presig_participants,
+                triple0,
+                triple1,
+                pk,
+                sk_share,
+                cfg.presignature.generation_timeout,
+            )?;
         }
 
         Ok(())

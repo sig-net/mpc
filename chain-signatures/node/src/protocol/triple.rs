@@ -266,6 +266,19 @@ impl TripleManager {
         Ok(())
     }
 
+    fn get(&self, id: &TripleId) -> Result<&Triple, GenerationError> {
+        if let Some(triple) = self.triples.get(id) {
+            return Ok(triple);
+        }
+        if self.generators.contains_key(id) {
+            Err(GenerationError::TripleIsGenerating(*id))
+        } else if self.gc.contains_key(id) {
+            Err(GenerationError::TripleIsGarbageCollected(*id))
+        } else {
+            Err(GenerationError::TripleIsMissing(*id))
+        }
+    }
+
     /// Take two unspent triple by theirs id with no way to return it. Only takes
     /// if both of them are present.
     /// It is very important to NOT reuse the same triple twice for two different
@@ -375,6 +388,27 @@ impl TripleManager {
             }
             Ok(val) => Some(val),
         }
+    }
+
+    pub async fn take_two_mine_intersection(&mut self, active: &Participants) -> Result<(Participants, Triple, Triple), GenerationError> {
+        if self.mine.len() < 2 {
+            return Err(GenerationError::TripleNotEnoughStockpiled(self.mine.len()));
+        }
+
+        for i in 0..self.mine.len() {
+            let id0 = self.mine[i];
+            let id1 = self.mine[i+1];
+            let triple0 = self.get(&id0)?;
+            let triple1 = self.get(&id1)?;
+
+            let participants = active
+                .intersection(&[&triple0.public.participants, &triple1.public.participants]);
+            if participants.len() >= self.threshold {
+                return self.take_two(id0, id1).await
+                    .map(|triples| (participants, triples.0, triples.1));
+            }
+        }
+        Err(GenerationError::TripleNotEnoughStockpiled(self.mine.len()))
     }
 
     pub async fn insert_mine(&mut self, triple: Triple) {
