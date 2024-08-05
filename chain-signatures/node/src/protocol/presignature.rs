@@ -3,6 +3,7 @@ use super::triple::{Triple, TripleId, TripleManager};
 use crate::protocol::contract::primitives::Participants;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
+use crate::web::StateView;
 
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
@@ -105,7 +106,7 @@ pub struct PresignatureManager {
     /// Ongoing presignature generation protocols.
     generators: HashMap<PresignatureId, PresignatureGenerator>,
     /// List of presignature ids generation of which was initiated by the current node.
-    mine: VecDeque<PresignatureId>,
+    pub mine: VecDeque<PresignatureId>,
     /// The set of presignatures that were introduced to the system by the current node.
     introduced: HashSet<PresignatureId>,
     /// Garbage collection for presignatures that have either been taken or failed. This
@@ -166,7 +167,7 @@ impl PresignatureManager {
 
     #[allow(clippy::too_many_arguments)]
     fn generate_internal(
-        participants: &Participants,
+        participants: &[Participant],
         me: Participant,
         threshold: usize,
         triple0: Triple,
@@ -176,13 +177,12 @@ impl PresignatureManager {
         mine: bool,
         timeout: u64,
     ) -> Result<PresignatureGenerator, InitializationError> {
-        let participants: Vec<_> = participants.keys().cloned().collect();
         let protocol = Box::new(cait_sith::presign(
-            &participants,
+            participants,
             me,
             // These paramaters appear to be to make it easier to use different indexing schemes for triples
             // Introduced in this PR https://github.com/LIT-Protocol/cait-sith/pull/7
-            &participants,
+            participants,
             me,
             PresignArguments {
                 triple0: (triple0.share, triple0.public),
@@ -196,7 +196,7 @@ impl PresignatureManager {
         )?);
         Ok(PresignatureGenerator::new(
             protocol,
-            participants,
+            participants.into(),
             triple0.id,
             triple1.id,
             mine,
@@ -207,7 +207,7 @@ impl PresignatureManager {
     /// Starts a new presignature generation protocol.
     pub fn generate(
         &mut self,
-        participants: &Participants,
+        participants: &[Participant],
         triple0: Triple,
         triple1: Triple,
         public_key: &PublicKey,
@@ -252,6 +252,7 @@ impl PresignatureManager {
     pub async fn stockpile(
         &mut self,
         active: &Participants,
+        state_views: &HashMap<Participant, StateView>,
         pk: &PublicKey,
         sk_share: &SecretKeyShare,
         triple_manager: &mut TripleManager,
@@ -274,28 +275,72 @@ impl PresignatureManager {
             // To ensure there is no contention between different nodes we are only using triples
             // that we proposed. This way in a non-BFT environment we are guaranteed to never try
             // to use the same triple as any other node.
-            if let Some((triple0, triple1)) = triple_manager.take_two_mine().await {
+            if let Some((triple0, triple1)) = triple_manager.peek_two_mine() {
                 let presig_participants = active
                     .intersection(&[&triple0.public.participants, &triple1.public.participants]);
                 if presig_participants.len() < self.threshold {
+                    tracing::warn!(
+                        id0 = triple0.id,
+                        id1 = triple0.id,
+                        participants = ?presig_participants.keys_vec(),
+                        "running: participants are not above threshold for presignature generation"
+                    );
+                    return Ok(());
+                }
+
+                let state_views = presig_participants
+                    .iter()
+                    .filter_map(|(p, _)| Some((*p, state_views.get(p)?)));
+
+                // Filter out the active participants with the state views that have the triples we want to use.
+                let active_filtered = state_views
+                    .filter(|(_, state_view)| {
+                        if let StateView::Running {
+                            triple_postview,
+                            ..
+                        } = state_view
+                        {
+                            triple_postview.contains(&triple0.id) && triple_postview.contains(&triple1.id)
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|(p, _)| p)
+                    .collect::<Vec<_>>();
+
+                if active_filtered.len() < self.threshold {
                     tracing::debug!(
+                        ?triple0,
+                        ?triple1,
                         participants = ?presig_participants.keys_vec(),
                         "running: we don't have enough participants to generate a presignature"
                     );
+                    return Ok(());
+                }
 
-                    // Insert back the triples to be used later since this active set of
-                    // participants were not able to make use of these triples.
-                    triple_manager.insert_mine(triple0).await;
-                    triple_manager.insert_mine(triple1).await;
-                } else {
-                    self.generate(
-                        &presig_participants,
-                        triple0,
-                        triple1,
-                        pk,
-                        sk_share,
-                        cfg.presignature.generation_timeout,
-                    )?;
+                // Actually take the triples now that we have done the necessary checks.
+                let Some((triple0, triple1)) = triple_manager.take_two_mine().await else {
+                    tracing::warn!("running: popping after peeking should have succeeded");
+                    return Ok(());
+                };
+                let id0 = triple0.id;
+                let id1 = triple1.id;
+
+                if let Err(err @ InitializationError::BadParameters(_)) = self.generate(
+                    &active_filtered,
+                    triple0,
+                    triple1,
+                    pk,
+                    sk_share,
+                    cfg.presignature.generation_timeout,
+                ) {
+                    tracing::warn!(
+                        id0,
+                        id1,
+                        ?err,
+                        "we had to trash two triples due to bad parameters"
+                    );
+                    return Err(err);
                 }
             } else {
                 tracing::debug!("running: we don't have enough triples to generate a presignature");
@@ -370,7 +415,7 @@ impl PresignatureManager {
                         },
                     };
                     let generator = Self::generate_internal(
-                        participants,
+                        &participants.keys_vec(),
                         self.me,
                         self.threshold,
                         triple0,
@@ -515,6 +560,16 @@ impl PresignatureManager {
         }
 
         messages
+    }
+
+    pub fn preview(&self, presignatures: &HashSet<PresignatureId>) -> HashSet<PresignatureId> {
+        let presignatures = presignatures
+            .into_iter()
+            .filter(|id| self.presignatures.contains_key(id))
+            .cloned()
+            .collect();
+
+        presignatures
     }
 }
 

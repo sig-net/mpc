@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
@@ -6,8 +6,10 @@ use tokio::sync::RwLock;
 use url::Url;
 
 use crate::protocol::contract::primitives::Participants;
+use crate::protocol::presignature::PresignatureId;
+use crate::protocol::triple::TripleId;
 use crate::protocol::ProtocolState;
-use crate::web::StateView;
+use crate::web::{StateParams, StateView};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -19,16 +21,19 @@ pub struct Pool {
     http: reqwest::Client,
     connections: RwLock<Participants>,
     potential_connections: RwLock<Participants>,
-    status: RwLock<HashMap<Participant, StateView>>,
-
     /// The currently active participants for this epoch.
     current_active: RwLock<Option<(Participants, Instant)>>,
     // Potentially active participants that we can use to establish a connection in the next epoch.
     potential_active: RwLock<Option<(Participants, Instant)>>,
+
+    pub status: RwLock<HashMap<Participant, StateView>>,
 }
 
 impl Pool {
-    pub async fn ping(&self) -> Participants {
+    pub async fn ping(
+        &mut self,
+        previews: Option<(HashSet<TripleId>, HashSet<PresignatureId>)>,
+    ) -> Participants {
         if let Some((ref active, timestamp)) = *self.current_active.read().await {
             if timestamp.elapsed() < DEFAULT_TIMEOUT {
                 return active.clone();
@@ -36,6 +41,12 @@ impl Pool {
         }
 
         let connections = self.connections.read().await;
+
+        let mut params = HashMap::new();
+        if let Some((triples, presignatures)) = previews {
+            params.insert("triple_preview", triples);
+            params.insert("presignature_preview", presignatures);
+        }
 
         let mut status = self.status.write().await;
         let mut participants = Participants::default();
@@ -49,7 +60,7 @@ impl Pool {
                 continue;
             };
 
-            let Ok(resp) = self.http.get(url.clone()).send().await else {
+            let Ok(resp) = self.http.get(url.clone()).query(&params).send().await else {
                 tracing::warn!(
                     "Pool.ping resp err participant {:?} url {}",
                     participant,
@@ -77,7 +88,7 @@ impl Pool {
         participants
     }
 
-    pub async fn ping_potential(&self) -> Participants {
+    pub async fn ping_potential(&mut self) -> Participants {
         if let Some((ref active, timestamp)) = *self.potential_active.read().await {
             if timestamp.elapsed() < DEFAULT_TIMEOUT {
                 return active.clone();
@@ -102,9 +113,10 @@ impl Pool {
             };
 
             status.insert(*participant, state);
+            // self.status.insert(*participant, state);
             participants.insert(participant, info.clone());
         }
-        drop(status);
+        // drop(status);
 
         let mut potential_active = self.potential_active.write().await;
         *potential_active = Some((participants.clone(), Instant::now()));

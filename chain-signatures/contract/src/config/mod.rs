@@ -59,6 +59,8 @@ pub struct TripleConfig {
     pub max_triples: u32,
     /// Timeout for triple generation in milliseconds.
     pub generation_timeout: u64,
+    /// Max amount of Triple IDs allowed to be previewed in state.
+    pub preview_limit: u32,
 
     /// The remaining entries that can be present in future forms of the configuration.
     #[serde(flatten)]
@@ -73,6 +75,8 @@ pub struct PresignatureConfig {
     pub max_presignatures: u32,
     /// Timeout for presignature generation in milliseconds.
     pub generation_timeout: u64,
+    /// Max amount of Presignature IDs allowed to be previewed in state.
+    pub preview_limit: u32,
 
     /// The remaining entries that can be present in future forms of the configuration.
     #[serde(flatten)]
