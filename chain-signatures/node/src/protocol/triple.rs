@@ -380,7 +380,7 @@ impl TripleManager {
         if self.mine.len() < 2 {
             return None;
         }
-        let id0 = self.mine.get(0)?;
+        let id0 = self.mine.front()?;
         let id1 = self.mine.get(1)?;
         let triple0 = self.triples.get(id0)?;
         let triple1 = self.triples.get(id1)?;
@@ -603,13 +603,11 @@ impl TripleManager {
     }
 
     pub fn preview(&self, triples: &HashSet<TripleId>) -> HashSet<TripleId> {
-        let triples = triples
-            .into_iter()
+        triples
+            .iter()
             .filter(|id| self.triples.contains_key(id))
             .cloned()
-            .collect();
-
-        triples
+            .collect()
     }
 }
 

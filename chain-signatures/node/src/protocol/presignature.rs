@@ -565,13 +565,11 @@ impl PresignatureManager {
     }
 
     pub fn preview(&self, presignatures: &HashSet<PresignatureId>) -> HashSet<PresignatureId> {
-        let presignatures = presignatures
-            .into_iter()
+        presignatures
+            .iter()
             .filter(|id| self.presignatures.contains_key(id))
             .cloned()
-            .collect();
-
-        presignatures
+            .collect()
     }
 }
 

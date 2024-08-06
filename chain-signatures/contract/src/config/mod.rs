@@ -114,12 +114,14 @@ mod tests {
                 "triple": {
                     "min_triples": 10,
                     "max_triples": 100,
-                    "generation_timeout": 10000
+                    "generation_timeout": 10000,
+                    "preview_limit": 128,
                 },
                 "presignature": {
                     "min_presignatures": 10,
                     "max_presignatures": 100,
-                    "generation_timeout": 10000
+                    "generation_timeout": 10000,
+                    "preview_limit": 256,
                 },
                 "signature": {
                     "generation_timeout": 10000,
