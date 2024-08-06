@@ -202,6 +202,7 @@ impl MpcSignProtocol {
         let mut last_state_update = Instant::now();
         let mut last_config_update = Instant::now();
         let mut last_pinged = Instant::now();
+        let mut require_ping = false;
 
         // Sets the latest configurations from the contract:
         {
@@ -255,6 +256,7 @@ impl MpcSignProtocol {
                 // set which participants are currently active in the protocol and determines who will be
                 // receiving messages.
                 self.ctx.mesh.establish_participants(&contract_state).await;
+                require_ping = true;
 
                 last_state_update = Instant::now();
                 Some(contract_state)
@@ -279,11 +281,12 @@ impl MpcSignProtocol {
                 guard.clone()
             };
 
-            if last_pinged.elapsed() > Duration::from_millis(300) {
+            if require_ping || last_pinged.elapsed() > Duration::from_millis(300) {
                 let protocol_cfg = &self.ctx.cfg.read().await.protocol;
                 let planned_previews = state.plan_preview(protocol_cfg).await;
                 self.ctx.mesh.ping(planned_previews).await;
                 last_pinged = Instant::now();
+                require_ping = false;
             }
 
             let crypto_time = Instant::now();

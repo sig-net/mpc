@@ -44,11 +44,17 @@ impl Pool {
 
         let mut params = HashMap::new();
         if let Some((triples, presignatures)) = previews {
-            params.insert("triple_preview", triples);
-            params.insert("presignature_preview", presignatures);
+            if !triples.is_empty() {
+                params.insert("triple_preview", triples);
+            }
+            if !presignatures.is_empty() {
+                params.insert("presignature_preview", presignatures);
+            }
         }
 
         let mut status = self.status.write().await;
+        status.clear();
+
         let mut participants = Participants::default();
         for (participant, info) in connections.iter() {
             let Ok(Ok(url)) = Url::parse(&info.url).map(|url| url.join("/state")) else {
@@ -60,13 +66,20 @@ impl Pool {
                 continue;
             };
 
-            let Ok(resp) = self.http.get(url.clone()).query(&params).send().await else {
-                tracing::warn!(
-                    "Pool.ping resp err participant {:?} url {}",
-                    participant,
-                    url
-                );
-                continue;
+            let resp = match self.http.get(url.clone())
+                .header("content-type", "application/json")
+                .json(&params).send().await
+            {
+                Ok(resp) => resp,
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        "Pool.ping resp err participant {:?} url {}",
+                        participant,
+                        url
+                    );
+                    continue;
+                }
             };
 
             let Ok(state): Result<StateView, _> = resp.json().await else {
@@ -79,6 +92,8 @@ impl Pool {
             };
 
             status.insert(*participant, state);
+            // self.status.insert(*participant, state);
+
             participants.insert(participant, info.clone());
         }
         drop(status);

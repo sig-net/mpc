@@ -106,23 +106,12 @@ async fn msg(
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StateParams {
-    pub triple_preview: Option<Vec<TripleId>>,
-    pub presignature_preview: Option<Vec<PresignatureId>>,
-}
-
-impl StateParams {
-    pub fn into_query(self) -> HashMap<String, Vec<u64>> {
-        let mut query = HashMap::new();
-        if let Some(triple_preview) = self.triple_preview {
-            query.insert("triple_preview".to_string(), triple_preview);
-        }
-        if let Some(presignature_preview) = self.presignature_preview {
-            query.insert("presignature_preview".to_string(), presignature_preview);
-        }
-        query
-    }
+    #[serde(default)]
+    pub triple_preview: Vec<TripleId>,
+    #[serde(default)]
+    pub presignature_preview: Vec<PresignatureId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -161,7 +150,7 @@ pub enum StateView {
 #[tracing::instrument(level = "debug", skip_all)]
 async fn state(
     Extension(state): Extension<Arc<AxumState>>,
-    Query(params): Query<StateParams>,
+    params: Option<Json<StateParams>>,
 ) -> Result<Json<StateView>> {
     tracing::debug!("fetching state");
     let latest_block_height = state.indexer.latest_block_height().await;
@@ -181,28 +170,25 @@ async fn state(
             let presignature_potential_count = presignature_read.potential_len();
             let participants = state.participants.keys_vec();
 
-            let triple_postview = if let Some(triple_preview) = params.triple_preview {
-                let triple_preview = triple_preview
-                    .into_iter()
+            let (triple_postview, presignature_postview) = if let Some(params) = params {
+                let triple_preview = params.triple_preview
+                    .iter()
                     .take(config.protocol.triple.preview_limit as usize)
+                    .cloned()
                     .collect();
                 let triple_manager = state.triple_manager.read().await;
-                triple_manager.preview(&triple_preview)
+                let triple_postview = triple_manager.preview(&triple_preview);
+                let presignature_preview = params.presignature_preview
+                    .iter()
+                    .take(config.protocol.presignature.preview_limit as usize)
+                    .cloned()
+                    .collect();
+                let presignature_manager = state.presignature_manager.read().await;
+                let presignature_postview = presignature_manager.preview(&presignature_preview);
+                (triple_postview, presignature_postview)
             } else {
-                HashSet::new()
+                (HashSet::new(), HashSet::new())
             };
-
-            let presignature_postview =
-                if let Some(presignature_preview) = params.presignature_preview {
-                    let presignature_preview = presignature_preview
-                        .into_iter()
-                        .take(config.protocol.presignature.preview_limit as usize)
-                        .collect();
-                    let presignature_manager = state.presignature_manager.read().await;
-                    presignature_manager.preview(&presignature_preview)
-                } else {
-                    HashSet::new()
-                };
 
             Ok(Json(StateView::Running {
                 participants,
