@@ -75,6 +75,7 @@ impl Mesh {
 
     /// Ping the active participants such that we can see who is alive.
     pub async fn ping(&mut self, previews: Option<(HashSet<TripleId>, HashSet<PresignatureId>)>) {
+        self.connections.clear_status().await;
         self.active_participants = self.connections.ping(previews).await;
         tracing::debug!(
             "Mesh.ping set active participants to {:?}",

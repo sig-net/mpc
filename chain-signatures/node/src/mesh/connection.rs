@@ -9,7 +9,7 @@ use crate::protocol::contract::primitives::Participants;
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::triple::TripleId;
 use crate::protocol::ProtocolState;
-use crate::web::{StateParams, StateView};
+use crate::web::StateView;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -53,8 +53,6 @@ impl Pool {
         }
 
         let mut status = self.status.write().await;
-        status.clear();
-
         let mut participants = Participants::default();
         for (participant, info) in connections.iter() {
             let Ok(Ok(url)) = Url::parse(&info.url).map(|url| url.join("/state")) else {
@@ -66,9 +64,13 @@ impl Pool {
                 continue;
             };
 
-            let resp = match self.http.get(url.clone())
+            let resp = match self
+                .http
+                .get(url.clone())
                 .header("content-type", "application/json")
-                .json(&params).send().await
+                .json(&params)
+                .send()
+                .await
             {
                 Ok(resp) => resp,
                 Err(err) => {
@@ -128,10 +130,8 @@ impl Pool {
             };
 
             status.insert(*participant, state);
-            // self.status.insert(*participant, state);
             participants.insert(participant, info.clone());
         }
-        // drop(status);
 
         let mut potential_active = self.potential_active.write().await;
         *potential_active = Some((participants.clone(), Instant::now()));
@@ -185,5 +185,10 @@ impl Pool {
                 StateView::Running { is_stable, .. } => *is_stable,
                 _ => false,
             })
+    }
+
+    pub async fn clear_status(&self) {
+        let mut status = self.status.write().await;
+        status.clear();
     }
 }

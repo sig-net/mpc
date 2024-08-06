@@ -9,7 +9,6 @@ use crate::protocol::triple::TripleId;
 use crate::protocol::{MpcMessage, NodeState};
 use crate::web::error::Result;
 use anyhow::Context;
-use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -19,7 +18,7 @@ use mpc_keys::hpke::{self, Ciphered};
 use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc::Sender, RwLock};
 
@@ -171,14 +170,16 @@ async fn state(
             let participants = state.participants.keys_vec();
 
             let (triple_postview, presignature_postview) = if let Some(params) = params {
-                let triple_preview = params.triple_preview
+                let triple_preview = params
+                    .triple_preview
                     .iter()
                     .take(config.protocol.triple.preview_limit as usize)
                     .cloned()
                     .collect();
                 let triple_manager = state.triple_manager.read().await;
                 let triple_postview = triple_manager.preview(&triple_preview);
-                let presignature_preview = params.presignature_preview
+                let presignature_preview = params
+                    .presignature_preview
                     .iter()
                     .take(config.protocol.presignature.preview_limit as usize)
                     .cloned()

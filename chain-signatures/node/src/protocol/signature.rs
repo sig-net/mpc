@@ -656,8 +656,7 @@ impl SignatureManager {
                     failed_presigs.push(presignature);
                     tracing::warn!(%receipt_id, id, ?err, "failed to retry signature generation: trashing presignature");
                 }
-            }
-            else {
+            } else {
                 let Some((receipt_id, my_request)) = my_requests.pop_front() else {
                     failed_presigs.push(presignature);
                     continue;

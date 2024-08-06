@@ -276,12 +276,14 @@ impl PresignatureManager {
             // that we proposed. This way in a non-BFT environment we are guaranteed to never try
             // to use the same triple as any other node.
             if let Some((triple0, triple1)) = triple_manager.peek_two_mine() {
+                let id0 = triple0.id;
+                let id1 = triple1.id;
                 let presig_participants = active
                     .intersection(&[&triple0.public.participants, &triple1.public.participants]);
                 if presig_participants.len() < self.threshold {
                     tracing::warn!(
-                        id0 = triple0.id,
-                        id1 = triple0.id,
+                        id0,
+                        id1,
                         participants = ?presig_participants.keys_vec(),
                         "running: participants are not above threshold for presignature generation"
                     );
@@ -296,11 +298,11 @@ impl PresignatureManager {
                 let active_filtered = state_views
                     .filter(|(_, state_view)| {
                         if let StateView::Running {
-                            triple_postview,
-                            ..
+                            triple_postview, ..
                         } = state_view
                         {
-                            triple_postview.contains(&triple0.id) && triple_postview.contains(&triple1.id)
+                            triple_postview.contains(&triple0.id)
+                                && triple_postview.contains(&triple1.id)
                         } else {
                             false
                         }
@@ -310,8 +312,8 @@ impl PresignatureManager {
 
                 if active_filtered.len() < self.threshold {
                     tracing::debug!(
-                        ?triple0,
-                        ?triple1,
+                        id0,
+                        id1,
                         participants = ?presig_participants.keys_vec(),
                         "running: we don't have enough participants to generate a presignature"
                     );
@@ -323,8 +325,6 @@ impl PresignatureManager {
                     tracing::warn!("running: popping after peeking should have succeeded");
                     return Ok(());
                 };
-                let id0 = triple0.id;
-                let id1 = triple1.id;
 
                 if let Err(err @ InitializationError::BadParameters(_)) = self.generate(
                     &active_filtered,
