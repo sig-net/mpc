@@ -77,11 +77,13 @@ impl Mesh {
     pub async fn ping(&mut self, previews: Option<(HashSet<TripleId>, HashSet<PresignatureId>)>) {
         self.connections.clear_status().await;
         self.active_participants = self.connections.ping(previews).await;
-        tracing::debug!(
-            "Mesh.ping set active participants to {:?}",
-            self.active_participants.keys_vec()
-        );
         self.active_potential_participants = self.connections.ping_potential().await;
+
+        tracing::debug!(
+            active = ?self.active_participants.keys_vec(),
+            active_potential = ?self.active_potential_participants.keys_vec(),
+            "mesh pinging",
+        );
     }
 
     pub async fn state_views(&self) -> HashMap<Participant, StateView> {
