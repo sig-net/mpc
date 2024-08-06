@@ -9,7 +9,8 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing_subscriber::EnvFilter;
+use tracing_stackdriver::layer as stackdriver_layer;
+use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 use url::Url;
 
 use mpc_keys::hpke;
@@ -144,14 +145,22 @@ fn is_running_on_gcp() -> bool {
 
 pub fn run(cmd: Cli) -> anyhow::Result<()> {
     // Install global collector configured based on RUST_LOG env var.
-    let mut subscriber = tracing_subscriber::fmt()
-        .with_thread_ids(true)
-        .with_env_filter(EnvFilter::from_default_env());
+    let stackdriver = stackdriver_layer().with_writer(std::io::stderr);
+
+    let mut fmt_layer = tracing_subscriber::fmt::layer().with_thread_ids(true);
+
     if is_running_on_gcp() {
         // Disable colored logging as it messes up GCP's log formatting
-        subscriber = subscriber.with_ansi(false);
+        fmt_layer = fmt_layer.with_ansi(false);
     }
-    subscriber.init();
+
+    let subscriber = Registry::default()
+        .with(EnvFilter::from_default_env())
+        .with(fmt_layer)
+        .with(stackdriver);
+
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
+
     let _span = tracing::trace_span!("cli").entered();
 
     match cmd {
