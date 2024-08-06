@@ -23,6 +23,7 @@ use near_account_id::AccountId;
 pub type PresignatureId = u64;
 
 /// A completed presignature.
+#[derive(Clone, Debug)]
 pub struct Presignature {
     pub id: PresignatureId,
     pub output: PresignOutput<Secp256k1>,

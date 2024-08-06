@@ -28,7 +28,7 @@ use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{MessageHandler, MpcMessageQueue};
 use crate::rpc_client;
 use crate::storage::secret_storage::SecretNodeStorageBox;
-use crate::storage::triple_storage::LockTripleNodeStorageBox;
+use crate::storage::triple_storage::LockNodeStorageBox;
 
 use cait_sith::protocol::Participant;
 use near_account_id::AccountId;
@@ -49,7 +49,7 @@ struct Ctx {
     http_client: reqwest::Client,
     sign_queue: Arc<RwLock<SignQueue>>,
     secret_storage: SecretNodeStorageBox,
-    triple_storage: LockTripleNodeStorageBox,
+    triple_storage: LockNodeStorageBox,
     cfg: Config,
     mesh: Mesh,
 }
@@ -91,7 +91,7 @@ impl ConsensusCtx for &mut MpcSignProtocol {
         &self.ctx.cfg
     }
 
-    fn triple_storage(&self) -> LockTripleNodeStorageBox {
+    fn triple_storage(&self) -> LockNodeStorageBox {
         self.ctx.triple_storage.clone()
     }
 }
@@ -163,7 +163,7 @@ impl MpcSignProtocol {
         receiver: mpsc::Receiver<MpcMessage>,
         sign_queue: Arc<RwLock<SignQueue>>,
         secret_storage: SecretNodeStorageBox,
-        triple_storage: LockTripleNodeStorageBox,
+        triple_storage: LockNodeStorageBox,
         cfg: Config,
     ) -> (Self, Arc<RwLock<NodeState>>) {
         let state = Arc::new(RwLock::new(NodeState::Starting));

@@ -154,14 +154,14 @@ impl FromValue for TripleData {
     }
 }
 
-type TripleResult<T> = std::result::Result<T, error::DatastoreStorageError>;
+pub type StorageResult<T> = std::result::Result<T, error::DatastoreStorageError>;
 
 #[async_trait]
-pub trait TripleNodeStorage {
-    async fn insert(&mut self, triple: Triple, mine: bool) -> TripleResult<()>;
-    async fn delete(&mut self, id: TripleId) -> TripleResult<()>;
-    async fn clear(&mut self) -> TripleResult<Vec<TripleData>>;
-    async fn load(&self) -> TripleResult<Vec<TripleData>>;
+pub trait NodeStorage {
+    async fn insert(&mut self, triple: Triple, mine: bool) -> StorageResult<()>;
+    async fn delete(&mut self, id: TripleId) -> StorageResult<()>;
+    async fn clear(&mut self) -> StorageResult<Vec<TripleData>>;
+    async fn load(&self) -> StorageResult<Vec<TripleData>>;
     fn account_id(&self) -> &AccountId;
 }
 
@@ -173,8 +173,8 @@ struct MemoryTripleNodeStorage {
 }
 
 #[async_trait]
-impl TripleNodeStorage for MemoryTripleNodeStorage {
-    async fn insert(&mut self, triple: Triple, mine: bool) -> TripleResult<()> {
+impl NodeStorage for MemoryTripleNodeStorage {
+    async fn insert(&mut self, triple: Triple, mine: bool) -> StorageResult<()> {
         if mine {
             self.mine.insert(triple.id);
         }
@@ -182,20 +182,20 @@ impl TripleNodeStorage for MemoryTripleNodeStorage {
         Ok(())
     }
 
-    async fn delete(&mut self, id: TripleId) -> TripleResult<()> {
+    async fn delete(&mut self, id: TripleId) -> StorageResult<()> {
         self.triples.remove(&id);
         self.mine.remove(&id);
         Ok(())
     }
 
-    async fn clear(&mut self) -> TripleResult<Vec<TripleData>> {
+    async fn clear(&mut self) -> StorageResult<Vec<TripleData>> {
         let res = self.load().await?;
         self.triples.clear();
         self.mine.clear();
         Ok(res)
     }
 
-    async fn load(&self) -> TripleResult<Vec<TripleData>> {
+    async fn load(&self) -> StorageResult<Vec<TripleData>> {
         let mut res: Vec<TripleData> = vec![];
         for (triple_id, triple) in self.triples.clone() {
             let mine = self.mine.contains(&triple_id);
@@ -214,13 +214,13 @@ impl TripleNodeStorage for MemoryTripleNodeStorage {
 }
 
 #[derive(Clone)]
-struct DataStoreTripleNodeStorage {
-    datastore: DatastoreService,
-    account_id: AccountId,
+pub struct DataStoreNodeStorage {
+    pub datastore: DatastoreService,
+    pub account_id: AccountId,
 }
 
-impl DataStoreTripleNodeStorage {
-    fn new(datastore: DatastoreService, account_id: &AccountId) -> Self {
+impl DataStoreNodeStorage {
+    pub fn new(datastore: DatastoreService, account_id: &AccountId) -> Self {
         Self {
             datastore,
             account_id: account_id.clone(),
@@ -229,8 +229,8 @@ impl DataStoreTripleNodeStorage {
 }
 
 #[async_trait]
-impl TripleNodeStorage for DataStoreTripleNodeStorage {
-    async fn insert(&mut self, triple: Triple, mine: bool) -> TripleResult<()> {
+impl NodeStorage for DataStoreNodeStorage {
+    async fn insert(&mut self, triple: Triple, mine: bool) -> StorageResult<()> {
         tracing::debug!(id = triple.id, "inserting triples using datastore");
         self.datastore
             .upsert(TripleData {
@@ -242,7 +242,7 @@ impl TripleNodeStorage for DataStoreTripleNodeStorage {
         Ok(())
     }
 
-    async fn delete(&mut self, id: TripleId) -> TripleResult<()> {
+    async fn delete(&mut self, id: TripleId) -> StorageResult<()> {
         tracing::debug!(id, "deleting triples using datastore");
         self.datastore
             .delete(TripleKey {
@@ -253,13 +253,13 @@ impl TripleNodeStorage for DataStoreTripleNodeStorage {
         Ok(())
     }
 
-    async fn clear(&mut self) -> TripleResult<Vec<TripleData>> {
+    async fn clear(&mut self) -> StorageResult<Vec<TripleData>> {
         let triples = self.load().await?;
         self.datastore.delete_many(&triples).await?;
         Ok(triples)
     }
 
-    async fn load(&self) -> TripleResult<Vec<TripleData>> {
+    async fn load(&self) -> StorageResult<Vec<TripleData>> {
         tracing::debug!("loading triples using datastore");
         let filter = if self.datastore.is_emulator() {
             None
@@ -299,24 +299,23 @@ impl TripleNodeStorage for DataStoreTripleNodeStorage {
     }
 }
 
-pub type TripleNodeStorageBox = Box<dyn TripleNodeStorage + Send + Sync>;
+pub type NodeStorageBox = Box<dyn NodeStorage + Send + Sync>;
 
 pub struct TripleStorage {
-    pub storage: TripleNodeStorageBox,
+    pub storage: NodeStorageBox,
 }
 
-pub type LockTripleNodeStorageBox = Arc<RwLock<TripleNodeStorageBox>>;
+pub type LockNodeStorageBox = Arc<RwLock<NodeStorageBox>>;
 
-pub fn init(gcp_service: Option<&GcpService>, account_id: &AccountId) -> TripleNodeStorageBox {
+pub fn init(gcp_service: Option<&GcpService>, account_id: &AccountId) -> NodeStorageBox {
     match gcp_service {
-        Some(gcp) => Box::new(DataStoreTripleNodeStorage::new(
-            gcp.datastore.clone(),
-            account_id,
-        )) as TripleNodeStorageBox,
+        Some(gcp) => {
+            Box::new(DataStoreNodeStorage::new(gcp.datastore.clone(), account_id)) as NodeStorageBox
+        }
         _ => Box::new(MemoryTripleNodeStorage {
             triples: HashMap::new(),
             mine: HashSet::new(),
             account_id: account_id.clone(),
-        }) as TripleNodeStorageBox,
+        }) as NodeStorageBox,
     }
 }

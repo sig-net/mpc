@@ -3,7 +3,7 @@ use crate::protocol::contract::primitives::Participants;
 use crate::protocol::presignature::GenerationError;
 use crate::protocol::triple::{Triple, TripleId, TripleManager};
 use crate::protocol::ParticipantInfo;
-use crate::storage::triple_storage::LockTripleNodeStorageBox;
+use crate::storage::triple_storage::LockNodeStorageBox;
 use crate::{gcp::GcpService, protocol::message::TripleMessage, storage};
 
 use cait_sith::protocol::{InitializationError, Participant, ProtocolError};
@@ -56,7 +56,7 @@ impl TestTripleManagers {
         let managers = (0..num_managers)
             .map(|num| {
                 let account_id = format!("account_{num}.testnet").parse().unwrap();
-                let triple_storage: LockTripleNodeStorageBox = Arc::new(RwLock::new(
+                let triple_storage: LockNodeStorageBox = Arc::new(RwLock::new(
                     storage::triple_storage::init(services[num as usize].as_ref(), &account_id),
                 ));
                 TripleManager::new(
@@ -163,7 +163,7 @@ impl TestTripleManagers {
         self.managers[index].mine.clone()
     }
 
-    fn triple_storage(&self, index: usize) -> LockTripleNodeStorageBox {
+    fn triple_storage(&self, index: usize) -> LockNodeStorageBox {
         self.managers[index].triple_storage.clone()
     }
 }

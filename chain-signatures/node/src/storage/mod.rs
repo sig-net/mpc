@@ -1,3 +1,4 @@
+pub mod presignature;
 pub mod secret_storage;
 pub mod triple_storage;
 

@@ -3,7 +3,7 @@ use super::cryptography::CryptographicError;
 use super::message::TripleMessage;
 use super::presignature::GenerationError;
 use crate::gcp::error;
-use crate::storage::triple_storage::{LockTripleNodeStorageBox, TripleData};
+use crate::storage::triple_storage::{LockNodeStorageBox, TripleData};
 use crate::types::TripleProtocol;
 use crate::util::AffinePointExt;
 
@@ -106,7 +106,7 @@ pub struct TripleManager {
     pub me: Participant,
     pub threshold: usize,
     pub epoch: u64,
-    pub triple_storage: LockTripleNodeStorageBox,
+    pub triple_storage: LockNodeStorageBox,
     pub my_account_id: AccountId,
 }
 
@@ -134,7 +134,7 @@ impl TripleManager {
         threshold: usize,
         epoch: u64,
         triple_data: Vec<TripleData>,
-        triple_storage: LockTripleNodeStorageBox,
+        triple_storage: LockNodeStorageBox,
         my_account_id: &AccountId,
     ) -> Self {
         let mut mine: VecDeque<TripleId> = VecDeque::new();
