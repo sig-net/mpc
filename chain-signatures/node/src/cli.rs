@@ -145,7 +145,7 @@ fn is_running_on_gcp() -> bool {
 
 pub fn run(cmd: Cli) -> anyhow::Result<()> {
     // Install global collector configured based on RUST_LOG env var.
-    let stackdriver = stackdriver_layer().with_writer(|| std::io::stderr());
+    let stackdriver = stackdriver_layer().with_writer(std::io::stderr);
 
     let mut fmt_layer = tracing_subscriber::fmt::layer().with_thread_ids(true);
 
