@@ -53,6 +53,10 @@ impl Pool {
         }
 
         let mut status = self.status.write().await;
+        // Clear the status before we overwrite it just so we don't have any stale participant
+        // statuses that are no longer in the network after a reshare.
+        status.clear();
+
         let mut participants = Participants::default();
         for (participant, info) in connections.iter() {
             let Ok(Ok(url)) = Url::parse(&info.url).map(|url| url.join("/state")) else {
@@ -94,8 +98,6 @@ impl Pool {
             };
 
             status.insert(*participant, state);
-            // self.status.insert(*participant, state);
-
             participants.insert(participant, info.clone());
         }
         drop(status);
@@ -179,12 +181,8 @@ impl Pool {
             .get(participant)
             .map_or(false, |state| match state {
                 StateView::Running { is_stable, .. } => *is_stable,
+                StateView::Resharing { is_stable,.. } => *is_stable,
                 _ => false,
             })
-    }
-
-    pub async fn clear_status(&self) {
-        let mut status = self.status.write().await;
-        status.clear();
     }
 }
