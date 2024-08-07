@@ -68,11 +68,17 @@ impl Pool {
                 continue;
             };
 
-            let resp = match self
+            let mut req = self
                 .http
-                .get(url.clone())
-                .header("content-type", "application/json")
-                .json(&params)
+                .get(url.clone());
+
+            if !params.is_empty() {
+                req = req
+                    .header("content-type", "application/json")
+                    .json(&params);
+            }
+
+            let resp = match req
                 .send()
                 .await
             {
