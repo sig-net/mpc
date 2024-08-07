@@ -238,6 +238,7 @@ pub struct SignatureManager {
     me: Participant,
     public_key: PublicKey,
     epoch: u64,
+    my_account_id: AccountId,
 }
 
 pub const MAX_RETRY: u8 = 10;
@@ -267,7 +268,12 @@ impl ToPublish {
 }
 
 impl SignatureManager {
-    pub fn new(me: Participant, public_key: PublicKey, epoch: u64) -> Self {
+    pub fn new(
+        me: Participant,
+        public_key: PublicKey,
+        epoch: u64,
+        my_account_id: &AccountId,
+    ) -> Self {
         Self {
             generators: HashMap::new(),
             failed: VecDeque::new(),
@@ -276,6 +282,7 @@ impl SignatureManager {
             me,
             public_key,
             epoch,
+            my_account_id: my_account_id.clone(),
         }
     }
 
@@ -354,6 +361,9 @@ impl SignatureManager {
             req,
             cfg,
         )?;
+        crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
+            .with_label_values(&[self.my_account_id.as_str()])
+            .inc();
         self.generators.insert(receipt_id, generator);
         Ok(())
     }
@@ -393,6 +403,9 @@ impl SignatureManager {
             },
             cfg,
         )?;
+        crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
+            .with_label_values(&[self.my_account_id.as_str()])
+            .inc();
         self.generators.insert(receipt_id, generator);
         Ok(())
     }
@@ -462,6 +475,9 @@ impl SignatureManager {
                     }
                 };
                 let generator = entry.insert(generator);
+                crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
+                    .with_label_values(&[self.my_account_id.as_str()])
+                    .inc();
                 Ok(&mut generator.protocol)
             }
             Entry::Occupied(entry) => Ok(&mut entry.into_mut().protocol),
@@ -482,6 +498,9 @@ impl SignatureManager {
                         if generator.proposer == self.me {
                             if generator.sign_request_timestamp.elapsed() < generator.timeout_total {
                                 tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
+                                crate::metrics::SIGNATURE_GENERATOR_FAILURES
+                                    .with_label_values(&[self.my_account_id.as_str()])
+                                    .inc();
                                 // only retry the signature generation if it was initially proposed by us. We do not
                                 // want any nodes to be proposing the same signature multiple times.
                                 self.failed.push_back((
@@ -496,6 +515,9 @@ impl SignatureManager {
                                 ));
                             } else {
                                 self.completed.insert(*receipt_id, Instant::now());
+                                crate::metrics::SIGNATURE_FAILURES
+                                    .with_label_values(&[self.my_account_id.as_str()])
+                                    .inc();
                                 tracing::warn!(?err, "signature failed to be produced; trashing request");
                             }
                         }
@@ -663,7 +685,6 @@ impl SignatureManager {
         rpc_client: &near_fetch::Client,
         signer: &T,
         mpc_contract_id: &AccountId,
-        my_account_id: &AccountId,
     ) {
         let mut to_retry: Vec<ToPublish> = Vec::new();
 
@@ -720,14 +741,14 @@ impl SignatureManager {
             };
 
             crate::metrics::NUM_SIGN_SUCCESS
-                .with_label_values(&[my_account_id.as_str()])
+                .with_label_values(&[self.my_account_id.as_str()])
                 .inc();
             crate::metrics::SIGN_LATENCY
-                .with_label_values(&[my_account_id.as_str()])
+                .with_label_values(&[self.my_account_id.as_str()])
                 .observe(time_added.elapsed().as_secs_f64());
             if time_added.elapsed().as_secs() <= 30 {
                 crate::metrics::NUM_SIGN_SUCCESS_30S
-                    .with_label_values(&[my_account_id.as_str()])
+                    .with_label_values(&[self.my_account_id.as_str()])
                     .inc();
             }
         }
