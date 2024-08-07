@@ -300,7 +300,7 @@ impl PresignatureManager {
                 triple0 = ?triple0.public.participants,
                 triple1 = ?triple1.public.participants,
                 active = ?active.keys_vec(),
-                "running: participants are not above threshold for presignature generation"
+                "running: common participants are less than threshold for presignature generation"
             );
             return Ok(());
         }
@@ -332,7 +332,7 @@ impl PresignatureManager {
                 active = ?active.keys_vec(),
                 ?active_filtered,
                 ?state_views,
-                "running: we don't have enough participants to generate a presignature"
+                "running: filtered participants are less than threshold for presignature generation"
             );
             return Ok(());
         }

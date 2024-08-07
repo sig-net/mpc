@@ -579,8 +579,8 @@ impl SignatureManager {
         cfg: &ProtocolConfig,
     ) {
         if stable.len() < threshold {
-            tracing::info!(
-                "Require at least {} stable participants to handle_requests, got {}: {:?}",
+            tracing::warn!(
+                "require at least {} stable participants to handle_requests, got {}: {:?}",
                 threshold,
                 stable.len(),
                 stable.keys_vec()
