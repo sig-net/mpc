@@ -68,20 +68,13 @@ impl Pool {
                 continue;
             };
 
-            let mut req = self
-                .http
-                .get(url.clone());
+            let mut req = self.http.get(url.clone());
 
             if !params.is_empty() {
-                req = req
-                    .header("content-type", "application/json")
-                    .json(&params);
+                req = req.header("content-type", "application/json").json(&params);
             }
 
-            let resp = match req
-                .send()
-                .await
-            {
+            let resp = match req.send().await {
                 Ok(resp) => resp,
                 Err(err) => {
                     tracing::warn!(
@@ -187,7 +180,7 @@ impl Pool {
             .get(participant)
             .map_or(false, |state| match state {
                 StateView::Running { is_stable, .. } => *is_stable,
-                StateView::Resharing { is_stable,.. } => *is_stable,
+                StateView::Resharing { is_stable, .. } => *is_stable,
                 _ => false,
             })
     }
