@@ -105,7 +105,7 @@ impl SignQueue {
         my_account_id: &AccountId,
     ) {
         if stable.len() < threshold {
-            tracing::info!(
+            tracing::warn!(
                 "Require at least {} stable participants to organize, got {}: {:?}",
                 threshold,
                 stable.len(),
@@ -118,18 +118,21 @@ impl SignQueue {
             let subset = stable.keys().choose_multiple(&mut rng, threshold);
             let proposer = **subset.choose(&mut rng).unwrap();
             if subset.contains(&&me) {
+                let is_mine = proposer == me;
                 tracing::info!(
                     receipt_id = %request.receipt_id,
-                    ?me,
+                    ?is_mine,
                     ?subset,
                     ?proposer,
                     "saving sign request: node is in the signer subset"
                 );
                 let proposer_requests = self.requests.entry(proposer).or_default();
                 proposer_requests.insert(request.receipt_id, request);
-                crate::metrics::NUM_SIGN_REQUESTS_MINE
-                    .with_label_values(&[my_account_id.as_str()])
-                    .inc();
+                if is_mine {
+                    crate::metrics::NUM_SIGN_REQUESTS_MINE
+                        .with_label_values(&[my_account_id.as_str()])
+                        .inc();
+                }
             } else {
                 tracing::info!(
                     receipt_id = %request.receipt_id,
@@ -199,9 +202,9 @@ impl SignatureGenerator {
 
     pub fn poke(&mut self) -> Result<Action<FullSignature<Secp256k1>>, ProtocolError> {
         if self.sign_request_timestamp.elapsed() > self.timeout_total {
-            return Err(ProtocolError::Other(
-                anyhow::anyhow!("signature protocol timeout completely").into(),
-            ));
+            let msg = "signature protocol timed out completely";
+            tracing::warn!(msg);
+            return Err(ProtocolError::Other(anyhow::anyhow!(msg).into()));
         }
 
         if self.generator_timestamp.elapsed() > self.timeout {
@@ -578,7 +581,7 @@ impl SignatureManager {
         cfg: &ProtocolConfig,
     ) {
         if stable.len() < threshold {
-            tracing::info!(
+            tracing::warn!(
                 "Require at least {} stable participants to handle_requests, got {}: {:?}",
                 threshold,
                 stable.len(),
@@ -596,9 +599,9 @@ impl SignatureManager {
         } {
             let sig_participants = stable.intersection(&[&presignature.participants]);
             if sig_participants.len() < threshold {
-                tracing::debug!(
+                tracing::warn!(
                     participants = ?sig_participants.keys_vec(),
-                    "we do not have enough participants to generate a signature"
+                    "intersection of stable participants and presignature participants is less than threshold"
                 );
                 failed_presigs.push(presignature);
                 continue;
@@ -699,7 +702,7 @@ impl SignatureManager {
             {
                 Ok(response) => response,
                 Err(err) => {
-                    tracing::error!(%receipt_id, error = ?err, "Failed to publish transaction");
+                    tracing::error!(%receipt_id, error = ?err, "Failed to publish the signature");
                     // Push the response to the back of the queue if it hasn't been retried the max number of times
                     if to_publish.retry_count < MAX_RETRY {
                         to_publish.retry_count += 1;
@@ -737,9 +740,17 @@ impl SignatureManager {
 
     /// Garbage collect all the completed signatures.
     pub fn garbage_collect(&mut self, cfg: &ProtocolConfig) {
+        let before = self.completed.len();
         self.completed.retain(|_, timestamp| {
             timestamp.elapsed() < Duration::from_millis(cfg.signature.garbage_timeout)
         });
+        let garbage_collected = before.saturating_sub(self.completed.len());
+        if garbage_collected > 0 {
+            tracing::debug!(
+                "garbage collected {} completed signatures",
+                garbage_collected
+            );
+        }
     }
 
     pub fn refresh_gc(&mut self, id: &ReceiptId) -> bool {

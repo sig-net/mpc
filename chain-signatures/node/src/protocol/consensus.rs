@@ -320,14 +320,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         &public_key,
                     )
                     .await
-                    .map_err(|err| {
-                        tracing::error!(
-                            ?public_key,
-                            ?err,
-                            "failed to vote for the generated public key"
-                        );
-                        ConsensusError::CannotVote(format!("{err:?}"))
-                    })?;
+                    .map_err(|err| ConsensusError::CannotVote(format!("{err:?}")))?;
                 }
                 Ok(NodeState::WaitingForConsensus(self))
             }
@@ -454,11 +447,6 @@ impl ConsensusProtocol for WaitingForConsensusState {
                                     )
                                     .await
                                     .map_err(|err| {
-                                        tracing::error!(
-                                            epoch = self.epoch,
-                                            ?err,
-                                            "failed to vote for resharing"
-                                        );
                                         ConsensusError::CannotVote(format!("{err:?}"))
                                     })?;
                                 } else {
@@ -504,7 +492,7 @@ impl ConsensusProtocol for RunningState {
                 }
                 Ordering::Less => Err(ConsensusError::EpochRollback),
                 Ordering::Equal => {
-                    tracing::debug!("running(running): continuing to run as normal");
+                    tracing::trace!("running(running): continuing to run as normal");
                     if contract_state.participants != self.participants {
                         return Err(ConsensusError::MismatchedParticipants);
                     }
