@@ -19,7 +19,6 @@ use mpc_node::storage;
 use mpc_node::storage::triple_storage::TripleNodeStorageBox;
 use near_crypto::KeyFile;
 use near_workspaces::network::{Sandbox, ValidatorKey};
-use near_workspaces::types::SecretKey;
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
 use testcontainers::{Container, GenericImage};
@@ -92,64 +91,23 @@ impl Nodes<'_> {
         }
     }
 
-    pub fn near_acc_sk(&self) -> HashMap<AccountId, SecretKey> {
-        let mut account_to_sk = HashMap::new();
+    pub fn near_accounts(&self) -> Vec<&Account> {
         match self {
-            Nodes::Local { nodes, .. } => {
-                for node in nodes {
-                    account_to_sk.insert(node.account_id.clone(), node.account_sk.clone());
-                }
-            }
-            Nodes::Docker { nodes, .. } => {
-                for node in nodes {
-                    account_to_sk.insert(node.account_id.clone(), node.account_sk.clone());
-                }
-            }
-        };
-        account_to_sk
-    }
-
-    pub fn near_accounts(&self) -> Vec<Account> {
-        let acc_sk = self.near_acc_sk();
-        let mut account_ids = Vec::new();
-        match self {
-            Nodes::Local { nodes, .. } => {
-                for node in nodes {
-                    account_ids.push(node.account_id.clone());
-                }
-            }
-            Nodes::Docker { nodes, .. } => {
-                for node in nodes {
-                    account_ids.push(node.account_id.clone());
-                }
-            }
-        };
-
-        account_ids
-            .into_iter()
-            .map(|account_id| {
-                Account::from_secret_key(
-                    account_id.clone(),
-                    acc_sk.get(&account_id).unwrap().clone(),
-                    &self.ctx().worker,
-                )
-            })
-            .collect()
+            Nodes::Local { nodes, .. } => nodes.iter().map(|node| &node.account).collect(),
+            Nodes::Docker { nodes, .. } => nodes.iter().map(|node| &node.account).collect(),
+        }
     }
 
     pub async fn start_node(
         &mut self,
-        new_node_account_id: &AccountId,
-        account_sk: &near_workspaces::types::SecretKey,
+        account: Account,
         cfg: &MultichainConfig,
     ) -> anyhow::Result<()> {
-        tracing::info!(%new_node_account_id, "adding one more node");
+        tracing::info!(account_id = %account.id(), "adding one more node");
         match self {
-            Nodes::Local { ctx, nodes } => {
-                nodes.push(local::Node::run(ctx, new_node_account_id, account_sk, cfg).await?)
-            }
+            Nodes::Local { ctx, nodes } => nodes.push(local::Node::run(ctx, account, cfg).await?),
             Nodes::Docker { ctx, nodes } => {
-                nodes.push(containers::Node::run(ctx, new_node_account_id, account_sk, cfg).await?)
+                nodes.push(containers::Node::run(ctx, account, cfg).await?)
             }
         }
 
@@ -162,7 +120,7 @@ impl Nodes<'_> {
                 let (index, node) = nodes
                     .iter_mut()
                     .enumerate()
-                    .find(|(_, node)| node.account_id == *account_id)
+                    .find(|(_, node)| node.account.id() == account_id)
                     .unwrap();
                 let node_killed = node.kill()?;
                 nodes.remove(index);
@@ -172,7 +130,7 @@ impl Nodes<'_> {
                 let (index, node) = nodes
                     .iter_mut()
                     .enumerate()
-                    .find(|(_, node)| node.account_id == *account_id)
+                    .find(|(_, node)| node.account.id() == account_id)
                     .unwrap();
                 let node_killed = node.kill();
                 nodes.remove(index);
@@ -187,8 +145,7 @@ impl Nodes<'_> {
     }
 
     pub async fn restart_node(&mut self, node_config: NodeConfig) -> anyhow::Result<()> {
-        let account_id = node_config.account_id.clone();
-        tracing::info!(%account_id, "restarting node");
+        tracing::info!(account_id = %node_config.account.id(), "restarting node");
         match self {
             Nodes::Local { ctx, nodes } => {
                 nodes.push(local::Node::restart(ctx, node_config).await?)
@@ -220,14 +177,14 @@ impl Nodes<'_> {
             Nodes::Local { nodes, .. } => {
                 for node in nodes {
                     gcp_services.push(
-                        GcpService::init(&node.account_id, &self.ctx().storage_options).await?,
+                        GcpService::init(node.account.id(), &self.ctx().storage_options).await?,
                     );
                 }
             }
             Nodes::Docker { nodes, .. } => {
                 for node in nodes {
                     gcp_services.push(
-                        GcpService::init(&node.account_id, &self.ctx().storage_options).await?,
+                        GcpService::init(node.account.id(), &self.ctx().storage_options).await?,
                     );
                 }
             }
@@ -309,7 +266,7 @@ pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyh
             .collect::<Result<Vec<_>, _>>()?;
     let mut node_futures = Vec::new();
     for account in &accounts {
-        let node = containers::Node::run(&ctx, account.id(), account.secret_key(), &cfg);
+        let node = containers::Node::run(&ctx, account.clone(), &cfg);
         node_futures.push(node);
     }
     let nodes = futures::future::join_all(node_futures)
@@ -354,13 +311,8 @@ pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
     let mut node_futures = Vec::with_capacity(cfg.nodes);
-    for account in accounts.iter().take(cfg.nodes) {
-        node_futures.push(local::Node::run(
-            &ctx,
-            account.id(),
-            account.secret_key(),
-            &cfg,
-        ));
+    for account in &accounts {
+        node_futures.push(local::Node::run(&ctx, account.clone(), &cfg));
     }
     let nodes = futures::future::join_all(node_futures)
         .await

@@ -8,7 +8,7 @@ use bollard::{container::LogsOptions, network::CreateNetworkOptions, service::Ip
 use futures::{lock::Mutex, StreamExt};
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
-use near_workspaces::AccountId;
+use near_workspaces::Account;
 use once_cell::sync::Lazy;
 use serde_json::json;
 use testcontainers::clients::Cli;
@@ -26,8 +26,7 @@ static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 pub struct Node<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
-    pub account_id: AccountId,
-    pub account_sk: near_workspaces::types::SecretKey,
+    pub account: Account,
     pub local_address: String,
     pub cipher_pk: hpke::PublicKey,
     pub cipher_sk: hpke::SecretKey,
@@ -43,11 +42,10 @@ impl<'a> Node<'a> {
 
     pub async fn run(
         ctx: &super::Context<'a>,
-        account_id: &AccountId,
-        account_sk: &near_workspaces::types::SecretKey,
+        account: Account,
         cfg: &MultichainConfig,
     ) -> anyhow::Result<Node<'a>> {
-        tracing::info!("running node container, account_id={}", account_id);
+        tracing::info!(account_id = %account.id(), "running node container");
         let (cipher_sk, cipher_pk) = hpke::generate();
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
@@ -55,13 +53,13 @@ impl<'a> Node<'a> {
 
         // Use proxied address to mock slow, congested or unstable rpc connection
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
-        let proxy_name = format!("rpc_from_node_{}", account_id);
+        let proxy_name = format!("rpc_from_node_{}", account.id());
         let rpc_port_proxied = utils::pick_unused_port().await?;
         let rpc_address_proxied = format!("{}:{}", near_rpc, rpc_port_proxied);
         tracing::info!(
             "Proxy RPC address {} accessed by node@{} to {}",
             near_rpc,
-            account_id,
+            account.id(),
             rpc_address_proxied
         );
         LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc).await?;
@@ -77,8 +75,8 @@ impl<'a> Node<'a> {
         let args = mpc_node::cli::Cli::Start {
             near_rpc: rpc_address_proxied.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
-            account_id: account_id.clone(),
-            account_sk: account_sk.to_string().parse()?,
+            account_id: account.id().clone(),
+            account_sk: account.secret_key().to_string().parse()?,
             web_port: Self::CONTAINER_PORT,
             cipher_pk: hex::encode(cipher_pk.to_bytes()),
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
@@ -114,14 +112,13 @@ impl<'a> Node<'a> {
         let full_address = format!("http://{ip_address}:{}", Self::CONTAINER_PORT);
         tracing::info!(
             full_address,
-            "node container is running, account_id={}",
-            account_id
+            account_id = %account.id(),
+            "node container is running",
         );
         Ok(Node {
             container,
             address: full_address,
-            account_id: account_id.clone(),
-            account_sk: account_sk.clone(),
+            account,
             local_address: format!("http://localhost:{host_port}"),
             cipher_pk,
             cipher_sk,
@@ -135,8 +132,7 @@ impl<'a> Node<'a> {
         self.container.stop();
         NodeConfig {
             web_port: Self::CONTAINER_PORT,
-            account_id: self.account_id.clone(),
-            account_sk: self.account_sk.clone(),
+            account: self.account.clone(),
             cipher_pk: self.cipher_pk.clone(),
             cipher_sk: self.cipher_sk.clone(),
             cfg: self.cfg.clone(),
@@ -147,12 +143,6 @@ impl<'a> Node<'a> {
     pub async fn restart(ctx: &super::Context<'a>, config: NodeConfig) -> anyhow::Result<Self> {
         let cipher_pk = config.cipher_pk;
         let cipher_sk = config.cipher_sk;
-        let cfg = config.cfg;
-        let account_id = config.account_id;
-        let account_sk = config.account_sk;
-        let storage_options = ctx.storage_options.clone();
-        let near_rpc = config.near_rpc;
-        let mpc_contract_id = ctx.mpc_contract.id().clone();
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
             s3_region: ctx.localstack.s3_region.clone(),
@@ -163,20 +153,22 @@ impl<'a> Node<'a> {
         };
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
+        let sign_pk = sign_sk.public_key();
+
         let args = mpc_node::cli::Cli::Start {
-            near_rpc: near_rpc.clone(),
-            mpc_contract_id: mpc_contract_id.clone(),
-            account_id: account_id.clone(),
-            account_sk: account_sk.to_string().parse()?,
+            near_rpc: config.near_rpc.clone(),
+            mpc_contract_id: ctx.mpc_contract.id().clone(),
+            account_id: config.account.id().clone(),
+            account_sk: config.account.secret_key().to_string().parse()?,
             web_port: Self::CONTAINER_PORT,
             cipher_pk: hex::encode(cipher_pk.to_bytes()),
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
-            indexer_options: indexer_options.clone(),
+            indexer_options,
             my_address: None,
-            storage_options: storage_options.clone(),
+            storage_options: ctx.storage_options.clone(),
             sign_sk: Some(sign_sk),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
-                cfg.protocol.clone(),
+                config.cfg.protocol.clone(),
             )?)),
             client_header_referer: None,
         }
@@ -203,20 +195,19 @@ impl<'a> Node<'a> {
         let full_address = format!("http://{ip_address}:{}", Self::CONTAINER_PORT);
         tracing::info!(
             full_address,
-            "node container is running, account_id={}",
-            account_id
+            account_id = %config.account.id(),
+            "node container is running",
         );
         Ok(Node {
             container,
             address: full_address,
-            account_id: account_id.clone(),
-            account_sk: account_sk.clone(),
+            account: config.account,
             local_address: format!("http://localhost:{host_port}"),
             cipher_pk,
             cipher_sk,
-            sign_pk: account_sk.public_key(),
-            cfg: cfg.clone(),
-            near_rpc,
+            sign_pk: sign_pk.to_string().parse().unwrap(),
+            cfg: config.cfg,
+            near_rpc: config.near_rpc,
         })
     }
 }

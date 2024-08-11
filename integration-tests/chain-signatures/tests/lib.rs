@@ -2,6 +2,7 @@ mod actions;
 mod cases;
 
 use crate::actions::wait_for;
+use mpc_contract::primitives::Info;
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 
 use anyhow::anyhow;
@@ -11,11 +12,11 @@ use integration_tests_chain_signatures::utils::{vote_join, vote_leave};
 use integration_tests_chain_signatures::{run, utils, MultichainConfig, Nodes};
 
 use near_jsonrpc_client::JsonRpcClient;
-use near_workspaces::types::{NearToken, SecretKey};
+use near_workspaces::types::NearToken;
 use near_workspaces::{Account, AccountId};
 
 use integration_tests_chain_signatures::local::NodeConfig;
-use std::str::FromStr;
+use std::collections::HashSet;
 
 const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(9000);
 const CURRENT_CONTRACT_FILE_PATH: &str =
@@ -31,19 +32,16 @@ pub struct MultichainTestContext<'a> {
 
 impl MultichainTestContext<'_> {
     pub async fn participant_accounts(&self) -> anyhow::Result<Vec<Account>> {
-        let node_accounts: Vec<Account> = self.nodes.near_accounts();
         let state = wait_for::running_mpc(self, None).await?;
-        let participant_ids = state.participants.keys().collect::<Vec<_>>();
-        let participant_accounts: Vec<Account> = participant_ids
+        let participants = state.participants.keys().collect::<HashSet<_>>();
+
+        let participant_accounts = self
+            .nodes
+            .near_accounts()
             .iter()
-            .map(|id| near_workspaces::types::AccountId::from_str(id.as_ref()).unwrap())
-            .map(|id| {
-                node_accounts
-                    .iter()
-                    .find(|a| a.id() == &id)
-                    .unwrap()
-                    .clone()
-            })
+            .filter(|account| participants.contains(account.id()))
+            .cloned()
+            .cloned()
             .collect();
         Ok(participant_accounts)
     }
@@ -53,22 +51,20 @@ impl MultichainTestContext<'_> {
         existing_node: Option<NodeConfig>,
     ) -> anyhow::Result<()> {
         let state = wait_for::running_mpc(self, None).await?;
-        let account_id: AccountId;
-        let sk: SecretKey;
-        let new_node_account: Account;
-
-        if let Some(node_cfg) = existing_node {
-            account_id = node_cfg.account_id;
-            sk = node_cfg.account_sk;
-            tracing::info!("Adding an existing participant: {}", account_id);
+        let node_account = if let Some(node_cfg) = existing_node {
+            tracing::info!(
+                account_id = %node_cfg.account.id(),
+                "Adding an existing participant"
+            );
+            node_cfg.account
         } else {
-            new_node_account = self.nodes.ctx().worker.dev_create_account().await?;
-            account_id = new_node_account.id().clone();
-            sk = new_node_account.secret_key().clone();
-            tracing::info!("Adding a new participant: {}", account_id);
-        }
+            let node_account = self.nodes.ctx().worker.dev_create_account().await?;
+            tracing::info!(account_id = %node_account.id(), "Adding a new participant");
+            node_account
+        };
 
-        self.nodes.start_node(&account_id, &sk, &self.cfg).await?;
+        let account_id = node_account.id().clone();
+        self.nodes.start_node(node_account, &self.cfg).await?;
 
         // Wait for new node to add itself as a candidate
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -197,6 +193,19 @@ impl MultichainTestContext<'_> {
             success >= self.cfg.threshold,
             "did not successfully vote for update"
         );
+    }
+
+    pub async fn update_info(&self, idx: usize, info: Info) -> bool {
+        let accounts = self.nodes.near_accounts();
+        accounts[idx]
+            .call(self.nodes.ctx().mpc_contract.id(), "update_info")
+            .args_json((info,))
+            .max_gas()
+            .transact()
+            .await
+            .unwrap()
+            .json()
+            .unwrap()
     }
 }
 
