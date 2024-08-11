@@ -8,10 +8,6 @@ use crypto_shared::{
     derive_epsilon, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     types::SignatureResponse, ScalarExt as _,
 };
-use errors::{
-    ConversionError, InitError, InvalidParameters, InvalidState, JoinError, PublicKeyError,
-    RespondError, SignError, VoteError,
-};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
@@ -20,17 +16,22 @@ use near_sdk::{
     env, log, near_bindgen, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise,
     PromiseError, PublicKey,
 };
-use primitives::{
-    CandidateInfo, Candidates, ContractSignatureRequest, Participants, PkVotes, SignRequest,
-    SignaturePromiseError, SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex,
-};
 use std::collections::{BTreeMap, HashSet};
+use std::collections::btree_map::Entry;
 
 use crate::config::Config;
-use crate::errors::Error;
+use crate::errors::{Error,
+    ConversionError, InitError, InvalidParameters, InvalidState, JoinError, PublicKeyError,
+    RespondError, SignError, VoteError,
+};
 use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
+use crate::primitives::{
+    CandidateInfo, Candidates, ContractSignatureRequest, Participants, PkVotes, SignRequest,
+    SignaturePromiseError, SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex,
+    ParticipantInfo, Info,
+};
 
-pub use state::{
+pub use crate::state::{
     InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
 };
 
@@ -510,7 +511,7 @@ impl VersionedMpcContract {
 
     /// Propose an update to the contract. [`Update`] are all the possible updates that can be proposed.
     ///
-    /// returns Some(id) if the proposal was successful, None otherwise
+    /// returns Ok(id) if the proposal was successful, Err(reason) otherwise
     #[payable]
     #[handle_result]
     pub fn propose_update(
@@ -573,6 +574,47 @@ impl VersionedMpcContract {
         };
 
         Ok(true)
+    }
+}
+
+// Contract APIs each participant of the network can call for their own benefit
+#[near_bindgen]
+impl VersionedMpcContract {
+    /// Update the participant themselves. Each participant can call into this function to update their own
+    /// information such as if their node URL got changed or their signing and encryption keys have been
+    /// changed or rotated.
+    #[handle_result]
+    pub fn update_info(&mut self, info: Info) -> Result<bool, Error> {
+        let ProtocolContractState::Running(RunningContractState {
+            participants,
+            candidates,
+            ..
+        }) = self.mutable_state() else {
+            return Err(InvalidState::ProtocolStateNotRunning.message("can only update info in running"));
+        };
+
+        let updater = env::signer_account_id();
+        if let Entry::Occupied(mut entry) = participants.entry(updater.clone()) {
+            let info: ParticipantInfo = info.into();
+            if entry.get() == &info {
+                // No change, return false
+                return Ok(false);
+            }
+
+            entry.insert(info);
+            return Ok(true);
+        }
+
+        if let Entry::Occupied(mut entry) = candidates.entry(updater) {
+            let info: CandidateInfo = info.into();
+            if entry.get() == &info {
+                return Ok(false);
+            }
+            entry.insert(info);
+            return Ok(true)
+        }
+
+        Err(InvalidState::MissingParticipantOrCandidate.into())
     }
 }
 

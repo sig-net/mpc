@@ -4,6 +4,7 @@ use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::btree_map;
 
 pub mod hpke {
     pub type PublicKey = [u8; 32];
@@ -54,6 +55,30 @@ impl SignatureRequest {
     }
 }
 
+
+#[derive(
+    Serialize,
+    Deserialize,
+    BorshDeserialize,
+    BorshSerialize,
+    Clone,
+    Hash,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Debug,
+)]
+pub struct Info {
+    pub account_id: AccountId,
+    /// Url of the node that this AccountId/Participant represents.
+    pub url: String,
+    /// The public key used for encrypting messages.
+    pub cipher_pk: hpke::PublicKey,
+    /// The public key used for verifying messages.
+    pub sign_pk: PublicKey,
+}
+
 #[derive(
     Serialize,
     Deserialize,
@@ -76,13 +101,36 @@ pub struct ParticipantInfo {
     pub sign_pk: PublicKey,
 }
 
+
+impl From<Info> for ParticipantInfo {
+    fn from(info: Info) -> Self {
+        Self {
+            account_id: info.account_id,
+            url: info.url,
+            cipher_pk: info.cipher_pk,
+            sign_pk: info.sign_pk,
+        }
+    }
+}
+
 impl From<CandidateInfo> for ParticipantInfo {
     fn from(candidate_info: CandidateInfo) -> Self {
-        ParticipantInfo {
+        Self {
             account_id: candidate_info.account_id,
             url: candidate_info.url,
             cipher_pk: candidate_info.cipher_pk,
             sign_pk: candidate_info.sign_pk,
+        }
+    }
+}
+
+impl From<Info> for CandidateInfo {
+    fn from(info: Info) -> Self {
+        Self {
+            account_id: info.account_id,
+            url: info.url,
+            cipher_pk: info.cipher_pk,
+            sign_pk: info.sign_pk,
         }
     }
 }
@@ -177,6 +225,10 @@ impl Participants {
     pub fn is_empty(&self) -> bool {
         self.participants.is_empty()
     }
+
+    pub fn entry(&mut self, id: AccountId) -> btree_map::Entry<'_, AccountId, ParticipantInfo> {
+        self.participants.entry(id)
+    }
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
@@ -215,6 +267,10 @@ impl Candidates {
 
     pub fn iter(&self) -> impl Iterator<Item = (&AccountId, &CandidateInfo)> {
         self.candidates.iter()
+    }
+
+    pub fn entry(&mut self, id: AccountId) -> btree_map::Entry<'_, AccountId, CandidateInfo> {
+        self.candidates.entry(id)
     }
 }
 

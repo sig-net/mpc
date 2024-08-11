@@ -77,6 +77,8 @@ pub enum InvalidState {
     ContractStateIsMissing,
     #[error("Mismatched epoch.")]
     EpochMismatch,
+    #[error("The calling participant or candidate cannot be found.")]
+    MissingParticipantOrCandidate,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
