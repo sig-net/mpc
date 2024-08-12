@@ -128,15 +128,15 @@ impl<'a> Node<'a> {
         })
     }
 
-    pub fn kill(&self) -> NodeConfig {
+    pub fn kill(self) -> NodeConfig {
         self.container.stop();
         NodeConfig {
             web_port: Self::CONTAINER_PORT,
-            account: self.account.clone(),
-            cipher_pk: self.cipher_pk.clone(),
-            cipher_sk: self.cipher_sk.clone(),
-            cfg: self.cfg.clone(),
-            near_rpc: self.near_rpc.clone(),
+            account: self.account,
+            cipher_pk: self.cipher_pk,
+            cipher_sk: self.cipher_sk,
+            cfg: self.cfg,
+            near_rpc: self.near_rpc,
         }
     }
 

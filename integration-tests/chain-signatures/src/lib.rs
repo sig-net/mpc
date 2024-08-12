@@ -98,6 +98,13 @@ impl Nodes<'_> {
         }
     }
 
+    pub fn account_id(&self, idx: usize) -> &AccountId {
+        match self {
+            Nodes::Local { nodes, .. } => nodes[idx].account.id(),
+            Nodes::Docker { nodes, .. } => nodes[idx].account.id(),
+        }
+    }
+
     pub async fn start_node(
         &mut self,
         account: Account,
@@ -117,24 +124,24 @@ impl Nodes<'_> {
     pub async fn kill_node(&mut self, account_id: &AccountId) -> anyhow::Result<NodeConfig> {
         let killed_node_config = match self {
             Nodes::Local { nodes, .. } => {
-                let (index, node) = nodes
+                let index = nodes
                     .iter_mut()
                     .enumerate()
                     .find(|(_, node)| node.account.id() == account_id)
+                    .map(|(index, _)| index)
                     .unwrap();
-                let node_killed = node.kill()?;
-                nodes.remove(index);
-                node_killed
+                let node = nodes.remove(index);
+                node.kill()?
             }
             Nodes::Docker { nodes, .. } => {
-                let (index, node) = nodes
+                let index = nodes
                     .iter_mut()
                     .enumerate()
                     .find(|(_, node)| node.account.id() == account_id)
+                    .map(|(index, _)| index)
                     .unwrap();
-                let node_killed = node.kill();
-                nodes.remove(index);
-                node_killed
+                let node = nodes.remove(index);
+                node.kill()
             }
         };
 
@@ -193,8 +200,8 @@ impl Nodes<'_> {
     }
 
     pub fn proxy_name_for_node(&self, id: usize) -> String {
-        let account_id = self.near_accounts();
-        format!("rpc_from_node_{}", account_id[id].id())
+        let account_id = self.account_id(id);
+        format!("rpc_from_node_{}", account_id)
     }
 }
 

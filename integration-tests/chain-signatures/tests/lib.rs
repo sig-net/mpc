@@ -2,7 +2,7 @@ mod actions;
 mod cases;
 
 use crate::actions::wait_for;
-use mpc_contract::primitives::Info;
+use mpc_contract::primitives::PartialInfo;
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 
 use anyhow::anyhow;
@@ -195,7 +195,7 @@ impl MultichainTestContext<'_> {
         );
     }
 
-    pub async fn update_info(&self, idx: usize, info: Info) -> bool {
+    pub async fn update_info(&self, idx: usize, info: PartialInfo) -> bool {
         let accounts = self.nodes.near_accounts();
         accounts[idx]
             .call(self.nodes.ctx().mpc_contract.id(), "update_info")

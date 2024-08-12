@@ -16,20 +16,20 @@ use near_sdk::{
     env, log, near_bindgen, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise,
     PromiseError, PublicKey,
 };
-use std::collections::{BTreeMap, HashSet};
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::config::Config;
-use crate::errors::{Error,
-    ConversionError, InitError, InvalidParameters, InvalidState, JoinError, PublicKeyError,
+use crate::errors::{
+    ConversionError, Error, InitError, InvalidParameters, InvalidState, JoinError, PublicKeyError,
     RespondError, SignError, VoteError,
 };
-use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
 use crate::primitives::{
-    CandidateInfo, Candidates, ContractSignatureRequest, Participants, PkVotes, SignRequest,
-    SignaturePromiseError, SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex,
-    ParticipantInfo, Info,
+    CandidateInfo, Candidates, ContractSignatureRequest, PartialInfo, ParticipantInfo,
+    Participants, PkVotes, SignRequest, SignaturePromiseError, SignatureRequest, SignatureResult,
+    StorageKey, Votes, YieldIndex,
 };
+use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
 
 pub use crate::state::{
     InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
@@ -584,18 +584,21 @@ impl VersionedMpcContract {
     /// information such as if their node URL got changed or their signing and encryption keys have been
     /// changed or rotated.
     #[handle_result]
-    pub fn update_info(&mut self, info: Info) -> Result<bool, Error> {
+    pub fn update_info(&mut self, info: PartialInfo) -> Result<bool, Error> {
         let ProtocolContractState::Running(RunningContractState {
             participants,
             candidates,
             ..
-        }) = self.mutable_state() else {
-            return Err(InvalidState::ProtocolStateNotRunning.message("can only update info in running"));
+        }) = self.mutable_state()
+        else {
+            return Err(
+                InvalidState::ProtocolStateNotRunning.message("can only update info in running")
+            );
         };
 
         let updater = env::signer_account_id();
         if let Entry::Occupied(mut entry) = participants.entry(updater.clone()) {
-            let info: ParticipantInfo = info.into();
+            let info = info.into_participant(entry.get());
             if entry.get() == &info {
                 // No change, return false
                 return Ok(false);
@@ -606,12 +609,12 @@ impl VersionedMpcContract {
         }
 
         if let Entry::Occupied(mut entry) = candidates.entry(updater) {
-            let info: CandidateInfo = info.into();
+            let info = info.into_canddiate(entry.get());
             if entry.get() == &info {
                 return Ok(false);
             }
             entry.insert(info);
-            return Ok(true)
+            return Ok(true);
         }
 
         Err(InvalidState::MissingParticipantOrCandidate.into())

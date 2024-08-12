@@ -155,16 +155,16 @@ impl Node {
         })
     }
 
-    pub fn kill(&mut self) -> std::io::Result<NodeConfig> {
+    pub fn kill(mut self) -> std::io::Result<NodeConfig> {
         self.process.kill()?;
         tracing::info!(account_id = %self.account.id(), ?self.address, "node killed");
         Ok(NodeConfig {
             web_port: self.web_port,
-            account: self.account.clone(),
-            cipher_pk: self.cipher_pk.clone(),
-            cipher_sk: self.cipher_sk.clone(),
-            cfg: self.cfg.clone(),
-            near_rpc: self.near_rpc.clone(),
+            account: self.account,
+            cipher_pk: self.cipher_pk,
+            cipher_sk: self.cipher_sk,
+            cfg: self.cfg,
+            near_rpc: self.near_rpc,
         })
     }
 }

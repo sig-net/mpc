@@ -3,8 +3,8 @@ use k256::Scalar;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
-use std::collections::{BTreeMap, HashMap, HashSet};
 use std::collections::btree_map;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub mod hpke {
     pub type PublicKey = [u8; 32];
@@ -55,28 +55,36 @@ impl SignatureRequest {
     }
 }
 
-
-#[derive(
-    Serialize,
-    Deserialize,
-    BorshDeserialize,
-    BorshSerialize,
-    Clone,
-    Hash,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Debug,
-)]
-pub struct Info {
-    pub account_id: AccountId,
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PartialInfo {
+    /// Account ID of the node
+    pub account_id: Option<AccountId>,
     /// Url of the node that this AccountId/Participant represents.
-    pub url: String,
+    pub url: Option<String>,
     /// The public key used for encrypting messages.
-    pub cipher_pk: hpke::PublicKey,
+    pub cipher_pk: Option<hpke::PublicKey>,
     /// The public key used for verifying messages.
-    pub sign_pk: PublicKey,
+    pub sign_pk: Option<PublicKey>,
+}
+
+impl PartialInfo {
+    pub fn into_participant(self, base: &ParticipantInfo) -> ParticipantInfo {
+        ParticipantInfo {
+            account_id: self.account_id.unwrap_or_else(|| base.account_id.clone()),
+            url: self.url.unwrap_or_else(|| base.url.clone()),
+            cipher_pk: self.cipher_pk.unwrap_or_else(|| base.cipher_pk.clone()),
+            sign_pk: self.sign_pk.unwrap_or_else(|| base.sign_pk.clone()),
+        }
+    }
+
+    pub fn into_canddiate(self, base: &CandidateInfo) -> CandidateInfo {
+        CandidateInfo {
+            account_id: self.account_id.unwrap_or_else(|| base.account_id.clone()),
+            url: self.url.unwrap_or_else(|| base.url.clone()),
+            cipher_pk: self.cipher_pk.unwrap_or_else(|| base.cipher_pk.clone()),
+            sign_pk: self.sign_pk.unwrap_or_else(|| base.sign_pk.clone()),
+        }
+    }
 }
 
 #[derive(
@@ -101,18 +109,6 @@ pub struct ParticipantInfo {
     pub sign_pk: PublicKey,
 }
 
-
-impl From<Info> for ParticipantInfo {
-    fn from(info: Info) -> Self {
-        Self {
-            account_id: info.account_id,
-            url: info.url,
-            cipher_pk: info.cipher_pk,
-            sign_pk: info.sign_pk,
-        }
-    }
-}
-
 impl From<CandidateInfo> for ParticipantInfo {
     fn from(candidate_info: CandidateInfo) -> Self {
         Self {
@@ -120,17 +116,6 @@ impl From<CandidateInfo> for ParticipantInfo {
             url: candidate_info.url,
             cipher_pk: candidate_info.cipher_pk,
             sign_pk: candidate_info.sign_pk,
-        }
-    }
-}
-
-impl From<Info> for CandidateInfo {
-    fn from(info: Info) -> Self {
-        Self {
-            account_id: info.account_id,
-            url: info.url,
-            cipher_pk: info.cipher_pk,
-            sign_pk: info.sign_pk,
         }
     }
 }
