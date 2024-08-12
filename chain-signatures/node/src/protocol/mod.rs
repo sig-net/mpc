@@ -167,9 +167,21 @@ impl MpcSignProtocol {
         triple_storage: LockTripleNodeStorageBox,
         cfg: Arc<RwLock<Config>>,
     ) -> (Self, Arc<RwLock<NodeState>>) {
+        let my_address = my_address.into_url().unwrap();
+        let rpc_url = rpc_client.rpc_addr();
+        let signer_account_id: AccountId = signer.clone().account_id;
+        tracing::info!(
+            ?my_address,
+            ?mpc_contract_id,
+            ?account_id,
+            ?rpc_url,
+            ?signer_account_id,
+            ?cfg,
+            "initializing protocol with parameters"
+        );
         let state = Arc::new(RwLock::new(NodeState::Starting));
         let ctx = Ctx {
-            my_address: my_address.into_url().unwrap(),
+            my_address,
             account_id,
             mpc_contract_id,
             rpc_client,
@@ -211,13 +223,13 @@ impl MpcSignProtocol {
                 .fetch_inplace(&self.ctx.rpc_client, &self.ctx.mpc_contract_id)
                 .await
             {
-                tracing::warn!("could not fetch contract's config on startup: {err:?}");
+                tracing::error!("could not fetch contract's config on startup: {err:?}");
             }
         }
 
         loop {
             let protocol_time = Instant::now();
-            tracing::debug!("trying to advance chain signatures protocol");
+            tracing::trace!("trying to advance chain signatures protocol");
             loop {
                 let msg_result = self.receiver.try_recv();
                 match msg_result {
@@ -244,13 +256,11 @@ impl MpcSignProtocol {
                 .await
                 {
                     Ok(contract_state) => contract_state,
-                    Err(e) => {
-                        tracing::error!("could not fetch contract's state: {e}");
+                    Err(_) => {
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         continue;
                     }
                 };
-                tracing::debug!(?contract_state);
 
                 // Establish the participants for this current iteration of the protocol loop. This will
                 // set which participants are currently active in the protocol and determines who will be
@@ -292,7 +302,7 @@ impl MpcSignProtocol {
             let crypto_time = Instant::now();
             let mut state = match state.progress(&mut self).await {
                 Ok(state) => {
-                    tracing::debug!("progress ok: {state}");
+                    tracing::trace!("progress ok: {state}");
                     state
                 }
                 Err(err) => {

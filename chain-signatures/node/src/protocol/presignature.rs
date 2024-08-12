@@ -158,8 +158,13 @@ impl PresignatureManager {
     }
 
     pub fn garbage_collect(&mut self, cfg: &ProtocolConfig) {
+        let before = self.gc.len();
         self.gc
             .retain(|_, instant| instant.elapsed() < Duration::from_millis(cfg.garbage_timeout));
+        let removed = before.saturating_sub(self.gc.len());
+        if removed > 0 {
+            tracing::debug!("garbage collected {} presignatures", removed);
+        }
     }
 
     pub fn refresh_gc(&mut self, id: &PresignatureId) -> bool {
@@ -223,6 +228,7 @@ impl PresignatureManager {
             || self.presignatures.contains_key(&id)
             || self.gc.contains_key(&id)
         {
+            tracing::warn!(id, "presignature id collision");
             return Err(InitializationError::BadParameters(format!(
                 "id collision: presignature_id={id}"
             )));
@@ -277,6 +283,7 @@ impl PresignatureManager {
             return Ok(());
         }
 
+        tracing::trace!("not enough presignatures, generating");
         // To ensure there is no contention between different nodes we are only using triples
         // that we proposed. This way in a non-BFT environment we are guaranteed to never try
         // to use the same triple as any other node.
@@ -300,7 +307,7 @@ impl PresignatureManager {
                 triple0 = ?triple0.public.participants,
                 triple1 = ?triple1.public.participants,
                 active = ?active.keys_vec(),
-                "running: common participants are less than threshold for presignature generation"
+                "running: the intersection of participants is less than the threshold"
             );
             return Ok(());
         }
@@ -387,8 +394,10 @@ impl PresignatureManager {
         cfg: &ProtocolConfig,
     ) -> Result<&mut PresignatureProtocol, GenerationError> {
         if self.presignatures.contains_key(&id) {
+            tracing::debug!(id, "presignature already generated");
             Err(GenerationError::AlreadyGenerated)
         } else if self.gc.contains_key(&id) {
+            tracing::debug!(id, "presignature was garbage collected");
             Err(GenerationError::PresignatureIsGarbageCollected(id))
         } else {
             match self.generators.entry(id) {
@@ -428,6 +437,7 @@ impl PresignatureManager {
                                 return Err(error);
                             }
                             _ => {
+                                tracing::error!(?error, "Unexpected Generation Error");
                                 return Err(error);
                             }
                         },
@@ -465,19 +475,24 @@ impl PresignatureManager {
     pub fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
         if let Some(presignature) = self.presignatures.remove(&id) {
             self.gc.insert(id, Instant::now());
+            tracing::trace!(id, "took presignature");
             return Ok(presignature);
         }
 
         if self.generators.contains_key(&id) {
+            tracing::warn!(id, "presignature is still generating");
             return Err(GenerationError::PresignatureIsGenerating(id));
         }
         if self.gc.contains_key(&id) {
+            tracing::warn!(id, "presignature was garbage collected");
             return Err(GenerationError::PresignatureIsGarbageCollected(id));
         }
+        tracing::warn!(id, "presignature is missing");
         Err(GenerationError::PresignatureIsMissing(id))
     }
 
     pub fn insert_mine(&mut self, presig: Presignature) {
+        tracing::trace!(id = ?presig.id, "inserting presignature");
         // Remove from taken list if it was there
         self.gc.remove(&presig.id);
         self.mine.push_back(presig.id);
@@ -496,6 +511,9 @@ impl PresignatureManager {
                 let action = match generator.poke() {
                     Ok(action) => action,
                     Err(e) => {
+                        crate::metrics::PRESIGNATURE_GENERATOR_FAILURES
+                            .with_label_values(&[self.my_account_id.as_str()])
+                            .inc();
                         self.gc.insert(*id, Instant::now());
                         self.introduced.remove(id);
                         errors.push(e);

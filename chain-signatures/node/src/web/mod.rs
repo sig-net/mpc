@@ -151,7 +151,7 @@ async fn state(
     Extension(state): Extension<Arc<AxumState>>,
     params: Option<Json<StateParams>>,
 ) -> Result<Json<StateView>> {
-    tracing::debug!("fetching state");
+    tracing::trace!("fetching state");
     let latest_block_height = state.indexer.latest_block_height().await;
     let is_stable = state.indexer.is_on_track().await;
     let config = state.config.read().await;
