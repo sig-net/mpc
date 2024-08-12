@@ -75,8 +75,8 @@ impl Mesh {
 
     /// Ping the active participants such that we can see who is alive.
     pub async fn ping(&mut self, previews: Option<(HashSet<TripleId>, HashSet<PresignatureId>)>) {
-        self.active_participants = self.connections.ping(previews).await;
-        self.active_potential_participants = self.connections.ping_potential().await;
+        self.active_participants = self.connections.ping(previews.clone()).await;
+        self.active_potential_participants = self.connections.ping_potential(previews).await;
 
         tracing::debug!(
             active = ?self.active_participants.account_ids(),

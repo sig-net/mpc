@@ -105,12 +105,6 @@ impl SignQueue {
         my_account_id: &AccountId,
     ) {
         if stable.len() < threshold {
-            tracing::warn!(
-                "Require at least {} stable participants to organize, got {}: {:?}",
-                threshold,
-                stable.len(),
-                stable.keys_vec()
-            );
             return;
         }
         for request in self.unorganized_requests.drain(..) {

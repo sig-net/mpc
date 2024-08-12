@@ -71,22 +71,21 @@ impl MultichainTestContext<'_> {
         self.nodes.start_node(&account_id, &sk, &self.cfg).await?;
 
         // Wait for new node to add itself as a candidate
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
         // T number of participants should vote
         let participants = self.participant_accounts().await?;
         let voting_participants = participants
             .iter()
             .take(state.threshold)
-            .cloned()
             .collect::<Vec<_>>();
-        assert!(vote_join(
-            voting_participants,
+        vote_join(
+            &voting_participants,
             self.nodes.ctx().mpc_contract.id(),
             &account_id,
+            self.cfg.threshold,
         )
-        .await
-        .is_ok());
+        .await?;
 
         let new_state = wait_for::running_mpc(self, Some(state.epoch + 1)).await?;
         assert_eq!(new_state.participants.len(), state.participants.len() + 1);
@@ -112,12 +111,11 @@ impl MultichainTestContext<'_> {
             .iter()
             .filter(|account| account.id() != leaving_account_id)
             .take(state.threshold)
-            .cloned()
-            .collect::<Vec<Account>>();
+            .collect::<Vec<_>>();
 
         tracing::info!("Removing vote from: {:?}", voting_accounts);
         let results = vote_leave(
-            voting_accounts.clone(),
+            &voting_accounts,
             self.nodes.ctx().mpc_contract.id(),
             leaving_account_id,
         )

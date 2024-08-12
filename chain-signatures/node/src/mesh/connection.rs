@@ -69,11 +69,9 @@ impl Pool {
             };
 
             let mut req = self.http.get(url.clone());
-
             if !params.is_empty() {
                 req = req.header("content-type", "application/json").json(&params);
             }
-
             let resp = match req.send().await {
                 Ok(resp) => resp,
                 Err(err) => {
@@ -106,7 +104,10 @@ impl Pool {
         participants
     }
 
-    pub async fn ping_potential(&mut self) -> Participants {
+    pub async fn ping_potential(
+        &mut self,
+        previews: Option<(HashSet<TripleId>, HashSet<PresignatureId>)>,
+    ) -> Participants {
         if let Some((ref active, timestamp)) = *self.potential_active.read().await {
             if timestamp.elapsed() < DEFAULT_TIMEOUT {
                 return active.clone();
@@ -115,6 +116,16 @@ impl Pool {
 
         let connections = self.potential_connections.read().await;
 
+        let mut params = HashMap::new();
+        if let Some((triples, presignatures)) = previews {
+            if !triples.is_empty() {
+                params.insert("triple_preview", triples);
+            }
+            if !presignatures.is_empty() {
+                params.insert("presignature_preview", presignatures);
+            }
+        }
+
         let mut status = self.status.write().await;
         let mut participants = Participants::default();
         for (participant, info) in connections.iter() {
@@ -122,8 +133,21 @@ impl Pool {
                 continue;
             };
 
-            let Ok(resp) = self.http.get(url).send().await else {
-                continue;
+            let mut req = self.http.get(url.clone());
+            if !params.is_empty() {
+                req = req.header("content-type", "application/json").json(&params);
+            }
+            let resp = match req.send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        "Pool.ping_potential resp err participant {:?} url {}",
+                        participant,
+                        url
+                    );
+                    continue;
+                }
             };
 
             let Ok(state): Result<StateView, _> = resp.json().await else {
