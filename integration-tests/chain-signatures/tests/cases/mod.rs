@@ -8,6 +8,7 @@ use integration_tests_chain_signatures::containers::{self, DockerClient};
 use integration_tests_chain_signatures::MultichainConfig;
 use k256::elliptic_curve::point::AffineCoordinates;
 use mpc_contract::config::Config;
+use mpc_contract::primitives::PartialInfo;
 use mpc_contract::update::ProposeUpdateArgs;
 use mpc_node::kdf::into_eth_sig;
 use mpc_node::test_utils;
@@ -386,6 +387,23 @@ async fn test_multichain_update_contract() -> anyhow::Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             wait_for::has_at_least_mine_presignatures(&ctx, 1).await?;
             actions::single_payload_signature_production(&ctx, &state).await?;
+
+            // Now do a config update and see if that also updates the same:
+            let id = ctx
+                .update_info(
+                    0,
+                    PartialInfo {
+                        account_id: todo!(),
+                        url: todo!(),
+                        cipher_pk: todo!(),
+                        sign_pk: todo!(),
+                    },
+                )
+                .await;
+            // ctx.vote_update(id).await;
+            // tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            // wait_for::has_at_least_mine_presignatures(&ctx, 1).await?;
+            // actions::single_payload_signature_production(&ctx, &state).await?;
 
             Ok(())
         })
