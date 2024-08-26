@@ -13,6 +13,7 @@ use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
 use crate::rpc_client;
+use crate::storage::presignature::PresignatureLockNodeStorageBox;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::LockNodeStorageBox;
 use crate::storage::triple_storage::TripleData;
@@ -41,6 +42,7 @@ pub trait ConsensusCtx {
     fn sign_queue(&self) -> Arc<RwLock<SignQueue>>;
     fn secret_storage(&self) -> &SecretNodeStorageBox;
     fn triple_storage(&self) -> LockNodeStorageBox;
+    fn presignature_storage(&self) -> PresignatureLockNodeStorageBox;
     fn cfg(&self) -> &Config;
 }
 
@@ -137,6 +139,7 @@ impl ConsensusProtocol for StartedState {
                                         contract_state.threshold,
                                         epoch,
                                         ctx.my_account_id(),
+                                        ctx.presignature_storage(),
                                     );
                                     let triple_manager = Arc::new(RwLock::new(TripleManager::new(
                                         me,
@@ -368,6 +371,10 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         tracing::warn!(?err, "failed to clear triples from storage");
                     }
 
+                    if let Err(err) = ctx.presignature_storage().write().await.clear().await {
+                        tracing::warn!(?err, "failed to clear presignatures from storage");
+                    }
+
                     let triple_manager = Arc::new(RwLock::new(TripleManager::new(
                         me,
                         self.threshold,
@@ -393,6 +400,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                             self.threshold,
                             self.epoch,
                             ctx.my_account_id(),
+                            ctx.presignature_storage(),
                         ))),
                         signature_manager: Arc::new(RwLock::new(SignatureManager::new(
                             me,

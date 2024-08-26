@@ -27,6 +27,7 @@ use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{MessageHandler, MpcMessageQueue};
 use crate::rpc_client;
+use crate::storage::presignature::PresignatureLockNodeStorageBox;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::LockNodeStorageBox;
 
@@ -50,6 +51,7 @@ struct Ctx {
     sign_queue: Arc<RwLock<SignQueue>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: LockNodeStorageBox,
+    presignature_storage: PresignatureLockNodeStorageBox,
     cfg: Config,
     mesh: Mesh,
 }
@@ -93,6 +95,10 @@ impl ConsensusCtx for &mut MpcSignProtocol {
 
     fn triple_storage(&self) -> LockNodeStorageBox {
         self.ctx.triple_storage.clone()
+    }
+
+    fn presignature_storage(&self) -> PresignatureLockNodeStorageBox {
+        self.ctx.presignature_storage.clone()
     }
 }
 
@@ -164,6 +170,7 @@ impl MpcSignProtocol {
         sign_queue: Arc<RwLock<SignQueue>>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: LockNodeStorageBox,
+        presignature_storage: PresignatureLockNodeStorageBox,
         cfg: Config,
     ) -> (Self, Arc<RwLock<NodeState>>) {
         let state = Arc::new(RwLock::new(NodeState::Starting));
@@ -177,6 +184,7 @@ impl MpcSignProtocol {
             signer,
             secret_storage,
             triple_storage,
+            presignature_storage,
             cfg,
             mesh: Mesh::default(),
         };

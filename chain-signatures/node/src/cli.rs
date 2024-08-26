@@ -1,6 +1,7 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::protocol::{MpcSignProtocol, SignQueue};
+use crate::storage::presignature::PresignatureLockNodeStorageBox;
 use crate::storage::triple_storage::LockNodeStorageBox;
 use crate::{indexer, storage, web};
 use clap::Parser;
@@ -190,6 +191,9 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let triple_storage: LockNodeStorageBox = Arc::new(RwLock::new(
                 storage::triple_storage::init(Some(&gcp_service), &account_id),
             ));
+            let presignature_storage: PresignatureLockNodeStorageBox = Arc::new(RwLock::new(
+                storage::presignature::init(Some(&gcp_service), &account_id),
+            ));
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
@@ -223,6 +227,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_queue,
                 key_storage,
                 triple_storage,
+                presignature_storage,
                 Config::new(LocalConfig {
                     over: override_config.unwrap_or_else(Default::default),
                     network: NetworkConfig {
