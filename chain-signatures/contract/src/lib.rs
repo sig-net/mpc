@@ -135,7 +135,7 @@ impl VersionedMpcContract {
         }
         // Check deposit
         let deposit = env::attached_deposit();
-        let required_deposit = self.experimental_signature_deposit();
+        let required_deposit: u128 = self.experimental_signature_deposit().into();
         if deposit.as_yoctonear() < required_deposit {
             return Err(InvalidParameters::InsufficientDeposit.message(format!(
                 "Attached {}, Required {}",
