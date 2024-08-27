@@ -58,9 +58,10 @@ async fn test_experimental_signature_deposit() -> anyhow::Result<()> {
         .view("experimental_signature_deposit")
         .await
         .unwrap()
-        .json()
-        .unwrap();
-    assert_eq!(deposit, 1u128);
+        .json::<String>()
+        .unwrap()
+        .parse()?;
+    assert_eq!(deposit, 1);
 
     let alice = worker.dev_create_account().await?;
     let path = "test";
@@ -92,8 +93,9 @@ async fn test_experimental_signature_deposit() -> anyhow::Result<()> {
         .view("experimental_signature_deposit")
         .await
         .unwrap()
-        .json()
-        .unwrap();
+        .json::<String>()
+        .unwrap()
+        .parse()?;
     assert_eq!(deposit, NearToken::from_millinear(50).as_yoctonear());
     Ok(())
 }
