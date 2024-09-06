@@ -345,6 +345,38 @@ pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyh
     Ok(Nodes::Docker { ctx, nodes })
 }
 
+pub async fn dry_host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<()> {
+    let ctx = setup(docker_client).await?;
+
+    let accounts =
+        futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+    for account in accounts.iter().take(cfg.nodes) {
+        local::Node::dry_run(
+            &ctx,
+            account.id(),
+            account.secret_key(),
+            &cfg,
+        ).await?;
+    }
+    println!("\nAfter run the nodes, please call the following command to init contract: ");
+    println!("near call {}", ctx.mpc_contract.id());
+    println!();
+
+    Ok(())
+    // ctx.mpc_contract
+    //     .call("init")
+    //     .args_json(json!({
+    //         "threshold": cfg.threshold,
+    //         "candidates": candidates
+    //     }))
+    //     .transact()
+    //     .await?
+    //     .into_result()?;
+}
+
 pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
     let ctx = setup(docker_client).await?;
 
@@ -401,6 +433,14 @@ pub async fn run(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow:
 
     #[cfg(not(feature = "docker-test"))]
     return host(cfg, docker_client).await;
+}
+
+pub async fn dry_run(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<()> {
+    #[cfg(feature = "docker-test")]
+    return dry_docker(cfg, docker_client).await;
+
+    #[cfg(not(feature = "docker-test"))]
+    return dry_host(cfg, docker_client).await;
 }
 
 async fn fetch_from_validator(

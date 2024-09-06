@@ -5,6 +5,9 @@ use async_process::Child;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
 use near_workspaces::AccountId;
+use crate::execute::executable;
+use anyhow::Context;
+use shell_escape::escape;
 
 pub struct Node {
     pub address: String,
@@ -34,6 +37,53 @@ pub struct NodeConfig {
 }
 
 impl Node {
+    pub async fn dry_run(
+        ctx: &super::Context<'_>,
+        account_id: &AccountId,
+        account_sk: &near_workspaces::types::SecretKey,
+        cfg: &MultichainConfig,
+    ) -> anyhow::Result<()> {
+        let web_port = utils::pick_unused_port().await?;
+        let (cipher_sk, cipher_pk) = hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
+
+        let indexer_options = mpc_node::indexer::Options {
+            s3_bucket: ctx.localstack.s3_bucket.clone(),
+            s3_region: ctx.localstack.s3_region.clone(),
+            s3_url: Some(ctx.localstack.s3_host_address.clone()),
+            start_block_height: 0,
+            running_threshold: 120,
+            behind_threshold: 120,
+        };
+        let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
+        let mpc_contract_id = ctx.mpc_contract.id().clone();
+        let cli = mpc_node::cli::Cli::Start {
+            near_rpc,
+            mpc_contract_id: mpc_contract_id.clone(),
+            account_id: account_id.clone(),
+            account_sk: account_sk.to_string().parse()?,
+            web_port,
+            cipher_pk: hex::encode(cipher_pk.to_bytes()),
+            cipher_sk: hex::encode(cipher_sk.to_bytes()),
+            sign_sk: Some(sign_sk.clone()),
+            indexer_options,
+            my_address: None,
+            storage_options: ctx.storage_options.clone(),
+            override_config: Some(OverrideConfig::new(serde_json::to_value(
+                cfg.protocol.clone(),
+            )?)),
+            client_header_referer: None,
+        };
+
+        let cmd = executable(ctx.release, crate::execute::PACKAGE_MULTICHAIN)
+            .with_context(|| "could not find target dir for mpc-node")?;
+        let args = cli.into_str_args();
+        let  escaped_args: Vec<_> = args.iter().map(|arg| escape(arg.clone().into()).to_string()).collect();
+        println!("\nCommand to run node {}:\n {} {}", account_id, cmd.to_str().unwrap(), escaped_args.join(" "));
+        Ok(())
+    }
+
     pub async fn run(
         ctx: &super::Context<'_>,
         account_id: &AccountId,
