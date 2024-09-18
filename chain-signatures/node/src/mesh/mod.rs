@@ -35,15 +35,15 @@ impl Mesh {
         &self.active_potential_participants
     }
 
-    /// Get all pontential participants, but they may not necessarily be active.
-    pub async fn potential_participants(&self) -> Participants {
-        self.connections.potential_participants().await
-    }
+    // /// Get all pontential participants, but they may not necessarily be active.
+    // pub async fn potential_participants(&self) -> Participants {
+    //     self.connections.potential_participants().await
+    // }
 
     pub fn all_active_participants(&self) -> Participants {
         let mut participants = self.active_participants.clone();
         let active = self.active_potential_participants.keys_vec();
-        tracing::info!(?active, "Getting potentially active participants");
+        tracing::info!(?active, "getting potentially active participants");
         for (participant, info) in self.active_potential_participants.iter() {
             if !participants.contains_key(participant) {
                 participants.insert(participant, info.clone());
@@ -75,8 +75,9 @@ impl Mesh {
 
     /// Ping the active participants such that we can see who is alive.
     pub async fn ping(&mut self, previews: Option<(HashSet<TripleId>, HashSet<PresignatureId>)>) {
-        self.active_participants = self.connections.ping(previews.clone()).await;
-        self.active_potential_participants = self.connections.ping_potential(previews).await;
+        (self.active_participants, self.active_potential_participants) =
+            self.connections.ping(previews).await;
+        // self.active_potential_participants = self.connections.ping_potential(previews).await;
 
         tracing::debug!(
             active = ?self.active_participants.account_ids(),

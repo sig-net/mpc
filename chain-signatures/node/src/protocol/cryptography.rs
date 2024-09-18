@@ -228,10 +228,9 @@ impl CryptographicProtocol for ResharingState {
         // TODO: we are not using active potential participants here, but we should in the future.
         // Currently resharing protocol does not timeout and restart with new set of participants.
         // So if it picks up a participant that is not active, it will never be able to send a message to it.
-        let active = ctx
-            .mesh()
-            .active_participants()
-            .and(&ctx.mesh().potential_participants().await);
+        let active = ctx.mesh().all_active_participants();
+        // .active_participants()
+        // .and(&ctx.mesh().potential_participants().await);
         tracing::info!(active = ?active.keys().collect::<Vec<_>>(), "progressing key reshare");
         let mut protocol = self.protocol.write().await;
         loop {

@@ -138,6 +138,10 @@ impl Participants {
         self.participants.iter()
     }
 
+    pub fn into_iter(self) -> impl IntoIterator<Item = (Participant, ParticipantInfo)> {
+        self.participants.into_iter()
+    }
+
     pub fn find_participant(&self, account_id: &AccountId) -> Option<Participant> {
         self.participants
             .iter()
