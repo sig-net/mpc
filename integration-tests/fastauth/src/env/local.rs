@@ -37,7 +37,7 @@ impl SignerNode {
             cipher_key: Some(hex::encode(cipher_key)),
             gcp_project_id: ctx.gcp_project_id.clone(),
             gcp_datastore_url: Some(ctx.datastore.local_address.clone()),
-            jwt_signature_pk_url: ctx.oidc_provider.jwt_pk_local_url.clone(),
+            jwt_signature_pk_urls: vec![ctx.oidc_provider.jwt_pk_local_url.clone()],
             logging_options: logging::Options::default(),
         };
 
@@ -118,7 +118,7 @@ impl LeaderNode {
             ),
             gcp_project_id: ctx.gcp_project_id.clone(),
             gcp_datastore_url: Some(ctx.datastore.local_address.clone()),
-            jwt_signature_pk_url: ctx.oidc_provider.jwt_pk_local_url.clone(),
+            jwt_signature_pk_urls: vec![ctx.oidc_provider.jwt_pk_local_url.clone()],
             logging_options: logging::Options::default(),
         };
 

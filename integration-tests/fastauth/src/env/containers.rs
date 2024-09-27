@@ -530,7 +530,7 @@ impl SignerNode<'_> {
             cipher_key: Some(hex::encode(cipher_key)),
             gcp_project_id: ctx.gcp_project_id.clone(),
             gcp_datastore_url: Some(ctx.datastore.address.clone()),
-            jwt_signature_pk_url: ctx.oidc_provider.jwt_pk_url.clone(),
+            jwt_signature_pk_urls: vec![ctx.oidc_provider.jwt_pk_url.clone()],
             logging_options: logging::Options::default(),
         }
         .into_str_args();
@@ -667,7 +667,7 @@ impl<'a> LeaderNode<'a> {
             fast_auth_partners_filepath: None,
             gcp_project_id: ctx.gcp_project_id.clone(),
             gcp_datastore_url: Some(ctx.datastore.address.to_string()),
-            jwt_signature_pk_url: ctx.oidc_provider.jwt_pk_url.to_string(),
+            jwt_signature_pk_urls: vec![ctx.oidc_provider.jwt_pk_url.clone()],
             logging_options: logging::Options::default(),
         }
         .into_str_args();
