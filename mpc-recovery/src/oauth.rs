@@ -1,6 +1,8 @@
+use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use jsonwebtoken::{Algorithm, DecodingKey};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde_json::Value;
 
 use crate::firewall::allowed::OidcProviderList;
 use crate::primitives::InternalAccountId;
@@ -13,12 +15,12 @@ pub async fn verify_oidc_token(
     token: &OidcToken,
     oidc_providers: Option<&OidcProviderList>,
     client: &reqwest::Client,
-    jwt_signature_pk_url: &str,
+    jwt_signature_pk_urls: &[String],
 ) -> anyhow::Result<IdTokenClaims> {
-    let public_keys = get_pagoda_firebase_public_keys(client, jwt_signature_pk_url)
+    let public_keys = get_public_keys(client, jwt_signature_pk_urls)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to get Firebase public key: {e}"))?;
-    tracing::info!("verify_oidc_token firebase public keys: {public_keys:?}");
+        .map_err(|e| anyhow::anyhow!("failed to get public keys: {e}"))?;
+    tracing::info!("verify_oidc_token public keys: {public_keys:?}");
 
     let mut last_occured_error =
         anyhow::anyhow!("Unexpected error. Firebase public keys not found");
@@ -99,13 +101,69 @@ impl IdTokenClaims {
     }
 }
 
-pub async fn get_pagoda_firebase_public_keys(
+pub async fn get_public_keys(
     client: &reqwest::Client,
-    jwt_signature_pk_url: &str,
-) -> anyhow::Result<Vec<String>> {
-    let response = client.get(jwt_signature_pk_url).send().await?;
-    let json: HashMap<String, String> = response.json().await?;
-    Ok(json.into_values().collect())
+    jwt_signature_pk_urls: &[String],
+) -> Result<Vec<String>> {
+    let mut all_keys = Vec::new();
+
+    for url in jwt_signature_pk_urls {
+        match fetch_and_parse_keys(client, url).await {
+            Ok(mut keys) => all_keys.append(&mut keys),
+            Err(e) => tracing::warn!("Failed to fetch keys from {}: {}", url, e),
+        }
+    }
+
+    if all_keys.is_empty() {
+        anyhow::bail!("No valid public keys found from any source");
+    }
+
+    Ok(all_keys)
+}
+
+async fn fetch_and_parse_keys(client: &reqwest::Client, url: &str) -> Result<Vec<String>> {
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .context("Failed to send request")?;
+
+    let json: Value = response.json().await.context("Failed to parse JSON")?;
+
+    match json {
+        Value::Object(obj) if obj.contains_key("keys") => parse_jwks_format(&obj),
+        Value::Object(obj) => parse_firebase_format(&obj),
+        _ => {
+            tracing::warn!("Unexpected response format from {}", url);
+            Ok(vec![])
+        }
+    }
+}
+
+fn parse_jwks_format(obj: &serde_json::Map<String, Value>) -> Result<Vec<String>> {
+    obj["keys"]
+        .as_array()
+        .context("'keys' is not an array")?
+        .iter()
+        .filter_map(|key| match (key["n"].as_str(), key["e"].as_str()) {
+            (Some(n), Some(e)) => Some(format_rsa_key(n, e)),
+            _ => None,
+        })
+        .collect::<Result<Vec<_>>>()
+}
+
+fn parse_firebase_format(obj: &serde_json::Map<String, Value>) -> Result<Vec<String>> {
+    Ok(obj
+        .values()
+        .filter_map(|value| value.as_str().map(String::from))
+        .collect())
+}
+
+fn format_rsa_key(n: &str, e: &str) -> Result<String> {
+    Ok(format!(
+        "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----",
+        BASE64.encode(format!("{}:{}", n, e))
+    ))
 }
 
 #[cfg(test)]
@@ -121,10 +179,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_pagoda_firebase_public_key() {
-        let url =
-        "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
+        let urls = vec![
+            "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com".to_string(),
+            "https://www.googleapis.com/oauth2/v3/certs".to_string(),
+        ];
         let client = reqwest::Client::new();
-        let pk = get_pagoda_firebase_public_keys(&client, url).await.unwrap();
+        let pk = get_public_keys(&client, &urls).await.unwrap();
+
         assert!(!pk.is_empty());
     }
 
