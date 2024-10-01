@@ -34,6 +34,7 @@ use near_primitives::delegate_action::{DelegateAction, NonDelegateAction};
 use near_primitives::transaction::{Action, DeleteAccountAction, DeleteKeyAction};
 use near_primitives::types::AccountId;
 use prometheus::{Encoder, TextEncoder};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -47,7 +48,7 @@ pub struct Config {
     // TODO: temporary solution
     pub account_creator_signer: KeyRotatingSigner,
     pub partners: PartnerList,
-    pub jwt_signature_pk_urls: Vec<String>,
+    pub jwt_signature_pk_urls: HashMap<String, String>,
 }
 
 pub async fn run(config: Config) {
@@ -198,7 +199,7 @@ struct LeaderState {
     // TODO: temporary solution
     account_creator_signer: KeyRotatingSigner,
     partners: PartnerList,
-    jwt_signature_pk_urls: Vec<String>
+    jwt_signature_pk_urls: HashMap<String, String>,
 }
 
 async fn mpc_public_key(

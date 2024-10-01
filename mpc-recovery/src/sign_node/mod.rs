@@ -24,6 +24,7 @@ use multi_party_eddsa::protocols::{self, ExpandedKeyPair};
 use near_primitives::hash::hash;
 use near_primitives::signable_message::{SignableMessage, SignableMessageType};
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -39,7 +40,7 @@ pub struct Config {
     pub node_key: ExpandedKeyPair,
     pub cipher: Aes256Gcm,
     pub port: u16,
-    pub jwt_signature_pk_urls: Vec<String>,
+    pub jwt_signature_pk_urls: HashMap<String, String>,
 }
 
 pub async fn run(config: Config) {
@@ -101,7 +102,7 @@ struct SignNodeState {
     cipher: Aes256Gcm,
     signing_state: SigningState,
     node_info: NodeInfo,
-    jwt_signature_pk_urls: Vec<String>,
+    jwt_signature_pk_urls: HashMap<String, String>
 }
 
 async fn get_or_generate_user_creds(

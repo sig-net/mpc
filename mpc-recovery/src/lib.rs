@@ -2,6 +2,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::path::PathBuf;
+use std::collections::HashMap;
 
 use aes_gcm::aead::consts::U32;
 use aes_gcm::aead::generic_array::GenericArray;
@@ -114,8 +115,8 @@ pub enum Cli {
         #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
         gcp_datastore_url: Option<String>,
         /// URLs of the public keys used by all issuers
-        #[arg(long, value_parser, num_args = 1.., value_delimiter = ',', env("MPC_RECOVERY_JWT_SIGNATURE_PK_URLS"))]
-        jwt_signature_pk_urls: Vec<String>,
+        #[arg(long, value_parser = parse_json_str::<HashMap<String, String>>, env("MPC_RECOVERY_JWT_SIGNATURE_PK_URLS"))]
+        jwt_signature_pk_urls: HashMap<String, String>,
         /// Enables export of span data using opentelemetry protocol.
         #[clap(flatten)]
         logging_options: logging::Options,
@@ -143,8 +144,8 @@ pub enum Cli {
         #[arg(long, env("MPC_RECOVERY_GCP_DATASTORE_URL"))]
         gcp_datastore_url: Option<String>,
         /// URLs of the public keys used by all issuers
-        #[arg(long, value_parser, num_args = 1.., value_delimiter = ',', env("MPC_RECOVERY_JWT_SIGNATURE_PK_URLS"))]
-        jwt_signature_pk_urls: Vec<String>,
+        #[arg(long, value_parser = parse_json_str::<HashMap<String, String>>, env("MPC_RECOVERY_JWT_SIGNATURE_PK_URLS"))]
+        jwt_signature_pk_urls: HashMap<String, String>,
         /// Enables export of span data using opentelemetry protocol.
         #[clap(flatten)]
         logging_options: logging::Options,
@@ -463,10 +464,11 @@ impl Cli {
                     buf.push("--sign-nodes".to_string());
                     buf.push(sign_node);
                 }
-                for url in jwt_signature_pk_urls {
-                    buf.push("--jwt-signature-pk-urls".to_string());
-                    buf.push(url);
-                }
+                
+                let jwt_signature_pk_urls = serde_json::to_string(&jwt_signature_pk_urls).unwrap();
+                buf.push("--jwt-signature-pk-urls".to_string());
+                buf.push(jwt_signature_pk_urls);
+
                 let account_creator_sk = serde_json::to_string(&account_creator_sk).unwrap();
                 buf.push("--account-creator-sk".to_string());
                 buf.push(account_creator_sk);
@@ -508,10 +510,11 @@ impl Cli {
                     buf.push("--gcp-datastore-url".to_string());
                     buf.push(gcp_datastore_url);
                 }
-                for url in jwt_signature_pk_urls {
-                    buf.push("--jwt-signature-pk-urls".to_string());
-                    buf.push(url);
-                }
+                
+                let jwt_signature_pk_urls = serde_json::to_string(&jwt_signature_pk_urls).unwrap();
+                buf.push("--jwt-signature-pk-urls".to_string());
+                buf.push(jwt_signature_pk_urls);
+
                 buf.extend(logging_options.into_str_args());
 
                 buf
