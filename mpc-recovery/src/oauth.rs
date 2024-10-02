@@ -21,7 +21,8 @@ pub async fn verify_oidc_token(
     let (_, claims, _) = token.decode_unverified()?;
     let issuer = &claims.iss;
 
-    let jwks_url = jwt_signature_pk_urls.get(issuer)
+    let jwks_url = jwt_signature_pk_urls
+        .get(issuer)
         .ok_or_else(|| anyhow::anyhow!("No JWKS URL found for issuer: {}", issuer))?;
 
     let public_keys = get_public_keys(client, jwks_url)
@@ -29,8 +30,7 @@ pub async fn verify_oidc_token(
         .map_err(|e| anyhow::anyhow!("failed to get public keys: {e}"))?;
     tracing::info!("verify_oidc_token public keys: {public_keys:?}");
 
-    let mut last_occured_error =
-        anyhow::anyhow!("Unexpected error. Public keys not found");
+    let mut last_occured_error = anyhow::anyhow!("Unexpected error. Public keys not found");
     for public_key in public_keys {
         match validate_jwt(token, public_key.as_bytes(), oidc_providers) {
             Ok(claims) => {
@@ -170,7 +170,7 @@ mod tests {
         "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
         let client = reqwest::Client::new();
         let pk = get_public_keys(&client, url).await.unwrap();
-        
+
         assert!(!pk.is_empty());
     }
 

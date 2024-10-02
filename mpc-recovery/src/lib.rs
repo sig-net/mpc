@@ -1,8 +1,8 @@
 // TODO: FIXME: Remove this once we have a better way to handle these large errors
 #![allow(clippy::result_large_err)]
 
-use std::path::PathBuf;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use aes_gcm::aead::consts::U32;
 use aes_gcm::aead::generic_array::GenericArray;
@@ -232,7 +232,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 near_root_account,
                 account_creator_signer,
                 partners,
-                jwt_signature_pk_urls
+                jwt_signature_pk_urls,
             };
 
             run_leader_node(config).await;
@@ -273,7 +273,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 node_key: sk_share,
                 cipher,
                 port: web_port,
-                jwt_signature_pk_urls
+                jwt_signature_pk_urls,
             };
             run_sign_node(config).await;
         }
@@ -464,7 +464,7 @@ impl Cli {
                     buf.push("--sign-nodes".to_string());
                     buf.push(sign_node);
                 }
-                
+
                 let jwt_signature_pk_urls = serde_json::to_string(&jwt_signature_pk_urls).unwrap();
                 buf.push("--jwt-signature-pk-urls".to_string());
                 buf.push(jwt_signature_pk_urls);
@@ -510,7 +510,7 @@ impl Cli {
                     buf.push("--gcp-datastore-url".to_string());
                     buf.push(gcp_datastore_url);
                 }
-                
+
                 let jwt_signature_pk_urls = serde_json::to_string(&jwt_signature_pk_urls).unwrap();
                 buf.push("--jwt-signature-pk-urls".to_string());
                 buf.push(jwt_signature_pk_urls);

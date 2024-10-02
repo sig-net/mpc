@@ -51,7 +51,7 @@ pub async fn run(config: Config) {
         node_key,
         cipher,
         port,
-        jwt_signature_pk_urls
+        jwt_signature_pk_urls,
     } = config;
     let our_index = usize::try_from(our_index).expect("This index is way to big");
 
@@ -67,7 +67,7 @@ pub async fn run(config: Config) {
         cipher,
         signing_state: SigningState::new(),
         node_info: NodeInfo::new(our_index, pk_set.map(|set| set.public_keys)),
-        jwt_signature_pk_urls
+        jwt_signature_pk_urls,
     });
 
     let app = Router::new()
@@ -102,7 +102,7 @@ struct SignNodeState {
     cipher: Aes256Gcm,
     signing_state: SigningState,
     node_info: NodeInfo,
-    jwt_signature_pk_urls: HashMap<String, String>
+    jwt_signature_pk_urls: HashMap<String, String>,
 }
 
 async fn get_or_generate_user_creds(
@@ -372,7 +372,7 @@ async fn process_public_key(
         &state.reqwest_client,
         &state.jwt_signature_pk_urls,
     )
-    .await  
+    .await
     .map_err(SignNodeError::OidcVerificationFailed)?;
 
     let frp_pk = request.frp_public_key;

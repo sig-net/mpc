@@ -60,7 +60,7 @@ pub async fn run(config: Config) {
         near_root_account,
         account_creator_signer,
         partners,
-        jwt_signature_pk_urls
+        jwt_signature_pk_urls,
     } = config;
     let _span = tracing::debug_span!("run", env, port);
     tracing::debug!(?sign_nodes, "running a leader node");
@@ -75,7 +75,7 @@ pub async fn run(config: Config) {
         near_root_account: near_root_account.parse().unwrap(),
         account_creator_signer,
         partners,
-        jwt_signature_pk_urls
+        jwt_signature_pk_urls,
     });
 
     // Get keys from all sign nodes, and broadcast them out as a set.
