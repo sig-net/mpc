@@ -61,7 +61,7 @@ impl MultichainTestContext<'_> {
 
         self.nodes.start_node(&self.cfg, &node_account).await?;
         // Wait for new node to add itself as a candidate
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
 
         // T number of participants should vote
         let participants = self.participant_accounts().await?;
@@ -76,7 +76,8 @@ impl MultichainTestContext<'_> {
             node_account.id(),
             self.cfg.threshold,
         )
-        .await?;
+        .await
+        .unwrap();
 
         let new_state = wait_for::running_mpc(self, Some(state.epoch + 1)).await?;
         assert_eq!(new_state.participants.len(), state.participants.len() + 1);
