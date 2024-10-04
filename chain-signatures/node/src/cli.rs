@@ -56,6 +56,9 @@ pub enum Cli {
         /// Storage options
         #[clap(flatten)]
         storage_options: storage::Options,
+        /// Redis URL
+        #[arg(long, env("MPC_REDIS_URL"))]
+        redis_url: Url,
         /// The set of configurations that we will use to override contract configurations.
         #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
         override_config: Option<OverrideConfig>,
@@ -80,6 +83,7 @@ impl Cli {
                 indexer_options,
                 my_address,
                 storage_options,
+                redis_url,
                 override_config,
                 client_header_referer,
             } => {
@@ -99,6 +103,8 @@ impl Cli {
                     cipher_pk,
                     "--cipher-sk".to_string(),
                     cipher_sk,
+                    "--redis-url".to_string(),
+                    redis_url.to_string(),
                 ];
                 if let Some(sign_sk) = sign_sk {
                     args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
@@ -172,6 +178,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             indexer_options,
             my_address,
             storage_options,
+            redis_url,
             override_config,
             client_header_referer,
         } => {
@@ -195,6 +202,9 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let triple_storage: LockTripleNodeStorageBox = Arc::new(RwLock::new(
                 storage::triple_storage::init(Some(&gcp_service), &account_id),
             ));
+
+            let redis_url: Url = Url::parse(redis_url.as_str())?;
+            let presignature_storage = storage::presignature_storage::init(redis_url);
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
@@ -228,6 +238,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_queue,
                 key_storage,
                 triple_storage,
+                presignature_storage,
                 Config::new(LocalConfig {
                     over: override_config.unwrap_or_else(Default::default),
                     network: NetworkConfig {

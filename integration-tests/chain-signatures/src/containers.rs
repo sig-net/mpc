@@ -112,6 +112,7 @@ impl<'a> Node<'a> {
             indexer_options: indexer_options.clone(),
             my_address: None,
             storage_options: ctx.storage_options.clone(),
+            redis_url: ctx.redis_url.clone(),
             sign_sk: Some(config.sign_sk.clone()),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),
