@@ -16,6 +16,7 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
+use near_sdk::json_types::U128;
 use near_sdk::{
     env, log, near_bindgen, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise,
     PromiseError, PublicKey,
@@ -34,13 +35,13 @@ pub use state::{
     InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
 };
 
-const GAS_FOR_SIGN_CALL: Gas = Gas::from_tgas(250);
+const GAS_FOR_SIGN_CALL: Gas = Gas::from_tgas(50);
 
 // Register used to receive data id from `promise_await_data`.
 const DATA_ID_REGISTER: u64 = 0;
 
 // Prepaid gas for a `clear_state_on_finish` call
-const CLEAR_STATE_ON_FINISH_CALL_GAS: Gas = Gas::from_tgas(5);
+const CLEAR_STATE_ON_FINISH_CALL_GAS: Gas = Gas::from_tgas(10);
 
 // Prepaid gas for a `return_signature_on_finish` call
 const RETURN_SIGNATURE_ON_FINISH_CALL_GAS: Gas = Gas::from_tgas(5);
@@ -134,7 +135,7 @@ impl VersionedMpcContract {
         }
         // Check deposit
         let deposit = env::attached_deposit();
-        let required_deposit = self.experimental_signature_deposit();
+        let required_deposit: u128 = self.experimental_signature_deposit().into();
         if deposit.as_yoctonear() < required_deposit {
             return Err(InvalidParameters::InsufficientDeposit.message(format!(
                 "Attached {}, Required {}",
@@ -217,16 +218,17 @@ impl VersionedMpcContract {
     /// This experimental function calculates the fee for a signature request.
     /// The fee is volatile and depends on the number of pending requests.
     /// If used on a client side, it can give outdate results.
-    pub fn experimental_signature_deposit(&self) -> u128 {
+    pub fn experimental_signature_deposit(&self) -> U128 {
         const CHEAP_REQUESTS: u32 = 3;
         let pending_requests = match self {
             Self::V0(mpc_contract) => mpc_contract.request_counter,
         };
         match pending_requests {
-            0..=CHEAP_REQUESTS => 1,
+            0..=CHEAP_REQUESTS => U128::from(1),
             _ => {
-                (pending_requests - CHEAP_REQUESTS) as u128
-                    * NearToken::from_millinear(50).as_yoctonear()
+                let expensive_requests = (pending_requests - CHEAP_REQUESTS) as u128;
+                let price = expensive_requests * NearToken::from_millinear(50).as_yoctonear();
+                U128::from(price)
             }
         }
     }

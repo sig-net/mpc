@@ -116,7 +116,7 @@ async fn test_signature_offline_node() -> anyhow::Result<()> {
                 state_0.participants.keys().last().unwrap().clone().as_ref(),
             )
             .unwrap();
-            ctx.nodes.kill_node(&account_id).await?;
+            ctx.nodes.kill_node(&account_id).await;
 
             // This could potentially fail and timeout the first time if the participant set picked up is the
             // one with the offline node. This is expected behavior for now if a user submits a request in between
@@ -149,8 +149,8 @@ async fn test_key_derivation() -> anyhow::Result<()> {
 
             for _ in 0..3 {
                 let mpc_pk: k256::AffinePoint = state_0.public_key.clone().into_affine_point();
-                let (_, payload_hashed, account, tx_hash) = actions::request_sign(&ctx).await?;
-                let sig = wait_for::signature_responded(&ctx, tx_hash).await?;
+                let (_, payload_hashed, account, status) = actions::request_sign(&ctx).await?;
+                let sig = wait_for::signature_responded(status).await?;
 
                 let hd_path = "test";
                 let derivation_epsilon = derive_epsilon(account.id(), hd_path);
@@ -272,7 +272,7 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
                 state_0.participants.keys().last().unwrap().clone().as_ref(),
             )
             .unwrap();
-            let killed_node_config = ctx.nodes.kill_node(&account_id).await?;
+            let killed_node_config = ctx.nodes.kill_node(&account_id).await;
 
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
