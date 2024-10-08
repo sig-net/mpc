@@ -1,6 +1,6 @@
 use clap::Parser;
 use integration_tests_chain_signatures::containers::DockerClient;
-use integration_tests_chain_signatures::{run, setup, utils, MultichainConfig, dry_run};
+use integration_tests_chain_signatures::{dry_run, run, utils, MultichainConfig};
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
         Cli::DepServices => {
             println!("Setting up dependency services");
             let config = MultichainConfig::default();
-            let nodes = dry_run(config.clone(), &docker_client).await?;
+            let _ctx = dry_run(config.clone(), &docker_client).await?;
 
             println!("Press Ctrl-C to stop dependency services");
             signal::ctrl_c().await.expect("Failed to listen for event");

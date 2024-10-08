@@ -1,12 +1,12 @@
 use crate::{execute, utils, MultichainConfig};
 
 use crate::containers::LakeIndexer;
+use crate::execute::executable;
+use anyhow::Context;
 use async_process::Child;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
-use crate::execute::executable;
-use anyhow::Context;
 use shell_escape::escape;
 
 pub struct Node {
@@ -38,10 +38,11 @@ pub struct NodeConfig {
 impl Node {
     pub async fn dry_run(
         ctx: &super::Context<'_>,
-        account_id: &AccountId,
-        account_sk: &near_workspaces::types::SecretKey,
+        account: &Account,
         cfg: &MultichainConfig,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<NodeConfig> {
+        let account_id = account.id();
+        let account_sk = account.secret_key();
         let web_port = utils::pick_unused_port().await?;
         let (cipher_sk, cipher_pk) = hpke::generate();
         let sign_sk =
@@ -58,7 +59,7 @@ impl Node {
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = mpc_node::cli::Cli::Start {
-            near_rpc,
+            near_rpc: near_rpc.clone(),
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
             account_sk: account_sk.to_string().parse()?,
@@ -78,9 +79,26 @@ impl Node {
         let cmd = executable(ctx.release, crate::execute::PACKAGE_MULTICHAIN)
             .with_context(|| "could not find target dir for mpc-node")?;
         let args = cli.into_str_args();
-        let  escaped_args: Vec<_> = args.iter().map(|arg| escape(arg.clone().into()).to_string()).collect();
-        println!("\nCommand to run node {}:\n {} {}", account_id, cmd.to_str().unwrap(), escaped_args.join(" "));
-        Ok(())
+        let escaped_args: Vec<_> = args
+            .iter()
+            .map(|arg| escape(arg.clone().into()).to_string())
+            .collect();
+        println!(
+            "\nCommand to run node {}:\n {} {}",
+            account_id,
+            cmd.to_str().unwrap(),
+            escaped_args.join(" ")
+        );
+        let node_config = NodeConfig {
+            web_port,
+            account: account.clone(),
+            cipher_pk,
+            cipher_sk,
+            sign_sk,
+            cfg: cfg.clone(),
+            near_rpc,
+        };
+        Ok(node_config)
     }
 
     pub async fn run(
