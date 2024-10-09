@@ -312,7 +312,7 @@ pub async fn dry_host(
             .collect::<Result<Vec<_>, _>>()?;
     let mut node_cfgs = Vec::new();
     for account in accounts.iter().take(cfg.nodes) {
-        node_cfgs.push(local::Node::dry_run(&ctx, &account, &cfg).await?);
+        node_cfgs.push(local::Node::dry_run(&ctx, account, &cfg).await?);
     }
 
     let candidates: HashMap<AccountId, CandidateInfo> = accounts
@@ -347,8 +347,8 @@ pub async fn dry_host(
              ctx.mpc_contract.id(),
              args,
              ctx.mpc_contract.id(),
-             sk.public_key().to_string(),
-             sk.to_string()
+             sk.public_key(),
+             sk
     );
     println!();
 
