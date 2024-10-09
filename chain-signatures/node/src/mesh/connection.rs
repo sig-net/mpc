@@ -49,7 +49,17 @@ impl Pool {
                 continue;
             };
 
+            tracing::debug!(
+                "going to send /state call to {:?} url {} /state",
+                participant,
+                info.url
+            );
             let Ok(resp) = self.http.get(url.clone()).send().await else {
+                tracing::debug!(
+                    "finish send /state call to {:?} url {} /state",
+                    participant,
+                    info.url
+                );
                 tracing::warn!(
                     "Pool.ping resp err participant {:?} url {}",
                     participant,
@@ -57,6 +67,12 @@ impl Pool {
                 );
                 continue;
             };
+
+            tracing::debug!(
+                "finish send /state call to {:?} url {} /state",
+                participant,
+                info.url
+            );
 
             let Ok(state): Result<StateView, _> = resp.json().await else {
                 tracing::warn!(
