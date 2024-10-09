@@ -1,6 +1,7 @@
 use super::message::PresignatureMessage;
 use super::triple::{Triple, TripleId, TripleManager};
 use crate::protocol::contract::primitives::Participants;
+use crate::storage::presignature_storage::LockPresignatureStorageBox;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 
@@ -103,7 +104,7 @@ pub enum GenerationError {
 /// complete some time in the future and a way to take an already generated triple.
 pub struct PresignatureManager {
     /// Completed unspent presignatures.
-    presignatures: HashMap<PresignatureId, Presignature>,
+    presignatures: LockPresignatureStorageBox,
     /// Ongoing presignature generation protocols.
     generators: HashMap<PresignatureId, PresignatureGenerator>,
     /// List of presignature ids generation of which was initiated by the current node.
@@ -121,9 +122,16 @@ pub struct PresignatureManager {
 }
 
 impl PresignatureManager {
-    pub fn new(me: Participant, threshold: usize, epoch: u64, my_account_id: &AccountId) -> Self {
+    pub fn new(
+        me: Participant,
+        threshold: usize,
+        epoch: u64,
+        my_account_id: &AccountId,
+        presignature_storage: LockPresignatureStorageBox,
+    ) -> Self {
         Self {
-            presignatures: HashMap::new(),
+            //TODO: rename to presignature_storage
+            presignatures: presignature_storage,
             generators: HashMap::new(),
             mine: VecDeque::new(),
             introduced: HashSet::new(),

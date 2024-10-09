@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use axum::async_trait;
 use redis::Connection;
+use tokio::sync::RwLock;
 use url::Url;
 
 use crate::{
@@ -10,6 +13,7 @@ use crate::{
 // TODO: organize errors, get rid of connection with GCP
 type PresignatureResult<T> = std::result::Result<T, error::DatastoreStorageError>;
 pub type PresignatureStorageBox = Box<dyn PresignatureStorage + Send + Sync>;
+pub type LockPresignatureStorageBox = Arc<RwLock<PresignatureStorageBox>>;
 
 pub fn init(redis_url: Url) -> PresignatureStorageBox {
     Box::new(RedisPresignatureStorage::new(redis_url)) as PresignatureStorageBox
@@ -19,6 +23,7 @@ pub fn init(redis_url: Url) -> PresignatureStorageBox {
 pub trait PresignatureStorage {
     async fn insert(&mut self, presignature: Presignature) -> PresignatureResult<()>;
     async fn insert_mine(&mut self, presignature: Presignature) -> PresignatureResult<()>;
+    async fn contrains(&self, id: PresignatureId) -> PresignatureResult<bool>;
     async fn get(&self, id: PresignatureId) -> PresignatureResult<Option<Presignature>>;
     async fn get_mine(&self) -> PresignatureResult<Vec<Presignature>>;
     async fn delete(&mut self, id: PresignatureId) -> PresignatureResult<()>;
@@ -47,6 +52,10 @@ impl PresignatureStorage for RedisPresignatureStorage {
     }
 
     async fn insert_mine(&mut self, presignature: Presignature) -> PresignatureResult<()> {
+        unimplemented!()
+    }
+
+    async fn contrains(&self, id: PresignatureId) -> PresignatureResult<bool> {
         unimplemented!()
     }
 

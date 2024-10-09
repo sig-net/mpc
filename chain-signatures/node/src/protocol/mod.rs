@@ -27,7 +27,7 @@ use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{MessageHandler, MpcMessageQueue};
 use crate::rpc_client;
-use crate::storage::presignature_storage::PresignatureStorageBox;
+use crate::storage::presignature_storage::LockPresignatureStorageBox;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::LockTripleNodeStorageBox;
 
@@ -51,7 +51,7 @@ struct Ctx {
     sign_queue: Arc<RwLock<SignQueue>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: LockTripleNodeStorageBox,
-    presignature_storage: PresignatureStorageBox,
+    presignature_storage: LockPresignatureStorageBox,
     cfg: Config,
     mesh: Mesh,
 }
@@ -95,6 +95,10 @@ impl ConsensusCtx for &mut MpcSignProtocol {
 
     fn triple_storage(&self) -> LockTripleNodeStorageBox {
         self.ctx.triple_storage.clone()
+    }
+
+    fn presignature_storage(&self) -> LockPresignatureStorageBox {
+        self.ctx.presignature_storage.clone()
     }
 }
 
@@ -166,7 +170,7 @@ impl MpcSignProtocol {
         sign_queue: Arc<RwLock<SignQueue>>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: LockTripleNodeStorageBox,
-        presignature_storage: PresignatureStorageBox,
+        presignature_storage: LockPresignatureStorageBox,
         cfg: Config,
     ) -> (Self, Arc<RwLock<NodeState>>) {
         let my_address = my_address.into_url().unwrap();
