@@ -54,7 +54,7 @@ impl Pool {
                 participant,
                 info.url
             );
-            let Ok(resp) = self.http.get(url.clone()).send().await else {
+            let Ok(resp) = self.http.get(url.clone()).timeout(Duration::from_secs(1)).send().await else {
                 tracing::debug!(
                     "finish send /state call to {:?} url {} /state",
                     participant,
@@ -109,7 +109,7 @@ impl Pool {
                 continue;
             };
 
-            let Ok(resp) = self.http.get(url).send().await else {
+            let Ok(resp) = self.http.get(url).timeout(Duration::from_secs(1)).send().await else {
                 continue;
             };
 
