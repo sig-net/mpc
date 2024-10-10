@@ -296,6 +296,7 @@ impl MpcSignProtocol {
                 guard.clone()
             };
 
+            tracing::debug!("finish reading state now");
             let crypto_time = Instant::now();
             let mut state = match state.progress(&mut self).await {
                 Ok(state) => {
