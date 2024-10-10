@@ -52,7 +52,7 @@ impl Pool {
             let Ok(resp) = self
                 .http
                 .get(url.clone())
-                .timeout(Duration::from_secs(1))
+                .timeout(Duration::from_millis(200))
                 .send()
                 .await
             else {
@@ -102,7 +102,7 @@ impl Pool {
             let Ok(resp) = self
                 .http
                 .get(url)
-                .timeout(Duration::from_secs(1))
+                .timeout(Duration::from_millis(200))
                 .send()
                 .await
             else {
