@@ -230,6 +230,7 @@ impl MpcSignProtocol {
             crate::metrics::PROTOCOL_LATENCY_ITER_CNT
                 .with_label_values(&[my_account_id.as_str()])
                 .inc();
+
             loop {
                 let msg_result = self.receiver.try_recv();
                 match msg_result {
@@ -287,22 +288,15 @@ impl MpcSignProtocol {
             }
 
             if last_pinged.elapsed() > Duration::from_millis(300) {
-                tracing::debug!("doing ping now");
-                let start = Instant::now();
                 self.ctx.mesh.ping().await;
-                let ping_latency = start.elapsed().as_secs();
-                tracing::debug!("ping latency was {ping_latency} seconds");
                 last_pinged = Instant::now();
             }
-
-            tracing::debug!("finish ping now");
 
             let state = {
                 let guard = self.state.read().await;
                 guard.clone()
             };
 
-            tracing::debug!("finish reading state now");
             let crypto_time = Instant::now();
             let mut state = match state.progress(&mut self).await {
                 Ok(state) => {
