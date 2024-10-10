@@ -398,7 +398,7 @@ pub(crate) static SIGNATURE_PUBLISH_RESPONSE_ERRORS: Lazy<CounterVec> = Lazy::ne
     .unwrap()
 });
 
-pub(crate) static PROTOCOL_LATENCY_ITER_CNT: Lazy<CounterVec> = Lazy::new(|| {
+pub(crate) static PROTOCOL_ITER_CNT: Lazy<CounterVec> = Lazy::new(|| {
     try_create_counter_vec(
         "multichain_protocol_iter_count",
         "Count of multichain protocol iter",
