@@ -284,9 +284,12 @@ impl MpcSignProtocol {
             }
 
             if last_pinged.elapsed() > Duration::from_millis(300) {
+                tracing::debug!("doing ping now");
                 self.ctx.mesh.ping().await;
                 last_pinged = Instant::now();
             }
+
+            tracing::debug!("finish ping now");
 
             let state = {
                 let guard = self.state.read().await;
