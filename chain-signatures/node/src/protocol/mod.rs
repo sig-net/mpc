@@ -227,6 +227,10 @@ impl MpcSignProtocol {
         loop {
             let protocol_time = Instant::now();
             tracing::debug!("trying to advance chain signatures protocol");
+            crate::metrics::PROTOCOL_ITER_CNT
+                .with_label_values(&[my_account_id.as_str()])
+                .inc();
+
             loop {
                 let msg_result = self.receiver.try_recv();
                 match msg_result {
