@@ -46,7 +46,7 @@ async fn send_encrypted<U: IntoUrl>(
             .post(url.clone())
             .header("content-type", "application/json")
             .json(&message)
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(2))
             .send()
             .await
             .map_err(SendError::ReqwestClientError)?;
