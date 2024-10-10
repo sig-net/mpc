@@ -136,7 +136,7 @@ fn is_running_on_gcp() -> bool {
     let resp = reqwest::blocking::Client::new()
         .get("http://metadata.google.internal/computeMetadata/v1/instance/id")
         .header("Metadata-Flavor", "Google")
-        .timeout(Duration::from_secs(1))
+        .timeout(Duration::from_millis(200))
         .send();
 
     match resp {
