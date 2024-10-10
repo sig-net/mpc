@@ -285,7 +285,10 @@ impl MpcSignProtocol {
 
             if last_pinged.elapsed() > Duration::from_millis(300) {
                 tracing::debug!("doing ping now");
+                let start = Instant::now();
                 self.ctx.mesh.ping().await;
+                let ping_latency = start.elapsed().as_secs();
+                tracing::debug!("ping latency was {ping_latency} seconds");
                 last_pinged = Instant::now();
             }
 
