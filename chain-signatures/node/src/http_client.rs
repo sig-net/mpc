@@ -47,9 +47,13 @@ async fn send_encrypted<U: IntoUrl>(
             .header("content-type", "application/json")
             .json(&message)
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
             .timeout(Duration::from_millis(400))
 >>>>>>> b340f1a0 (increase timeout)
+=======
+            .timeout(Duration::from_millis(200))
+>>>>>>> 26a2f6a4 (revert timeout, change presig timeout)
             .send()
             .await
             .map_err(SendError::ReqwestClientError)?;
