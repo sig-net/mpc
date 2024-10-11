@@ -108,21 +108,26 @@ impl ToRedisArgs for Presignature {
     where
         W: ?Sized + RedisWrite,
     {
-        let json = serde_json::to_string(self).expect("Failed to serialize Presignature");
-        out.write_arg(json.as_bytes());
+        match serde_json::to_string(self) {
+            std::result::Result::Ok(json) => out.write_arg(json.as_bytes()),
+            Err(e) => {
+                tracing::error!("Failed to serialize Presignature: {}", e);
+                out.write_arg("failed_to_serialize".as_bytes())
+            }
+        }
     }
 }
 
 impl FromRedisValue for Presignature {
     fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
-        let json = String::from_redis_value(v)?;
-        let presignature: Presignature = serde_json::from_str(&json).map_err(|e| {
+        let json: String = String::from_redis_value(v)?;
+
+        serde_json::from_str(&json).map_err(|e| {
             redis::RedisError::from((
                 redis::ErrorKind::TypeError,
-                "Failed to deserialize presignature",
+                "Failed to deserialize Presignature",
                 e.to_string(),
             ))
-        })?;
-        Ok(presignature)
+        })
     }
 }

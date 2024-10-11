@@ -11,6 +11,8 @@ use chrono::Utc;
 use crypto_shared::PublicKey;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -28,6 +30,73 @@ pub struct Presignature {
     pub id: PresignatureId,
     pub output: PresignOutput<Secp256k1>,
     pub participants: Vec<Participant>,
+}
+
+impl Serialize for Presignature {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("Presignature", 3)?;
+        state.serialize_field("id", &self.id)?;
+
+        let mut output_map = serde_json::Map::new();
+        output_map.insert(
+            "big_r".to_string(),
+            serde_json::to_value(&self.output.big_r).map_err(serde::ser::Error::custom)?,
+        );
+        output_map.insert(
+            "k".to_string(),
+            serde_json::to_value(&self.output.k).map_err(serde::ser::Error::custom)?,
+        );
+        output_map.insert(
+            "sigma".to_string(),
+            serde_json::to_value(&self.output.sigma).map_err(serde::ser::Error::custom)?,
+        );
+
+        state.serialize_field("output", &output_map)?;
+        state.serialize_field("participants", &self.participants)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Presignature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct PresignatureFields {
+            id: PresignatureId,
+            output: serde_json::Value,
+            participants: Vec<Participant>,
+        }
+
+        let fields = PresignatureFields::deserialize(deserializer)?;
+
+        let big_r = fields
+            .output
+            .get("big_r")
+            .ok_or_else(|| serde::de::Error::missing_field("big_r"))?;
+        let k = fields
+            .output
+            .get("k")
+            .ok_or_else(|| serde::de::Error::missing_field("k"))?;
+        let sigma = fields
+            .output
+            .get("sigma")
+            .ok_or_else(|| serde::de::Error::missing_field("sigma"))?;
+
+        Ok(Self {
+            id: fields.id,
+            output: PresignOutput {
+                big_r: serde_json::from_value(big_r.clone()).map_err(serde::de::Error::custom)?,
+                k: serde_json::from_value(k.clone()).map_err(serde::de::Error::custom)?,
+                sigma: serde_json::from_value(sigma.clone()).map_err(serde::de::Error::custom)?,
+            },
+            participants: fields.participants,
+        })
+    }
 }
 
 /// An ongoing presignature generator.
@@ -651,4 +720,41 @@ const fn first_8_bytes(input: [u8; 32]) -> [u8; 8] {
         i += 1;
     }
     output
+}
+
+// test presignature serialization and deserialization
+#[cfg(test)]
+mod tests {
+    use cait_sith::{protocol::Participant, PresignOutput};
+    use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
+
+    use crate::protocol::presignature::Presignature;
+
+    #[tokio::test]
+    async fn test_presignature_serialize_deserialize() {
+        let presignature = Presignature {
+            id: 1,
+            output: PresignOutput {
+                big_r: <Secp256k1 as CurveArithmetic>::AffinePoint::default(),
+                k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
+                sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
+            },
+            participants: vec![Participant::from(1), Participant::from(2)],
+        };
+
+        // Serialize Presignature to JSON
+        let serialized =
+            serde_json::to_string(&presignature).expect("Failed to serialize Presignature");
+
+        // Deserialize JSON back to Presignature
+        let deserialized: Presignature =
+            serde_json::from_str(&serialized).expect("Failed to deserialize Presignature");
+
+        // Assert that the original and deserialized Presignature are equal
+        assert_eq!(presignature.id, deserialized.id);
+        assert_eq!(presignature.output.big_r, deserialized.output.big_r);
+        assert_eq!(presignature.output.k, deserialized.output.k);
+        assert_eq!(presignature.output.sigma, deserialized.output.sigma);
+        assert_eq!(presignature.participants, deserialized.participants);
+    }
 }
