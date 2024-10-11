@@ -46,6 +46,7 @@ async fn send_encrypted<U: IntoUrl>(
             .post(url.clone())
             .header("content-type", "application/json")
             .json(&message)
+            .timeout(Duration::from_millis(200))
             .send()
             .await
             .map_err(SendError::ReqwestClientError)?;
@@ -169,7 +170,7 @@ impl MessageQueue {
         }
 
         if uncompacted > 0 {
-            tracing::debug!(
+            tracing::info!(
                 uncompacted,
                 compacted,
                 "{from:?} sent messages in {:?};",

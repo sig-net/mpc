@@ -17,6 +17,7 @@ pub use message::MpcMessage;
 pub use signature::SignQueue;
 pub use signature::SignRequest;
 pub use state::NodeState;
+pub use sysinfo::{Components, CpuRefreshKind, Disks, RefreshKind, System};
 
 use self::consensus::ConsensusCtx;
 use self::cryptography::CryptographicCtx;
@@ -35,6 +36,7 @@ use cait_sith::protocol::Participant;
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use reqwest::IntoUrl;
+use std::path::Path;
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc::{self, error::TryRecvError};
@@ -220,6 +222,7 @@ impl MpcSignProtocol {
         let mut queue = MpcMessageQueue::default();
         let mut last_state_update = Instant::now();
         let mut last_config_update = Instant::now();
+        let last_hardware_pull = Instant::now();
         let mut last_pinged = Instant::now();
 
         // Sets the latest configurations from the contract:
@@ -234,20 +237,28 @@ impl MpcSignProtocol {
 
         loop {
             let protocol_time = Instant::now();
-            tracing::trace!("trying to advance chain signatures protocol");
+            tracing::debug!("trying to advance chain signatures protocol");
+            // Hardware metric refresh
+            if last_hardware_pull.elapsed() > Duration::from_secs(5) {
+                update_system_metrics(&my_account_id);
+            }
+
+            crate::metrics::PROTOCOL_ITER_CNT
+                .with_label_values(&[my_account_id.as_str()])
+                .inc();
             loop {
                 let msg_result = self.receiver.try_recv();
                 match msg_result {
                     Ok(msg) => {
-                        tracing::trace!("received a new message");
+                        tracing::debug!("received a new message");
                         queue.push(msg);
                     }
                     Err(TryRecvError::Empty) => {
-                        tracing::trace!("no new messages received");
+                        tracing::debug!("no new messages received");
                         break;
                     }
                     Err(TryRecvError::Disconnected) => {
-                        tracing::debug!("communication was disconnected, no more messages will be received, spinning down");
+                        tracing::warn!("communication was disconnected, no more messages will be received, spinning down");
                         return Ok(());
                     }
                 }
@@ -304,7 +315,7 @@ impl MpcSignProtocol {
             let crypto_time = Instant::now();
             let mut state = match state.progress(&mut self).await {
                 Ok(state) => {
-                    tracing::trace!("progress ok: {state}");
+                    tracing::debug!("progress ok: {state}");
                     state
                 }
                 Err(err) => {
@@ -388,4 +399,57 @@ fn node_version() -> i64 {
         0
     };
     (rc_num + version.patch * 1000 + version.minor * 1000000 + version.major * 1000000000) as i64
+}
+
+fn update_system_metrics(node_account_id: &str) {
+    let mut system = System::new_all();
+
+    // Refresh only the necessary components
+    system.refresh_all();
+
+    let mut s =
+        System::new_with_specifics(RefreshKind::new().with_cpu(CpuRefreshKind::everything()));
+    // Wait a bit because CPU usage is based on diff.
+    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    // Refresh CPUs again to get actual value.
+    s.refresh_cpu_specifics(CpuRefreshKind::everything());
+
+    // Update CPU usage metric
+    let cpu_usage = s.global_cpu_usage() as i64;
+    crate::metrics::CPU_USAGE_PERCENTAGE
+        .with_label_values(&["global", node_account_id])
+        .set(cpu_usage);
+
+    // Update available memory metric
+    let available_memory = system.available_memory() as i64;
+    crate::metrics::AVAILABLE_MEMORY_BYTES
+        .with_label_values(&["available_mem", node_account_id])
+        .set(available_memory);
+
+    // Update used memory metric
+    let used_memory = system.used_memory() as i64;
+    crate::metrics::USED_MEMORY_BYTES
+        .with_label_values(&["used", node_account_id])
+        .set(used_memory);
+
+    let root_mount_point = Path::new("/");
+    // Update available disk space metric
+    let available_disk_space = Disks::new_with_refreshed_list()
+        .iter()
+        .find(|d| d.mount_point() == root_mount_point)
+        .expect("No disk found mounted at '/'")
+        .available_space() as i64;
+    crate::metrics::AVAILABLE_DISK_SPACE_BYTES
+        .with_label_values(&["available_disk", node_account_id])
+        .set(available_disk_space);
+
+    // Update total disk space metric
+    let total_disk_space = Disks::new_with_refreshed_list()
+        .iter()
+        .find(|d| d.mount_point() == root_mount_point)
+        .expect("No disk found mounted at '/'")
+        .total_space() as i64;
+    crate::metrics::TOTAL_DISK_SPACE_BYTES
+        .with_label_values(&["total_disk", node_account_id])
+        .set(total_disk_space);
 }

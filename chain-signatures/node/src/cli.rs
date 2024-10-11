@@ -9,6 +9,7 @@ use local_ip_address::local_ip;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use tracing_stackdriver::layer as stackdriver_layer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
@@ -142,6 +143,7 @@ fn is_running_on_gcp() -> bool {
     let resp = reqwest::blocking::Client::new()
         .get("http://metadata.google.internal/computeMetadata/v1/instance/id")
         .header("Metadata-Flavor", "Google")
+        .timeout(Duration::from_millis(200))
         .send();
 
     match resp {
@@ -228,7 +230,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 client_headers.insert(http::header::REFERER, referer_param.parse().unwrap());
             }
 
-            tracing::debug!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
+            tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let (protocol, protocol_state) = MpcSignProtocol::init(
                 my_address,
@@ -251,18 +253,18 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             );
 
             rt.block_on(async {
-                tracing::debug!("protocol initialized");
+                tracing::info!("protocol initialized");
                 let protocol_handle = tokio::spawn(async move { protocol.run().await });
-                tracing::debug!("protocol thread spawned");
+                tracing::info!("protocol thread spawned");
                 let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
                 let web_handle = tokio::spawn(async move {
                     web::run(web_port, sender, cipher_sk, protocol_state, indexer).await
                 });
-                tracing::debug!("protocol http server spawned");
+                tracing::info!("protocol http server spawned");
 
                 protocol_handle.await??;
                 web_handle.await??;
-                tracing::debug!("spinning down");
+                tracing::info!("spinning down");
 
                 indexer_handle.join().unwrap()?;
                 anyhow::Ok(())

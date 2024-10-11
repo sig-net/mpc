@@ -140,7 +140,7 @@ impl PresignatureManager {
 
     // TODO: add logs and better error handling in all functions
     pub async fn insert(&mut self, presignature: Presignature) {
-        tracing::trace!(id = ?presignature.id, "inserting presignature");
+        tracing::info!(id = ?presignature.id, "inserting presignature");
         self.presignature_storage
             .write()
             .await
@@ -151,7 +151,7 @@ impl PresignatureManager {
     }
 
     pub async fn insert_mine(&mut self, presignature: Presignature) {
-        tracing::trace!(id = ?presignature.id, "inserting mine presignature");
+        tracing::info!(id = ?presignature.id, "inserting mine presignature");
         // Remove from taken list if it was there
         self.gc.remove(&presignature.id);
         self.presignature_storage
@@ -199,7 +199,7 @@ impl PresignatureManager {
                 })?
         {
             self.gc.insert(id, Instant::now());
-            tracing::trace!(id, "took presignature");
+            tracing::info!(id, "took presignature");
             return Ok(presignature);
         };
 
@@ -225,7 +225,7 @@ impl PresignatureManager {
                 tracing::error!(?e, "failed to look for mine presignature");
             })
             .ok()??;
-        tracing::debug!(id = ?presignature.id, "take presignature of mine");
+        tracing::info!(id = ?presignature.id, "take presignature of mine");
         Some(presignature)
     }
 
@@ -344,7 +344,7 @@ impl PresignatureManager {
             )));
         }
 
-        tracing::debug!(id, "starting protocol to generate a new presignature");
+        tracing::info!(id, "starting protocol to generate a new presignature");
         let generator = Self::generate_internal(
             participants,
             self.me,
@@ -389,7 +389,7 @@ impl PresignatureManager {
         };
 
         if not_enough_presignatures {
-            tracing::trace!("not enough presignatures, generating");
+            tracing::debug!("not enough presignatures, generating");
             // To ensure there is no contention between different nodes we are only using triples
             // that we proposed. This way in a non-BFT environment we are guaranteed to never try
             // to use the same triple as any other node.
@@ -397,7 +397,7 @@ impl PresignatureManager {
                 let presig_participants = active
                     .intersection(&[&triple0.public.participants, &triple1.public.participants]);
                 if presig_participants.len() < self.threshold {
-                    tracing::debug!(
+                    tracing::warn!(
                         participants = ?presig_participants.keys_vec(),
                         "running: the intersection of participants is less than the threshold"
                     );
@@ -418,7 +418,7 @@ impl PresignatureManager {
                     .await?;
                 }
             } else {
-                tracing::debug!("running: we don't have enough triples to generate a presignature");
+                tracing::warn!("running: we don't have enough triples to generate a presignature");
             }
         }
 
@@ -457,7 +457,7 @@ impl PresignatureManager {
             tracing::debug!(id, "presignature already generated");
             Err(GenerationError::AlreadyGenerated)
         } else if self.gc.contains_key(&id) {
-            tracing::debug!(id, "presignature was garbage collected");
+            tracing::warn!(id, "presignature was garbage collected");
             Err(GenerationError::PresignatureIsGarbageCollected(id))
         } else {
             match self.generators.entry(id) {
@@ -549,7 +549,7 @@ impl PresignatureManager {
                 };
                 match action {
                     Action::Wait => {
-                        tracing::trace!("waiting");
+                        tracing::debug!("presignature: waiting");
                         // Retain protocol until we are finished
                         return true;
                     }
