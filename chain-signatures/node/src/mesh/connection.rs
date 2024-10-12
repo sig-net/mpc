@@ -49,26 +49,37 @@ impl Pool {
                 continue;
             };
 
-            let Ok(resp) = self.http.get(url.clone()).send().await else {
-                tracing::warn!(
-                    "Pool.ping resp err participant {:?} url {}",
-                    participant,
-                    url
-                );
-                continue;
+            let work = self.http.get(url.clone()).send();
+            match tokio::time::timeout(Duration::from_millis(200), work).await {
+                Ok(result) => match result {
+                    Ok(resp) => {
+                        let Ok(state): Result<StateView, _> = resp.json().await else {
+                            tracing::warn!(
+                                "Pool.ping state view err participant {:?} url {}",
+                                participant,
+                                url
+                            );
+                            continue;
+                        };
+            
+                        status.insert(*participant, state);
+                        participants.insert(participant, info.clone());
+                    },
+                    Err(e) => {
+                        tracing::warn!("Network error: {:?}", e);
+                        continue;
+                    }
+                },
+                Err(_) => {
+                    tracing::warn!(
+                        "Pool.ping resp err participant {:?} url {}, timed out",
+                        participant,
+                        url
+                    );
+                    continue;
+                }
             };
-
-            let Ok(state): Result<StateView, _> = resp.json().await else {
-                tracing::warn!(
-                    "Pool.ping state view err participant {:?} url {}",
-                    participant,
-                    url
-                );
-                continue;
-            };
-
-            status.insert(*participant, state);
-            participants.insert(participant, info.clone());
+            
         }
         drop(status);
 
