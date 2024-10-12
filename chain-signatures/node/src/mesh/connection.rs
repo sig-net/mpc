@@ -50,7 +50,7 @@ impl Pool {
             };
 
             let work = self.http.get(url.clone()).send();
-            match tokio::time::timeout(Duration::from_millis(200), work).await {
+            match tokio::time::timeout(Duration::from_millis(500), work).await {
                 Ok(result) => match result {
                     Ok(resp) => {
                         let Ok(state): Result<StateView, _> = resp.json().await else {
