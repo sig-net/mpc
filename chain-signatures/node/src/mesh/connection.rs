@@ -49,13 +49,7 @@ impl Pool {
                 continue;
             };
 
-            let Ok(resp) = self
-                .http
-                .get(url.clone())
-                .timeout(Duration::from_millis(200))
-                .send()
-                .await
-            else {
+            let Ok(resp) = self.http.get(url.clone()).send().await else {
                 tracing::warn!(
                     "Pool.ping resp err participant {:?} url {}",
                     participant,
@@ -99,13 +93,7 @@ impl Pool {
                 continue;
             };
 
-            let Ok(resp) = self
-                .http
-                .get(url)
-                .timeout(Duration::from_millis(200))
-                .send()
-                .await
-            else {
+            let Ok(resp) = self.http.get(url).send().await else {
                 continue;
             };
 
