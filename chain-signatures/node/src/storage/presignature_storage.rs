@@ -46,8 +46,6 @@ impl RedisPresignatureStorage {
     }
 }
 
-// Note: it is possible to use a Lua script to make all operations atomic
-// TODO: add logs and better error handling
 #[async_trait]
 impl PresignatureStorage for RedisPresignatureStorage {
     fn insert(&mut self, presignature: Presignature) -> PresigResult<()> {
