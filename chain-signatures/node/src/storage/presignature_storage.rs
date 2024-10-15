@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::Ok;
-use axum::async_trait;
 use redis::{Commands, Connection, FromRedisValue, RedisWrite, ToRedisArgs};
 use tokio::sync::RwLock;
 use url::Url;
@@ -45,16 +44,20 @@ impl RedisPresignatureStorage {
     }
 }
 
-#[async_trait]
 impl PresignatureStorage for RedisPresignatureStorage {
     fn insert(&mut self, presignature: Presignature) -> PresigResult<()> {
         self.redis_connection
-            .hset(PRESIGNATURES_MAP_NAME, presignature.id, presignature)?;
+            .hset::<&str, PresignatureId, Presignature, ()>(
+                PRESIGNATURES_MAP_NAME,
+                presignature.id,
+                presignature,
+            )?;
         Ok(())
     }
 
     fn insert_mine(&mut self, presignature: Presignature) -> PresigResult<()> {
-        self.redis_connection.sadd(MINE_SET_NAME, presignature.id)?;
+        self.redis_connection
+            .sadd::<&str, PresignatureId, ()>(MINE_SET_NAME, presignature.id)?;
         self.insert(presignature)?;
         Ok(())
     }
@@ -74,7 +77,8 @@ impl PresignatureStorage for RedisPresignatureStorage {
             self.redis_connection.hget(PRESIGNATURES_MAP_NAME, id)?;
         match result {
             Some(presignature) => {
-                self.redis_connection.hdel(PRESIGNATURES_MAP_NAME, id)?;
+                self.redis_connection
+                    .hdel::<&str, PresignatureId, ()>(PRESIGNATURES_MAP_NAME, *id)?;
                 Ok(Some(presignature))
             }
             None => Ok(None),
