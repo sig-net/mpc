@@ -14,6 +14,14 @@ module "gce-container" {
     args  = ["start"]
     port  = "3000"
 
+    volumeMounts = [
+      {
+        mountPath = "/data"
+        name = "host-path"
+        readOnly = false
+      }
+    ]
+
     env = concat(var.static_env, [
       {
         name  = "MPC_NODE_ID"
@@ -61,6 +69,15 @@ module "gce-container" {
       }
     ])
   }
+
+  volumes = [
+      {
+        name = "host-path"
+        hostPath = {
+          path = "/etc/redis"
+        }
+      }
+    ]
 }
 
 resource "google_compute_address" "internal_ips" {
