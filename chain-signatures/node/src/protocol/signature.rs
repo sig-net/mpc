@@ -481,7 +481,7 @@ impl SignatureManager {
                 ) {
                     Ok(generator) => generator,
                     Err((presignature, err @ InitializationError::BadParameters(_))) => {
-                        presignature_manager.insert_mine(presignature);
+                        presignature_manager.insert_mine(presignature).await;
                         tracing::warn!(%receipt_id, presignature_id, ?err, "failed to start signature generation");
                         return Err(GenerationError::CaitSithInitializationError(err));
                     }
@@ -689,7 +689,7 @@ impl SignatureManager {
         // add back the failed presignatures that were incompatible to be made into
         // signatures due to failures or lack of participants.
         for presignature in failed_presigs {
-            presignature_manager.insert_mine(presignature);
+            presignature_manager.insert_mine(presignature).await;
         }
     }
 

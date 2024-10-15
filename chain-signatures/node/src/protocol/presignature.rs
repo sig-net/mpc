@@ -207,29 +207,25 @@ impl PresignatureManager {
         }
     }
 
-    // TODO: add logs and better error handling in all functions
     pub async fn insert(&mut self, presignature: Presignature) {
         tracing::info!(id = ?presignature.id, "inserting presignature");
-        self.presignature_storage
-            .write()
-            .await
-            .insert(presignature)
-            .map_err(|e| {
-                tracing::error!(?e, "failed to insert presignature");
-            });
+        if let Err(e) = self.presignature_storage.write().await.insert(presignature) {
+            tracing::error!(?e, "failed to insert presignature");
+        }
     }
 
     pub async fn insert_mine(&mut self, presignature: Presignature) {
         tracing::info!(id = ?presignature.id, "inserting mine presignature");
         // Remove from taken list if it was there
         self.gc.remove(&presignature.id);
-        self.presignature_storage
+        if let Err(e) = self
+            .presignature_storage
             .write()
             .await
             .insert_mine(presignature)
-            .map_err(|e| {
-                tracing::error!(?e, "failed to insert mine presignature");
-            });
+        {
+            tracing::error!(?e, "failed to insert mine presignature");
+        }
     }
 
     /// Returns true if the presignature with the given id is already generated
@@ -239,7 +235,7 @@ impl PresignatureManager {
             .await
             .contains(id)
             .map_err(|e| {
-                tracing::error!(?e, "failed to check if presignature exist");
+                tracing::warn!(?e, "failed to check if presignature exist");
             })
             .unwrap_or(false)
     }
@@ -251,7 +247,7 @@ impl PresignatureManager {
             .await
             .contains_mine(id)
             .map_err(|e| {
-                tracing::error!(?e, "failed to check if mine presignature exist");
+                tracing::warn!(?e, "failed to check if mine presignature exist");
             })
             .unwrap_or(false)
     }
@@ -285,7 +281,7 @@ impl PresignatureManager {
     }
 
     pub async fn take_mine(&mut self) -> Option<Presignature> {
-        let presignature = self
+        if let Some(presignature) = self
             .presignature_storage
             .write()
             .await
@@ -293,9 +289,12 @@ impl PresignatureManager {
             .map_err(|e| {
                 tracing::error!(?e, "failed to look for mine presignature");
             })
-            .ok()??;
-        tracing::info!(id = ?presignature.id, "take presignature of mine");
-        Some(presignature)
+            .ok()?
+        {
+            tracing::info!(id = ?presignature.id, "took presignature of mine");
+            return Some(presignature);
+        }
+        None
     }
 
     /// Returns the number of unspent presignatures available in the manager.

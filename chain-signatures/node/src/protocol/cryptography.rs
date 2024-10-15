@@ -445,13 +445,15 @@ impl CryptographicProtocol for RunningState {
             .set(my_requests.len() as i64);
 
         let mut signature_manager = self.signature_manager.write().await;
-        signature_manager.handle_requests(
-            self.threshold,
-            &stable,
-            my_requests,
-            &mut presignature_manager,
-            protocol_cfg,
-        );
+        signature_manager
+            .handle_requests(
+                self.threshold,
+                &stable,
+                my_requests,
+                &mut presignature_manager,
+                protocol_cfg,
+            )
+            .await;
         drop(sign_queue);
         drop(presignature_manager);
 
