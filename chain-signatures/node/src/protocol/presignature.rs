@@ -43,15 +43,15 @@ impl Serialize for Presignature {
         let mut output_map = serde_json::Map::new();
         output_map.insert(
             "big_r".to_string(),
-            serde_json::to_value(&self.output.big_r).map_err(serde::ser::Error::custom)?,
+            serde_json::to_value(self.output.big_r).map_err(serde::ser::Error::custom)?,
         );
         output_map.insert(
             "k".to_string(),
-            serde_json::to_value(&self.output.k).map_err(serde::ser::Error::custom)?,
+            serde_json::to_value(self.output.k).map_err(serde::ser::Error::custom)?,
         );
         output_map.insert(
             "sigma".to_string(),
-            serde_json::to_value(&self.output.sigma).map_err(serde::ser::Error::custom)?,
+            serde_json::to_value(self.output.sigma).map_err(serde::ser::Error::custom)?,
         );
 
         state.serialize_field("output", &output_map)?;
@@ -330,7 +330,7 @@ impl PresignatureManager {
 
     /// Returns the number of unspent presignatures we will have in the manager once
     /// all ongoing generation protocols complete.
-    pub async fn potential_len(&self) -> usize {
+    pub async fn count_potential(&self) -> usize {
         let complete_presignatures = self.count_all().await;
         let ongoing_generators = self.generators.len();
         complete_presignatures + ongoing_generators
@@ -449,7 +449,7 @@ impl PresignatureManager {
             // Stopgap to prevent too many presignatures in the system. This should be around min_presig*nodes*2
             // for good measure so that we have enough presignatures to do sig generation while also maintain
             // the minimum number of presignature where a single node can't flood the system.
-            if self.potential_len().await >= cfg.presignature.max_presignatures as usize {
+            if self.count_potential().await >= cfg.presignature.max_presignatures as usize {
                 false
             } else {
                 // We will always try to generate a new triple if we have less than the minimum
@@ -515,7 +515,7 @@ impl PresignatureManager {
     ) -> Result<&mut PresignatureProtocol, GenerationError> {
         if id != hash_as_id(triple0, triple1) {
             tracing::error!(id, "presignature id does not match the expected hash");
-            return Err(GenerationError::PresignatureBadParameters);
+            Err(GenerationError::PresignatureBadParameters)
         } else if self.contains(&id).await {
             tracing::debug!(id, "presignature already generated");
             Err(GenerationError::AlreadyGenerated)
@@ -716,7 +716,6 @@ const fn first_8_bytes(input: [u8; 32]) -> [u8; 8] {
     output
 }
 
-// test presignature serialization and deserialization
 #[cfg(test)]
 mod tests {
     use cait_sith::{protocol::Participant, PresignOutput};

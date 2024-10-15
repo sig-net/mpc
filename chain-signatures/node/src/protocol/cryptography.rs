@@ -421,7 +421,7 @@ impl CryptographicProtocol for RunningState {
         crate::metrics::NUM_PRESIGNATURE_GENERATORS_TOTAL
             .with_label_values(&[my_account_id.as_str()])
             .set(
-                presignature_manager.potential_len().await as i64
+                presignature_manager.count_potential().await as i64
                     - presignature_manager.count_all().await as i64,
             );
 

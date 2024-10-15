@@ -143,7 +143,7 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<State
             let presignature_read = state.presignature_manager.read().await;
             let presignature_count = presignature_read.count_all().await;
             let presignature_mine_count = presignature_read.count_mine().await;
-            let presignature_potential_count = presignature_read.potential_len().await;
+            let presignature_potential_count = presignature_read.count_potential().await;
             let participants = state.participants.keys_vec();
 
             Ok(Json(StateView::Running {

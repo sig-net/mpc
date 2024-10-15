@@ -12,14 +12,13 @@ type PresigResult<T> = std::result::Result<T, anyhow::Error>;
 pub type PresignatureStorageBox = Box<dyn PresignatureStorage + Send + Sync>;
 pub type LockPresignatureStorageBox = Arc<RwLock<PresignatureStorageBox>>;
 
-const PRESIGNATURES_MAP_NAME: &'static str = "presignatures";
-const MINE_SET_NAME: &'static str = "presignatures_mine";
+const PRESIGNATURES_MAP_NAME: &str = "presignatures";
+const MINE_SET_NAME: &str = "presignatures_mine";
 
 pub fn init(redis_url: Url) -> PresignatureStorageBox {
     Box::new(RedisPresignatureStorage::new(redis_url)) as PresignatureStorageBox
 }
 
-#[async_trait]
 pub trait PresignatureStorage {
     fn insert(&mut self, presignature: Presignature) -> PresigResult<()>;
     fn insert_mine(&mut self, presignature: Presignature) -> PresigResult<()>;
