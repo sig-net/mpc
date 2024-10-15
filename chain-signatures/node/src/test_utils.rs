@@ -41,6 +41,7 @@ impl TestTripleManagers {
                     gcp_datastore_url: Some(url.clone()),
                     env: "triple-test".to_string(),
                     sk_share_local_path: None,
+                    redis_url: "redis://localhost".to_string(), // not used
                 };
                 Some(
                     GcpService::init(&account_id, &storage_options)

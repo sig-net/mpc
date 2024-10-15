@@ -23,7 +23,6 @@ use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
 use testcontainers::{Container, GenericImage};
-use url::Url;
 
 const NETWORK: &str = "mpc_it_network";
 
@@ -207,7 +206,6 @@ pub struct Context<'a> {
     pub mpc_contract: Contract,
     pub datastore: crate::containers::Datastore<'a>,
     pub storage_options: storage::Options,
-    pub redis_url: Url,
 }
 
 pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> {
@@ -241,6 +239,7 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         sk_share_secret_id: None,
         gcp_datastore_url: Some(datastore.local_address.clone()),
         sk_share_local_path: Some(sk_share_local_path),
+        redis_url: "redis://localhost".to_string(), // TODO:pass real redis URL
     };
     Ok(Context {
         docker_client,
@@ -252,7 +251,6 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         mpc_contract,
         datastore,
         storage_options,
-        redis_url: Url::parse("redis://localhost")?, // TODO:pass real URL
     })
 }
 

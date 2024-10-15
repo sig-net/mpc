@@ -161,7 +161,6 @@ impl Node {
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
-            redis_url: ctx.redis_url.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),
             )?)),

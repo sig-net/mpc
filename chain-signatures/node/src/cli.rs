@@ -58,9 +58,6 @@ pub enum Cli {
         /// Storage options
         #[clap(flatten)]
         storage_options: storage::Options,
-        /// Redis URL
-        #[arg(long, env("MPC_REDIS_URL"))]
-        redis_url: Url,
         /// The set of configurations that we will use to override contract configurations.
         #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
         override_config: Option<OverrideConfig>,
@@ -85,7 +82,6 @@ impl Cli {
                 indexer_options,
                 my_address,
                 storage_options,
-                redis_url,
                 override_config,
                 client_header_referer,
             } => {
@@ -106,7 +102,7 @@ impl Cli {
                     "--cipher-sk".to_string(),
                     cipher_sk,
                     "--redis-url".to_string(),
-                    redis_url.to_string(),
+                    storage_options.redis_url.to_string(),
                 ];
                 if let Some(sign_sk) = sign_sk {
                     args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
@@ -181,7 +177,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             indexer_options,
             my_address,
             storage_options,
-            redis_url,
             override_config,
             client_header_referer,
         } => {
@@ -206,7 +201,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 storage::triple_storage::init(Some(&gcp_service), &account_id),
             ));
 
-            let redis_url: Url = Url::parse(redis_url.as_str())?;
+            let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
             let presignature_storage: LockPresignatureStorageBox =
                 Arc::new(RwLock::new(storage::presignature_storage::init(redis_url)));
 
