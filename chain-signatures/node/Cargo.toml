@@ -1,6 +1,6 @@
 [package]
 name = "mpc-node"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 edition = "2021"
 
 [[bin]]
@@ -45,11 +45,11 @@ tracing-stackdriver = "0.10.0"
 url = { version = "2.4.0", features = ["serde"] }
 
 near-account-id = "1.0.0"
-near-crypto = "0.23.0"
-near-fetch = "0.5.1"
-near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/1.40-and-async-run" }
-near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/1.40-and-async-run" }
-near-primitives = "0.23.0"
+near-crypto = "0.26.0"
+near-fetch = "0.6.0"
+near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/2.3.0" }
+near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/2.3.0" }
+near-primitives = "0.26.0"
 near-sdk = { version = "5.2.1", features = ["legacy", "unit-testing"] }
 
 mpc-contract = { path = "../contract" }
@@ -60,3 +60,4 @@ itertools = "0.12.0"
 http = "1.1.0"
 prometheus = { version = "0.13.3" }
 once_cell = "1.13.1"
+sysinfo = "0.32.0"

@@ -19,6 +19,7 @@ use mpc_node::storage;
 use mpc_node::storage::triple_storage::TripleNodeStorageBox;
 use near_crypto::KeyFile;
 use near_workspaces::network::{Sandbox, ValidatorKey};
+use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
 use testcontainers::{Container, GenericImage};
@@ -298,6 +299,62 @@ pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyh
     Ok(Nodes::Docker { ctx, nodes })
 }
 
+pub async fn dry_host(
+    cfg: MultichainConfig,
+    docker_client: &DockerClient,
+) -> anyhow::Result<Context> {
+    let ctx = setup(docker_client).await?;
+
+    let accounts =
+        futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+    let mut node_cfgs = Vec::new();
+    for account in accounts.iter().take(cfg.nodes) {
+        node_cfgs.push(local::Node::dry_run(&ctx, account, &cfg).await?);
+    }
+
+    let candidates: HashMap<AccountId, CandidateInfo> = accounts
+        .iter()
+        .cloned()
+        .zip(&node_cfgs)
+        .map(|(account, node_cfg)| {
+            (
+                account.id().clone(),
+                CandidateInfo {
+                    account_id: account.id().as_str().parse().unwrap(),
+                    url: format!("http://127.0.0.1:{0}", node_cfg.web_port),
+                    cipher_pk: node_cfg.cipher_pk.to_bytes(),
+                    sign_pk: node_cfg.sign_sk.public_key().to_string().parse().unwrap(),
+                },
+            )
+        })
+        .collect();
+
+    println!("\nPlease call below to update localnet:\n");
+    let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
+    println!("near config add-connection --network-name local --connection-name local --rpc-url {} --wallet-url http://127.0.0.1/ --explorer-transaction-url http://127.0.0.1:6666/", near_rpc);
+    println!("\nAfter run the nodes, please call the following command to init contract: ");
+    let args = json!({
+        "threshold": cfg.threshold,
+        "candidates": candidates
+    })
+    .to_string();
+    let sk = SecretKey::from_seed(KeyType::ED25519, "testificate");
+
+    println!("near contract call-function as-transaction {} init json-args '{}' prepaid-gas '100.0 Tgas' attached-deposit '0 NEAR' sign-as {} network-config local sign-with-plaintext-private-key --signer-public-key {} --signer-private-key {} send",
+             ctx.mpc_contract.id(),
+             args,
+             ctx.mpc_contract.id(),
+             sk.public_key(),
+             sk
+    );
+    println!();
+
+    Ok(ctx)
+}
+
 pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
     let ctx = setup(docker_client).await?;
 
@@ -349,6 +406,17 @@ pub async fn run(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow:
 
     #[cfg(not(feature = "docker-test"))]
     return host(cfg, docker_client).await;
+}
+
+pub async fn dry_run(
+    cfg: MultichainConfig,
+    docker_client: &DockerClient,
+) -> anyhow::Result<Context> {
+    #[cfg(feature = "docker-test")]
+    unimplemented!("dry_run only works with native node");
+
+    #[cfg(not(feature = "docker-test"))]
+    return dry_host(cfg, docker_client).await;
 }
 
 async fn fetch_from_validator(

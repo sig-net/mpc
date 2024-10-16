@@ -1,8 +1,8 @@
 use once_cell::sync::Lazy;
 pub use prometheus::{
     self, core::MetricVec, core::MetricVecBuilder, exponential_buckets, linear_buckets, Counter,
-    Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec,
-    IntGauge, IntGaugeVec, Opts, Result, TextEncoder,
+    CounterVec, Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter,
+    IntCounterVec, IntGauge, IntGaugeVec, Opts, Result, TextEncoder,
 };
 
 pub(crate) static NODE_RUNNING: Lazy<IntGaugeVec> = Lazy::new(|| {
@@ -14,8 +14,8 @@ pub(crate) static NODE_RUNNING: Lazy<IntGaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static NUM_SIGN_REQUESTS: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
+pub(crate) static NUM_SIGN_REQUESTS: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
         "multichain_sign_requests_count",
         "number of multichain sign requests, marked by sign requests indexed",
         &["node_account_id"],
@@ -23,8 +23,8 @@ pub(crate) static NUM_SIGN_REQUESTS: Lazy<IntGaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static NUM_SIGN_REQUESTS_MINE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
+pub(crate) static NUM_SIGN_REQUESTS_MINE: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
         "multichain_sign_requests_count_mine",
         "number of multichain sign requests, marked by sign requests indexed",
         &["node_account_id"],
@@ -32,8 +32,8 @@ pub(crate) static NUM_SIGN_REQUESTS_MINE: Lazy<IntGaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static NUM_SIGN_SUCCESS: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
+pub(crate) static NUM_SIGN_SUCCESS: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
         "multichain_sign_requests_success",
         "number of successful multichain sign requests, marked by publish()",
         &["node_account_id"],
@@ -179,8 +179,8 @@ pub(crate) static NODE_VERSION: Lazy<IntGaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
+pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
         "multichain_num_total_historical_triple_generators",
         "number of all triple generators historically on the node",
         &["node_account_id"],
@@ -188,9 +188,9 @@ pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS: Lazy<IntGaugeVec> = La
     .unwrap()
 });
 
-pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS: Lazy<IntGaugeVec> =
+pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS: Lazy<CounterVec> =
     Lazy::new(|| {
-        try_create_int_gauge_vec(
+        try_create_counter_vec(
             "multichain_num_total_historical_triple_generators_success",
             "number of all successful triple generators historically on the node",
             &["node_account_id"],
@@ -198,9 +198,9 @@ pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS: Lazy<IntGaugeV
         .unwrap()
     });
 
-pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS: Lazy<IntGaugeVec> =
+pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS: Lazy<CounterVec> =
     Lazy::new(|| {
-        try_create_int_gauge_vec(
+        try_create_counter_vec(
             "multichain_num_total_historical_triple_generations_mine_success",
             "number of successful triple generators that was mine historically on the node",
             &["node_account_id"],
@@ -208,9 +208,9 @@ pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS: Lazy<Int
         .unwrap()
     });
 
-pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS: Lazy<IntGaugeVec> =
+pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS: Lazy<CounterVec> =
     Lazy::new(|| {
-        try_create_int_gauge_vec(
+        try_create_counter_vec(
             "multichain_num_total_historical_presignature_generators",
             "number of all presignature generators historically on the node",
             &["node_account_id"],
@@ -218,9 +218,9 @@ pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS: Lazy<IntGaugeVec
         .unwrap()
     });
 
-pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS: Lazy<IntGaugeVec> =
+pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS: Lazy<CounterVec> =
     Lazy::new(|| {
-        try_create_int_gauge_vec(
+        try_create_counter_vec(
             "multichain_num_total_historical_presignature_generators_success",
             "number of all successful presignature generators historically on the node",
             &["node_account_id"],
@@ -228,9 +228,9 @@ pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS: Lazy<Int
         .unwrap()
     });
 
-pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE: Lazy<IntGaugeVec> =
+pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE: Lazy<CounterVec> =
     Lazy::new(|| {
-        try_create_int_gauge_vec(
+        try_create_counter_vec(
             "multichain_num_total_historical_presignature_generators_mine",
             "number of mine presignature generators historically on the node",
             &["node_account_id"],
@@ -238,9 +238,9 @@ pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE: Lazy<IntGau
         .unwrap()
     });
 
-pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS: Lazy<IntGaugeVec> =
+pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS: Lazy<CounterVec> =
     Lazy::new(|| {
-        try_create_int_gauge_vec(
+        try_create_counter_vec(
             "multichain_num_total_historical_presignature_generators_mine_success",
             "number of mine presignature generators historically on the node",
             &["node_account_id"],
@@ -248,8 +248,8 @@ pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS: Laz
         .unwrap()
     });
 
-pub(crate) static NUM_SIGN_SUCCESS_30S: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
+pub(crate) static NUM_SIGN_SUCCESS_30S: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
             "multichain_sign_requests_success_30s",
             "number of successful multichain sign requests that finished within 30s, marked by publish()",
             &["node_account_id"],
@@ -307,8 +307,8 @@ pub(crate) static PROTOCOL_LATENCY_ITER_MESSAGE: Lazy<HistogramVec> = Lazy::new(
     .unwrap()
 });
 
-pub(crate) static NUM_SEND_ENCRYPTED_FAILURE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
+pub(crate) static NUM_SEND_ENCRYPTED_FAILURE: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
         "multichain_send_encrypted_failure",
         "number of successful send encrypted",
         &["node_account_id"],
@@ -316,8 +316,8 @@ pub(crate) static NUM_SEND_ENCRYPTED_FAILURE: Lazy<IntGaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static NUM_SEND_ENCRYPTED_TOTAL: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
+pub(crate) static NUM_SEND_ENCRYPTED_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
         "multichain_send_encrypted_total",
         "number total send encrypted",
         &["node_account_id"],
@@ -335,8 +335,8 @@ pub(crate) static FAILED_SEND_ENCRYPTED_LATENCY: Lazy<HistogramVec> = Lazy::new(
     .unwrap()
 });
 
-pub(crate) static NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
+pub(crate) static NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
         "multichain_num_total_historical_signature_generators",
         "number of all signature generators historically on the node",
         &["node_account_id"],
@@ -344,8 +344,8 @@ pub(crate) static NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS: Lazy<IntGaugeVec> =
     .unwrap()
 });
 
-pub(crate) static TRIPLE_GENERATOR_FAILURES: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
+pub(crate) static TRIPLE_GENERATOR_FAILURES: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
         "multichain_triple_generator_failures",
         "total triple generator failures",
         &["node_account_id"],
@@ -353,8 +353,8 @@ pub(crate) static TRIPLE_GENERATOR_FAILURES: Lazy<IntGaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static SIGNATURE_GENERATOR_FAILURES: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
+pub(crate) static SIGNATURE_GENERATOR_FAILURES: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
         "multichain_signature_generator_failures",
         "total signature generator failures",
         &["node_account_id"],
@@ -362,8 +362,8 @@ pub(crate) static SIGNATURE_GENERATOR_FAILURES: Lazy<IntGaugeVec> = Lazy::new(||
     .unwrap()
 });
 
-pub(crate) static PRESIGNATURE_GENERATOR_FAILURES: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
+pub(crate) static PRESIGNATURE_GENERATOR_FAILURES: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
         "multichain_presignature_generator_failures",
         "total presignature generator failures",
         &["node_account_id"],
@@ -371,10 +371,87 @@ pub(crate) static PRESIGNATURE_GENERATOR_FAILURES: Lazy<IntGaugeVec> = Lazy::new
     .unwrap()
 });
 
-pub(crate) static SIGNATURE_FAILURES: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
+pub(crate) static SIGNATURE_FAILURES: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
         "multichain_signature_failures",
         "total signature failures",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static SIGNATURE_PUBLISH_FAILURES: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
+        "multichain_signature_publish_failures",
+        "number of failed signature publish",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+// CPU Usage Percentage Metric
+pub(crate) static CPU_USAGE_PERCENTAGE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_cpu_usage_percentage",
+        "CPU Usage Percentage",
+        &["global", "node_account_id"],
+    )
+    .unwrap()
+});
+
+// Available Memory Metric
+pub(crate) static AVAILABLE_MEMORY_BYTES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_available_memory_bytes",
+        "Available Memory in Bytes",
+        &["available_mem", "node_account_id"],
+    )
+    .unwrap()
+});
+
+// Used Memory Metric
+pub(crate) static USED_MEMORY_BYTES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_used_memory_bytes",
+        "Used Memory in Bytes",
+        &["used", "node_account_id"],
+    )
+    .unwrap()
+});
+
+// Disk Space Metric
+pub(crate) static AVAILABLE_DISK_SPACE_BYTES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_available_disk_space_bytes",
+        "Available Disk Space in Bytes",
+        &["available_disk", "node_account_id"],
+    )
+    .unwrap()
+});
+
+// Total Disk Space Metric
+pub(crate) static TOTAL_DISK_SPACE_BYTES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_total_disk_space_bytes",
+        "Total Disk Space in Bytes",
+        &["total_disk", "node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static SIGNATURE_PUBLISH_RESPONSE_ERRORS: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
+        "multichain_signature_publish_response_errors",
+        "number of respond calls with response that cannot be converted to json",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static PROTOCOL_ITER_CNT: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
+        "multichain_protocol_iter_count",
+        "Count of multichain protocol iter",
         &["node_account_id"],
     )
     .unwrap()
@@ -386,6 +463,14 @@ pub fn try_create_int_gauge_vec(name: &str, help: &str, labels: &[&str]) -> Resu
     let gauge = IntGaugeVec::new(opts, labels)?;
     prometheus::register(Box::new(gauge.clone()))?;
     Ok(gauge)
+}
+
+pub fn try_create_counter_vec(name: &str, help: &str, labels: &[&str]) -> Result<CounterVec> {
+    check_metric_multichain_prefix(name)?;
+    let opts = Opts::new(name, help);
+    let counter = CounterVec::new(opts, labels)?;
+    prometheus::register(Box::new(counter.clone()))?;
+    Ok(counter)
 }
 
 /// Attempts to create a `HistogramVector`, returning `Err` if the registry does not accept the counter

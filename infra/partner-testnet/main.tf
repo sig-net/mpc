@@ -4,6 +4,11 @@ provider "google" {
 provider "google-beta" {
   project = var.project_id
 }
+
+resource "google_compute_project_metadata_item" "project_logging" {
+  key = "google-logging-enabled"
+  value = "true"
+}
 module "gce-container" {
   count   = length(var.node_configs)
   source  = "terraform-google-modules/container-vm/google"
@@ -103,7 +108,7 @@ module "ig_template" {
   source_image_project = "cos-cloud"
   machine_type         = "n2d-standard-2"
 
-  startup_script = "docker rm watchtower ; docker run -d --name watchtower -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower --debug --interval 3600"
+  startup_script = "docker rm watchtower ; docker run -d --name watchtower -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower --debug --interval 30"
 
   source_image = reverse(split("/", module.gce-container[count.index].source_image))[0]
   metadata     = merge(var.additional_metadata, { "gce-container-declaration" = module.gce-container["${count.index}"].metadata_value })
