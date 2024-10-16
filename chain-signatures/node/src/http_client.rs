@@ -56,23 +56,6 @@ async fn send_encrypted<U: IntoUrl>(
     url.set_path("msg");
     tracing::debug!(?from, to = %url, "making http request: sending encrypted message");
     let action = || async {
-<<<<<<< HEAD
-        let response = client
-            .post(url.clone())
-            .header("content-type", "application/json")
-            .json(&message)
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-            .timeout(Duration::from_millis(400))
->>>>>>> b340f1a0 (increase timeout)
-=======
-            .timeout(Duration::from_millis(200))
->>>>>>> 26a2f6a4 (revert timeout, change presig timeout)
-            .send()
-            .await
-            .map_err(SendError::ReqwestClientError)?;
-=======
         let response = tokio::time::timeout(
             request_timeout,
             client
@@ -85,7 +68,6 @@ async fn send_encrypted<U: IntoUrl>(
         .map_err(|_| SendError::Timeout(format!("send encrypted from {from:?} to {url}")))?
         .map_err(SendError::ReqwestClientError)?;
 
->>>>>>> 611df5c0 (refactor: all param in env variables)
         let status = response.status();
         let response_bytes = response
             .bytes()
