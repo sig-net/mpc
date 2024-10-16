@@ -3677,7 +3677,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-contract"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "borsh",
  "crypto-shared",
@@ -3702,7 +3702,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-node"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "anyhow",
  "async-trait",
