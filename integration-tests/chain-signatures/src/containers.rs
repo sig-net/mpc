@@ -633,7 +633,7 @@ impl<'a> Redis<'a> {
     pub const CONTAINER_CONFIG_PATH: &'static str = "/usr/local/etc/redis/redis.conf";
 
     pub async fn run(docker_client: &'a DockerClient, network: &str) -> anyhow::Result<Redis<'a>> {
-        tracing::info!("Running Redis container with hardcoded config...");
+        tracing::info!("Running Redis container...");
 
         let image = GenericImage::new("redis", "7.2.5")
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
@@ -660,10 +660,7 @@ impl<'a> Redis<'a> {
 
         let full_address = format!("redis://{}:{}/", ip_address, Self::CONTAINER_PORT);
         let local_address = format!("redis://127.0.0.1:{}/", host_port);
-        tracing::info!(
-            "Redis container is running with hardcoded config at {}",
-            full_address
-        );
+        tracing::info!("Redis container is running at {}", full_address);
 
         Ok(Redis {
             container,
