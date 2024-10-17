@@ -187,8 +187,8 @@ pub async fn test_triple_generation(datastore_url: Option<String>) {
 
     let inputs = tm.managers.into_iter().map(|m| {
         (
-            m.my_len(),
-            m.len(),
+            m.count_mine(),
+            m.count(),
             m.generators,
             m.triples,
             m.triple_storage,

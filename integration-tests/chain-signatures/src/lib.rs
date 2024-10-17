@@ -239,7 +239,7 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
     let redis_container = crate::containers::Redis::run(docker_client, docker_network).await?;
     let redis_url = redis_container.local_address.clone();
 
-    tracing::info!(redis_url = %redis_url, "started Redis container");
+    tracing::info!(%redis_url, "started Redis container");
 
     let sk_share_local_path = "multichain-integration-secret-manager".to_string();
     let storage_options = mpc_node::storage::Options {
