@@ -309,7 +309,7 @@ impl MessageHandler for RunningState {
             }
 
             let protocol = match presignature_manager
-                .get_or_start_protocol(
+                .get_or_start_generation(
                     participants,
                     *id,
                     *triple0,

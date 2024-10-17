@@ -5,10 +5,13 @@ use crate::actions::{self, add_latency, wait_for};
 use crate::with_multichain_nodes;
 
 use cait_sith::protocol::Participant;
+use cait_sith::PresignOutput;
 use crypto_shared::{self, derive_epsilon, derive_key, x_coordinate, ScalarExt};
+use elliptic_curve::CurveArithmetic;
 use integration_tests_chain_signatures::containers::{self, DockerClient};
 use integration_tests_chain_signatures::MultichainConfig;
 use k256::elliptic_curve::point::AffineCoordinates;
+use k256::Secp256k1;
 use mpc_contract::config::Config;
 use mpc_contract::update::ProposeUpdateArgs;
 use mpc_node::kdf::into_eth_sig;
@@ -250,7 +253,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         presignature_storage,
     );
 
-    let presignature = Presignature::default();
+    let presignature = dummy_presignature();
 
     // Check that the storage is empty at the start
     assert!(!presignature_manager.contains(&presignature.id).await);
@@ -295,6 +298,18 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.count_potential().await, 0);
 
     Ok(())
+}
+
+fn dummy_presignature() -> Presignature {
+    Presignature {
+        id: 1,
+        output: PresignOutput {
+            big_r: <Secp256k1 as CurveArithmetic>::AffinePoint::default(),
+            k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
+            sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
+        },
+        participants: vec![Participant::from(1), Participant::from(2)],
+    }
 }
 
 #[test(tokio::test)]

@@ -9,7 +9,6 @@ use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolErro
 use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
 use chrono::Utc;
 use crypto_shared::PublicKey;
-use k256::elliptic_curve::CurveArithmetic;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use serde::ser::SerializeStruct;
@@ -27,25 +26,10 @@ use near_account_id::AccountId;
 pub type PresignatureId = u64;
 
 /// A completed presignature.
-#[derive(Clone)]
 pub struct Presignature {
     pub id: PresignatureId,
     pub output: PresignOutput<Secp256k1>,
     pub participants: Vec<Participant>,
-}
-
-impl Default for Presignature {
-    fn default() -> Self {
-        Self {
-            id: 1,
-            output: PresignOutput {
-                big_r: <Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-                k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-                sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
-            },
-            participants: vec![Participant::from(1), Participant::from(2)],
-        }
-    }
 }
 
 impl Serialize for Presignature {
@@ -518,7 +502,7 @@ impl PresignatureManager {
     /// 4) Depends on triples (`triple0`/`triple1`) that are unknown to the node
     // TODO: What if the presignature completed generation and is already spent?
     #[allow(clippy::too_many_arguments)]
-    pub async fn get_or_start_protocol(
+    pub async fn get_or_start_generation(
         &mut self,
         participants: &Participants,
         id: PresignatureId,
@@ -734,11 +718,22 @@ const fn first_8_bytes(input: [u8; 32]) -> [u8; 8] {
 
 #[cfg(test)]
 mod tests {
+    use cait_sith::{protocol::Participant, PresignOutput};
+    use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
+
     use crate::protocol::presignature::Presignature;
 
     #[tokio::test]
     async fn test_presignature_serialize_deserialize() {
-        let presignature = Presignature::default();
+        let presignature = Presignature {
+            id: 1,
+            output: PresignOutput {
+                big_r: <Secp256k1 as CurveArithmetic>::AffinePoint::default(),
+                k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
+                sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
+            },
+            participants: vec![Participant::from(1), Participant::from(2)],
+        };
 
         // Serialize Presignature to JSON
         let serialized =
