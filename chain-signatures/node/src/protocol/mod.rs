@@ -30,7 +30,7 @@ use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{MessageHandler, MpcMessageQueue};
 use crate::rpc_client;
-use crate::storage::presignature_storage::LockPresignatureStorageBox;
+use crate::storage::presignature_storage::LockRedisPresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::LockTripleNodeStorageBox;
 
@@ -55,7 +55,7 @@ struct Ctx {
     sign_queue: Arc<RwLock<SignQueue>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: LockTripleNodeStorageBox,
-    presignature_storage: LockPresignatureStorageBox,
+    presignature_storage: LockRedisPresignatureStorage,
     cfg: Config,
     mesh: Mesh,
     message_options: http_client::Options,
@@ -102,7 +102,7 @@ impl ConsensusCtx for &mut MpcSignProtocol {
         self.ctx.triple_storage.clone()
     }
 
-    fn presignature_storage(&self) -> LockPresignatureStorageBox {
+    fn presignature_storage(&self) -> LockRedisPresignatureStorage {
         self.ctx.presignature_storage.clone()
     }
 
@@ -179,7 +179,7 @@ impl MpcSignProtocol {
         sign_queue: Arc<RwLock<SignQueue>>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: LockTripleNodeStorageBox,
-        presignature_storage: LockPresignatureStorageBox,
+        presignature_storage: LockRedisPresignatureStorage,
         cfg: Config,
         mesh_options: mesh::Options,
         message_options: http_client::Options,

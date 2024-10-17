@@ -13,7 +13,7 @@ use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
-use crate::storage::presignature_storage::LockPresignatureStorageBox;
+use crate::storage::presignature_storage::LockRedisPresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::LockTripleNodeStorageBox;
 use crate::storage::triple_storage::TripleData;
@@ -43,7 +43,7 @@ pub trait ConsensusCtx {
     fn sign_queue(&self) -> Arc<RwLock<SignQueue>>;
     fn secret_storage(&self) -> &SecretNodeStorageBox;
     fn triple_storage(&self) -> LockTripleNodeStorageBox;
-    fn presignature_storage(&self) -> LockPresignatureStorageBox;
+    fn presignature_storage(&self) -> LockRedisPresignatureStorage;
     fn cfg(&self) -> &Config;
     fn message_options(&self) -> http_client::Options;
 }

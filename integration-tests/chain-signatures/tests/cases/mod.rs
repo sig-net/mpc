@@ -15,8 +15,8 @@ use k256::Secp256k1;
 use mpc_contract::config::Config;
 use mpc_contract::update::ProposeUpdateArgs;
 use mpc_node::kdf::into_eth_sig;
-use mpc_node::protocol::presignature::{Presignature, PresignatureManager};
-use mpc_node::storage::presignature_storage::LockPresignatureStorageBox;
+use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
+use mpc_node::storage::presignature_storage::LockRedisPresignatureStorage;
 use mpc_node::types::LatestBlockHeight;
 use mpc_node::util::NearPublicKeyExt;
 use mpc_node::{storage, test_utils};
@@ -243,7 +243,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     docker_client.create_network(docker_network).await?;
     let redis = containers::Redis::run(&docker_client, docker_network).await?;
     let redis_url = Url::parse(redis.local_address.as_str())?;
-    let presignature_storage: LockPresignatureStorageBox =
+    let presignature_storage: LockRedisPresignatureStorage =
         Arc::new(RwLock::new(storage::presignature_storage::init(redis_url)));
     let mut presignature_manager = PresignatureManager::new(
         Participant::from(0),
@@ -254,44 +254,48 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     );
 
     let presignature = dummy_presignature();
+    let presignature_id: PresignatureId = presignature.id;
 
     // Check that the storage is empty at the start
-    assert!(!presignature_manager.contains(&presignature.id).await);
-    assert!(!presignature_manager.contains_mine(&presignature.id).await);
+    assert!(!presignature_manager.contains(&presignature_id).await);
+    assert!(!presignature_manager.contains_mine(&presignature_id).await);
     assert_eq!(presignature_manager.count_all().await, 0);
     assert_eq!(presignature_manager.count_mine().await, 0);
     assert!(presignature_manager.is_empty().await);
     assert_eq!(presignature_manager.count_potential().await, 0);
 
-    presignature_manager.insert(presignature.clone()).await;
+    presignature_manager.insert(presignature).await;
 
     // Check that the storage contains the foreign presignature
-    assert!(presignature_manager.contains(&presignature.id).await);
-    assert!(!presignature_manager.contains_mine(&presignature.id).await);
+    assert!(presignature_manager.contains(&presignature_id).await);
+    assert!(!presignature_manager.contains_mine(&presignature_id).await);
     assert_eq!(presignature_manager.count_all().await, 1);
     assert_eq!(presignature_manager.count_mine().await, 0);
     assert_eq!(presignature_manager.count_potential().await, 1);
 
     // Take presignature and check that it is removed from the storage
-    presignature_manager.take(presignature.id).await.unwrap();
-    assert!(!presignature_manager.contains(&presignature.id).await);
-    assert!(!presignature_manager.contains_mine(&presignature.id).await);
+    presignature_manager.take(presignature_id).await.unwrap();
+    assert!(!presignature_manager.contains(&presignature_id).await);
+    assert!(!presignature_manager.contains_mine(&presignature_id).await);
     assert_eq!(presignature_manager.count_all().await, 0);
     assert_eq!(presignature_manager.count_mine().await, 0);
     assert_eq!(presignature_manager.count_potential().await, 0);
 
+    let mine_presignature = dummy_presignature();
+    let mine_presig_id: PresignatureId = mine_presignature.id;
+
     // Add mine presignature and check that it is in the storage
-    presignature_manager.insert_mine(presignature.clone()).await;
-    assert!(presignature_manager.contains(&presignature.id).await);
-    assert!(presignature_manager.contains_mine(&presignature.id).await);
+    presignature_manager.insert_mine(mine_presignature).await;
+    assert!(presignature_manager.contains(&mine_presig_id).await);
+    assert!(presignature_manager.contains_mine(&mine_presig_id).await);
     assert_eq!(presignature_manager.count_all().await, 1);
     assert_eq!(presignature_manager.count_mine().await, 1);
     assert_eq!(presignature_manager.count_potential().await, 1);
 
     // Take mine presignature and check that it is removed from the storage
     presignature_manager.take_mine().await.unwrap();
-    assert!(!presignature_manager.contains(&presignature.id).await);
-    assert!(!presignature_manager.contains_mine(&presignature.id).await);
+    assert!(!presignature_manager.contains(&mine_presig_id).await);
+    assert!(!presignature_manager.contains_mine(&mine_presig_id).await);
     assert_eq!(presignature_manager.count_all().await, 0);
     assert_eq!(presignature_manager.count_mine().await, 0);
     assert!(presignature_manager.is_empty().await);

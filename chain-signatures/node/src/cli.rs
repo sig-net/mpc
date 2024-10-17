@@ -1,7 +1,7 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::protocol::{MpcSignProtocol, SignQueue};
-use crate::storage::presignature_storage::LockPresignatureStorageBox;
+use crate::storage::presignature_storage::LockRedisPresignatureStorage;
 use crate::storage::triple_storage::LockTripleNodeStorageBox;
 use crate::{http_client, indexer, mesh, storage, web};
 use clap::Parser;
@@ -212,7 +212,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             ));
 
             let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
-            let presignature_storage: LockPresignatureStorageBox =
+            let presignature_storage: LockRedisPresignatureStorage =
                 Arc::new(RwLock::new(storage::presignature_storage::init(redis_url)));
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());

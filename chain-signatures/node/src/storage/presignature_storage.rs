@@ -8,28 +8,16 @@ use url::Url;
 use crate::protocol::presignature::{Presignature, PresignatureId};
 
 type PresigResult<T> = std::result::Result<T, anyhow::Error>;
-pub type PresignatureStorageBox = Box<dyn PresignatureStorage + Send + Sync>;
-pub type LockPresignatureStorageBox = Arc<RwLock<PresignatureStorageBox>>;
+pub type LockRedisPresignatureStorage = Arc<RwLock<RedisPresignatureStorage>>;
 
 const PRESIGNATURES_MAP_NAME: &str = "presignatures";
 const MINE_SET_NAME: &str = "presignatures_mine";
 
-pub fn init(redis_url: Url) -> PresignatureStorageBox {
-    Box::new(RedisPresignatureStorage::new(redis_url)) as PresignatureStorageBox
+pub fn init(redis_url: Url) -> RedisPresignatureStorage {
+    RedisPresignatureStorage::new(redis_url)
 }
 
-pub trait PresignatureStorage {
-    fn insert(&mut self, presignature: Presignature) -> PresigResult<()>;
-    fn insert_mine(&mut self, presignature: Presignature) -> PresigResult<()>;
-    fn contains(&mut self, id: &PresignatureId) -> PresigResult<bool>;
-    fn contains_mine(&mut self, id: &PresignatureId) -> PresigResult<bool>;
-    fn take(&mut self, id: &PresignatureId) -> PresigResult<Option<Presignature>>;
-    fn take_mine(&mut self) -> PresigResult<Option<Presignature>>;
-    fn count_all(&mut self) -> PresigResult<usize>;
-    fn count_mine(&mut self) -> PresigResult<usize>;
-}
-
-struct RedisPresignatureStorage {
+pub struct RedisPresignatureStorage {
     redis_connection: Connection,
 }
 
@@ -44,8 +32,8 @@ impl RedisPresignatureStorage {
     }
 }
 
-impl PresignatureStorage for RedisPresignatureStorage {
-    fn insert(&mut self, presignature: Presignature) -> PresigResult<()> {
+impl RedisPresignatureStorage {
+    pub fn insert(&mut self, presignature: Presignature) -> PresigResult<()> {
         self.redis_connection
             .hset::<&str, PresignatureId, Presignature, ()>(
                 PRESIGNATURES_MAP_NAME,
@@ -55,24 +43,24 @@ impl PresignatureStorage for RedisPresignatureStorage {
         Ok(())
     }
 
-    fn insert_mine(&mut self, presignature: Presignature) -> PresigResult<()> {
+    pub fn insert_mine(&mut self, presignature: Presignature) -> PresigResult<()> {
         self.redis_connection
             .sadd::<&str, PresignatureId, ()>(MINE_SET_NAME, presignature.id)?;
         self.insert(presignature)?;
         Ok(())
     }
 
-    fn contains(&mut self, id: &PresignatureId) -> PresigResult<bool> {
+    pub fn contains(&mut self, id: &PresignatureId) -> PresigResult<bool> {
         let result: bool = self.redis_connection.hexists(PRESIGNATURES_MAP_NAME, id)?;
         Ok(result)
     }
 
-    fn contains_mine(&mut self, id: &PresignatureId) -> PresigResult<bool> {
+    pub fn contains_mine(&mut self, id: &PresignatureId) -> PresigResult<bool> {
         let result: bool = self.redis_connection.sismember(MINE_SET_NAME, id)?;
         Ok(result)
     }
 
-    fn take(&mut self, id: &PresignatureId) -> PresigResult<Option<Presignature>> {
+    pub fn take(&mut self, id: &PresignatureId) -> PresigResult<Option<Presignature>> {
         let result: Option<Presignature> =
             self.redis_connection.hget(PRESIGNATURES_MAP_NAME, id)?;
         match result {
@@ -85,7 +73,7 @@ impl PresignatureStorage for RedisPresignatureStorage {
         }
     }
 
-    fn take_mine(&mut self) -> PresigResult<Option<Presignature>> {
+    pub fn take_mine(&mut self) -> PresigResult<Option<Presignature>> {
         let id: Option<PresignatureId> = self.redis_connection.spop(MINE_SET_NAME)?;
         match id {
             Some(id) => self.take(&id),
@@ -93,12 +81,12 @@ impl PresignatureStorage for RedisPresignatureStorage {
         }
     }
 
-    fn count_all(&mut self) -> PresigResult<usize> {
+    pub fn count_all(&mut self) -> PresigResult<usize> {
         let result: usize = self.redis_connection.hlen(PRESIGNATURES_MAP_NAME)?;
         Ok(result)
     }
 
-    fn count_mine(&mut self) -> PresigResult<usize> {
+    pub fn count_mine(&mut self) -> PresigResult<usize> {
         let result: usize = self.redis_connection.scard(MINE_SET_NAME)?;
         Ok(result)
     }
