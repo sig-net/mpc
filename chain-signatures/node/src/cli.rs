@@ -212,8 +212,9 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             ));
 
             let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
-            let presignature_storage: LockRedisPresignatureStorage =
-                Arc::new(RwLock::new(storage::presignature_storage::init(redis_url)));
+            let presignature_storage: LockRedisPresignatureStorage = Arc::new(RwLock::new(
+                storage::presignature_storage::init(redis_url, &account_id),
+            ));
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
