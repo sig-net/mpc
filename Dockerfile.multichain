@@ -25,7 +25,7 @@ RUN update-ca-certificates
 COPY --from=builder /usr/src/app/target/release/mpc-node /usr/local/bin/mpc-node
 
 # Create a script to start both Redis and the Rust app
-RUN echo "#!/bin/bash\nservice redis-server start ./redis.conf\nexec mpc-node" > /start.sh \
+RUN echo "#!/bin/bash\nservice redis-server start ./redis.conf\nexec mpc-node start" > /start.sh \
     && chmod +x /start.sh
 
 WORKDIR /usr/local/bin
