@@ -9,7 +9,7 @@ use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolErro
 use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
 use chrono::Utc;
 use crypto_shared::PublicKey;
-use k256::Secp256k1;
+use k256::{AffinePoint, Scalar, Secp256k1};
 use mpc_contract::config::ProtocolConfig;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
@@ -37,24 +37,11 @@ impl Serialize for Presignature {
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("Presignature", 3)?;
+        let mut state = serializer.serialize_struct("Presignature", 5)?;
         state.serialize_field("id", &self.id)?;
-
-        let mut output_map = serde_json::Map::new();
-        output_map.insert(
-            "big_r".to_string(),
-            serde_json::to_value(self.output.big_r).map_err(serde::ser::Error::custom)?,
-        );
-        output_map.insert(
-            "k".to_string(),
-            serde_json::to_value(self.output.k).map_err(serde::ser::Error::custom)?,
-        );
-        output_map.insert(
-            "sigma".to_string(),
-            serde_json::to_value(self.output.sigma).map_err(serde::ser::Error::custom)?,
-        );
-
-        state.serialize_field("output", &output_map)?;
+        state.serialize_field("output_big_r", &self.output.big_r)?;
+        state.serialize_field("output_k", &self.output.k)?;
+        state.serialize_field("output_sigma", &self.output.sigma)?;
         state.serialize_field("participants", &self.participants)?;
         state.end()
     }
@@ -68,31 +55,20 @@ impl<'de> Deserialize<'de> for Presignature {
         #[derive(Deserialize)]
         struct PresignatureFields {
             id: PresignatureId,
-            output: serde_json::Value,
+            output_big_r: AffinePoint,
+            output_k: Scalar,
+            output_sigma: Scalar,
             participants: Vec<Participant>,
         }
 
         let fields = PresignatureFields::deserialize(deserializer)?;
 
-        let big_r = fields
-            .output
-            .get("big_r")
-            .ok_or_else(|| serde::de::Error::missing_field("big_r"))?;
-        let k = fields
-            .output
-            .get("k")
-            .ok_or_else(|| serde::de::Error::missing_field("k"))?;
-        let sigma = fields
-            .output
-            .get("sigma")
-            .ok_or_else(|| serde::de::Error::missing_field("sigma"))?;
-
         Ok(Self {
             id: fields.id,
             output: PresignOutput {
-                big_r: serde_json::from_value(big_r.clone()).map_err(serde::de::Error::custom)?,
-                k: serde_json::from_value(k.clone()).map_err(serde::de::Error::custom)?,
-                sigma: serde_json::from_value(sigma.clone()).map_err(serde::de::Error::custom)?,
+                big_r: fields.output_big_r,
+                k: fields.output_k,
+                sigma: fields.output_sigma,
             },
             participants: fields.participants,
         })
