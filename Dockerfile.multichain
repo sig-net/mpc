@@ -33,8 +33,5 @@ RUN echo "#!/bin/bash\nservice redis-server start &\nexec mpc-node start" > /sta
 
 WORKDIR /usr/local/bin
 
-# Expose Redis port (6379) and mpc node's port
-EXPOSE 6379 8080
-
 # Start Redis and the Rust application
 ENTRYPOINT [ "/start.sh" ]
