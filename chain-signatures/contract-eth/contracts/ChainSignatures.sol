@@ -1,67 +1,99 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-
-contract ChainSignatures is Ownable {
-    using ECDSA for bytes32;
-
-    struct Participant {
-        string url;
-        bytes32 cipherPk;
-        address signPk;
-    }
+contract ChainSignatures {
+    // Generator point G of secp256k1
+    uint256 constant Gx = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798;
+    uint256 constant Gy = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8;
 
     struct SignatureRequest {
-        bytes32 payloadHash;
+        uint256 payload;
         address requester;
         string path;
     }
 
     struct SignatureResponse {
-        bytes32 big_r;
-        bytes32 s;
+        PublicKey big_r;
+        uint256 s;
         uint8 recovery_id;
+    }
+
+    // public key in affine form
+    struct PublicKey {
+        uint256 x;
+        uint256 y;
     }
 
     uint256 public threshold;
     mapping(bytes32 => SignatureRequest) public pendingRequests;
     uint256 public requestCounter;
-    address public publicKey;
+    PublicKey public publicKey;
 
     mapping(bytes32 => uint256) public depositToRefund;
 
-    event SignatureRequested(bytes32 indexed requestId, address requester, bytes32 payloadHash, string path);
+    event SignatureRequested(bytes32 indexed requestId, address requester, uint256 payload, string path);
     event SignatureResponded(bytes32 indexed requestId, bytes32 big_r, bytes32 s, uint8 recovery_id);
 
-    constructor(address _publicKey) {
+    constructor(PublicKey memory _publicKey) {
         publicKey = _publicKey;
     }
 
-    function sign(bytes32 _payloadHash, string memory _path) external payable returns (bytes32) {
+    function getPublicKey() public view returns (PublicKey memory) {
+        return publicKey;
+    }
+
+    function derivedPublicKey(string memory path, address _predecessor) public view returns (PublicKey memory) {
+        address predecessor = _predecessor == address(0) ? msg.sender : _predecessor;
+        uint256 epsilon = deriveEpsilon(path, predecessor);
+        PublicKey memory _derivedPublicKey = deriveKey(publicKey, epsilon);
+        return _derivedPublicKey;
+    }
+
+function deriveKey(PublicKey memory _publicKey, uint256 epsilon) internal view returns (PublicKey memory) {
+        
+        // G * epsilon + publicKey
+        (uint256 epsilonGx, uint256 epsilonGy) = ecMul(epsilon, gx, gy);
+        (uint256 resultX, uint256 resultY) = ecAdd(epsilonGx, epsilonGy, _publicKey.x, _publicKey.y);
+        return PublicKey(resultX, resultY, 0);
+    }
+
+    function deriveEpsilon(string memory path, address predecessor) public pure returns (uint256) {
+        // TODO Ethereum doesn't have SHA3-256, so we use keccak256 temporarily
+        bytes32 epsilonBytes = keccak256(abi.encodePacked("near-mpc-recovery v0.1.0 epsilon derivation:", predecessor, ",", path));
+        uint256 epsilon = uint256(epsilonBytes);
+        return epsilon;
+    }
+
+    function sign(bytes32 _payload, string memory _path) external payable returns (bytes32) {
         uint256 requiredDeposit = getSignatureDeposit();
         require(msg.value >= requiredDeposit, "Insufficient deposit");
 
-        bytes32 requestId = keccak256(abi.encodePacked(_payloadHash, msg.sender, _path));
+        // Concert payload to int as big-endian, check if payload is than the secp256k1 curve order
+        uint256 payload = uint256(_payload);
+        require(
+            payload < 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141,
+            "Payload exceeds secp256k1 curve order"
+        );
+
+        bytes32 requestId = keccak256(abi.encodePacked(payload, msg.sender, _path));
         require(pendingRequests[requestId].requester == address(0), "Request already exists");
 
-        pendingRequests[requestId] = SignatureRequest(_payloadHash, msg.sender, _path);
+        SignatureRequest memory request = SignatureRequest(payload, msg.sender, _path);
+        pendingRequests[requestId] = request;
         depositToRefund[requestId] = msg.value - requiredDeposit;
         requestCounter++;
 
-        emit SignatureRequested(requestId, msg.sender, _payloadHash, _path);
+        emit SignatureRequested(requestId, msg.sender, payload, _path);
 
         return requestId;
     }
+    
     function respond(bytes32 _requestId, SignatureResponse memory _response) external {        
         SignatureRequest storage request = pendingRequests[_requestId];
         require(request.requester != address(0), "Request not found");
 
-        // Verify the signature
-        // Derive the expected public key
-        bytes32 epsilon = keccak256(abi.encodePacked("near-mpc-recovery v0.1.0 epsilon derivation:", request.requester, ",", request.path));
-        address expectedPublicKey = deriveKey(publicKey, epsilon);
+        uint256 epsilon = deriveEpsilon(request.path, request.requester);
+        PublicKey memory expectedPublicKey = deriveKey(publicKey, epsilon);
 
         // Check the signature
         require(
@@ -99,27 +131,31 @@ contract ChainSignatures is Ownable {
         }
     }
 
-    function deriveKey(address _publicKey, bytes32 _epsilon) internal view returns (address) {
-        // Convert public key to (x, y) coordinates
-        (uint256 x, uint256 y) = abi.decode(abi.encodePacked(_publicKey), (uint256, uint256));
-        
-        // Perform elliptic curve point addition
-        // G * epsilon + publicKey
-        (x, y) = ecMul(uint256(_epsilon), 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798, 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8);
-        (x, y) = ecAdd(x, y, uint256(uint160(_publicKey)), y);
-        
-        // Convert result back to address
-        return address(uint160(uint256(keccak256(abi.encodePacked(x, y)))));
-    }
-
     function checkECSignature(
-        address _expectedPk,
-        uint256 _bigR,
+        PublicKey memory _expectedPk,
+        PublicKey memory _bigR,
         uint256 _s,
         bytes32 _msgHash,
         uint8 _recoveryId
     ) internal pure returns (bool) {
-        // TODO
+        // Reconstruct the signature
+        bytes32 r = bytes32(_bigR);
+        bytes32 s = bytes32(_s);
+    
+        // Recover the signer's address
+        // TODO ethereum ecrecover returns an address, but we need a curve point
+        PublicKey foundPk = ecrecover(_msgHash, _recoveryId, r, s);
+        
+        // If recovery fails with the given recovery ID, try the alternative
+        uint8 alternativeRecoveryId = _recoveryId ^ 1;
+        address alternativeRecoveredAddress = ecrecover(_msgHash, alternativeRecoveryId, r, s);
+        
+        if (alternativeRecoveredAddress == _expectedPk) {
+            return true;
+        }
+        
+        // If both recovery attempts fail, return false
+        return false;
     }
 
     // Helper function for elliptic curve point multiplication
