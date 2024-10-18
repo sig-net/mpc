@@ -6,6 +6,7 @@ use super::state::{
 use super::{Config, SignQueue};
 use crate::gcp::error::DatastoreStorageError;
 use crate::gcp::error::SecretStorageError;
+use crate::http_client::MessageQueue;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::monitor::StuckMonitor;
 use crate::protocol::presignature::PresignatureManager;
@@ -170,7 +171,9 @@ impl ConsensusProtocol for StartedState {
                                                 ctx.my_account_id(),
                                             ),
                                         )),
-                                        messages: Default::default(),
+                                        messages: Arc::new(RwLock::new(MessageQueue::new(
+                                            ctx.my_account_id(),
+                                        ))),
                                     }))
                                 }
                                 None => Ok(NodeState::Joining(JoiningState {
@@ -224,7 +227,9 @@ impl ConsensusProtocol for StartedState {
                                 participants,
                                 threshold: contract_state.threshold,
                                 protocol,
-                                messages: Default::default(),
+                                messages: Arc::new(RwLock::new(MessageQueue::new(
+                                    ctx.my_account_id(),
+                                ))),
                             }))
                         }
                         None => {
@@ -760,6 +765,6 @@ async fn start_resharing<C: ConsensusCtx>(
         threshold: contract_state.threshold,
         public_key: contract_state.public_key,
         protocol,
-        messages: Default::default(),
+        messages: Arc::new(RwLock::new(MessageQueue::new(ctx.my_account_id()))),
     }))
 }

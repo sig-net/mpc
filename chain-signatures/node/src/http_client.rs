@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
 
+use near_account_id::AccountId;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
     #[error("http request was unsuccessful: {0}")]
@@ -33,7 +35,7 @@ pub enum SendError {
 
 async fn send_encrypted<U: IntoUrl>(
     from: Participant,
-    client: &Client,
+    client: Client,
     url: U,
     message: Vec<Ciphered>,
 ) -> Result<(), SendError> {
@@ -75,13 +77,21 @@ async fn send_encrypted<U: IntoUrl>(
 
 // TODO: add in retry logic either in struct or at call site.
 // TODO: add check for participant list to see if the messages to be sent are still valid.
-#[derive(Default)]
 pub struct MessageQueue {
     deque: VecDeque<(ParticipantInfo, MpcMessage, Instant)>,
     seen_counts: HashSet<String>,
+    account_id: AccountId,
 }
 
 impl MessageQueue {
+    pub fn new(id: &AccountId) -> Self {
+        Self {
+            deque: VecDeque::new(),
+            seen_counts: HashSet::new(),
+            account_id: id.clone(),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.deque.len()
     }
@@ -135,47 +145,57 @@ impl MessageQueue {
             encrypted.push((encrypted_msg, (info, msg, instant)));
         }
 
-        let mut compacted = 0;
+        let mut tasks = tokio::task::JoinSet::new();
         for (id, encrypted) in encrypted {
             for partition in partition_ciphered_256kb(encrypted) {
-                let (encrypted_partition, msgs): (Vec<_>, Vec<_>) = partition.into_iter().unzip();
+                let (encrypted_partition, _msgs): (Vec<_>, Vec<_>) = partition.into_iter().unzip();
                 // guaranteed to unwrap due to our previous loop check:
-                let info = participants.get(&Participant::from(id)).unwrap();
+                let id = Participant::from(id);
+                let info = participants.get(&id).unwrap();
                 let account_id = &info.account_id;
 
-                let start = Instant::now();
                 crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
                     .with_label_values(&[account_id.as_str()])
                     .inc();
-                if let Err(err) = send_encrypted(from, client, &info.url, encrypted_partition).await
-                {
-                    crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
-                        .with_label_values(&[account_id.as_str()])
-                        .inc();
-                    crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
-                        .with_label_values(&[account_id.as_str()])
-                        .observe(start.elapsed().as_millis() as f64);
 
-                    // since we failed, put back all the messages related to this
-                    failed.extend(msgs);
+                tasks.spawn(send_encrypted(
+                    from,
+                    client.clone(),
+                    info.url.clone(),
+                    encrypted_partition,
+                ));
+            }
+        }
+
+        let mut compacted = 0;
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(result) => {
+                    let Err(err) = result else {
+                        compacted += 1;
+                        continue;
+                    };
                     errors.push(err);
-                } else {
-                    compacted += msgs.len();
-                    crate::metrics::SEND_ENCRYPTED_LATENCY
-                        .with_label_values(&[account_id.as_str()])
-                        .observe(start.elapsed().as_millis() as f64);
+                }
+                Err(err) => {
+                    tracing::error!(?err, "message queue task failure");
                 }
             }
         }
 
-        if uncompacted > 0 {
+        let elapsed = outer.elapsed();
+        if elapsed > Duration::from_millis(100) && uncompacted > 0 {
             tracing::info!(
                 uncompacted,
                 compacted,
-                "{from:?} sent messages in {:?};",
-                outer.elapsed()
+                "{from:?} sent messages in {:?}",
+                elapsed,
             );
         }
+        crate::metrics::SEND_ENCRYPTED_LATENCY
+            .with_label_values(&[self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
+
         // only add the participant count if it hasn't been seen before.
         let counts = format!("{participant_counter:?}");
         if !participant_counter.is_empty() && self.seen_counts.insert(counts.clone()) {
