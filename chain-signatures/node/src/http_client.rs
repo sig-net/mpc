@@ -13,6 +13,19 @@ use tokio_retry::Retry;
 
 use near_account_id::AccountId;
 
+#[derive(Debug, Clone, clap::Parser)]
+#[group(id = "message_options")]
+pub struct Options {
+    #[clap(long, env("MPC_MESSAGE_TIMEOUT"), default_value = "1000")]
+    pub timeout: u64,
+}
+
+impl Options {
+    pub fn into_str_args(self) -> Vec<String> {
+        vec!["--timeout".to_string(), self.timeout.to_string()]
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
     #[error("http request was unsuccessful: {0}")]
@@ -38,19 +51,25 @@ async fn send_encrypted<U: IntoUrl>(
     client: Client,
     url: U,
     message: Vec<Ciphered>,
+    request_timeout: Duration,
 ) -> Result<(), SendError> {
     let _span = tracing::info_span!("message_request");
     let mut url = url.into_url()?;
     url.set_path("msg");
     tracing::debug!(?from, to = %url, "making http request: sending encrypted message");
     let action = || async {
-        let response = client
-            .post(url.clone())
-            .header("content-type", "application/json")
-            .json(&message)
-            .send()
-            .await
-            .map_err(SendError::ReqwestClientError)?;
+        let response = tokio::time::timeout(
+            request_timeout,
+            client
+                .post(url.clone())
+                .header("content-type", "application/json")
+                .json(&message)
+                .send(),
+        )
+        .await
+        .map_err(|_| SendError::Timeout(format!("send encrypted from {from:?} to {url}")))?
+        .map_err(SendError::ReqwestClientError)?;
+
         let status = response.status();
         let response_bytes = response
             .bytes()
@@ -81,14 +100,16 @@ pub struct MessageQueue {
     deque: VecDeque<(ParticipantInfo, MpcMessage, Instant)>,
     seen_counts: HashSet<String>,
     account_id: AccountId,
+    message_options: Options,
 }
 
 impl MessageQueue {
-    pub fn new(id: &AccountId) -> Self {
+    pub fn new(id: &AccountId, options: Options) -> Self {
         Self {
             deque: VecDeque::new(),
             seen_counts: HashSet::new(),
             account_id: id.clone(),
+            message_options: options,
         }
     }
 
@@ -163,6 +184,7 @@ impl MessageQueue {
                     client.clone(),
                     info.url.clone(),
                     encrypted_partition,
+                    Duration::from_millis(self.message_options.timeout),
                 ));
             }
         }
