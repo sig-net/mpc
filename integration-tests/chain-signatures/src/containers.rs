@@ -631,26 +631,15 @@ pub struct Redis<'a> {
 
 impl<'a> Redis<'a> {
     pub const CONTAINER_PORT: u16 = 6379;
-    pub const HOST_CONFIG_PATH: &'static str = "./redis.conf";
-    pub const CONTAINER_CONFIG_PATH: &'static str = "/usr/local/etc/redis/redis.conf";
 
     pub async fn run(docker_client: &'a DockerClient, network: &str) -> anyhow::Result<Redis<'a>> {
         tracing::info!("Running Redis container...");
 
-        let image = GenericImage::new("redis", "7.2.5")
+        let image = GenericImage::new("redis", "7.0.15")
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .with_exposed_port(Self::CONTAINER_PORT)
-            .with_volume(Self::HOST_CONFIG_PATH, Self::CONTAINER_CONFIG_PATH);
+            .with_exposed_port(Self::CONTAINER_PORT);
 
-        // Pass the config file to Redis on startup
-        let image: RunnableImage<GenericImage> = (
-            image,
-            vec![
-                "redis-server".to_string(),
-                Self::CONTAINER_CONFIG_PATH.to_string(),
-            ],
-        )
-            .into();
+        let image: RunnableImage<GenericImage> = (image).into();
 
         let image = image.with_network(network);
 
