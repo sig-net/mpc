@@ -626,48 +626,35 @@ impl<'a> Datastore<'a> {
 pub struct Redis<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,
+    pub full_address: String,
     pub local_address: String,
 }
 
 impl<'a> Redis<'a> {
-    pub const CONTAINER_PORT: u16 = 6379;
-    pub const HOST_CONFIG_PATH: &'static str = "./redis.conf";
-    pub const CONTAINER_CONFIG_PATH: &'static str = "/usr/local/etc/redis/redis.conf";
+    const CONTAINER_PORT: u16 = 3000;
 
     pub async fn run(docker_client: &'a DockerClient, network: &str) -> anyhow::Result<Redis<'a>> {
         tracing::info!("Running Redis container...");
-
-        let image = GenericImage::new("redis", "7.2.5")
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+        let image = GenericImage::new("redis", "latest")
             .with_exposed_port(Self::CONTAINER_PORT)
-            .with_volume(Self::HOST_CONFIG_PATH, Self::CONTAINER_CONFIG_PATH);
-
-        // Pass the config file to Redis on startup
-        let image: RunnableImage<GenericImage> = (
-            image,
-            vec![
-                "redis-server".to_string(),
-                Self::CONTAINER_CONFIG_PATH.to_string(),
-            ],
-        )
-            .into();
-
+            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"));
+        let image: RunnableImage<GenericImage> = image.into();
         let image = image.with_network(network);
-
         let container = docker_client.cli.run(image);
-        let ip_address = docker_client
+        let address = docker_client
             .get_network_ip_address(&container, network)
             .await?;
+
+        // Note: this port is hardcoded in the Redis image
+        let full_address = format!("redis://{}:{}", address, 6379);
         let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
 
-        let full_address = format!("redis://{}:{}/", ip_address, Self::CONTAINER_PORT);
-        let local_address = format!("redis://127.0.0.1:{}/", host_port);
         tracing::info!("Redis container is running at {}", full_address);
-
         Ok(Redis {
             container,
-            local_address,
-            address: full_address,
+            address,
+            full_address,
+            local_address: format!("http://127.0.0.1:{host_port}"),
         })
     }
 }

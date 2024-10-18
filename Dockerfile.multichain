@@ -32,8 +32,5 @@ RUN echo "#!/bin/bash\nchown redis:redis /data\nservice redis-server start &\nex
 
 WORKDIR /usr/local/bin
 
-# Expose Redis port (6379) and mpc node's port
-EXPOSE 6379 8080
-
 # Start Redis and the Rust application
 ENTRYPOINT [ "/start.sh" ]
