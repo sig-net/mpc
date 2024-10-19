@@ -77,7 +77,7 @@ module "gce-container" {
       {
         name = "host-path"
         hostPath = {
-          path = "/etc/redis"
+          path = "/var/redis"
         }
       }
     ]
