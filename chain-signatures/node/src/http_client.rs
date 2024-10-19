@@ -206,12 +206,11 @@ impl MessageQueue {
         }
 
         let elapsed = outer.elapsed();
-        if elapsed > Duration::from_millis(100) && uncompacted > 0 {
+        if uncompacted > 0 {
             tracing::info!(
                 uncompacted,
                 compacted,
-                "{from:?} sent messages in {:?}",
-                elapsed,
+                "{from:?} sent messages in {elapsed:?}",
             );
         }
         crate::metrics::SEND_ENCRYPTED_LATENCY
