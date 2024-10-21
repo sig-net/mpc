@@ -242,7 +242,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let docker_network = "test-presignature-persistence";
     docker_client.create_network(docker_network).await?;
     let redis = containers::Redis::run(&docker_client, docker_network).await?;
-    let redis_url = Url::parse(redis.local_address.as_str())?;
+    let redis_url = Url::parse(&&redis.internal_address.as_str())?;
     let presignature_storage: LockRedisPresignatureStorage = Arc::new(RwLock::new(
         storage::presignature_storage::init(redis_url, &AccountId::from_str("test.near").unwrap()),
     ));
