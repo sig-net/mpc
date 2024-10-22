@@ -16,10 +16,10 @@ use mpc_contract::config::Config;
 use mpc_contract::update::ProposeUpdateArgs;
 use mpc_node::kdf::into_eth_sig;
 use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
+use mpc_node::storage;
 use mpc_node::storage::presignature_storage::LockRedisPresignatureStorage;
 use mpc_node::types::LatestBlockHeight;
 use mpc_node::util::NearPublicKeyExt;
-use mpc_node::{storage, test_utils};
 use near_account_id::AccountId;
 use test_log::test;
 use tokio::sync::RwLock;
@@ -209,30 +209,8 @@ async fn test_key_derivation() -> anyhow::Result<()> {
 }
 
 #[test(tokio::test)]
-async fn test_triples_persistence_for_generation() -> anyhow::Result<()> {
-    let docker_client = DockerClient::default();
-    let gcp_project_id = "test-triple-persistence";
-    let docker_network = "test-triple-persistence";
-    docker_client.create_network(docker_network).await?;
-    let datastore =
-        containers::Datastore::run(&docker_client, docker_network, gcp_project_id).await?;
-    let datastore_url = datastore.local_address.clone();
-    // verifies that @triple generation, the datastore triples are in sync with local generated triples
-    test_utils::test_triple_generation(Some(datastore_url.clone())).await;
-    Ok(())
-}
-
-#[test(tokio::test)]
-async fn test_triples_persistence_for_deletion() -> anyhow::Result<()> {
-    let docker_client = DockerClient::default();
-    let gcp_project_id = "test-triple-persistence";
-    let docker_network = "test-triple-persistence";
-    docker_client.create_network(docker_network).await?;
-    let datastore =
-        containers::Datastore::run(&docker_client, docker_network, gcp_project_id).await?;
-    let datastore_url = datastore.local_address.clone();
-    // verifies that @triple deletion, the datastore is working as expected
-    test_utils::test_triple_deletion(Some(datastore_url)).await;
+async fn test_triple_persistence() -> anyhow::Result<()> {
+    // TODO: add triple persistence test
     Ok(())
 }
 

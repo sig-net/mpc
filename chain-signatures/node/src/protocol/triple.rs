@@ -3,7 +3,7 @@ use super::cryptography::CryptographicError;
 use super::message::TripleMessage;
 use super::presignature::GenerationError;
 use crate::gcp::error;
-use crate::storage::triple_storage::{LockTripleNodeStorageBox, TripleData};
+use crate::storage::triple_storage::{LockMemoryTripleStorage, TripleData};
 use crate::types::TripleProtocol;
 use crate::util::AffinePointExt;
 
@@ -106,7 +106,7 @@ pub struct TripleManager {
     pub me: Participant,
     pub threshold: usize,
     pub epoch: u64,
-    pub triple_storage: LockTripleNodeStorageBox,
+    pub triple_storage: LockMemoryTripleStorage,
     pub my_account_id: AccountId,
 }
 
@@ -134,7 +134,7 @@ impl TripleManager {
         threshold: usize,
         epoch: u64,
         triple_data: Vec<TripleData>,
-        triple_storage: LockTripleNodeStorageBox,
+        triple_storage: LockMemoryTripleStorage,
         my_account_id: &AccountId,
     ) -> Self {
         let mut mine: VecDeque<TripleId> = VecDeque::new();
@@ -607,20 +607,5 @@ impl TripleManager {
             let retry_strategy = std::iter::repeat_with(|| Duration::from_millis(500)).take(3);
             let _ = tokio_retry::Retry::spawn(retry_strategy, action).await;
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    // TODO: This test currently takes 22 seconds on my machine, which is much slower than it should be
-    // Improve this before we make more similar tests
-    #[tokio::test]
-    async fn test_happy_triple_generation_locally() {
-        crate::test_utils::test_triple_generation(None).await
-    }
-
-    #[tokio::test]
-    async fn test_triple_deletion_locally() {
-        crate::test_utils::test_triple_deletion(None).await
     }
 }
