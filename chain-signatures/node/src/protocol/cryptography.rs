@@ -372,7 +372,7 @@ impl CryptographicProtocol for RunningState {
         crate::metrics::MESSAGE_QUEUE_SIZE
             .with_label_values(&[my_account_id.as_str()])
             .set(messages.len() as i64);
-        if let Err(err) = triple_manager.stockpile(active, protocol_cfg) {
+        if let Err(err) = triple_manager.stockpile(active, protocol_cfg).await {
             tracing::warn!(?err, "running: failed to stockpile triples");
         }
         for (p, msg) in triple_manager.poke(protocol_cfg).await {
@@ -382,10 +382,10 @@ impl CryptographicProtocol for RunningState {
 
         crate::metrics::NUM_TRIPLES_MINE
             .with_label_values(&[my_account_id.as_str()])
-            .set(triple_manager.mine.len() as i64);
+            .set(triple_manager.count_mine().await as i64);
         crate::metrics::NUM_TRIPLES_TOTAL
             .with_label_values(&[my_account_id.as_str()])
-            .set(triple_manager.triples.len() as i64);
+            .set(triple_manager.count_all().await as i64);
         crate::metrics::NUM_TRIPLE_GENERATORS_INTRODUCED
             .with_label_values(&[my_account_id.as_str()])
             .set(triple_manager.introduced.len() as i64);
@@ -482,7 +482,6 @@ impl CryptographicProtocol for RunningState {
         }
         drop(messages);
 
-        self.stuck_monitor.write().await.check(protocol_cfg).await;
         Ok(NodeState::Running(self))
     }
 }

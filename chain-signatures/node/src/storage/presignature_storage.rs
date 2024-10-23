@@ -64,6 +64,10 @@ impl RedisPresignatureStorage {
     }
 
     pub fn take(&mut self, id: &PresignatureId) -> PresigResult<Option<Presignature>> {
+        if self.contains_mine(id)? {
+            tracing::error!("Can not take mine presignature as foreign: {:?}", id);
+            return Ok(None);
+        }
         let result: Option<Presignature> =
             self.redis_connection.hget(self.presignature_key(), id)?;
         match result {
@@ -92,6 +96,13 @@ impl RedisPresignatureStorage {
     pub fn count_mine(&mut self) -> PresigResult<usize> {
         let result: usize = self.redis_connection.scard(self.mine_key())?;
         Ok(result)
+    }
+
+    pub fn clear(&mut self) -> PresigResult<()> {
+        self.redis_connection
+            .del::<&str, ()>(&self.presignature_key())?;
+        self.redis_connection.del::<&str, ()>(&self.mine_key())?;
+        Ok(())
     }
 
     fn presignature_key(&self) -> String {

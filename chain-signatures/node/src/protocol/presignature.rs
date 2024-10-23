@@ -187,6 +187,8 @@ impl PresignatureManager {
 
     pub async fn insert(&mut self, presignature: Presignature) {
         tracing::info!(id = ?presignature.id, "inserting presignature");
+        // Remove from taken list if it was there
+        self.gc.remove(&presignature.id);
         if let Err(e) = self.presignature_storage.write().await.insert(presignature) {
             tracing::error!(?e, "failed to insert presignature");
         }
