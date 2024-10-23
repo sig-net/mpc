@@ -256,7 +256,10 @@ impl MessageHandler for RunningState {
             !triple_manager.refresh_gc(id)
         });
         for (id, queue) in triple_messages {
-            let protocol = match triple_manager.get_or_generate(*id, participants, protocol_cfg) {
+            let protocol = match triple_manager
+                .get_or_start_generation(*id, participants, protocol_cfg)
+                .await
+            {
                 Ok(protocol) => protocol,
                 Err(err) => {
                     // ignore the message since the generation had bad parameters. Also have the other node who

@@ -1,8 +1,8 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::protocol::{MpcSignProtocol, SignQueue};
-use crate::storage::presignature_storage::LockRedisPresignatureStorage;
-use crate::storage::triple_storage::LockTripleNodeStorageBox;
+use crate::storage::presignature_storage::LockPresignatureRedisStorage;
+use crate::storage::triple_storage::LockTripleRedisStorage;
 use crate::{http_client, indexer, mesh, storage, web};
 use clap::Parser;
 use local_ip_address::local_ip;
@@ -207,12 +207,14 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let key_storage =
                 storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
-            let triple_storage: LockTripleNodeStorageBox = Arc::new(RwLock::new(
-                storage::triple_storage::init(Some(&gcp_service), &account_id),
-            ));
 
             let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
-            let presignature_storage: LockRedisPresignatureStorage = Arc::new(RwLock::new(
+
+            let triple_storage: LockTripleRedisStorage = Arc::new(RwLock::new(
+                storage::triple_storage::init(redis_url.clone(), &account_id),
+            ));
+
+            let presignature_storage: LockPresignatureRedisStorage = Arc::new(RwLock::new(
                 storage::presignature_storage::init(redis_url, &account_id),
             ));
 

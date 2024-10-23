@@ -3,7 +3,6 @@ mod cryptography;
 pub mod consensus;
 pub mod contract;
 pub mod message;
-pub mod monitor;
 pub mod presignature;
 pub mod signature;
 pub mod state;
@@ -30,9 +29,9 @@ use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{MessageHandler, MpcMessageQueue};
 use crate::rpc_client;
-use crate::storage::presignature_storage::LockRedisPresignatureStorage;
+use crate::storage::presignature_storage::LockPresignatureRedisStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
-use crate::storage::triple_storage::LockTripleNodeStorageBox;
+use crate::storage::triple_storage::LockTripleRedisStorage;
 
 use cait_sith::protocol::Participant;
 use near_account_id::AccountId;
@@ -54,8 +53,8 @@ struct Ctx {
     http_client: reqwest::Client,
     sign_queue: Arc<RwLock<SignQueue>>,
     secret_storage: SecretNodeStorageBox,
-    triple_storage: LockTripleNodeStorageBox,
-    presignature_storage: LockRedisPresignatureStorage,
+    triple_storage: LockTripleRedisStorage,
+    presignature_storage: LockPresignatureRedisStorage,
     cfg: Config,
     mesh: Mesh,
     message_options: http_client::Options,
@@ -98,11 +97,11 @@ impl ConsensusCtx for &mut MpcSignProtocol {
         &self.ctx.cfg
     }
 
-    fn triple_storage(&self) -> LockTripleNodeStorageBox {
+    fn triple_storage(&self) -> LockTripleRedisStorage {
         self.ctx.triple_storage.clone()
     }
 
-    fn presignature_storage(&self) -> LockRedisPresignatureStorage {
+    fn presignature_storage(&self) -> LockPresignatureRedisStorage {
         self.ctx.presignature_storage.clone()
     }
 
@@ -178,8 +177,8 @@ impl MpcSignProtocol {
         receiver: mpsc::Receiver<MpcMessage>,
         sign_queue: Arc<RwLock<SignQueue>>,
         secret_storage: SecretNodeStorageBox,
-        triple_storage: LockTripleNodeStorageBox,
-        presignature_storage: LockRedisPresignatureStorage,
+        triple_storage: LockTripleRedisStorage,
+        presignature_storage: LockPresignatureRedisStorage,
         cfg: Config,
         mesh_options: mesh::Options,
         message_options: http_client::Options,
