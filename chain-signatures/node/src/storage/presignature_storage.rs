@@ -9,21 +9,21 @@ use url::Url;
 use crate::protocol::presignature::{Presignature, PresignatureId};
 
 type PresigResult<T> = std::result::Result<T, anyhow::Error>;
-pub type LockRedisPresignatureStorage = Arc<RwLock<RedisPresignatureStorage>>;
+pub type LockPresignatureRedisStorage = Arc<RwLock<PresignatureRedisStorage>>;
 
 // Can be used to "clear" redis storage in case of a breaking change
-const STORAGE_VERSION: &str = "v1";
+const PRESIGNATURE_STORAGE_VERSION: &str = "v1";
 
-pub fn init(redis_url: Url, node_account_id: &AccountId) -> RedisPresignatureStorage {
-    RedisPresignatureStorage::new(redis_url, node_account_id)
+pub fn init(redis_url: Url, node_account_id: &AccountId) -> PresignatureRedisStorage {
+    PresignatureRedisStorage::new(redis_url, node_account_id)
 }
 
-pub struct RedisPresignatureStorage {
+pub struct PresignatureRedisStorage {
     redis_connection: Connection,
     node_account_id: AccountId,
 }
 
-impl RedisPresignatureStorage {
+impl PresignatureRedisStorage {
     fn new(redis_url: Url, node_account_id: &AccountId) -> Self {
         Self {
             redis_connection: redis::Client::open(redis_url.as_str())
@@ -35,7 +35,7 @@ impl RedisPresignatureStorage {
     }
 }
 
-impl RedisPresignatureStorage {
+impl PresignatureRedisStorage {
     pub fn insert(&mut self, presignature: Presignature) -> PresigResult<()> {
         self.redis_connection
             .hset::<&str, PresignatureId, Presignature, ()>(
@@ -106,13 +106,16 @@ impl RedisPresignatureStorage {
     }
 
     fn presignature_key(&self) -> String {
-        format!("presignatures:{}:{}", STORAGE_VERSION, self.node_account_id)
+        format!(
+            "presignatures:{}:{}",
+            PRESIGNATURE_STORAGE_VERSION, self.node_account_id
+        )
     }
 
     fn mine_key(&self) -> String {
         format!(
             "presignatures_mine:{}:{}",
-            STORAGE_VERSION, self.node_account_id
+            PRESIGNATURE_STORAGE_VERSION, self.node_account_id
         )
     }
 }

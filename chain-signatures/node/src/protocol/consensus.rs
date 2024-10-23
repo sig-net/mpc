@@ -12,9 +12,9 @@ use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
-use crate::storage::presignature_storage::LockRedisPresignatureStorage;
+use crate::storage::presignature_storage::LockPresignatureRedisStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
-use crate::storage::triple_storage::LockTripleMemoryStorage;
+use crate::storage::triple_storage::LockTripleRedisStorage;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 use crate::{http_client, rpc_client};
@@ -40,8 +40,8 @@ pub trait ConsensusCtx {
     fn my_address(&self) -> &Url;
     fn sign_queue(&self) -> Arc<RwLock<SignQueue>>;
     fn secret_storage(&self) -> &SecretNodeStorageBox;
-    fn triple_storage(&self) -> LockTripleMemoryStorage;
-    fn presignature_storage(&self) -> LockRedisPresignatureStorage;
+    fn triple_storage(&self) -> LockTripleRedisStorage;
+    fn presignature_storage(&self) -> LockPresignatureRedisStorage;
     fn cfg(&self) -> &Config;
     fn message_options(&self) -> http_client::Options;
 }
@@ -138,8 +138,8 @@ impl ConsensusProtocol for StartedState {
                                         me,
                                         contract_state.threshold,
                                         epoch,
-                                        ctx.triple_storage(),
                                         ctx.my_account_id(),
+                                        ctx.triple_storage(),
                                     )));
 
                                     let presignature_manager =
@@ -379,8 +379,8 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         me,
                         self.threshold,
                         self.epoch,
-                        ctx.triple_storage(),
                         ctx.my_account_id(),
+                        ctx.triple_storage(),
                     )));
 
                     let presignature_manager = Arc::new(RwLock::new(PresignatureManager::new(

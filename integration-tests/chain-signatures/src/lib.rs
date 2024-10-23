@@ -18,13 +18,14 @@ use mpc_node::gcp::GcpService;
 use mpc_node::http_client;
 use mpc_node::mesh;
 use mpc_node::storage;
-use mpc_node::storage::triple_storage::TripleMemoryStorage;
+use mpc_node::storage::triple_storage::TripleRedisStorage;
 use near_crypto::KeyFile;
 use near_workspaces::network::{Sandbox, ValidatorKey};
 use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
 use testcontainers::{Container, GenericImage};
+use url::Url;
 
 const NETWORK: &str = "mpc_it_network";
 
@@ -155,8 +156,12 @@ impl Nodes<'_> {
         Ok(())
     }
 
-    pub async fn triple_storage(&self, account_id: &AccountId) -> TripleMemoryStorage {
-        storage::triple_storage::init(account_id)
+    pub async fn triple_storage(
+        &self,
+        redis_url: Url,
+        account_id: &AccountId,
+    ) -> TripleRedisStorage {
+        storage::triple_storage::init(redis_url, account_id)
     }
 
     pub async fn gcp_services(&self) -> anyhow::Result<Vec<GcpService>> {
