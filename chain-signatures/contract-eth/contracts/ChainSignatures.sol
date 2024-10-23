@@ -49,8 +49,7 @@ contract ChainSignatures {
         return _derivedPublicKey;
     }
 
-function deriveKey(PublicKey memory _publicKey, uint256 epsilon) internal view returns (PublicKey memory) {
-        
+    function deriveKey(PublicKey memory _publicKey, uint256 epsilon) internal view returns (PublicKey memory) {
         // G * epsilon + publicKey
         (uint256 epsilonGx, uint256 epsilonGy) = ecMul(epsilon, gx, gy);
         (uint256 resultX, uint256 resultY) = ecAdd(epsilonGx, epsilonGy, _publicKey.x, _publicKey.y);
