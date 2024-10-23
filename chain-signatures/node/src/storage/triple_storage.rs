@@ -94,8 +94,8 @@ impl TripleRedisStorage {
     }
 
     pub fn clear(&mut self) -> TripleResult<()> {
-        self.redis_connection.del(&self.triple_key())?;
-        self.redis_connection.del(&self.mine_key())?;
+        self.redis_connection.del::<&str, ()>(&self.triple_key())?;
+        self.redis_connection.del::<&str, ()>(&self.mine_key())?;
         Ok(())
     }
 
