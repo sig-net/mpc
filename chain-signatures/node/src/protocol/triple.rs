@@ -236,6 +236,8 @@ impl TripleManager {
         self.gc.insert(id0, Instant::now());
         self.gc.insert(id1, Instant::now());
 
+        tracing::info!(id0, id1, "took two triples");
+
         Ok((triple_0, triple_1))
     }
 
@@ -243,6 +245,10 @@ impl TripleManager {
     /// It is very important to NOT reuse the same triple twice for two different
     /// protocols.
     pub async fn take_two_mine(&mut self) -> Option<(Triple, Triple)> {
+        if self.count_mine().await < 2 {
+            tracing::warn!("not enough mine triples");
+            return None;
+        }
         let triple_0 = match self.triple_storage.write().await.take_mine() {
             Ok(Some(triple)) => triple,
             Ok(None) => {
@@ -275,6 +281,8 @@ impl TripleManager {
 
         self.gc.insert(triple_0.id, Instant::now());
         self.gc.insert(triple_1.id, Instant::now());
+
+        tracing::info!(triple_0.id, triple_1.id, "took two mine triples");
 
         Some((triple_0, triple_1))
     }

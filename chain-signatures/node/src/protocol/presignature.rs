@@ -465,8 +465,6 @@ impl PresignatureManager {
                     )
                     .await?;
                 }
-            } else {
-                tracing::warn!("running: we don't have enough triples to generate a presignature");
             }
         }
 
