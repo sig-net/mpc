@@ -71,7 +71,7 @@ impl SignQueue {
         my_account_id: &AccountId,
     ) {
         if stable.len() < threshold {
-            tracing::info!(
+            tracing::debug!(
                 "Require at least {} stable participants to organize, got {}: {:?}",
                 threshold,
                 stable.len(),
@@ -517,7 +517,7 @@ impl SignatureManager {
         cfg: &ProtocolConfig,
     ) {
         if stable.len() < threshold {
-            tracing::info!(
+            tracing::debug!(
                 "Require at least {} stable participants to handle_requests, got {}: {:?}",
                 threshold,
                 stable.len(),

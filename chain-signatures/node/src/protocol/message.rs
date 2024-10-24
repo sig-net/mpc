@@ -200,8 +200,14 @@ impl MessageHandler for GeneratingState {
         queue: &mut MpcMessageQueue,
     ) -> Result<(), MessageHandleError> {
         let mut protocol = self.protocol.write().await;
+        if !queue.generating.is_empty() {
+            tracing::debug!(
+                msgs = queue.generating.len(),
+                "handling new generating message"
+            );
+        }
+
         while let Some(msg) = queue.generating.pop_front() {
-            tracing::debug!("handling new generating message");
             protocol.message(msg.from, msg.data);
         }
         Ok(())
@@ -218,6 +224,11 @@ impl MessageHandler for ResharingState {
         let q = queue.resharing_bins.entry(self.old_epoch).or_default();
         let mut protocol = self.protocol.write().await;
         while let Some(msg) = q.pop_front() {
+            // if !self.new_participants.contains_key(msg.participant) {
+            //     tracing::debug!("old participants ");
+            //     continue;
+            // }
+
             protocol.message(msg.from, msg.data);
         }
         Ok(())

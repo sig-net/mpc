@@ -23,6 +23,7 @@ use near_workspaces::types::SecretKey;
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
 use testcontainers::{Container, GenericImage};
+use mpc_node::web::StateView;
 
 const NETWORK: &str = "mpc_it_network";
 
@@ -59,10 +60,12 @@ pub enum Nodes<'a> {
     Local {
         ctx: Context<'a>,
         nodes: Vec<local::Node>,
+        http: reqwest::Client,
     },
     Docker {
         ctx: Context<'a>,
         nodes: Vec<containers::Node<'a>>,
+        http: reqwest::Client,
     },
 }
 
@@ -142,18 +145,18 @@ impl Nodes<'_> {
         new_node_account_id: &AccountId,
         account_sk: &near_workspaces::types::SecretKey,
         cfg: &MultichainConfig,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         tracing::info!(%new_node_account_id, "adding one more node");
         match self {
-            Nodes::Local { ctx, nodes } => {
+            Nodes::Local { ctx, nodes, .. } => {
                 nodes.push(local::Node::run(ctx, new_node_account_id, account_sk, cfg).await?)
             }
-            Nodes::Docker { ctx, nodes } => {
+            Nodes::Docker { ctx, nodes, .. } => {
                 nodes.push(containers::Node::run(ctx, new_node_account_id, account_sk, cfg).await?)
             }
         }
 
-        Ok(())
+        Ok(self.len() - 1)
     }
 
     pub async fn kill_node(&mut self, account_id: &AccountId) -> anyhow::Result<NodeConfig> {
@@ -190,10 +193,10 @@ impl Nodes<'_> {
         let account_id = node_config.account_id.clone();
         tracing::info!(%account_id, "restarting node");
         match self {
-            Nodes::Local { ctx, nodes } => {
+            Nodes::Local { ctx, nodes, .. } => {
                 nodes.push(local::Node::restart(ctx, node_config).await?)
             }
-            Nodes::Docker { ctx, nodes } => {
+            Nodes::Docker { ctx, nodes, .. } => {
                 nodes.push(containers::Node::restart(ctx, node_config).await?)
             }
         }
@@ -238,6 +241,19 @@ impl Nodes<'_> {
     pub fn proxy_name_for_node(&self, id: usize) -> String {
         let account_id = self.near_accounts();
         format!("rpc_from_node_{}", account_id[id].id())
+    }
+
+    pub fn client(&self) -> &reqwest::Client {
+        match self {
+            Nodes::Local { http, .. } => http,
+            Nodes::Docker { http, .. } => http,
+        }
+    }
+
+    pub async fn state(&self, id: usize) -> anyhow::Result<StateView> {
+        let state_url = format!("{}/state", self.url(id));
+        let state: StateView = self.client().get(state_url).send().await?.json().await?;
+        Ok(state)
     }
 }
 
@@ -342,7 +358,7 @@ pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyh
         .await?
         .into_result()?;
 
-    Ok(Nodes::Docker { ctx, nodes })
+    Ok(Nodes::Docker { ctx, nodes, http: reqwest::Client::new() })
 }
 
 pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
@@ -392,7 +408,7 @@ pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow
         .await?
         .into_result()?;
 
-    Ok(Nodes::Local { ctx, nodes })
+    Ok(Nodes::Local { ctx, nodes, http: reqwest::Client::new() })
 }
 
 pub async fn run(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {

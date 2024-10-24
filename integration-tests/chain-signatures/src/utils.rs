@@ -30,7 +30,7 @@ pub async fn vote_join(
         .await
         .iter()
         .for_each(|result| {
-            assert!(result.as_ref().unwrap().failures().is_empty());
+            assert!(result.as_ref().unwrap().failures().is_empty(), "Failed to vote_join {:?}", result.as_ref().unwrap().failures());
         });
 
     Ok(())

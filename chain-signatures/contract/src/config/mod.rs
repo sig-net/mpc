@@ -45,6 +45,8 @@ pub struct ProtocolConfig {
     pub presignature: PresignatureConfig,
     /// Configuration for signature generation.
     pub signature: SignatureConfig,
+    /// Configuration for resharing keys when participants leave or join.
+    pub reshare: ReshareConfig,
 
     /// The remaining entries that can be present in future forms of the configuration.
     #[serde(flatten)]
@@ -82,6 +84,17 @@ pub struct PresignatureConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
 pub struct SignatureConfig {
     /// Timeout for signature generation in milliseconds.
+    pub generation_timeout: u64,
+
+    /// The remaining entries that can be present in future forms of the configuration.
+    #[serde(flatten)]
+    pub other: HashMap<String, DynamicValue>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
+pub struct ReshareConfig {
+    /// Timeout for reshare generation in milliseconds. This will likely happen if a node
+    /// goes offline during the reshare process. In this case, let us timeout.
     pub generation_timeout: u64,
 
     /// The remaining entries that can be present in future forms of the configuration.

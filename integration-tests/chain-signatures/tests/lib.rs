@@ -66,7 +66,7 @@ impl MultichainTestContext<'_> {
         self.nodes.start_node(&account_id, &sk, &self.cfg).await?;
 
         // Wait for new node to add itself as a candidate
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
         // T number of participants should vote
         let participants = self.participant_accounts().await?;
@@ -143,6 +143,15 @@ impl MultichainTestContext<'_> {
         );
 
         Ok(self.nodes.kill_node(leaving_account_id).await.unwrap())
+    }
+
+    pub async fn make_offline(&mut self, node_id: Option<&AccountId>) -> anyhow::Result<NodeConfig> {
+        let participant_accounts = self.participant_accounts().await?;
+        let node_id = node_id.unwrap_or_else(|| participant_accounts.first().unwrap().id());
+        tracing::info!("Killing node: {node_id}");
+        let config = self.nodes.kill_node(&node_id).await?;
+        let new_state = wait_for::running_mpc(self, None).await?;
+        Ok(config)
     }
 }
 
