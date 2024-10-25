@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
+import "./EllipticCurve.sol";
+
 contract ChainSignatures {
     // Generator point G of secp256k1
     uint256 constant Gx = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798;
@@ -32,7 +34,7 @@ contract ChainSignatures {
     mapping(bytes32 => uint256) public depositToRefund;
 
     event SignatureRequested(bytes32 indexed requestId, address requester, uint256 payload, string path);
-    event SignatureResponded(bytes32 indexed requestId, bytes32 big_r, bytes32 s, uint8 recovery_id);
+    event SignatureResponded(bytes32 indexed requestId, SignatureResponse response);
 
     constructor(PublicKey memory _publicKey) {
         publicKey = _publicKey;
@@ -49,11 +51,11 @@ contract ChainSignatures {
         return _derivedPublicKey;
     }
 
-    function deriveKey(PublicKey memory _publicKey, uint256 epsilon) internal view returns (PublicKey memory) {
+    function deriveKey(PublicKey memory _publicKey, uint256 epsilon) public view returns (PublicKey memory) {
         // G * epsilon + publicKey
-        (uint256 epsilonGx, uint256 epsilonGy) = ecMul(epsilon, gx, gy);
+        (uint256 epsilonGx, uint256 epsilonGy) = ecMul(epsilon, Gx, Gy);
         (uint256 resultX, uint256 resultY) = ecAdd(epsilonGx, epsilonGy, _publicKey.x, _publicKey.y);
-        return PublicKey(resultX, resultY, 0);
+        return PublicKey(resultX, resultY);
     }
 
     function deriveEpsilon(string memory path, address predecessor) public pure returns (uint256) {
@@ -98,15 +100,15 @@ contract ChainSignatures {
         require(
             checkECSignature(
                 expectedPublicKey,
-                uint256(_response.big_r),
+                _response.big_r,
                 uint256(_response.s),
-                request.payloadHash,
+                request.payload,
                 _response.recovery_id
             ),
             "Invalid signature"
         );
 
-        emit SignatureResponded(_requestId, _response.big_r, _response.s, _response.recovery_id);
+        emit SignatureResponded(_requestId, _response);
 
         // Refund excess deposit
         uint256 refund = depositToRefund[_requestId];
@@ -134,41 +136,36 @@ contract ChainSignatures {
         PublicKey memory _expectedPk,
         PublicKey memory _bigR,
         uint256 _s,
-        bytes32 _msgHash,
+        uint256 _msgHash,
         uint8 _recoveryId
     ) internal pure returns (bool) {
-        // Reconstruct the signature
-        bytes32 r = bytes32(_bigR);
-        bytes32 s = bytes32(_s);
+        // // Reconstruct the signature
+        // bytes32 r = bytes32(_bigR);
+        // bytes32 s = bytes32(_s);
     
-        // Recover the signer's address
-        // TODO ethereum ecrecover returns an address, but we need a curve point
-        PublicKey foundPk = ecrecover(_msgHash, _recoveryId, r, s);
+        // // Recover the signer's address
+        // // TODO ethereum ecrecover returns an address, but we need a curve point
+        // PublicKey memory foundPk = ecrecover(_msgHash, _recoveryId, r, s);
         
-        // If recovery fails with the given recovery ID, try the alternative
-        uint8 alternativeRecoveryId = _recoveryId ^ 1;
-        address alternativeRecoveredAddress = ecrecover(_msgHash, alternativeRecoveryId, r, s);
+        // // If recovery fails with the given recovery ID, try the alternative
+        // uint8 alternativeRecoveryId = _recoveryId ^ 1;
+        // address alternativeRecoveredAddress = ecrecover(_msgHash, alternativeRecoveryId, r, s);
         
-        if (alternativeRecoveredAddress == _expectedPk) {
-            return true;
-        }
+        // if (alternativeRecoveredAddress == _expectedPk) {
+        //     return true;
+        // }
         
-        // If both recovery attempts fail, return false
+        // // If both recovery attempts fail, return false
         return false;
     }
 
     // Helper function for elliptic curve point multiplication
-    function ecMul(uint256 _k, uint256 _x, uint256 _y) internal view returns (uint256, uint256) {
-        (bool success, bytes memory result) = address(0x07).staticcall(abi.encode(_k, _x, _y));
-        require(success, "EC multiplication failed");
-        return abi.decode(result, (uint256, uint256));
+    function ecMul(uint256 _k, uint256 _x, uint256 _y) internal pure returns (uint256, uint256) {
+        return EllipticCurve.ecMul(_k, _x, _y, 0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F);
     }
 
     // Helper function for elliptic curve point addition
-    function ecAdd(uint256 _x1, uint256 _y1, uint256 _x2, uint256 _y2) internal view returns (uint256, uint256) {
-        (bool success, bytes memory result) = address(0x06).staticcall(abi.encode(_x1, _y1, _x2, _y2));
-        require(success, "EC addition failed");
-        return abi.decode(result, (uint256, uint256));
+    function ecAdd(uint256 _x1, uint256 _y1, uint256 _x2, uint256 _y2) internal pure returns (uint256, uint256) {
+        return EllipticCurve.ecAdd(_x1, _y1, _x2, _y2, 0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F);
     }
-
 }
