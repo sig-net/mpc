@@ -382,10 +382,10 @@ impl CryptographicProtocol for RunningState {
 
         crate::metrics::NUM_TRIPLES_MINE
             .with_label_values(&[my_account_id.as_str()])
-            .set(triple_manager.count_mine().await as i64);
+            .set(triple_manager.len_mine().await as i64);
         crate::metrics::NUM_TRIPLES_TOTAL
             .with_label_values(&[my_account_id.as_str()])
-            .set(triple_manager.count_all().await as i64);
+            .set(triple_manager.len_generated().await as i64);
         crate::metrics::NUM_TRIPLE_GENERATORS_INTRODUCED
             .with_label_values(&[my_account_id.as_str()])
             .set(triple_manager.introduced.len() as i64);
@@ -414,15 +414,15 @@ impl CryptographicProtocol for RunningState {
 
         crate::metrics::NUM_PRESIGNATURES_MINE
             .with_label_values(&[my_account_id.as_str()])
-            .set(presignature_manager.count_mine().await as i64);
+            .set(presignature_manager.len_mine().await as i64);
         crate::metrics::NUM_PRESIGNATURES_TOTAL
             .with_label_values(&[my_account_id.as_str()])
-            .set(presignature_manager.count_all().await as i64);
+            .set(presignature_manager.len_generated().await as i64);
         crate::metrics::NUM_PRESIGNATURE_GENERATORS_TOTAL
             .with_label_values(&[my_account_id.as_str()])
             .set(
-                presignature_manager.count_potential().await as i64
-                    - presignature_manager.count_all().await as i64,
+                presignature_manager.len_potential().await as i64
+                    - presignature_manager.len_generated().await as i64,
             );
 
         // NOTE: signatures should only use stable and not active participants. The difference here is that

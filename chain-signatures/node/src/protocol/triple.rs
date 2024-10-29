@@ -247,7 +247,7 @@ impl TripleManager {
     /// It is very important to NOT reuse the same triple twice for two different
     /// protocols.
     pub async fn take_two_mine(&mut self) -> Option<(Triple, Triple)> {
-        if self.count_mine().await < 2 {
+        if self.len_mine().await < 2 {
             tracing::warn!("not enough mine triples");
             return None;
         }
@@ -302,38 +302,38 @@ impl TripleManager {
     }
 
     /// Returns the number of unspent triples available in the manager.
-    pub async fn count_all(&self) -> usize {
+    pub async fn len_generated(&self) -> usize {
         self.triple_storage
             .write()
             .await
-            .count_all()
+            .len_generated()
             .await
             .unwrap_or(0)
     }
 
     /// Returns the number of unspent triples assigned to this node.
-    pub async fn count_mine(&self) -> usize {
+    pub async fn len_mine(&self) -> usize {
         self.triple_storage
             .write()
             .await
-            .count_mine()
+            .len_mine()
             .await
             .unwrap_or(0)
     }
 
     /// Returns if there's any unspent triple in the manager.
     pub async fn is_empty(&self) -> bool {
-        self.count_all().await == 0
+        self.len_generated().await == 0
     }
 
     /// Returns the number of unspent triples we will have in the manager once
     /// all ongoing generation protocols complete.
-    pub async fn count_potential(&self) -> usize {
-        self.count_all().await + self.generators.len()
+    pub async fn len_potential(&self) -> usize {
+        self.len_generated().await + self.generators.len()
     }
 
     pub async fn has_min_triples(&self, cfg: &ProtocolConfig) -> bool {
-        self.count_mine().await >= cfg.triple.min_triples as usize
+        self.len_mine().await >= cfg.triple.min_triples as usize
     }
 
     /// Clears an entry from failed triples if that triple protocol was created more than 2 hrs ago
@@ -404,11 +404,11 @@ impl TripleManager {
             // Stopgap to prevent too many triples in the system. This should be around min_triple*nodes*2
             // for good measure so that we have enough triples to do presig generation while also maintain
             // the minimum number of triples where a single node can't flood the system.
-            if self.count_potential().await >= cfg.triple.max_triples as usize {
+            if self.len_potential().await >= cfg.triple.max_triples as usize {
                 false
             } else {
                 // We will always try to generate a new triple if we have less than the minimum
-                self.count_mine().await < cfg.triple.min_triples as usize
+                self.len_mine().await < cfg.triple.min_triples as usize
                     && self.introduced.len() < cfg.max_concurrent_introduction as usize
                     && self.generators.len() < cfg.max_concurrent_generation as usize
             }
@@ -436,7 +436,7 @@ impl TripleManager {
         if self.contains(&id).await || self.gc.contains_key(&id) {
             Ok(None)
         } else {
-            let potential_len = self.count_potential().await;
+            let potential_len = self.len_potential().await;
             match self.generators.entry(id) {
                 Entry::Vacant(e) => {
                     if potential_len >= cfg.triple.max_triples as usize {

@@ -87,13 +87,13 @@ impl PresignatureRedisStorage {
         }
     }
 
-    pub async fn count_all(&mut self) -> PresigResult<usize> {
+    pub async fn len_generated(&mut self) -> PresigResult<usize> {
         let mut connection = self.redis_pool.get().await?;
         let result: usize = connection.hlen(self.presig_key()).await?;
         Ok(result)
     }
 
-    pub async fn count_mine(&mut self) -> PresigResult<usize> {
+    pub async fn len_mine(&mut self) -> PresigResult<usize> {
         let mut connection = self.redis_pool.get().await?;
         let result: usize = connection.scard(self.mine_key()).await?;
         Ok(result)

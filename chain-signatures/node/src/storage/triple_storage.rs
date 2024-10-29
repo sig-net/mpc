@@ -79,13 +79,13 @@ impl TripleRedisStorage {
         }
     }
 
-    pub async fn count_all(&mut self) -> TripleResult<usize> {
+    pub async fn len_generated(&mut self) -> TripleResult<usize> {
         let mut conn = self.redis_pool.get().await?;
         let result: usize = conn.hlen(self.triple_key()).await?;
         Ok(result)
     }
 
-    pub async fn count_mine(&mut self) -> TripleResult<usize> {
+    pub async fn len_mine(&mut self) -> TripleResult<usize> {
         let mut conn = self.redis_pool.get().await?;
         let result: usize = conn.scard(self.mine_key()).await?;
         Ok(result)

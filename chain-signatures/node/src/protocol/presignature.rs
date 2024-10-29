@@ -289,11 +289,11 @@ impl PresignatureManager {
     }
 
     /// Returns the number of unspent presignatures available in the manager.
-    pub async fn count_all(&self) -> usize {
+    pub async fn len_generated(&self) -> usize {
         self.presignature_storage
             .write()
             .await
-            .count_all()
+            .len_generated()
             .await
             .map_err(|e| {
                 tracing::error!(?e, "failed to count all presignatures");
@@ -302,11 +302,11 @@ impl PresignatureManager {
     }
 
     /// Returns the number of unspent presignatures assigned to this node.
-    pub async fn count_mine(&self) -> usize {
+    pub async fn len_mine(&self) -> usize {
         self.presignature_storage
             .write()
             .await
-            .count_mine()
+            .len_mine()
             .await
             .map_err(|e| {
                 tracing::error!(?e, "failed to count mine presignatures");
@@ -316,13 +316,13 @@ impl PresignatureManager {
 
     /// Returns if there are unspent presignatures available in the manager.
     pub async fn is_empty(&self) -> bool {
-        self.count_all().await == 0
+        self.len_generated().await == 0
     }
 
     /// Returns the number of unspent presignatures we will have in the manager once
     /// all ongoing generation protocols complete.
-    pub async fn count_potential(&self) -> usize {
-        let complete_presignatures = self.count_all().await;
+    pub async fn len_potential(&self) -> usize {
+        let complete_presignatures = self.len_generated().await;
         let ongoing_generators = self.generators.len();
         complete_presignatures + ongoing_generators
     }
@@ -440,11 +440,11 @@ impl PresignatureManager {
             // Stopgap to prevent too many presignatures in the system. This should be around min_presig*nodes*2
             // for good measure so that we have enough presignatures to do sig generation while also maintain
             // the minimum number of presignature where a single node can't flood the system.
-            if self.count_potential().await >= cfg.presignature.max_presignatures as usize {
+            if self.len_potential().await >= cfg.presignature.max_presignatures as usize {
                 false
             } else {
                 // We will always try to generate a new triple if we have less than the minimum
-                self.count_mine().await < cfg.presignature.min_presignatures as usize
+                self.len_mine().await < cfg.presignature.min_presignatures as usize
                     && self.introduced.len() < cfg.max_concurrent_introduction as usize
             }
         };
