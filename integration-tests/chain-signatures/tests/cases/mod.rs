@@ -220,9 +220,11 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let redis_url = Url::parse(redis.internal_address.as_str())?;
     let redis_cfg = deadpool_redis::Config::from_url(redis_url);
     let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-    let triple_storage: storage::triple_storage::LockTripleRedisStorage = Arc::new(RwLock::new(
-        storage::triple_storage::init(redis_pool.clone(), &AccountId::from_str("test.near").unwrap()),
-    ));
+    let triple_storage: storage::triple_storage::LockTripleRedisStorage =
+        Arc::new(RwLock::new(storage::triple_storage::init(
+            redis_pool.clone(),
+            &AccountId::from_str("test.near").unwrap(),
+        )));
 
     let mut triple_manager = TripleManager::new(
         Participant::from(0),
@@ -309,9 +311,11 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let redis_url = Url::parse(redis.internal_address.as_str())?;
     let redis_cfg = deadpool_redis::Config::from_url(redis_url);
     let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-    let presignature_storage: LockPresignatureRedisStorage = Arc::new(RwLock::new(
-        storage::presignature_storage::init(redis_pool.clone(), &AccountId::from_str("test.near").unwrap()),
-    ));
+    let presignature_storage: LockPresignatureRedisStorage =
+        Arc::new(RwLock::new(storage::presignature_storage::init(
+            redis_pool.clone(),
+            &AccountId::from_str("test.near").unwrap(),
+        )));
     let mut presignature_manager = PresignatureManager::new(
         Participant::from(0),
         5,
