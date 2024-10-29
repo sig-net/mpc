@@ -361,14 +361,14 @@ impl ConsensusProtocol for WaitingForConsensusState {
 
                     // Clear triples from storage before starting the new epoch. This is necessary if the node has accumulated
                     // triples from previous epochs. If it was not able to clear the previous triples, we'll leave them as-is
-                    if let Err(err) = ctx.triple_storage().write().await.clear() {
+                    if let Err(err) = ctx.triple_storage().write().await.clear().await {
                         tracing::error!(
                             ?err,
                             "failed to clear triples from storage on new epoch start"
                         );
                     }
 
-                    if let Err(err) = ctx.presignature_storage().write().await.clear() {
+                    if let Err(err) = ctx.presignature_storage().write().await.clear().await {
                         tracing::error!(
                             ?err,
                             "failed to clear presignatures from storage on new epoch start"

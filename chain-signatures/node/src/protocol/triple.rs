@@ -147,7 +147,7 @@ impl TripleManager {
     pub async fn insert(&mut self, triple: Triple) {
         tracing::info!(id = triple.id, "inserting triple");
         self.gc.remove(&triple.id);
-        if let Err(e) = self.triple_storage.write().await.insert(triple) {
+        if let Err(e) = self.triple_storage.write().await.insert(triple).await {
             tracing::warn!(?e, "failed to insert triple");
         }
     }
@@ -155,7 +155,7 @@ impl TripleManager {
     pub async fn insert_mine(&mut self, triple: Triple) {
         tracing::debug!(id = triple.id, "inserting mine triple");
         self.gc.remove(&triple.id);
-        if let Err(e) = self.triple_storage.write().await.insert_mine(triple) {
+        if let Err(e) = self.triple_storage.write().await.insert_mine(triple).await {
             tracing::warn!(?e, "failed to insert mine triple");
         }
     }
@@ -165,6 +165,7 @@ impl TripleManager {
             .write()
             .await
             .contains(id)
+            .await
             .map_err(|e| tracing::warn!(?e, "failed to check if triple exists"))
             .unwrap_or(false)
     }
@@ -174,6 +175,7 @@ impl TripleManager {
             .write()
             .await
             .contains_mine(id)
+            .await
             .map_err(|e| tracing::warn!(?e, "failed to check if mine triple exists"))
             .unwrap_or(false)
     }
@@ -187,7 +189,7 @@ impl TripleManager {
         id0: TripleId,
         id1: TripleId,
     ) -> Result<(Triple, Triple), GenerationError> {
-        let triple_0 = match self.triple_storage.write().await.take(&id0) {
+        let triple_0 = match self.triple_storage.write().await.take(&id0).await {
             Ok(Some(triple)) => triple,
             Ok(None) => {
                 if self.generators.contains_key(&id0) {
@@ -207,10 +209,10 @@ impl TripleManager {
             }
         };
 
-        let triple_1 = match self.triple_storage.write().await.take(&id1) {
+        let triple_1 = match self.triple_storage.write().await.take(&id1).await {
             Ok(Some(triple)) => triple,
             Ok(None) => {
-                if let Err(e) = self.triple_storage.write().await.insert(triple_0) {
+                if let Err(e) = self.triple_storage.write().await.insert(triple_0).await {
                     tracing::warn!(id0, ?e, "failed to insert triple back");
                 }
                 if self.generators.contains_key(&id1) {
@@ -226,7 +228,7 @@ impl TripleManager {
             }
             Err(e) => {
                 tracing::warn!(id1, ?e, "failed to take triple");
-                if let Err(e) = self.triple_storage.write().await.insert(triple_0) {
+                if let Err(e) = self.triple_storage.write().await.insert(triple_0).await {
                     tracing::warn!(id0, ?e, "failed to insert triple back");
                 }
                 return Err(GenerationError::TripleIsMissing(id1));
@@ -249,7 +251,7 @@ impl TripleManager {
             tracing::warn!("not enough mine triples");
             return None;
         }
-        let triple_0 = match self.triple_storage.write().await.take_mine() {
+        let triple_0 = match self.triple_storage.write().await.take_mine().await {
             Ok(Some(triple)) => triple,
             Ok(None) => {
                 tracing::warn!("no mine triple left");
@@ -261,10 +263,16 @@ impl TripleManager {
             }
         };
 
-        let triple_1 = match self.triple_storage.write().await.take_mine() {
+        let triple_1 = match self.triple_storage.write().await.take_mine().await {
             Ok(Some(triple)) => triple,
             Ok(None) => {
-                if let Err(e) = self.triple_storage.write().await.insert_mine(triple_0) {
+                if let Err(e) = self
+                    .triple_storage
+                    .write()
+                    .await
+                    .insert_mine(triple_0)
+                    .await
+                {
                     tracing::warn!(?e, "failed to insert mine triple back");
                 }
                 tracing::warn!("no mine triple left");
@@ -272,7 +280,13 @@ impl TripleManager {
             }
             Err(e) => {
                 tracing::warn!(?e, "failed to take mine triple");
-                if let Err(e) = self.triple_storage.write().await.insert_mine(triple_0) {
+                if let Err(e) = self
+                    .triple_storage
+                    .write()
+                    .await
+                    .insert_mine(triple_0)
+                    .await
+                {
                     tracing::warn!(?e, "failed to insert mine triple back");
                 }
                 return None;
@@ -289,12 +303,22 @@ impl TripleManager {
 
     /// Returns the number of unspent triples available in the manager.
     pub async fn count_all(&self) -> usize {
-        self.triple_storage.write().await.count_all().unwrap_or(0)
+        self.triple_storage
+            .write()
+            .await
+            .count_all()
+            .await
+            .unwrap_or(0)
     }
 
     /// Returns the number of unspent triples assigned to this node.
     pub async fn count_mine(&self) -> usize {
-        self.triple_storage.write().await.count_mine().unwrap_or(0)
+        self.triple_storage
+            .write()
+            .await
+            .count_mine()
+            .await
+            .unwrap_or(0)
     }
 
     /// Returns if there's any unspent triple in the manager.

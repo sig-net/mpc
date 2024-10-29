@@ -189,7 +189,13 @@ impl PresignatureManager {
         tracing::info!(id = ?presignature.id, "inserting presignature");
         // Remove from taken list if it was there
         self.gc.remove(&presignature.id);
-        if let Err(e) = self.presignature_storage.write().await.insert(presignature) {
+        if let Err(e) = self
+            .presignature_storage
+            .write()
+            .await
+            .insert(presignature)
+            .await
+        {
             tracing::error!(?e, "failed to insert presignature");
         }
     }
@@ -203,6 +209,7 @@ impl PresignatureManager {
             .write()
             .await
             .insert_mine(presignature)
+            .await
         {
             tracing::error!(?e, "failed to insert mine presignature");
         }
@@ -214,6 +221,7 @@ impl PresignatureManager {
             .write()
             .await
             .contains(id)
+            .await
             .map_err(|e| {
                 tracing::warn!(?e, "failed to check if presignature exist");
             })
@@ -226,6 +234,7 @@ impl PresignatureManager {
             .write()
             .await
             .contains_mine(id)
+            .await
             .map_err(|e| {
                 tracing::warn!(?e, "failed to check if mine presignature exist");
             })
@@ -233,15 +242,16 @@ impl PresignatureManager {
     }
 
     pub async fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
-        if let Some(presignature) =
-            self.presignature_storage
-                .write()
-                .await
-                .take(&id)
-                .map_err(|e| {
-                    tracing::error!(?e, "failed to look for presignature");
-                    GenerationError::PresignatureIsMissing(id)
-                })?
+        if let Some(presignature) = self
+            .presignature_storage
+            .write()
+            .await
+            .take(&id)
+            .await
+            .map_err(|e| {
+                tracing::error!(?e, "failed to look for presignature");
+                GenerationError::PresignatureIsMissing(id)
+            })?
         {
             self.gc.insert(id, Instant::now());
             tracing::info!(id, "took presignature");
@@ -266,6 +276,7 @@ impl PresignatureManager {
             .write()
             .await
             .take_mine()
+            .await
             .map_err(|e| {
                 tracing::error!(?e, "failed to look for mine presignature");
             })
@@ -283,6 +294,7 @@ impl PresignatureManager {
             .write()
             .await
             .count_all()
+            .await
             .map_err(|e| {
                 tracing::error!(?e, "failed to count all presignatures");
             })
@@ -295,6 +307,7 @@ impl PresignatureManager {
             .write()
             .await
             .count_mine()
+            .await
             .map_err(|e| {
                 tracing::error!(?e, "failed to count mine presignatures");
             })

@@ -3,6 +3,7 @@ pub mod execute;
 pub mod local;
 pub mod utils;
 
+use deadpool_redis::Pool;
 use std::collections::HashMap;
 
 use self::local::NodeConfig;
@@ -25,7 +26,6 @@ use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
 use testcontainers::{Container, GenericImage};
-use url::Url;
 
 const NETWORK: &str = "mpc_it_network";
 
@@ -158,10 +158,10 @@ impl Nodes<'_> {
 
     pub async fn triple_storage(
         &self,
-        redis_url: Url,
+        redis_pool: Pool,
         account_id: &AccountId,
     ) -> TripleRedisStorage {
-        storage::triple_storage::init(redis_url, account_id)
+        storage::triple_storage::init(redis_pool, account_id)
     }
 
     pub async fn gcp_services(&self) -> anyhow::Result<Vec<GcpService>> {

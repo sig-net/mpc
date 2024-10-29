@@ -8,6 +8,7 @@ use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
 use crypto_shared::{self, derive_epsilon, derive_key, x_coordinate, ScalarExt};
+use deadpool_redis::Runtime;
 use elliptic_curve::CurveArithmetic;
 use integration_tests_chain_signatures::containers::{self, DockerClient};
 use integration_tests_chain_signatures::MultichainConfig;
@@ -217,8 +218,10 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     docker_client.create_network(docker_network).await?;
     let redis = containers::Redis::run(&docker_client, docker_network).await?;
     let redis_url = Url::parse(redis.internal_address.as_str())?;
+    let redis_cfg = deadpool_redis::Config::from_url(redis_url);
+    let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
     let triple_storage: storage::triple_storage::LockTripleRedisStorage = Arc::new(RwLock::new(
-        storage::triple_storage::init(redis_url, &AccountId::from_str("test.near").unwrap()),
+        storage::triple_storage::init(redis_pool.clone(), &AccountId::from_str("test.near").unwrap()),
     ));
 
     let mut triple_manager = TripleManager::new(
@@ -304,8 +307,10 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     docker_client.create_network(docker_network).await?;
     let redis = containers::Redis::run(&docker_client, docker_network).await?;
     let redis_url = Url::parse(redis.internal_address.as_str())?;
+    let redis_cfg = deadpool_redis::Config::from_url(redis_url);
+    let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
     let presignature_storage: LockPresignatureRedisStorage = Arc::new(RwLock::new(
-        storage::presignature_storage::init(redis_url, &AccountId::from_str("test.near").unwrap()),
+        storage::presignature_storage::init(redis_pool.clone(), &AccountId::from_str("test.near").unwrap()),
     ));
     let mut presignature_manager = PresignatureManager::new(
         Participant::from(0),

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use anyhow::Ok;
+use deadpool_redis::Pool;
 use near_sdk::AccountId;
-use redis::{Commands, Connection, FromRedisValue, RedisWrite, ToRedisArgs};
+use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
 use tokio::sync::RwLock;
-use url::Url;
 
 use crate::protocol::presignature::{Presignature, PresignatureId};
 
@@ -14,98 +14,99 @@ pub type LockPresignatureRedisStorage = Arc<RwLock<PresignatureRedisStorage>>;
 // Can be used to "clear" redis storage in case of a breaking change
 const PRESIGNATURE_STORAGE_VERSION: &str = "v1";
 
-pub fn init(redis_url: Url, node_account_id: &AccountId) -> PresignatureRedisStorage {
-    PresignatureRedisStorage::new(redis_url, node_account_id)
+pub fn init(redis_pool: Pool, node_account_id: &AccountId) -> PresignatureRedisStorage {
+    PresignatureRedisStorage {
+        redis_pool,
+        node_account_id: node_account_id.clone(),
+    }
 }
 
 pub struct PresignatureRedisStorage {
-    redis_connection: Connection,
+    redis_pool: Pool,
     node_account_id: AccountId,
 }
 
 impl PresignatureRedisStorage {
-    fn new(redis_url: Url, node_account_id: &AccountId) -> Self {
-        Self {
-            redis_connection: redis::Client::open(redis_url.as_str())
-                .expect("Failed to connect to Redis")
-                .get_connection()
-                .expect("Failed to get Redis connection"),
-            node_account_id: node_account_id.clone(),
-        }
-    }
-}
-
-impl PresignatureRedisStorage {
-    pub fn insert(&mut self, presignature: Presignature) -> PresigResult<()> {
-        self.redis_connection
+    pub async fn insert(&mut self, presignature: Presignature) -> PresigResult<()> {
+        let mut connection = self.redis_pool.get().await?;
+        connection
             .hset::<&str, PresignatureId, Presignature, ()>(
-                &self.presignature_key(),
+                &self.presig_key(),
                 presignature.id,
                 presignature,
-            )?;
+            )
+            .await?;
         Ok(())
     }
 
-    pub fn insert_mine(&mut self, presignature: Presignature) -> PresigResult<()> {
-        self.redis_connection
-            .sadd::<&str, PresignatureId, ()>(&self.mine_key(), presignature.id)?;
-        self.insert(presignature)?;
+    pub async fn insert_mine(&mut self, presignature: Presignature) -> PresigResult<()> {
+        let mut connection = self.redis_pool.get().await?;
+        connection
+            .sadd::<&str, PresignatureId, ()>(&self.mine_key(), presignature.id)
+            .await?;
+        self.insert(presignature).await?;
         Ok(())
     }
 
-    pub fn contains(&mut self, id: &PresignatureId) -> PresigResult<bool> {
-        let result: bool = self.redis_connection.hexists(self.presignature_key(), id)?;
+    pub async fn contains(&mut self, id: &PresignatureId) -> PresigResult<bool> {
+        let mut connection = self.redis_pool.get().await?;
+        let result: bool = connection.hexists(self.presig_key(), id).await?;
         Ok(result)
     }
 
-    pub fn contains_mine(&mut self, id: &PresignatureId) -> PresigResult<bool> {
-        let result: bool = self.redis_connection.sismember(self.mine_key(), id)?;
+    pub async fn contains_mine(&mut self, id: &PresignatureId) -> PresigResult<bool> {
+        let mut connection = self.redis_pool.get().await?;
+        let result: bool = connection.sismember(self.mine_key(), id).await?;
         Ok(result)
     }
 
-    pub fn take(&mut self, id: &PresignatureId) -> PresigResult<Option<Presignature>> {
-        if self.contains_mine(id)? {
+    pub async fn take(&mut self, id: &PresignatureId) -> PresigResult<Option<Presignature>> {
+        let mut connection = self.redis_pool.get().await?;
+        if self.contains_mine(id).await? {
             tracing::error!("Can not take mine presignature as foreign: {:?}", id);
             return Ok(None);
         }
-        let result: Option<Presignature> =
-            self.redis_connection.hget(self.presignature_key(), id)?;
+        let result: Option<Presignature> = connection.hget(self.presig_key(), id).await?;
         match result {
             Some(presignature) => {
-                self.redis_connection
-                    .hdel::<&str, PresignatureId, ()>(&self.presignature_key(), *id)?;
+                connection
+                    .hdel::<&str, PresignatureId, ()>(&self.presig_key(), *id)
+                    .await?;
                 Ok(Some(presignature))
             }
             None => Ok(None),
         }
     }
 
-    pub fn take_mine(&mut self) -> PresigResult<Option<Presignature>> {
-        let id: Option<PresignatureId> = self.redis_connection.spop(self.mine_key())?;
+    pub async fn take_mine(&mut self) -> PresigResult<Option<Presignature>> {
+        let mut connection = self.redis_pool.get().await?;
+        let id: Option<PresignatureId> = connection.spop(self.mine_key()).await?;
         match id {
-            Some(id) => self.take(&id),
+            Some(id) => self.take(&id).await,
             None => Ok(None),
         }
     }
 
-    pub fn count_all(&mut self) -> PresigResult<usize> {
-        let result: usize = self.redis_connection.hlen(self.presignature_key())?;
+    pub async fn count_all(&mut self) -> PresigResult<usize> {
+        let mut connection = self.redis_pool.get().await?;
+        let result: usize = connection.hlen(self.presig_key()).await?;
         Ok(result)
     }
 
-    pub fn count_mine(&mut self) -> PresigResult<usize> {
-        let result: usize = self.redis_connection.scard(self.mine_key())?;
+    pub async fn count_mine(&mut self) -> PresigResult<usize> {
+        let mut connection = self.redis_pool.get().await?;
+        let result: usize = connection.scard(self.mine_key()).await?;
         Ok(result)
     }
 
-    pub fn clear(&mut self) -> PresigResult<()> {
-        self.redis_connection
-            .del::<&str, ()>(&self.presignature_key())?;
-        self.redis_connection.del::<&str, ()>(&self.mine_key())?;
+    pub async fn clear(&mut self) -> PresigResult<()> {
+        let mut connection = self.redis_pool.get().await?;
+        connection.del::<&str, ()>(&self.presig_key()).await?;
+        connection.del::<&str, ()>(&self.mine_key()).await?;
         Ok(())
     }
 
-    fn presignature_key(&self) -> String {
+    fn presig_key(&self) -> String {
         format!(
             "presignatures:{}:{}",
             PRESIGNATURE_STORAGE_VERSION, self.node_account_id
