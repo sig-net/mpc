@@ -186,7 +186,7 @@ impl PresignatureManager {
     }
 
     pub async fn insert(&mut self, presignature: Presignature) {
-        tracing::info!(id = ?presignature.id, "inserting presignature");
+        tracing::debug!(id = ?presignature.id, "inserting presignature");
         // Remove from taken list if it was there
         self.gc.remove(&presignature.id);
         if let Err(e) = self
@@ -201,7 +201,7 @@ impl PresignatureManager {
     }
 
     pub async fn insert_mine(&mut self, presignature: Presignature) {
-        tracing::info!(id = ?presignature.id, "inserting mine presignature");
+        tracing::debug!(id = ?presignature.id, "inserting mine presignature");
         // Remove from taken list if it was there
         self.gc.remove(&presignature.id);
         if let Err(e) = self
@@ -254,7 +254,7 @@ impl PresignatureManager {
             })?
         {
             self.gc.insert(id, Instant::now());
-            tracing::info!(id, "took presignature");
+            tracing::debug!(id, "took presignature");
             return Ok(presignature);
         };
 
@@ -282,7 +282,7 @@ impl PresignatureManager {
             })
             .ok()?
         {
-            tracing::info!(id = ?presignature.id, "took presignature of mine");
+            tracing::debug!(id = ?presignature.id, "took presignature of mine");
             return Some(presignature);
         }
         None

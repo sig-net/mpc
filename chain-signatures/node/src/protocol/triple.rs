@@ -145,7 +145,7 @@ impl TripleManager {
     }
 
     pub async fn insert(&mut self, triple: Triple) {
-        tracing::info!(id = triple.id, "inserting triple");
+        tracing::debug!(id = triple.id, "inserting triple");
         self.gc.remove(&triple.id);
         if let Err(e) = self.triple_storage.write().await.insert(triple).await {
             tracing::warn!(?e, "failed to insert triple");
@@ -238,7 +238,7 @@ impl TripleManager {
         self.gc.insert(id0, Instant::now());
         self.gc.insert(id1, Instant::now());
 
-        tracing::info!(id0, id1, "took two triples");
+        tracing::debug!(id0, id1, "took two triples");
 
         Ok((triple_0, triple_1))
     }
@@ -296,7 +296,7 @@ impl TripleManager {
         self.gc.insert(triple_0.id, Instant::now());
         self.gc.insert(triple_1.id, Instant::now());
 
-        tracing::info!(triple_0.id, triple_1.id, "took two mine triples");
+        tracing::debug!(triple_0.id, triple_1.id, "took two mine triples");
 
         Some((triple_0, triple_1))
     }
