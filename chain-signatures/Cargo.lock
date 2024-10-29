@@ -3244,6 +3244,7 @@ dependencies = [
  "aws-types",
  "axum",
  "axum-extra",
+ "borsh",
  "cait-sith",
  "chrono",
  "clap",
