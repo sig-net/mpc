@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
-import "./EllipticCurve.sol";
+import "./Secp256k1.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
 import "hardhat/console.sol"; // Import Hardhat's console library
 
 
 contract ChainSignatures {
-    // Generator point G of secp256k1
-    uint256 constant Gx = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798;
-    uint256 constant Gy = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8;
-
     struct SignRequest {
         bytes32 payload;
         string path;
@@ -23,13 +19,18 @@ contract ChainSignatures {
     }
 
     struct SignatureResponse {
-        PublicKey bigR;
+        AffinePoint bigR;
         uint256 s;
         uint8 recoveryId;
     }
 
     // public key in affine form
     struct PublicKey {
+        uint256 x;
+        uint256 y;
+    }
+
+    struct AffinePoint {
         uint256 x;
         uint256 y;
     }
@@ -61,8 +62,8 @@ contract ChainSignatures {
 
     function deriveKey(PublicKey memory _publicKey, uint256 epsilon) public pure returns (PublicKey memory) {
         // G * epsilon + publicKey
-        (uint256 epsilonGx, uint256 epsilonGy) = ecMul(epsilon, Gx, Gy);
-        (uint256 resultX, uint256 resultY) = ecAdd(epsilonGx, epsilonGy, _publicKey.x, _publicKey.y);
+        (uint256 epsilonGx, uint256 epsilonGy) = Secp256k1.ecMul(epsilon, Secp256k1.GX, Secp256k1.GY);
+        (uint256 resultX, uint256 resultY) = Secp256k1.ecAdd(epsilonGx, epsilonGy, _publicKey.x, _publicKey.y);
         return PublicKey(resultX, resultY);
     }
 
@@ -143,39 +144,17 @@ contract ChainSignatures {
     }
 
     function checkECSignature(
-        PublicKey memory _expectedPk,
-        PublicKey memory _bigR,
-        uint256 _s,
-        uint256 _msgHash,
-        uint8 _recoveryId
-    ) internal pure returns (bool) {
-        // // Reconstruct the signature
-        // bytes32 r = bytes32(_bigR);
-        // bytes32 s = bytes32(_s);
-    
-        // // Recover the signer's address
-        // // TODO ethereum ecrecover returns an address, but we need a curve point
-        // PublicKey memory foundPk = ecrecover(_msgHash, _recoveryId, r, s);
-        
-        // // If recovery fails with the given recovery ID, try the alternative
-        // uint8 alternativeRecoveryId = _recoveryId ^ 1;
-        // address alternativeRecoveredAddress = ecrecover(_msgHash, alternativeRecoveryId, r, s);
-        
-        // if (alternativeRecoveredAddress == _expectedPk) {
-        //     return true;
-        // }
-        
-        // // If both recovery attempts fail, return false
-        return false;
-    }
-
-    // Helper function for elliptic curve point multiplication
-    function ecMul(uint256 _k, uint256 _x, uint256 _y) internal pure returns (uint256, uint256) {
-        return EllipticCurve.ecMul(_k, _x, _y, 0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F);
-    }
-
-    // Helper function for elliptic curve point addition
-    function ecAdd(uint256 _x1, uint256 _y1, uint256 _x2, uint256 _y2) internal pure returns (uint256, uint256) {
-        return EllipticCurve.ecAdd(_x1, _y1, _x2, _y2, 0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F);
+        PublicKey memory expectedPk,
+        AffinePoint memory bigR,
+        uint256 s,
+        uint256 msgHash,
+        uint8 recoveryId
+    ) public pure returns (bool) {
+        console.log("expectedPk", expectedPk.x, expectedPk.y);
+        console.log("signature", bigR.x, s);
+        console.log("msgHash", msgHash);
+        (uint256 pkX, uint256 pkY) = Secp256k1.recover(msgHash, recoveryId, bigR.x, s);
+        console.log("recovered", pkX, pkY);
+        return (pkX == expectedPk.x && pkY == expectedPk.y);
     }
 }

@@ -195,9 +195,16 @@ pub async fn create_response(
         AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0)).unwrap();
     let s: k256::Scalar = *s.as_ref();
 
+    println!("=== derived_pk {:?} {:?}\nbig_r {:?} {:?}\ns {:?}\nscalar_hash {:?}", derived_pk,
+        derived_pk.to_encoded_point(false).to_bytes(),
+        big_r,
+        big_r.to_encoded_point(false).to_bytes(),
+        s, scalar_hash);
     let recovery_id = if check_ec_signature(&derived_pk, &big_r, &s, scalar_hash, 0).is_ok() {
+        println!("0 is ok");
         0
     } else if check_ec_signature(&derived_pk, &big_r, &s, scalar_hash, 1).is_ok() {
+        println!("1 is ok");
         1
     } else {
         panic!("unable to use recovery id of 0 or 1");

@@ -53,15 +53,21 @@ pub fn check_ec_signature(
     msg_hash: Scalar,
     recovery_id: u8,
 ) -> anyhow::Result<()> {
+    println!("---");
     let public_key = expected_pk.to_encoded_point(false);
+    println!("public_key {}", public_key.to_string());
     let signature = k256::ecdsa::Signature::from_scalars(x_coordinate(big_r), s)
         .context("cannot create signature from cait_sith signature")?;
+    println!("signature {} {}", signature.r(), signature.s());
+    println!("msg_hash {:?}", msg_hash);
     let found_pk = recover(
         &msg_hash.to_bytes(),
         &signature,
         RecoveryId::try_from(recovery_id).context("invalid recovery ID")?,
     )?
     .to_encoded_point(false);
+    println!("found_pk {}", found_pk.to_string());
+
     if public_key == found_pk {
         return Ok(());
     }
