@@ -1,7 +1,6 @@
-use crate::gcp::error::DatastoreStorageError;
 use crate::gcp::GcpService;
 use crate::protocol::{SignQueue, SignRequest};
-use crate::types::LatestBlockHeight;
+use crate::storage::app_data_storage::AppDataRedisStorage;
 use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
 use near_account_id::AccountId;
@@ -83,6 +82,7 @@ struct SignArguments {
     request: UnvalidatedContractSignRequest,
 }
 
+// TODO: why do we need this type?
 /// What is recieved when sign is called
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 struct UnvalidatedContractSignRequest {
@@ -99,9 +99,8 @@ pub struct ContractSignRequest {
     pub key_version: u32,
 }
 
-#[derive(Debug, Clone)]
 pub struct Indexer {
-    latest_block_height: Arc<RwLock<LatestBlockHeight>>,
+    storage: AppDataRedisStorage,
     last_updated_timestamp: Arc<RwLock<Instant>>,
     latest_block_timestamp_nanosec: Arc<RwLock<Option<u64>>>,
     running_threshold: Duration,
@@ -109,13 +108,10 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    fn new(latest_block_height: LatestBlockHeight, options: &Options) -> Self {
-        tracing::info!(
-            "creating new indexer, latest block height: {}",
-            latest_block_height.block_height
-        );
+    async fn new(storage: AppDataRedisStorage, options: &Options) -> Self {
+        // TODO: log latest block height
         Self {
-            latest_block_height: Arc::new(RwLock::new(latest_block_height)),
+            storage,
             last_updated_timestamp: Arc::new(RwLock::new(Instant::now())),
             latest_block_timestamp_nanosec: Arc::new(RwLock::new(None)),
             running_threshold: Duration::from_secs(options.running_threshold),
@@ -123,9 +119,22 @@ impl Indexer {
         }
     }
 
-    /// Get the latest block height from the chain.
+    /// Get the latest processed block height
     pub async fn latest_block_height(&self) -> BlockHeight {
-        self.latest_block_height.read().await.block_height
+        let height = match self.storage.get_last_processed_block().await {
+            Ok(Some(height)) => height,
+            Ok(None) => {
+                tracing::warn!("block height was not set");
+                return 0;
+            }
+            Err(e) => {
+                // TODO: make it error in triples and presignatures
+                tracing::error!(?e, "failed to get block height");
+                return 0;
+            }
+        };
+        tracing::debug!(height, "latest block height");
+        height
     }
 
     /// Check whether the indexer is on track with the latest block height from the chain.
@@ -155,25 +164,24 @@ impl Indexer {
         &self,
         block_height: BlockHeight,
         block_timestamp_nanosec: u64,
-        gcp: &GcpService,
-    ) -> Result<(), DatastoreStorageError> {
+    ) {
         tracing::debug!(block_height, "update_block_height_and_timestamp");
         *self.last_updated_timestamp.write().await = Instant::now();
         *self.latest_block_timestamp_nanosec.write().await = Some(block_timestamp_nanosec);
-        self.latest_block_height
-            .write()
+        self.storage
+            .set_last_processed_block(block_height)
             .await
-            .set(block_height)
-            .store(gcp)
-            .await
+            .map_err(|e| {
+                tracing::error!(?e, "failed to set last processed block");
+            });
     }
 }
 
+// TODO: why do we need this type? Why not use the `Indexer` type directly?
 #[derive(Clone, LakeContext)]
 struct Context {
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
-    gcp_service: GcpService,
     queue: Arc<RwLock<SignQueue>>,
     indexer: Indexer,
 }
@@ -263,12 +271,8 @@ async fn handle_block(
     }
 
     ctx.indexer
-        .update_block_height_and_timestamp(
-            block.block_height(),
-            block.header().timestamp_nanosec(),
-            &ctx.gcp_service,
-        )
-        .await?;
+        .update_block_height_and_timestamp(block.block_height(), block.header().timestamp_nanosec())
+        .await;
 
     crate::metrics::LATEST_BLOCK_HEIGHT
         .with_label_values(&[ctx.gcp_service.account_id.as_str()])
@@ -302,7 +306,6 @@ pub fn run(
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
     queue: &Arc<RwLock<SignQueue>>,
-    gcp_service: &crate::gcp::GcpService,
     rt: &tokio::runtime::Runtime,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, Indexer)> {
     tracing::info!(
@@ -314,24 +317,10 @@ pub fn run(
         "starting indexer"
     );
 
-    let latest_block_height = rt.block_on(async {
-        match LatestBlockHeight::fetch(gcp_service).await {
-            Ok(latest) => latest,
-            Err(err) => {
-                tracing::warn!(%err, "failed to fetch latest block height; using start_block_height={} instead", options.start_block_height);
-                LatestBlockHeight {
-                    account_id: node_account_id.clone(),
-                    block_height: options.start_block_height,
-                }
-            }
-        }
-    });
-
-    let indexer = Indexer::new(latest_block_height, options);
+    let indexer = Indexer::new(options).await;
     let context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
         node_account_id: node_account_id.clone(),
-        gcp_service: gcp_service.clone(),
         queue: queue.clone(),
         indexer: indexer.clone(),
     };
