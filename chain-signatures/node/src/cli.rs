@@ -1,9 +1,9 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::protocol::{MpcSignProtocol, SignQueue};
-use crate::storage::triple_storage::LockTripleNodeStorageBox;
 use crate::{http_client, indexer, mesh, storage, web};
 use clap::Parser;
+use deadpool_redis::Runtime;
 use local_ip_address::local_ip;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
@@ -106,6 +106,8 @@ impl Cli {
                     cipher_pk,
                     "--cipher-sk".to_string(),
                     cipher_sk,
+                    "--redis-url".to_string(),
+                    storage_options.redis_url.to_string(),
                 ];
                 if let Some(sign_sk) = sign_sk {
                     args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
@@ -204,9 +206,14 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let key_storage =
                 storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
-            let triple_storage: LockTripleNodeStorageBox = Arc::new(RwLock::new(
-                storage::triple_storage::init(Some(&gcp_service), &account_id),
-            ));
+
+            let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
+
+            let redis_cfg = deadpool_redis::Config::from_url(redis_url);
+            let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+            let triple_storage = storage::triple_storage::init(&redis_pool, &account_id);
+            let presignature_storage =
+                storage::presignature_storage::init(&redis_pool, &account_id);
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
@@ -240,6 +247,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_queue,
                 key_storage,
                 triple_storage,
+                presignature_storage,
                 Config::new(LocalConfig {
                     over: override_config.unwrap_or_else(Default::default),
                     network: NetworkConfig {

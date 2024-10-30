@@ -61,4 +61,6 @@ itertools = "0.12.0"
 http = "1.1.0"
 prometheus = { version = "0.13.3" }
 once_cell = "1.13.1"
+redis = "0.27.2"
+deadpool-redis = "0.18.0"
 sysinfo = "0.32.0"
