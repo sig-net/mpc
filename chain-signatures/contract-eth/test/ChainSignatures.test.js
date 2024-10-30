@@ -24,7 +24,7 @@ describe("ChainSignatures", function () {
   });
 
   describe("deriveKey", function () {
-    it.only("should correctly derive a new key", async function () {  
+    it("should correctly derive a new key", async function () {  
       const testEpsilon = "0x4B2E9854C775F5ECC88004EB6DCF7CEB775D74D0E313CD5FA5E5994A4B57E11C";
 
       // Call the deriveKey function
@@ -38,6 +38,15 @@ describe("ChainSignatures", function () {
       // Assert that the derived key matches the expected key
       expect(derivedKey.x).to.equal(expectedX);
       expect(derivedKey.y).to.equal(expectedY);
+    });
+  });
+
+  describe("deriveEpsilon", function () {
+    it.only("should generate correct epsilon values", async function () {
+      const testPath = "test";
+      expect(addr1.address).to.equal('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
+      const epsilon = await chainSignatures.deriveEpsilon(testPath, addr1.address);
+      expect(epsilon).to.equal('0x0C38479E8053A632CC3E1CAC05ED33D7733C908FDC256AFEBB9396206A05D86D');
     });
   });
 
@@ -98,4 +107,6 @@ describe("ChainSignatures", function () {
       expect(await chainSignatures.getSignatureDeposit()).to.equal(ethers.utils.parseEther("0.004"));
     });
   });
+
+
 });

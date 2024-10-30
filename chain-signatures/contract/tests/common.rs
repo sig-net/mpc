@@ -176,6 +176,9 @@ pub async fn create_response(
     println!("epsilon: {:?} {:?}", epsilon, epsilon.to_bytes());
     let derived_pk = derive_key(pk.into(), epsilon);
     println!("derived_pk: {:?} {:?}", derived_pk, derived_pk.to_encoded_point(false).to_bytes());
+    let p1 = AccountId::new_unvalidated("0x70997970C51812dc3A010C7d01b50e0d17dc79C8".to_string().to_lowercase());
+    let path = "test";
+    println!("derive_epsilon({}, {}) = {:?}", p1, path, derive_epsilon(&p1, path));
     let signing_key = k256::ecdsa::SigningKey::from(&derived_sk);
     let verifying_key =
         k256::ecdsa::VerifyingKey::from(&k256::PublicKey::from_affine(derived_pk).unwrap());

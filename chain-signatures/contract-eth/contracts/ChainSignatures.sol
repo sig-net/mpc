@@ -2,22 +2,30 @@
 pragma solidity ^0.8.17;
 
 import "./EllipticCurve.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
+import "hardhat/console.sol"; // Import Hardhat's console library
+
 
 contract ChainSignatures {
     // Generator point G of secp256k1
     uint256 constant Gx = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798;
     uint256 constant Gy = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8;
 
-    struct SignatureRequest {
-        uint256 payload;
-        address requester;
+    struct SignRequest {
+        bytes32 payload;
         string path;
     }
 
+    struct SignatureRequest {
+        uint256 epsilon;
+        uint256 payloadHash;
+        address requester;
+    }
+
     struct SignatureResponse {
-        PublicKey big_r;
+        PublicKey bigR;
         uint256 s;
-        uint8 recovery_id;
+        uint8 recoveryId;
     }
 
     // public key in affine form
@@ -33,7 +41,7 @@ contract ChainSignatures {
 
     mapping(bytes32 => uint256) public depositToRefund;
 
-    event SignatureRequested(bytes32 indexed requestId, address requester, uint256 payload, string path);
+    event SignatureRequested(bytes32 indexed requestId, address requester, uint256 epsilon, uint256 payloadHash, string path);
     event SignatureResponded(bytes32 indexed requestId, SignatureResponse response);
 
     constructor(PublicKey memory _publicKey) {
@@ -51,40 +59,43 @@ contract ChainSignatures {
         return _derivedPublicKey;
     }
 
-    function deriveKey(PublicKey memory _publicKey, uint256 epsilon) public view returns (PublicKey memory) {
+    function deriveKey(PublicKey memory _publicKey, uint256 epsilon) public pure returns (PublicKey memory) {
         // G * epsilon + publicKey
         (uint256 epsilonGx, uint256 epsilonGy) = ecMul(epsilon, Gx, Gy);
         (uint256 resultX, uint256 resultY) = ecAdd(epsilonGx, epsilonGy, _publicKey.x, _publicKey.y);
         return PublicKey(resultX, resultY);
     }
 
-    function deriveEpsilon(string memory path, address predecessor) public pure returns (uint256) {
-        // TODO Ethereum doesn't have SHA3-256, so we use keccak256 temporarily
-        bytes32 epsilonBytes = keccak256(abi.encodePacked("near-mpc-recovery v0.1.0 epsilon derivation:", predecessor, ",", path));
+    function deriveEpsilon(string memory path, address requester) public pure returns (uint256) {
+        string memory requesterStr = Strings.toHexString(uint256(uint160(requester)), 20);
+        string memory epsilonString = string.concat("near-mpc-recovery v0.2.0 epsilon derivation:", requesterStr, ",", path);
+        console.log("Epsilon String:", epsilonString);
+        bytes32 epsilonBytes = keccak256(bytes(epsilonString));
         uint256 epsilon = uint256(epsilonBytes);
         return epsilon;
     }
 
-    function sign(bytes32 _payload, string memory _path) external payable returns (bytes32) {
+    function sign(bytes32 payload, string memory path) external payable returns (bytes32) {
         uint256 requiredDeposit = getSignatureDeposit();
         require(msg.value >= requiredDeposit, "Insufficient deposit");
 
         // Concert payload to int as big-endian, check if payload is than the secp256k1 curve order
-        uint256 payload = uint256(_payload);
+        uint256 payloadHash = uint256(payload);
         require(
-            payload < 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141,
+            payloadHash < 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141,
             "Payload exceeds secp256k1 curve order"
         );
 
-        bytes32 requestId = keccak256(abi.encodePacked(payload, msg.sender, _path));
+        bytes32 requestId = keccak256(abi.encodePacked(payload, msg.sender, path));
         require(pendingRequests[requestId].requester == address(0), "Request already exists");
 
-        SignatureRequest memory request = SignatureRequest(payload, msg.sender, _path);
+        uint256 epsilon = deriveEpsilon(path, msg.sender);
+        SignatureRequest memory request = SignatureRequest(epsilon, payloadHash, msg.sender);
         pendingRequests[requestId] = request;
         depositToRefund[requestId] = msg.value - requiredDeposit;
         requestCounter++;
 
-        emit SignatureRequested(requestId, msg.sender, payload, _path);
+        emit SignatureRequested(requestId, msg.sender, epsilon, payloadHash, path);
 
         return requestId;
     }
@@ -93,17 +104,16 @@ contract ChainSignatures {
         SignatureRequest storage request = pendingRequests[_requestId];
         require(request.requester != address(0), "Request not found");
 
-        uint256 epsilon = deriveEpsilon(request.path, request.requester);
-        PublicKey memory expectedPublicKey = deriveKey(publicKey, epsilon);
+        PublicKey memory expectedPublicKey = deriveKey(publicKey, request.epsilon);
 
         // Check the signature
         require(
             checkECSignature(
                 expectedPublicKey,
-                _response.big_r,
+                _response.bigR,
                 uint256(_response.s),
-                request.payload,
-                _response.recovery_id
+                request.payloadHash,
+                _response.recoveryId
             ),
             "Invalid signature"
         );
