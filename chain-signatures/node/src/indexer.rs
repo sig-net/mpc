@@ -47,7 +47,7 @@ pub struct Options {
     pub start_block_height: u64,
 
     /// The amount of time before we should that our indexer is behind.
-    #[clap(long, env("MPC_INDEXER_BEHIND_THRESHOLD"), default_value = "180")]
+    #[clap(long, env("MPC_INDEXER_BEHIND_THRESHOLD"), default_value = "200")]
     pub behind_threshold: u64,
 
     /// The threshold in seconds to check if the indexer needs to be restarted due to it stalling.
@@ -103,6 +103,7 @@ pub struct ContractSignRequest {
 pub struct Indexer {
     latest_block_height: Arc<RwLock<LatestBlockHeight>>,
     last_updated_timestamp: Arc<RwLock<Instant>>,
+    latest_block_timestamp_nanosec: Arc<RwLock<Option<u64>>>,
     running_threshold: Duration,
     behind_threshold: Duration,
 }
@@ -116,6 +117,7 @@ impl Indexer {
         Self {
             latest_block_height: Arc::new(RwLock::new(latest_block_height)),
             last_updated_timestamp: Arc::new(RwLock::new(Instant::now())),
+            latest_block_timestamp_nanosec: Arc::new(RwLock::new(None)),
             running_threshold: Duration::from_secs(options.running_threshold),
             behind_threshold: Duration::from_secs(options.behind_threshold),
         }
@@ -127,27 +129,37 @@ impl Indexer {
     }
 
     /// Check whether the indexer is on track with the latest block height from the chain.
-    pub async fn is_on_track(&self) -> bool {
-        self.last_updated_timestamp.read().await.elapsed() <= self.behind_threshold
-    }
-
-    /// Check whether the indexer is on track with the latest block height from the chain.
     pub async fn is_running(&self) -> bool {
         self.last_updated_timestamp.read().await.elapsed() <= self.running_threshold
     }
 
     /// Check whether the indexer is behind with the latest block height from the chain.
     pub async fn is_behind(&self) -> bool {
-        self.last_updated_timestamp.read().await.elapsed() > self.behind_threshold
+        if let Some(latest_block_timestamp_nanosec) =
+            *self.latest_block_timestamp_nanosec.read().await
+        {
+            crate::util::is_elapsed_longer_than_timeout(
+                latest_block_timestamp_nanosec / 1_000_000_000,
+                self.behind_threshold.as_millis() as u64,
+            )
+        } else {
+            true
+        }
     }
 
-    async fn update_block_height(
+    pub async fn is_stable(&self) -> bool {
+        !self.is_behind().await && self.is_running().await
+    }
+
+    async fn update_block_height_and_timestamp(
         &self,
         block_height: BlockHeight,
+        block_timestamp_nanosec: u64,
         gcp: &GcpService,
     ) -> Result<(), DatastoreStorageError> {
-        tracing::debug!(block_height, "update_block_height");
+        tracing::debug!(block_height, "update_block_height_and_timestamp");
         *self.last_updated_timestamp.write().await = Instant::now();
+        *self.latest_block_timestamp_nanosec.write().await = Some(block_timestamp_nanosec);
         self.latest_block_height
             .write()
             .await
@@ -251,7 +263,11 @@ async fn handle_block(
     }
 
     ctx.indexer
-        .update_block_height(block.block_height(), &ctx.gcp_service)
+        .update_block_height_and_timestamp(
+            block.block_height(),
+            block.header().timestamp_nanosec(),
+            &ctx.gcp_service,
+        )
         .await?;
 
     crate::metrics::LATEST_BLOCK_HEIGHT
