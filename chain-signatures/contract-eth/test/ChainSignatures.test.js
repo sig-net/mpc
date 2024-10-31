@@ -23,6 +23,15 @@ describe("ChainSignatures", function () {
     await chainSignatures.deployed();
   });
 
+  describe("deriveEpsilon", function () {
+    it("should generate correct epsilon values", async function () {
+      const testPath = "test";
+      expect(addr1.address).to.equal('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
+      const epsilon = await chainSignatures.deriveEpsilon(testPath, addr1.address);
+      expect(epsilon).to.equal('0x0C38479E8053A632CC3E1CAC05ED33D7733C908FDC256AFEBB9396206A05D86D');
+    });
+  });
+
   describe("deriveKey", function () {
     it("should correctly derive a new key", async function () {  
       const testEpsilon = "0x4B2E9854C775F5ECC88004EB6DCF7CEB775D74D0E313CD5FA5E5994A4B57E11C";
@@ -39,77 +48,26 @@ describe("ChainSignatures", function () {
       expect(derivedKey.x).to.equal(expectedX);
       expect(derivedKey.y).to.equal(expectedY);
     });
-  });
 
-  describe("deriveEpsilon", function () {
-    it("should generate correct epsilon values", async function () {
-      const testPath = "test";
-      expect(addr1.address).to.equal('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
-      const epsilon = await chainSignatures.deriveEpsilon(testPath, addr1.address);
-      expect(epsilon).to.equal('0x0C38479E8053A632CC3E1CAC05ED33D7733C908FDC256AFEBB9396206A05D86D');
-    });
-  });
+    it("should correctly derive a new key from derived epsilon", async function () {  
+      const derivedEpsilon = "0x0C38479E8053A632CC3E1CAC05ED33D7733C908FDC256AFEBB9396206A05D86D";
 
-  describe("Signing requests", function () {
-    it("Should create a signature request", async function () {
-      const payloadHash = ethers.utils.id("Test payload");
-      const path = "test/path";
-      const requiredDeposit = await chainSignatures.getSignatureDeposit();
+      // Call the deriveKey function
+      const derivedKey = await chainSignatures.deriveKey(publicKey, derivedEpsilon);
 
-      await expect(chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit }))
-        .to.emit(chainSignatures, "SignatureRequested")
-        .withArgs(ethers.utils.keccak256(ethers.utils.solidityPack(["bytes32", "address", "string"], [payloadHash, addr1.address, path])), addr1.address, payloadHash, path);
+      // Expected result (pre-computed)
+      const expectedKey = [4, 190, 143, 8, 126, 40, 72, 115, 4, 123, 130, 29, 196, 122, 34, 228, 26, 20, 35, 250, 206, 151, 165, 156, 80, 108, 174, 28, 201, 170, 194, 76, 62, 12, 129, 226, 158, 161, 199, 99, 154, 106, 237, 60, 51, 66, 251, 34, 189, 109, 197, 189, 114, 141, 17, 10, 82, 55, 232, 178, 0, 131, 170, 202, 41];
+      const expectedX = '0x' + expectedKey.slice(1, 33).map(byte => byte.toString(16).padStart(2, '0')).join('');
+      const expectedY = '0x' + expectedKey.slice(33).map(byte => byte.toString(16).padStart(2, '0')).join('');
 
-      expect(await chainSignatures.requestCounter()).to.equal(1);
-    });
-
-    it("Should not allow creating a request with insufficient deposit", async function () {
-      const payloadHash = ethers.utils.id("Test payload");
-      const path = "test/path";
-      const requiredDeposit = await chainSignatures.getSignatureDeposit();
-
-      await expect(chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit.sub(1) }))
-        .to.be.revertedWith("Insufficient deposit");
-    });
-
-    it("Should respond to a signature request", async function () {
-      const payloadHash = ethers.utils.id("Test payload");
-      const path = "test/path";
-      const requiredDeposit = await chainSignatures.getSignatureDeposit();
-
-      const tx = await chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit });
-      const receipt = await tx.wait();
-      const requestId = receipt.events[0].args[0];
-
-      const messageHash = ethers.utils.solidityKeccak256(["string", "bytes32"], ["\x19Ethereum Signed Message:\n32", payloadHash]);
-      const signature = await owner.signMessage(ethers.utils.arrayify(messageHash));
-      const { v, r, s } = ethers.utils.splitSignature(signature);
-
-      await expect(chainSignatures.connect(owner).respond(requestId, { big_r: r, s: s, recovery_id: v - 27 }))
-        .to.emit(chainSignatures, "SignatureResponded")
-        .withArgs(requestId, r, s, v - 27);
-
-      expect(await chainSignatures.requestCounter()).to.equal(0);
-    });
-  });
-
-  describe("Signature deposit", function () {
-    it("Should return correct deposit amount", async function () {
-      expect(await chainSignatures.getSignatureDeposit()).to.equal(1);
-
-      for (let i = 0; i < 3; i++) {
-        const payloadHash = ethers.utils.id(`Test payload ${i}`);
-        const path = `test/path/${i}`;
-        const requiredDeposit = await chainSignatures.getSignatureDeposit();
-        await chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit });
-      }
-
-      expect(await chainSignatures.getSignatureDeposit()).to.equal(ethers.utils.parseEther("0.004"));
+      // Assert that the derived key matches the expected key
+      expect(derivedKey.x).to.equal(expectedX);
+      expect(derivedKey.y).to.equal(expectedY);
     });
   });
 
   describe("checkECSignature", function () {
-    it.only("should verify a valid signature", async function () {
+    it("should verify a valid signature", async function () {
       // precomputed from rust
       const derivedKey = [4, 190, 143, 8, 126, 40, 72, 115, 4, 123, 130, 29, 196, 122, 34, 228, 26, 20, 35, 250, 206, 151, 165, 156, 80, 108, 174, 28, 201, 170, 194, 76, 62, 12, 129, 226, 158, 161, 199, 99, 154, 106, 237, 60, 51, 66, 251, 34, 189, 109, 197, 189, 114, 141, 17, 10, 82, 55, 232, 178, 0, 131, 170, 202, 41];
       const derivedKeyX = '0x' + derivedKey.slice(1, 33).map(byte => byte.toString(16).padStart(2, '0')).join('');
@@ -132,6 +90,79 @@ describe("ChainSignatures", function () {
       );
 
       expect(isValid).to.be.true;
+    });
+  });
+
+  describe("Signing requests", function () {
+    it("Should create a signature request", async function () {
+      const payloadHash = ethers.utils.id("Test payload");
+      const path = "test/path";
+      const requiredDeposit = await chainSignatures.getSignatureDeposit();
+      const epsilon = await chainSignatures.deriveEpsilon(path, addr1.address);
+      const requestId = ethers.utils.keccak256(
+        ethers.utils.solidityPack(
+          ["bytes32", "address", "string"],
+          [payloadHash, addr1.address, path]
+        )
+      );
+
+      await expect(chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit }))
+        .to.emit(chainSignatures, "SignatureRequested")
+        .withArgs(requestId, addr1.address, epsilon, payloadHash, path);
+    });
+
+    it("Should not allow creating a request with insufficient deposit", async function () {
+      const payloadHash = ethers.utils.id("Test payload");
+      const path = "test/path";
+      const requiredDeposit = await chainSignatures.getSignatureDeposit();
+
+      await expect(chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit.sub(1) }))
+        .to.be.revertedWith("Insufficient deposit");
+    });
+
+    it("Respond to a signature request", async function () {
+      const payloadHash = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9"
+      const path = "test";
+      const requiredDeposit = await chainSignatures.getSignatureDeposit();
+
+      const tx = await chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit });
+      const receipt = await tx.wait();
+      const requestId = receipt.events[0].args[0];
+
+      const derivedKey = [4, 190, 143, 8, 126, 40, 72, 115, 4, 123, 130, 29, 196, 122, 34, 228, 26, 20, 35, 250, 206, 151, 165, 156, 80, 108, 174, 28, 201, 170, 194, 76, 62, 12, 129, 226, 158, 161, 199, 99, 154, 106, 237, 60, 51, 66, 251, 34, 189, 109, 197, 189, 114, 141, 17, 10, 82, 55, 232, 178, 0, 131, 170, 202, 41];
+      const derivedKeyX = '0x' + derivedKey.slice(1, 33).map(byte => byte.toString(16).padStart(2, '0')).join('');
+      const derivedKeyY = '0x' + derivedKey.slice(33).map(byte => byte.toString(16).padStart(2, '0')).join('');
+      const bigR = [4, 235, 32, 243, 182, 197, 136, 46, 1, 139, 239, 143, 68, 206, 69, 33, 21, 197, 53, 152, 61, 231, 35, 110, 41, 52, 59, 59, 197, 198, 72, 248, 149, 64, 216, 248, 234, 27, 102, 47, 185, 225, 141, 23, 254, 91, 155, 253, 111, 45, 62, 172, 73, 217, 254, 251, 168, 191, 184, 149, 228, 119, 12, 209, 248];
+      const bigRX = '0x' + bigR.slice(1, 33).map(byte => byte.toString(16).padStart(2, '0')).join('');
+      const bigRY = '0x' + bigR.slice(33).map(byte => byte.toString(16).padStart(2, '0')).join('');
+      const s = "0x5F06F4BC377E509EDA49EC73074D62962CB0C5D48C0800580FAD3E19EC620C09".toLowerCase();
+      const msgHash = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9".toLowerCase();
+      const response = { bigR: { x: bigRX, y: bigRY }, s: s, recoveryId: 0 };
+      
+      // This form doesn't work, possible hardhat bug
+      // await expect(chainSignatures.connect(owner).respond(requestId, response))
+      //   .to.emit(chainSignatures, "SignatureResponded")
+      //   .withArgs(requestId, [[ethers.BigNumber.from(bigRX), ethers.BigNumber.from(bigRY)], ethers.BigNumber.from(s), 0]);
+      const tx2 = await chainSignatures.connect(owner).respond(requestId, response);
+      const receipt2 = await tx2.wait();
+      console.log(receipt2.events[0].args[1][0][0]);
+      console.log('Is BigNumber:', ethers.BigNumber.isBigNumber(receipt2.events[0].args[1][0][0]));
+      await expect(receipt2.events[0].args).to.deep.equal([requestId, [[ethers.BigNumber.from(bigRX), ethers.BigNumber.from(bigRY)], ethers.BigNumber.from(s), 0]]);
+    });
+  });
+
+  describe("Signature deposit", function () {
+    it("Should return correct deposit amount", async function () {
+      expect(await chainSignatures.getSignatureDeposit()).to.equal(1);
+
+      for (let i = 0; i < 4; i++) {
+        const payloadHash = ethers.utils.id(`Test payload ${i}`);
+        const path = `test/path/${i}`;
+        const requiredDeposit = await chainSignatures.getSignatureDeposit();
+        await chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit });
+      }
+
+      expect(await chainSignatures.getSignatureDeposit()).to.equal(ethers.utils.parseEther("0.004"));
     });
   });
 

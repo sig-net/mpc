@@ -30,30 +30,45 @@ library Secp256k1 {
 
     /// @dev recovers signer public key point value.
     /// @param digest hashed message
-    /// @param v recovery
+    /// @param recoveryId recovery id
     /// @param r first 32 bytes of signature
-    /// @param v last 32 bytes of signature
+    /// @param s last 32 bytes of signature
     /// @return (x, y) EC point
     function recover(
         uint256 digest,
-        uint8 v,
+        uint8 recoveryId,
         uint256 r,
         uint256 s
     ) internal pure returns (uint256, uint256) {
-        uint256 x = addmod(r, P * (v >> 1), P);
-        if (x > P || s > N || r > N || s == 0 || r == 0 || v > 1) {
-            return (0, 0);
+        require(r < P && s < N, "Invalid signature");
+        require(recoveryId == 0 || recoveryId == 1, "Invalid recovery id");
+        
+        // Calculate curve point R
+        uint256 x = r;
+        if (recoveryId >> 1 == 1) {
+            x += N;
         }
-        uint256 rInv = EllipticCurve.invMod(r, N);
+        require(x < P, "Invalid x coordinate");
 
-        uint256 y2 = addmod(mulmod(x, mulmod(x, x, P), P), addmod(mulmod(x, A, P), B, P), P);
-        y2 = EllipticCurve.expMod(y2, (P + 1) / 4, P);
-        uint256 y = ((y2 + v + 2) & 1 == 0) ? y2 : P - y2;
+        // Calculate R.y = ±sqrt(x³ + 7)
+        uint256 y = EllipticCurve.deriveY(recoveryId == 0 ? 0x02 : 0x03, x, A, B, P);
+        if ((y % 2 != 0) != (recoveryId % 2 != 0)) {
+            y = P - y;
+        }
 
-        (uint256 qx, uint256 qy, uint256 qz) = EllipticCurve.jacMul(mulmod(rInv, N - digest, N), GX, GY, 1, A, P);
-        (uint256 qx2, uint256 qy2, uint256 qz2) = EllipticCurve.jacMul(mulmod(rInv, s, N), x, y, 1, A, P);
-        (uint256 qx3, uint256 qy3) = EllipticCurve.ecAdd(qx, qy, qz, qx2, qy2, qz2);
+        // Calculate r_inv = r^(-1) mod n
+        uint256 r_inv = EllipticCurve.invMod(r, N);
+        
+        // u1 = -z * r^(-1) mod n
+        uint256 u1 = mulmod(N - digest % N, r_inv, N);
+        // u2 = s * r^(-1) mod n
+        uint256 u2 = mulmod(s, r_inv, N);
 
-        return (qx3, qy3);
+        // Q = u1*G + u2*R
+        (uint256 x1, uint256 y1) = ecMul(u1, GX, GY);
+        (uint256 x2, uint256 y2) = ecMul(u2, x, y);
+        (uint256 qx, uint256 qy) = ecAdd(x1, y1, x2, y2);
+
+        return (qx, qy);
     }
 }
