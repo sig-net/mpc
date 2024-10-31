@@ -9,44 +9,6 @@ use crypto_shared::SignatureResponse;
 use std::collections::HashMap;
 
 #[tokio::test]
-async fn test_contract_sign_simple() -> anyhow::Result<()> {
-    let (_, contract, _, sk) = init_env().await;
-    let predecessor_id = contract.id();
-    let path = "test";
-
-    let msg = "hello world";
-    let (payload_hash, respond_req, respond_resp) =
-        create_response(predecessor_id, msg, path, &sk).await;
-    let request = SignRequest {
-        payload: payload_hash,
-        path: path.into(),
-        key_version: 0,
-    };
-
-    sign_and_validate(&request, Some((&respond_req, &respond_resp)), &contract).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_contract_sign_eth() -> anyhow::Result<()> {
-    let (_, contract, _, sk) = init_env().await;
-    let predecessor_id = AccountId::new_unvalidated("0x70997970C51812dc3A010C7d01b50e0d17dc79C8".to_string().to_lowercase());
-    let path = "test";
-
-    let msg = "hello world";
-    let (payload_hash, respond_req, respond_resp) =
-        create_response(&predecessor_id, msg, path, &sk).await;
-    let request = SignRequest {
-        payload: payload_hash,
-        path: path.into(),
-        key_version: 0,
-    };
-
-    sign_and_validate(&request, Some((&respond_req, &respond_resp)), &contract).await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_contract_sign_request() -> anyhow::Result<()> {
     let (_, contract, _, sk) = init_env().await;
     let predecessor_id = contract.id();

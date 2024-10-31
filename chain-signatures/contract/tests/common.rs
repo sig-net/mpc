@@ -12,7 +12,6 @@ use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::point::DecompressPoint as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{AffinePoint, FieldBytes, Scalar, Secp256k1};
-use k256::pkcs8::EncodePrivateKey;
 use mpc_contract::primitives::{
     CandidateInfo, ParticipantInfo, Participants, SignRequest, SignatureRequest,
 };
@@ -70,9 +69,7 @@ pub async fn accounts(
 pub async fn init() -> (Worker<Sandbox>, Contract) {
     let worker = near_workspaces::sandbox().await.unwrap();
     let wasm = std::fs::read(CONTRACT_FILE_PATH).unwrap();
-    let contract = worker.dev_deploy(&wasm).await;
-    println!("{:?}", contract);
-    let contract = contract.unwrap();
+    let contract = worker.dev_deploy(&wasm).await.unwrap();
     (worker, contract)
 }
 
@@ -127,15 +124,8 @@ pub async fn init_with_candidates(
 }
 
 pub async fn init_env() -> (Worker<Sandbox>, Contract, Vec<Account>, k256::SecretKey) {
-    let bt = FieldBytes::from_slice(&[138, 168, 39, 233, 27, 207, 102, 142, 255, 136, 108, 126, 68, 146, 218, 135, 233, 113, 121, 137, 188, 188, 173, 100, 83, 107, 18, 35, 18, 99, 192, 136]);
-    let sk = k256::SecretKey::from_bytes(&bt).unwrap();
-    println!("init_env sk bytes {:?}", bt);
-    // let sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let sk = k256::SecretKey::random(&mut rand::thread_rng());
     let pk = sk.public_key();
-    use k256::elliptic_curve::group::GroupEncoding;
-    println!("init_env pk {:?}\n{:?}\n{:?}\n{:?}", pk, pk.as_affine(), pk.to_sec1_bytes(), pk.as_affine().to_bytes());
-    let pt = pk.to_encoded_point(false);
-    println!("uncompressed: {:?}\n{:?}", pt, pt.to_bytes());
     let (worker, contract, accounts) =
         init_with_candidates(Some(near_crypto::PublicKey::SECP256K1(
             near_crypto::Secp256K1PublicKey::try_from(
@@ -170,15 +160,10 @@ pub async fn create_response(
 ) -> ([u8; 32], SignatureRequest, SignatureResponse) {
     let (digest, scalar_hash, payload_hash) = process_message(msg).await;
     let pk = sk.public_key();
-    println!("create_response public_key: {:?}", pk);
+
     let epsilon = derive_epsilon(predecessor_id, path);
     let derived_sk = derive_secret_key(sk, epsilon);
-    println!("epsilon: {:?} {:?}", epsilon, epsilon.to_bytes());
     let derived_pk = derive_key(pk.into(), epsilon);
-    println!("derived_pk: {:?} {:?}", derived_pk, derived_pk.to_encoded_point(false).to_bytes());
-    let p1 = AccountId::new_unvalidated("0x70997970C51812dc3A010C7d01b50e0d17dc79C8".to_string().to_lowercase());
-    let path = "test";
-    println!("derive_epsilon({}, {}) = {:?}", p1, path, derive_epsilon(&p1, path));
     let signing_key = k256::ecdsa::SigningKey::from(&derived_sk);
     let verifying_key =
         k256::ecdsa::VerifyingKey::from(&k256::PublicKey::from_affine(derived_pk).unwrap());
@@ -195,16 +180,9 @@ pub async fn create_response(
         AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0)).unwrap();
     let s: k256::Scalar = *s.as_ref();
 
-    println!("=== derived_pk {:?} {:?}\nbig_r {:?} {:?}\ns {:?}\nscalar_hash {:?}", derived_pk,
-        derived_pk.to_encoded_point(false).to_bytes(),
-        big_r,
-        big_r.to_encoded_point(false).to_bytes(),
-        s, scalar_hash);
     let recovery_id = if check_ec_signature(&derived_pk, &big_r, &s, scalar_hash, 0).is_ok() {
-        println!("0 is ok");
         0
     } else if check_ec_signature(&derived_pk, &big_r, &s, scalar_hash, 1).is_ok() {
-        println!("1 is ok");
         1
     } else {
         panic!("unable to use recovery id of 0 or 1");

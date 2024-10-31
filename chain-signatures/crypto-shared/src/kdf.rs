@@ -6,11 +6,11 @@ use k256::{
     Scalar, Secp256k1, SecretKey,
 };
 use near_account_id::AccountId;
-use sha3::{Digest, Keccak256, Sha3_256};
+use sha3::{Digest, Sha3_256};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // near-mpc-recovery with key derivation protocol vX.Y.Z.
-const EPSILON_DERIVATION_PREFIX: &str = "near-mpc-recovery v0.2.0 epsilon derivation:";
+const EPSILON_DERIVATION_PREFIX: &str = "near-mpc-recovery v0.1.0 epsilon derivation:";
 
 pub fn derive_epsilon(predecessor_id: &AccountId, path: &str) -> Scalar {
     // TODO: Use a key derivation library instead of doing this manually.
@@ -22,8 +22,7 @@ pub fn derive_epsilon(predecessor_id: &AccountId, path: &str) -> Scalar {
     // Do not reuse this hash function on anything that isn't an account
     // ID or it'll be vunerable to Hash Melleability/extention attacks.
     let derivation_path = format!("{EPSILON_DERIVATION_PREFIX}{},{}", predecessor_id, path);
-    println!("derivation_path: \n{}", derivation_path);
-    let mut hasher = Keccak256::new();
+    let mut hasher = Sha3_256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
     Scalar::from_non_biased(hash)
@@ -53,21 +52,15 @@ pub fn check_ec_signature(
     msg_hash: Scalar,
     recovery_id: u8,
 ) -> anyhow::Result<()> {
-    println!("---");
     let public_key = expected_pk.to_encoded_point(false);
-    println!("public_key {}", public_key.to_string());
     let signature = k256::ecdsa::Signature::from_scalars(x_coordinate(big_r), s)
         .context("cannot create signature from cait_sith signature")?;
-    println!("signature {} {}", signature.r(), signature.s());
-    println!("msg_hash {:?}", msg_hash);
     let found_pk = recover(
         &msg_hash.to_bytes(),
         &signature,
         RecoveryId::try_from(recovery_id).context("invalid recovery ID")?,
     )?
     .to_encoded_point(false);
-    println!("found_pk {}", found_pk.to_string());
-
     if public_key == found_pk {
         return Ok(());
     }
