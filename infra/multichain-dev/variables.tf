@@ -123,3 +123,8 @@ variable "static_env" {
     }
   ]
 }
+
+variable "redis_url" {
+  type = string
+  default = "redis://127.0.0.1:6379"
+}

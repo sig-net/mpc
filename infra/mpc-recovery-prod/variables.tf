@@ -1,20 +1,16 @@
 variable "project" {
 }
 
-variable "credentials_file" {
-  default = null
-}
-
 variable "credentials" {
   default = null
 }
 
 variable "region" {
-  default = "us-east1"
+  default = "europe-west1"
 }
 
 variable "zone" {
-  default = "us-east1-c"
+  default = "europe-west1-b"
 }
 
 variable "docker_image" {
@@ -48,18 +44,18 @@ variable "signer_configs" {
 }
 
 variable "prod-connector" {
-  default = "projects/pagoda-shared-infrastructure/locations/us-east1/connectors/prod-us-east1-connector"
+  default = "projects/sig-shared-network/locations/europe-west1/connectors/prod-eu-west1-connector"
 }
 
 data "google_compute_subnetwork" "prod_subnetwork" {
-  name    = "cloudrun-main-prod-us-east1"
-  project = "pagoda-shared-infrastructure"
-  region  = "us-east1"
+  name    = "cloudrun-main-prod-europe-west1"
+  project = "sig-shared-network"
+  region  = "europe-west1"
 }
 
 data "google_compute_network" "prod_network" {
   name    = "prod"
-  project = "pagoda-shared-infrastructure"
+  project = "sig-shared-network"
 }
 
 variable "jwt_signature_pk_url" {
@@ -71,5 +67,9 @@ variable "otlp_endpoint" {
 }
 
 variable "opentelemetry_level" {
+  type = string
+}
+
+variable "env" {
   type = string
 }
