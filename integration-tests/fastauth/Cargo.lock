@@ -2807,6 +2807,7 @@ dependencies = [
  "futures",
  "hex 0.4.3",
  "hyper",
+ "hyper-tls",
  "mpc-recovery",
  "multi-party-eddsa",
  "near-crypto 0.17.0",

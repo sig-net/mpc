@@ -5,6 +5,7 @@ use std::io::Write;
 
 use anyhow::Context;
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
+use hyper_tls::HttpsConnector;
 use near_workspaces::{types::SecretKey, AccountId};
 use serde::{Deserialize, Serialize};
 use toml::Value;
@@ -27,7 +28,10 @@ where
         ))
         .context("failed to build the request")?;
 
-    let client = Client::new();
+    // Set up an HTTPS connector.
+    let https = HttpsConnector::new();
+    let client = Client::builder().build::<_, hyper::Body>(https);
+
     let response = client
         .request(req)
         .await

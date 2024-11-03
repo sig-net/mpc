@@ -929,9 +929,12 @@ impl LeaderNodeApi {
         user_secret_key: &SecretKey,
     ) -> anyhow::Result<(StatusCode, ClaimOidcResponse)> {
         let oidc_token_hash = oidc_token.digest_hash();
+        tracing::info!("OIDC Token Hash: {:?}", oidc_token_hash);
 
         let request_digest = claim_oidc_request_digest(&oidc_token_hash, user_public_key).unwrap();
+        tracing::info!("Request Digest: {:?}", request_digest);
         let request_digest_signature = sign_digest(&request_digest, user_secret_key)?;
+        tracing::info!("Request Digest Signature: {:?}", request_digest_signature);
 
         let oidc_request = ClaimOidcRequest {
             oidc_token_hash,
@@ -939,16 +942,29 @@ impl LeaderNodeApi {
             frp_signature: request_digest_signature,
         };
 
+        tracing::info!("OIDC request: {:?}", oidc_request);
+
         let response = self.claim_oidc(oidc_request.clone()).await?;
+        tracing::info!("OIDC response: {:?}", response);
 
         match response.1 {
             ClaimOidcResponse::Ok { mpc_signature } => {
+                tracing::info!("MPC Signature: {:?}", mpc_signature);
+
                 let mpc_pk: PublicKeyEd25519 =
                     self.get_mpc_pk(MpcPkRequest {}).await?.1.try_into()?;
+                tracing::info!("MPC PK: {:?}", mpc_pk);
 
                 // Verify signature
                 let response_digest = claim_oidc_response_digest(oidc_request.frp_signature)?;
-                mpc_pk.verify(&response_digest, &mpc_signature)?;
+                tracing::info!("Response Digest: {:?}", response_digest);
+                mpc_pk
+                    .verify(&response_digest, &mpc_signature)
+                    .map_err(|e| {
+                        tracing::error!("Signature verification failed: {:?}", e);
+                        e
+                    })?;
+                tracing::info!("Signature verified");
                 Ok(response)
             }
             ClaimOidcResponse::Err { .. } => Ok(response),
@@ -975,5 +991,45 @@ impl LeaderNodeApi {
             frp_public_key: client_pk.clone(),
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mpc_recovery::{
+        firewall::allowed::DelegateActionRelayer, relayer::NearRpcAndRelayerClient,
+        sign_node::oidc::OidcToken,
+    };
+    use near_crypto::KeyType;
+
+    use crate::env::LeaderNodeApi;
+
+    #[tokio::test]
+    async fn test_oidc_with_real_server() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
+
+        let leader_api = LeaderNodeApi {
+            address: "https://mpc-recovery-leader-mainnet-1094058868047.europe-west1.run.app/"
+                .to_string(),
+            client: NearRpcAndRelayerClient::connect("https://rpc.mainnet.near.org"),
+            relayer: DelegateActionRelayer {
+                // Not used
+                url: "http://localhost:3002".to_string(),
+                api_key: None,
+            },
+        };
+
+        let user_secret_key = near_crypto::SecretKey::from_random(KeyType::ED25519);
+        let user_public_key = user_secret_key.public_key();
+        let oidc_token = OidcToken::new("test_oidc_345987453");
+
+        let result = leader_api
+            .claim_oidc_with_helper(&oidc_token, &user_public_key, &user_secret_key)
+            .await
+            .unwrap();
+
+        tracing::info!("Claiming helper result: {:?}", result);
     }
 }
