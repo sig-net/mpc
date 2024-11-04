@@ -11,7 +11,7 @@ pub struct Options {
     #[clap(
         long,
         env("MPC_MESH_FETCH_PARTICIPANT_TIMEOUT"),
-        default_value = "1000"
+        default_value = "100"
     )]
     pub fetch_participant_timeout: u64,
     #[clap(long, env("MPC_MESH_REFRESH_ACTIVE_TIMEOUT"), default_value = "1000")]
