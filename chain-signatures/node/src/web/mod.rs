@@ -131,19 +131,19 @@ pub enum StateView {
 async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
     tracing::debug!("fetching state");
     let latest_block_height = state.indexer.latest_block_height().await;
-    let is_stable = state.indexer.is_on_track().await;
+    let is_stable = state.indexer.is_stable().await;
     let protocol_state = state.protocol_state.read().await;
 
     match &*protocol_state {
         NodeState::Running(state) => {
             let triple_manager_read = state.triple_manager.read().await;
-            let triple_potential_count = triple_manager_read.potential_len();
-            let triple_count = triple_manager_read.len();
-            let triple_mine_count = triple_manager_read.my_len();
+            let triple_potential_count = triple_manager_read.len_potential().await;
+            let triple_count = triple_manager_read.len_generated().await;
+            let triple_mine_count = triple_manager_read.len_mine().await;
             let presignature_read = state.presignature_manager.read().await;
-            let presignature_count = presignature_read.len();
-            let presignature_mine_count = presignature_read.my_len();
-            let presignature_potential_count = presignature_read.potential_len();
+            let presignature_count = presignature_read.len_generated().await;
+            let presignature_mine_count = presignature_read.len_mine().await;
+            let presignature_potential_count = presignature_read.len_potential().await;
             let participants = state.participants.keys_vec();
 
             Ok(Json(StateView::Running {

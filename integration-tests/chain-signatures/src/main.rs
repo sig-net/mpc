@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
             println!("\nExternal services:");
             println!("  datastore:     {}", ctx.datastore.local_address);
             println!("  lake_indexer:  {}", ctx.lake_indexer.rpc_host_address);
+            println!("  redis:  {}", ctx.redis.internal_address);
 
             println!("\nNodes:");
             for i in 0..urls.len() {
