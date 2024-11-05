@@ -99,7 +99,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_INDEXER_START_BLOCK_HEIGHT"
-      value = 177673773
+      value = 178736306
     },
     {
       name  = "AWS_DEFAULT_REGION"
