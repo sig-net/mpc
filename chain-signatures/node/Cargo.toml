@@ -15,6 +15,7 @@ aws-sdk-s3 = "1.29"
 aws-types = "1.2"
 axum = { version = "0.6.19" }
 axum-extra = "0.7"
+borsh = "1.5.0"
 cait-sith = { git = "https://github.com/LIT-Protocol/cait-sith.git", features = [
     "k256",
 ], rev = "8ad2316" }
@@ -60,4 +61,6 @@ itertools = "0.12.0"
 http = "1.1.0"
 prometheus = { version = "0.13.3" }
 once_cell = "1.13.1"
+redis = "0.27.2"
+deadpool-redis = "0.18.0"
 sysinfo = "0.32.0"

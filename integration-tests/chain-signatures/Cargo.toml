@@ -28,6 +28,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 url = { version = "2.4.0", features = ["serde"] }
+deadpool-redis = "0.18.0"
 
 # crypto dependencies
 cait-sith = { git = "https://github.com/LIT-Protocol/cait-sith.git", features = [

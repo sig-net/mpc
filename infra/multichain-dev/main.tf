@@ -18,6 +18,7 @@ module "gce-container" {
 
   container = {
     image = "europe-west1-docker.pkg.dev/near-cs-dev/multichain-public/multichain-dev:latest"
+
     port  = "3000"
 
     volumeMounts = [
@@ -108,6 +109,7 @@ resource "google_project_iam_member" "sa-roles" {
   role    = each.key
   member  = "serviceAccount:${google_service_account.service_account.email}"
   project = var.project_id
+
 }
 
 resource "google_compute_address" "internal_ips" {
