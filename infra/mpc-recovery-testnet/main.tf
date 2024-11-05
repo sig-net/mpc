@@ -39,14 +39,6 @@ resource "google_service_account" "service_account" {
   display_name = "MPC Recovery testnet Account"
 }
 
-# resource "google_service_account_iam_member" "serivce-account-iam" {
-#   service_account_id = google_service_account.service_account.name
-#   role               = "roles/iam.serviceAccountUser"
-
-#   member = [
-#     "serviceAccount:${google_service_account.service_account.email}",
-#   ]
-# }
 
 resource "google_project_iam_member" "service-account-datastore-user" {
   project = var.project

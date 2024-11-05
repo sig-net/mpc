@@ -39,14 +39,6 @@ resource "google_service_account" "service_account" {
   display_name = "MPC Recovery mainnet Account"
 }
 
-# resource "google_service_account_iam_binding" "serivce-account-iam" {
-#   service_account_id = google_service_account.service_account.name
-#   role               = "roles/iam.serviceAccountUser"
-
-#   members = [
-#     "serviceAccount:${local.client_email}"
-#   ]
-# }
 
 resource "google_project_iam_member" "service-account-datastore-user" {
   project = var.project

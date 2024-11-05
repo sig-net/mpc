@@ -611,7 +611,7 @@ impl VersionedMpcContract {
 
     // This function can be used to transfer the MPC network to a new contract.
     #[private]
-    #[init(ignore_state)]
+    #[init]
     #[handle_result]
     pub fn init_running(
         epoch: u64,
