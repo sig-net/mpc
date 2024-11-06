@@ -17,10 +17,11 @@ describe("ChainSignatures", function () {
     const y = publicKeyArray.slice(33);
     const xHex = '0x' + x.map(byte => byte.toString(16).padStart(2, '0')).join('');
     const yHex = '0x' + y.map(byte => byte.toString(16).padStart(2, '0')).join('');
+    console.log("===", xHex, yHex);
     ChainSignatures = await ethers.getContractFactory("ChainSignatures");
     publicKey = { x: xHex, y: yHex };
     chainSignatures = await ChainSignatures.deploy(publicKey);
-    await chainSignatures.deployed();
+    // await chainSignatures.deployed();
   });
 
   describe("deriveEpsilon", function () {
@@ -95,16 +96,15 @@ describe("ChainSignatures", function () {
 
   describe("Signing requests", function () {
     it("Should create a signature request", async function () {
-      const payloadHash = ethers.utils.id("Test payload");
+      const payloadHash = ethers.keccak256(ethers.toUtf8Bytes("Test payload"));
       const path = "test/path";
       const requiredDeposit = await chainSignatures.getSignatureDeposit();
       const epsilon = await chainSignatures.deriveEpsilon(path, addr1.address);
-      const requestId = ethers.utils.keccak256(
-        ethers.utils.solidityPack(
+      const requestId = 
+        ethers.solidityPackedKeccak256(
           ["bytes32", "address", "string"],
           [payloadHash, addr1.address, path]
-        )
-      );
+        );
 
       await expect(chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit }))
         .to.emit(chainSignatures, "SignatureRequested")
@@ -112,11 +112,11 @@ describe("ChainSignatures", function () {
     });
 
     it("Should not allow creating a request with insufficient deposit", async function () {
-      const payloadHash = ethers.utils.id("Test payload");
+      const payloadHash = ethers.keccak256(ethers.toUtf8Bytes("Test payload"));
       const path = "test/path";
       const requiredDeposit = await chainSignatures.getSignatureDeposit();
 
-      await expect(chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit.sub(1) }))
+      await expect(chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit - 1n }))
         .to.be.revertedWith("Insufficient deposit");
     });
 
@@ -127,7 +127,8 @@ describe("ChainSignatures", function () {
 
       const tx = await chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit });
       const receipt = await tx.wait();
-      const requestId = receipt.events[0].args[0];
+      console.log(receipt)
+      const requestId = receipt.logs[0].args[0];
 
       const derivedKey = [4, 190, 143, 8, 126, 40, 72, 115, 4, 123, 130, 29, 196, 122, 34, 228, 26, 20, 35, 250, 206, 151, 165, 156, 80, 108, 174, 28, 201, 170, 194, 76, 62, 12, 129, 226, 158, 161, 199, 99, 154, 106, 237, 60, 51, 66, 251, 34, 189, 109, 197, 189, 114, 141, 17, 10, 82, 55, 232, 178, 0, 131, 170, 202, 41];
       const derivedKeyX = '0x' + derivedKey.slice(1, 33).map(byte => byte.toString(16).padStart(2, '0')).join('');
@@ -138,16 +139,23 @@ describe("ChainSignatures", function () {
       const s = "0x5F06F4BC377E509EDA49EC73074D62962CB0C5D48C0800580FAD3E19EC620C09".toLowerCase();
       const msgHash = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9".toLowerCase();
       const response = { bigR: { x: bigRX, y: bigRY }, s: s, recoveryId: 0 };
-      
+      console.log("===", requestId, response);
       // This form doesn't work, possible hardhat bug
       // await expect(chainSignatures.connect(owner).respond(requestId, response))
       //   .to.emit(chainSignatures, "SignatureResponded")
       //   .withArgs(requestId, [[ethers.BigNumber.from(bigRX), ethers.BigNumber.from(bigRY)], ethers.BigNumber.from(s), 0]);
       const tx2 = await chainSignatures.connect(owner).respond(requestId, response);
       const receipt2 = await tx2.wait();
-      console.log(receipt2.events[0].args[1][0][0]);
-      console.log('Is BigNumber:', ethers.BigNumber.isBigNumber(receipt2.events[0].args[1][0][0]));
-      await expect(receipt2.events[0].args).to.deep.equal([requestId, [[ethers.BigNumber.from(bigRX), ethers.BigNumber.from(bigRY)], ethers.BigNumber.from(s), 0]]);
+      const responseEvent = receipt2.logs.find(log => 
+        chainSignatures.interface.parseLog(log)?.name === "SignatureResponded"
+      );
+      const parsedEvent = chainSignatures.interface.parseLog(responseEvent);
+      
+      expect(parsedEvent.args[0]).to.equal(requestId);
+      expect(parsedEvent.args[1][0][0]).to.equal(bigRX);
+      expect(parsedEvent.args[1][0][1]).to.equal(bigRY);
+      expect(parsedEvent.args[1][1]).to.equal(s);
+      expect(parsedEvent.args[1][2]).to.equal(0);
     });
   });
 
@@ -156,13 +164,13 @@ describe("ChainSignatures", function () {
       expect(await chainSignatures.getSignatureDeposit()).to.equal(1);
 
       for (let i = 0; i < 4; i++) {
-        const payloadHash = ethers.utils.id(`Test payload ${i}`);
+        const payloadHash = ethers.keccak256(ethers.toUtf8Bytes(`Test payload ${i}`));
         const path = `test/path/${i}`;
         const requiredDeposit = await chainSignatures.getSignatureDeposit();
         await chainSignatures.connect(addr1).sign(payloadHash, path, { value: requiredDeposit });
       }
 
-      expect(await chainSignatures.getSignatureDeposit()).to.equal(ethers.utils.parseEther("0.004"));
+      expect(await chainSignatures.getSignatureDeposit()).to.equal(ethers.parseEther("0.004"));
     });
   });
 
