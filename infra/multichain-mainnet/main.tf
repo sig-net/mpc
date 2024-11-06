@@ -4,6 +4,10 @@ provider "google" {
 provider "google-beta" {
   project = var.project_id
 }
+resource "google_compute_project_metadata_item" "project_logging" {
+  key   = "google-logging-enabled"
+  value = "true"
+}
 module "gce-container" {
   count   = length(var.node_configs)
   source  = "terraform-google-modules/container-vm/google"
@@ -64,7 +68,7 @@ module "gce-container" {
 }
 
 resource "google_service_account" "service_account" {
-  account_id   = "multichain-partner-${var.env}"
+  account_id   = "multichain-${var.env}"
   display_name = "Multichain ${var.env} Account"
 }
 
@@ -84,7 +88,7 @@ resource "google_project_iam_member" "sa-roles" {
 
 resource "google_compute_global_address" "external_ips" {
   count        = length(var.node_configs)
-  name         = "multichain-partner-mainnet-${count.index}"
+  name         = "multichain-mainnet-${count.index}"
   address_type = "EXTERNAL"
 
   lifecycle {
@@ -94,7 +98,7 @@ resource "google_compute_global_address" "external_ips" {
 
 resource "google_compute_managed_ssl_certificate" "mainnet_ssl" {
   count = length(var.node_configs)
-  name = "multichain-partner-mainnet-ssl-${count.index}"
+  name = "multichain-mainnet-ssl-${count.index}"
 
   managed {
     domains = [var.node_configs[count.index].domain]
@@ -111,7 +115,7 @@ module "ig_template" {
     email  = google_service_account.service_account.email,
     scopes = ["cloud-platform"]
   }
-  name_prefix          = "multichain-partner-mainnet-${count.index}"
+  name_prefix          = "multichain-mainnet-${count.index}"
   source_image_family  = "cos-113-lts"
   source_image_project = "cos-cloud"
   machine_type         = "n2d-standard-2"
@@ -121,11 +125,14 @@ module "ig_template" {
   source_image = reverse(split("/", module.gce-container[count.index].source_image))[0]
   metadata     = merge(var.additional_metadata, { "gce-container-declaration" = module.gce-container["${count.index}"].metadata_value })
   tags = [
-    "multichain",
-    "allow-ssh"
+    "multichain"
   ]
   labels = {
-    "container-vm" = module.gce-container[count.index].vm_container_label
+    "container-vm" = module.gce-container[count.index].vm_container_label,
+    environment    = "prod",
+    chain          = "near",
+    owner          = "sig",
+    network        = "mainnet"
   }
 
   depends_on = [google_compute_global_address.external_ips]
@@ -137,7 +144,7 @@ module "instances" {
   source     = "../modules/instance-from-tpl"
   region     = var.region
   project_id = var.project_id
-  hostname   = "multichain-mainnet-partner-${count.index}"
+  hostname   = "multichain-mainnet-${count.index}"
   network    = var.network
   subnetwork = var.subnetwork
 
@@ -146,7 +153,7 @@ module "instances" {
 }
 
 resource "google_compute_health_check" "multichain_healthcheck" {
-  name = "multichain-mainnet-partner-healthcheck"
+  name = "multichain-mainnet-healthcheck"
 
   http_health_check {
     port         = 3000
@@ -157,7 +164,7 @@ resource "google_compute_health_check" "multichain_healthcheck" {
 
 resource "google_compute_global_forwarding_rule" "http_fw" {
   count      = length(var.node_configs)
-  name       = "multichain-partner-mainnet-http-rule-${count.index}"
+  name       = "multichain-mainnet-http-rule-${count.index}"
   target     = google_compute_target_http_proxy.default[count.index].id
   port_range = "80"
   ip_protocol = "TCP"
@@ -167,7 +174,7 @@ resource "google_compute_global_forwarding_rule" "http_fw" {
 
 resource "google_compute_global_forwarding_rule" "https_fw" {
   count      = length(var.node_configs)
-  name       = "multichain-partner-mainnet-https-rule-${count.index}"
+  name       = "multichain-mainnet-https-rule-${count.index}"
   target     = google_compute_target_https_proxy.default_https[count.index].id
   port_range = "443"
   ip_protocol = "TCP"
@@ -177,14 +184,14 @@ resource "google_compute_global_forwarding_rule" "https_fw" {
 
 resource "google_compute_target_http_proxy" "default" {
   count      = length(var.node_configs)
-  name        = "multichain-partner-mainnet-http-target-proxy-${count.index}"
+  name        = "multichain-mainnet-http-target-proxy-${count.index}"
   description = "a description"
   url_map     = google_compute_url_map.redirect_default[count.index].id
 }
 
 resource "google_compute_target_https_proxy" "default_https" {
   count      = length(var.node_configs)
-  name        = "multichain-partner-mainnet-https-target-proxy-${count.index}"
+  name        = "multichain-mainnet-https-target-proxy-${count.index}"
   description = "a description"
   ssl_certificates = [ google_compute_managed_ssl_certificate.mainnet_ssl[count.index].self_link ]
   url_map     = google_compute_url_map.default[count.index].id
@@ -192,13 +199,13 @@ resource "google_compute_target_https_proxy" "default_https" {
 
 resource "google_compute_url_map" "default" {
   count           = length(var.node_configs)
-  name            = "multichain-partner-mainnet-url-map-${count.index}"
+  name            = "multichain-mainnet-url-map-${count.index}"
   default_service = google_compute_backend_service.multichain_backend[count.index].id
 }
 
 resource "google_compute_url_map" "redirect_default" {
   count           = length(var.node_configs)
-  name            = "multichain-partner-mainnet-redirect-url-map-${count.index}"
+  name            = "multichain-mainnet-redirect-url-map-${count.index}"
   default_url_redirect {
     strip_query    = false
     https_redirect = true
@@ -207,7 +214,7 @@ resource "google_compute_url_map" "redirect_default" {
 
 resource "google_compute_backend_service" "multichain_backend" {
   count                 = length(var.node_configs)
-  name                  = "multichain-partner-mainnet-backend-service-${count.index}"
+  name                  = "multichain-mainnet-backend-service-${count.index}"
   load_balancing_scheme = "EXTERNAL"
 
   log_config {
@@ -223,7 +230,7 @@ resource "google_compute_backend_service" "multichain_backend" {
 
 resource "google_compute_instance_group" "multichain_group" {
   count     = length(var.node_configs)
-  name      = "multichain-partner-mainnet-instance-group-${count.index}"
+  name      = "multichain-mainnet-instance-group-${count.index}"
   instances = [module.instances[count.index].self_links[0]]
 
   zone = var.zone

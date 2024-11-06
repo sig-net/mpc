@@ -20,10 +20,17 @@ jobs:
       - uses: actions/checkout@v3
         name: "Checkout mpc-recovery"
 
-      - name: Login to GCP Artifact Registry
-        run: echo "$GOOGLE_CREDENTIALS" | docker login -u _json_key --password-stdin https://us-east1-docker.pkg.dev
+      - name: Login to GCP Artifact Registry Mainnet
+        if: github.event.inputs.network == 'mainnet'
+        run: echo "$GOOGLE_CREDENTIALS" | docker login -u _json_key --password-stdin https://europe-west1-docker.pkg.dev
         env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS_PROD }}
+          GOOGLE_CREDENTIALS: ${{ secrets.SIG_CREDENTIALS_MAINNET }}
+
+      - name: Login to GCP Artifact Registry Testnet
+        if: github.event.inputs.network == 'testnet'
+        run: echo "$GOOGLE_CREDENTIALS" | docker login -u _json_key --password-stdin https://europe-west1-docker.pkg.dev
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.SIG_CREDENTIALS_TESTNET }}
       
         # Since the Mainnet and Testnet nodes are polling this image repository, only the image needs to be updated in order to trigger a deployment
       - name: Build Docker image and deploy partner nodes
@@ -32,4 +39,4 @@ jobs:
         with:
           push: true
           file: ./Dockerfile.multichain
-          tags: "us-east1-docker.pkg.dev/pagoda-discovery-platform-prod/multichain-public/multichain-${{ github.event.inputs.network }}:latest"
+          tags: "europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:latest"

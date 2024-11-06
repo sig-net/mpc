@@ -13,7 +13,7 @@ resource "google_cloud_run_v2_service" "signer" {
       for_each = var.connector_id == null ? [] : [1]
       content {
         connector = var.connector_id == null ? null : var.connector_id
-        egress    = "PRIVATE_RANGES_ONLY"
+        egress    = "ALL_TRAFFIC"
       }
     }
 

@@ -17,7 +17,7 @@ variable "mig_name" {
 variable "image" {
   description = "The Docker image to deploy to GCE instances. Note: This is a public image repository used for updating your nodes, please do not change this"
   type        = string
-  default     = "us-east1-docker.pkg.dev/pagoda-discovery-platform-prod/multichain-public/multichain-mainnet:latest"
+  default     = "us-east1-docker.pkg.dev/near-cs-mainnet/multichain-public/multichain-mainnet:latest"
 }
 
 variable "image_port" {
@@ -101,7 +101,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_INDEXER_START_BLOCK_HEIGHT"
-      value = 124092099
+      value = 131590539
     },
     {
       name  = "AWS_DEFAULT_REGION"
@@ -109,7 +109,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_GCP_PROJECT_ID"
-      value = "pagoda-discovery-platform-prod"
+      value = "near-cs-mainnet"
     },
     {
       name  = "MPC_WEB_PORT"

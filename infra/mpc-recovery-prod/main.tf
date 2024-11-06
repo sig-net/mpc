@@ -1,6 +1,6 @@
 terraform {
   backend "gcs" {
-    bucket = "mpc-recovery-terraform-prod"
+    bucket = "near-multichain-state-mainnet"
     prefix = "state/mpc-recovery"
   }
 
@@ -13,9 +13,6 @@ terraform {
 }
 
 locals {
-  credentials  = var.credentials != null ? var.credentials : file(var.credentials_file)
-  client_email = jsondecode(local.credentials).client_email
-  client_id    = jsondecode(local.credentials).client_id
 
   workspace = {
     near_rpc          = "https://rpc.mainnet.near.org"
@@ -28,7 +25,6 @@ data "external" "git_checkout" {
 }
 
 provider "google" {
-  credentials = local.credentials
 
   project = var.project
   region  = var.region
@@ -43,14 +39,6 @@ resource "google_service_account" "service_account" {
   display_name = "MPC Recovery mainnet Account"
 }
 
-resource "google_service_account_iam_binding" "serivce-account-iam" {
-  service_account_id = google_service_account.service_account.name
-  role               = "roles/iam.serviceAccountUser"
-
-  members = [
-    "serviceAccount:${local.client_email}"
-  ]
-}
 
 resource "google_project_iam_member" "service-account-datastore-user" {
   project = var.project
@@ -91,11 +79,11 @@ resource "google_secret_manager_secret_iam_member" "fast_auth_partners_secret_ac
 
 module "mpc-leader-lb-mainnet" {
   source        = "../modules/internal_cloudrun_lb"
-  name          = "mpc-prod-leader-mainnet"
+  name          = "mpc-leader-mainnet"
   network_id    = data.google_compute_network.prod_network.id
   subnetwork_id = data.google_compute_subnetwork.prod_subnetwork.id
   project_id    = var.project
-  region        = "us-east1"
+  region        = var.region
   service_name  = "mpc-recovery-leader-mainnet"
 }
 

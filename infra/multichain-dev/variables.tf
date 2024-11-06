@@ -1,13 +1,13 @@
 variable "project_id" {
   description = "The project ID to deploy resource into"
   type        = string
-  default     = "pagoda-discovery-platform-dev"
+  default     = "near-cs-dev"
 }
 
 variable "subnetwork" {
   description = "The name of the subnetwork to deploy instances into"
   type        = string
-  default     = "dev-us-central1"
+  default     = "dev-europe-west1"
 }
 
 variable "mig_name" {
@@ -19,7 +19,7 @@ variable "mig_name" {
 variable "image" {
   description = "The Docker image to deploy to GCE instances"
   type        = string
-  default     = "us-east1-docker.pkg.dev/pagoda-discovery-platform-dev/multichain/multichain-dev:latest"
+  default     = "europe-west1-docker.pkg.dev/near-cs-dev/multichain/multichain-dev:latest"
 }
 
 variable "image_port" {
@@ -31,7 +31,7 @@ variable "image_port" {
 variable "region" {
   description = "The GCP region to deploy instances into"
   type        = string
-  default     = "us-central1"
+  default     = "europe-west1"
 }
 
 variable "network" {
@@ -104,7 +104,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_INDEXER_START_BLOCK_HEIGHT"
-      value = 177069137
+      value = 178736306
     },
     {
       name  = "AWS_DEFAULT_REGION"
@@ -112,7 +112,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_GCP_PROJECT_ID"
-      value = "pagoda-discovery-platform-dev"
+      value = "near-cs-dev"
     },
     {
       name  = "MPC_WEB_PORT"
@@ -127,4 +127,9 @@ variable "static_env" {
       value = "eu-central-1"
     }
   ]
+}
+
+variable "redis_url" {
+  type = string
+  default = "redis://127.0.0.1:6379"
 }
