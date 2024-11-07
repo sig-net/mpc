@@ -88,6 +88,7 @@ pub struct ContractSignRequest {
 
 #[derive(Debug, Clone)]
 pub struct Indexer {
+    last_processed_block: Arc<RwLock<BlockHeight>>,
     last_updated_timestamp: Arc<RwLock<Instant>>,
     latest_block_timestamp_nanosec: Arc<RwLock<Option<u64>>>,
     running_threshold: Duration,
@@ -96,8 +97,8 @@ pub struct Indexer {
 
 impl Indexer {
     fn new(options: &Options) -> Self {
-        // TODO: log latest block height
         Self {
+            last_processed_block: Arc::new(RwLock::new(0)),
             last_updated_timestamp: Arc::new(RwLock::new(Instant::now())),
             latest_block_timestamp_nanosec: Arc::new(RwLock::new(None)),
             running_threshold: Duration::from_secs(options.running_threshold),
@@ -105,10 +106,8 @@ impl Indexer {
         }
     }
 
-    /// Get the latest processed block height
-    pub async fn latest_block_height(&self) -> BlockHeight {
-        // TODO: fetch latest block using RPC
-        0 as BlockHeight
+    pub async fn last_processed_block(&self) -> BlockHeight {
+        *self.last_processed_block.read().await
     }
 
     /// Check whether the indexer is on track with the latest block height from the chain.
@@ -140,13 +139,12 @@ impl Indexer {
         block_timestamp_nanosec: u64,
     ) {
         tracing::debug!(block_height, "update_block_height_and_timestamp");
+        *self.last_processed_block.write().await = block_height;
         *self.last_updated_timestamp.write().await = Instant::now();
         *self.latest_block_timestamp_nanosec.write().await = Some(block_timestamp_nanosec);
-        // TODO: update the block height in the indexer (add in memoru variable?)
     }
 }
 
-// TODO: why do we need this type? Why not use the `Indexer` type directly?
 #[derive(Clone, LakeContext)]
 struct Context {
     mpc_contract_id: AccountId,
@@ -285,6 +283,8 @@ pub fn run(
         "starting indexer"
     );
 
+    // TODO: fetch here or in the loop the latest block height from the chain.
+
     let indexer = Indexer::new(options);
     let context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
@@ -308,7 +308,7 @@ pub fn run(
             i += 1;
 
             let Ok(lake) = rt.block_on(async {
-                let latest = context.indexer.latest_block_height().await;
+                let latest = context.indexer.last_processed_block().await;
                 if i > 0 {
                     tracing::warn!("indexer latest height {latest}, restart count={i}");
                 }
