@@ -96,7 +96,6 @@ impl<'a> Node<'a> {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
             s3_region: ctx.localstack.s3_region.clone(),
             s3_url: Some(ctx.localstack.s3_host_address.clone()),
-            start_block_height: 0,
             running_threshold: 120,
             behind_threshold: 120,
         };

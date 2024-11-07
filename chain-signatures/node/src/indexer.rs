@@ -34,15 +34,6 @@ pub struct Options {
     #[clap(long, env("MPC_INDEXER_S3_URL"))]
     pub s3_url: Option<String>,
 
-    /// The block height to start indexing from.
-    // Defaults to the latest block on 2023-11-14 07:40:22 AM UTC
-    #[clap(
-        long,
-        env("MPC_INDEXER_START_BLOCK_HEIGHT"),
-        default_value = "145964826"
-    )]
-    pub start_block_height: u64,
-
     /// The amount of time before we should that our indexer is behind.
     #[clap(long, env("MPC_INDEXER_BEHIND_THRESHOLD"), default_value = "200")]
     pub behind_threshold: u64,
@@ -59,8 +50,6 @@ impl Options {
             self.s3_bucket,
             "--s3-region".to_string(),
             self.s3_region,
-            "--start-block-height".to_string(),
-            self.start_block_height.to_string(),
             "--behind-threshold".to_string(),
             self.behind_threshold.to_string(),
             "--running-threshold".to_string(),
@@ -292,7 +281,6 @@ pub fn run(
         s3_bucket = options.s3_bucket,
         s3_region = options.s3_region,
         s3_url = options.s3_url,
-        start_block_height = options.start_block_height,
         %mpc_contract_id,
         "starting indexer"
     );
