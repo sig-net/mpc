@@ -200,7 +200,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 &mpc_contract_id,
                 &account_id,
                 &sign_queue,
-                &gcp_service,
                 &rt,
             )?;
 

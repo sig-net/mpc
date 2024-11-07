@@ -1,17 +1,10 @@
 pub mod error;
 pub mod value;
 
-use self::value::{FromValue, IntoValue};
-use crate::gcp::error::DatastoreStorageError;
 use crate::storage;
 
-use google_datastore1::api::Filter;
-use google_datastore1::api::{
-    CommitRequest, Entity, EntityResult, Key, KindExpression, LookupRequest, Mutation, PathElement,
-    Query, RunQueryRequest,
-};
+use google_datastore1::api::Key;
 use google_datastore1::oauth2::AccessTokenAuthenticator;
-use google_datastore1::Datastore;
 use google_secretmanager1::api::{AddSecretVersionRequest, SecretPayload};
 use google_secretmanager1::oauth2::authenticator::ApplicationDefaultCredentialsTypes;
 use google_secretmanager1::oauth2::{
@@ -101,8 +94,8 @@ impl GcpService {
     ) -> anyhow::Result<Self> {
         let project_id = storage_options.gcp_project_id.clone();
         let secret_manager;
+        // TODO: check string
         if storage_options.env == "local-test" {
-            // TODO: check string
             let client = hyper::Client::builder().build(
                 hyper_rustls::HttpsConnectorBuilder::new()
                     .with_native_roots()

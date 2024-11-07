@@ -4,7 +4,6 @@ use super::state::{
     WaitingForConsensusState,
 };
 use super::{Config, SignQueue};
-use crate::gcp::error::DatastoreStorageError;
 use crate::gcp::error::SecretStorageError;
 use crate::http_client::MessageQueue;
 use crate::protocol::contract::primitives::Participants;
@@ -68,19 +67,11 @@ pub enum ConsensusError {
     CaitSithInitializationError(#[from] InitializationError),
     #[error("secret storage error: {0}")]
     SecretStorageError(SecretStorageError),
-    #[error("datastore storage error: {0}")]
-    DatastoreStorageError(DatastoreStorageError),
 }
 
 impl From<SecretStorageError> for ConsensusError {
     fn from(err: SecretStorageError) -> Self {
         ConsensusError::SecretStorageError(err)
-    }
-}
-
-impl From<DatastoreStorageError> for ConsensusError {
-    fn from(err: DatastoreStorageError) -> Self {
-        ConsensusError::DatastoreStorageError(err)
     }
 }
 

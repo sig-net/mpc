@@ -1,6 +1,4 @@
-use crate::gcp::GcpService;
 use crate::protocol::{SignQueue, SignRequest};
-use crate::storage::app_data_storage::AppDataRedisStorage;
 use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
 use near_account_id::AccountId;
@@ -99,8 +97,8 @@ pub struct ContractSignRequest {
     pub key_version: u32,
 }
 
+#[derive(Debug, Clone)]
 pub struct Indexer {
-    storage: AppDataRedisStorage,
     last_updated_timestamp: Arc<RwLock<Instant>>,
     latest_block_timestamp_nanosec: Arc<RwLock<Option<u64>>>,
     running_threshold: Duration,
@@ -108,10 +106,9 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    async fn new(storage: AppDataRedisStorage, options: &Options) -> Self {
+    fn new(options: &Options) -> Self {
         // TODO: log latest block height
         Self {
-            storage,
             last_updated_timestamp: Arc::new(RwLock::new(Instant::now())),
             latest_block_timestamp_nanosec: Arc::new(RwLock::new(None)),
             running_threshold: Duration::from_secs(options.running_threshold),
@@ -121,20 +118,8 @@ impl Indexer {
 
     /// Get the latest processed block height
     pub async fn latest_block_height(&self) -> BlockHeight {
-        let height = match self.storage.get_last_processed_block().await {
-            Ok(Some(height)) => height,
-            Ok(None) => {
-                tracing::warn!("block height was not set");
-                return 0;
-            }
-            Err(e) => {
-                // TODO: make it error in triples and presignatures
-                tracing::error!(?e, "failed to get block height");
-                return 0;
-            }
-        };
-        tracing::debug!(height, "latest block height");
-        height
+        // TODO: fetch latest block using RPC
+        0 as BlockHeight
     }
 
     /// Check whether the indexer is on track with the latest block height from the chain.
@@ -168,12 +153,7 @@ impl Indexer {
         tracing::debug!(block_height, "update_block_height_and_timestamp");
         *self.last_updated_timestamp.write().await = Instant::now();
         *self.latest_block_timestamp_nanosec.write().await = Some(block_timestamp_nanosec);
-        self.storage
-            .set_last_processed_block(block_height)
-            .await
-            .map_err(|e| {
-                tracing::error!(?e, "failed to set last processed block");
-            });
+        // TODO: update the block height in the indexer (add in memoru variable?)
     }
 }
 
@@ -275,7 +255,7 @@ async fn handle_block(
         .await;
 
     crate::metrics::LATEST_BLOCK_HEIGHT
-        .with_label_values(&[ctx.gcp_service.account_id.as_str()])
+        .with_label_values(&[ctx.node_account_id.as_str()])
         .set(block.block_height() as i64);
 
     // Add the requests after going through the whole block to avoid partial processing if indexer fails somewhere.
@@ -284,7 +264,7 @@ async fn handle_block(
     for request in pending_requests {
         queue.add(request);
         crate::metrics::NUM_SIGN_REQUESTS
-            .with_label_values(&[ctx.gcp_service.account_id.as_str()])
+            .with_label_values(&[ctx.node_account_id.as_str()])
             .inc();
     }
     drop(queue);
@@ -306,7 +286,7 @@ pub fn run(
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
     queue: &Arc<RwLock<SignQueue>>,
-    rt: &tokio::runtime::Runtime,
+    _rt: &tokio::runtime::Runtime,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, Indexer)> {
     tracing::info!(
         s3_bucket = options.s3_bucket,
@@ -317,7 +297,7 @@ pub fn run(
         "starting indexer"
     );
 
-    let indexer = Indexer::new(options).await;
+    let indexer = Indexer::new(options);
     let context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
         node_account_id: node_account_id.clone(),
