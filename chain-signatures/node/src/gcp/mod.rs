@@ -1,5 +1,4 @@
 pub mod error;
-pub mod value;
 
 use crate::storage;
 

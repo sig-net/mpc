@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
             println!("  release:        {}", ctx.release);
 
             println!("\nExternal services:");
+            // TOOD: do we still need this container? Is it required for secret manager?
             println!("  datastore:     {}", ctx.datastore.local_address);
             println!("  lake_indexer:  {}", ctx.lake_indexer.rpc_host_address);
             println!("  redis:  {}", ctx.redis.internal_address);

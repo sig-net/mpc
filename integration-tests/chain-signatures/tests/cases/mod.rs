@@ -19,7 +19,6 @@ use mpc_node::kdf::into_eth_sig;
 use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
 use mpc_node::protocol::triple::{Triple, TripleManager};
 use mpc_node::storage;
-use mpc_node::types::LatestBlockHeight;
 use mpc_node::util::NearPublicKeyExt;
 use near_account_id::AccountId;
 use test_log::test;
@@ -396,37 +395,6 @@ fn dummy_triple(id: u64) -> Triple {
             threshold: 5,
         },
     }
-}
-
-#[test(tokio::test)]
-async fn test_latest_block_height() -> anyhow::Result<()> {
-    with_multichain_nodes(MultichainConfig::default(), |ctx| {
-        Box::pin(async move {
-            let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
-            assert_eq!(state_0.participants.len(), 3);
-            wait_for::has_at_least_triples(&ctx, 2).await?;
-            wait_for::has_at_least_presignatures(&ctx, 2).await?;
-
-            let gcp_services = ctx.nodes.gcp_services().await?;
-            for gcp_service in &gcp_services {
-                let latest = LatestBlockHeight::fetch(gcp_service).await?;
-                assert!(latest.block_height > 10);
-            }
-
-            // test manually updating the latest block height
-            let gcp_service = gcp_services[0].clone();
-            let latest = LatestBlockHeight {
-                account_id: gcp_service.account_id.clone(),
-                block_height: 1000,
-            };
-            latest.store(&gcp_service).await?;
-            let new_latest = LatestBlockHeight::fetch(&gcp_service).await?;
-            assert_eq!(new_latest.block_height, latest.block_height);
-
-            Ok(())
-        })
-    })
-    .await
 }
 
 #[test(tokio::test)]
