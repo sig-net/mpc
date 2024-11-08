@@ -10,6 +10,7 @@ contract ChainSignatures {
     struct SignRequest {
         bytes32 payload;
         string path;
+        uint32 keyVersion;
     }
 
     struct SignatureRequest {
@@ -76,7 +77,19 @@ contract ChainSignatures {
         return epsilon;
     }
 
-    function sign(bytes32 payload, string memory path) external payable returns (bytes32) {
+    function latestKeyVersion() public pure returns (uint32) {
+        return 0;
+    }
+
+    function sign(SignRequest memory _request) external payable returns (bytes32) {
+        bytes32 payload = _request.payload;
+        string memory path = _request.path;
+        uint32 keyVersion = _request.keyVersion;
+
+        if (keyVersion > latestKeyVersion()) {
+            revert("This key version is not supported. Call latest_key_version() to get the latest supported version.");
+        }
+
         uint256 requiredDeposit = getSignatureDeposit();
         require(msg.value >= requiredDeposit, "Insufficient deposit");
 

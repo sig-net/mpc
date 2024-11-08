@@ -39,7 +39,7 @@ async function main() {
     const signer = (await hre.ethers.getSigners())[1];
     const chainSignaturesWithSigner = chainSignatures.connect(signer);
     
-    const tx = await chainSignaturesWithSigner.sign(testMessage, testPath, {
+    const tx = await chainSignaturesWithSigner.sign({payload: testMessage, path: testPath, keyVersion: 0}, {
       value: signatureDeposit
     });
     const receipt = await tx.wait();
