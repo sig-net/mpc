@@ -131,7 +131,7 @@ pub enum StateView {
 async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
     tracing::debug!("fetching state");
     // TODO: rename to last_processed_block when making other breaking changes
-    let latest_block_height = state.indexer.last_processed_block().await;
+    let latest_block_height = state.indexer.get_last_processed_block().await.unwrap_or(0);
     let is_stable = state.indexer.is_stable().await;
     let protocol_state = state.protocol_state.read().await;
 
