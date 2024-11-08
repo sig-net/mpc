@@ -448,9 +448,9 @@ async fn update_last_processed_block(
 
     tracing::info!(
         "set last processed block to {} to start indexer with, previous last processed: {}, latest block: {}",
+        starting_block,
         last_processed_block,
         latest_block,
-        starting_block,
     );
     Ok(())
 }
