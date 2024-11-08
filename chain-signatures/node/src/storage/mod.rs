@@ -6,7 +6,7 @@ pub mod triple_storage;
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "storage_options")]
 pub struct Options {
-    /// env used to suffix datastore table names to differentiate among environments.
+    /// env used to differentiate among environments.
     #[clap(long, env("MPC_ENV"))]
     pub env: String,
     /// GCP project ID.

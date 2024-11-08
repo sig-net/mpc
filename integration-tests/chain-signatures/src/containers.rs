@@ -562,6 +562,7 @@ impl Default for DockerClient {
     }
 }
 
+// TODO: remove or rename this struct and other mentions of datastore
 pub struct Datastore<'a> {
     pub container: Container<'a, GenericImage>,
     pub address: String,

@@ -39,13 +39,6 @@ resource "google_service_account" "service_account" {
   display_name = "MPC Recovery testnet Account"
 }
 
-
-resource "google_project_iam_member" "service-account-datastore-user" {
-  project = var.project
-  role    = "roles/datastore.user"
-  member  = "serviceAccount:${google_service_account.service_account.email}"
-}
-
 /*
  * Ensure service account has access to Secret Manager variables
  */
