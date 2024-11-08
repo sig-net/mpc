@@ -93,7 +93,6 @@ impl GcpService {
     ) -> anyhow::Result<Self> {
         let project_id = storage_options.gcp_project_id.clone();
         let secret_manager;
-        // TODO: check string
         if storage_options.env == "local-test" {
             let client = hyper::Client::builder().build(
                 hyper_rustls::HttpsConnectorBuilder::new()

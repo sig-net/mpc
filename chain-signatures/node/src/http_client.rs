@@ -203,7 +203,7 @@ impl MessageQueue {
         }
 
         if uncompacted > 0 {
-            tracing::info!(
+            tracing::debug!(
                 uncompacted,
                 compacted,
                 "{from:?} sent messages in {:?};",

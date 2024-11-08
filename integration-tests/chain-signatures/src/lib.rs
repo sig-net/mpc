@@ -204,7 +204,6 @@ pub struct Context<'a> {
     pub lake_indexer: crate::containers::LakeIndexer<'a>,
     pub worker: Worker<Sandbox>,
     pub mpc_contract: Contract,
-    pub datastore: crate::containers::Datastore<'a>,
     pub redis: crate::containers::Redis<'a>,
     pub storage_options: storage::Options,
     pub mesh_options: mesh::Options,
@@ -230,10 +229,6 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         )?)
         .await?;
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
-
-    let gcp_project_id = "multichain-integration";
-    let datastore =
-        crate::containers::Datastore::run(docker_client, docker_network, gcp_project_id).await?;
 
     let redis = crate::containers::Redis::run(docker_client, docker_network).await?;
     let redis_url = redis.internal_address.clone();
@@ -262,7 +257,6 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         lake_indexer,
         worker,
         mpc_contract,
-        datastore,
         redis,
         storage_options,
         mesh_options,
