@@ -74,7 +74,6 @@ resource "google_service_account" "service_account" {
 
 resource "google_project_iam_member" "sa-roles" {
   for_each = toset([
-      "roles/.user",
       "roles/secretmanager.admin",
       "roles/storage.objectAdmin",
       "roles/iam.serviceAccountAdmin",
