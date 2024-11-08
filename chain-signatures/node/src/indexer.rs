@@ -346,10 +346,10 @@ pub fn run(
                         lake_builder = lake_builder.s3_config(s3_config);
                     }
                     let lake = lake_builder.build()?;
-                    return anyhow::Ok(lake);
+                    anyhow::Ok(lake)
                 } else {
                     tracing::warn!("indexer failed to get last processed block");
-                    return Err(anyhow::anyhow!("failed to get last processed block"));
+                    Err(anyhow::anyhow!("failed to get last processed block"))
                 }
             }) else {
                 tracing::error!(?options, "indexer failed to build");
@@ -419,7 +419,7 @@ async fn update_last_processed_block(
         Ok(None) => 0,
         Err(err) => {
             tracing::warn!(%err, "failed to get last processed block");
-            return Err(err.into());
+            return Err(err);
         }
     };
 
