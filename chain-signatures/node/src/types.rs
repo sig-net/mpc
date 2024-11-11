@@ -236,3 +236,102 @@ impl KeyKind for &LatestBlockHeight {
         "LatestBlockHeight".to_string()
     }
 }
+
+pub struct EthLatestBlockHeight {
+    pub account_id: AccountId,
+    pub block_height: u64,
+}
+
+impl EthLatestBlockHeight {
+    pub async fn fetch(gcp: &GcpService) -> DatastoreResult<Self> {
+        gcp.datastore
+            .get(format!("{}/eth-latest-block-height", gcp.account_id))
+            .await
+    }
+
+    pub fn set(&mut self, block_height: u64) -> &mut Self {
+        self.block_height = block_height;
+        self
+    }
+
+    pub async fn store(&self, gcp: &GcpService) -> DatastoreResult<()> {
+        gcp.datastore.upsert(self).await
+    }
+}
+
+impl IntoValue for LatestBlockHeight {
+    fn into_value(self) -> Value {
+        (&self).into_value()
+    }
+}
+
+impl IntoValue for &EthLatestBlockHeight {
+    fn into_value(self) -> Value {
+        let properties = {
+            let mut properties = std::collections::HashMap::new();
+            properties.insert(
+                "account_id".to_string(),
+                Value::StringValue(self.account_id.to_string()),
+            );
+            properties.insert(
+                "block_height".to_string(),
+                Value::IntegerValue(self.block_height as i64),
+            );
+            properties
+        };
+        Value::EntityValue {
+            key: google_datastore1::api::Key {
+                path: Some(vec![google_datastore1::api::PathElement {
+                    kind: Some(EthLatestBlockHeight::kind()),
+                    name: Some(format!("{}/eth-latest-block-height", self.account_id)),
+                    id: None,
+                }]),
+                partition_id: None,
+            },
+            properties,
+        }
+    }
+}
+
+impl FromValue for EthLatestBlockHeight {
+    fn from_value(value: Value) -> Result<Self, ConvertError> {
+        match value {
+            Value::EntityValue {
+                key: _,
+                mut properties,
+            } => {
+                let account_id = properties
+                    .remove("account_id")
+                    .ok_or_else(|| ConvertError::MissingProperty("account_id".to_string()))?;
+                let account_id = String::from_value(account_id)?.parse().map_err(|err| {
+                    ConvertError::MalformedProperty(format!(
+                        "EthLatestBlockHeight failed to parse account_id: {err:?}",
+                    ))
+                })?;
+
+                let block_height = properties
+                    .remove("block_height")
+                    .ok_or_else(|| ConvertError::MissingProperty("block_height".to_string()))?;
+                let block_height = i64::from_value(block_height)? as u64;
+
+                Ok(EthLatestBlockHeight { account_id, block_height })
+            }
+            _ => Err(ConvertError::UnexpectedPropertyType {
+                expected: String::from("integer"),
+                got: String::from(value.type_name()),
+            }),
+        }
+    }
+}
+
+impl KeyKind for EthLatestBlockHeight {
+    fn kind() -> String {
+        "EthLatestBlockHeight".to_string()
+    }
+}
+
+impl KeyKind for &EthLatestBlockHeight {
+    fn kind() -> String {
+        "EthLatestBlockHeight".to_string()
+    }
+}

@@ -51,6 +51,9 @@ pub enum Cli {
         /// NEAR Lake Indexer options
         #[clap(flatten)]
         indexer_options: indexer::Options,
+        /// Ethereum Indexer options
+        #[clap(flatten)]
+        eth_indexer_options: eth_indexer::Options,
         /// Local address that other peers can use to message this node.
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
@@ -182,6 +185,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             cipher_sk,
             sign_sk,
             indexer_options,
+            eth_indexer_options,
             my_address,
             storage_options,
             override_config,
@@ -197,6 +201,15 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 rt.block_on(async { GcpService::init(&account_id, &storage_options).await })?;
             let (indexer_handle, indexer) = indexer::run(
                 &indexer_options,
+                &mpc_contract_id,
+                &account_id,
+                &sign_queue,
+                &gcp_service,
+                &rt,
+            )?;
+            let eth_indexer_handle = indexer_eth::run(
+                &indexer_options,
+                &eth_indexer_options,
                 &mpc_contract_id,
                 &account_id,
                 &sign_queue,
@@ -274,6 +287,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 tracing::info!("spinning down");
 
                 indexer_handle.join().unwrap()?;
+                eth_indexer_handle.join().unwrap()?;
+
                 anyhow::Ok(())
             })?;
         }
