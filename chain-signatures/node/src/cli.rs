@@ -1,7 +1,7 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::protocol::{MpcSignProtocol, SignQueue};
-use crate::{http_client, indexer, mesh, storage, web};
+use crate::{http_client, indexer, indexer_eth, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
 use local_ip_address::local_ip;
@@ -53,7 +53,7 @@ pub enum Cli {
         indexer_options: indexer::Options,
         /// Ethereum Indexer options
         #[clap(flatten)]
-        eth_indexer_options: eth_indexer::Options,
+        indexer_eth_options: indexer_eth::Options,
         /// Local address that other peers can use to message this node.
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
@@ -86,6 +86,7 @@ impl Cli {
                 cipher_sk,
                 sign_sk,
                 indexer_options,
+                indexer_eth_options,
                 my_address,
                 storage_options,
                 override_config,
@@ -130,6 +131,7 @@ impl Cli {
                 }
 
                 args.extend(indexer_options.into_str_args());
+                args.extend(indexer_eth_options.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(mesh_options.into_str_args());
                 args.extend(message_options.into_str_args());
@@ -185,7 +187,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             cipher_sk,
             sign_sk,
             indexer_options,
-            eth_indexer_options,
+            indexer_eth_options,
             my_address,
             storage_options,
             override_config,
@@ -207,10 +209,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 &gcp_service,
                 &rt,
             )?;
-            let eth_indexer_handle = indexer_eth::run(
-                &indexer_options,
-                &eth_indexer_options,
-                &mpc_contract_id,
+            let (eth_indexer_handle, eth_indexer) = indexer_eth::run(
+                &indexer_eth_options,
                 &account_id,
                 &sign_queue,
                 &gcp_service,

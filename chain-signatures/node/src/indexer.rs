@@ -1,6 +1,6 @@
 use crate::gcp::error::DatastoreStorageError;
 use crate::gcp::GcpService;
-use crate::protocol::{SignQueue, SignRequest};
+use crate::protocol::{Chain, SignQueue, SignRequest};
 use crate::types::LatestBlockHeight;
 use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
@@ -257,6 +257,7 @@ async fn handle_block(
                     entropy,
                     // TODO: use indexer timestamp instead.
                     time_added: Instant::now(),
+                    chain: Chain::NEAR,
                 });
             }
         }

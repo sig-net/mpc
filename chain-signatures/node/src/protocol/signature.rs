@@ -33,6 +33,12 @@ pub struct SignRequest {
     pub epsilon: Scalar,
     pub entropy: [u8; 32],
     pub time_added: Instant,
+    pub chain: Chain,
+}
+
+pub enum Chain {
+    NEAR,
+    Ethereum,
 }
 
 /// Type that preserves the insertion order of requests.

@@ -13,6 +13,7 @@ pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::MpcMessage;
+pub use signature::Chain;
 pub use signature::SignQueue;
 pub use signature::SignRequest;
 pub use state::NodeState;

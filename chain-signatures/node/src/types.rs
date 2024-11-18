@@ -237,6 +237,7 @@ impl KeyKind for &LatestBlockHeight {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct EthLatestBlockHeight {
     pub account_id: AccountId,
     pub block_height: u64,
@@ -259,7 +260,7 @@ impl EthLatestBlockHeight {
     }
 }
 
-impl IntoValue for LatestBlockHeight {
+impl IntoValue for EthLatestBlockHeight {
     fn into_value(self) -> Value {
         (&self).into_value()
     }
@@ -314,7 +315,10 @@ impl FromValue for EthLatestBlockHeight {
                     .ok_or_else(|| ConvertError::MissingProperty("block_height".to_string()))?;
                 let block_height = i64::from_value(block_height)? as u64;
 
-                Ok(EthLatestBlockHeight { account_id, block_height })
+                Ok(EthLatestBlockHeight {
+                    account_id,
+                    block_height,
+                })
             }
             _ => Err(ConvertError::UnexpectedPropertyType {
                 expected: String::from("integer"),

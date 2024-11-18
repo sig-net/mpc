@@ -3,6 +3,7 @@ pub mod config;
 pub mod gcp;
 pub mod http_client;
 pub mod indexer;
+mod indexer_eth;
 pub mod kdf;
 pub mod mesh;
 pub mod metrics;
