@@ -192,7 +192,10 @@ impl PresignatureManager {
             return;
         }
         if self.contains_used(&presignature.id).await {
-            tracing::error!(id = presignature.id, "tried to insert used mine presignature");
+            tracing::error!(
+                id = presignature.id,
+                "tried to insert used mine presignature"
+            );
             return;
         }
         // Remove from taken list if it was there
@@ -209,7 +212,10 @@ impl PresignatureManager {
             return;
         }
         if self.contains_used(&presignature.id).await {
-            tracing::error!(id = presignature.id, "tried to insert used mine presignature");
+            tracing::error!(
+                id = presignature.id,
+                "tried to insert used mine presignature"
+            );
             return;
         }
         // Remove from taken list if it was there
