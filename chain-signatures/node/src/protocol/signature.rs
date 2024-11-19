@@ -626,7 +626,6 @@ impl SignatureManager {
             );
             return;
         }
-        let mut failed_presigs = Vec::new();
         while let Some(mut presignature) = {
             if self.failed.is_empty() && my_requests.is_empty() {
                 None
@@ -640,7 +639,6 @@ impl SignatureManager {
                     participants = ?sig_participants.keys_vec(),
                     "intersection of stable participants and presignature participants is less than threshold"
                 );
-                failed_presigs.push(presignature);
                 continue;
             }
             let presig_id = presignature.id;
@@ -650,7 +648,7 @@ impl SignatureManager {
             // when the request made it into the NEAR network.
             // issue: https://github.com/near/mpc-recovery/issues/596
             if let Some((sign_request_identifier, failed_req)) = self.failed.pop_front() {
-                if let Err((presignature, InitializationError::BadParameters(err))) = self
+                if let Err((_, InitializationError::BadParameters(err))) = self
                     .retry_failed_generation(
                         sign_request_identifier.clone(),
                         failed_req,
@@ -665,7 +663,6 @@ impl SignatureManager {
                         ?err,
                         "failed to retry signature generation: trashing presignature"
                     );
-                    failed_presigs.push(presignature);
                     continue;
                 }
 
@@ -677,11 +674,10 @@ impl SignatureManager {
             }
 
             let Some(my_request) = my_requests.pop_front() else {
-                failed_presigs.push(presignature);
                 continue;
             };
 
-            if let Err((presignature, InitializationError::BadParameters(err))) = self.generate(
+            if let Err((_, InitializationError::BadParameters(err))) = self.generate(
                 &sig_participants,
                 my_request.request_id,
                 presignature,
@@ -691,16 +687,9 @@ impl SignatureManager {
                 my_request.time_added,
                 cfg,
             ) {
-                failed_presigs.push(presignature);
                 tracing::warn!(request_id = ?CryptoHash(my_request.request_id), presig_id, ?err, "failed to start signature generation: trashing presignature");
                 continue;
             }
-        }
-
-        // add back the failed presignatures that were incompatible to be made into
-        // signatures due to failures or lack of participants.
-        for presignature in failed_presigs {
-            presignature_manager.insert_mine(presignature).await;
         }
     }
 

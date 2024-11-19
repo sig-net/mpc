@@ -322,7 +322,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         &presignature_storage,
     );
 
-    let presignature = dummy_presignature();
+    let presignature = dummy_presignature(1);
     let presignature_id: PresignatureId = presignature.id;
 
     // Check that the storage is empty at the start
@@ -332,6 +332,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert!(presignature_manager.is_empty().await);
     assert_eq!(presignature_manager.len_potential().await, 0);
+    assert_eq!(presignature_manager.len_used().await, 0);
 
     presignature_manager.insert(presignature).await;
 
@@ -341,6 +342,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_generated().await, 1);
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert_eq!(presignature_manager.len_potential().await, 1);
+    assert_eq!(presignature_manager.len_used().await, 0);
 
     // Take presignature and check that it is removed from the storage
     presignature_manager.take(presignature_id).await.unwrap();
@@ -349,8 +351,9 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_generated().await, 0);
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert_eq!(presignature_manager.len_potential().await, 0);
+    assert_eq!(presignature_manager.len_used().await, 1);
 
-    let mine_presignature = dummy_presignature();
+    let mine_presignature = dummy_presignature(2);
     let mine_presig_id: PresignatureId = mine_presignature.id;
 
     // Add mine presignature and check that it is in the storage
@@ -360,6 +363,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_generated().await, 1);
     assert_eq!(presignature_manager.len_mine().await, 1);
     assert_eq!(presignature_manager.len_potential().await, 1);
+    assert_eq!(presignature_manager.len_used().await, 1);
 
     // Take mine presignature and check that it is removed from the storage
     presignature_manager.take_mine().await.unwrap();
@@ -369,13 +373,14 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert!(presignature_manager.is_empty().await);
     assert_eq!(presignature_manager.len_potential().await, 0);
+    assert_eq!(presignature_manager.len_used().await, 2);
 
     Ok(())
 }
 
-fn dummy_presignature() -> Presignature {
+fn dummy_presignature(id: u64) -> Presignature {
     Presignature {
-        id: 1,
+        id,
         output: PresignOutput {
             big_r: <Secp256k1 as CurveArithmetic>::AffinePoint::default(),
             k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,

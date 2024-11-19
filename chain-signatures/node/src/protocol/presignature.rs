@@ -187,6 +187,14 @@ impl PresignatureManager {
 
     pub async fn insert(&mut self, presignature: Presignature) {
         tracing::debug!(id = ?presignature.id, "inserting presignature");
+        if self.contains(&presignature.id).await {
+            tracing::error!(id = presignature.id, "mine presignature already inserted");
+            return;
+        }
+        if self.contains_used(&presignature.id).await {
+            tracing::error!(id = presignature.id, "tried to insert used mine presignature");
+            return;
+        }
         // Remove from taken list if it was there
         self.gc.remove(&presignature.id);
         if let Err(e) = self.presignature_storage.insert(presignature).await {
@@ -196,10 +204,25 @@ impl PresignatureManager {
 
     pub async fn insert_mine(&mut self, presignature: Presignature) {
         tracing::debug!(id = ?presignature.id, "inserting mine presignature");
+        if self.contains(&presignature.id).await {
+            tracing::error!(id = presignature.id, "mine presignature already inserted");
+            return;
+        }
+        if self.contains_used(&presignature.id).await {
+            tracing::error!(id = presignature.id, "tried to insert used mine presignature");
+            return;
+        }
         // Remove from taken list if it was there
         self.gc.remove(&presignature.id);
         if let Err(e) = self.presignature_storage.insert_mine(presignature).await {
             tracing::error!(?e, "failed to insert mine presignature");
+        }
+    }
+
+    pub async fn insert_used(&mut self, id: PresignatureId) {
+        tracing::debug!(id, "inserting presignature to used");
+        if let Err(e) = self.presignature_storage.insert_used(id).await {
+            tracing::error!(?e, "failed to insert presignature to used");
         }
     }
 
@@ -225,11 +248,20 @@ impl PresignatureManager {
             .unwrap_or(false)
     }
 
+    pub async fn contains_used(&self, id: &PresignatureId) -> bool {
+        self.presignature_storage
+            .contains_used(id)
+            .await
+            .map_err(|e| tracing::warn!(?e, "failed to check if presignature was used"))
+            .unwrap_or(false)
+    }
+
     pub async fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
         if let Some(presignature) = self.presignature_storage.take(&id).await.map_err(|e| {
             tracing::error!(?e, "failed to look for presignature");
             GenerationError::PresignatureIsMissing(id)
         })? {
+            self.insert_used(presignature.id).await;
             self.gc.insert(id, Instant::now());
             tracing::debug!(id, "took presignature");
             return Ok(presignature);
@@ -257,6 +289,7 @@ impl PresignatureManager {
             })
             .ok()?
         {
+            self.insert_used(presignature.id).await;
             tracing::debug!(id = ?presignature.id, "took presignature of mine");
             return Some(presignature);
         }
@@ -281,6 +314,16 @@ impl PresignatureManager {
             .await
             .map_err(|e| {
                 tracing::error!(?e, "failed to count mine presignatures");
+            })
+            .unwrap_or(0)
+    }
+
+    pub async fn len_used(&self) -> usize {
+        self.presignature_storage
+            .len_used()
+            .await
+            .map_err(|e| {
+                tracing::error!(?e, "failed to count used presignatures");
             })
             .unwrap_or(0)
     }

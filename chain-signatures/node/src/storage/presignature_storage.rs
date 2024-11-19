@@ -8,7 +8,7 @@ use crate::protocol::presignature::{Presignature, PresignatureId};
 type PresigResult<T> = std::result::Result<T, anyhow::Error>;
 
 // Can be used to "clear" redis storage in case of a breaking change
-const PRESIGNATURE_STORAGE_VERSION: &str = "v1";
+const PRESIGNATURE_STORAGE_VERSION: &str = "v2";
 
 pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureRedisStorage {
     PresignatureRedisStorage {
@@ -45,6 +45,14 @@ impl PresignatureRedisStorage {
         Ok(())
     }
 
+    pub async fn insert_used(&self, id: PresignatureId) -> PresigResult<()> {
+        let mut connection = self.redis_pool.get().await?;
+        connection
+            .sadd::<&str, PresignatureId, ()>(&self.used_key(), id)
+            .await?;
+        Ok(())
+    }
+
     pub async fn contains(&self, id: &PresignatureId) -> PresigResult<bool> {
         let mut connection = self.redis_pool.get().await?;
         let result: bool = connection.hexists(self.presig_key(), id).await?;
@@ -54,6 +62,12 @@ impl PresignatureRedisStorage {
     pub async fn contains_mine(&self, id: &PresignatureId) -> PresigResult<bool> {
         let mut connection = self.redis_pool.get().await?;
         let result: bool = connection.sismember(self.mine_key(), id).await?;
+        Ok(result)
+    }
+
+    pub async fn contains_used(&self, id: &PresignatureId) -> PresigResult<bool> {
+        let mut connection = self.redis_pool.get().await?;
+        let result: bool = connection.sismember(self.used_key(), id).await?;
         Ok(result)
     }
 
@@ -96,10 +110,17 @@ impl PresignatureRedisStorage {
         Ok(result)
     }
 
+    pub async fn len_used(&self) -> PresigResult<usize> {
+        let mut connection = self.redis_pool.get().await?;
+        let result: usize = connection.scard(self.used_key()).await?;
+        Ok(result)
+    }
+
     pub async fn clear(&self) -> PresigResult<()> {
         let mut connection = self.redis_pool.get().await?;
         connection.del::<&str, ()>(&self.presig_key()).await?;
         connection.del::<&str, ()>(&self.mine_key()).await?;
+        connection.del::<&str, ()>(&self.used_key()).await?;
         Ok(())
     }
 
@@ -113,6 +134,13 @@ impl PresignatureRedisStorage {
     fn mine_key(&self) -> String {
         format!(
             "presignatures_mine:{}:{}",
+            PRESIGNATURE_STORAGE_VERSION, self.node_account_id
+        )
+    }
+
+    fn used_key(&self) -> String {
+        format!(
+            "presignatures_used:{}:{}",
             PRESIGNATURE_STORAGE_VERSION, self.node_account_id
         )
     }
