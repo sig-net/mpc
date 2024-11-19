@@ -8,7 +8,7 @@ use near_account_id::AccountId;
 type TripleResult<T> = std::result::Result<T, anyhow::Error>;
 
 // Can be used to "clear" redis storage in case of a breaking change
-const TRIPLE_STORAGE_VERSION: &str = "v1";
+const TRIPLE_STORAGE_VERSION: &str = "v2";
 
 pub fn init(pool: &Pool, account_id: &AccountId) -> TripleRedisStorage {
     TripleRedisStorage {
@@ -39,6 +39,13 @@ impl TripleRedisStorage {
         Ok(())
     }
 
+    pub async fn insert_used(&self, id: TripleId) -> TripleResult<()> {
+        let mut conn = self.redis_pool.get().await?;
+        conn.sadd::<&str, TripleId, ()>(&self.used_key(), id)
+            .await?;
+        Ok(())
+    }
+
     pub async fn contains(&self, id: &TripleId) -> TripleResult<bool> {
         let mut conn = self.redis_pool.get().await?;
         let result: bool = conn.hexists(self.triple_key(), id).await?;
@@ -48,6 +55,12 @@ impl TripleRedisStorage {
     pub async fn contains_mine(&self, id: &TripleId) -> TripleResult<bool> {
         let mut conn = self.redis_pool.get().await?;
         let result: bool = conn.sismember(self.mine_key(), id).await?;
+        Ok(result)
+    }
+
+    pub async fn contains_used(&self, id: &TripleId) -> TripleResult<bool> {
+        let mut conn = self.redis_pool.get().await?;
+        let result: bool = conn.sismember(self.used_key(), id).await?;
         Ok(result)
     }
 
@@ -89,10 +102,17 @@ impl TripleRedisStorage {
         Ok(result)
     }
 
+    pub async fn len_used(&self) -> TripleResult<usize> {
+        let mut conn = self.redis_pool.get().await?;
+        let result: usize = conn.scard(self.used_key()).await?;
+        Ok(result)
+    }
+
     pub async fn clear(&self) -> TripleResult<()> {
         let mut conn = self.redis_pool.get().await?;
         conn.del::<&str, ()>(&self.triple_key()).await?;
         conn.del::<&str, ()>(&self.mine_key()).await?;
+        conn.del::<&str, ()>(&self.used_key()).await?;
         Ok(())
     }
 
@@ -106,6 +126,13 @@ impl TripleRedisStorage {
     fn mine_key(&self) -> String {
         format!(
             "triples_mine:{}:{}",
+            TRIPLE_STORAGE_VERSION, self.node_account_id
+        )
+    }
+
+    fn used_key(&self) -> String {
+        format!(
+            "triples_used:{}:{}",
             TRIPLE_STORAGE_VERSION, self.node_account_id
         )
     }

@@ -146,6 +146,14 @@ impl TripleManager {
 
     pub async fn insert(&mut self, triple: Triple) {
         tracing::debug!(id = triple.id, "inserting triple");
+        if self.contains(&triple.id).await {
+            tracing::error!(id = triple.id, "triple already inserted");
+            return;
+        }
+        if self.contains_used(&triple.id).await {
+            tracing::error!(id = triple.id, "tried to insert used triple");
+            return;
+        }
         self.gc.remove(&triple.id);
         if let Err(e) = self.triple_storage.insert(triple).await {
             tracing::warn!(?e, "failed to insert triple");
@@ -154,9 +162,24 @@ impl TripleManager {
 
     pub async fn insert_mine(&mut self, triple: Triple) {
         tracing::debug!(id = triple.id, "inserting mine triple");
+        if self.contains(&triple.id).await {
+            tracing::error!(id = triple.id, "mine triple already inserted");
+            return;
+        }
+        if self.contains_used(&triple.id).await {
+            tracing::error!(id = triple.id, "tried to insert used mine triple");
+            return;
+        }
         self.gc.remove(&triple.id);
         if let Err(e) = self.triple_storage.insert_mine(triple).await {
             tracing::warn!(?e, "failed to insert mine triple");
+        }
+    }
+
+    pub async fn insert_used(&mut self, id: TripleId) {
+        tracing::debug!(id, "inserting triple to used");
+        if let Err(e) = self.triple_storage.insert_used(id).await {
+            tracing::warn!(?e, "failed to insert tripel to used");
         }
     }
 
@@ -173,6 +196,14 @@ impl TripleManager {
             .contains_mine(id)
             .await
             .map_err(|e| tracing::warn!(?e, "failed to check if mine triple exists"))
+            .unwrap_or(false)
+    }
+
+    pub async fn contains_used(&self, id: &TripleId) -> bool {
+        self.triple_storage
+            .contains_used(id)
+            .await
+            .map_err(|e| tracing::warn!(?e, "failed to check if triple was used"))
             .unwrap_or(false)
     }
 
@@ -232,6 +263,9 @@ impl TripleManager {
             }
         };
 
+        self.insert_used(triple_0.id).await;
+        self.insert_used(triple_1.id).await;
+
         self.gc.insert(id0, Instant::now());
         self.gc.insert(id1, Instant::now());
 
@@ -278,6 +312,9 @@ impl TripleManager {
                 return None;
             }
         };
+
+        self.insert_used(triple_0.id).await;
+        self.insert_used(triple_1.id).await;
 
         self.gc.insert(triple_0.id, Instant::now());
         self.gc.insert(triple_1.id, Instant::now());
