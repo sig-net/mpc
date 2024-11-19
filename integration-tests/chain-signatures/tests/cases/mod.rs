@@ -240,6 +240,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_mine().await, 0);
     assert!(triple_manager.is_empty().await);
     assert_eq!(triple_manager.len_potential().await, 0);
+    assert_eq!(triple_manager.len_used().await, 0);
 
     triple_manager.insert(triple_1).await;
     triple_manager.insert(triple_2).await;
@@ -252,6 +253,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_generated().await, 2);
     assert_eq!(triple_manager.len_mine().await, 0);
     assert_eq!(triple_manager.len_potential().await, 2);
+    assert_eq!(triple_manager.len_used().await, 0);
 
     // Take triple and check that it is removed from the storage
     triple_manager
@@ -265,6 +267,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_generated().await, 0);
     assert_eq!(triple_manager.len_mine().await, 0);
     assert_eq!(triple_manager.len_potential().await, 0);
+    assert_eq!(triple_manager.len_used().await, 2);
 
     let mine_id_1: u64 = 3;
     let mine_triple_1 = dummy_triple(mine_id_1);
@@ -281,6 +284,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_generated().await, 2);
     assert_eq!(triple_manager.len_mine().await, 2);
     assert_eq!(triple_manager.len_potential().await, 2);
+    assert_eq!(triple_manager.len_used().await, 2);
 
     // Take mine triple and check that it is removed from the storage
     triple_manager.take_two_mine().await.unwrap();
@@ -292,6 +296,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_mine().await, 0);
     assert!(triple_manager.is_empty().await);
     assert_eq!(triple_manager.len_potential().await, 0);
+    assert_eq!(triple_manager.len_used().await, 4);
 
     Ok(())
 }

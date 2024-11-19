@@ -334,6 +334,11 @@ impl TripleManager {
         self.triple_storage.len_mine().await.unwrap_or(0)
     }
 
+    /// Returns the number of used triples
+    pub async fn len_used(&self) -> usize {
+        self.triple_storage.len_used().await.unwrap_or(0)
+    }
+
     /// Returns if there's any unspent triple in the manager.
     pub async fn is_empty(&self) -> bool {
         self.len_generated().await == 0
