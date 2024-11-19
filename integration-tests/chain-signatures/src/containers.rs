@@ -100,7 +100,13 @@ impl<'a> Node<'a> {
             running_threshold: 120,
             behind_threshold: 120,
         };
-
+        let indexer_eth_options = mpc_node::indexer_eth::Options {
+            eth_rpc_url: "http://localhost:8545".to_string(),
+            eth_contract_address: "0x5FbDB2315678afecb367f032d93F642f64180aa3".to_string(),
+            eth_start_block_height: 0,
+            eth_behind_threshold: 120,
+            eth_running_threshold: 120,
+        };
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -110,6 +116,7 @@ impl<'a> Node<'a> {
             cipher_pk: hex::encode(config.cipher_pk.to_bytes()),
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             indexer_options: indexer_options.clone(),
+            indexer_eth_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             sign_sk: Some(config.sign_sk.clone()),

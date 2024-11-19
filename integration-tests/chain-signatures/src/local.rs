@@ -56,6 +56,13 @@ impl Node {
             running_threshold: 120,
             behind_threshold: 120,
         };
+        let indexer_eth_options = mpc_node::indexer_eth::Options {
+            eth_rpc_url: "http://localhost:8545".to_string(),
+            eth_contract_address: "0x5FbDB2315678afecb367f032d93F642f64180aa3".to_string(),
+            eth_start_block_height: 0,
+            eth_behind_threshold: 120,
+            eth_running_threshold: 120,
+        };
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = mpc_node::cli::Cli::Start {
@@ -68,6 +75,7 @@ impl Node {
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
             sign_sk: Some(sign_sk.clone()),
             indexer_options,
+            indexer_eth_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
@@ -151,6 +159,13 @@ impl Node {
             running_threshold: 120,
             behind_threshold: 120,
         };
+        let indexer_eth_options = mpc_node::indexer_eth::Options {
+            eth_rpc_url: "http://localhost:8545".to_string(),
+            eth_contract_address: "0x5FbDB2315678afecb367f032d93F642f64180aa3".to_string(),
+            eth_start_block_height: 0,
+            eth_behind_threshold: 120,
+            eth_running_threshold: 120,
+        };
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -161,6 +176,7 @@ impl Node {
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             sign_sk: Some(config.sign_sk.clone()),
             indexer_options,
+            indexer_eth_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(

@@ -52,7 +52,7 @@ impl Options {
             self.eth_rpc_url,
             "--eth-contract-address".to_string(),
             self.eth_contract_address,
-            "--eth-start-block".to_string(),
+            "--eth-start-block-height".to_string(),
             self.eth_start_block_height.to_string(),
             "--eth-behind-threshold".to_string(),
             self.eth_behind_threshold.to_string(),
