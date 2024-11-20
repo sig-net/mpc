@@ -2,7 +2,7 @@ use super::contract::primitives::Participants;
 use super::cryptography::CryptographicError;
 use super::message::TripleMessage;
 use super::presignature::GenerationError;
-use crate::storage::triple_storage::TripleRedisStorage;
+use crate::storage::triple_storage::TripleStorage;
 use crate::types::TripleProtocol;
 use crate::util::AffinePointExt;
 
@@ -80,7 +80,7 @@ impl TripleGenerator {
 /// complete some time in the future and a way to take an already generated triple.
 pub struct TripleManager {
     /// Triple Storage
-    pub triple_storage: TripleRedisStorage,
+    pub triple_storage: TripleStorage,
 
     /// The pool of triple protocols that have yet to be completed.
     pub generators: HashMap<TripleId, TripleGenerator>,
@@ -128,7 +128,7 @@ impl TripleManager {
         threshold: usize,
         epoch: u64,
         my_account_id: &AccountId,
-        storage: &TripleRedisStorage,
+        storage: &TripleStorage,
     ) -> Self {
         Self {
             generators: HashMap::new(),

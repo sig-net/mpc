@@ -19,7 +19,7 @@ use mpc_node::gcp::GcpService;
 use mpc_node::http_client;
 use mpc_node::mesh;
 use mpc_node::storage;
-use mpc_node::storage::triple_storage::TripleRedisStorage;
+use mpc_node::storage::triple_storage::TripleStorage;
 use near_crypto::KeyFile;
 use near_workspaces::network::{Sandbox, ValidatorKey};
 use near_workspaces::types::{KeyType, SecretKey};
@@ -156,11 +156,7 @@ impl Nodes<'_> {
         Ok(())
     }
 
-    pub async fn triple_storage(
-        &self,
-        redis_pool: &Pool,
-        account_id: &AccountId,
-    ) -> TripleRedisStorage {
+    pub async fn triple_storage(&self, redis_pool: &Pool, account_id: &AccountId) -> TripleStorage {
         storage::triple_storage::init(redis_pool, account_id)
     }
 

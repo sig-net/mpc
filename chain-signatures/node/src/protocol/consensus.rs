@@ -11,9 +11,9 @@ use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
-use crate::storage::presignature_storage::PresignatureRedisStorage;
+use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
-use crate::storage::triple_storage::TripleRedisStorage;
+use crate::storage::triple_storage::TripleStorage;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 use crate::{http_client, rpc_client};
@@ -39,8 +39,8 @@ pub trait ConsensusCtx {
     fn my_address(&self) -> &Url;
     fn sign_queue(&self) -> Arc<RwLock<SignQueue>>;
     fn secret_storage(&self) -> &SecretNodeStorageBox;
-    fn triple_storage(&self) -> &TripleRedisStorage;
-    fn presignature_storage(&self) -> &PresignatureRedisStorage;
+    fn triple_storage(&self) -> &TripleStorage;
+    fn presignature_storage(&self) -> &PresignatureStorage;
     fn cfg(&self) -> &Config;
     fn message_options(&self) -> http_client::Options;
 }

@@ -10,20 +10,20 @@ type TripleResult<T> = std::result::Result<T, anyhow::Error>;
 // Can be used to "clear" redis storage in case of a breaking change
 const TRIPLE_STORAGE_VERSION: &str = "v1";
 
-pub fn init(pool: &Pool, account_id: &AccountId) -> TripleRedisStorage {
-    TripleRedisStorage {
+pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
+    TripleStorage {
         redis_pool: pool.clone(),
         node_account_id: account_id.clone(),
     }
 }
 
 #[derive(Clone)]
-pub struct TripleRedisStorage {
+pub struct TripleStorage {
     redis_pool: Pool,
     node_account_id: AccountId,
 }
 
-impl TripleRedisStorage {
+impl TripleStorage {
     pub async fn insert(&self, triple: Triple) -> TripleResult<()> {
         let mut conn = self.redis_pool.get().await?;
         conn.hset::<&str, TripleId, Triple, ()>(&self.triple_key(), triple.id, triple)

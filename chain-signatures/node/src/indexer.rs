@@ -1,5 +1,5 @@
 use crate::protocol::{SignQueue, SignRequest};
-use crate::storage::app_data_storage::AppDataRedisStorage;
+use crate::storage::app_data_storage::AppDataStorage;
 use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
 use near_account_id::AccountId;
@@ -88,7 +88,7 @@ pub struct ContractSignRequest {
 
 #[derive(Clone)]
 pub struct Indexer {
-    app_data_storage: AppDataRedisStorage,
+    app_data_storage: AppDataStorage,
     last_updated_timestamp: Arc<RwLock<Instant>>,
     latest_block_timestamp_nanosec: Arc<RwLock<Option<u64>>>,
     running_threshold: Duration,
@@ -96,7 +96,7 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    fn new(app_data_storage: AppDataRedisStorage, options: &Options) -> Self {
+    fn new(app_data_storage: AppDataStorage, options: &Options) -> Self {
         Self {
             app_data_storage: app_data_storage.clone(),
             last_updated_timestamp: Arc::new(RwLock::new(Instant::now())),
@@ -106,8 +106,8 @@ impl Indexer {
         }
     }
 
-    pub async fn get_last_processed_block(&self) -> Option<BlockHeight> {
-        match self.app_data_storage.get_last_processed_block().await {
+    pub async fn last_processed_block(&self) -> Option<BlockHeight> {
+        match self.app_data_storage.last_processed_block().await {
             Ok(Some(block_height)) => Some(block_height),
             Ok(None) => {
                 tracing::warn!("no last processed block found");
@@ -293,7 +293,7 @@ pub fn run(
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
     queue: &Arc<RwLock<SignQueue>>,
-    app_data_storage: AppDataRedisStorage,
+    app_data_storage: AppDataStorage,
     rpc_client: near_fetch::Client,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, Indexer)> {
     tracing::info!(
@@ -329,7 +329,7 @@ pub fn run(
             let Ok(lake) = rt.block_on(async {
                 update_last_processed_block(rpc_client.clone(), app_data_storage.clone()).await?;
 
-                if let Some(latest) = context.indexer.get_last_processed_block().await {
+                if let Some(latest) = context.indexer.last_processed_block().await {
                     if i > 0 {
                         tracing::warn!("indexer latest height {latest}, restart count={i}");
                     }
@@ -412,9 +412,9 @@ pub fn run(
 /// This function ensures we do not go back in time a lot when restarting the node
 async fn update_last_processed_block(
     rpc_client: near_fetch::Client,
-    app_data_storage: AppDataRedisStorage,
+    app_data_storage: AppDataStorage,
 ) -> anyhow::Result<()> {
-    let last_processed_block = match app_data_storage.get_last_processed_block().await {
+    let last_processed_block = match app_data_storage.last_processed_block().await {
         Ok(Some(block_height)) => block_height,
         Ok(None) => 0,
         Err(err) => {
