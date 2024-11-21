@@ -20,6 +20,11 @@ variable "image" {
   default     = "us-east1-docker.pkg.dev/near-cs-mainnet/multichain-public/multichain-mainnet:latest"
 }
 
+variable "source_image" {
+  type    = string
+  default = "projects/cos-cloud/global/images/cos-stable-117-18613-75-37"
+}
+
 variable "image_port" {
   description = "The port the image exposes for HTTP requests"
   type        = number
@@ -43,8 +48,8 @@ variable "network" {
 variable "additional_metadata" {
   type        = map(any)
   description = "Additional metadata to attach to the instance"
-  default     = {
-    cos-update-strategy:	"update_enabled"
+  default = {
+    cos-update-strategy : "update_enabled"
   }
 }
 
@@ -77,7 +82,7 @@ variable "node_configs" {
 }
 
 variable "env" {
-  type = string
+  type    = string
   default = "mainnet"
 }
 
@@ -132,5 +137,5 @@ variable "static_env" {
 
 variable "domain" {
   description = "DNS name for your node"
-  default = null
+  default     = null
 }

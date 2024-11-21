@@ -20,6 +20,11 @@ variable "image" {
   default     = "us-east1-docker.pkg.dev/pagoda-discovery-platform-prod/multichain-public/multichain-mainnet:latest"
 }
 
+variable "source_image" {
+  type    = string
+  default = "projects/cos-cloud/global/images/cos-stable-117-18613-75-37"
+}
+
 variable "image_port" {
   description = "The port the image exposes for HTTP requests"
   type        = number
@@ -137,5 +142,5 @@ variable "create_network" {
 
 variable "domain" {
   description = "DNS name for your node"
-  default = ""
+  default     = ""
 }
