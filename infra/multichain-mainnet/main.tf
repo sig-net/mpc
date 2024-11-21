@@ -15,8 +15,16 @@ module "gce-container" {
 
   container = {
     image = var.image
-    args  = ["start"]
-    port  = "3000"
+
+    port = "3000"
+
+    volumeMounts = [
+      {
+        mountPath = "/data"
+        name      = "host-path"
+        readOnly  = false
+      }
+    ]
 
     env = concat(var.static_env, [
       {
@@ -62,9 +70,22 @@ module "gce-container" {
       {
         name  = "MPC_ENV",
         value = var.env
+      },
+      {
+        name  = "MPC_REDIS_URL",
+        value = var.redis_url
       }
     ])
   }
+
+  volumes = [
+    {
+      name = "host-path"
+      hostPath = {
+        path = "/var/redis"
+      }
+    }
+  ]
 }
 
 resource "google_service_account" "service_account" {

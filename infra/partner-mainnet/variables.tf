@@ -94,7 +94,7 @@ variable "static_env" {
   default = [
     {
       name  = "MPC_NEAR_RPC"
-      value = "https://rpc.mainnet.near.org"
+      value = "https://rpc.mainnet.fastnear.com"
     },
     {
       name  = "MPC_CONTRACT_ID"
@@ -143,4 +143,9 @@ variable "create_network" {
 variable "domain" {
   description = "DNS name for your node"
   default     = ""
+}
+
+variable "redis_url" {
+  type    = string
+  default = "redis://127.0.0.1:6379"
 }
