@@ -1,6 +1,7 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::protocol::{MpcSignProtocol, SignQueue};
+use crate::storage::app_data_storage;
 use crate::{http_client, indexer, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -195,14 +196,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 .build()?;
             let gcp_service =
                 rt.block_on(async { GcpService::init(&account_id, &storage_options).await })?;
-            let (indexer_handle, indexer) = indexer::run(
-                &indexer_options,
-                &mpc_contract_id,
-                &account_id,
-                &sign_queue,
-                &gcp_service,
-                &rt,
-            )?;
 
             let key_storage =
                 storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
@@ -214,6 +207,23 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let triple_storage = storage::triple_storage::init(&redis_pool, &account_id);
             let presignature_storage =
                 storage::presignature_storage::init(&redis_pool, &account_id);
+            let app_data_storage = app_data_storage::init(&redis_pool, &account_id);
+
+            let mut rpc_client = near_fetch::Client::new(&near_rpc);
+            if let Some(referer_param) = client_header_referer {
+                let client_headers = rpc_client.inner_mut().headers_mut();
+                client_headers.insert(http::header::REFERER, referer_param.parse().unwrap());
+            }
+            tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
+
+            let (indexer_handle, indexer) = indexer::run(
+                &indexer_options,
+                &mpc_contract_id,
+                &account_id,
+                &sign_queue,
+                app_data_storage,
+                rpc_client.clone(),
+            )?;
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
@@ -229,13 +239,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let (sender, receiver) = mpsc::channel(16384);
 
             tracing::info!(%my_address, "address detected");
-            let mut rpc_client = near_fetch::Client::new(&near_rpc);
-            if let Some(referer_param) = client_header_referer {
-                let client_headers = rpc_client.inner_mut().headers_mut();
-                client_headers.insert(http::header::REFERER, referer_param.parse().unwrap());
-            }
-
-            tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let (protocol, protocol_state) = MpcSignProtocol::init(
                 my_address,

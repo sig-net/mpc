@@ -19,7 +19,7 @@ use mpc_node::gcp::GcpService;
 use mpc_node::http_client;
 use mpc_node::mesh;
 use mpc_node::storage;
-use mpc_node::storage::triple_storage::TripleRedisStorage;
+use mpc_node::storage::triple_storage::TripleStorage;
 use near_crypto::KeyFile;
 use near_workspaces::network::{Sandbox, ValidatorKey};
 use near_workspaces::types::{KeyType, SecretKey};
@@ -156,11 +156,7 @@ impl Nodes<'_> {
         Ok(())
     }
 
-    pub async fn triple_storage(
-        &self,
-        redis_pool: &Pool,
-        account_id: &AccountId,
-    ) -> TripleRedisStorage {
+    pub async fn triple_storage(&self, redis_pool: &Pool, account_id: &AccountId) -> TripleStorage {
         storage::triple_storage::init(redis_pool, account_id)
     }
 
@@ -204,7 +200,6 @@ pub struct Context<'a> {
     pub lake_indexer: crate::containers::LakeIndexer<'a>,
     pub worker: Worker<Sandbox>,
     pub mpc_contract: Contract,
-    pub datastore: crate::containers::Datastore<'a>,
     pub redis: crate::containers::Redis<'a>,
     pub storage_options: storage::Options,
     pub mesh_options: mesh::Options,
@@ -231,10 +226,6 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         .await?;
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
 
-    let gcp_project_id = "multichain-integration";
-    let datastore =
-        crate::containers::Datastore::run(docker_client, docker_network, gcp_project_id).await?;
-
     let redis = crate::containers::Redis::run(docker_client, docker_network).await?;
     let redis_url = redis.internal_address.clone();
 
@@ -243,7 +234,6 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         env: "local-test".to_string(),
         gcp_project_id: "multichain-integration".to_string(),
         sk_share_secret_id: None,
-        gcp_datastore_url: Some(datastore.local_address.clone()),
         sk_share_local_path: Some(sk_share_local_path),
         redis_url,
     };
@@ -263,7 +253,6 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         lake_indexer,
         worker,
         mpc_contract,
-        datastore,
         redis,
         storage_options,
         mesh_options,

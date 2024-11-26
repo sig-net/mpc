@@ -1,7 +1,5 @@
-use crate::gcp::error::DatastoreStorageError;
-use crate::gcp::GcpService;
 use crate::protocol::{SignQueue, SignRequest};
-use crate::types::LatestBlockHeight;
+use crate::storage::app_data_storage::AppDataStorage;
 use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
 use near_account_id::AccountId;
@@ -37,15 +35,6 @@ pub struct Options {
     #[clap(long, env("MPC_INDEXER_S3_URL"))]
     pub s3_url: Option<String>,
 
-    /// The block height to start indexing from.
-    // Defaults to the latest block on 2023-11-14 07:40:22 AM UTC
-    #[clap(
-        long,
-        env("MPC_INDEXER_START_BLOCK_HEIGHT"),
-        default_value = "145964826"
-    )]
-    pub start_block_height: u64,
-
     /// The amount of time before we should that our indexer is behind.
     #[clap(long, env("MPC_INDEXER_BEHIND_THRESHOLD"), default_value = "200")]
     pub behind_threshold: u64,
@@ -62,8 +51,6 @@ impl Options {
             self.s3_bucket,
             "--s3-region".to_string(),
             self.s3_region,
-            "--start-block-height".to_string(),
-            self.start_block_height.to_string(),
             "--behind-threshold".to_string(),
             self.behind_threshold.to_string(),
             "--running-threshold".to_string(),
@@ -99,9 +86,9 @@ pub struct ContractSignRequest {
     pub key_version: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Indexer {
-    latest_block_height: Arc<RwLock<LatestBlockHeight>>,
+    app_data_storage: AppDataStorage,
     last_updated_timestamp: Arc<RwLock<Instant>>,
     latest_block_timestamp_nanosec: Arc<RwLock<Option<u64>>>,
     running_threshold: Duration,
@@ -109,13 +96,9 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    fn new(latest_block_height: LatestBlockHeight, options: &Options) -> Self {
-        tracing::info!(
-            "creating new indexer, latest block height: {}",
-            latest_block_height.block_height
-        );
+    fn new(app_data_storage: AppDataStorage, options: &Options) -> Self {
         Self {
-            latest_block_height: Arc::new(RwLock::new(latest_block_height)),
+            app_data_storage: app_data_storage.clone(),
             last_updated_timestamp: Arc::new(RwLock::new(Instant::now())),
             latest_block_timestamp_nanosec: Arc::new(RwLock::new(None)),
             running_threshold: Duration::from_secs(options.running_threshold),
@@ -123,9 +106,28 @@ impl Indexer {
         }
     }
 
-    /// Get the latest block height from the chain.
-    pub async fn latest_block_height(&self) -> BlockHeight {
-        self.latest_block_height.read().await.block_height
+    pub async fn last_processed_block(&self) -> Option<BlockHeight> {
+        match self.app_data_storage.last_processed_block().await {
+            Ok(Some(block_height)) => Some(block_height),
+            Ok(None) => {
+                tracing::warn!("no last processed block found");
+                None
+            }
+            Err(err) => {
+                tracing::warn!(%err, "failed to get last processed block");
+                None
+            }
+        }
+    }
+
+    pub async fn set_last_processed_block(&self, block_height: BlockHeight) {
+        if let Err(err) = self
+            .app_data_storage
+            .set_last_processed_block(block_height)
+            .await
+        {
+            tracing::error!(%err, "failed to set last processed block");
+        }
     }
 
     /// Check whether the indexer is on track with the latest block height from the chain.
@@ -155,17 +157,11 @@ impl Indexer {
         &self,
         block_height: BlockHeight,
         block_timestamp_nanosec: u64,
-        gcp: &GcpService,
-    ) -> Result<(), DatastoreStorageError> {
+    ) {
         tracing::debug!(block_height, "update_block_height_and_timestamp");
+        self.set_last_processed_block(block_height).await;
         *self.last_updated_timestamp.write().await = Instant::now();
         *self.latest_block_timestamp_nanosec.write().await = Some(block_timestamp_nanosec);
-        self.latest_block_height
-            .write()
-            .await
-            .set(block_height)
-            .store(gcp)
-            .await
     }
 }
 
@@ -173,7 +169,6 @@ impl Indexer {
 struct Context {
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
-    gcp_service: GcpService,
     queue: Arc<RwLock<SignQueue>>,
     indexer: Indexer,
 }
@@ -263,15 +258,11 @@ async fn handle_block(
     }
 
     ctx.indexer
-        .update_block_height_and_timestamp(
-            block.block_height(),
-            block.header().timestamp_nanosec(),
-            &ctx.gcp_service,
-        )
-        .await?;
+        .update_block_height_and_timestamp(block.block_height(), block.header().timestamp_nanosec())
+        .await;
 
     crate::metrics::LATEST_BLOCK_HEIGHT
-        .with_label_values(&[ctx.gcp_service.account_id.as_str()])
+        .with_label_values(&[ctx.node_account_id.as_str()])
         .set(block.block_height() as i64);
 
     // Add the requests after going through the whole block to avoid partial processing if indexer fails somewhere.
@@ -280,7 +271,7 @@ async fn handle_block(
     for request in pending_requests {
         queue.add(request);
         crate::metrics::NUM_SIGN_REQUESTS
-            .with_label_values(&[ctx.gcp_service.account_id.as_str()])
+            .with_label_values(&[ctx.node_account_id.as_str()])
             .inc();
     }
     drop(queue);
@@ -302,36 +293,21 @@ pub fn run(
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
     queue: &Arc<RwLock<SignQueue>>,
-    gcp_service: &crate::gcp::GcpService,
-    rt: &tokio::runtime::Runtime,
+    app_data_storage: AppDataStorage,
+    rpc_client: near_fetch::Client,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, Indexer)> {
     tracing::info!(
         s3_bucket = options.s3_bucket,
         s3_region = options.s3_region,
         s3_url = options.s3_url,
-        start_block_height = options.start_block_height,
         %mpc_contract_id,
         "starting indexer"
     );
 
-    let latest_block_height = rt.block_on(async {
-        match LatestBlockHeight::fetch(gcp_service).await {
-            Ok(latest) => latest,
-            Err(err) => {
-                tracing::warn!(%err, "failed to fetch latest block height; using start_block_height={} instead", options.start_block_height);
-                LatestBlockHeight {
-                    account_id: node_account_id.clone(),
-                    block_height: options.start_block_height,
-                }
-            }
-        }
-    });
-
-    let indexer = Indexer::new(latest_block_height, options);
+    let indexer = Indexer::new(app_data_storage.clone(), options);
     let context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
         node_account_id: node_account_id.clone(),
-        gcp_service: gcp_service.clone(),
         queue: queue.clone(),
         indexer: indexer.clone(),
     };
@@ -351,24 +327,30 @@ pub fn run(
             i += 1;
 
             let Ok(lake) = rt.block_on(async {
-                let latest = context.indexer.latest_block_height().await;
-                if i > 0 {
-                    tracing::warn!("indexer latest height {latest}, restart count={i}");
-                }
-                let mut lake_builder = LakeBuilder::default()
-                    .s3_bucket_name(&options.s3_bucket)
-                    .s3_region_name(&options.s3_region)
-                    .start_block_height(latest);
+                update_last_processed_block(rpc_client.clone(), app_data_storage.clone()).await?;
 
-                if let Some(s3_url) = &options.s3_url {
-                    let aws_config = aws_config::from_env().load().await;
-                    let s3_config = aws_sdk_s3::config::Builder::from(&aws_config)
-                        .endpoint_url(s3_url)
-                        .build();
-                    lake_builder = lake_builder.s3_config(s3_config);
+                if let Some(latest) = context.indexer.last_processed_block().await {
+                    if i > 0 {
+                        tracing::warn!("indexer latest height {latest}, restart count={i}");
+                    }
+                    let mut lake_builder = LakeBuilder::default()
+                        .s3_bucket_name(&options.s3_bucket)
+                        .s3_region_name(&options.s3_region)
+                        .start_block_height(latest);
+
+                    if let Some(s3_url) = &options.s3_url {
+                        let aws_config = aws_config::from_env().load().await;
+                        let s3_config = aws_sdk_s3::config::Builder::from(&aws_config)
+                            .endpoint_url(s3_url)
+                            .build();
+                        lake_builder = lake_builder.s3_config(s3_config);
+                    }
+                    let lake = lake_builder.build()?;
+                    anyhow::Ok(lake)
+                } else {
+                    tracing::warn!("indexer failed to get last processed block");
+                    Err(anyhow::anyhow!("failed to get last processed block"))
                 }
-                let lake = lake_builder.build()?;
-                anyhow::Ok(lake)
             }) else {
                 tracing::error!(?options, "indexer failed to build");
                 backoff(i, 1, 120);
@@ -425,6 +407,52 @@ pub fn run(
     });
 
     Ok((join_handle, indexer))
+}
+
+/// This function ensures we do not go back in time a lot when restarting the node
+async fn update_last_processed_block(
+    rpc_client: near_fetch::Client,
+    app_data_storage: AppDataStorage,
+) -> anyhow::Result<()> {
+    let last_processed_block = match app_data_storage.last_processed_block().await {
+        Ok(Some(block_height)) => block_height,
+        Ok(None) => 0,
+        Err(err) => {
+            tracing::warn!(%err, "failed to get last processed block");
+            return Err(err);
+        }
+    };
+
+    let latest_block: u64 = rpc_client.view_block().await?.header.height;
+
+    if last_processed_block > latest_block {
+        let error_message = format!(
+            "last processed block is greater than latest block: last_processed_block={}, latest_block={}",
+            last_processed_block, latest_block
+        );
+        tracing::error!("{}", error_message);
+        Err(anyhow::anyhow!(error_message))?;
+    }
+
+    const MAX_YIELD_RESUME_BLOCKS: u64 = 200;
+    let starting_block: u64 = {
+        if latest_block - last_processed_block < MAX_YIELD_RESUME_BLOCKS {
+            last_processed_block
+        } else {
+            latest_block.saturating_sub(MAX_YIELD_RESUME_BLOCKS)
+        }
+    };
+    app_data_storage
+        .set_last_processed_block(starting_block)
+        .await?;
+
+    tracing::info!(
+        "set last processed block to {} to start indexer with, previous last processed: {}, latest block: {}",
+        starting_block,
+        last_processed_block,
+        latest_block,
+    );
+    Ok(())
 }
 
 fn backoff(i: u32, multiplier: u32, max: u64) {

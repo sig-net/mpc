@@ -4,7 +4,6 @@ use super::state::{
     WaitingForConsensusState,
 };
 use super::{Config, SignQueue};
-use crate::gcp::error::DatastoreStorageError;
 use crate::gcp::error::SecretStorageError;
 use crate::http_client::MessageQueue;
 use crate::protocol::contract::primitives::Participants;
@@ -12,9 +11,9 @@ use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
-use crate::storage::presignature_storage::PresignatureRedisStorage;
+use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
-use crate::storage::triple_storage::TripleRedisStorage;
+use crate::storage::triple_storage::TripleStorage;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 use crate::{http_client, rpc_client};
@@ -40,8 +39,8 @@ pub trait ConsensusCtx {
     fn my_address(&self) -> &Url;
     fn sign_queue(&self) -> Arc<RwLock<SignQueue>>;
     fn secret_storage(&self) -> &SecretNodeStorageBox;
-    fn triple_storage(&self) -> &TripleRedisStorage;
-    fn presignature_storage(&self) -> &PresignatureRedisStorage;
+    fn triple_storage(&self) -> &TripleStorage;
+    fn presignature_storage(&self) -> &PresignatureStorage;
     fn cfg(&self) -> &Config;
     fn message_options(&self) -> http_client::Options;
 }
@@ -68,19 +67,11 @@ pub enum ConsensusError {
     CaitSithInitializationError(#[from] InitializationError),
     #[error("secret storage error: {0}")]
     SecretStorageError(SecretStorageError),
-    #[error("datastore storage error: {0}")]
-    DatastoreStorageError(DatastoreStorageError),
 }
 
 impl From<SecretStorageError> for ConsensusError {
     fn from(err: SecretStorageError) -> Self {
         ConsensusError::SecretStorageError(err)
-    }
-}
-
-impl From<DatastoreStorageError> for ConsensusError {
-    fn from(err: DatastoreStorageError) -> Self {
-        ConsensusError::DatastoreStorageError(err)
     }
 }
 

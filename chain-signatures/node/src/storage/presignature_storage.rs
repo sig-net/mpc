@@ -10,20 +10,20 @@ type PresigResult<T> = std::result::Result<T, anyhow::Error>;
 // Can be used to "clear" redis storage in case of a breaking change
 const PRESIGNATURE_STORAGE_VERSION: &str = "v1";
 
-pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureRedisStorage {
-    PresignatureRedisStorage {
+pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureStorage {
+    PresignatureStorage {
         redis_pool: pool.clone(),
         node_account_id: node_account_id.clone(),
     }
 }
 
 #[derive(Clone)]
-pub struct PresignatureRedisStorage {
+pub struct PresignatureStorage {
     redis_pool: Pool,
     node_account_id: AccountId,
 }
 
-impl PresignatureRedisStorage {
+impl PresignatureStorage {
     pub async fn insert(&self, presignature: Presignature) -> PresigResult<()> {
         let mut connection = self.redis_pool.get().await?;
         connection

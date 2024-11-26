@@ -104,10 +104,6 @@ variable "static_env" {
       value = "near-lake-data-testnet"
     },
     {
-      name  = "MPC_INDEXER_START_BLOCK_HEIGHT"
-      value = 180133172
-    },
-    {
       name  = "AWS_DEFAULT_REGION"
       value = "eu-central-1"
     },

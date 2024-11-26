@@ -96,7 +96,6 @@ impl<'a> Node<'a> {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
             s3_region: ctx.localstack.s3_region.clone(),
             s3_url: Some(ctx.localstack.s3_host_address.clone()),
-            start_block_height: 0,
             running_threshold: 120,
             behind_threshold: 120,
         };
@@ -560,66 +559,6 @@ impl Default for DockerClient {
             .unwrap(),
             cli: Default::default(),
         }
-    }
-}
-
-pub struct Datastore<'a> {
-    pub container: Container<'a, GenericImage>,
-    pub address: String,
-    pub local_address: String,
-}
-
-impl<'a> Datastore<'a> {
-    pub const CONTAINER_PORT: u16 = 3000;
-
-    pub async fn run(
-        docker_client: &'a DockerClient,
-        network: &str,
-        project_id: &str,
-    ) -> anyhow::Result<Datastore<'a>> {
-        tracing::info!("Running datastore container...");
-        let image = GenericImage::new(
-            "gcr.io/google.com/cloudsdktool/google-cloud-cli",
-            "464.0.0-emulators",
-        )
-        .with_wait_for(WaitFor::message_on_stderr("Dev App Server is now running."))
-        .with_exposed_port(Self::CONTAINER_PORT)
-        .with_entrypoint("gcloud")
-        .with_env_var(
-            "DATASTORE_EMULATOR_HOST",
-            format!("0.0.0.0:{}", Self::CONTAINER_PORT),
-        )
-        .with_env_var("DATASTORE_PROJECT_ID", project_id);
-        let image: RunnableImage<GenericImage> = (
-            image,
-            vec![
-                "beta".to_string(),
-                "emulators".to_string(),
-                "datastore".to_string(),
-                "start".to_string(),
-                format!("--project={project_id}"),
-                "--host-port".to_string(),
-                format!("0.0.0.0:{}", Self::CONTAINER_PORT),
-                "--no-store-on-disk".to_string(),
-                "--consistency=1.0".to_string(),
-            ],
-        )
-            .into();
-        let image = image.with_network(network);
-        let container = docker_client.cli.run(image);
-        let ip_address = docker_client
-            .get_network_ip_address(&container, network)
-            .await?;
-        let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
-
-        let full_address = format!("http://{}:{}/", ip_address, Self::CONTAINER_PORT);
-        let local_address = format!("http://127.0.0.1:{}/", host_port);
-        tracing::info!("Datastore container is running at {}", full_address);
-        Ok(Datastore {
-            container,
-            local_address,
-            address: full_address,
-        })
     }
 }
 
