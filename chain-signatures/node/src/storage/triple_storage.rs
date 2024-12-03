@@ -1,6 +1,7 @@
 use crate::protocol::triple::{Triple, TripleId};
+use crate::storage::error::{StoreError, StoreResult};
 
-use deadpool_redis::Pool;
+use deadpool_redis::{Connection, Pool};
 use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
 
 use near_account_id::AccountId;
@@ -22,69 +23,74 @@ pub struct TripleStorage {
 }
 
 impl TripleStorage {
-    pub async fn insert(&self, triple: Triple, mine: bool) -> anyhow::Result<()> {
-        let mut conn = self.redis_pool.get().await?;
+    async fn connect(&self) -> StoreResult<Connection> {
+        self.redis_pool
+            .get()
+            .await
+            .map_err(anyhow::Error::new)
+            .map_err(StoreError::Connect)
+    }
+
+    pub async fn insert(&self, triple: Triple, mine: bool) -> StoreResult<()> {
+        let mut conn = self.connect().await?;
         if mine {
             conn.sadd::<&str, TripleId, ()>(&self.mine_key(), triple.id)
-            .await?;
+                .await?;
         }
         conn.hset::<&str, TripleId, Triple, ()>(&self.triple_key(), triple.id, triple)
             .await?;
         Ok(())
     }
 
-    pub async fn contains(&self, id: &TripleId) -> anyhow::Result<bool> {
-        let mut conn = self.redis_pool.get().await?;
+    pub async fn contains(&self, id: &TripleId) -> StoreResult<bool> {
+        let mut conn = self.connect().await?;
         let result: bool = conn.hexists(self.triple_key(), id).await?;
         Ok(result)
     }
 
-    pub async fn contains_mine(&self, id: &TripleId) -> anyhow::Result<bool> {
-        let mut conn = self.redis_pool.get().await?;
+    pub async fn contains_mine(&self, id: &TripleId) -> StoreResult<bool> {
+        let mut conn = self.connect().await?;
         let result: bool = conn.sismember(self.mine_key(), id).await?;
         Ok(result)
     }
 
-    pub async fn take(&self, id: &TripleId) -> anyhow::Result<Option<Triple>> {
-        let mut conn = self.redis_pool.get().await?;
+    pub async fn take(&self, id: &TripleId) -> StoreResult<Triple> {
+        let mut conn = self.connect().await?;
         if self.contains_mine(id).await? {
-            tracing::error!("cannot take mine triple as foreign: {:?}", id);
-            return Ok(None);
+            tracing::error!(?id, "cannot take mine triple as foreign owned");
+            return Err(StoreError::TripleDenied(
+                *id,
+                "cannot take mine triple as foreign owned",
+            ));
         }
-        let result: Option<Triple> = conn.hget(self.triple_key(), id).await?;
-        match result {
-            Some(triple) => {
-                conn.hdel::<&str, TripleId, ()>(&self.triple_key(), *id)
-                    .await?;
-                Ok(Some(triple))
-            }
-            None => Ok(None),
-        }
+        let triple: Option<Triple> = conn.hget(self.triple_key(), id).await?;
+        let triple = triple.ok_or_else(|| StoreError::TripleIsMissing(*id))?;
+        conn.hdel::<&str, TripleId, ()>(&self.triple_key(), *id)
+            .await?;
+        Ok(triple)
     }
 
-    pub async fn take_mine(&self) -> anyhow::Result<Option<Triple>> {
-        let mut conn = self.redis_pool.get().await?;
+    pub async fn take_mine(&self) -> StoreResult<Triple> {
+        let mut conn = self.connect().await?;
         let id: Option<TripleId> = conn.spop(self.mine_key()).await?;
-        match id {
-            Some(id) => self.take(&id).await,
-            None => Ok(None),
-        }
+        let id = id.ok_or_else(|| StoreError::Empty("mine triple stockpile"))?;
+        self.take(&id).await
     }
 
-    pub async fn len_generated(&self) -> anyhow::Result<usize> {
-        let mut conn = self.redis_pool.get().await?;
+    pub async fn len_generated(&self) -> StoreResult<usize> {
+        let mut conn = self.connect().await?;
         let result: usize = conn.hlen(self.triple_key()).await?;
         Ok(result)
     }
 
-    pub async fn len_mine(&self) -> anyhow::Result<usize> {
-        let mut conn = self.redis_pool.get().await?;
+    pub async fn len_mine(&self) -> StoreResult<usize> {
+        let mut conn = self.connect().await?;
         let result: usize = conn.scard(self.mine_key()).await?;
         Ok(result)
     }
 
-    pub async fn clear(&self) -> anyhow::Result<()> {
-        let mut conn = self.redis_pool.get().await?;
+    pub async fn clear(&self) -> StoreResult<()> {
+        let mut conn = self.connect().await?;
         conn.del::<&str, ()>(&self.triple_key()).await?;
         conn.del::<&str, ()>(&self.mine_key()).await?;
         Ok(())

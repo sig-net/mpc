@@ -2,6 +2,7 @@ use super::contract::primitives::Participants;
 use super::cryptography::CryptographicError;
 use super::message::TripleMessage;
 use super::presignature::GenerationError;
+use crate::storage::error::StoreError;
 use crate::storage::triple_storage::TripleStorage;
 use crate::types::TripleProtocol;
 use crate::util::AffinePointExt;
@@ -168,6 +169,27 @@ impl TripleManager {
             .unwrap_or(false)
     }
 
+    async fn take(&self, id: &TripleId) -> Result<Triple, GenerationError> {
+        self.triple_storage.take(id).await.map_err(|err| match err {
+            StoreError::TripleIsMissing(_) | StoreError::TripleDenied(_, _) => {
+                if self.generators.contains_key(id) {
+                    tracing::warn!(id, "triple is generating");
+                    return GenerationError::TripleIsGenerating(*id);
+                } else if self.gc.contains_key(id) {
+                    tracing::warn!(id, "triple is garbage collected");
+                    return GenerationError::TripleIsGarbageCollected(*id);
+                } else {
+                    tracing::warn!(id, "triple is missing");
+                    return GenerationError::TripleIsMissing(*id);
+                }
+            }
+            e => {
+                tracing::warn!(id, ?e, "failed to take triple");
+                return GenerationError::TripleIsMissing(*id);
+            }
+        })
+    }
+
     /// Take two unspent triple by theirs id with no way to return it. Only takes
     /// if both of them are present.
     /// It is very important to NOT reuse the same triple twice for two different
@@ -177,56 +199,18 @@ impl TripleManager {
         id0: TripleId,
         id1: TripleId,
     ) -> Result<(Triple, Triple), GenerationError> {
-        let triples = &self.triple_storage;
-        let triple_0 = match triples.take(&id0).await {
-            Ok(Some(triple)) => triple,
-            Ok(None) => {
-                if self.generators.contains_key(&id0) {
-                    tracing::warn!(id0, "triple is generating");
-                    return Err(GenerationError::TripleIsGenerating(id0));
-                } else if self.gc.contains_key(&id0) {
-                    tracing::warn!(id0, "triple is garbage collected");
-                    return Err(GenerationError::TripleIsGarbageCollected(id0));
-                } else {
-                    tracing::warn!(id0, "triple is missing");
-                    return Err(GenerationError::TripleIsMissing(id0));
+        let triple_0 = self.take(&id0).await?;
+        let triple_1 = match self.take(&id1).await {
+            Ok(triple) => triple,
+            Err(err) => {
+                if let Err(e) = self.triple_storage.insert(triple_0, false).await {
+                    tracing::warn!(?e, id0, "failed to insert triple back");
                 }
-            }
-            Err(e) => {
-                tracing::warn!(id0, ?e, "failed to take triple");
-                return Err(GenerationError::TripleIsMissing(id0));
+                return Err(err);
             }
         };
-
-        let triple_1 = match triples.take(&id1).await {
-            Ok(Some(triple)) => triple,
-            Ok(None) => {
-                if let Err(e) = triples.insert(triple_0, false).await {
-                    tracing::warn!(id0, ?e, "failed to insert triple back");
-                }
-                if self.generators.contains_key(&id1) {
-                    tracing::warn!(id1, "triple is generating");
-                    return Err(GenerationError::TripleIsGenerating(id1));
-                } else if self.gc.contains_key(&id1) {
-                    tracing::warn!(id1, "triple is garbage collected");
-                    return Err(GenerationError::TripleIsGarbageCollected(id1));
-                } else {
-                    tracing::warn!(id1, "triple is missing");
-                    return Err(GenerationError::TripleIsMissing(id1));
-                }
-            }
-            Err(e) => {
-                tracing::warn!(id1, ?e, "failed to take triple");
-                if let Err(e) = triples.insert(triple_0, false).await {
-                    tracing::warn!(id0, ?e, "failed to insert triple back");
-                }
-                return Err(GenerationError::TripleIsMissing(id1));
-            }
-        };
-
         self.gc.insert(id0, Instant::now());
         self.gc.insert(id1, Instant::now());
-
         tracing::debug!(id0, id1, "took two triples");
 
         Ok((triple_0, triple_1))
@@ -242,26 +226,14 @@ impl TripleManager {
             return None;
         }
         let triple_0 = match triples.take_mine().await {
-            Ok(Some(triple)) => triple,
-            Ok(None) => {
-                tracing::warn!("no mine triple left");
-                return None;
-            }
+            Ok(triple) => triple,
             Err(e) => {
                 tracing::warn!(?e, "failed to take mine triple");
                 return None;
             }
         };
-
         let triple_1 = match triples.take_mine().await {
-            Ok(Some(triple)) => triple,
-            Ok(None) => {
-                if let Err(e) = triples.insert(triple_0, true).await {
-                    tracing::warn!(?e, "failed to insert mine triple back");
-                }
-                tracing::warn!("no mine triple left");
-                return None;
-            }
+            Ok(triple) => triple,
             Err(e) => {
                 tracing::warn!(?e, "failed to take mine triple");
                 if let Err(e) = triples.insert(triple_0, true).await {
