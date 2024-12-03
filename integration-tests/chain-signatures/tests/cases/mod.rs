@@ -240,8 +240,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_manager.is_empty().await);
     assert_eq!(triple_manager.len_potential().await, 0);
 
-    triple_manager.insert(triple_1).await;
-    triple_manager.insert(triple_2).await;
+    triple_manager.insert(triple_1, false).await;
+    triple_manager.insert(triple_2, false).await;
 
     // Check that the storage contains the foreign triple
     assert!(triple_manager.contains(&triple_id_1).await);
@@ -271,8 +271,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let mine_triple_2 = dummy_triple(mine_id_2);
 
     // Add mine triple and check that it is in the storage
-    triple_manager.insert_mine(mine_triple_1).await;
-    triple_manager.insert_mine(mine_triple_2).await;
+    triple_manager.insert(mine_triple_1, true).await;
+    triple_manager.insert(mine_triple_2, true).await;
     assert!(triple_manager.contains(&mine_id_1).await);
     assert!(triple_manager.contains(&mine_id_2).await);
     assert!(triple_manager.contains_mine(&mine_id_1).await);

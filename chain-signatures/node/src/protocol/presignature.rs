@@ -436,8 +436,8 @@ impl PresignatureManager {
 
                     // Insert back the triples to be used later since this active set of
                     // participants were not able to make use of these triples.
-                    triple_manager.insert_mine(triple0).await;
-                    triple_manager.insert_mine(triple1).await;
+                    triple_manager.insert(triple0, true).await;
+                    triple_manager.insert(triple1, true).await;
                 } else {
                     self.generate(
                         &presig_participants,

@@ -144,19 +144,11 @@ impl TripleManager {
         }
     }
 
-    pub async fn insert(&mut self, triple: Triple) {
-        tracing::debug!(id = triple.id, "inserting triple");
+    pub async fn insert(&mut self, triple: Triple, mine: bool) {
+        tracing::debug!(id = triple.id, mine, "inserting triple");
         self.gc.remove(&triple.id);
-        if let Err(e) = self.triple_storage.insert(triple).await {
-            tracing::warn!(?e, "failed to insert triple");
-        }
-    }
-
-    pub async fn insert_mine(&mut self, triple: Triple) {
-        tracing::debug!(id = triple.id, "inserting mine triple");
-        self.gc.remove(&triple.id);
-        if let Err(e) = self.triple_storage.insert_mine(triple).await {
-            tracing::warn!(?e, "failed to insert mine triple");
+        if let Err(e) = self.triple_storage.insert(triple, mine).await {
+            tracing::warn!(?e, mine, "failed to insert triple");
         }
     }
 
@@ -209,7 +201,7 @@ impl TripleManager {
         let triple_1 = match triples.take(&id1).await {
             Ok(Some(triple)) => triple,
             Ok(None) => {
-                if let Err(e) = triples.insert(triple_0).await {
+                if let Err(e) = triples.insert(triple_0, false).await {
                     tracing::warn!(id0, ?e, "failed to insert triple back");
                 }
                 if self.generators.contains_key(&id1) {
@@ -225,7 +217,7 @@ impl TripleManager {
             }
             Err(e) => {
                 tracing::warn!(id1, ?e, "failed to take triple");
-                if let Err(e) = triples.insert(triple_0).await {
+                if let Err(e) = triples.insert(triple_0, false).await {
                     tracing::warn!(id0, ?e, "failed to insert triple back");
                 }
                 return Err(GenerationError::TripleIsMissing(id1));
@@ -264,7 +256,7 @@ impl TripleManager {
         let triple_1 = match triples.take_mine().await {
             Ok(Some(triple)) => triple,
             Ok(None) => {
-                if let Err(e) = triples.insert_mine(triple_0).await {
+                if let Err(e) = triples.insert(triple_0, true).await {
                     tracing::warn!(?e, "failed to insert mine triple back");
                 }
                 tracing::warn!("no mine triple left");
@@ -272,7 +264,7 @@ impl TripleManager {
             }
             Err(e) => {
                 tracing::warn!(?e, "failed to take mine triple");
-                if let Err(e) = triples.insert_mine(triple_0).await {
+                if let Err(e) = triples.insert(triple_0, true).await {
                     tracing::warn!(?e, "failed to insert mine triple back");
                 }
                 return None;
@@ -460,8 +452,7 @@ impl TripleManager {
 
         let mut messages = Vec::new();
         let mut errors = Vec::new();
-        let mut new_triples = Vec::new();
-        let mut new_mine_triples = Vec::new();
+        let mut triples = Vec::new();
         self.generators.retain(|id, generator| {
             if !self.ongoing.contains(id) {
                 // If the protocol is not ongoing, we should retain it for the next time
@@ -564,13 +555,11 @@ impl TripleManager {
                             triple_owner == self.me
                         };
 
+                        triples.push((triple, triple_is_mine));
                         if triple_is_mine {
-                            new_mine_triples.push(triple.clone());
                             crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS
                                 .with_label_values(&[self.my_account_id.as_str()])
                                 .inc();
-                        } else {
-                            new_triples.push(triple.clone());
                         }
 
                         // Protocol done, remove it from the ongoing pool.
@@ -583,12 +572,8 @@ impl TripleManager {
             }
         });
 
-        for triple in new_triples {
-            self.insert(triple).await;
-        }
-
-        for triple in new_mine_triples {
-            self.insert_mine(triple).await;
+        for (triple, mine) in triples {
+            self.insert(triple, mine).await;
         }
 
         if !errors.is_empty() {
