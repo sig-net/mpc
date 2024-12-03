@@ -2,7 +2,6 @@ use super::contract::primitives::Participants;
 use super::cryptography::CryptographicError;
 use super::message::TripleMessage;
 use super::presignature::GenerationError;
-use crate::storage::error::StoreError;
 use crate::storage::triple_storage::TripleStorage;
 use crate::types::TripleProtocol;
 use crate::util::AffinePointExt;
@@ -170,22 +169,16 @@ impl TripleManager {
     }
 
     async fn take(&self, id: &TripleId) -> Result<Triple, GenerationError> {
-        self.triple_storage.take(id).await.map_err(|err| match err {
-            StoreError::TripleIsMissing(_) | StoreError::TripleDenied(_, _) => {
-                if self.generators.contains_key(id) {
-                    tracing::warn!(id, "triple is generating");
-                    return GenerationError::TripleIsGenerating(*id);
-                } else if self.gc.contains_key(id) {
-                    tracing::warn!(id, "triple is garbage collected");
-                    return GenerationError::TripleIsGarbageCollected(*id);
-                } else {
-                    tracing::warn!(id, "triple is missing");
-                    return GenerationError::TripleIsMissing(*id);
-                }
-            }
-            e => {
-                tracing::warn!(id, ?e, "failed to take triple");
-                return GenerationError::TripleIsMissing(*id);
+        self.triple_storage.take(id).await.map_err(|store_err| {
+            if self.generators.contains_key(id) {
+                tracing::warn!(id, ?store_err, "triple is generating");
+                GenerationError::TripleIsGenerating(*id)
+            } else if self.gc.contains_key(id) {
+                tracing::warn!(id, ?store_err, "triple is garbage collected");
+                GenerationError::TripleIsGarbageCollected(*id)
+            } else {
+                tracing::warn!(id, ?store_err, "triple is missing");
+                GenerationError::TripleIsMissing(*id)
             }
         })
     }
@@ -203,8 +196,8 @@ impl TripleManager {
         let triple_1 = match self.take(&id1).await {
             Ok(triple) => triple,
             Err(err) => {
-                if let Err(e) = self.triple_storage.insert(triple_0, false).await {
-                    tracing::warn!(?e, id0, "failed to insert triple back");
+                if let Err(store_err) = self.triple_storage.insert(triple_0, false).await {
+                    tracing::warn!(?store_err, id0, "failed to insert triple back");
                 }
                 return Err(err);
             }

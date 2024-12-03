@@ -11,10 +11,12 @@ pub enum StoreError {
     Connect(#[from] anyhow::Error),
     #[error("missing triple: id={0}")]
     TripleIsMissing(TripleId),
-    #[error("invalid triple: id={0}, {1}")]
+    #[error("triple access denied: id={0}, {1}")]
     TripleDenied(TripleId, &'static str),
     #[error("missing presignature: {0}")]
     PresignatureIsMissing(PresignatureId),
+    #[error("presignature access denied: id={0}, {1}")]
+    PresignatureDenied(PresignatureId, &'static str),
     #[error("empty: {0}")]
     Empty(&'static str),
 }

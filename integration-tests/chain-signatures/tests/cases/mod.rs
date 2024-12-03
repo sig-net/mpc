@@ -327,7 +327,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert!(presignature_manager.is_empty().await);
     assert_eq!(presignature_manager.len_potential().await, 0);
 
-    presignature_manager.insert(presignature).await;
+    presignature_manager.insert(presignature, false).await;
 
     // Check that the storage contains the foreign presignature
     assert!(presignature_manager.contains(&presignature_id).await);
@@ -348,7 +348,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let mine_presig_id: PresignatureId = mine_presignature.id;
 
     // Add mine presignature and check that it is in the storage
-    presignature_manager.insert_mine(mine_presignature).await;
+    presignature_manager.insert(mine_presignature, true).await;
     assert!(presignature_manager.contains(&mine_presig_id).await);
     assert!(presignature_manager.contains_mine(&mine_presig_id).await);
     assert_eq!(presignature_manager.len_generated().await, 1);
