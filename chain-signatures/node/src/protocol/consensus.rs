@@ -41,7 +41,7 @@ pub trait ConsensusCtx {
     fn secret_storage(&self) -> &SecretNodeStorageBox;
     fn triple_storage(&self) -> &TripleStorage;
     fn presignature_storage(&self) -> &PresignatureStorage;
-    fn cfg(&self) -> &Config;
+    fn cfg(&self) -> &Arc<RwLock<Config>>;
     fn message_options(&self) -> http_client::Options;
 }
 
@@ -663,12 +663,13 @@ impl ConsensusProtocol for JoiningState {
                         tracing::info!(
                             "joining(running): sending a transaction to join the participant set"
                         );
+                        let cfg = ctx.cfg().read().await.clone();
                         ctx.rpc_client()
                             .call(ctx.signer(), ctx.mpc_contract_id(), "join")
                             .args_json(json!({
                                 "url": ctx.my_address(),
-                                "cipher_pk": ctx.cfg().local.network.cipher_pk.to_bytes(),
-                                "sign_pk": ctx.cfg().local.network.sign_sk.public_key(),
+                                "cipher_pk": cfg.local.network.cipher_pk.to_bytes(),
+                                "sign_pk": cfg.local.network.sign_sk.public_key(),
                             }))
                             .max_gas()
                             .retry_exponential(10, 3)
