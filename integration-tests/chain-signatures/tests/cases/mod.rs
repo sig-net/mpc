@@ -212,7 +212,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let docker_client = DockerClient::default();
     let docker_network = "test-triple-persistence";
     docker_client.create_network(docker_network).await?;
-    let redis = containers::Redis::run(&docker_client, docker_network).await?;
+    let redis = containers::Redis::run(&docker_client, docker_network).await;
     let redis_url = Url::parse(redis.internal_address.as_str())?;
     let redis_cfg = deadpool_redis::Config::from_url(redis_url);
     let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
@@ -300,7 +300,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let docker_client = DockerClient::default();
     let docker_network = "test-presignature-persistence";
     docker_client.create_network(docker_network).await?;
-    let redis = containers::Redis::run(&docker_client, docker_network).await?;
+    let redis = containers::Redis::run(&docker_client, docker_network).await;
     let redis_url = Url::parse(redis.internal_address.as_str())?;
     let redis_cfg = deadpool_redis::Config::from_url(redis_url);
     let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();

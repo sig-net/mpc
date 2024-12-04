@@ -1,6 +1,6 @@
 pub mod wait_for;
 
-use crate::MultichainTestContext;
+use crate::TestContext;
 
 use cait_sith::FullSignature;
 use crypto_shared::ScalarExt;
@@ -41,7 +41,7 @@ use k256::{
 use serde_json::json;
 
 pub async fn request_sign(
-    ctx: &MultichainTestContext<'_>,
+    ctx: &TestContext,
 ) -> anyhow::Result<([u8; 32], [u8; 32], Account, AsyncTransactionStatus)> {
     let worker = &ctx.nodes.ctx().worker;
     let account = worker.dev_create_account().await?;
@@ -74,7 +74,7 @@ pub async fn request_sign(
 }
 
 pub async fn request_batch_random_sign(
-    ctx: &MultichainTestContext<'_>,
+    ctx: &TestContext,
 ) -> anyhow::Result<(Vec<([u8; 32], [u8; 32])>, Account, AsyncTransactionStatus)> {
     let worker = &ctx.nodes.ctx().worker;
     let account = worker.dev_create_account().await?;
@@ -110,7 +110,7 @@ pub async fn request_batch_random_sign(
 }
 
 pub async fn request_batch_duplicate_sign(
-    ctx: &MultichainTestContext<'_>,
+    ctx: &TestContext,
 ) -> anyhow::Result<([u8; 32], u32, Account, AsyncTransactionStatus)> {
     let worker = &ctx.nodes.ctx().worker;
     let account = worker.dev_create_account().await?;
@@ -159,7 +159,7 @@ pub async fn assert_signature(
 
 // A normal signature, but we try to insert a bad response which fails and the signature is generated
 pub async fn single_signature_rogue_responder(
-    ctx: &MultichainTestContext<'_>,
+    ctx: &TestContext,
     state: &RunningContractState,
 ) -> anyhow::Result<()> {
     let (_, payload_hash, account, status) = request_sign(ctx).await?;
@@ -189,7 +189,7 @@ pub async fn single_signature_rogue_responder(
 }
 
 pub async fn single_signature_production(
-    ctx: &MultichainTestContext<'_>,
+    ctx: &TestContext,
     state: &RunningContractState,
 ) -> anyhow::Result<()> {
     let (_, payload_hash, account, status) = request_sign(ctx).await?;
@@ -203,7 +203,7 @@ pub async fn single_signature_production(
 }
 
 pub async fn rogue_respond(
-    ctx: &MultichainTestContext<'_>,
+    ctx: &TestContext,
     payload_hash: [u8; 32],
     predecessor: &near_workspaces::AccountId,
     path: &str,
@@ -254,7 +254,7 @@ pub async fn rogue_respond(
 }
 
 pub async fn request_sign_non_random(
-    ctx: &MultichainTestContext<'_>,
+    ctx: &TestContext,
     account: Account,
     payload: [u8; 32],
     payload_hashed: [u8; 32],
@@ -296,7 +296,7 @@ pub async fn request_sign_non_random(
 }
 
 pub async fn single_payload_signature_production(
-    ctx: &MultichainTestContext<'_>,
+    ctx: &TestContext,
     state: &RunningContractState,
 ) -> anyhow::Result<()> {
     let (payload, payload_hash, account, status) = request_sign(ctx).await?;
@@ -377,7 +377,7 @@ pub async fn clear_toxics() -> anyhow::Result<()> {
 }
 
 pub async fn batch_random_signature_production(
-    ctx: &MultichainTestContext<'_>,
+    ctx: &TestContext,
     state: &RunningContractState,
 ) -> anyhow::Result<()> {
     let (payloads, account, status) = request_batch_random_sign(ctx).await?;
@@ -396,7 +396,7 @@ pub async fn batch_random_signature_production(
 }
 
 pub async fn batch_duplicate_signature_production(
-    ctx: &MultichainTestContext<'_>,
+    ctx: &TestContext,
     _state: &RunningContractState,
 ) -> anyhow::Result<()> {
     let (_, _, _, status) = request_batch_duplicate_sign(ctx).await?;

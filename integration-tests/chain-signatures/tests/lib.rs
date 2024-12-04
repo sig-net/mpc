@@ -19,14 +19,14 @@ const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(900
 const CURRENT_CONTRACT_FILE_PATH: &str =
     "../../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
 
-pub struct MultichainTestContext<'a> {
-    nodes: Nodes<'a>,
+pub struct TestContext {
+    nodes: Nodes,
     rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
     cfg: MultichainConfig,
 }
 
-impl MultichainTestContext<'_> {
+impl TestContext {
     pub fn contract(&self) -> &Contract {
         self.nodes.contract()
     }
@@ -186,7 +186,7 @@ impl MultichainTestContext<'_> {
 
 pub async fn with_multichain_nodes<F>(cfg: MultichainConfig, f: F) -> anyhow::Result<()>
 where
-    F: for<'a> FnOnce(MultichainTestContext<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
+    F: FnOnce(TestContext) -> BoxFuture<'static, anyhow::Result<()>>,
 {
     let docker_client = DockerClient::default();
     let nodes = run(cfg.clone(), &docker_client).await?;
@@ -196,7 +196,7 @@ where
     let connector = near_jsonrpc_client::JsonRpcClient::new_client();
     let jsonrpc_client = connector.connect(&nodes.ctx().lake_indexer.rpc_host_address);
     let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
-    let result = f(MultichainTestContext {
+    let result = f(TestContext {
         nodes,
         rpc_client,
         http_client: reqwest::Client::default(),

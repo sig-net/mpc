@@ -3,6 +3,7 @@ pub mod execute;
 pub mod local;
 pub mod utils;
 
+use containers::Container;
 use deadpool_redis::Pool;
 use std::collections::HashMap;
 
@@ -25,7 +26,6 @@ use near_workspaces::network::{Sandbox, ValidatorKey};
 use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
-use testcontainers::{Container, GenericImage};
 
 const NETWORK: &str = "mpc_it_network";
 
@@ -58,18 +58,18 @@ impl Default for MultichainConfig {
     }
 }
 
-pub enum Nodes<'a> {
+pub enum Nodes {
     Local {
-        ctx: Context<'a>,
+        ctx: Context,
         nodes: Vec<local::Node>,
     },
     Docker {
-        ctx: Context<'a>,
-        nodes: Vec<containers::Node<'a>>,
+        ctx: Context,
+        nodes: Vec<containers::Node>,
     },
 }
 
-impl Nodes<'_> {
+impl Nodes {
     pub fn len(&self) -> usize {
         match self {
             Nodes::Local { nodes, .. } => nodes.len(),
@@ -134,7 +134,7 @@ impl Nodes<'_> {
                     .iter()
                     .position(|node| node.account.id() == account_id)
                     .unwrap();
-                nodes.remove(index).kill()
+                nodes.remove(index).kill().await
             }
         };
 
@@ -191,22 +191,22 @@ impl Nodes<'_> {
     }
 }
 
-pub struct Context<'a> {
-    pub docker_client: &'a DockerClient,
+pub struct Context {
+    pub docker_client: DockerClient,
     pub docker_network: String,
     pub release: bool,
 
-    pub localstack: crate::containers::LocalStack<'a>,
-    pub lake_indexer: crate::containers::LakeIndexer<'a>,
+    pub localstack: crate::containers::LocalStack,
+    pub lake_indexer: crate::containers::LakeIndexer,
     pub worker: Worker<Sandbox>,
     pub mpc_contract: Contract,
-    pub redis: crate::containers::Redis<'a>,
+    pub redis: crate::containers::Redis,
     pub storage_options: storage::Options,
     pub mesh_options: mesh::Options,
     pub message_options: http_client::Options,
 }
 
-pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> {
+pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context> {
     let release = true;
     let docker_network = NETWORK;
     docker_client.create_network(docker_network).await?;
@@ -226,7 +226,7 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
         .await?;
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
 
-    let redis = crate::containers::Redis::run(docker_client, docker_network).await?;
+    let redis = crate::containers::Redis::run(docker_client, docker_network).await;
     let redis_url = redis.internal_address.clone();
 
     let sk_share_local_path = "multichain-integration-secret-manager".to_string();
@@ -246,7 +246,7 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context<'_>> 
     let message_options = http_client::Options { timeout: 1000 };
 
     Ok(Context {
-        docker_client,
+        docker_client: docker_client.clone(),
         docker_network: docker_network.to_string(),
         release,
         localstack,
@@ -427,8 +427,8 @@ pub async fn dry_run(
 }
 
 async fn fetch_from_validator(
-    docker_client: &containers::DockerClient,
-    container: &Container<'_, GenericImage>,
+    docker_client: &DockerClient,
+    container: &Container,
     path: &str,
 ) -> anyhow::Result<Vec<u8>> {
     tracing::info!(path, "fetching data from validator");
@@ -465,8 +465,8 @@ async fn fetch_from_validator(
 }
 
 async fn fetch_validator_keys(
-    docker_client: &containers::DockerClient,
-    container: &Container<'_, GenericImage>,
+    docker_client: &DockerClient,
+    container: &Container,
 ) -> anyhow::Result<KeyFile> {
     let _span = tracing::info_span!("fetch_validator_keys");
     let key_data =
@@ -474,19 +474,19 @@ async fn fetch_validator_keys(
     Ok(serde_json::from_slice(&key_data)?)
 }
 
-pub struct LakeIndexerCtx<'a> {
-    pub localstack: containers::LocalStack<'a>,
-    pub lake_indexer: containers::LakeIndexer<'a>,
+pub struct LakeIndexerCtx {
+    pub localstack: containers::LocalStack,
+    pub lake_indexer: containers::LakeIndexer,
     pub worker: Worker<Sandbox>,
 }
 
-pub async fn initialize_lake_indexer<'a>(
-    docker_client: &'a containers::DockerClient,
+pub async fn initialize_lake_indexer(
+    docker_client: &DockerClient,
     network: &str,
-) -> anyhow::Result<LakeIndexerCtx<'a>> {
+) -> anyhow::Result<LakeIndexerCtx> {
     let s3_bucket = "near-lake-custom";
     let s3_region = "us-east-1";
-    let localstack = LocalStack::run(docker_client, network, s3_bucket, s3_region).await?;
+    let localstack = LocalStack::run(docker_client, network, s3_bucket, s3_region).await;
 
     let lake_indexer = containers::LakeIndexer::run(
         docker_client,
@@ -495,7 +495,7 @@ pub async fn initialize_lake_indexer<'a>(
         s3_bucket,
         s3_region,
     )
-    .await?;
+    .await;
 
     let validator_key = fetch_validator_keys(docker_client, &lake_indexer.container).await?;
 

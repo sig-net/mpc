@@ -2,7 +2,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use crate::actions;
-use crate::MultichainTestContext;
+use crate::TestContext;
 
 use anyhow::Context;
 use backon::Retryable;
@@ -23,8 +23,8 @@ use near_workspaces::Account;
 use std::collections::HashMap;
 use url::Url;
 
-pub async fn running_mpc<'a>(
-    ctx: &MultichainTestContext<'a>,
+pub async fn running_mpc(
+    ctx: &TestContext,
     epoch: Option<u64>,
 ) -> anyhow::Result<RunningContractState> {
     let is_running = || async {
@@ -60,8 +60,8 @@ pub async fn running_mpc<'a>(
         .with_context(|| err_msg)
 }
 
-pub async fn has_at_least_triples<'a>(
-    ctx: &MultichainTestContext<'a>,
+pub async fn has_at_least_triples(
+    ctx: &TestContext,
     expected_triple_count: usize,
 ) -> anyhow::Result<Vec<StateView>> {
     let is_enough_triples = |id| {
@@ -108,8 +108,8 @@ pub async fn has_at_least_triples<'a>(
     Ok(state_views)
 }
 
-pub async fn has_at_least_mine_triples<'a>(
-    ctx: &MultichainTestContext<'a>,
+pub async fn has_at_least_mine_triples(
+    ctx: &TestContext,
     expected_mine_triple_count: usize,
 ) -> anyhow::Result<Vec<StateView>> {
     let is_enough_mine_triples = |id| {
@@ -150,8 +150,8 @@ pub async fn has_at_least_mine_triples<'a>(
     Ok(state_views)
 }
 
-pub async fn has_at_least_presignatures<'a>(
-    ctx: &MultichainTestContext<'a>,
+pub async fn has_at_least_presignatures(
+    ctx: &TestContext,
     expected_presignature_count: usize,
 ) -> anyhow::Result<Vec<StateView>> {
     let is_enough_presignatures = |id| {
@@ -192,8 +192,8 @@ pub async fn has_at_least_presignatures<'a>(
     Ok(state_views)
 }
 
-pub async fn has_at_least_mine_presignatures<'a>(
-    ctx: &MultichainTestContext<'a>,
+pub async fn has_at_least_mine_presignatures(
+    ctx: &TestContext,
     expected_mine_presignature_count: usize,
 ) -> anyhow::Result<Vec<StateView>> {
     let is_enough_mine_presignatures = |id| {
@@ -302,7 +302,7 @@ pub async fn signature_responded(
 }
 
 pub async fn signature_payload_responded(
-    ctx: &MultichainTestContext<'_>,
+    ctx: &TestContext,
     account: Account,
     payload: [u8; 32],
     payload_hashed: [u8; 32],

@@ -37,7 +37,7 @@ pub struct NodeConfig {
 
 impl Node {
     pub async fn dry_run(
-        ctx: &super::Context<'_>,
+        ctx: &super::Context,
         account: &Account,
         cfg: &MultichainConfig,
     ) -> anyhow::Result<NodeConfig> {
@@ -103,7 +103,7 @@ impl Node {
     }
 
     pub async fn run(
-        ctx: &super::Context<'_>,
+        ctx: &super::Context,
         cfg: &MultichainConfig,
         account: &Account,
     ) -> anyhow::Result<Self> {
@@ -140,7 +140,7 @@ impl Node {
         .await
     }
 
-    pub async fn spawn(ctx: &super::Context<'_>, config: NodeConfig) -> anyhow::Result<Self> {
+    pub async fn spawn(ctx: &super::Context, config: NodeConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
