@@ -45,6 +45,7 @@ impl ContractUpdater {
                 }
                 last_config_update = Instant::now();
             }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 }

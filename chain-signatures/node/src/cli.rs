@@ -1,6 +1,7 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::mesh::Mesh;
+use crate::mesh::{Mesh, MeshState};
+use crate::protocol::contract::primitives::Participants;
 use crate::protocol::{MpcSignProtocol, SignQueue};
 use crate::storage::app_data_storage;
 use crate::{http_client, indexer, mesh, storage, web};
@@ -241,7 +242,13 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!(%my_address, "address detected");
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
-            let (mesh, mesh_state) = Mesh::init(mesh_options);
+            let mesh_state = Arc::new(RwLock::new(MeshState {
+                active_participants: Participants::default(),
+                active_potential_participants: Participants::default(),
+                potential_participants: Participants::default(),
+                stable_participants: Participants::default(),
+            }));
+            let mesh = Mesh::init(mesh_options);
             let config = Arc::new(RwLock::new(Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network: NetworkConfig {
