@@ -228,7 +228,7 @@ impl ConsensusProtocol for StartedState {
                             }))
                         }
                         None => {
-                            tracing::info!("started(initializing): we are not a part of the initial participant set, waiting for key generation to complete");
+                            tracing::info!("started(initializing): we are not a part of the initial participant set, waiting for key generation to complete.");
                             Ok(NodeState::Started(self))
                         }
                     }
