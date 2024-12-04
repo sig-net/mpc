@@ -134,7 +134,7 @@ struct Context {
 }
 
 async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
-    tracing::debug!(block_height = block_number, "handle eth block");
+    tracing::warn!(block_height = block_number, "handle eth block");
 
     // Create filter for the specific block and SignatureRequested event
     let signature_requested_topic = H256::from_slice(&web3::signing::keccak256(
@@ -274,10 +274,11 @@ pub fn run(
         rt.block_on(async {
             loop {
                 let latest_block = context.web3.eth().block_number().await?;
-                let current_block = context.indexer.latest_block_height().await;
+                let latest_handled_block = context.indexer.latest_block_height().await;
+                tracing::warn!("=== eth latest_block {} latest_handled_block {} ===", latest_block, latest_handled_block);
 
-                if current_block < latest_block.as_u64() {
-                    handle_block(current_block, &context).await?;
+                if latest_handled_block < latest_block.as_u64() {
+                    handle_block(latest_handled_block + 1, &context).await?;
                 } else {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }

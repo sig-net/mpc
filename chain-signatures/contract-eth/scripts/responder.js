@@ -11,14 +11,14 @@ async function main() {
   console.log("Watching for SignatureRequested events...");
   
   // Set up event listener
-  chainSignatures.on("SignatureRequested", (requestId, epsilon, payloadHash, event) => {
+  chainSignatures.on("SignatureRequested", (requestId, requester, epsilon, payloadHash, path) => {
     console.log("\nNew SignatureRequested event detected!");
     console.log({
       requestId: requestId.toString(),
+      requester: requester,
       epsilon: epsilon.toString(),
       payloadHash: payloadHash.toString(),
-      blockNumber: event.blockNumber,
-      transactionHash: event.transactionHash
+      path: path,
     });
 
     // Respond to the signature request
@@ -39,7 +39,8 @@ async function main() {
         const receipt = await tx.wait();
 
         console.log("Signature submitted successfully!");
-        console.log("Transaction hash:", receipt.transactionHash);
+        console.log(receipt);
+        process.exit(0);
       } catch (error) {
         console.error("Error submitting signature:", error.message); 
       }
