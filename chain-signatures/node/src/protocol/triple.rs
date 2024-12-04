@@ -215,7 +215,7 @@ impl TripleManager {
     pub async fn take_two_mine(&mut self) -> Option<(Triple, Triple)> {
         let triples = &self.triple_storage;
         if triples.len_mine().await.unwrap_or(0) < 2 {
-            tracing::warn!("not enough mine triples");
+            tracing::debug!("not enough mine triples");
             return None;
         }
         let triple_0 = match triples.take_mine().await {

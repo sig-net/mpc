@@ -1,5 +1,6 @@
 mod actions;
 mod cases;
+pub mod cluster;
 
 use crate::actions::wait_for;
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};

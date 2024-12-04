@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use crate::actions::{self, add_latency, wait_for};
-use crate::with_multichain_nodes;
+use crate::{cluster, with_multichain_nodes};
 
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
@@ -98,16 +98,12 @@ async fn test_triples_and_presignatures() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_signature_basic() -> anyhow::Result<()> {
-    with_multichain_nodes(MultichainConfig::default(), |ctx| {
-        Box::pin(async move {
-            let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
-            assert_eq!(state_0.participants.len(), 3);
-            wait_for::has_at_least_triples(&ctx, 2).await?;
-            wait_for::has_at_least_presignatures(&ctx, 2).await?;
-            actions::single_signature_rogue_responder(&ctx, &state_0).await
-        })
-    })
-    .await
+    let nodes = cluster::spawn().wait_for_running().await?;
+
+    nodes.wait().ready_to_sign().await?;
+    let _ = nodes.sign().await?;
+
+    Ok(())
 }
 
 #[test(tokio::test)]
