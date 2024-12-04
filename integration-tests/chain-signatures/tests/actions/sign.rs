@@ -1,13 +1,16 @@
 use std::future::IntoFuture;
 
 use cait_sith::FullSignature;
-use k256::Secp256k1;
+use crypto_shared::{
+    derive_epsilon, ScalarExt as _, SerializableAffinePoint, SerializableScalar, SignatureResponse,
+};
+use k256::{Scalar, Secp256k1};
 use mpc_contract::errors;
-use mpc_contract::primitives::SignRequest;
+use mpc_contract::primitives::{SignRequest, SignatureRequest};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
-use near_workspaces::Account;
+use near_workspaces::{Account, AccountId};
 use rand::Rng;
 
 use crate::actions::{self, wait_for};
@@ -92,19 +95,19 @@ impl<'a> IntoFuture for SignAction<'a> {
     type IntoFuture =
         std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'a>>;
 
-    fn into_future(self) -> Self::IntoFuture {
+    fn into_future(mut self) -> Self::IntoFuture {
         let Self { nodes, .. } = self;
 
         Box::pin(async move {
             let state = nodes.expect_running().await?;
             let account = self.account_or_new().await;
-            let (payload, payload_hash) = self.payload_or_random().await;
+            let payload = self.payload_or_random();
+            let payload_hash = self.payload_hash();
             let status = self.transact_async(&account, payload_hash).await?;
 
             // We have to use seperate transactions because one could fail.
             // This leads to a potential race condition where this transaction could get sent after the signature completes, but I think that's unlikely
-            let rogue_status =
-                actions::rogue_respond_(nodes, payload_hash, account.id(), "test").await?;
+            let (rogue, rogue_status) = self.rogue_respond(payload_hash, account.id()).await?;
             let err = wait_for::rogue_message_responded(rogue_status).await?;
 
             assert!(err.contains(&errors::RespondError::InvalidSignature.to_string()));
@@ -125,6 +128,7 @@ impl<'a> IntoFuture for SignAction<'a> {
 
             Ok(SignResult {
                 account,
+                rogue,
                 signature,
                 payload,
                 payload_hash,
@@ -143,13 +147,14 @@ impl SignAction<'_> {
         }
     }
 
-    async fn payload_or_random(&self) -> ([u8; 32], [u8; 32]) {
-        let payload = if let Some(payload) = &self.payload {
-            *payload
-        } else {
-            rand::thread_rng().gen()
-        };
-        (payload, web3::signing::keccak256(&payload))
+    fn payload_or_random(&mut self) -> [u8; 32] {
+        let payload = self.payload.unwrap_or_else(|| rand::thread_rng().gen());
+        self.payload = Some(payload);
+        payload
+    }
+
+    fn payload_hash(&mut self) -> [u8; 32] {
+        web3::signing::keccak256(&self.payload_or_random())
     }
 
     async fn transact_async(
@@ -180,10 +185,63 @@ impl SignAction<'_> {
             .await?;
         Ok(status)
     }
+
+    async fn rogue_respond(
+        &self,
+        payload_hash: [u8; 32],
+        predecessor: &AccountId,
+    ) -> anyhow::Result<(Account, AsyncTransactionStatus)> {
+        let rogue = self.nodes.worker().dev_create_account().await?;
+        let signer = InMemorySigner {
+            account_id: rogue.id().clone(),
+            public_key: rogue.secret_key().public_key().clone().into(),
+            secret_key: rogue.secret_key().to_string().parse()?,
+        };
+        let epsilon = derive_epsilon(predecessor, &self.path);
+
+        let request = SignatureRequest {
+            payload_hash: Scalar::from_bytes(payload_hash).unwrap().into(),
+            epsilon: SerializableScalar { scalar: epsilon },
+        };
+
+        let big_r = serde_json::from_value(
+            "02EC7FA686BB430A4B700BDA07F2E07D6333D9E33AEEF270334EB2D00D0A6FEC6C".into(),
+        )?; // Fake BigR
+        let s = serde_json::from_value(
+            "20F90C540EE00133C911EA2A9ADE2ABBCC7AD820687F75E011DFEEC94DB10CD6".into(),
+        )?; // Fake S
+
+        let response = SignatureResponse {
+            big_r: SerializableAffinePoint {
+                affine_point: big_r,
+            },
+            s: SerializableScalar { scalar: s },
+            recovery_id: 0,
+        };
+
+        let status = self
+            .nodes
+            .rpc_client
+            .call(&signer, self.nodes.contract().id(), "respond")
+            .args_json(serde_json::json!({
+                "request": request,
+                "response": response,
+            }))
+            .max_gas()
+            .transact_async()
+            .await?;
+
+        Ok((rogue, status))
+    }
 }
 
 pub struct SignResult {
+    /// The account that signed the payload.
     pub account: Account,
+
+    /// Underlying rogue account that responded to the signature request.
+    pub rogue: Account,
+
     pub payload: [u8; 32],
     pub payload_hash: [u8; 32],
     pub signature: FullSignature<Secp256k1>,
