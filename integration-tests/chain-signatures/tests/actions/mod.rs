@@ -76,38 +76,6 @@ pub async fn request_sign(
     Ok((payload, payload_hashed, account, status))
 }
 
-pub async fn request_sign_(
-    nodes: &Cluster,
-) -> anyhow::Result<([u8; 32], [u8; 32], Account, AsyncTransactionStatus)> {
-    let account = nodes.worker().dev_create_account().await?;
-    let payload: [u8; 32] = rand::thread_rng().gen();
-    let payload_hashed = web3::signing::keccak256(&payload);
-
-    let signer = InMemorySigner {
-        account_id: account.id().clone(),
-        public_key: account.secret_key().public_key().to_string().parse()?,
-        secret_key: account.secret_key().to_string().parse()?,
-    };
-
-    let request = SignRequest {
-        payload: payload_hashed,
-        path: "test".to_string(),
-        key_version: 0,
-    };
-    let status = nodes
-        .rpc_client
-        .call(&signer, nodes.contract().id(), "sign")
-        .args_json(serde_json::json!({
-            "request": request,
-        }))
-        .gas(Gas::from_tgas(50))
-        .deposit(NearToken::from_yoctonear(1))
-        .transact_async()
-        .await?;
-    // tokio::time::sleep(Duration::from_secs(1)).await;
-    Ok((payload, payload_hashed, account, status))
-}
-
 pub async fn request_batch_random_sign(
     ctx: &TestContext,
 ) -> anyhow::Result<(Vec<([u8; 32], [u8; 32])>, Account, AsyncTransactionStatus)> {
