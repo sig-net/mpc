@@ -15,7 +15,7 @@ enum WaitActions {
     MinMineTriples(usize),
     MinPresignatures(usize),
     MinMinePresignatures(usize),
-    ReadyToSign(usize),
+    Signable(usize),
 }
 
 pub struct WaitAction<'a, R> {
@@ -72,12 +72,12 @@ impl<'a, R> WaitAction<'a, R> {
     }
 
     pub fn signable(mut self) -> Self {
-        self.actions.push(WaitActions::ReadyToSign(1));
+        self.actions.push(WaitActions::Signable(1));
         self
     }
 
     pub fn signable_many(mut self, count: usize) -> Self {
-        self.actions.push(WaitActions::ReadyToSign(count));
+        self.actions.push(WaitActions::Signable(count));
         self
     }
 
@@ -99,7 +99,7 @@ impl<'a, R> WaitAction<'a, R> {
                 WaitActions::MinMinePresignatures(expected) => {
                     require_presignatures(self.nodes, expected, true).await?;
                 }
-                WaitActions::ReadyToSign(count) => {
+                WaitActions::Signable(count) => {
                     require_presignatures(self.nodes, count, true).await?;
                 }
             }
