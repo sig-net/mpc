@@ -136,7 +136,6 @@ struct Context {
 async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
     tracing::warn!(block_height = block_number, "handle eth block");
 
-    // Create filter for the specific block and SignatureRequested event
     let signature_requested_topic = H256::from_slice(&web3::signing::keccak256(
         b"SignatureRequested(bytes32,address,uint256,uint256,string)",
     ));
@@ -148,9 +147,11 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
         .topics(Some(vec![signature_requested_topic]), None, None, None)
         .build();
 
+    let logs = ctx.web3.eth().logs(filter).await?;
+    tracing::info!("====== FILTERED RESULTS ====== Found {} filtered logs", logs.len());
+
     let mut pending_requests = Vec::new();
     // Get logs using filter
-    let logs = ctx.web3.eth().logs(filter).await?;
     for log in logs {
         let event = parse_event(&log)?;
         tracing::info!("Found eth event: {:?}", event);
@@ -168,7 +169,12 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
             key_version: 0,
         };
         let epsilon = derive_epsilon_eth(event.requester.to_string(), &request.path);
-        let entropy = [0u8; 32]; // TODO
+        
+        // Use transaction hash as entropy
+        let entropy = log.transaction_hash
+            .map(|h| *h.as_fixed_bytes())
+            .unwrap_or([0u8; 32]);
+
         let sign_request = SignRequest {
             request_id: event.request_id,
             request,
