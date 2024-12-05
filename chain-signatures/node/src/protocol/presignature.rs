@@ -137,12 +137,16 @@ pub enum GenerationError {
     TripleIsGenerating(TripleId),
     #[error("triple {0} is in garbage collection")]
     TripleIsGarbageCollected(TripleId),
+    #[error("triple access denied: id={0}, {1}")]
+    TripleDenied(TripleId, &'static str),
     #[error("presignature {0} is generating")]
     PresignatureIsGenerating(PresignatureId),
     #[error("presignature {0} is missing")]
     PresignatureIsMissing(PresignatureId),
     #[error("presignature {0} is in garbage collection")]
     PresignatureIsGarbageCollected(TripleId),
+    #[error("presignature access denied: id={0}, {1}")]
+    PresignatureDenied(PresignatureId, &'static str),
     #[error("presignature bad parameters")]
     PresignatureBadParameters,
 }
@@ -219,6 +223,14 @@ impl PresignatureManager {
     }
 
     pub async fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
+        if self.contains_mine(&id).await {
+            tracing::error!(?id, "cannot take mine presignature as foreign owned");
+            return Err(GenerationError::PresignatureDenied(
+                id,
+                "cannot take mine presignature as foreign owned",
+            ));
+        }
+
         let presignature = self
             .presignature_storage
             .take(&id)

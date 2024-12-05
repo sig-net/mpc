@@ -145,10 +145,12 @@ impl TripleManager {
     }
 
     pub async fn insert(&mut self, triple: Triple, mine: bool) {
-        tracing::debug!(id = triple.id, mine, "inserting triple");
-        self.gc.remove(&triple.id);
+        let id = triple.id;
+        tracing::debug!(id, mine, "inserting triple");
         if let Err(e) = self.triple_storage.insert(triple, mine).await {
             tracing::warn!(?e, mine, "failed to insert triple");
+        } else {
+            self.gc.remove(&id);
         }
     }
 
@@ -168,8 +170,16 @@ impl TripleManager {
             .unwrap_or(false)
     }
 
-    async fn take(&self, id: &TripleId) -> Result<Triple, GenerationError> {
-        self.triple_storage.take(id).await.map_err(|store_err| {
+    async fn take(&mut self, id: &TripleId) -> Result<Triple, GenerationError> {
+        if self.contains_mine(id).await {
+            tracing::error!(?id, "cannot take mine triple as foreign owned");
+            return Err(GenerationError::TripleDenied(
+                *id,
+                "cannot take mine triple as foreign owned",
+            ));
+        }
+
+        let result = self.triple_storage.take(id).await.map_err(|store_err| {
             if self.generators.contains_key(id) {
                 tracing::warn!(id, ?store_err, "triple is generating");
                 GenerationError::TripleIsGenerating(*id)
@@ -180,7 +190,13 @@ impl TripleManager {
                 tracing::warn!(id, ?store_err, "triple is missing");
                 GenerationError::TripleIsMissing(*id)
             }
-        })
+        });
+
+        if result.is_ok() {
+            self.gc.insert(*id, Instant::now());
+        }
+
+        result
     }
 
     /// Take two unspent triple by theirs id with no way to return it. Only takes
@@ -196,14 +212,10 @@ impl TripleManager {
         let triple_1 = match self.take(&id1).await {
             Ok(triple) => triple,
             Err(err) => {
-                if let Err(store_err) = self.triple_storage.insert(triple_0, false).await {
-                    tracing::warn!(?store_err, id0, "failed to insert triple back");
-                }
+                self.insert(triple_0, false).await;
                 return Err(err);
             }
         };
-        self.gc.insert(id0, Instant::now());
-        self.gc.insert(id1, Instant::now());
         tracing::debug!(id0, id1, "took two triples");
 
         Ok((triple_0, triple_1))
@@ -229,9 +241,7 @@ impl TripleManager {
             Ok(triple) => triple,
             Err(e) => {
                 tracing::warn!(?e, "failed to take mine triple");
-                if let Err(e) = triples.insert(triple_0, true).await {
-                    tracing::warn!(?e, "failed to insert mine triple back");
-                }
+                self.insert(triple_0, true).await;
                 return None;
             }
         };

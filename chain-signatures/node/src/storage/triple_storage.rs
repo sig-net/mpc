@@ -56,13 +56,6 @@ impl TripleStorage {
 
     pub async fn take(&self, id: &TripleId) -> StoreResult<Triple> {
         let mut conn = self.connect().await?;
-        if self.contains_mine(id).await? {
-            tracing::error!(?id, "cannot take mine triple as foreign owned");
-            return Err(StoreError::TripleDenied(
-                *id,
-                "cannot take mine triple as foreign owned",
-            ));
-        }
         let triple: Option<Triple> = conn.hget(self.triple_key(), id).await?;
         let triple = triple.ok_or_else(|| StoreError::TripleIsMissing(*id))?;
         conn.hdel::<&str, TripleId, ()>(&self.triple_key(), *id)
