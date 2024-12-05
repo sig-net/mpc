@@ -22,7 +22,7 @@ async fn test_nightly_signature_production() -> anyhow::Result<()> {
         .await?;
 
     for i in 0..SIGNATURE_AMOUNT {
-        if let Err(err) = nodes.wait().ready_to_sign().await {
+        if let Err(err) = nodes.wait().signable().await {
             tracing::error!(?err, "Failed to be ready to sign");
             continue;
         }

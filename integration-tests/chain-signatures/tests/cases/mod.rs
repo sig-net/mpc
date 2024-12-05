@@ -28,12 +28,12 @@ pub mod nightly;
 #[test(tokio::test)]
 async fn test_multichain_reshare() -> anyhow::Result<()> {
     let mut nodes = cluster::spawn().wait_for_running().await?;
-    nodes.wait().ready_to_sign().await?;
+    nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
 
     tracing::info!("!!! Add participant 3");
     nodes.add_participant(None).await.unwrap();
-    let state = nodes.wait().running().ready_to_sign().await.unwrap();
+    let state = nodes.wait().running().signable().await.unwrap();
     let _ = nodes.sign().await.unwrap();
 
     tracing::info!("!!! Remove participant 0 and participant 2");
@@ -47,7 +47,7 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
     )
     .unwrap();
     let node_cfg_0 = nodes.remove_participant(Some(&account_0)).await.unwrap();
-    nodes.wait().running().ready_to_sign().await.unwrap();
+    nodes.wait().running().signable().await.unwrap();
     let _ = nodes.sign().await.unwrap();
 
     tracing::info!("!!! Try remove participant 3, should fail due to threshold");
@@ -55,12 +55,12 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
 
     tracing::info!("!!! Add participant 5");
     nodes.add_participant(None).await.unwrap();
-    nodes.wait().running().ready_to_sign().await.unwrap();
+    nodes.wait().running().signable().await.unwrap();
     let _ = nodes.sign().await.unwrap();
 
     tracing::info!("!!! Add back participant 0");
     nodes.add_participant(Some(node_cfg_0)).await.unwrap();
-    nodes.wait().running().ready_to_sign().await.unwrap();
+    nodes.wait().running().signable().await.unwrap();
     let _ = nodes.sign().await.unwrap();
 
     Ok(())
@@ -69,7 +69,7 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
 #[test(tokio::test)]
 async fn test_signature_basic() -> anyhow::Result<()> {
     let nodes = cluster::spawn().wait_for_running().await?;
-    nodes.wait().ready_to_sign().await?;
+    nodes.wait().signable().await?;
     nodes.sign().await?;
 
     Ok(())
@@ -78,7 +78,7 @@ async fn test_signature_basic() -> anyhow::Result<()> {
 #[test(tokio::test)]
 async fn test_signature_rogue() -> anyhow::Result<()> {
     let nodes = cluster::spawn().wait_for_running().await?;
-    nodes.wait().ready_to_sign().await?;
+    nodes.wait().signable().await?;
     nodes.sign().rogue_responder().await?;
 
     Ok(())
@@ -87,7 +87,7 @@ async fn test_signature_rogue() -> anyhow::Result<()> {
 #[test(tokio::test)]
 async fn test_signature_offline_node() -> anyhow::Result<()> {
     let mut nodes = cluster::spawn().wait_for_running().await?;
-    nodes.wait().ready_to_sign().await?;
+    nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
 
     // Kill the node then have presignatures and signature generation only use the active set of nodes
@@ -106,14 +106,14 @@ async fn test_signature_offline_node() -> anyhow::Result<()> {
     // This could potentially fail and timeout the first time if the participant set picked up is the
     // one with the offline node. This is expected behavior for now if a user submits a request in between
     // a node going offline and the system hasn't detected it yet.
-    nodes.wait().ready_to_sign().await.unwrap();
+    nodes.wait().signable().await.unwrap();
     let outcome = nodes.sign().await;
 
     // Try again if the first attempt failed. This second portion should not be needed when the NEP
     // comes in for resumeable MPC.
     if outcome.is_err() {
         // Retry if the first attempt failed.
-        nodes.wait().ready_to_sign().await.unwrap();
+        nodes.wait().signable().await.unwrap();
         let _outcome = nodes.sign().await.unwrap();
     }
 
@@ -123,7 +123,7 @@ async fn test_signature_offline_node() -> anyhow::Result<()> {
 #[test(tokio::test)]
 async fn test_key_derivation() -> anyhow::Result<()> {
     let nodes = cluster::spawn().wait_for_running().await?;
-    nodes.wait().ready_to_sign().await?;
+    nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
 
     let mpc_pk: k256::AffinePoint = nodes.root_public_key().await?.into_affine_point();
@@ -366,7 +366,7 @@ fn dummy_triple(id: u64) -> Triple {
 #[test(tokio::test)]
 async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
     let mut nodes = cluster::spawn().wait_for_running().await?;
-    nodes.wait().ready_to_sign().await?;
+    nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
 
     // Kill node 2
@@ -384,7 +384,7 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
     nodes.restart_node(killed).await?;
 
     // Check that we can sign again
-    nodes.wait().ready_to_sign().await?;
+    nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
 
     Ok(())
@@ -404,7 +404,7 @@ async fn test_lake_congestion() -> anyhow::Result<()> {
     // with a 1s latency it fails to wait for signature response in time
     add_latency("lake-s3", false, 1.0, 100, 10).await?;
 
-    nodes.wait().running().ready_to_sign().await?;
+    nodes.wait().running().signable().await?;
     nodes.sign().await.unwrap();
 
     Ok(())
@@ -439,7 +439,7 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
     assert!(state.participants.len() == 2);
 
     // make sure signing works after reshare
-    nodes.wait().ready_to_sign().await?;
+    nodes.wait().signable().await?;
     nodes.sign().await.unwrap();
 
     Ok(())
@@ -448,14 +448,14 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
 #[test(tokio::test)]
 async fn test_multichain_update_contract() -> anyhow::Result<()> {
     let nodes = cluster::spawn().wait_for_running().await?;
-    nodes.wait().ready_to_sign().await?;
+    nodes.wait().signable().await?;
     nodes.sign().await.unwrap();
 
     // Perform update to the contract and see that the nodes are still properly running and picking
     // up the new contract by first upgrading the contract, then trying to generate a new signature.
     let id = nodes.propose_update_contract_default().await;
     nodes.vote_update(id).await;
-    nodes.wait().ready_to_sign().await?;
+    nodes.wait().signable().await?;
     nodes.sign().await.unwrap();
 
     // Now do a config update and see if that also updates the same:
@@ -466,7 +466,7 @@ async fn test_multichain_update_contract() -> anyhow::Result<()> {
         })
         .await;
     nodes.vote_update(id).await;
-    nodes.wait().ready_to_sign().await?;
+    nodes.wait().signable().await?;
     nodes.sign().await.unwrap();
 
     Ok(())

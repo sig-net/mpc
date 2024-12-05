@@ -71,12 +71,12 @@ impl<'a, R> WaitAction<'a, R> {
         self
     }
 
-    pub fn ready_to_sign(mut self) -> Self {
+    pub fn signable(mut self) -> Self {
         self.actions.push(WaitActions::ReadyToSign(1));
         self
     }
 
-    pub fn ready_to_sign_many(mut self, count: usize) -> Self {
+    pub fn signable_many(mut self, count: usize) -> Self {
         self.actions.push(WaitActions::ReadyToSign(count));
         self
     }
