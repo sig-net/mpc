@@ -2,7 +2,6 @@ use anyhow::Context;
 use backon::{ExponentialBuilder, Retryable};
 use mpc_contract::config::ProtocolConfig;
 use mpc_contract::{ProtocolContractState, RunningContractState};
-use mpc_node::web::StateView;
 
 use std::future::{Future, IntoFuture};
 
@@ -65,116 +64,10 @@ impl IntoFuture for ClusterSpawner {
             };
 
             if self.wait_for_running {
-                running_mpc(&cluster, Some(0)).await?;
+                cluster.wait().running().await?;
             }
 
             Ok(cluster)
         })
     }
-}
-
-pub async fn running_mpc(
-    nodes: &Cluster,
-    epoch: Option<u64>,
-) -> anyhow::Result<RunningContractState> {
-    let is_running = || async {
-        match nodes.contract_state().await? {
-            ProtocolContractState::Running(running) => match epoch {
-                None => Ok(running),
-                Some(expected_epoch) if running.epoch >= expected_epoch => Ok(running),
-                Some(_) => {
-                    anyhow::bail!("running with an older epoch: {}", running.epoch)
-                }
-            },
-            _ => anyhow::bail!("not running"),
-        }
-    };
-    let err_msg = format!(
-        "mpc did not reach {} in time",
-        if epoch.is_some() {
-            "expected epoch"
-        } else {
-            "running state"
-        }
-    );
-    is_running
-        .retry(&ExponentialBuilder::default().with_max_times(6))
-        .await
-        .with_context(|| err_msg)
-}
-
-pub async fn require_mine_presignatures(
-    nodes: &Cluster,
-    expected: usize,
-) -> anyhow::Result<Vec<StateView>> {
-    let is_enough = || async {
-        let state_views = nodes.fetch_states().await?;
-        let enough = state_views
-            .iter()
-            .filter(|state| match state {
-                StateView::Running {
-                    presignature_mine_count,
-                    ..
-                } => *presignature_mine_count >= expected,
-                _ => {
-                    tracing::warn!("state=NotRunning while checking mine presignatures");
-                    false
-                }
-            })
-            .count();
-        if enough >= nodes.len() {
-            Ok(state_views)
-        } else {
-            anyhow::bail!("not enough nodes with mine presignatures")
-        }
-    };
-
-    let state_views = is_enough
-        .retry(&ExponentialBuilder::default().with_max_times(15))
-        .await
-        .with_context(|| {
-            format!(
-                "mpc nodes failed to generate {} presignatures before deadline",
-                expected
-            )
-        })?;
-
-    Ok(state_views)
-}
-
-pub async fn require_mine_triples(
-    nodes: &Cluster,
-    expected: usize,
-) -> anyhow::Result<Vec<StateView>> {
-    let is_enough = || async {
-        let state_views = nodes.fetch_states().await?;
-        let enough = state_views
-            .iter()
-            .filter(|state| match state {
-                StateView::Running {
-                    triple_mine_count, ..
-                } => *triple_mine_count >= expected,
-                _ => {
-                    tracing::warn!("state=NotRunning while checking mine triples");
-                    false
-                }
-            })
-            .count();
-        if enough >= nodes.len() {
-            Ok(state_views)
-        } else {
-            anyhow::bail!("not enough nodes with mine triples")
-        }
-    };
-    let state_views = is_enough
-        .retry(&ExponentialBuilder::default().with_max_times(12))
-        .await
-        .with_context(|| {
-            format!(
-                "mpc nodes failed to generate {} triples before deadline",
-                expected
-            )
-        })?;
-
-    Ok(state_views)
 }

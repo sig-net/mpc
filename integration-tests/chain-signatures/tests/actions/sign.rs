@@ -19,6 +19,19 @@ use crate::cluster::Cluster;
 pub const SIGN_GAS: Gas = Gas::from_tgas(50);
 pub const SIGN_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
 
+pub struct SignOutcome {
+    /// The account that signed the payload.
+    pub account: Account,
+
+    /// Underlying rogue account that responded to the signature request if we wanted
+    /// to test the rogue behavior.
+    pub rogue: Option<Account>,
+
+    pub payload: [u8; 32],
+    pub payload_hash: [u8; 32],
+    pub signature: FullSignature<Secp256k1>,
+}
+
 pub struct SignAction<'a> {
     nodes: &'a Cluster,
     count: usize,
@@ -28,6 +41,7 @@ pub struct SignAction<'a> {
     key_version: u32,
     gas: Gas,
     deposit: NearToken,
+    execute_rogue: bool,
 }
 
 impl<'a> SignAction<'a> {
@@ -41,6 +55,7 @@ impl<'a> SignAction<'a> {
             key_version: 0,
             gas: SIGN_GAS,
             deposit: SIGN_DEPOSIT,
+            execute_rogue: false,
         }
     }
 }
@@ -88,10 +103,15 @@ impl SignAction<'_> {
         self.deposit = deposit;
         self
     }
+
+    pub fn rogue_responder(mut self) -> Self {
+        self.execute_rogue = true;
+        self
+    }
 }
 
 impl<'a> IntoFuture for SignAction<'a> {
-    type Output = anyhow::Result<SignResult>;
+    type Output = anyhow::Result<SignOutcome>;
     type IntoFuture =
         std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'a>>;
 
@@ -103,16 +123,23 @@ impl<'a> IntoFuture for SignAction<'a> {
             let account = self.account_or_new().await;
             let payload = self.payload_or_random();
             let payload_hash = self.payload_hash();
-            let status = self.transact_async(&account, payload_hash).await?;
+            let status = self.transact_sign(&account, payload_hash).await?;
 
             // We have to use seperate transactions because one could fail.
             // This leads to a potential race condition where this transaction could get sent after the signature completes, but I think that's unlikely
-            let (rogue, rogue_status) = self.rogue_respond(payload_hash, account.id()).await?;
-            let err = wait_for::rogue_message_responded(rogue_status).await?;
+            let rogue = if self.execute_rogue {
+                let (rogue, rogue_status) = self
+                    .transact_rogue_respond(payload_hash, account.id())
+                    .await?;
+                let err = wait_for::rogue_message_responded(rogue_status).await?;
 
-            assert!(err.contains(&errors::RespondError::InvalidSignature.to_string()));
+                assert!(err.contains(&errors::RespondError::InvalidSignature.to_string()));
+                Some(rogue)
+            } else {
+                None
+            };
+
             let signature = wait_for::signature_responded(status).await?;
-
             let mut mpc_pk_bytes = vec![0x04];
             mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
 
@@ -126,7 +153,7 @@ impl<'a> IntoFuture for SignAction<'a> {
             // );
             actions::assert_signature(account.id(), &mpc_pk_bytes, payload_hash, &signature).await;
 
-            Ok(SignResult {
+            Ok(SignOutcome {
                 account,
                 rogue,
                 signature,
@@ -157,7 +184,7 @@ impl SignAction<'_> {
         web3::signing::keccak256(&self.payload_or_random())
     }
 
-    async fn transact_async(
+    async fn transact_sign(
         &self,
         account: &Account,
         payload_hashed: [u8; 32],
@@ -186,7 +213,7 @@ impl SignAction<'_> {
         Ok(status)
     }
 
-    async fn rogue_respond(
+    async fn transact_rogue_respond(
         &self,
         payload_hash: [u8; 32],
         predecessor: &AccountId,
@@ -233,16 +260,4 @@ impl SignAction<'_> {
 
         Ok((rogue, status))
     }
-}
-
-pub struct SignResult {
-    /// The account that signed the payload.
-    pub account: Account,
-
-    /// Underlying rogue account that responded to the signature request.
-    pub rogue: Account,
-
-    pub payload: [u8; 32],
-    pub payload_hash: [u8; 32],
-    pub signature: FullSignature<Secp256k1>,
 }

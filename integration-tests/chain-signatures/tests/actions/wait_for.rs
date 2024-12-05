@@ -2,7 +2,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use crate::actions;
-use crate::TestContext;
+use crate::cluster::Cluster;
 
 use anyhow::Context;
 use backon::Retryable;
@@ -24,13 +24,13 @@ use std::collections::HashMap;
 use url::Url;
 
 pub async fn running_mpc(
-    ctx: &TestContext,
+    nodes: &Cluster,
     epoch: Option<u64>,
 ) -> anyhow::Result<RunningContractState> {
     let is_running = || async {
-        let state: ProtocolContractState = ctx
+        let state: ProtocolContractState = nodes
             .rpc_client
-            .view(ctx.contract().id(), "state")
+            .view(nodes.contract().id(), "state")
             .await
             .map_err(|err| anyhow::anyhow!("could not view state {err:?}"))?
             .json()?;
@@ -60,180 +60,180 @@ pub async fn running_mpc(
         .with_context(|| err_msg)
 }
 
-pub async fn has_at_least_triples(
-    ctx: &TestContext,
-    expected_triple_count: usize,
-) -> anyhow::Result<Vec<StateView>> {
-    let is_enough_triples = |id| {
-        move || async move {
-            let state_view: StateView = ctx
-                .http_client
-                .get(
-                    Url::parse(ctx.nodes.url(id))
-                        .unwrap()
-                        .join("/state")
-                        .unwrap(),
-                )
-                .send()
-                .await?
-                .json()
-                .await?;
+// pub async fn has_at_least_triples(
+//     ctx: &TestContext,
+//     expected_triple_count: usize,
+// ) -> anyhow::Result<Vec<StateView>> {
+//     let is_enough_triples = |id| {
+//         move || async move {
+//             let state_view: StateView = ctx
+//                 .http_client
+//                 .get(
+//                     Url::parse(ctx.nodes.url(id))
+//                         .unwrap()
+//                         .join("/state")
+//                         .unwrap(),
+//                 )
+//                 .send()
+//                 .await?
+//                 .json()
+//                 .await?;
 
-            tracing::debug!(
-                "has_at_least_triples state_view from {}: {:?}",
-                id,
-                state_view
-            );
+//             tracing::debug!(
+//                 "has_at_least_triples state_view from {}: {:?}",
+//                 id,
+//                 state_view
+//             );
 
-            match state_view {
-                StateView::Running { triple_count, .. }
-                    if triple_count >= expected_triple_count =>
-                {
-                    Ok(state_view)
-                }
-                StateView::Running { .. } => anyhow::bail!("node does not have enough triples yet"),
-                state => anyhow::bail!("node is not running {state:?}"),
-            }
-        }
-    };
+//             match state_view {
+//                 StateView::Running { triple_count, .. }
+//                     if triple_count >= expected_triple_count =>
+//                 {
+//                     Ok(state_view)
+//                 }
+//                 StateView::Running { .. } => anyhow::bail!("node does not have enough triples yet"),
+//                 state => anyhow::bail!("node is not running {state:?}"),
+//             }
+//         }
+//     };
 
-    let mut state_views = Vec::new();
-    for id in 0..ctx.nodes.len() {
-        let state_view = is_enough_triples(id)
-            .retry(&ExponentialBuilder::default().with_max_times(6))
-            .await
-            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_triple_count}' triples before deadline"))?;
-        state_views.push(state_view);
-    }
-    Ok(state_views)
-}
+//     let mut state_views = Vec::new();
+//     for id in 0..ctx.nodes.len() {
+//         let state_view = is_enough_triples(id)
+//             .retry(&ExponentialBuilder::default().with_max_times(6))
+//             .await
+//             .with_context(|| format!("mpc node '{id}' failed to generate '{expected_triple_count}' triples before deadline"))?;
+//         state_views.push(state_view);
+//     }
+//     Ok(state_views)
+// }
 
-pub async fn has_at_least_mine_triples(
-    ctx: &TestContext,
-    expected_mine_triple_count: usize,
-) -> anyhow::Result<Vec<StateView>> {
-    let is_enough_mine_triples = |id| {
-        move || async move {
-            let state_view: StateView = ctx
-                .http_client
-                .get(
-                    Url::parse(ctx.nodes.url(id))
-                        .unwrap()
-                        .join("/state")
-                        .unwrap(),
-                )
-                .send()
-                .await?
-                .json()
-                .await?;
+// pub async fn has_at_least_mine_triples(
+//     ctx: &TestContext,
+//     expected_mine_triple_count: usize,
+// ) -> anyhow::Result<Vec<StateView>> {
+//     let is_enough_mine_triples = |id| {
+//         move || async move {
+//             let state_view: StateView = ctx
+//                 .http_client
+//                 .get(
+//                     Url::parse(ctx.nodes.url(id))
+//                         .unwrap()
+//                         .join("/state")
+//                         .unwrap(),
+//                 )
+//                 .send()
+//                 .await?
+//                 .json()
+//                 .await?;
 
-            match state_view {
-                StateView::Running {
-                    triple_mine_count, ..
-                } if triple_mine_count >= expected_mine_triple_count => Ok(state_view),
-                StateView::Running { .. } => {
-                    anyhow::bail!("node does not have enough mine triples yet")
-                }
-                state => anyhow::bail!("node is not running {state:?}"),
-            }
-        }
-    };
+//             match state_view {
+//                 StateView::Running {
+//                     triple_mine_count, ..
+//                 } if triple_mine_count >= expected_mine_triple_count => Ok(state_view),
+//                 StateView::Running { .. } => {
+//                     anyhow::bail!("node does not have enough mine triples yet")
+//                 }
+//                 state => anyhow::bail!("node is not running {state:?}"),
+//             }
+//         }
+//     };
 
-    let mut state_views = Vec::new();
-    for id in 0..ctx.nodes.len() {
-        let state_view = is_enough_mine_triples(id)
-            .retry(&ExponentialBuilder::default().with_max_times(15))
-            .await
-            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_mine_triple_count}' triples before deadline"))?;
-        state_views.push(state_view);
-    }
-    Ok(state_views)
-}
+//     let mut state_views = Vec::new();
+//     for id in 0..ctx.nodes.len() {
+//         let state_view = is_enough_mine_triples(id)
+//             .retry(&ExponentialBuilder::default().with_max_times(15))
+//             .await
+//             .with_context(|| format!("mpc node '{id}' failed to generate '{expected_mine_triple_count}' triples before deadline"))?;
+//         state_views.push(state_view);
+//     }
+//     Ok(state_views)
+// }
 
-pub async fn has_at_least_presignatures(
-    ctx: &TestContext,
-    expected_presignature_count: usize,
-) -> anyhow::Result<Vec<StateView>> {
-    let is_enough_presignatures = |id| {
-        move || async move {
-            let state_view: StateView = ctx
-                .http_client
-                .get(
-                    Url::parse(ctx.nodes.url(id))
-                        .unwrap()
-                        .join("/state")
-                        .unwrap(),
-                )
-                .send()
-                .await?
-                .json()
-                .await?;
+// pub async fn has_at_least_presignatures(
+//     ctx: &TestContext,
+//     expected_presignature_count: usize,
+// ) -> anyhow::Result<Vec<StateView>> {
+//     let is_enough_presignatures = |id| {
+//         move || async move {
+//             let state_view: StateView = ctx
+//                 .http_client
+//                 .get(
+//                     Url::parse(ctx.nodes.url(id))
+//                         .unwrap()
+//                         .join("/state")
+//                         .unwrap(),
+//                 )
+//                 .send()
+//                 .await?
+//                 .json()
+//                 .await?;
 
-            match state_view {
-                StateView::Running {
-                    presignature_count, ..
-                } if presignature_count >= expected_presignature_count => Ok(state_view),
-                StateView::Running { .. } => {
-                    anyhow::bail!("node does not have enough presignatures yet")
-                }
-                state => anyhow::bail!("node is not running {state:?}"),
-            }
-        }
-    };
+//             match state_view {
+//                 StateView::Running {
+//                     presignature_count, ..
+//                 } if presignature_count >= expected_presignature_count => Ok(state_view),
+//                 StateView::Running { .. } => {
+//                     anyhow::bail!("node does not have enough presignatures yet")
+//                 }
+//                 state => anyhow::bail!("node is not running {state:?}"),
+//             }
+//         }
+//     };
 
-    let mut state_views = Vec::new();
-    for id in 0..ctx.nodes.len() {
-        let state_view = is_enough_presignatures(id)
-            .retry(&ExponentialBuilder::default().with_max_times(6))
-            .await
-            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_presignature_count}' presignatures before deadline"))?;
-        state_views.push(state_view);
-    }
-    Ok(state_views)
-}
+//     let mut state_views = Vec::new();
+//     for id in 0..ctx.nodes.len() {
+//         let state_view = is_enough_presignatures(id)
+//             .retry(&ExponentialBuilder::default().with_max_times(6))
+//             .await
+//             .with_context(|| format!("mpc node '{id}' failed to generate '{expected_presignature_count}' presignatures before deadline"))?;
+//         state_views.push(state_view);
+//     }
+//     Ok(state_views)
+// }
 
-pub async fn has_at_least_mine_presignatures(
-    ctx: &TestContext,
-    expected_mine_presignature_count: usize,
-) -> anyhow::Result<Vec<StateView>> {
-    let is_enough_mine_presignatures = |id| {
-        move || async move {
-            let state_view: StateView = ctx
-                .http_client
-                .get(
-                    Url::parse(ctx.nodes.url(id))
-                        .unwrap()
-                        .join("/state")
-                        .unwrap(),
-                )
-                .send()
-                .await?
-                .json()
-                .await?;
+// pub async fn has_at_least_mine_presignatures(
+//     ctx: &TestContext,
+//     expected_mine_presignature_count: usize,
+// ) -> anyhow::Result<Vec<StateView>> {
+//     let is_enough_mine_presignatures = |id| {
+//         move || async move {
+//             let state_view: StateView = ctx
+//                 .http_client
+//                 .get(
+//                     Url::parse(ctx.nodes.url(id))
+//                         .unwrap()
+//                         .join("/state")
+//                         .unwrap(),
+//                 )
+//                 .send()
+//                 .await?
+//                 .json()
+//                 .await?;
 
-            match state_view {
-                StateView::Running {
-                    presignature_mine_count,
-                    ..
-                } if presignature_mine_count >= expected_mine_presignature_count => Ok(state_view),
-                StateView::Running { .. } => {
-                    anyhow::bail!("node does not have enough mine presignatures yet")
-                }
-                state => anyhow::bail!("node is not running {state:?}"),
-            }
-        }
-    };
+//             match state_view {
+//                 StateView::Running {
+//                     presignature_mine_count,
+//                     ..
+//                 } if presignature_mine_count >= expected_mine_presignature_count => Ok(state_view),
+//                 StateView::Running { .. } => {
+//                     anyhow::bail!("node does not have enough mine presignatures yet")
+//                 }
+//                 state => anyhow::bail!("node is not running {state:?}"),
+//             }
+//         }
+//     };
 
-    let mut state_views = Vec::new();
-    for id in 0..ctx.nodes.len() {
-        let state_view = is_enough_mine_presignatures(id)
-            .retry(&ExponentialBuilder::default().with_max_times(6))
-            .await
-            .with_context(|| format!("mpc node '{id}' failed to generate '{expected_mine_presignature_count}' presignatures before deadline"))?;
-        state_views.push(state_view);
-    }
-    Ok(state_views)
-}
+//     let mut state_views = Vec::new();
+//     for id in 0..ctx.nodes.len() {
+//         let state_view = is_enough_mine_presignatures(id)
+//             .retry(&ExponentialBuilder::default().with_max_times(6))
+//             .await
+//             .with_context(|| format!("mpc node '{id}' failed to generate '{expected_mine_presignature_count}' presignatures before deadline"))?;
+//         state_views.push(state_view);
+//     }
+//     Ok(state_views)
+// }
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignatureError {
@@ -302,14 +302,15 @@ pub async fn signature_responded(
 }
 
 pub async fn signature_payload_responded(
-    ctx: &TestContext,
+    nodes: &Cluster,
     account: Account,
     payload: [u8; 32],
     payload_hashed: [u8; 32],
 ) -> Result<FullSignature<Secp256k1>, WaitForError> {
     let is_signature_ready = || async {
         let (_, _, _, status) =
-            actions::request_sign_non_random(ctx, account.clone(), payload, payload_hashed).await?;
+            actions::request_sign_non_random(nodes, account.clone(), payload, payload_hashed)
+                .await?;
         let result = signature_responded(status).await;
         if let Err(err) = &result {
             println!("failed to produce signature: {err:?}");

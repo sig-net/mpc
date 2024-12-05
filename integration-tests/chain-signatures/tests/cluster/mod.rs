@@ -1,5 +1,7 @@
 mod spawner;
 
+use integration_tests_chain_signatures::local::NodeConfig;
+use mpc_contract::primitives::Participants;
 use near_workspaces::network::Sandbox;
 use spawner::ClusterSpawner;
 
@@ -9,7 +11,7 @@ use mpc_node::web::StateView;
 use anyhow::Context;
 use integration_tests_chain_signatures::containers::DockerClient;
 use integration_tests_chain_signatures::{utils, MultichainConfig, Nodes};
-use near_workspaces::{Contract, Worker};
+use near_workspaces::{AccountId, Contract, Worker};
 use url::Url;
 
 use crate::actions::sign::SignAction;
@@ -31,7 +33,7 @@ pub struct Cluster {
     pub docker_client: DockerClient,
     pub rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
-    nodes: Nodes,
+    pub(crate) nodes: Nodes,
 }
 
 impl Cluster {
@@ -87,6 +89,24 @@ impl Cluster {
         } else {
             anyhow::bail!("expected running state, got {:?}", state)
         }
+    }
+
+    pub async fn participants(&self) -> anyhow::Result<Participants> {
+        let state = self.expect_running().await?;
+        Ok(state.participants)
+    }
+
+    pub async fn root_public_key(&self) -> anyhow::Result<near_sdk::PublicKey> {
+        let state: RunningContractState = self.expect_running().await?;
+        Ok(state.public_key)
+    }
+
+    pub async fn kill_node(&mut self, account_id: &AccountId) -> NodeConfig {
+        self.nodes.kill_node(account_id).await
+    }
+
+    pub async fn restart_node(&mut self, config: NodeConfig) -> anyhow::Result<()> {
+        self.nodes.restart_node(config).await
     }
 }
 

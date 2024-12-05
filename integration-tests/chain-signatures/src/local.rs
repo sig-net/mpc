@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::{execute, utils, MultichainConfig};
 
 use crate::containers::LakeIndexer;
@@ -33,6 +35,18 @@ pub struct NodeConfig {
     pub cfg: MultichainConfig,
     // near rpc address, after proxy
     pub near_rpc: String,
+}
+
+impl fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("web_port", &self.web_port)
+            .field("account", &self.account)
+            .field("cipher_pk", &self.cipher_pk)
+            .field("cfg", &self.cfg)
+            .field("near_rpc", &self.near_rpc)
+            .finish()
+    }
 }
 
 impl Node {

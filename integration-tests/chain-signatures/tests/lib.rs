@@ -3,15 +3,13 @@ mod cases;
 pub mod cluster;
 
 use crate::actions::wait_for;
+use cluster::Cluster;
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 
-use futures::future::BoxFuture;
-use integration_tests_chain_signatures::containers::DockerClient;
 use integration_tests_chain_signatures::utils::{vote_join, vote_leave};
-use integration_tests_chain_signatures::{run, utils, MultichainConfig, Nodes};
 
 use near_workspaces::types::NearToken;
-use near_workspaces::{Account, AccountId, Contract};
+use near_workspaces::{Account, AccountId};
 
 use integration_tests_chain_signatures::local::NodeConfig;
 use std::collections::HashSet;
@@ -20,18 +18,7 @@ const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(900
 const CURRENT_CONTRACT_FILE_PATH: &str =
     "../../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
 
-pub struct TestContext {
-    nodes: Nodes,
-    rpc_client: near_fetch::Client,
-    http_client: reqwest::Client,
-    cfg: MultichainConfig,
-}
-
-impl TestContext {
-    pub fn contract(&self) -> &Contract {
-        self.nodes.contract()
-    }
-
+impl Cluster {
     pub async fn participant_accounts(&self) -> anyhow::Result<Vec<&Account>> {
         let state = wait_for::running_mpc(self, None).await?;
         let participant_ids = state.participants.keys().collect::<HashSet<_>>();
@@ -54,7 +41,7 @@ impl TestContext {
                 node.account
             }
             None => {
-                let account = self.nodes.ctx().worker.dev_create_account().await?;
+                let account = self.worker().dev_create_account().await?;
                 tracing::info!(node_account_id = %account.id(), "adding new participant");
                 account
             }
@@ -182,29 +169,7 @@ impl TestContext {
             success >= self.cfg.threshold,
             "did not successfully vote for update"
         );
+
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
-}
-
-pub async fn with_multichain_nodes<F>(cfg: MultichainConfig, f: F) -> anyhow::Result<()>
-where
-    F: FnOnce(TestContext) -> BoxFuture<'static, anyhow::Result<()>>,
-{
-    let docker_client = DockerClient::default();
-    let nodes = run(cfg.clone(), &docker_client).await?;
-
-    let sk_local_path = nodes.ctx().storage_options.sk_share_local_path.clone();
-
-    let connector = near_jsonrpc_client::JsonRpcClient::new_client();
-    let jsonrpc_client = connector.connect(&nodes.ctx().lake_indexer.rpc_host_address);
-    let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
-    let result = f(TestContext {
-        nodes,
-        rpc_client,
-        http_client: reqwest::Client::default(),
-        cfg,
-    })
-    .await;
-    utils::clear_local_sk_shares(sk_local_path).await?;
-
-    result
 }

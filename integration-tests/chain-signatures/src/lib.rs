@@ -139,7 +139,7 @@ impl Nodes {
         };
 
         // wait for the node to be removed from the network
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
         killed_node_config
     }
@@ -151,7 +151,7 @@ impl Nodes {
             Nodes::Docker { ctx, nodes } => nodes.push(containers::Node::spawn(ctx, config).await?),
         }
         // wait for the node to be added to the network
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
         Ok(())
     }
