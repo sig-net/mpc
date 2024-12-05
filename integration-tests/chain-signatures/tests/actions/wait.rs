@@ -7,8 +7,10 @@ use mpc_node::web::StateView;
 
 use crate::cluster::Cluster;
 
+type Epoch = u64;
+
 enum WaitActions {
-    Running,
+    Running(Epoch),
     MinTriples(usize),
     MinMineTriples(usize),
     MinPresignatures(usize),
@@ -16,24 +18,34 @@ enum WaitActions {
     ReadyToSign(usize),
 }
 
-pub struct WaitAction<'a> {
+pub struct WaitAction<'a, R> {
     nodes: &'a Cluster,
     actions: Vec<WaitActions>,
+    _phantom: std::marker::PhantomData<R>,
 }
 
-impl<'a> WaitAction<'a> {
+impl<'a> WaitAction<'a, ()> {
     pub fn new(nodes: &'a Cluster) -> Self {
         Self {
             nodes,
             actions: Vec::new(),
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl WaitAction<'_> {
-    pub fn running(mut self) -> Self {
-        self.actions.push(WaitActions::Running);
-        self
+impl<'a, R> WaitAction<'a, R> {
+    pub fn running(self) -> WaitAction<'a, RunningContractState> {
+        self.running_on_epoch(0)
+    }
+
+    pub fn running_on_epoch(mut self, epoch: Epoch) -> WaitAction<'a, RunningContractState> {
+        self.actions.push(WaitActions::Running(epoch));
+        WaitAction {
+            nodes: self.nodes,
+            actions: self.actions,
+            _phantom: std::marker::PhantomData,
+        }
     }
 
     pub fn min_triples(mut self, min_triples: usize) -> Self {
@@ -68,39 +80,53 @@ impl WaitAction<'_> {
         self.actions.push(WaitActions::ReadyToSign(count));
         self
     }
+
+    async fn execute(self) -> anyhow::Result<&'a Cluster> {
+        for action in self.actions {
+            match action {
+                WaitActions::Running(epoch) => {
+                    running_mpc(self.nodes, Some(epoch)).await?;
+                }
+                WaitActions::MinTriples(expected) => {
+                    require_triples(self.nodes, expected, false).await?;
+                }
+                WaitActions::MinMineTriples(expected) => {
+                    require_triples(self.nodes, expected, true).await?;
+                }
+                WaitActions::MinPresignatures(expected) => {
+                    require_presignatures(self.nodes, expected, false).await?;
+                }
+                WaitActions::MinMinePresignatures(expected) => {
+                    require_presignatures(self.nodes, expected, true).await?;
+                }
+                WaitActions::ReadyToSign(count) => {
+                    require_presignatures(self.nodes, count, true).await?;
+                }
+            }
+        }
+
+        Ok(self.nodes)
+    }
 }
 
-impl<'a> IntoFuture for WaitAction<'a> {
+impl<'a> IntoFuture for WaitAction<'a, ()> {
     type Output = anyhow::Result<()>;
     type IntoFuture = std::pin::Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            for action in self.actions {
-                match action {
-                    WaitActions::Running => {
-                        running_mpc(self.nodes, None).await?;
-                    }
-                    WaitActions::MinTriples(expected) => {
-                        require_triples(self.nodes, expected, false).await?;
-                    }
-                    WaitActions::MinMineTriples(expected) => {
-                        require_triples(self.nodes, expected, true).await?;
-                    }
-                    WaitActions::MinPresignatures(expected) => {
-                        require_presignatures(self.nodes, expected, false).await?;
-                    }
-                    WaitActions::MinMinePresignatures(expected) => {
-                        require_presignatures(self.nodes, expected, true).await?;
-                    }
-                    WaitActions::ReadyToSign(count) => {
-                        require_presignatures(self.nodes, count, true).await?;
-                    }
-                }
-            }
-
+            self.execute().await?;
             Ok(())
         })
+    }
+}
+
+impl<'a> IntoFuture for WaitAction<'a, RunningContractState> {
+    type Output = anyhow::Result<RunningContractState>;
+    type IntoFuture = std::pin::Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move { self.execute().await?.expect_running().await })
     }
 }
 

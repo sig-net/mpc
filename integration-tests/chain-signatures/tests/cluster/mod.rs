@@ -1,5 +1,7 @@
 mod spawner;
 
+use std::collections::HashSet;
+
 use integration_tests_chain_signatures::local::NodeConfig;
 use mpc_contract::primitives::Participants;
 use near_workspaces::network::Sandbox;
@@ -11,7 +13,7 @@ use mpc_node::web::StateView;
 use anyhow::Context;
 use integration_tests_chain_signatures::containers::DockerClient;
 use integration_tests_chain_signatures::{utils, MultichainConfig, Nodes};
-use near_workspaces::{AccountId, Contract, Worker};
+use near_workspaces::{Account, AccountId, Contract, Worker};
 use url::Url;
 
 use crate::actions::sign::SignAction;
@@ -56,7 +58,7 @@ impl Cluster {
         futures::future::try_join_all(tasks).await
     }
 
-    pub fn wait(&self) -> WaitAction<'_> {
+    pub fn wait(&self) -> WaitAction<'_, ()> {
         WaitAction::new(self)
     }
 
@@ -94,6 +96,18 @@ impl Cluster {
     pub async fn participants(&self) -> anyhow::Result<Participants> {
         let state = self.expect_running().await?;
         Ok(state.participants)
+    }
+
+    pub async fn participant_ids(&self) -> anyhow::Result<HashSet<AccountId>> {
+        let participants = self.participants().await?;
+        Ok(participants.keys().cloned().collect())
+    }
+
+    pub async fn participant_accounts(&self) -> anyhow::Result<Vec<&Account>> {
+        let participant_ids = self.participant_ids().await?;
+        let mut node_accounts = self.nodes.near_accounts();
+        node_accounts.retain(|a| participant_ids.contains(a.id()));
+        Ok(node_accounts)
     }
 
     pub async fn root_public_key(&self) -> anyhow::Result<near_sdk::PublicKey> {

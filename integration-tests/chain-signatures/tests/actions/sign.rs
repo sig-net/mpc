@@ -116,10 +116,8 @@ impl<'a> IntoFuture for SignAction<'a> {
         std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'a>>;
 
     fn into_future(mut self) -> Self::IntoFuture {
-        let Self { nodes, .. } = self;
-
         Box::pin(async move {
-            let state = nodes.expect_running().await?;
+            let state = self.nodes.expect_running().await?;
             let account = self.account_or_new().await;
             let payload = self.payload_or_random();
             let payload_hash = self.payload_hash();

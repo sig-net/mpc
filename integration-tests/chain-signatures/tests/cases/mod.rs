@@ -33,10 +33,9 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
 
     tracing::info!("!!! Add participant 3");
     nodes.add_participant(None).await.unwrap();
-    nodes.wait().running().ready_to_sign().await.unwrap();
+    let state = nodes.wait().running().ready_to_sign().await.unwrap();
     let _ = nodes.sign().await.unwrap();
 
-    let state = nodes.expect_running().await.unwrap();
     tracing::info!("!!! Remove participant 0 and participant 2");
     let account_2 = near_workspaces::types::AccountId::from_str(
         state.participants.keys().nth(2).unwrap().clone().as_ref(),
@@ -421,23 +420,23 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
     // this fails if the latency above is too long (10s)
     nodes.remove_participant(None).await.unwrap();
 
-    nodes.wait().running().await?;
-    assert!(nodes.expect_running().await?.participants.len() == 2);
+    let state = nodes.wait().running().await?;
+    assert!(state.participants.len() == 2);
 
     // Going below T should error out
     nodes.remove_participant(None).await.unwrap_err();
-    nodes.wait().running().await?;
-    assert!(nodes.expect_running().await?.participants.len() == 2);
+    let state = nodes.wait().running().await?;
+    assert!(state.participants.len() == 2);
 
     nodes.add_participant(None).await.unwrap();
     // add latency to node2->rpc
     add_latency(&nodes.nodes.proxy_name_for_node(2), true, 1.0, 1_000, 100).await?;
-    nodes.wait().running().await?;
-    assert!(nodes.expect_running().await?.participants.len() == 3);
+    let state = nodes.wait().running().await?;
+    assert!(state.participants.len() == 3);
 
     nodes.remove_participant(None).await.unwrap();
-    nodes.wait().running().await?;
-    assert!(nodes.expect_running().await?.participants.len() == 2);
+    let state = nodes.wait().running().await?;
+    assert!(state.participants.len() == 2);
 
     // make sure signing works after reshare
     nodes.wait().ready_to_sign().await?;

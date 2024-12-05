@@ -2,36 +2,26 @@ mod actions;
 mod cases;
 pub mod cluster;
 
-use crate::actions::wait_for;
 use cluster::Cluster;
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 
 use integration_tests_chain_signatures::utils::{vote_join, vote_leave};
 
 use near_workspaces::types::NearToken;
-use near_workspaces::{Account, AccountId};
+use near_workspaces::AccountId;
 
 use integration_tests_chain_signatures::local::NodeConfig;
-use std::collections::HashSet;
 
 const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(9000);
 const CURRENT_CONTRACT_FILE_PATH: &str =
     "../../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
 
 impl Cluster {
-    pub async fn participant_accounts(&self) -> anyhow::Result<Vec<&Account>> {
-        let state = wait_for::running_mpc(self, None).await?;
-        let participant_ids = state.participants.keys().collect::<HashSet<_>>();
-        let mut node_accounts = self.nodes.near_accounts();
-        node_accounts.retain(|a| participant_ids.contains(a.id()));
-        Ok(node_accounts)
-    }
-
     pub async fn add_participant(
         &mut self,
         existing_node: Option<NodeConfig>,
     ) -> anyhow::Result<()> {
-        let state = wait_for::running_mpc(self, None).await?;
+        let state = self.expect_running().await?;
         let node_account = match existing_node {
             Some(node) => {
                 tracing::info!(
@@ -66,7 +56,7 @@ impl Cluster {
         .await
         .is_ok());
 
-        let new_state = wait_for::running_mpc(self, Some(state.epoch + 1)).await?;
+        let new_state = self.wait().running_on_epoch(state.epoch + 1).await?;
         assert_eq!(new_state.participants.len(), state.participants.len() + 1);
         assert_eq!(
             state.public_key, new_state.public_key,
@@ -80,7 +70,7 @@ impl Cluster {
         &mut self,
         kick: Option<&AccountId>,
     ) -> anyhow::Result<NodeConfig> {
-        let state = wait_for::running_mpc(self, None).await?;
+        let state = self.expect_running().await?;
         let participant_accounts = self.participant_accounts().await?;
         let kick = kick
             .unwrap_or_else(|| participant_accounts.last().unwrap().id())
@@ -103,7 +93,7 @@ impl Cluster {
             anyhow::bail!("failed to vote_leave");
         }
 
-        let new_state = wait_for::running_mpc(self, Some(state.epoch + 1)).await?;
+        let new_state = self.wait().running_on_epoch(state.epoch + 1).await?;
         tracing::info!(
             "Getting new state, old {} {:?}, new {} {:?}",
             state.participants.len(),
