@@ -59,13 +59,6 @@ impl PresignatureStorage {
 
     pub async fn take(&self, id: &PresignatureId) -> StoreResult<Presignature> {
         let mut conn = self.connect().await?;
-        if self.contains_mine(id).await? {
-            tracing::error!(?id, "cannot take mine presignature as foreign owned");
-            return Err(StoreError::PresignatureDenied(
-                *id,
-                "cannot take mine presignature as foreign owned",
-            ));
-        }
         let presignature: Option<Presignature> = conn.hget(self.presig_key(), id).await?;
         let presignature = presignature.ok_or_else(|| StoreError::PresignatureIsMissing(*id))?;
         conn.hdel::<&str, PresignatureId, ()>(&self.presig_key(), *id)
