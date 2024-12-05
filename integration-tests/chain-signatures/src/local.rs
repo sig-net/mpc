@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::{execute, utils, MultichainConfig};
 
 use crate::containers::LakeIndexer;
@@ -35,9 +37,21 @@ pub struct NodeConfig {
     pub near_rpc: String,
 }
 
+impl fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("web_port", &self.web_port)
+            .field("account", &self.account)
+            .field("cipher_pk", &self.cipher_pk)
+            .field("cfg", &self.cfg)
+            .field("near_rpc", &self.near_rpc)
+            .finish()
+    }
+}
+
 impl Node {
     pub async fn dry_run(
-        ctx: &super::Context<'_>,
+        ctx: &super::Context,
         account: &Account,
         cfg: &MultichainConfig,
     ) -> anyhow::Result<NodeConfig> {
@@ -103,7 +117,7 @@ impl Node {
     }
 
     pub async fn run(
-        ctx: &super::Context<'_>,
+        ctx: &super::Context,
         cfg: &MultichainConfig,
         account: &Account,
     ) -> anyhow::Result<Self> {
@@ -140,7 +154,7 @@ impl Node {
         .await
     }
 
-    pub async fn spawn(ctx: &super::Context<'_>, config: NodeConfig) -> anyhow::Result<Self> {
+    pub async fn spawn(ctx: &super::Context, config: NodeConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
