@@ -53,8 +53,6 @@ struct Ctx {
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
-    cfg: Arc<RwLock<Config>>,
-    mesh_state: Arc<RwLock<MeshState>>,
     message_options: http_client::Options,
 }
 
@@ -89,10 +87,6 @@ impl ConsensusCtx for &mut MpcSignProtocol {
 
     fn secret_storage(&self) -> &SecretNodeStorageBox {
         &self.ctx.secret_storage
-    }
-
-    fn cfg(&self) -> &Arc<RwLock<Config>> {
-        &self.ctx.cfg
     }
 
     fn triple_storage(&self) -> &TripleStorage {
@@ -133,28 +127,12 @@ impl CryptographicCtx for &mut MpcSignProtocol {
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox {
         &mut self.ctx.secret_storage
     }
-
-    fn cfg(&self) -> &Arc<RwLock<Config>> {
-        &self.ctx.cfg
-    }
-
-    fn mesh_state(&self) -> &Arc<RwLock<MeshState>> {
-        &self.ctx.mesh_state
-    }
 }
 
 #[async_trait::async_trait]
 impl MessageCtx for &MpcSignProtocol {
     async fn me(&self) -> Participant {
         get_my_participant(self).await
-    }
-
-    fn mesh_state(&self) -> &Arc<RwLock<MeshState>> {
-        &self.ctx.mesh_state
-    }
-
-    fn cfg(&self) -> &Arc<RwLock<Config>> {
-        &self.ctx.cfg
     }
 }
 
@@ -177,8 +155,6 @@ impl MpcSignProtocol {
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
-        cfg: Arc<RwLock<Config>>,
-        mesh_state: Arc<RwLock<MeshState>>,
         message_options: http_client::Options,
     ) -> (Self, Arc<RwLock<NodeState>>) {
         let my_address = my_address.into_url().unwrap();
@@ -190,7 +166,6 @@ impl MpcSignProtocol {
             ?account_id,
             ?rpc_url,
             ?signer_account_id,
-            ?cfg,
             "initializing protocol with parameters"
         );
         let state = Arc::new(RwLock::new(NodeState::Starting));
@@ -205,8 +180,6 @@ impl MpcSignProtocol {
             secret_storage,
             triple_storage,
             presignature_storage,
-            cfg,
-            mesh_state,
             message_options,
         };
         let protocol = MpcSignProtocol {
@@ -220,6 +193,8 @@ impl MpcSignProtocol {
     pub async fn run(
         mut self,
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
+        config: Arc<RwLock<Config>>,
+        mesh_state: Arc<RwLock<MeshState>>,
     ) -> anyhow::Result<()> {
         let my_account_id = self.ctx.account_id.to_string();
         let _span = tracing::info_span!("running", my_account_id);
@@ -262,7 +237,18 @@ impl MpcSignProtocol {
                 }
             }
 
-            let contract_state = contract_state.read().await.clone();
+            let contract_state = {
+                let state = contract_state.read().await;
+                state.clone()
+            };
+            let cfg = {
+                let config = config.read().await;
+                config.clone()
+            };
+            let mesh_state = {
+                let state = mesh_state.read().await;
+                state.clone()
+            };
 
             let state = {
                 let guard = self.state.read().await;
@@ -270,7 +256,10 @@ impl MpcSignProtocol {
             };
 
             let crypto_time = Instant::now();
-            let mut state = match state.progress(&mut self).await {
+            let mut state = match state
+                .progress(&mut self, cfg.clone(), mesh_state.clone())
+                .await
+            {
                 Ok(state) => {
                     tracing::debug!("progress ok: {state}");
                     state
@@ -288,7 +277,7 @@ impl MpcSignProtocol {
             let consensus_time = Instant::now();
             if let Some(contract_state) = contract_state {
                 let from_state = format!("{state}");
-                state = match state.advance(&mut self, contract_state).await {
+                state = match state.advance(&mut self, contract_state, cfg.clone()).await {
                     Ok(state) => {
                         tracing::debug!("advance ok: {from_state} => {state}");
                         state
@@ -305,7 +294,7 @@ impl MpcSignProtocol {
                 .observe(consensus_time.elapsed().as_secs_f64());
 
             let message_time = Instant::now();
-            if let Err(err) = state.handle(&self, &mut queue).await {
+            if let Err(err) = state.handle(&self, &mut queue, cfg, mesh_state).await {
                 tracing::warn!("protocol unable to handle messages: {err:?}");
             }
             crate::metrics::PROTOCOL_LATENCY_ITER_MESSAGE

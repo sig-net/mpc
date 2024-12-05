@@ -6,6 +6,7 @@ use super::triple::TripleId;
 use crate::gcp::error::SecretStorageError;
 use crate::http_client::SendError;
 use crate::indexer::ContractSignRequest;
+use crate::protocol::Config;
 use crate::protocol::MeshState;
 use crate::util;
 
@@ -22,8 +23,6 @@ use tokio::sync::RwLock;
 #[async_trait::async_trait]
 pub trait MessageCtx {
     async fn me(&self) -> Participant;
-    fn mesh_state(&self) -> &Arc<RwLock<MeshState>>;
-    fn cfg(&self) -> &Arc<RwLock<crate::config::Config>>;
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -193,15 +192,20 @@ pub trait MessageHandler {
         &mut self,
         ctx: C,
         queue: &mut MpcMessageQueue,
+        cfg: Config,
+        mesh_state: MeshState,
     ) -> Result<(), MessageHandleError>;
 }
 
 #[async_trait]
 impl MessageHandler for GeneratingState {
+    #[allow(unused_variables)]
     async fn handle<C: MessageCtx + Send + Sync>(
         &mut self,
         _ctx: C,
         queue: &mut MpcMessageQueue,
+        cfg: Config,
+        mesh_state: MeshState,
     ) -> Result<(), MessageHandleError> {
         let mut protocol = self.protocol.write().await;
         while let Some(msg) = queue.generating.pop_front() {
@@ -214,10 +218,13 @@ impl MessageHandler for GeneratingState {
 
 #[async_trait]
 impl MessageHandler for ResharingState {
+    #[allow(unused_variables)]
     async fn handle<C: MessageCtx + Send + Sync>(
         &mut self,
         _ctx: C,
         queue: &mut MpcMessageQueue,
+        cfg: Config,
+        mesh_state: MeshState,
     ) -> Result<(), MessageHandleError> {
         tracing::debug!("handling {} resharing messages", queue.resharing_bins.len());
         let q = queue.resharing_bins.entry(self.old_epoch).or_default();
@@ -231,13 +238,14 @@ impl MessageHandler for ResharingState {
 
 #[async_trait]
 impl MessageHandler for RunningState {
+    #[allow(unused_variables)]
     async fn handle<C: MessageCtx + Send + Sync>(
         &mut self,
         ctx: C,
         queue: &mut MpcMessageQueue,
+        cfg: Config,
+        mesh_state: MeshState,
     ) -> Result<(), MessageHandleError> {
-        let mesh_state = ctx.mesh_state().read().await.clone();
-        let cfg = ctx.cfg().read().await.clone();
         let protocol_cfg = &cfg.protocol;
         let participants = &mesh_state.active_participants;
         let mut triple_manager = self.triple_manager.write().await;
@@ -497,11 +505,13 @@ impl MessageHandler for NodeState {
         &mut self,
         ctx: C,
         queue: &mut MpcMessageQueue,
+        cfg: Config,
+        mesh_state: MeshState,
     ) -> Result<(), MessageHandleError> {
         match self {
-            NodeState::Generating(state) => state.handle(ctx, queue).await,
-            NodeState::Resharing(state) => state.handle(ctx, queue).await,
-            NodeState::Running(state) => state.handle(ctx, queue).await,
+            NodeState::Generating(state) => state.handle(ctx, queue, cfg, mesh_state).await,
+            NodeState::Resharing(state) => state.handle(ctx, queue, cfg, mesh_state).await,
+            NodeState::Running(state) => state.handle(ctx, queue, cfg, mesh_state).await,
             _ => {
                 tracing::debug!("skipping message processing");
                 Ok(())

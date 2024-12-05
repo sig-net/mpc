@@ -31,7 +31,7 @@ impl Options {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct MeshState {
     pub active_participants: Participants,
 
@@ -46,35 +46,42 @@ pub struct MeshState {
 pub struct Mesh {
     /// Pool of connections to participants. Used to check who is alive in the network.
     connections: connection::Pool,
+    state: Arc<RwLock<MeshState>>,
 }
 
 impl Mesh {
-    pub fn init(options: Options) -> Self {
-        Self {
+    pub fn init(options: Options) -> (Self, Arc<RwLock<MeshState>>) {
+        let state = Arc::new(RwLock::new(MeshState::default()));
+        let mesh = Self {
             connections: connection::Pool::new(
                 Duration::from_millis(options.fetch_participant_timeout),
                 Duration::from_millis(options.refresh_active_timeout),
             ),
-        }
+            state: state.clone(),
+        };
+        (mesh, state)
+    }
+
+    async fn ping(&mut self) {
+        let mut mesh_state = self.state.write().await;
+        *mesh_state = MeshState {
+            active_participants: self.connections.ping().await,
+            active_potential_participants: self.connections.ping_potential().await,
+            potential_participants: self.connections.potential_participants().await,
+            stable_participants: self.connections.stable_participants().await,
+        };
     }
 
     pub async fn run(
-        &self,
+        mut self,
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
-        mesh_state: Arc<RwLock<MeshState>>,
     ) -> anyhow::Result<()> {
         let mut last_pinged = Instant::now();
         loop {
             if last_pinged.elapsed() > Duration::from_millis(300) {
                 if let Some(state) = contract_state.read().await.clone() {
                     self.connections.establish_participants(&state).await;
-                    let mut mesh_state = mesh_state.write().await;
-                    *mesh_state = MeshState {
-                        active_participants: self.connections.ping().await,
-                        active_potential_participants: self.connections.ping_potential().await,
-                        potential_participants: self.connections.potential_participants().await,
-                        stable_participants: self.connections.stable_participants().await,
-                    };
+                    self.ping().await;
                     last_pinged = Instant::now();
                 }
             }

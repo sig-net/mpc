@@ -3,7 +3,8 @@ use super::state::{
     JoiningState, NodeState, PersistentNodeData, RunningState, StartedState,
     WaitingForConsensusState,
 };
-use super::{Config, SignQueue};
+use super::SignQueue;
+use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
 use crate::http_client::MessageQueue;
 use crate::protocol::contract::primitives::Participants;
@@ -41,7 +42,6 @@ pub trait ConsensusCtx {
     fn secret_storage(&self) -> &SecretNodeStorageBox;
     fn triple_storage(&self) -> &TripleStorage;
     fn presignature_storage(&self) -> &PresignatureStorage;
-    fn cfg(&self) -> &Arc<RwLock<Config>>;
     fn message_options(&self) -> http_client::Options;
 }
 
@@ -81,15 +81,18 @@ pub trait ConsensusProtocol {
         self,
         ctx: C,
         contract_state: ProtocolState,
+        cfg: Config,
     ) -> Result<NodeState, ConsensusError>;
 }
 
 #[async_trait]
 impl ConsensusProtocol for StartedState {
+    #[allow(unused_variables)]
     async fn advance<C: ConsensusCtx + Send + Sync>(
         self,
         ctx: C,
         contract_state: ProtocolState,
+        cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match self.persistent_node_data {
             Some(PersistentNodeData {
@@ -242,10 +245,12 @@ impl ConsensusProtocol for StartedState {
 
 #[async_trait]
 impl ConsensusProtocol for GeneratingState {
+    #[allow(unused_variables)]
     async fn advance<C: ConsensusCtx + Send + Sync>(
         self,
         _ctx: C,
         contract_state: ProtocolState,
+        cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => {
@@ -292,10 +297,12 @@ impl ConsensusProtocol for GeneratingState {
 
 #[async_trait]
 impl ConsensusProtocol for WaitingForConsensusState {
+    #[allow(unused_variables)]
     async fn advance<C: ConsensusCtx + Send + Sync>(
         self,
         ctx: C,
         contract_state: ProtocolState,
+        cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(contract_state) => {
@@ -477,10 +484,12 @@ impl ConsensusProtocol for WaitingForConsensusState {
 
 #[async_trait]
 impl ConsensusProtocol for RunningState {
+    #[allow(unused_variables)]
     async fn advance<C: ConsensusCtx + Send + Sync>(
         self,
         ctx: C,
         contract_state: ProtocolState,
+        cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
@@ -551,10 +560,12 @@ impl ConsensusProtocol for RunningState {
 
 #[async_trait]
 impl ConsensusProtocol for ResharingState {
+    #[allow(unused_variables)]
     async fn advance<C: ConsensusCtx + Send + Sync>(
         self,
         _ctx: C,
         contract_state: ProtocolState,
+        cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
@@ -631,6 +642,7 @@ impl ConsensusProtocol for JoiningState {
         self,
         ctx: C,
         contract_state: ProtocolState,
+        cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
@@ -663,7 +675,6 @@ impl ConsensusProtocol for JoiningState {
                         tracing::info!(
                             "joining(running): sending a transaction to join the participant set"
                         );
-                        let cfg = ctx.cfg().read().await.clone();
                         ctx.rpc_client()
                             .call(ctx.signer(), ctx.mpc_contract_id(), "join")
                             .args_json(json!({
@@ -701,10 +712,12 @@ impl ConsensusProtocol for JoiningState {
 
 #[async_trait]
 impl ConsensusProtocol for NodeState {
+    #[allow(unused_variables)]
     async fn advance<C: ConsensusCtx + Send + Sync>(
         self,
         ctx: C,
         contract_state: ProtocolState,
+        cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match self {
             NodeState::Starting => {
@@ -713,12 +726,12 @@ impl ConsensusProtocol for NodeState {
                     persistent_node_data,
                 }))
             }
-            NodeState::Started(state) => state.advance(ctx, contract_state).await,
-            NodeState::Generating(state) => state.advance(ctx, contract_state).await,
-            NodeState::WaitingForConsensus(state) => state.advance(ctx, contract_state).await,
-            NodeState::Running(state) => state.advance(ctx, contract_state).await,
-            NodeState::Resharing(state) => state.advance(ctx, contract_state).await,
-            NodeState::Joining(state) => state.advance(ctx, contract_state).await,
+            NodeState::Started(state) => state.advance(ctx, contract_state, cfg).await,
+            NodeState::Generating(state) => state.advance(ctx, contract_state, cfg).await,
+            NodeState::WaitingForConsensus(state) => state.advance(ctx, contract_state, cfg).await,
+            NodeState::Running(state) => state.advance(ctx, contract_state, cfg).await,
+            NodeState::Resharing(state) => state.advance(ctx, contract_state, cfg).await,
+            NodeState::Joining(state) => state.advance(ctx, contract_state, cfg).await,
         }
     }
 }
