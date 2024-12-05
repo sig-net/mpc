@@ -1,24 +1,18 @@
 use std::task::Poll;
 use std::time::Duration;
 
-use crate::actions;
-use crate::cluster::Cluster;
-
 use anyhow::Context;
+use backon::ConstantBuilder;
 use backon::Retryable;
-use backon::{ConstantBuilder, ExponentialBuilder};
 use cait_sith::FullSignature;
 use crypto_shared::SignatureResponse;
 use k256::Secp256k1;
-use mpc_contract::ProtocolContractState;
-use mpc_contract::RunningContractState;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_lake_primitives::CryptoHash;
 use near_primitives::errors::ActionErrorKind;
 use near_primitives::views::ExecutionOutcomeWithIdView;
 use near_primitives::views::ExecutionStatusView;
 use near_primitives::views::FinalExecutionStatus;
-use near_workspaces::Account;
 use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
@@ -37,8 +31,6 @@ pub enum WaitForError {
     Signature(SignatureError),
     #[error("Serde json error: {0}")]
     SerdeJson(String),
-    #[error("Parsing error")]
-    Parsing,
 }
 
 /// Used locally for testing to circumvent retrying on all errors. This will avoid retrying
@@ -85,27 +77,6 @@ pub async fn signature_responded(
             "Should not return more than one signature".to_string(),
         ))),
     }
-}
-
-pub async fn signature_payload_responded(
-    nodes: &Cluster,
-    account: Account,
-    payload: [u8; 32],
-    payload_hashed: [u8; 32],
-) -> Result<FullSignature<Secp256k1>, WaitForError> {
-    let is_signature_ready = || async {
-        let (_, _, _, status) =
-            actions::request_sign_non_random(nodes, account.clone(), payload, payload_hashed)
-                .await?;
-        let result = signature_responded(status).await;
-        if let Err(err) = &result {
-            println!("failed to produce signature: {err:?}");
-        }
-        result
-    };
-
-    let strategy = ConstantBuilder::default().with_max_times(3);
-    is_signature_ready.retry(&strategy).await
 }
 
 // Check that the rogue message failed

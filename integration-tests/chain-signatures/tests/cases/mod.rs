@@ -123,22 +123,20 @@ async fn test_signature_offline_node() -> anyhow::Result<()> {
 #[test(tokio::test)]
 async fn test_key_derivation() -> anyhow::Result<()> {
     let nodes = cluster::spawn().wait_for_running().await?;
-    nodes.wait().signable().await?;
-    let _ = nodes.sign().await?;
 
+    let hd_path = "test";
     let mpc_pk: k256::AffinePoint = nodes.root_public_key().await?.into_affine_point();
     for _ in 0..3 {
-        let (_, payload_hashed, account, status) = actions::request_sign(&nodes).await?;
-        let sig = wait_for::signature_responded(status).await?;
+        nodes.wait().signable().await?;
+        let outcome = nodes.sign().path(hd_path).await?;
 
-        let hd_path = "test";
-        let derivation_epsilon = derive_epsilon(account.id(), hd_path);
+        let derivation_epsilon = derive_epsilon(outcome.account.id(), hd_path);
         let user_pk = derive_key(mpc_pk, derivation_epsilon);
         let multichain_sig = into_eth_sig(
             &user_pk,
-            &sig.big_r,
-            &sig.s,
-            k256::Scalar::from_bytes(payload_hashed).unwrap(),
+            &outcome.signature.big_r,
+            &outcome.signature.s,
+            k256::Scalar::from_bytes(outcome.payload_hash).unwrap(),
         )
         .unwrap();
 
@@ -162,7 +160,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
             signature
         };
         let recovered_addr = web3::signing::recover(
-            &payload_hashed,
+            &outcome.payload_hash,
             &signature_for_recovery,
             multichain_sig.recovery_id as i32,
         )
