@@ -43,6 +43,10 @@ impl Cluster {
         self.nodes.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
     pub fn url(&self, id: usize) -> Url {
         Url::parse(self.nodes.url(id)).unwrap()
     }
@@ -127,6 +131,6 @@ impl Cluster {
 impl Drop for Cluster {
     fn drop(&mut self) {
         let sk_local_path = self.nodes.ctx().storage_options.sk_share_local_path.clone();
-        let _ = tokio::task::spawn(utils::clear_local_sk_shares(sk_local_path));
+        let _task = tokio::task::spawn(utils::clear_local_sk_shares(sk_local_path));
     }
 }

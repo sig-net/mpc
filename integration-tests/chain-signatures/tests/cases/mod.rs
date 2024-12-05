@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::actions::{self, add_latency, wait_for};
+use crate::actions::{self, add_latency};
 use crate::cluster;
 
 use cait_sith::protocol::Participant;
