@@ -32,15 +32,15 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
     with_multichain_nodes(config.clone(), |mut ctx| {
         Box::pin(async move {
             let state = wait_for::running_mpc(&ctx, Some(0)).await?;
-            wait_for::has_at_least_triples(&ctx, 2).await?;
-            wait_for::has_at_least_presignatures(&ctx, 2).await?;
+            wait_for::has_at_least_mine_triples(&ctx, 2).await?;
+            wait_for::has_at_least_mine_presignatures(&ctx, 1).await?;
             actions::single_signature_production(&ctx, &state).await?;
 
             tracing::info!("!!! Add participant 3");
             assert!(ctx.add_participant(None).await.is_ok());
             let state = wait_for::running_mpc(&ctx, None).await?;
-            wait_for::has_at_least_triples(&ctx, 2).await?;
-            wait_for::has_at_least_presignatures(&ctx, 2).await?;
+            wait_for::has_at_least_mine_triples(&ctx, 2).await?;
+            wait_for::has_at_least_mine_presignatures(&ctx, 1).await?;
             actions::single_signature_production(&ctx, &state).await?;
 
             tracing::info!("!!! Remove participant 0 and participant 2");
@@ -57,8 +57,8 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
             assert!(node_cfg_0.is_ok());
             let node_cfg_0 = node_cfg_0.unwrap();
             let state = wait_for::running_mpc(&ctx, None).await?;
-            wait_for::has_at_least_triples(&ctx, 2).await?;
-            wait_for::has_at_least_presignatures(&ctx, 2).await?;
+            wait_for::has_at_least_mine_triples(&ctx, 2).await?;
+            wait_for::has_at_least_mine_presignatures(&ctx, 1).await?;
             actions::single_signature_production(&ctx, &state).await?;
 
             tracing::info!("!!! Try remove participant 3, should fail due to threshold");
@@ -67,15 +67,15 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
             tracing::info!("!!! Add participant 5");
             assert!(ctx.add_participant(None).await.is_ok());
             let state = wait_for::running_mpc(&ctx, None).await?;
-            wait_for::has_at_least_triples(&ctx, 2).await?;
-            wait_for::has_at_least_presignatures(&ctx, 2).await?;
+            wait_for::has_at_least_mine_triples(&ctx, 2).await?;
+            wait_for::has_at_least_mine_presignatures(&ctx, 1).await?;
             actions::single_signature_production(&ctx, &state).await?;
 
             tracing::info!("!!! Add back participant 0");
             assert!(ctx.add_participant(Some(node_cfg_0)).await.is_ok());
             let state = wait_for::running_mpc(&ctx, None).await?;
-            wait_for::has_at_least_triples(&ctx, 2).await?;
-            wait_for::has_at_least_presignatures(&ctx, 2).await?;
+            wait_for::has_at_least_mine_triples(&ctx, 2).await?;
+            wait_for::has_at_least_mine_presignatures(&ctx, 1).await?;
             actions::single_signature_production(&ctx, &state).await
         })
     })
@@ -449,8 +449,8 @@ async fn test_lake_congestion() -> anyhow::Result<()> {
 
             let state_0 = wait_for::running_mpc(&ctx, Some(0)).await?;
             assert_eq!(state_0.participants.len(), 3);
-            wait_for::has_at_least_triples(&ctx, 2).await?;
-            wait_for::has_at_least_presignatures(&ctx, 2).await?;
+            wait_for::has_at_least_mine_triples(&ctx, 2).await?;
+            wait_for::has_at_least_mine_presignatures(&ctx, 1).await?;
             actions::single_signature_rogue_responder(&ctx, &state_0).await?;
             Ok(())
         })

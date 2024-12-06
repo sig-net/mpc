@@ -3030,6 +3030,7 @@ dependencies = [
  "clap",
  "crypto-shared",
  "deadpool-redis",
+ "futures",
  "google-datastore1",
  "google-secretmanager1",
  "hex",
