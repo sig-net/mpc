@@ -102,7 +102,6 @@ fn main() -> anyhow::Result<()> {
     rt.block_on(async {
         build_multichain_contract(release).await?;
         build_multichain(release).await?;
-
         Ok(())
     })
 }
