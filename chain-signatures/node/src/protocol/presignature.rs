@@ -263,7 +263,7 @@ impl PresignatureManager {
             })
             .ok()?;
         tracing::debug!(id = ?presignature.id, "took presignature of mine");
-        return Some(presignature);
+        Some(presignature)
     }
 
     /// Returns the number of unspent presignatures available in the manager.
