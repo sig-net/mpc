@@ -199,13 +199,12 @@ pub trait MessageHandler {
 
 #[async_trait]
 impl MessageHandler for GeneratingState {
-    #[allow(unused_variables)]
     async fn handle<C: MessageCtx + Send + Sync>(
         &mut self,
         _ctx: C,
         queue: &mut MpcMessageQueue,
-        cfg: Config,
-        mesh_state: MeshState,
+        _cfg: Config,
+        _mesh_state: MeshState,
     ) -> Result<(), MessageHandleError> {
         let mut protocol = self.protocol.write().await;
         while let Some(msg) = queue.generating.pop_front() {
@@ -218,13 +217,12 @@ impl MessageHandler for GeneratingState {
 
 #[async_trait]
 impl MessageHandler for ResharingState {
-    #[allow(unused_variables)]
     async fn handle<C: MessageCtx + Send + Sync>(
         &mut self,
         _ctx: C,
         queue: &mut MpcMessageQueue,
-        cfg: Config,
-        mesh_state: MeshState,
+        _cfg: Config,
+        _mesh_state: MeshState,
     ) -> Result<(), MessageHandleError> {
         tracing::debug!("handling {} resharing messages", queue.resharing_bins.len());
         let q = queue.resharing_bins.entry(self.old_epoch).or_default();
@@ -238,10 +236,9 @@ impl MessageHandler for ResharingState {
 
 #[async_trait]
 impl MessageHandler for RunningState {
-    #[allow(unused_variables)]
     async fn handle<C: MessageCtx + Send + Sync>(
         &mut self,
-        ctx: C,
+        _ctx: C,
         queue: &mut MpcMessageQueue,
         cfg: Config,
         mesh_state: MeshState,

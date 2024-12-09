@@ -87,12 +87,11 @@ pub trait ConsensusProtocol {
 
 #[async_trait]
 impl ConsensusProtocol for StartedState {
-    #[allow(unused_variables)]
     async fn advance<C: ConsensusCtx + Send + Sync>(
         self,
         ctx: C,
         contract_state: ProtocolState,
-        cfg: Config,
+        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match self.persistent_node_data {
             Some(PersistentNodeData {
@@ -245,12 +244,11 @@ impl ConsensusProtocol for StartedState {
 
 #[async_trait]
 impl ConsensusProtocol for GeneratingState {
-    #[allow(unused_variables)]
     async fn advance<C: ConsensusCtx + Send + Sync>(
         self,
         _ctx: C,
         contract_state: ProtocolState,
-        cfg: Config,
+        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => {
@@ -297,12 +295,11 @@ impl ConsensusProtocol for GeneratingState {
 
 #[async_trait]
 impl ConsensusProtocol for WaitingForConsensusState {
-    #[allow(unused_variables)]
     async fn advance<C: ConsensusCtx + Send + Sync>(
         self,
         ctx: C,
         contract_state: ProtocolState,
-        cfg: Config,
+        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(contract_state) => {
@@ -484,12 +481,11 @@ impl ConsensusProtocol for WaitingForConsensusState {
 
 #[async_trait]
 impl ConsensusProtocol for RunningState {
-    #[allow(unused_variables)]
     async fn advance<C: ConsensusCtx + Send + Sync>(
         self,
         ctx: C,
         contract_state: ProtocolState,
-        cfg: Config,
+        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
@@ -560,12 +556,11 @@ impl ConsensusProtocol for RunningState {
 
 #[async_trait]
 impl ConsensusProtocol for ResharingState {
-    #[allow(unused_variables)]
     async fn advance<C: ConsensusCtx + Send + Sync>(
         self,
         _ctx: C,
         contract_state: ProtocolState,
-        cfg: Config,
+        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
@@ -712,7 +707,6 @@ impl ConsensusProtocol for JoiningState {
 
 #[async_trait]
 impl ConsensusProtocol for NodeState {
-    #[allow(unused_variables)]
     async fn advance<C: ConsensusCtx + Send + Sync>(
         self,
         ctx: C,
