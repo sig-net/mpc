@@ -137,12 +137,16 @@ pub enum GenerationError {
     TripleIsGenerating(TripleId),
     #[error("triple {0} is in garbage collection")]
     TripleIsGarbageCollected(TripleId),
+    #[error("triple access denied: id={0}, {1}")]
+    TripleDenied(TripleId, &'static str),
     #[error("presignature {0} is generating")]
     PresignatureIsGenerating(PresignatureId),
     #[error("presignature {0} is missing")]
     PresignatureIsMissing(PresignatureId),
     #[error("presignature {0} is in garbage collection")]
     PresignatureIsGarbageCollected(TripleId),
+    #[error("presignature access denied: id={0}, {1}")]
+    PresignatureDenied(PresignatureId, &'static str),
     #[error("presignature bad parameters")]
     PresignatureBadParameters,
 }
@@ -185,21 +189,14 @@ impl PresignatureManager {
         }
     }
 
-    pub async fn insert(&mut self, presignature: Presignature) {
-        tracing::debug!(id = ?presignature.id, "inserting presignature");
-        // Remove from taken list if it was there
-        self.gc.remove(&presignature.id);
-        if let Err(e) = self.presignature_storage.insert(presignature).await {
-            tracing::error!(?e, "failed to insert presignature");
-        }
-    }
-
-    pub async fn insert_mine(&mut self, presignature: Presignature) {
-        tracing::debug!(id = ?presignature.id, "inserting mine presignature");
-        // Remove from taken list if it was there
-        self.gc.remove(&presignature.id);
-        if let Err(e) = self.presignature_storage.insert_mine(presignature).await {
-            tracing::error!(?e, "failed to insert mine presignature");
+    pub async fn insert(&mut self, presignature: Presignature, mine: bool) {
+        let id = presignature.id;
+        tracing::debug!(id, mine, "inserting presignature");
+        if let Err(store_err) = self.presignature_storage.insert(presignature, mine).await {
+            tracing::error!(?store_err, mine, "failed to insert presignature");
+        } else {
+            // Remove from taken list if it was there
+            self.gc.remove(&id);
         }
     }
 
@@ -226,41 +223,47 @@ impl PresignatureManager {
     }
 
     pub async fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
-        if let Some(presignature) = self.presignature_storage.take(&id).await.map_err(|e| {
-            tracing::error!(?e, "failed to look for presignature");
-            GenerationError::PresignatureIsMissing(id)
-        })? {
-            self.gc.insert(id, Instant::now());
-            tracing::debug!(id, "took presignature");
-            return Ok(presignature);
-        };
+        if self.contains_mine(&id).await {
+            tracing::error!(?id, "cannot take mine presignature as foreign owned");
+            return Err(GenerationError::PresignatureDenied(
+                id,
+                "cannot take mine presignature as foreign owned",
+            ));
+        }
 
-        if self.generators.contains_key(&id) {
-            tracing::warn!(id, "presignature is still generating");
-            return Err(GenerationError::PresignatureIsGenerating(id));
-        }
-        if self.gc.contains_key(&id) {
-            tracing::warn!(id, "presignature was garbage collected");
-            return Err(GenerationError::PresignatureIsGarbageCollected(id));
-        }
-        tracing::warn!(id, "presignature is missing");
-        Err(GenerationError::PresignatureIsMissing(id))
+        let presignature = self
+            .presignature_storage
+            .take(&id)
+            .await
+            .map_err(|store_err| {
+                if self.generators.contains_key(&id) {
+                    tracing::warn!(id, ?store_err, "presignature is still generating");
+                    GenerationError::PresignatureIsGenerating(id)
+                } else if self.gc.contains_key(&id) {
+                    tracing::warn!(id, ?store_err, "presignature was garbage collected");
+                    GenerationError::PresignatureIsGarbageCollected(id)
+                } else {
+                    tracing::warn!(id, ?store_err, "presignature is missing");
+                    GenerationError::PresignatureIsMissing(id)
+                }
+            })?;
+
+        self.gc.insert(id, Instant::now());
+        tracing::debug!(id, "took presignature");
+        Ok(presignature)
     }
 
     pub async fn take_mine(&mut self) -> Option<Presignature> {
-        if let Some(presignature) = self
+        let presignature = self
             .presignature_storage
             .take_mine()
             .await
             .map_err(|e| {
                 tracing::error!(?e, "failed to look for mine presignature");
             })
-            .ok()?
-        {
-            tracing::debug!(id = ?presignature.id, "took presignature of mine");
-            return Some(presignature);
-        }
-        None
+            .ok()?;
+        tracing::debug!(id = ?presignature.id, "took presignature of mine");
+        Some(presignature)
     }
 
     /// Returns the number of unspent presignatures available in the manager.
@@ -436,8 +439,8 @@ impl PresignatureManager {
 
                     // Insert back the triples to be used later since this active set of
                     // participants were not able to make use of these triples.
-                    triple_manager.insert_mine(triple0).await;
-                    triple_manager.insert_mine(triple1).await;
+                    triple_manager.insert(triple0, true).await;
+                    triple_manager.insert(triple1, true).await;
                 } else {
                     self.generate(
                         &presig_participants,
@@ -554,8 +557,7 @@ impl PresignatureManager {
     pub async fn poke(&mut self) -> Vec<(Participant, PresignatureMessage)> {
         let mut messages = Vec::new();
         let mut errors = Vec::new();
-        let mut new_presignatures = Vec::new();
-        let mut new_mine_presignatures = Vec::new();
+        let mut presignatures = Vec::new();
         self.generators.retain(|id, generator| {
             loop {
                 let action = match generator.poke() {
@@ -618,13 +620,11 @@ impl PresignatureManager {
                         };
                         if generator.mine {
                             tracing::info!(id, "assigning presignature to myself");
-                            new_mine_presignatures.push(presignature);
                             crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS
                                 .with_label_values(&[self.my_account_id.as_str()])
                                 .inc();
-                        } else {
-                            new_presignatures.push(presignature);
                         }
+                        presignatures.push((presignature, generator.mine));
                         self.introduced.remove(id);
 
                         crate::metrics::PRESIGNATURE_LATENCY
@@ -640,12 +640,8 @@ impl PresignatureManager {
             }
         });
 
-        for presignature in new_presignatures {
-            self.insert(presignature).await;
-        }
-
-        for presignature in new_mine_presignatures {
-            self.insert_mine(presignature).await;
+        for (presignature, mine) in presignatures {
+            self.insert(presignature, mine).await;
         }
 
         if !errors.is_empty() {
