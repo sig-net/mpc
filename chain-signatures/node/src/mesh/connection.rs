@@ -9,7 +9,6 @@ use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ParticipantInfo;
 use crate::protocol::ProtocolState;
 use crate::web::StateView;
-use futures::stream::{FuturesUnordered, StreamExt};
 use mpc_keys::hpke::Ciphered;
 
 // TODO: this is a basic connection pool and does not do most of the work yet. This is
@@ -60,6 +59,7 @@ impl Pool {
             refresh_active_timeout,
         }
     }
+
     pub async fn ping(&self) -> Participants {
         if let Some((ref active, timestamp)) = *self.current_active.read().await {
             if timestamp.elapsed() < self.refresh_active_timeout {
@@ -69,47 +69,24 @@ impl Pool {
 
         let connections = self.connections.read().await;
 
-        let mut participants = Participants::default();
-
-        // FuturesUnordered for parallel execution
-        let mut tasks = FuturesUnordered::new();
-
-        for (participant, info) in connections.iter() {
-            let participant = *participant;
-            let info = info.clone();
-            tasks.push(async move {
-                match self.fetch_participant_state(&info).await {
-                    Ok(state) => match self.send_empty_msg(&participant, &info).await {
-                        Ok(()) => Ok((participant, state, info)),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Send empty msg for participant {participant:?} with url {} failed: {e}.",
-                                info.url
-                            );
-                            Err(())
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            "Fetch state for participant {participant:?} with url {} failed: {e}.",
-                            info.url
-                        );
-                        Err(())
-                    }
-                }
-            });
-        }
-
-        // Process results as tasks complete
         let mut status = self.status.write().await;
-
-        while let Some(result) = tasks.next().await {
-            if let Ok((participant, state, info)) = result {
-                status.insert(participant, state);
-                participants.insert(&participant, info);
+        let mut participants = Participants::default();
+        for (participant, info) in connections.iter() {
+            match self.fetch_participant_state(info).await {
+                Ok(state) => match self.send_empty_msg(participant, info).await {
+                    Ok(()) => {
+                        status.insert(*participant, state);
+                        participants.insert(participant, info.clone());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Send empty msg for participant {participant:?} with url {} has failed with error {e}.", info.url);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Fetch state for participant {participant:?} with url {} has failed with error {e}.", info.url);
+                }
             }
         }
-
         drop(status);
 
         let mut active = self.current_active.write().await;
@@ -126,47 +103,24 @@ impl Pool {
 
         let connections = self.potential_connections.read().await;
 
-        let mut participants = Participants::default();
-
-        // FuturesUnordered for parallel execution
-        let mut tasks = FuturesUnordered::new();
-
-        for (participant, info) in connections.iter() {
-            let participant = *participant;
-            let info = info.clone();
-            tasks.push(async move {
-                match self.fetch_participant_state(&info).await {
-                    Ok(state) => match self.send_empty_msg(&participant, &info).await {
-                        Ok(()) => Ok((participant, state, info)),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Send empty msg for participant {participant:?} with url {} failed: {e}.",
-                                info.url
-                            );
-                            Err(())
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            "Fetch state for participant {participant:?} with url {} failed: {e}.",
-                            info.url
-                        );
-                        Err(())
-                    }
-                }
-            });
-        }
-
-        // Process results as tasks complete
         let mut status = self.status.write().await;
-
-        while let Some(result) = tasks.next().await {
-            if let Ok((participant, state, info)) = result {
-                status.insert(participant, state);
-                participants.insert(&participant, info);
+        let mut participants = Participants::default();
+        for (participant, info) in connections.iter() {
+            match self.fetch_participant_state(info).await {
+                Ok(state) => match self.send_empty_msg(participant, info).await {
+                    Ok(()) => {
+                        status.insert(*participant, state);
+                        participants.insert(participant, info.clone());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Send empty msg for participant {participant:?} with url {} has failed with error {e}.", info.url);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Fetch state for participant {participant:?} with url {} has failed with error {e}.", info.url);
+                }
             }
         }
-
         drop(status);
 
         let mut potential_active = self.potential_active.write().await;
