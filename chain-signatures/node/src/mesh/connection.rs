@@ -62,6 +62,7 @@ impl Pool {
         }
     }
 
+    // self typed Arc<Self> so it can be passed between tokio tasks
     pub async fn ping(self: Arc<Self>) -> Participants {
         // Check if the current active participants are still valid
         if let Some((ref active, timestamp)) = *self.current_active.read().await {
@@ -130,6 +131,7 @@ impl Pool {
         participants
     }
 
+    // self typed Arc<Self> so it can be passed between tokio tasks
     pub async fn ping_potential(self: Arc<Self>) -> Participants {
         if let Some((ref active, timestamp)) = *self.potential_active.read().await {
             if timestamp.elapsed() < self.refresh_active_timeout {
