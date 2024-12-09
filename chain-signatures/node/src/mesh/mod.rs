@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ProtocolState;
@@ -76,16 +76,15 @@ impl Mesh {
         mut self,
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
     ) -> anyhow::Result<()> {
-        let mut last_pinged = Instant::now();
         loop {
-            if last_pinged.elapsed() > Duration::from_millis(300) {
-                if let Some(state) = contract_state.read().await.clone() {
-                    self.connections.establish_participants(&state).await;
+            {
+                let state = contract_state.read().await;
+                if let Some(state) = &*state {
+                    self.connections.establish_participants(state).await;
                     self.ping().await;
-                    last_pinged = Instant::now();
                 }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
         }
     }
 }
