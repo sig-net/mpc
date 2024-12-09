@@ -1,8 +1,8 @@
 pub mod app_data_storage;
+pub mod error;
 pub mod presignature_storage;
 pub mod secret_storage;
 pub mod triple_storage;
-pub mod error;
 
 /// Configures storage.
 #[derive(Debug, Clone, clap::Parser)]
