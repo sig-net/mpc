@@ -17,10 +17,7 @@ const CURRENT_CONTRACT_FILE_PATH: &str =
     "../../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
 
 impl Cluster {
-    pub async fn add_participant(
-        &mut self,
-        existing_node: Option<NodeConfig>,
-    ) -> anyhow::Result<()> {
+    pub async fn join(&mut self, existing_node: Option<NodeConfig>) -> anyhow::Result<()> {
         let state = self.expect_running().await?;
         let node_account = match existing_node {
             Some(node) => {
@@ -66,10 +63,7 @@ impl Cluster {
         Ok(())
     }
 
-    pub async fn remove_participant(
-        &mut self,
-        kick: Option<&AccountId>,
-    ) -> anyhow::Result<NodeConfig> {
+    pub async fn leave(&mut self, kick: Option<&AccountId>) -> anyhow::Result<NodeConfig> {
         let state = self.expect_running().await?;
         let participant_accounts = self.participant_accounts().await?;
         let kick = kick

@@ -32,7 +32,7 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
     let _ = nodes.sign().await?;
 
     tracing::info!("!!! Add participant 3");
-    nodes.add_participant(None).await.unwrap();
+    nodes.join(None).await.unwrap();
     let state = nodes.wait().running().signable().await.unwrap();
     let _ = nodes.sign().await.unwrap();
 
@@ -41,25 +41,25 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
         state.participants.keys().nth(2).unwrap().clone().as_ref(),
     )
     .unwrap();
-    nodes.remove_participant(Some(&account_2)).await.unwrap();
+    nodes.leave(Some(&account_2)).await.unwrap();
     let account_0 = near_workspaces::types::AccountId::from_str(
         state.participants.keys().next().unwrap().clone().as_ref(),
     )
     .unwrap();
-    let node_cfg_0 = nodes.remove_participant(Some(&account_0)).await.unwrap();
+    let node_cfg_0 = nodes.leave(Some(&account_0)).await.unwrap();
     nodes.wait().running().signable().await.unwrap();
     let _ = nodes.sign().await.unwrap();
 
     tracing::info!("!!! Try remove participant 3, should fail due to threshold");
-    nodes.remove_participant(None).await.unwrap_err();
+    nodes.leave(None).await.unwrap_err();
 
     tracing::info!("!!! Add participant 5");
-    nodes.add_participant(None).await.unwrap();
+    nodes.join(None).await.unwrap();
     nodes.wait().running().signable().await.unwrap();
     let _ = nodes.sign().await.unwrap();
 
     tracing::info!("!!! Add back participant 0");
-    nodes.add_participant(Some(node_cfg_0)).await.unwrap();
+    nodes.join(Some(node_cfg_0)).await.unwrap();
     nodes.wait().running().signable().await.unwrap();
     let _ = nodes.sign().await.unwrap();
 
@@ -101,7 +101,7 @@ async fn test_signature_offline_node() -> anyhow::Result<()> {
         .as_str()
         .parse()?;
 
-    nodes.remove_participant(Some(&account_id)).await.unwrap();
+    nodes.leave(Some(&account_id)).await.unwrap();
 
     // This could potentially fail and timeout the first time if the participant set picked up is the
     // one with the offline node. This is expected behavior for now if a user submits a request in between
@@ -416,23 +416,23 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
     add_latency(&nodes.nodes.proxy_name_for_node(1), true, 1.0, 1_000, 100).await?;
     // remove node2, node0 and node1 should still reach concensus
     // this fails if the latency above is too long (10s)
-    nodes.remove_participant(None).await.unwrap();
+    nodes.leave(None).await.unwrap();
 
     let state = nodes.wait().running().await?;
     assert!(state.participants.len() == 2);
 
     // Going below T should error out
-    nodes.remove_participant(None).await.unwrap_err();
+    nodes.leave(None).await.unwrap_err();
     let state = nodes.wait().running().await?;
     assert!(state.participants.len() == 2);
 
-    nodes.add_participant(None).await.unwrap();
+    nodes.join(None).await.unwrap();
     // add latency to node2->rpc
     add_latency(&nodes.nodes.proxy_name_for_node(2), true, 1.0, 1_000, 100).await?;
     let state = nodes.wait().running().await?;
     assert!(state.participants.len() == 3);
 
-    nodes.remove_participant(None).await.unwrap();
+    nodes.leave(None).await.unwrap();
     let state = nodes.wait().running().await?;
     assert!(state.participants.len() == 2);
 
