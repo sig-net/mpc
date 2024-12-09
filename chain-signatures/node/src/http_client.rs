@@ -169,11 +169,12 @@ impl MessageQueue {
                 // guaranteed to unwrap due to our previous loop check:
                 let info = participants.get(&Participant::from(id)).unwrap();
                 let account_id = &info.account_id;
+                let number_of_messages = encrypted_partition.len() as f64;
 
                 let start = Instant::now();
                 crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
                     .with_label_values(&[account_id.as_str()])
-                    .inc();
+                    .inc_by(number_of_messages);
                 if let Err(err) = send_encrypted(
                     from,
                     client,
@@ -185,7 +186,7 @@ impl MessageQueue {
                 {
                     crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
                         .with_label_values(&[account_id.as_str()])
-                        .inc();
+                        .inc_by(number_of_messages);
                     crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
                         .with_label_values(&[account_id.as_str()])
                         .observe(start.elapsed().as_millis() as f64);
