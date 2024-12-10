@@ -14,7 +14,7 @@ use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
 use once_cell::sync::Lazy;
 use serde_json::json;
-use testcontainers::core::ExecCommand;
+use testcontainers::core::{ExecCommand, Mount};
 use testcontainers::ContainerAsync;
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
@@ -591,6 +591,12 @@ impl Default for DockerClient {
     }
 }
 
+pub enum Load {
+    Full,
+    Empty,
+    Partial(u32),
+}
+
 pub struct Redis {
     pub container: Container,
     pub internal_address: String,
@@ -600,15 +606,33 @@ pub struct Redis {
 impl Redis {
     const DEFAULT_REDIS_PORT: u16 = 6379;
 
-    pub async fn run(docker_client: &DockerClient, network: &str) -> Self {
+    pub async fn run(docker_client: &DockerClient, network: &str, load: Load) -> Self {
         tracing::info!("Running Redis container...");
-        let container = GenericImage::new("redis", "7.0.15")
+        let mut container = GenericImage::new("redis", "7.0.15")
+            // let container = container
             .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .with_network(network)
-            .start()
-            .await
-            .unwrap();
+            .with_network(network);
+
+        let path = mpc_forge::target_dir().unwrap().join("redisdata");
+        container = container.with_mount(Mount::volume_mount(
+            path.to_string_lossy().to_string(),
+            "/data",
+        ));
+
+        // match load {
+        //     Load::Full => {
+        //         let path = mpc_forge::target_dir().unwrap().join("redisdata");
+        //         container = container.with_mount(Mount::volume_mount(
+        //             path.to_string_lossy().to_string(),
+        //             "/data",
+        //         ));
+        //     }
+        //     Load::Empty => {}
+        //     Load::Partial(size) => {}
+        // }
+
+        let container = container.start().await.unwrap();
         let network_ip = docker_client
             .get_network_ip_address(&container, network)
             .await
