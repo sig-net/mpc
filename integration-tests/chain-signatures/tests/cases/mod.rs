@@ -33,19 +33,13 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
 
     tracing::info!("!!! Add participant 3");
     nodes.join(None).await.unwrap();
-    let state = nodes.wait().running().signable().await.unwrap();
+    let _state = nodes.wait().running().signable().await.unwrap();
     let _ = nodes.sign().await.unwrap();
 
     tracing::info!("!!! Remove participant 0 and participant 2");
-    let account_2 = near_workspaces::types::AccountId::from_str(
-        state.participants.keys().nth(2).unwrap().clone().as_ref(),
-    )
-    .unwrap();
+    let account_2 = nodes.account_id(2).clone();
     nodes.leave(Some(&account_2)).await.unwrap();
-    let account_0 = near_workspaces::types::AccountId::from_str(
-        state.participants.keys().next().unwrap().clone().as_ref(),
-    )
-    .unwrap();
+    let account_0 = nodes.account_id(0).clone();
     let node_cfg_0 = nodes.leave(Some(&account_0)).await.unwrap();
     nodes.wait().running().signable().await.unwrap();
     let _ = nodes.sign().await.unwrap();
@@ -92,15 +86,7 @@ async fn test_signature_offline_node() -> anyhow::Result<()> {
 
     // Kill the node then have presignatures and signature generation only use the active set of nodes
     // to start generating presignatures and signatures.
-    let account_id: near_workspaces::types::AccountId = nodes
-        .participants()
-        .await?
-        .keys()
-        .last()
-        .unwrap()
-        .as_str()
-        .parse()?;
-
+    let account_id = nodes.account_ids().into_iter().last().unwrap().clone();
     nodes.leave(Some(&account_id)).await.unwrap();
 
     // This could potentially fail and timeout the first time if the participant set picked up is the
@@ -368,14 +354,7 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
     let _ = nodes.sign().await?;
 
     // Kill node 2
-    let account_id: near_workspaces::types::AccountId = nodes
-        .participants()
-        .await?
-        .keys()
-        .last()
-        .unwrap()
-        .as_str()
-        .parse()?;
+    let account_id = nodes.account_id(2).clone();
     let killed = nodes.kill_node(&account_id).await;
 
     // Start the killed node again

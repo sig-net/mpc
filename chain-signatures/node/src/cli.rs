@@ -1,5 +1,6 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
+use crate::mesh::Mesh;
 use crate::protocol::{MpcSignProtocol, SignQueue};
 use crate::storage::app_data_storage;
 use crate::{http_client, indexer, mesh, storage, web};
@@ -240,31 +241,49 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!(%my_address, "address detected");
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
+            let (mesh, mesh_state) = Mesh::init(mesh_options);
+            let config = Arc::new(RwLock::new(Config::new(LocalConfig {
+                over: override_config.unwrap_or_else(Default::default),
+                network: NetworkConfig {
+                    cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
+                    sign_sk,
+                },
+            })));
+            let contract_state = Arc::new(RwLock::new(None));
             let (protocol, protocol_state) = MpcSignProtocol::init(
                 my_address,
-                mpc_contract_id,
+                mpc_contract_id.clone(),
                 account_id,
-                rpc_client,
+                rpc_client.clone(),
                 signer,
                 receiver,
                 sign_queue,
                 key_storage,
                 triple_storage,
                 presignature_storage,
-                Config::new(LocalConfig {
-                    over: override_config.unwrap_or_else(Default::default),
-                    network: NetworkConfig {
-                        cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
-                        sign_sk,
-                    },
-                }),
-                mesh_options,
                 message_options,
             );
 
+            let contract_updater =
+                crate::contract_updater::ContractUpdater::init(rpc_client, mpc_contract_id);
+
             rt.block_on(async {
                 tracing::info!("protocol initialized");
-                let protocol_handle = tokio::spawn(async move { protocol.run().await });
+                let contract_handle = tokio::spawn({
+                    let contract_state = Arc::clone(&contract_state);
+                    let config = Arc::clone(&config);
+                    async move { contract_updater.run(contract_state, config).await }
+                });
+                let mesh_handle = tokio::spawn({
+                    let contract_state = Arc::clone(&contract_state);
+                    async move { mesh.run(contract_state).await }
+                });
+                let protocol_handle = tokio::spawn({
+                    let contract_state = Arc::clone(&contract_state);
+                    let config = Arc::clone(&config);
+                    let mesh_state = Arc::clone(&mesh_state);
+                    async move { protocol.run(contract_state, config, mesh_state).await }
+                });
                 tracing::info!("protocol thread spawned");
                 let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
                 let web_handle = tokio::spawn(async move {
@@ -272,6 +291,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 });
                 tracing::info!("protocol http server spawned");
 
+                contract_handle.await??;
+                mesh_handle.await??;
                 protocol_handle.await??;
                 web_handle.await??;
                 tracing::info!("spinning down");

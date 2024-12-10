@@ -47,6 +47,14 @@ impl Cluster {
         self.nodes.is_empty()
     }
 
+    pub fn account_id(&self, id: usize) -> &AccountId {
+        self.nodes.near_accounts()[id].id()
+    }
+
+    pub fn account_ids(&self) -> Vec<&AccountId> {
+        self.nodes.near_accounts().iter().map(|a| a.id()).collect()
+    }
+
     pub fn url(&self, id: usize) -> Url {
         Url::parse(self.nodes.url(id)).unwrap()
     }
