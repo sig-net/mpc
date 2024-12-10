@@ -3,13 +3,13 @@ use mpc_contract::config::ProtocolConfig;
 use std::future::{Future, IntoFuture};
 
 use integration_tests_chain_signatures::containers::DockerClient;
-use integration_tests_chain_signatures::{run, MultichainConfig};
+use integration_tests_chain_signatures::{run, NodeConfig};
 
 // use crate::actions::wait_for;
 use crate::cluster::Cluster;
 
 pub struct ClusterSpawner {
-    pub(crate) cfg: MultichainConfig,
+    pub(crate) cfg: NodeConfig,
     pub(crate) wait_for_running: bool,
 }
 
@@ -29,7 +29,7 @@ impl ClusterSpawner {
         self
     }
 
-    pub fn with_config(mut self, call: impl FnOnce(&mut MultichainConfig)) -> Self {
+    pub fn with_config(mut self, call: impl FnOnce(&mut NodeConfig)) -> Self {
         call(&mut self.cfg);
         self
     }

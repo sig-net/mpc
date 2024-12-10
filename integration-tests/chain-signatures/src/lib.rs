@@ -7,7 +7,7 @@ use containers::Container;
 use deadpool_redis::Pool;
 use std::collections::HashMap;
 
-use self::local::NodeConfig;
+use self::local::NodeEnvConfig;
 use crate::containers::DockerClient;
 use crate::containers::LocalStack;
 
@@ -30,13 +30,13 @@ use serde_json::json;
 const NETWORK: &str = "mpc_it_network";
 
 #[derive(Clone, Debug)]
-pub struct MultichainConfig {
+pub struct NodeConfig {
     pub nodes: usize,
     pub threshold: usize,
     pub protocol: ProtocolConfig,
 }
 
-impl Default for MultichainConfig {
+impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             nodes: 3,
@@ -104,7 +104,7 @@ impl Nodes {
 
     pub async fn start_node(
         &mut self,
-        cfg: &MultichainConfig,
+        cfg: &NodeConfig,
         new_account: &Account,
     ) -> anyhow::Result<()> {
         tracing::info!(id = %new_account.id(), "adding one more node");
@@ -120,7 +120,7 @@ impl Nodes {
         Ok(())
     }
 
-    pub async fn kill_node(&mut self, account_id: &AccountId) -> NodeConfig {
+    pub async fn kill_node(&mut self, account_id: &AccountId) -> NodeEnvConfig {
         let killed_node_config = match self {
             Nodes::Local { nodes, .. } => {
                 let index = nodes
@@ -144,7 +144,7 @@ impl Nodes {
         killed_node_config
     }
 
-    pub async fn restart_node(&mut self, config: NodeConfig) -> anyhow::Result<()> {
+    pub async fn restart_node(&mut self, config: NodeEnvConfig) -> anyhow::Result<()> {
         tracing::info!(node_account_id = %config.account.id(), "restarting node");
         match self {
             Nodes::Local { ctx, nodes } => nodes.push(local::Node::spawn(ctx, config).await?),
@@ -260,7 +260,7 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context> {
     })
 }
 
-pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
+pub async fn docker(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
     let ctx = setup(docker_client).await?;
 
     let accounts =
@@ -306,10 +306,7 @@ pub async fn docker(cfg: MultichainConfig, docker_client: &DockerClient) -> anyh
     Ok(Nodes::Docker { ctx, nodes })
 }
 
-pub async fn dry_host(
-    cfg: MultichainConfig,
-    docker_client: &DockerClient,
-) -> anyhow::Result<Context> {
+pub async fn dry_host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Context> {
     let ctx = setup(docker_client).await?;
 
     let accounts =
@@ -362,7 +359,7 @@ pub async fn dry_host(
     Ok(ctx)
 }
 
-pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
+pub async fn host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
     let ctx = setup(docker_client).await?;
 
     let accounts =
@@ -407,7 +404,7 @@ pub async fn host(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow
     Ok(Nodes::Local { ctx, nodes })
 }
 
-pub async fn run(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
+pub async fn run(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
     #[cfg(feature = "docker-test")]
     return docker(cfg, docker_client).await;
 
@@ -415,10 +412,7 @@ pub async fn run(cfg: MultichainConfig, docker_client: &DockerClient) -> anyhow:
     return host(cfg, docker_client).await;
 }
 
-pub async fn dry_run(
-    cfg: MultichainConfig,
-    docker_client: &DockerClient,
-) -> anyhow::Result<Context> {
+pub async fn dry_run(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Context> {
     #[cfg(feature = "docker-test")]
     unimplemented!("dry_run only works with native node");
 

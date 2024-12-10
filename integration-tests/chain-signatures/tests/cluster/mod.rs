@@ -2,7 +2,7 @@ mod spawner;
 
 use std::collections::HashSet;
 
-use integration_tests_chain_signatures::local::NodeConfig;
+use integration_tests_chain_signatures::local::NodeEnvConfig;
 use mpc_contract::primitives::Participants;
 use near_workspaces::network::Sandbox;
 use spawner::ClusterSpawner;
@@ -12,7 +12,7 @@ use mpc_node::web::StateView;
 
 use anyhow::Context;
 use integration_tests_chain_signatures::containers::DockerClient;
-use integration_tests_chain_signatures::{utils, MultichainConfig, Nodes};
+use integration_tests_chain_signatures::{utils, NodeConfig, Nodes};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use url::Url;
 
@@ -22,7 +22,7 @@ use crate::actions::wait::WaitAction;
 pub fn spawn() -> ClusterSpawner {
     ClusterSpawner {
         wait_for_running: false,
-        cfg: MultichainConfig {
+        cfg: NodeConfig {
             nodes: 3,
             threshold: 2,
             protocol: Default::default(),
@@ -31,7 +31,7 @@ pub fn spawn() -> ClusterSpawner {
 }
 
 pub struct Cluster {
-    pub cfg: MultichainConfig,
+    pub cfg: NodeConfig,
     pub docker_client: DockerClient,
     pub rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
@@ -119,11 +119,11 @@ impl Cluster {
         Ok(state.public_key)
     }
 
-    pub async fn kill_node(&mut self, account_id: &AccountId) -> NodeConfig {
+    pub async fn kill_node(&mut self, account_id: &AccountId) -> NodeEnvConfig {
         self.nodes.kill_node(account_id).await
     }
 
-    pub async fn restart_node(&mut self, config: NodeConfig) -> anyhow::Result<()> {
+    pub async fn restart_node(&mut self, config: NodeEnvConfig) -> anyhow::Result<()> {
         self.nodes.restart_node(config).await
     }
 }

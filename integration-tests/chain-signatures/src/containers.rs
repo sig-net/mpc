@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::{local::NodeConfig, utils, MultichainConfig};
+use super::{local::NodeEnvConfig, utils, NodeConfig};
 use anyhow::{anyhow, Context};
 use async_process::Child;
 use bollard::container::LogsOptions;
@@ -36,7 +36,7 @@ pub struct Node {
     pub cipher_pk: hpke::PublicKey,
     pub cipher_sk: hpke::SecretKey,
     pub sign_sk: near_crypto::SecretKey,
-    cfg: MultichainConfig,
+    cfg: NodeConfig,
     // near rpc address, after proxy
     near_rpc: String,
 }
@@ -47,7 +47,7 @@ impl Node {
 
     pub async fn run(
         ctx: &super::Context,
-        cfg: &MultichainConfig,
+        cfg: &NodeConfig,
         account: &Account,
     ) -> anyhow::Result<Self> {
         tracing::info!(id = %account.id(), "running node container");
@@ -72,7 +72,7 @@ impl Node {
 
         Self::spawn(
             ctx,
-            NodeConfig {
+            NodeEnvConfig {
                 web_port: Self::CONTAINER_PORT,
                 account: account.clone(),
                 cipher_pk,
@@ -85,9 +85,9 @@ impl Node {
         .await
     }
 
-    pub async fn kill(self) -> NodeConfig {
+    pub async fn kill(self) -> NodeEnvConfig {
         self.container.stop().await.unwrap();
-        NodeConfig {
+        NodeEnvConfig {
             web_port: Self::CONTAINER_PORT,
             account: self.account,
             cipher_pk: self.cipher_pk,
@@ -98,7 +98,7 @@ impl Node {
         }
     }
 
-    pub async fn spawn(ctx: &super::Context, config: NodeConfig) -> anyhow::Result<Self> {
+    pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
             s3_region: ctx.localstack.s3_region.clone(),

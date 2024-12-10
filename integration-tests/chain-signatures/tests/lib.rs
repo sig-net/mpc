@@ -10,14 +10,14 @@ use integration_tests_chain_signatures::utils::{vote_join, vote_leave};
 use near_workspaces::types::NearToken;
 use near_workspaces::AccountId;
 
-use integration_tests_chain_signatures::local::NodeConfig;
+use integration_tests_chain_signatures::local::NodeEnvConfig;
 
 const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(9000);
 const CURRENT_CONTRACT_FILE_PATH: &str =
     "../../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
 
 impl Cluster {
-    pub async fn join(&mut self, existing_node: Option<NodeConfig>) -> anyhow::Result<()> {
+    pub async fn join(&mut self, existing_node: Option<NodeEnvConfig>) -> anyhow::Result<()> {
         let state = self.expect_running().await?;
         let node_account = match existing_node {
             Some(node) => {
@@ -63,7 +63,7 @@ impl Cluster {
         Ok(())
     }
 
-    pub async fn leave(&mut self, kick: Option<&AccountId>) -> anyhow::Result<NodeConfig> {
+    pub async fn leave(&mut self, kick: Option<&AccountId>) -> anyhow::Result<NodeEnvConfig> {
         let state = self.expect_running().await?;
         let participant_accounts = self.participant_accounts().await?;
         let kick = kick

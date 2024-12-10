@@ -5,7 +5,7 @@ use std::vec;
 
 use clap::Parser;
 use integration_tests_chain_signatures::containers::DockerClient;
-use integration_tests_chain_signatures::{dry_run, run, utils, MultichainConfig};
+use integration_tests_chain_signatures::{dry_run, run, utils, NodeConfig};
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
                 "Setting up an environment with {} nodes, {} threshold ...",
                 nodes, threshold
             );
-            let config = MultichainConfig {
+            let config = NodeConfig {
                 nodes,
                 threshold,
                 ..Default::default()
@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cli::DepServices => {
             println!("Setting up dependency services");
-            let config = MultichainConfig::default();
+            let config = NodeConfig::default();
             let _ctx = dry_run(config.clone(), &docker_client).await?;
 
             println!("Press Ctrl-C to stop dependency services");
