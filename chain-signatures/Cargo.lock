@@ -3003,6 +3003,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-forge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-process",
+]
+
+[[package]]
 name = "mpc-keys"
 version = "0.1.0"
 dependencies = [

@@ -3,7 +3,6 @@ use std::fmt;
 use crate::{execute, utils, NodeConfig};
 
 use crate::containers::LakeIndexer;
-use crate::execute::executable;
 use anyhow::Context;
 use async_process::Child;
 use mpc_keys::hpke;
@@ -91,7 +90,7 @@ impl Node {
             message_options: ctx.message_options.clone(),
         };
 
-        let cmd = executable(ctx.release, crate::execute::PACKAGE_MULTICHAIN)
+        let cmd = execute::node_executable(ctx.release)
             .with_context(|| "could not find target dir for mpc-node")?;
         let args = cli.into_str_args();
         let escaped_args: Vec<_> = args
@@ -184,7 +183,7 @@ impl Node {
         };
 
         let mpc_node_id = format!("multichain/{}", config.account.id());
-        let process = execute::spawn_multichain(ctx.release, &mpc_node_id, cli)?;
+        let process = execute::spawn_node(ctx.release, &mpc_node_id, cli)?;
         let address = format!("http://127.0.0.1:{web_port}");
         tracing::info!("node is starting at {address}");
         utils::ping_until_ok(&address, 60).await?;

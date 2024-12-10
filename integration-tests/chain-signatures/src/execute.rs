@@ -1,35 +1,16 @@
-use anyhow::Context;
+use std::io;
+
+use anyhow::Context as _;
 use async_process::Child;
 
-pub(crate) const PACKAGE_MULTICHAIN: &str = "mpc-node";
+pub(crate) const PACKAGE_NODE: &str = "mpc-node";
 
-pub fn target_dir() -> Option<std::path::PathBuf> {
-    let mut out_dir = std::path::Path::new(std::env!("OUT_DIR"));
-    loop {
-        if out_dir.ends_with("target") {
-            break Some(out_dir.to_path_buf());
-        }
-
-        match out_dir.parent() {
-            Some(parent) => out_dir = parent,
-            None => break None, // We've reached the root directory and didn't find "target"
-        }
-    }
+pub fn node_executable(release: bool) -> io::Result<std::path::PathBuf> {
+    mpc_forge::executable(release, PACKAGE_NODE)
 }
 
-pub fn executable(release: bool, executable: &str) -> Option<std::path::PathBuf> {
-    let executable = target_dir()?
-        .join(if release { "release" } else { "debug" })
-        .join(executable);
-    Some(executable)
-}
-
-pub fn spawn_multichain(
-    release: bool,
-    node: &str,
-    cli: mpc_node::cli::Cli,
-) -> anyhow::Result<Child> {
-    let executable = executable(release, PACKAGE_MULTICHAIN)
+pub fn spawn_node(release: bool, node: &str, cli: mpc_node::cli::Cli) -> anyhow::Result<Child> {
+    let executable = node_executable(release)
         .with_context(|| format!("could not find target dir while starting {node} node"))?;
 
     async_process::Command::new(&executable)

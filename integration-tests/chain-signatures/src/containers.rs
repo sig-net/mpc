@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use super::{local::NodeEnvConfig, utils, NodeConfig};
 use anyhow::{anyhow, Context};
@@ -6,7 +7,7 @@ use async_process::Child;
 use bollard::container::LogsOptions;
 use bollard::exec::CreateExecOptions;
 use bollard::network::CreateNetworkOptions;
-use bollard::secret::Ipam;
+use bollard::secret::{Ipam, Volume};
 use bollard::Docker;
 use futures::{lock::Mutex, StreamExt};
 use mpc_keys::hpke;
@@ -14,7 +15,7 @@ use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
 use once_cell::sync::Lazy;
 use serde_json::json;
-use testcontainers::core::ExecCommand;
+use testcontainers::core::{ExecCommand, Mount};
 use testcontainers::ContainerAsync;
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
@@ -501,6 +502,30 @@ impl DockerClient {
         Ok(ip_address)
     }
 
+    // pub async fn create_volume(&self, name: &str) -> anyhow::Result<Volume> {
+    //     let _lock = &NETWORK_MUTEX.lock().await;
+    //     let list = self.docker.list_volumes::<&str>(None).await?;
+    //     let Some(volumes) = list.volumes else {
+    //         anyhow::bail!(
+    //             "unable to create volume {name}; warnings = {:?}",
+    //             list.warnings
+    //         );
+    //     };
+
+    //     for vol in volumes {
+    //         if vol.name == name {
+    //             return Ok(vol);
+    //         }
+    //     }
+
+    //     let create_volume_options = bollard::volume::CreateVolumeOptions {
+    //         name,
+    //         ..Default::default()
+    //     };
+    //     let volume = self.docker.create_volume(create_volume_options).await?;
+    //     Ok(volume)
+    // }
+
     pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
         let _lock = &NETWORK_MUTEX.lock().await;
         let list = self.docker.list_networks::<&str>(None).await?;
@@ -591,6 +616,12 @@ impl Default for DockerClient {
     }
 }
 
+pub enum Load {
+    Full,
+    Empty,
+    Partial(u32),
+}
+
 pub struct Redis {
     pub container: Container,
     pub internal_address: String,
@@ -599,16 +630,70 @@ pub struct Redis {
 
 impl Redis {
     const DEFAULT_REDIS_PORT: u16 = 6379;
+    const DEFAULT_REDIS_DATA_MOUNT: &str = "/data";
+
+    fn mount_persistence() -> Mount {
+        // let path = mpc_forge::target_dir()
+        //     .expect("unable to find target_dir for storing redisdata")
+        //     .join("redis")
+        //     .join("data");
+
+        // std::fs::create_dir_all(&path).unwrap();
+        // let path = std::fs::canonicalize(path)
+        //     .unwrap()
+        //     .to_string_lossy()
+        //     .to_string();
+
+        // std::fs::create_dir_all("/tmp/redis/data").unwrap();
+        // Mount::volume_mount("/tmp/redis/data", Self::DEFAULT_REDIS_DATA_MOUNT)
+        Mount::volume_mount("redis-data", Self::DEFAULT_REDIS_DATA_MOUNT)
+    }
+
+    fn mount_redis_conf() -> Mount {
+        let path = mpc_forge::target_dir()
+            .expect("unable to find target_dir for storing redisdata")
+            .join("..")
+            .join("chain-signatures")
+            .join("node")
+            .join("redis.conf");
+        let path = std::fs::canonicalize(path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        Mount::bind_mount(path, "/etc/redis/redis.conf")
+    }
 
     pub async fn run(docker_client: &DockerClient, network: &str) -> Self {
+        // docker_client.create_volume(name)
+
         tracing::info!("Running Redis container...");
         let container = GenericImage::new("redis", "7.0.15")
             .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
             .with_network(network)
-            .start()
-            .await
-            .unwrap();
+            .with_mount(Self::mount_persistence())
+            .with_mount(Self::mount_redis_conf())
+            .with_startup_timeout(Duration::from_secs(120))
+            .with_cmd(vec!["/etc/redis/redis.conf"]);
+        // .with_cmd(vec!["--appendonly", "yes"]);
+        // .with_cmd(vec!["--save", "3", "1", "--loglevel", "warning"]);
+        // .with_mount(Self::mount_redis_conf());
+
+        // _load: Load
+        // match load {
+        //     Load::Full => {
+        //         let path = mpc_forge::target_dir().unwrap().join("redisdata");
+        //         container = container.with_mount(Mount::volume_mount(
+        //             path.to_string_lossy().to_string(),
+        //             "/data",
+        //         ));
+        //     }
+        //     Load::Empty => {}
+        //     Load::Partial(size) => {}
+        // }
+
+        let container = container.start().await.unwrap();
         let network_ip = docker_client
             .get_network_ip_address(&container, network)
             .await

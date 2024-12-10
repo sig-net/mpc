@@ -8,8 +8,7 @@ use deadpool_redis::Pool;
 use std::collections::HashMap;
 
 use self::local::NodeEnvConfig;
-use crate::containers::DockerClient;
-use crate::containers::LocalStack;
+use crate::containers::{DockerClient, LocalStack};
 
 use anyhow::Context as _;
 use bollard::exec::{CreateExecOptions, StartExecResults};
@@ -196,11 +195,11 @@ pub struct Context {
     pub docker_network: String,
     pub release: bool,
 
-    pub localstack: crate::containers::LocalStack,
-    pub lake_indexer: crate::containers::LakeIndexer,
+    pub localstack: containers::LocalStack,
+    pub lake_indexer: containers::LakeIndexer,
     pub worker: Worker<Sandbox>,
     pub mpc_contract: Contract,
-    pub redis: crate::containers::Redis,
+    pub redis: containers::Redis,
     pub storage_options: storage::Options,
     pub mesh_options: mesh::Options,
     pub message_options: http_client::Options,
@@ -211,22 +210,22 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context> {
     let docker_network = NETWORK;
     docker_client.create_network(docker_network).await?;
 
-    let LakeIndexerCtx {
+    let LakeIndexer {
         localstack,
         lake_indexer,
         worker,
-    } = initialize_lake_indexer(docker_client, docker_network).await?;
+    } = LakeIndexer::spawn(docker_client, docker_network).await?;
 
     let mpc_contract = worker
         .dev_deploy(&std::fs::read(
-            execute::target_dir()
+            mpc_forge::target_dir()
                 .context("could not find target dir")?
                 .join("wasm32-unknown-unknown/release/mpc_contract.wasm"),
         )?)
         .await?;
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
 
-    let redis = crate::containers::Redis::run(docker_client, docker_network).await;
+    let redis = containers::Redis::run(docker_client, docker_network).await;
     let redis_url = redis.internal_address.clone();
 
     let sk_share_local_path = "multichain-integration-secret-manager".to_string();
@@ -468,45 +467,44 @@ async fn fetch_validator_keys(
     Ok(serde_json::from_slice(&key_data)?)
 }
 
-pub struct LakeIndexerCtx {
+pub struct LakeIndexer {
     pub localstack: containers::LocalStack,
     pub lake_indexer: containers::LakeIndexer,
     pub worker: Worker<Sandbox>,
 }
 
-pub async fn initialize_lake_indexer(
-    docker_client: &DockerClient,
-    network: &str,
-) -> anyhow::Result<LakeIndexerCtx> {
-    let s3_bucket = "near-lake-custom";
-    let s3_region = "us-east-1";
-    let localstack = LocalStack::run(docker_client, network, s3_bucket, s3_region).await;
+impl LakeIndexer {
+    pub async fn spawn(docker_client: &DockerClient, network: &str) -> anyhow::Result<Self> {
+        let s3_bucket = "near-lake-custom";
+        let s3_region = "us-east-1";
+        let localstack = LocalStack::run(docker_client, network, s3_bucket, s3_region).await;
 
-    let lake_indexer = containers::LakeIndexer::run(
-        docker_client,
-        network,
-        &localstack.s3_address,
-        s3_bucket,
-        s3_region,
-    )
-    .await;
+        let lake_indexer = containers::LakeIndexer::run(
+            docker_client,
+            network,
+            &localstack.s3_address,
+            s3_bucket,
+            s3_region,
+        )
+        .await;
 
-    let validator_key = fetch_validator_keys(docker_client, &lake_indexer.container).await?;
+        let validator_key = fetch_validator_keys(docker_client, &lake_indexer.container).await?;
 
-    tracing::info!("initializing sandbox worker");
-    let worker = near_workspaces::sandbox()
-        // use not proxied rpc address because workspace is used in setup (create dev account, deploy
-        // contract which we can assume succeed
-        .rpc_addr(&lake_indexer.rpc_host_address)
-        .validator_key(ValidatorKey::Known(
-            validator_key.account_id.to_string().parse()?,
-            validator_key.secret_key.to_string().parse()?,
-        ))
-        .await?;
+        tracing::info!("initializing sandbox worker");
+        let worker = near_workspaces::sandbox()
+            // use not proxied rpc address because workspace is used in setup (create dev account, deploy
+            // contract which we can assume succeed
+            .rpc_addr(&lake_indexer.rpc_host_address)
+            .validator_key(ValidatorKey::Known(
+                validator_key.account_id.to_string().parse()?,
+                validator_key.secret_key.to_string().parse()?,
+            ))
+            .await?;
 
-    Ok(LakeIndexerCtx {
-        localstack,
-        lake_indexer,
-        worker,
-    })
+        Ok(Self {
+            localstack,
+            lake_indexer,
+            worker,
+        })
+    }
 }
