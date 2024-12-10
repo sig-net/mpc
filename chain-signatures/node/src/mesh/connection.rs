@@ -59,6 +59,7 @@ impl Pool {
             refresh_active_timeout,
         }
     }
+
     pub async fn ping(&self) -> Participants {
         if let Some((ref active, timestamp)) = *self.current_active.read().await {
             if timestamp.elapsed() < self.refresh_active_timeout {
@@ -165,7 +166,7 @@ impl Pool {
         self.potential_connections.read().await.clone()
     }
 
-    pub async fn is_participant_stable(&self, participant: &Participant) -> bool {
+    async fn is_participant_stable(&self, participant: &Participant) -> bool {
         self.status
             .read()
             .await
@@ -174,6 +175,20 @@ impl Pool {
                 StateView::Running { is_stable, .. } => *is_stable,
                 _ => false,
             })
+    }
+
+    /// Get active participants that have a stable connection. This is useful for arbitrary metrics to
+    /// say whether or not a node is stable, such as a node being on track with the latest block height.
+    pub async fn stable_participants(&self) -> Participants {
+        let mut stable = Participants::default();
+        if let Some((active_participants, _)) = self.current_active.read().await.clone() {
+            for (participant, info) in active_participants.iter() {
+                if self.is_participant_stable(participant).await {
+                    stable.insert(participant, info.clone());
+                }
+            }
+        }
+        stable
     }
 
     async fn fetch_participant_state(
