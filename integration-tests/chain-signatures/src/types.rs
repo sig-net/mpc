@@ -47,8 +47,8 @@ impl Default for NodeConfig {
                     ..Default::default()
                 },
                 presignature: PresignatureConfig {
-                    min_presignatures: 100,
-                    max_presignatures: 1000,
+                    min_presignatures: 2,
+                    max_presignatures: 100,
                     ..Default::default()
                 },
                 ..Default::default()

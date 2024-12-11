@@ -242,7 +242,7 @@ pub async fn setup(
         .into_result()?;
     tracing::info!("initialized mpc contract");
 
-    let redis = containers::Redis::run(docker_client, docker_network).await;
+    let redis = containers::Redis::run(docker_client, docker_network, cfg.load).await;
     let redis_url = redis.internal_address.clone();
 
     let sk_share_local_path = "multichain-integration-secret-manager".to_string();

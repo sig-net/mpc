@@ -612,68 +612,43 @@ pub struct Redis {
 impl Redis {
     const DEFAULT_REDIS_PORT: u16 = 6379;
     const DEFAULT_REDIS_DATA_MOUNT: &str = "/data";
+    const DEFAULT_REDIS_ARGS: [&str; 15] = [
+        "--tcp-backlog",
+        "511",
+        "--timeout",
+        "0",
+        "--appendonly",
+        "yes",
+        "--appendfilename",
+        "appendonly.aof",
+        "--appendfsync",
+        "everysec",
+        "--save",
+        "3",
+        "1",
+        "--dbfilename",
+        "dump.rdb",
+    ];
 
     fn mount_persistence() -> Mount {
-        // let path = mpc_forge::target_dir()
-        //     .expect("unable to find target_dir for storing redisdata")
-        //     .join("redis")
-        //     .join("data");
-
-        // std::fs::create_dir_all(&path).unwrap();
-        // let path = std::fs::canonicalize(path)
-        //     .unwrap()
-        //     .to_string_lossy()
-        //     .to_string();
-
-        // std::fs::create_dir_all("/tmp/redis/data").unwrap();
-        // Mount::volume_mount("/tmp/redis/data", Self::DEFAULT_REDIS_DATA_MOUNT)
+        // create named volume redis-data for db to stored at on host.
         Mount::volume_mount("redis-data", Self::DEFAULT_REDIS_DATA_MOUNT)
     }
 
-    fn mount_redis_conf() -> Mount {
-        let path = mpc_forge::target_dir()
-            .expect("unable to find target_dir for storing redisdata")
-            .join("..")
-            .join("chain-signatures")
-            .join("node")
-            .join("redis.conf");
-        let path = std::fs::canonicalize(path)
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-
-        Mount::bind_mount(path, "/etc/redis/redis.conf")
+    fn persist(container: ContainerRequest<GenericImage>) -> ContainerRequest<GenericImage> {
+        container
+            .with_mount(Self::mount_persistence())
+            .with_cmd(Self::DEFAULT_REDIS_ARGS)
     }
 
     pub async fn run(docker_client: &DockerClient, network: &str) -> Self {
-        // docker_client.create_volume(name)
-
         tracing::info!("Running Redis container...");
         let container = GenericImage::new("redis", "7.0.15")
             .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .with_network(network)
-            .with_mount(Self::mount_persistence())
-            .with_mount(Self::mount_redis_conf())
-            .with_startup_timeout(Duration::from_secs(120))
-            .with_cmd(vec!["/etc/redis/redis.conf"]);
-        // .with_cmd(vec!["--appendonly", "yes"]);
-        // .with_cmd(vec!["--save", "3", "1", "--loglevel", "warning"]);
-        // .with_mount(Self::mount_redis_conf());
+            .with_network(network);
 
-        // _load: Load
-        // match load {
-        //     Load::Full => {
-        //         let path = mpc_forge::target_dir().unwrap().join("redisdata");
-        //         container = container.with_mount(Mount::volume_mount(
-        //             path.to_string_lossy().to_string(),
-        //             "/data",
-        //         ));
-        //     }
-        //     Load::Empty => {}
-        //     Load::Partial(size) => {}
-        // }
-
+        let container = Redis::persist(container);
         let container = container.start().await.unwrap();
         let network_ip = docker_client
             .get_network_ip_address(&container, network)
