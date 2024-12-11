@@ -47,8 +47,8 @@ pub trait ConsensusCtx {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ConsensusError {
-    #[error("contract state has been rolled back")]
-    ContractStateRollback,
+    #[error("contract state has been rolled back: {0}")]
+    ContractStateRollback(&'static str),
     #[error("contract epoch has been rolled back")]
     EpochRollback,
     #[error("mismatched public key between contract state and local state")]
@@ -99,7 +99,9 @@ impl ConsensusProtocol for StartedState {
                 private_share,
                 public_key,
             }) => match contract_state {
-                ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
+                ProtocolState::Initializing(_) => {
+                    Err(ConsensusError::ContractStateRollback("started"))
+                }
                 ProtocolState::Running(contract_state) => {
                     if contract_state.public_key != public_key {
                         return Err(ConsensusError::MismatchedPublicKey);
@@ -488,7 +490,7 @@ impl ConsensusProtocol for RunningState {
         _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
-            ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
+            ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback("running")),
             ProtocolState::Running(contract_state) => match contract_state.epoch.cmp(&self.epoch) {
                 Ordering::Greater => {
                     tracing::warn!(
@@ -563,7 +565,9 @@ impl ConsensusProtocol for ResharingState {
         _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
-            ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
+            ProtocolState::Initializing(_) => {
+                Err(ConsensusError::ContractStateRollback("resharing"))
+            }
             ProtocolState::Running(contract_state) => {
                 match contract_state.epoch.cmp(&(self.old_epoch + 1)) {
                     Ordering::Greater => {
@@ -640,7 +644,7 @@ impl ConsensusProtocol for JoiningState {
         cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
-            ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
+            ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback("joining")),
             ProtocolState::Running(contract_state) => {
                 match contract_state
                     .candidates
