@@ -101,7 +101,7 @@ pub async fn ping_until_ok(addr: &str, timeout: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn clear_local_sk_shares(sk_local_path: Option<String>) -> anyhow::Result<()> {
+pub fn clear_local_sk_shares(sk_local_path: Option<String>) -> anyhow::Result<()> {
     if let Some(sk_share_local_path) = sk_local_path {
         let pattern = format!("{sk_share_local_path}*");
         for entry in glob::glob(&pattern).expect("Failed to read glob pattern") {

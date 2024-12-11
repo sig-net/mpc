@@ -135,6 +135,6 @@ impl Cluster {
 impl Drop for Cluster {
     fn drop(&mut self) {
         let sk_local_path = self.nodes.ctx().storage_options.sk_share_local_path.clone();
-        let _task = tokio::task::spawn(utils::clear_local_sk_shares(sk_local_path));
+        utils::clear_local_sk_shares(sk_local_path).unwrap();
     }
 }
