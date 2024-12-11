@@ -597,10 +597,11 @@ impl Default for DockerClient {
     }
 }
 
-pub enum Load {
+#[derive(Copy, Clone)]
+pub enum RedisLoad {
     Full,
+    Half,
     Empty,
-    Partial(u32),
 }
 
 pub struct Redis {
@@ -641,7 +642,7 @@ impl Redis {
             .with_cmd(Self::DEFAULT_REDIS_ARGS)
     }
 
-    pub async fn run(docker_client: &DockerClient, network: &str) -> Self {
+    pub async fn run(docker_client: &DockerClient, network: &str, load: RedisLoad) -> Self {
         tracing::info!("Running Redis container...");
         let container = GenericImage::new("redis", "7.0.15")
             .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())

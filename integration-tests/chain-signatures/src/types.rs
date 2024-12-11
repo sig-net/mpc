@@ -4,6 +4,7 @@ use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_keys::hpke;
 use near_workspaces::Account;
 
+use crate::containers::RedisLoad;
 use crate::utils::pick_unused_port;
 
 pub const SEED_SIGN_SK: &str = "sign-sk-seed";
@@ -30,6 +31,7 @@ impl Default for Secrets {
 
 #[derive(Clone)]
 pub struct NodeConfig {
+    pub load: RedisLoad,
     pub nodes: usize,
     pub threshold: usize,
     pub protocol: ProtocolConfig,
@@ -38,6 +40,7 @@ pub struct NodeConfig {
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
+            load: RedisLoad::Full,
             nodes: 3,
             threshold: 2,
             protocol: ProtocolConfig {

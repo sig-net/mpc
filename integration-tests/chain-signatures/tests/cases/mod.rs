@@ -9,7 +9,7 @@ use cait_sith::PresignOutput;
 use crypto_shared::{self, derive_epsilon, derive_key, x_coordinate, ScalarExt};
 use deadpool_redis::Runtime;
 use elliptic_curve::CurveArithmetic;
-use integration_tests_chain_signatures::containers::{self, DockerClient};
+use integration_tests_chain_signatures::containers::{self, DockerClient, RedisLoad};
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::Secp256k1;
 use mpc_contract::config::Config;
@@ -162,7 +162,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let docker_client = DockerClient::default();
     let docker_network = "test-triple-persistence";
     docker_client.create_network(docker_network).await?;
-    let redis = containers::Redis::run(&docker_client, docker_network).await;
+    let redis = containers::Redis::run(&docker_client, docker_network, RedisLoad::Empty).await;
     let redis_url = Url::parse(redis.internal_address.as_str())?;
     let redis_cfg = deadpool_redis::Config::from_url(redis_url);
     let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
@@ -250,7 +250,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let docker_client = DockerClient::default();
     let docker_network = "test-presignature-persistence";
     docker_client.create_network(docker_network).await?;
-    let redis = containers::Redis::run(&docker_client, docker_network).await;
+    let redis = containers::Redis::run(&docker_client, docker_network, RedisLoad::Empty).await;
     let redis_url = Url::parse(redis.internal_address.as_str())?;
     let redis_cfg = deadpool_redis::Config::from_url(redis_url);
     let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();

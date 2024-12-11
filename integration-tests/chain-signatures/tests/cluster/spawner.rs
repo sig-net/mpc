@@ -2,7 +2,7 @@ use crate::cluster::Cluster;
 
 use std::future::{Future, IntoFuture};
 
-use integration_tests_chain_signatures::containers::DockerClient;
+use integration_tests_chain_signatures::containers::{DockerClient, RedisLoad};
 use integration_tests_chain_signatures::run;
 use integration_tests_chain_signatures::types::NodeConfig;
 use mpc_contract::config::ProtocolConfig;
@@ -32,6 +32,11 @@ impl ClusterSpawner {
 
     pub fn protocol(mut self, protocol: ProtocolConfig) -> Self {
         self.cfg.protocol = protocol;
+        self
+    }
+
+    pub fn load(mut self, load: RedisLoad) -> Self {
+        self.cfg.load = load;
         self
     }
 

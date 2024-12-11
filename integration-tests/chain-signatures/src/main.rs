@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
 
             signal::ctrl_c().await.expect("Failed to listen for event");
             println!("Received Ctrl-C");
-            utils::clear_local_sk_shares(sk_local_path).await?;
+            utils::clear_local_sk_shares(sk_local_path)?;
             println!("Clean up finished");
         }
         Cli::DepServices => {
