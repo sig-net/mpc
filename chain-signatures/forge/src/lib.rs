@@ -37,6 +37,13 @@ pub fn target_dir() -> io::Result<std::path::PathBuf> {
     }
 }
 
+pub fn new_test_env_dir() -> io::Result<PathBuf> {
+    let mut target_dir = target_dir()?;
+    target_dir.push("test-env");
+    target_dir.push(chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string());
+    Ok(target_dir)
+}
+
 pub async fn build_package(
     release: bool,
     package: &str,
@@ -83,8 +90,8 @@ pub async fn build_contract(release: bool) -> anyhow::Result<ExitStatus> {
 }
 
 pub fn executable(release: bool, executable: &str) -> io::Result<PathBuf> {
-    let executable = target_dir()?
-        .join(if release { "release" } else { "debug" })
-        .join(executable);
-    Ok(executable)
+    let mut exe = target_dir()?;
+    exe.push(if release { "release" } else { "debug" });
+    exe.push(executable);
+    Ok(exe)
 }
