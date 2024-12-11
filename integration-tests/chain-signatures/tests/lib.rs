@@ -10,7 +10,7 @@ use integration_tests_chain_signatures::utils::{vote_join, vote_leave};
 use near_workspaces::types::NearToken;
 use near_workspaces::AccountId;
 
-use integration_tests_chain_signatures::local::NodeEnvConfig;
+use integration_tests_chain_signatures::types::{NodeEnvConfig, NodeSpawnConfig};
 
 const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(9000);
 const CURRENT_CONTRACT_FILE_PATH: &str =
@@ -19,22 +19,32 @@ const CURRENT_CONTRACT_FILE_PATH: &str =
 impl Cluster {
     pub async fn join(&mut self, existing_node: Option<NodeEnvConfig>) -> anyhow::Result<()> {
         let state = self.expect_running().await?;
-        let node_account = match existing_node {
+        let (node_account_id, spawn_cfg) = match existing_node {
             Some(node) => {
+                let account_id = node.account.id().clone();
                 tracing::info!(
-                    node_account_id = %node.account.id(),
+                    node_account_id = %account_id,
                     "adding pre-existing participant"
                 );
-                node.account
+                let spawn_cfg = NodeSpawnConfig {
+                    account: node.account,
+                    cfg: node.cfg,
+                    secrets: node.secrets,
+                    web_port: node.web_port,
+                };
+                (account_id, spawn_cfg)
             }
             None => {
                 let account = self.worker().dev_create_account().await?;
                 tracing::info!(node_account_id = %account.id(), "adding new participant");
-                account
+                (
+                    account.id().clone(),
+                    NodeSpawnConfig::new(&self.cfg, &account).await,
+                )
             }
         };
 
-        self.nodes.start_node(&self.cfg, &node_account).await?;
+        self.nodes.start_node(spawn_cfg).await?;
         // Wait for new node to add itself as a candidate
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
@@ -45,13 +55,11 @@ impl Cluster {
             .take(state.threshold)
             .cloned()
             .collect::<Vec<_>>();
-        assert!(vote_join(
-            &voting_participants,
-            self.contract().id(),
-            node_account.id(),
-        )
-        .await
-        .is_ok());
+        assert!(
+            vote_join(&voting_participants, self.contract().id(), &node_account_id)
+                .await
+                .is_ok()
+        );
 
         let new_state = self.wait().running_on_epoch(state.epoch + 1).await?;
         assert_eq!(new_state.participants.len(), state.participants.len() + 1);

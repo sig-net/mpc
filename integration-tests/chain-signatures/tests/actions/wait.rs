@@ -1,7 +1,7 @@
 use std::future::{Future, IntoFuture};
 
 use anyhow::Context;
-use backon::{ConstantBuilder, ExponentialBuilder, Retryable};
+use backon::{ConstantBuilder, Retryable};
 use mpc_contract::{ProtocolContractState, RunningContractState};
 use mpc_node::web::StateView;
 
@@ -146,18 +146,21 @@ pub async fn running_mpc(
             _ => anyhow::bail!("not running"),
         }
     };
-    let err_msg = format!(
-        "mpc did not reach {} in time",
-        if epoch.is_some() {
-            "expected epoch"
-        } else {
-            "running state"
-        }
-    );
-    is_running
-        .retry(&ExponentialBuilder::default().with_max_times(6))
-        .await
-        .with_context(|| err_msg)
+
+    let strategy = ConstantBuilder::default()
+        .with_delay(std::time::Duration::from_secs(5))
+        .with_max_times(100);
+
+    is_running.retry(&strategy).await.with_context(|| {
+        format!(
+            "mpc did not reach {} in time",
+            if epoch.is_some() {
+                "expected epoch"
+            } else {
+                "running state"
+            }
+        )
+    })
 }
 
 pub async fn require_presignatures(
@@ -241,15 +244,17 @@ pub async fn require_triples(
             anyhow::bail!("not enough nodes with triples")
         }
     };
-    let state_views = is_enough
-        .retry(&ExponentialBuilder::default().with_max_times(12))
-        .await
-        .with_context(|| {
-            format!(
-                "mpc nodes failed to generate {} triples before deadline",
-                expected
-            )
-        })?;
+
+    let strategy = ConstantBuilder::default()
+        .with_delay(std::time::Duration::from_secs(5))
+        .with_max_times(expected * 100);
+
+    let state_views = is_enough.retry(&strategy).await.with_context(|| {
+        format!(
+            "mpc nodes failed to generate {} triples before deadline",
+            expected
+        )
+    })?;
 
     Ok(state_views)
 }

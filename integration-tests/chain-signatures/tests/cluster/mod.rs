@@ -1,32 +1,28 @@
 mod spawner;
 
-use std::collections::HashSet;
-
-use integration_tests_chain_signatures::local::NodeEnvConfig;
-use mpc_contract::primitives::Participants;
-use near_workspaces::network::Sandbox;
+use crate::actions::sign::SignAction;
+use crate::actions::wait::WaitAction;
 use spawner::ClusterSpawner;
 
-use mpc_contract::{ProtocolContractState, RunningContractState};
-use mpc_node::web::StateView;
+use integration_tests_chain_signatures::containers::DockerClient;
+use integration_tests_chain_signatures::types::{NodeConfig, NodeEnvConfig};
+use integration_tests_chain_signatures::{utils, Nodes};
 
 use anyhow::Context;
-use integration_tests_chain_signatures::containers::DockerClient;
-use integration_tests_chain_signatures::{utils, NodeConfig, Nodes};
+use mpc_contract::primitives::Participants;
+use mpc_contract::{ProtocolContractState, RunningContractState};
+use mpc_node::web::StateView;
+use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use url::Url;
 
-use crate::actions::sign::SignAction;
-use crate::actions::wait::WaitAction;
+use std::collections::HashSet;
 
 pub fn spawn() -> ClusterSpawner {
     ClusterSpawner {
+        accounts: None,
         wait_for_running: false,
-        cfg: NodeConfig {
-            nodes: 3,
-            threshold: 2,
-            protocol: Default::default(),
-        },
+        cfg: NodeConfig::default(),
     }
 }
 
