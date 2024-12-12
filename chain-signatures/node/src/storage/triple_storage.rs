@@ -85,22 +85,15 @@ impl TripleStorage {
             return {v1, v2}
         "#;
 
-        let result: Result<(Option<Triple>, Option<Triple>), redis::RedisError> =
-            redis::Script::new(lua_script)
-                .key(self.triple_key())
-                .key(self.mine_key())
-                .arg(id1.to_string())
-                .arg(id2.to_string())
-                .invoke_async(&mut conn)
-                .await;
+        let result: Result<(Triple, Triple), redis::RedisError> = redis::Script::new(lua_script)
+            .key(self.triple_key())
+            .key(self.mine_key())
+            .arg(id1.to_string())
+            .arg(id2.to_string())
+            .invoke_async(&mut conn)
+            .await;
 
-        match result {
-            Ok((Some(triple1), Some(triple2))) => Ok((triple1, triple2)),
-            Ok(_) => Err(StoreError::Other(
-                "Unexpected Lua script result, must return full result or error".to_owned(),
-            )),
-            Err(err) => Err(StoreError::from(err)),
-        }
+        result.map_err(StoreError::from)
     }
 
     pub async fn take_two_mine(&self) -> StoreResult<(Triple, Triple)> {
@@ -136,21 +129,13 @@ impl TripleStorage {
             return {v1, v2}
         "#;
 
-        // TODO: can we get rid of option here?
-        let result: Result<(Option<Triple>, Option<Triple>), redis::RedisError> =
-            redis::Script::new(lua_script)
-                .key(self.mine_key())
-                .key(self.triple_key())
-                .invoke_async(&mut conn)
-                .await;
+        let result: Result<(Triple, Triple), redis::RedisError> = redis::Script::new(lua_script)
+            .key(self.mine_key())
+            .key(self.triple_key())
+            .invoke_async(&mut conn)
+            .await;
 
-        match result {
-            Ok((Some(triple1), Some(triple2))) => Ok((triple1, triple2)),
-            Ok(_) => Err(StoreError::Other(
-                "Unexpected Lua script result, must return full result or error".to_owned(),
-            )),
-            Err(err) => Err(StoreError::from(err)),
-        }
+        result.map_err(StoreError::from)
     }
 
     pub async fn len_generated(&self) -> StoreResult<usize> {
