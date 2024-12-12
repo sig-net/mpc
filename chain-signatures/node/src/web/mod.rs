@@ -137,10 +137,9 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<State
 
     match &*protocol_state {
         NodeState::Running(state) => {
-            let triple_manager_read = state.triple_manager.read().await;
-            let triple_potential_count = triple_manager_read.len_potential().await;
-            let triple_count = triple_manager_read.len_generated().await;
-            let triple_mine_count = triple_manager_read.len_mine().await;
+            let triple_potential_count = state.triple_manager.len_potential().await;
+            let triple_count = state.triple_manager.len_generated().await;
+            let triple_mine_count = state.triple_manager.len_mine().await;
             let presignature_read = state.presignature_manager.read().await;
             let presignature_count = presignature_read.len_generated().await;
             let presignature_mine_count = presignature_read.len_mine().await;

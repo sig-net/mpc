@@ -22,7 +22,6 @@ use mpc_node::util::NearPublicKeyExt as _;
 use near_account_id::AccountId;
 use test_log::test;
 use url::Url;
-
 pub mod nightly;
 
 #[test(tokio::test)]
@@ -169,7 +168,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let triple_storage =
         storage::triple_storage::init(&redis_pool, &AccountId::from_str("test.near").unwrap());
 
-    let mut triple_manager = TripleManager::new(
+    let triple_manager = TripleManager::new(
         Participant::from(0),
         5,
         123,

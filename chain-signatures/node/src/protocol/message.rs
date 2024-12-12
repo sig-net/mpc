@@ -245,29 +245,29 @@ impl MessageHandler for RunningState {
     ) -> Result<(), MessageHandleError> {
         let protocol_cfg = &cfg.protocol;
         let participants = &mesh_state.active_participants;
-        let mut triple_manager = self.triple_manager.write().await;
 
         // remove the triple_id that has already failed or taken from the triple_bins
         // and refresh the timestamp of failed and taken
         let triple_messages = queue.triple_bins.entry(self.epoch).or_default();
-        triple_messages.retain(|id, queue| {
-            if queue.is_empty()
-                || queue.iter().any(|msg| {
-                    util::is_elapsed_longer_than_timeout(
-                        msg.timestamp,
-                        protocol_cfg.triple.generation_timeout,
-                    )
-                })
-            {
-                return false;
-            }
+        // triple_messages.retain(|id, queue| {
+        //     if queue.is_empty()
+        //         || queue.iter().any(|msg| {
+        //             util::is_elapsed_longer_than_timeout(
+        //                 msg.timestamp,
+        //                 protocol_cfg.triple.generation_timeout,
+        //             )
+        //         })
+        //     {
+        //         return false;
+        //     }
 
-            // if triple id is in GC, remove these messages because the triple is currently
-            // being GC'ed, where this particular triple has previously failed or been utilized.
-            !triple_manager.refresh_gc(id)
-        });
+        //     // if triple id is in GC, remove these messages because the triple is currently
+        //     // being GC'ed, where this particular triple has previously failed or been utilized.
+        //     !triple_manager.refresh_gc(id)
+        // });
         for (id, queue) in triple_messages {
-            let protocol = match triple_manager
+            let protocol = match self
+                .triple_manager
                 .get_or_start_generation(*id, participants, protocol_cfg)
                 .await
             {
@@ -282,7 +282,7 @@ impl MessageHandler for RunningState {
 
             if let Some(protocol) = protocol {
                 while let Some(message) = queue.pop_front() {
-                    protocol.message(message.from, message.data);
+                    protocol.message(message.from, message.data).await;
                 }
             }
         }
@@ -328,7 +328,7 @@ impl MessageHandler for RunningState {
                     *id,
                     *triple0,
                     *triple1,
-                    &mut triple_manager,
+                    &self.triple_manager,
                     &self.public_key,
                     &self.private_share,
                     protocol_cfg,
@@ -489,7 +489,7 @@ impl MessageHandler for RunningState {
                 protocol.message(message.from, message.data);
             }
         }
-        triple_manager.garbage_collect(protocol_cfg);
+        self.triple_manager.garbage_collect(protocol_cfg).await;
         presignature_manager.garbage_collect(protocol_cfg);
         signature_manager.garbage_collect(protocol_cfg);
         Ok(())

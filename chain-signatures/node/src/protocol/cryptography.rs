@@ -361,8 +361,7 @@ impl CryptographicProtocol for RunningState {
         cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
-        let protocol_cfg = &cfg.protocol;
-        let active = &mesh_state.active_participants;
+        let active = mesh_state.active_participants.clone();
         if active.len() < self.threshold {
             tracing::warn!(
                 active = ?active.keys_vec(),
@@ -371,117 +370,176 @@ impl CryptographicProtocol for RunningState {
             return Ok(NodeState::Running(self));
         }
 
-        let mut messages = self.messages.write().await;
-        let mut triple_manager = self.triple_manager.write().await;
-        let my_account_id = triple_manager.my_account_id.clone();
-        crate::metrics::MESSAGE_QUEUE_SIZE
-            .with_label_values(&[my_account_id.as_str()])
-            .set(messages.len() as i64);
-        if let Err(err) = triple_manager.stockpile(active, protocol_cfg).await {
-            tracing::warn!(?err, "running: failed to stockpile triples");
-        }
-        for (p, msg) in triple_manager.poke(protocol_cfg).await {
-            let info = self.fetch_participant(&p)?;
-            messages.push(info.clone(), MpcMessage::Triple(msg));
-        }
+        let participant_map = active
+            .iter()
+            .map(|(p, info)| (p.clone(), info.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
 
-        crate::metrics::NUM_TRIPLES_MINE
-            .with_label_values(&[my_account_id.as_str()])
-            .set(triple_manager.len_mine().await as i64);
-        crate::metrics::NUM_TRIPLES_TOTAL
-            .with_label_values(&[my_account_id.as_str()])
-            .set(triple_manager.len_generated().await as i64);
-        crate::metrics::NUM_TRIPLE_GENERATORS_INTRODUCED
-            .with_label_values(&[my_account_id.as_str()])
-            .set(triple_manager.introduced.len() as i64);
-        crate::metrics::NUM_TRIPLE_GENERATORS_TOTAL
-            .with_label_values(&[my_account_id.as_str()])
-            .set(triple_manager.ongoing.len() as i64);
+        let my_account_id = self.triple_manager.my_account_id.clone();
+        let protocol_cfg = cfg.protocol.clone();
+        let messages = self.messages.clone();
+        let triple_par = participant_map.clone();
+        let triple_manager = self.triple_manager.clone();
+        let triple_task = tokio::task::spawn(async move {
+            let participant_map = triple_par;
+            let my_account_id = triple_manager.my_account_id.clone();
+            // crate::metrics::MESSAGE_QUEUE_SIZE
+            //     .with_label_values(&[my_account_id.as_str()])
+            //     .set(messages.len() as i64);
+            if let Err(err) = triple_manager.stockpile(&active, &protocol_cfg).await {
+                tracing::warn!(?err, "running: failed to stockpile triples");
+            }
+            let mut messages = messages.write().await;
+            for (p, msg) in triple_manager.poke(&protocol_cfg).await {
+                messages.push(
+                    participant_map.get(&p).unwrap().clone(),
+                    MpcMessage::Triple(msg),
+                );
+            }
+            drop(messages);
 
-        let mut presignature_manager = self.presignature_manager.write().await;
-        if let Err(err) = presignature_manager
-            .stockpile(
-                active,
-                &self.public_key,
-                &self.private_share,
-                &mut triple_manager,
-                protocol_cfg,
-            )
-            .await
-        {
-            tracing::warn!(?err, "running: failed to stockpile presignatures");
-        }
-        drop(triple_manager);
-        for (p, msg) in presignature_manager.poke().await {
-            let info = self.fetch_participant(&p)?;
-            messages.push(info.clone(), MpcMessage::Presignature(msg));
-        }
+            crate::metrics::NUM_TRIPLES_MINE
+                .with_label_values(&[my_account_id.as_str()])
+                .set(triple_manager.len_mine().await as i64);
+            crate::metrics::NUM_TRIPLES_TOTAL
+                .with_label_values(&[my_account_id.as_str()])
+                .set(triple_manager.len_generated().await as i64);
+            // crate::metrics::NUM_TRIPLE_GENERATORS_INTRODUCED
+            //     .with_label_values(&[my_account_id.as_str()])
+            //     .set(triple_manager.introduced.len() as i64);
+            // crate::metrics::NUM_TRIPLE_GENERATORS_TOTAL
+            //     .with_label_values(&[my_account_id.as_str()])
+            //     .set(triple_manager.ongoing.len() as i64);
+        });
 
-        crate::metrics::NUM_PRESIGNATURES_MINE
-            .with_label_values(&[my_account_id.as_str()])
-            .set(presignature_manager.len_mine().await as i64);
-        crate::metrics::NUM_PRESIGNATURES_TOTAL
-            .with_label_values(&[my_account_id.as_str()])
-            .set(presignature_manager.len_generated().await as i64);
-        crate::metrics::NUM_PRESIGNATURE_GENERATORS_TOTAL
-            .with_label_values(&[my_account_id.as_str()])
-            .set(
-                presignature_manager.len_potential().await as i64
-                    - presignature_manager.len_generated().await as i64,
-            );
+        let messages = self.messages.clone();
+        let triple_manager = self.triple_manager.clone();
+        let presignature_manager = self.presignature_manager.clone();
+        let presig_par = participant_map.clone();
+        let active = mesh_state.active_participants.clone();
+        let protocol_cfg = cfg.protocol.clone();
+        let presig_task = tokio::task::spawn(async move {
+            let participant_map = presig_par;
+            let mut presignature_manager = presignature_manager.write().await;
+            if let Err(err) = presignature_manager
+                .stockpile(
+                    &active,
+                    &self.public_key,
+                    &self.private_share,
+                    &triple_manager,
+                    &protocol_cfg,
+                )
+                .await
+            {
+                tracing::warn!(?err, "running: failed to stockpile presignatures");
+            }
+            let my_account_id = triple_manager.my_account_id.clone();
+            drop(triple_manager);
+
+            let mut messages = messages.write().await;
+            for (p, msg) in presignature_manager.poke().await {
+                messages.push(
+                    participant_map.get(&p).unwrap().clone(),
+                    MpcMessage::Presignature(msg),
+                );
+            }
+            drop(messages);
+
+            crate::metrics::NUM_PRESIGNATURES_MINE
+                .with_label_values(&[my_account_id.as_str()])
+                .set(presignature_manager.len_mine().await as i64);
+            crate::metrics::NUM_PRESIGNATURES_TOTAL
+                .with_label_values(&[my_account_id.as_str()])
+                .set(presignature_manager.len_generated().await as i64);
+            crate::metrics::NUM_PRESIGNATURE_GENERATORS_TOTAL
+                .with_label_values(&[my_account_id.as_str()])
+                .set(
+                    presignature_manager.len_potential().await as i64
+                        - presignature_manager.len_generated().await as i64,
+                );
+        });
 
         // NOTE: signatures should only use stable and not active participants. The difference here is that
         // stable participants utilizes more than the online status of a node, such as whether or not their
         // block height is up to date, such that they too can process signature requests. If they cannot
         // then they are considered unstable and should not be a part of signature generation this round.
-        let stable = mesh_state.stable_participants;
+        let stable = mesh_state.stable_participants.clone();
         tracing::debug!(?stable, "stable participants");
 
-        let mut sign_queue = self.sign_queue.write().await;
-        crate::metrics::SIGN_QUEUE_SIZE
-            .with_label_values(&[my_account_id.as_str()])
-            .set(sign_queue.len() as i64);
+        // let mut sign_queue = self.sign_queue.write().await;
+        // crate::metrics::SIGN_QUEUE_SIZE
+        //     .with_label_values(&[my_account_id.as_str()])
+        //     .set(sign_queue.len() as i64);
+        let presignature_manager = self.presignature_manager.clone();
+        let signature_manager = self.signature_manager.clone();
+        let messages = self.messages.clone();
+        let protocol_cfg = cfg.protocol.clone();
+        let sign_queue = self.sign_queue.clone();
         let me = ctx.me().await;
-        sign_queue.organize(self.threshold, &stable, me, &my_account_id);
+        let rpc_client = ctx.rpc_client().clone();
+        let signer = ctx.signer().clone();
+        let mpc_contract_id = ctx.mpc_contract_id().clone();
+        let sig_task = tokio::task::spawn(async move {
+            let participant_map = participant_map.clone();
+            tracing::debug!(?stable, "stable participants");
 
-        let my_requests = sign_queue.my_requests(me);
-        crate::metrics::SIGN_QUEUE_MINE_SIZE
-            .with_label_values(&[my_account_id.as_str()])
-            .set(my_requests.len() as i64);
+            let mut sign_queue = sign_queue.write().await;
+            // crate::metrics::SIGN_QUEUE_SIZE
+            //     .with_label_values(&[my_account_id.as_str()])
+            //     .set(sign_queue.len() as i64);
+            sign_queue.organize(self.threshold, &stable, me, &my_account_id);
 
-        let mut signature_manager = self.signature_manager.write().await;
-        signature_manager
-            .handle_requests(
-                self.threshold,
-                &stable,
-                my_requests,
-                &mut presignature_manager,
-                protocol_cfg,
-            )
-            .await;
-        drop(sign_queue);
-        drop(presignature_manager);
+            let my_requests = sign_queue.my_requests(me);
+            // crate::metrics::SIGN_QUEUE_MINE_SIZE
+            //     .with_label_values(&[my_account_id.as_str()])
+            //     .set(my_requests.len() as i64);
 
-        for (p, msg) in signature_manager.poke() {
-            let info = self.fetch_participant(&p)?;
-            messages.push(info.clone(), MpcMessage::Signature(msg));
+            let mut presignature_manager = presignature_manager.write().await;
+            let mut signature_manager = signature_manager.write().await;
+            signature_manager
+                .handle_requests(
+                    self.threshold,
+                    &stable,
+                    my_requests,
+                    &mut presignature_manager,
+                    &protocol_cfg,
+                )
+                .await;
+            drop(presignature_manager);
+
+            let mut messages = messages.write().await;
+            for (p, msg) in signature_manager.poke() {
+                messages.push(
+                    participant_map.get(&p).unwrap().clone(),
+                    MpcMessage::Signature(msg),
+                );
+            }
+            drop(messages);
+            signature_manager
+                .publish(&rpc_client, &signer, &mpc_contract_id)
+                .await;
+        });
+
+        match tokio::try_join!(triple_task, presig_task, sig_task) {
+            Ok(_result) => (),
+            Err(err) => {
+                tracing::warn!(?err, "running: failed to progress cryptographic protocol");
+            }
         }
-        signature_manager
-            .publish(ctx.rpc_client(), ctx.signer(), ctx.mpc_contract_id())
-            .await;
-        drop(signature_manager);
+
+        let mut messages = self.messages.write().await;
         let failures = messages
             .send_encrypted(
-                ctx.me().await,
+                me,
                 &cfg.local.network.sign_sk,
                 ctx.http_client(),
-                active,
-                protocol_cfg,
+                &mesh_state.active_participants,
+                &cfg.protocol,
             )
             .await;
         if !failures.is_empty() {
             tracing::warn!(
-                active = ?active.keys_vec(),
+                active = ?mesh_state.active_participants.keys_vec(),
                 "running: failed to send encrypted message; {failures:?}"
             );
         }

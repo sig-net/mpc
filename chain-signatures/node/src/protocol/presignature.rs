@@ -407,7 +407,7 @@ impl PresignatureManager {
         active: &Participants,
         pk: &PublicKey,
         sk_share: &SecretKeyShare,
-        triple_manager: &mut TripleManager,
+        triple_manager: &TripleManager,
         cfg: &ProtocolConfig,
     ) -> Result<(), InitializationError> {
         let not_enough_presignatures = {
@@ -471,7 +471,7 @@ impl PresignatureManager {
         id: PresignatureId,
         triple0: TripleId,
         triple1: TripleId,
-        triple_manager: &mut TripleManager,
+        triple_manager: &TripleManager,
         public_key: &PublicKey,
         private_share: &SecretKeyShare,
         cfg: &ProtocolConfig,
