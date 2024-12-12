@@ -229,7 +229,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
 
     let triple_id_1: u64 = 1;
     let triple_1 = dummy_triple(triple_id_1);
-    let triple_id_2: u64 = 2;  
+    let triple_id_2: u64 = 2;
     let triple_2 = dummy_triple(triple_id_2);
 
     // Check that the storage is empty at the start

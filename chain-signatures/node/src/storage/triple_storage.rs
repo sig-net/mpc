@@ -107,11 +107,11 @@ impl TripleStorage {
         let mut conn = self.connect().await?;
 
         let lua_script = r#"
-            -- Check the number of elements in the set
+            -- Check the number of triples in the set
             local count = redis.call("SCARD", KEYS[1])
     
             if count < 2 then
-                return {err = "Mine triple stockpile does not have enough elements"}
+                return {err = "Mine triple stockpile does not have enough triples"}
             end
     
             -- Pop two IDs atomically
@@ -121,12 +121,12 @@ impl TripleStorage {
             -- Retrieve the corresponding triples
             local v1 = redis.call("HGET", KEYS[2], id1)
             if not v1 then
-                return {err = "Triple " .. id1 .. " is missing"}
+                return {err = "Unexpected behavior. Triple " .. id1 .. " is missing"}
             end
     
             local v2 = redis.call("HGET", KEYS[2], id2)
             if not v2 then
-                return {err = "Triple " .. id2 .. " is missing"}
+                return {err = "Unexpected behavior. Triple " .. id2 .. " is missing"}
             end
     
             -- Delete the triples from the hash map
