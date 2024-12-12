@@ -179,23 +179,23 @@ impl TripleManager {
         id0: &TripleId,
         id1: &TripleId,
     ) -> Result<(Triple, Triple), GenerationError> {
-        if self.generators.contains_key(&id0) {
+        if self.generators.contains_key(id0) {
             tracing::warn!(id0, "triple is generating");
             return Err(GenerationError::TripleIsGenerating(*id0));
-        } else if self.gc.contains_key(&id0) {
+        } else if self.gc.contains_key(id0) {
             tracing::warn!(id0, "triple is garbage collected");
             return Err(GenerationError::TripleIsGarbageCollected(*id0));
-        } else if self.generators.contains_key(&id1) {
+        } else if self.generators.contains_key(id1) {
             tracing::warn!(id1, "triple is generating");
             return Err(GenerationError::TripleIsGenerating(*id1));
-        } else if self.gc.contains_key(&id1) {
+        } else if self.gc.contains_key(id1) {
             tracing::warn!(id1, "triple is garbage collected");
             return Err(GenerationError::TripleIsGarbageCollected(*id1));
         }
 
         let (triple_0, triple_1) =
             self.triple_storage
-                .take_two(&id0, &id1)
+                .take_two(id0, id1)
                 .await
                 .map_err(|store_error| {
                     tracing::warn!(?store_error, "failed to take two triples");
