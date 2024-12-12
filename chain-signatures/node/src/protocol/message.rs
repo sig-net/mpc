@@ -343,7 +343,7 @@ impl MessageHandler for RunningState {
                 Err(
                     err @ (GenerationError::AlreadyGenerated
                     | GenerationError::TripleIsGarbageCollected(_)
-                    | GenerationError::TripleIsMissing(_)),
+                    | GenerationError::TripleStoreError(_)),
                 ) => {
                     // This triple has already been generated or removed from the triple manager, so we will have to bin
                     // the entirety of the messages we received for this presignature id, and have the other nodes timeout
