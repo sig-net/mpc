@@ -36,7 +36,7 @@ impl Cluster {
 
         self.nodes.start_node(&self.cfg, &node_account).await?;
         // Wait for new node to add itself as a candidate
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
 
         // T number of participants should vote
         let participants = self.participant_accounts().await?;

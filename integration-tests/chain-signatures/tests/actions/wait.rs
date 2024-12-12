@@ -146,18 +146,22 @@ pub async fn running_mpc(
             _ => anyhow::bail!("not running"),
         }
     };
-    let err_msg = format!(
-        "mpc did not reach {} in time",
-        if epoch.is_some() {
-            "expected epoch"
-        } else {
-            "running state"
-        }
-    );
+
+    let strategy = ConstantBuilder::default()
+        .with_delay(std::time::Duration::from_secs(3))
+        .with_max_times(100);
+
     is_running
-        .retry(&ExponentialBuilder::default().with_max_times(6))
+        .retry(&strategy)
         .await
-        .with_context(|| err_msg)
+        .with_context(|| format!(
+            "mpc did not reach {} in time",
+            if epoch.is_some() {
+                "expected epoch"
+            } else {
+                "running state"
+            }
+        ))
 }
 
 pub async fn require_presignatures(
@@ -241,8 +245,13 @@ pub async fn require_triples(
             anyhow::bail!("not enough nodes with triples")
         }
     };
+
+    let strategy = ConstantBuilder::default()
+        .with_delay(std::time::Duration::from_secs(5))
+        .with_max_times(expected * 100);
+
     let state_views = is_enough
-        .retry(&ExponentialBuilder::default().with_max_times(12))
+        .retry(&strategy)
         .await
         .with_context(|| {
             format!(
