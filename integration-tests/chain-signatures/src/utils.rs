@@ -2,7 +2,9 @@ use anyhow::Context;
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::{Account, AccountId};
-use std::fs;
+
+use std::path::Path;
+use std::{fs, io};
 
 pub async fn vote_join(
     accounts: &[&Account],
@@ -115,6 +117,20 @@ pub fn clear_local_sk_shares(sk_local_path: Option<String>) -> anyhow::Result<()
                 }
                 Err(e) => eprintln!("{:?}", e),
             }
+        }
+    }
+    Ok(())
+}
+
+pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
+    fs::create_dir_all(&dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
         }
     }
     Ok(())

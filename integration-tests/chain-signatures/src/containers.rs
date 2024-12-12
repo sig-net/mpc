@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::utils;
 use crate::types::{NodeConfig, NodeEnvConfig, NodeSpawnConfig, Secrets};
@@ -15,7 +15,7 @@ use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
 use once_cell::sync::Lazy;
 use serde_json::json;
-use testcontainers::core::{ExecCommand, IntoContainerPort, Mount, WaitFor};
+use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, Mount, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, ContainerRequest, GenericImage, ImageExt};
 use tokio::io::AsyncWriteExt;
@@ -602,18 +602,21 @@ pub enum RedisLoad {
     Full,
     Half,
     Empty,
+    Persist,
 }
 
 pub struct Redis {
     pub container: Container,
     pub internal_address: String,
     pub external_address: String,
+    pub data_path: Option<PathBuf>,
 }
 
 impl Redis {
-    const DEFAULT_REDIS_PORT: u16 = 6379;
-    const DEFAULT_REDIS_DATA_MOUNT: &str = "/data";
-    const DEFAULT_REDIS_ARGS: [&str; 15] = [
+    const DEFAULT_PORT: u16 = 6379;
+    const DEFAULT_DATA_MOUNT: &str = "/data";
+    const DEFAULT_DATA_PERSISTED: &str = "redis-100t-100p";
+    const DEFAULT_ARGS: [&str; 15] = [
         "--tcp-backlog",
         "511",
         "--timeout",
@@ -633,33 +636,78 @@ impl Redis {
 
     fn mount_persistence() -> Mount {
         // create named volume redis-data for db to stored at on host.
-        Mount::volume_mount("redis-data", Self::DEFAULT_REDIS_DATA_MOUNT)
+        Mount::volume_mount("redis-data", Self::DEFAULT_DATA_MOUNT)
     }
 
     fn persist(container: ContainerRequest<GenericImage>) -> ContainerRequest<GenericImage> {
         container
             .with_mount(Self::mount_persistence())
-            .with_cmd(Self::DEFAULT_REDIS_ARGS)
+            .with_cmd(Self::DEFAULT_ARGS)
     }
 
-    pub async fn run(docker_client: &DockerClient, network: &str, load: RedisLoad) -> Self {
+    fn persisted_path() -> PathBuf {
+        let path = mpc_forge::target_dir()
+            .expect("unable to find target_dir for storing redisdata")
+            .join("..")
+            .join("integration-tests")
+            .join("resources")
+            .join(Self::DEFAULT_DATA_PERSISTED);
+
+        std::fs::canonicalize(path).unwrap()
+    }
+
+    fn copy_persisted(test_env: &Path) -> PathBuf {
+        let from = Self::persisted_path();
+        let into = test_env.join("redis");
+
+        std::fs::create_dir_all(&into).unwrap();
+        crate::utils::copy_dir_all(&from, &into).unwrap();
+        into
+    }
+
+    pub async fn run(
+        docker_client: &DockerClient,
+        network: &str,
+        load: RedisLoad,
+        test_env: impl AsRef<Path>,
+    ) -> Self {
         tracing::info!("Running Redis container...");
-        let container = GenericImage::new("redis", "7.0.15")
-            .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
+        let mut container = GenericImage::new("redis", "7.0.15")
+            .with_exposed_port(Self::DEFAULT_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
             .with_network(network);
 
-        let container = Redis::persist(container);
+        let data_path = match load {
+            RedisLoad::Empty => None,
+            // Note: RedisLoad::Half uses the same codepath here but the nodes will be reconfigured
+            // to have double the listed min triple and presignatures.
+            RedisLoad::Full | RedisLoad::Half => {
+                let data_path = Self::copy_persisted(test_env.as_ref());
+                container = container
+                    .with_cmd(Self::DEFAULT_ARGS)
+                    .with_mount(Mount::bind_mount(
+                        data_path.to_string_lossy().to_string(),
+                        Self::DEFAULT_DATA_MOUNT,
+                    ));
+                Some(data_path)
+            }
+            RedisLoad::Persist => {
+                container = Self::persist(container);
+                None
+            }
+        };
+
         let container = container.start().await.unwrap();
+
         let network_ip = docker_client
             .get_network_ip_address(&container, network)
             .await
             .unwrap();
 
-        let external_address = format!("redis://{}:{}", network_ip, Self::DEFAULT_REDIS_PORT);
+        let external_address = format!("redis://{}:{}", network_ip, Self::DEFAULT_PORT);
 
         let host_port = container
-            .get_host_port_ipv4(Self::DEFAULT_REDIS_PORT)
+            .get_host_port_ipv4(Self::DEFAULT_PORT)
             .await
             .unwrap();
         let internal_address = format!("redis://127.0.0.1:{host_port}");
@@ -674,6 +722,33 @@ impl Redis {
             container,
             internal_address,
             external_address,
+            data_path,
         }
     }
+}
+
+impl Drop for Redis {
+    fn drop(&mut self) {
+        // if let Some(data_path) = &self.data_path {
+        //     std::fs::remove_dir_all(data_path).unwrap();
+        // }
+    }
+}
+
+#[test]
+fn test_() {
+    let cmd = format!("bash -c 'redis-cli KEYS \\*last_block | xargs redis-cli DEL'");
+    let cmd = cmd.split_whitespace().collect::<Vec<_>>();
+    println!("{:#?}", cmd);
+}
+
+#[tokio::test]
+async fn tset_redis() {
+
+    // let _ = tracing_subscriber::fmt::try_init();
+    // let test_env = mpc_forge::new_test_env_dir().unwrap();
+    // let docker_client = DockerClient::default();
+    // let network = "test-network";
+    // docker_client.create_network(network).await.unwrap();
+    // let _redis = Redis::run(&docker_client, network, RedisLoad::Full, &test_env).await;
 }

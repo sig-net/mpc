@@ -3737,6 +3737,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-process",
+ "chrono",
 ]
 
 [[package]]

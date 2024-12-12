@@ -9,9 +9,11 @@ use crate::containers::{DockerClient, LocalStack};
 use crate::types::{NodeConfig, NodeEnvConfig, NodeSpawnConfig};
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use anyhow::Context as _;
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use containers::RedisLoad;
 use deadpool_redis::Pool;
 use futures::StreamExt;
 use mpc_contract::primitives::CandidateInfo;
@@ -21,6 +23,7 @@ use mpc_node::mesh;
 use mpc_node::storage;
 use mpc_node::storage::triple_storage::TripleStorage;
 use near_crypto::KeyFile;
+use near_sdk::NearToken;
 use near_workspaces::network::{Sandbox, ValidatorKey};
 use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
@@ -169,6 +172,7 @@ pub struct Context {
     pub mesh_options: mesh::Options,
     pub message_options: http_client::Options,
     pub candidates: HashMap<AccountId, CandidateInfo>,
+    pub test_env: PathBuf,
 }
 
 pub async fn setup(
@@ -187,6 +191,19 @@ pub async fn setup(
     } = LakeIndexer::spawn(docker_client, docker_network).await?;
 
     let accounts = if let Some(accounts) = accounts {
+        accounts
+    } else if matches!(cfg.load, RedisLoad::Full | RedisLoad::Empty) {
+        let root = worker.root_account().unwrap();
+        let mut accounts = Vec::with_capacity(cfg.nodes);
+        for i in 0..cfg.nodes {
+            let account = root
+                .create_subaccount(&format!("node{i}"))
+                .initial_balance(NearToken::from_near(100))
+                .transact()
+                .await?
+                .into_result()?;
+            accounts.push(account);
+        }
         accounts
     } else {
         futures::future::join_all((0..cfg.nodes).map(|_| worker.dev_create_account()))
@@ -242,10 +259,17 @@ pub async fn setup(
         .into_result()?;
     tracing::info!("initialized mpc contract");
 
-    let redis = containers::Redis::run(docker_client, docker_network, cfg.load).await;
+    let test_env = mpc_forge::new_test_env_dir()?;
+    let redis = containers::Redis::run(docker_client, docker_network, cfg.load, &test_env).await;
     let redis_url = redis.internal_address.clone();
 
-    let sk_share_local_path = "multichain-integration-secret-manager".to_string();
+    // let sk_share_local_path = "multichain-integration-secret-manager".to_string();
+    let sk_share_local_path = test_env.join("secrets");
+    std::fs::create_dir_all(&sk_share_local_path)?;
+    let sk_share_local_path = sk_share_local_path
+        .join("persistent-node-data")
+        .to_string_lossy()
+        .to_string();
     let storage_options = mpc_node::storage::Options {
         env: "local-test".to_string(),
         gcp_project_id: "multichain-integration".to_string(),
@@ -276,6 +300,7 @@ pub async fn setup(
             mesh_options,
             message_options,
             candidates,
+            test_env,
         },
     ))
 }
