@@ -470,54 +470,57 @@ impl CryptographicProtocol for RunningState {
         // crate::metrics::SIGN_QUEUE_SIZE
         //     .with_label_values(&[my_account_id.as_str()])
         //     .set(sign_queue.len() as i64);
-        let presignature_manager = self.presignature_manager.clone();
-        let signature_manager = self.signature_manager.clone();
-        let messages = self.messages.clone();
-        let protocol_cfg = cfg.protocol.clone();
-        let sign_queue = self.sign_queue.clone();
         let me = ctx.me().await;
-        let rpc_client = ctx.rpc_client().clone();
-        let signer = ctx.signer().clone();
-        let mpc_contract_id = ctx.mpc_contract_id().clone();
-        let sig_task = tokio::task::spawn(async move {
+        let sig_task = tokio::task::spawn({
+            let presignature_manager = self.presignature_manager.clone();
+            let signature_manager = self.signature_manager.clone();
+            let messages = self.messages.clone();
+            let protocol_cfg = cfg.protocol.clone();
+            let sign_queue = self.sign_queue.clone();
+            let rpc_client = ctx.rpc_client().clone();
+            let signer = ctx.signer().clone();
+            let mpc_contract_id = ctx.mpc_contract_id().clone();
             let participant_map = participant_map.clone();
-            tracing::debug!(?stable, "stable participants");
 
-            let mut sign_queue = sign_queue.write().await;
-            // crate::metrics::SIGN_QUEUE_SIZE
-            //     .with_label_values(&[my_account_id.as_str()])
-            //     .set(sign_queue.len() as i64);
-            sign_queue.organize(self.threshold, &stable, me, &my_account_id);
+            tokio::task::unconstrained(async move {
+                tracing::debug!(?stable, "stable participants");
 
-            let my_requests = sign_queue.my_requests(me);
-            // crate::metrics::SIGN_QUEUE_MINE_SIZE
-            //     .with_label_values(&[my_account_id.as_str()])
-            //     .set(my_requests.len() as i64);
+                let mut sign_queue = sign_queue.write().await;
+                // crate::metrics::SIGN_QUEUE_SIZE
+                //     .with_label_values(&[my_account_id.as_str()])
+                //     .set(sign_queue.len() as i64);
+                sign_queue.organize(self.threshold, &stable, me, &my_account_id);
 
-            let mut presignature_manager = presignature_manager.write().await;
-            let mut signature_manager = signature_manager.write().await;
-            signature_manager
-                .handle_requests(
-                    self.threshold,
-                    &stable,
-                    my_requests,
-                    &mut presignature_manager,
-                    &protocol_cfg,
-                )
-                .await;
-            drop(presignature_manager);
+                let my_requests = sign_queue.my_requests(me);
+                // crate::metrics::SIGN_QUEUE_MINE_SIZE
+                //     .with_label_values(&[my_account_id.as_str()])
+                //     .set(my_requests.len() as i64);
 
-            let mut messages = messages.write().await;
-            for (p, msg) in signature_manager.poke() {
-                messages.push(
-                    participant_map.get(&p).unwrap().clone(),
-                    MpcMessage::Signature(msg),
-                );
-            }
-            drop(messages);
-            signature_manager
-                .publish(&rpc_client, &signer, &mpc_contract_id)
-                .await;
+                let mut presignature_manager = presignature_manager.write().await;
+                let mut signature_manager = signature_manager.write().await;
+                signature_manager
+                    .handle_requests(
+                        self.threshold,
+                        &stable,
+                        my_requests,
+                        &mut presignature_manager,
+                        &protocol_cfg,
+                    )
+                    .await;
+                drop(presignature_manager);
+
+                let mut messages = messages.write().await;
+                for (p, msg) in signature_manager.poke() {
+                    messages.push(
+                        participant_map.get(&p).unwrap().clone(),
+                        MpcMessage::Signature(msg),
+                    );
+                }
+                drop(messages);
+                signature_manager
+                    .publish(&rpc_client, &signer, &mpc_contract_id)
+                    .await;
+            })
         });
 
         match tokio::try_join!(triple_task, presig_task, sig_task) {
