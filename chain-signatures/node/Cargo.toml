@@ -10,9 +10,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 async-trait = "0.1"
-aws-config = "1.4"
-aws-sdk-s3 = "1.29"
-aws-types = "1.2"
+aws-config = "1.5.10"
+aws-sdk-s3 = "1.65.0"
+aws-types = "1.3.3"
 axum = { version = "0.6.19" }
 axum-extra = "0.7"
 borsh = "1.5.3"
@@ -21,8 +21,8 @@ cait-sith = { git = "https://github.com/LIT-Protocol/cait-sith.git", features = 
 ], rev = "8ad2316" }
 clap = { version = "4.2", features = ["derive", "env"] }
 chrono = "0.4.24"
-google-datastore1 = "=5.0.4"
-google-secretmanager1 = "5"
+google-datastore1 = "6.0.0+20240617"
+google-secretmanager1 = "6.0.0+20240621"
 hex = "0.4.3"
 hkdf = "0.12.4"
 highway = "1.1.0"
@@ -43,7 +43,7 @@ tokio-retry = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-stackdriver = "0.10.0"
-url = { version = "2.4.0", features = ["serde"] }
+url = { version = "2.5.4", features = ["serde"] }
 
 near-account-id = "1.0.0"
 near-crypto = "0.26.0"
