@@ -233,8 +233,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let triple_2 = dummy_triple(triple_id_2);
 
     // Check that the storage is empty at the start
-    assert!(!triple_manager.contains(&triple_id_1).await);
-    assert!(!triple_manager.contains_mine(&triple_id_1).await);
+    assert!(!triple_manager.contains(triple_id_1).await);
+    assert!(!triple_manager.contains_mine(triple_id_1).await);
     assert_eq!(triple_manager.len_generated().await, 0);
     assert_eq!(triple_manager.len_mine().await, 0);
     assert!(triple_manager.is_empty().await);
@@ -244,23 +244,23 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     triple_manager.insert(triple_2, false).await;
 
     // Check that the storage contains the foreign triple
-    assert!(triple_manager.contains(&triple_id_1).await);
-    assert!(triple_manager.contains(&triple_id_2).await);
-    assert!(!triple_manager.contains_mine(&triple_id_1).await);
-    assert!(!triple_manager.contains_mine(&triple_id_2).await);
+    assert!(triple_manager.contains(triple_id_1).await);
+    assert!(triple_manager.contains(triple_id_2).await);
+    assert!(!triple_manager.contains_mine(triple_id_1).await);
+    assert!(!triple_manager.contains_mine(triple_id_2).await);
     assert_eq!(triple_manager.len_generated().await, 2);
     assert_eq!(triple_manager.len_mine().await, 0);
     assert_eq!(triple_manager.len_potential().await, 2);
 
     // Take triple and check that it is removed from the storage
     triple_manager
-        .take_two(&triple_id_1, &triple_id_2)
+        .take_two(triple_id_1, triple_id_2)
         .await
         .unwrap();
-    assert!(!triple_manager.contains(&triple_id_1).await);
-    assert!(!triple_manager.contains(&triple_id_2).await);
-    assert!(!triple_manager.contains_mine(&triple_id_1).await);
-    assert!(!triple_manager.contains_mine(&triple_id_2).await);
+    assert!(!triple_manager.contains(triple_id_1).await);
+    assert!(!triple_manager.contains(triple_id_2).await);
+    assert!(!triple_manager.contains_mine(triple_id_1).await);
+    assert!(!triple_manager.contains_mine(triple_id_2).await);
     assert_eq!(triple_manager.len_generated().await, 0);
     assert_eq!(triple_manager.len_mine().await, 0);
     assert_eq!(triple_manager.len_potential().await, 0);
@@ -273,20 +273,20 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     // Add mine triple and check that it is in the storage
     triple_manager.insert(mine_triple_1, true).await;
     triple_manager.insert(mine_triple_2, true).await;
-    assert!(triple_manager.contains(&mine_id_1).await);
-    assert!(triple_manager.contains(&mine_id_2).await);
-    assert!(triple_manager.contains_mine(&mine_id_1).await);
-    assert!(triple_manager.contains_mine(&mine_id_2).await);
+    assert!(triple_manager.contains(mine_id_1).await);
+    assert!(triple_manager.contains(mine_id_2).await);
+    assert!(triple_manager.contains_mine(mine_id_1).await);
+    assert!(triple_manager.contains_mine(mine_id_2).await);
     assert_eq!(triple_manager.len_generated().await, 2);
     assert_eq!(triple_manager.len_mine().await, 2);
     assert_eq!(triple_manager.len_potential().await, 2);
 
     // Take mine triple and check that it is removed from the storage
     triple_manager.take_two_mine().await.unwrap();
-    assert!(!triple_manager.contains(&mine_id_1).await);
-    assert!(!triple_manager.contains(&mine_id_2).await);
-    assert!(!triple_manager.contains_mine(&mine_id_1).await);
-    assert!(!triple_manager.contains_mine(&mine_id_2).await);
+    assert!(!triple_manager.contains(mine_id_1).await);
+    assert!(!triple_manager.contains(mine_id_2).await);
+    assert!(!triple_manager.contains_mine(mine_id_1).await);
+    assert!(!triple_manager.contains_mine(mine_id_2).await);
     assert_eq!(triple_manager.len_generated().await, 0);
     assert_eq!(triple_manager.len_mine().await, 0);
     assert!(triple_manager.is_empty().await);

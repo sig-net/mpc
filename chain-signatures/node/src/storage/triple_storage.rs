@@ -42,19 +42,19 @@ impl TripleStorage {
         Ok(())
     }
 
-    pub async fn contains(&self, id: &TripleId) -> StoreResult<bool> {
+    pub async fn contains(&self, id: TripleId) -> StoreResult<bool> {
         let mut conn = self.connect().await?;
         let result: bool = conn.hexists(self.triple_key(), id).await?;
         Ok(result)
     }
 
-    pub async fn contains_mine(&self, id: &TripleId) -> StoreResult<bool> {
+    pub async fn contains_mine(&self, id: TripleId) -> StoreResult<bool> {
         let mut conn = self.connect().await?;
         let result: bool = conn.sismember(self.mine_key(), id).await?;
         Ok(result)
     }
 
-    pub async fn take_two(&self, id1: &TripleId, id2: &TripleId) -> StoreResult<(Triple, Triple)> {
+    pub async fn take_two(&self, id1: TripleId, id2: TripleId) -> StoreResult<(Triple, Triple)> {
         let mut conn = self.connect().await?;
 
         let lua_script = r#"

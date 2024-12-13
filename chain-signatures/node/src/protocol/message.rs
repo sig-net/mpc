@@ -264,7 +264,7 @@ impl MessageHandler for RunningState {
 
             // if triple id is in GC, remove these messages because the triple is currently
             // being GC'ed, where this particular triple has previously failed or been utilized.
-            !triple_manager.refresh_gc(id)
+            !triple_manager.refresh_gc(*id)
         });
         for (id, queue) in triple_messages {
             let protocol = match triple_manager
