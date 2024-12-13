@@ -21,14 +21,14 @@ cait-sith = { git = "https://github.com/LIT-Protocol/cait-sith.git", features = 
 ], rev = "8ad2316" }
 clap = { version = "4.2", features = ["derive", "env"] }
 chrono = "0.4.24"
-google-datastore1 = "6.0.0+20240617"
-google-secretmanager1 = "6.0.0+20240621"
+google-datastore1 = "6.0.0"
+google-secretmanager1 = "6.0.0"
 hex = "0.4.3"
 hkdf = "0.12.4"
 highway = "1.1.0"
-hyper = { version = "0.14", features = ["full"] }
-hyper-rustls = { version = "=0.24", features = ["http2"] }
-k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
+hyper = { version = "1.5.1", features = ["full"] }
+hyper-rustls = { version = "0.27.3", features = ["http2"] }
+k256 = { version = "0.13.4", features = ["sha256", "ecdsa", "serde"] }
 local-ip-address = "0.5.4"
 rand = "0.8"
 reqwest = { version = "0.11.16", features = ["blocking", "json"] }
