@@ -9,6 +9,14 @@ use crate::cluster::Cluster;
 
 type Epoch = u64;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum NodeState {
+    Running,
+    Resharing,
+    Joining,
+    NotRunning,
+}
+
 enum WaitActions {
     Running(Epoch),
     MinTriples(usize),
@@ -16,6 +24,7 @@ enum WaitActions {
     MinPresignatures(usize),
     MinMinePresignatures(usize),
     Signable(usize),
+    NodeState(NodeState, usize),
 }
 
 pub struct WaitAction<'a, R> {
@@ -81,6 +90,24 @@ impl<'a, R> WaitAction<'a, R> {
         self
     }
 
+    pub fn node_running(mut self, id: usize) -> Self {
+        self.actions
+            .push(WaitActions::NodeState(NodeState::Running, id));
+        self
+    }
+
+    pub fn node_resharing(mut self, id: usize) -> Self {
+        self.actions
+            .push(WaitActions::NodeState(NodeState::Resharing, id));
+        self
+    }
+
+    pub fn node_joining(mut self, id: usize) -> Self {
+        self.actions
+            .push(WaitActions::NodeState(NodeState::Joining, id));
+        self
+    }
+
     async fn execute(self) -> anyhow::Result<&'a Cluster> {
         for action in self.actions {
             match action {
@@ -101,6 +128,9 @@ impl<'a, R> WaitAction<'a, R> {
                 }
                 WaitActions::Signable(count) => {
                     require_presignatures(self.nodes, count, true).await?;
+                }
+                WaitActions::NodeState(node_state, id) => {
+                    node_ready(self.nodes, node_state, id).await?;
                 }
             }
         }
@@ -128,6 +158,40 @@ impl<'a> IntoFuture for WaitAction<'a, RunningContractState> {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move { self.execute().await?.expect_running().await })
     }
+}
+
+async fn node_ready(nodes: &Cluster, state: NodeState, id: usize) -> anyhow::Result<()> {
+    let is_ready = || async {
+        let node_state = match nodes.fetch_state(id).await? {
+            StateView::Running { .. } => NodeState::Running,
+            StateView::Resharing { .. } => NodeState::Resharing,
+            StateView::Joining { .. } => NodeState::Joining,
+            StateView::NotRunning => NodeState::NotRunning,
+            _ => anyhow::bail!("unexpected varian for checking node state"),
+        };
+
+        if node_state == state {
+            anyhow::bail!("node not ready yet {:?} != {:?}", node_state, state);
+        }
+
+        Ok(state)
+    };
+
+    let strategy = ConstantBuilder::default()
+        .with_delay(std::time::Duration::from_secs(3))
+        .with_max_times(100);
+
+    let state = is_ready
+        .retry(&strategy)
+        .await
+        .context("did not reach node state in time")?;
+
+    if matches!(state, NodeState::Joining) {
+        // wait a bit longer for voting to join
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    }
+
+    Ok(())
 }
 
 pub async fn running_mpc(

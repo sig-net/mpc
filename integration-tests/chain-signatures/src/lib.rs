@@ -106,18 +106,18 @@ impl Nodes {
         &mut self,
         cfg: &NodeConfig,
         new_account: &Account,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         tracing::info!(id = %new_account.id(), "adding one more node");
         match self {
             Nodes::Local { ctx, nodes } => {
-                nodes.push(local::Node::run(ctx, cfg, new_account).await?)
+                nodes.push(local::Node::run(ctx, cfg, new_account).await?);
+                Ok(nodes.len() - 1)
             }
             Nodes::Docker { ctx, nodes } => {
-                nodes.push(containers::Node::run(ctx, cfg, new_account).await?)
+                nodes.push(containers::Node::run(ctx, cfg, new_account).await?);
+                Ok(nodes.len() - 1)
             }
         }
-
-        Ok(())
     }
 
     pub async fn kill_node(&mut self, account_id: &AccountId) -> NodeEnvConfig {
