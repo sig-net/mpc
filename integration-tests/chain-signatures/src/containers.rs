@@ -237,7 +237,10 @@ impl LocalStack {
         let s3_address = format!("http://{}:{}", address, Self::S3_CONTAINER_PORT);
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         let s3_host_address = {
-            let s3_host_port = container.get_host_port_ipv4(Self::S3_CONTAINER_PORT);
+            let s3_host_port = container
+                .get_host_port_ipv4(Self::S3_CONTAINER_PORT)
+                .await
+                .unwrap();
             format!("http://127.0.0.1:{s3_host_port}")
         };
         #[cfg(target_arch = "x86_64")]
