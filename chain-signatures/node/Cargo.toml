@@ -26,8 +26,8 @@ google-secretmanager1 = "6.0.0"
 hex = "0.4.3"
 hkdf = "0.12.4"
 highway = "1.1.0"
-hyper = { version = "0.14", features = ["full"] }
-hyper-rustls = { version = "0.24", features = ["http2"] }
+hyper = { version = "1.5.1", features = ["full"] }
+hyper-rustls = { version = "0.27.3", features = ["http2"] }
 k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
 local-ip-address = "0.5.4"
 rand = "0.8"
