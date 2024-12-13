@@ -248,27 +248,28 @@ impl MessageHandler for RunningState {
 
         // remove the triple_id that has already failed or taken from the triple_bins
         // and refresh the timestamp of failed and taken
-        let triple_messages = queue.triple_bins.entry(self.epoch).or_default();
-        // triple_messages.retain(|id, queue| {
-        //     if queue.is_empty()
-        //         || queue.iter().any(|msg| {
-        //             util::is_elapsed_longer_than_timeout(
-        //                 msg.timestamp,
-        //                 protocol_cfg.triple.generation_timeout,
-        //             )
-        //         })
-        //     {
-        //         return false;
-        //     }
+        let triple_messages = queue.triple_bins.remove(&self.epoch).unwrap_or_default();
+        for (id, mut queue) in triple_messages {
+            if queue.is_empty()
+                || queue.iter().any(|msg| {
+                    util::is_elapsed_longer_than_timeout(
+                        msg.timestamp,
+                        protocol_cfg.triple.generation_timeout,
+                    )
+                })
+            {
+                continue;
+            }
 
-        //     // if triple id is in GC, remove these messages because the triple is currently
-        //     // being GC'ed, where this particular triple has previously failed or been utilized.
-        //     !triple_manager.refresh_gc(id)
-        // });
-        for (id, queue) in triple_messages {
+            // if triple id is in GC, remove these messages because the triple is currently
+            // being GC'ed, where this particular triple has previously failed or been utilized.
+            if self.triple_manager.refresh_gc(id).await {
+                continue;
+            }
+
             let protocol = match self
                 .triple_manager
-                .get_or_start_generation(*id, participants, protocol_cfg)
+                .get_or_start_generation(id, participants, protocol_cfg)
                 .await
             {
                 Ok(protocol) => protocol,

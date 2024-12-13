@@ -383,9 +383,6 @@ impl CryptographicProtocol for RunningState {
         let triple_task = tokio::task::spawn(async move {
             let participant_map = triple_par;
             let my_account_id = triple_manager.my_account_id.clone();
-            // crate::metrics::MESSAGE_QUEUE_SIZE
-            //     .with_label_values(&[my_account_id.as_str()])
-            //     .set(messages.len() as i64);
             if let Err(err) = triple_manager.stockpile(&active, &protocol_cfg).await {
                 tracing::warn!(?err, "running: failed to stockpile triples");
             }
@@ -396,6 +393,9 @@ impl CryptographicProtocol for RunningState {
                     MpcMessage::Triple(msg),
                 );
             }
+            crate::metrics::MESSAGE_QUEUE_SIZE
+                .with_label_values(&[my_account_id.as_str()])
+                .set(messages.len() as i64);
             drop(messages);
 
             crate::metrics::NUM_TRIPLES_MINE
@@ -404,12 +404,12 @@ impl CryptographicProtocol for RunningState {
             crate::metrics::NUM_TRIPLES_TOTAL
                 .with_label_values(&[my_account_id.as_str()])
                 .set(triple_manager.len_generated().await as i64);
-            // crate::metrics::NUM_TRIPLE_GENERATORS_INTRODUCED
-            //     .with_label_values(&[my_account_id.as_str()])
-            //     .set(triple_manager.introduced.len() as i64);
-            // crate::metrics::NUM_TRIPLE_GENERATORS_TOTAL
-            //     .with_label_values(&[my_account_id.as_str()])
-            //     .set(triple_manager.ongoing.len() as i64);
+            crate::metrics::NUM_TRIPLE_GENERATORS_INTRODUCED
+                .with_label_values(&[my_account_id.as_str()])
+                .set(triple_manager.len_introduced().await as i64);
+            crate::metrics::NUM_TRIPLE_GENERATORS_TOTAL
+                .with_label_values(&[my_account_id.as_str()])
+                .set(triple_manager.len_ongoing().await as i64);
         });
 
         let messages = self.messages.clone();
@@ -466,10 +466,6 @@ impl CryptographicProtocol for RunningState {
         let stable = mesh_state.stable_participants.clone();
         tracing::debug!(?stable, "stable participants");
 
-        // let mut sign_queue = self.sign_queue.write().await;
-        // crate::metrics::SIGN_QUEUE_SIZE
-        //     .with_label_values(&[my_account_id.as_str()])
-        //     .set(sign_queue.len() as i64);
         let me = ctx.me().await;
         let sig_task = tokio::task::spawn({
             let presignature_manager = self.presignature_manager.clone();
@@ -486,15 +482,15 @@ impl CryptographicProtocol for RunningState {
                 tracing::debug!(?stable, "stable participants");
 
                 let mut sign_queue = sign_queue.write().await;
-                // crate::metrics::SIGN_QUEUE_SIZE
-                //     .with_label_values(&[my_account_id.as_str()])
-                //     .set(sign_queue.len() as i64);
+                crate::metrics::SIGN_QUEUE_SIZE
+                    .with_label_values(&[my_account_id.as_str()])
+                    .set(sign_queue.len() as i64);
                 sign_queue.organize(self.threshold, &stable, me, &my_account_id);
 
                 let my_requests = sign_queue.my_requests(me);
-                // crate::metrics::SIGN_QUEUE_MINE_SIZE
-                //     .with_label_values(&[my_account_id.as_str()])
-                //     .set(my_requests.len() as i64);
+                crate::metrics::SIGN_QUEUE_MINE_SIZE
+                    .with_label_values(&[my_account_id.as_str()])
+                    .set(my_requests.len() as i64);
 
                 let mut presignature_manager = presignature_manager.write().await;
                 let mut signature_manager = signature_manager.write().await;
