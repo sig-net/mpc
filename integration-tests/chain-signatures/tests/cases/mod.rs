@@ -389,7 +389,7 @@ async fn test_lake_congestion() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn().await?;
+    let mut nodes = cluster::spawn().wait_for_running().await?;
 
     // add latency to node1->rpc, but not node0->rpc
     add_latency(&nodes.nodes.proxy_name_for_node(1), true, 1.0, 1_000, 100).await?;
