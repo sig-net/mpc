@@ -1,13 +1,28 @@
 use std::future::{Future, IntoFuture};
 
 use anyhow::Context;
-use backon::{ConstantBuilder, ExponentialBuilder, Retryable};
+use backon::{ConstantBuilder, Retryable};
 use mpc_contract::{ProtocolContractState, RunningContractState};
 use mpc_node::web::StateView;
+use near_sdk::AccountId;
 
 use crate::cluster::Cluster;
 
 type Epoch = u64;
+type Present = bool;
+
+enum ContractState {
+    Candidate(AccountId, Present),
+    Participant(AccountId, Present),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum NodeState {
+    Running,
+    Resharing,
+    Joining,
+    NotRunning,
+}
 
 enum WaitActions {
     Running(Epoch),
@@ -16,6 +31,8 @@ enum WaitActions {
     MinPresignatures(usize),
     MinMinePresignatures(usize),
     Signable(usize),
+    NodeState(NodeState, usize),
+    ContractState(ContractState),
 }
 
 pub struct WaitAction<'a, R> {
@@ -81,11 +98,65 @@ impl<'a, R> WaitAction<'a, R> {
         self
     }
 
+    pub fn node_running(mut self, id: usize) -> Self {
+        self.actions
+            .push(WaitActions::NodeState(NodeState::Running, id));
+        self
+    }
+
+    pub fn node_resharing(mut self, id: usize) -> Self {
+        self.actions
+            .push(WaitActions::NodeState(NodeState::Resharing, id));
+        self
+    }
+
+    pub fn node_joining(mut self, id: usize) -> Self {
+        self.actions
+            .push(WaitActions::NodeState(NodeState::Joining, id));
+        self
+    }
+
+    pub fn candidate_present(mut self, candidate: &AccountId) -> Self {
+        self.actions
+            .push(WaitActions::ContractState(ContractState::Candidate(
+                candidate.clone(),
+                true,
+            )));
+        self
+    }
+
+    pub fn candidate_missing(mut self, candidate: &AccountId) -> Self {
+        self.actions
+            .push(WaitActions::ContractState(ContractState::Candidate(
+                candidate.clone(),
+                false,
+            )));
+        self
+    }
+
+    pub fn participant_present(mut self, participant: &AccountId) -> Self {
+        self.actions
+            .push(WaitActions::ContractState(ContractState::Participant(
+                participant.clone(),
+                true,
+            )));
+        self
+    }
+
+    pub fn participant_missing(mut self, participant: &AccountId) -> Self {
+        self.actions
+            .push(WaitActions::ContractState(ContractState::Participant(
+                participant.clone(),
+                false,
+            )));
+        self
+    }
+
     async fn execute(self) -> anyhow::Result<&'a Cluster> {
         for action in self.actions {
             match action {
                 WaitActions::Running(epoch) => {
-                    running_mpc(self.nodes, Some(epoch)).await?;
+                    running_mpc(self.nodes, if epoch > 0 { Some(epoch) } else { None }).await?;
                 }
                 WaitActions::MinTriples(expected) => {
                     require_triples(self.nodes, expected, false).await?;
@@ -101,6 +172,12 @@ impl<'a, R> WaitAction<'a, R> {
                 }
                 WaitActions::Signable(count) => {
                     require_presignatures(self.nodes, count, true).await?;
+                }
+                WaitActions::NodeState(state, id) => {
+                    node_ready(self.nodes, state, id).await?;
+                }
+                WaitActions::ContractState(state) => {
+                    require_contract_state(self.nodes, state).await?;
                 }
             }
         }
@@ -130,6 +207,72 @@ impl<'a> IntoFuture for WaitAction<'a, RunningContractState> {
     }
 }
 
+async fn node_ready(nodes: &Cluster, state: NodeState, id: usize) -> anyhow::Result<()> {
+    let is_ready = || async {
+        let node_state = match nodes.fetch_state(id).await? {
+            StateView::Running { .. } => NodeState::Running,
+            StateView::Resharing { .. } => NodeState::Resharing,
+            StateView::Joining { .. } => NodeState::Joining,
+            StateView::NotRunning => NodeState::NotRunning,
+            _ => anyhow::bail!("unexpected varian for checking node state"),
+        };
+
+        if node_state == state {
+            anyhow::bail!("node not ready yet {:?} != {:?}", node_state, state);
+        }
+
+        Ok(state)
+    };
+
+    let strategy = ConstantBuilder::default()
+        .with_delay(std::time::Duration::from_secs(3))
+        .with_max_times(100);
+
+    let state = is_ready
+        .retry(&strategy)
+        .await
+        .context("did not reach node state in time")?;
+
+    if matches!(state, NodeState::Joining) {
+        // wait a bit longer for voting to join
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    }
+
+    Ok(())
+}
+
+async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow::Result<()> {
+    let is_ready = || async {
+        let current_state = running_mpc(nodes, None).await?;
+
+        match &state {
+            ContractState::Candidate(candidate, present) => {
+                if *present == current_state.candidates.contains_key(candidate) {
+                    anyhow::bail!("candidate not found in contract state");
+                }
+            }
+            ContractState::Participant(participant, present) => {
+                if *present == current_state.participants.contains_key(participant) {
+                    anyhow::bail!("participant not found in contract state");
+                }
+            }
+        }
+
+        Ok(())
+    };
+
+    let strategy = ConstantBuilder::default()
+        .with_delay(std::time::Duration::from_secs(3))
+        .with_max_times(100);
+
+    let state = is_ready
+        .retry(&strategy)
+        .await
+        .context("did not reach contract state in time")?;
+
+    Ok(state)
+}
+
 pub async fn running_mpc(
     nodes: &Cluster,
     epoch: Option<u64>,
@@ -146,18 +289,21 @@ pub async fn running_mpc(
             _ => anyhow::bail!("not running"),
         }
     };
-    let err_msg = format!(
-        "mpc did not reach {} in time",
-        if epoch.is_some() {
-            "expected epoch"
-        } else {
-            "running state"
-        }
-    );
-    is_running
-        .retry(&ExponentialBuilder::default().with_max_times(6))
-        .await
-        .with_context(|| err_msg)
+
+    let strategy = ConstantBuilder::default()
+        .with_delay(std::time::Duration::from_secs(3))
+        .with_max_times(if epoch.is_some() { 200 } else { 100 });
+
+    is_running.retry(&strategy).await.with_context(|| {
+        format!(
+            "mpc did not reach {} in time",
+            if let Some(epoch) = epoch {
+                format!("expected epoch={epoch}")
+            } else {
+                "running state".to_string()
+            }
+        )
+    })
 }
 
 pub async fn require_presignatures(
@@ -241,15 +387,17 @@ pub async fn require_triples(
             anyhow::bail!("not enough nodes with triples")
         }
     };
-    let state_views = is_enough
-        .retry(&ExponentialBuilder::default().with_max_times(12))
-        .await
-        .with_context(|| {
-            format!(
-                "mpc nodes failed to generate {} triples before deadline",
-                expected
-            )
-        })?;
+
+    let strategy = ConstantBuilder::default()
+        .with_delay(std::time::Duration::from_secs(5))
+        .with_max_times(expected * 100);
+
+    let state_views = is_enough.retry(&strategy).await.with_context(|| {
+        format!(
+            "mpc nodes failed to generate {} triples before deadline",
+            expected
+        )
+    })?;
 
     Ok(state_views)
 }

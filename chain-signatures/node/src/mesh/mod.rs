@@ -45,7 +45,7 @@ pub struct MeshState {
 
 pub struct Mesh {
     /// Pool of connections to participants. Used to check who is alive in the network.
-    connections: connection::Pool,
+    connections: Arc<connection::Pool>,
     state: Arc<RwLock<MeshState>>,
 }
 
@@ -53,10 +53,10 @@ impl Mesh {
     pub fn init(options: Options) -> (Self, Arc<RwLock<MeshState>>) {
         let state = Arc::new(RwLock::new(MeshState::default()));
         let mesh = Self {
-            connections: connection::Pool::new(
+            connections: Arc::new(connection::Pool::new(
                 Duration::from_millis(options.fetch_participant_timeout),
                 Duration::from_millis(options.refresh_active_timeout),
-            ),
+            )),
             state: state.clone(),
         };
         (mesh, state)
@@ -65,11 +65,12 @@ impl Mesh {
     async fn ping(&mut self) {
         let mut mesh_state = self.state.write().await;
         *mesh_state = MeshState {
-            active_participants: self.connections.ping().await,
-            active_potential_participants: self.connections.ping_potential().await,
+            active_participants: Arc::clone(&self.connections).ping().await,
+            active_potential_participants: Arc::clone(&self.connections).ping_potential().await,
             potential_participants: self.connections.potential_participants().await,
             stable_participants: self.connections.stable_participants().await,
         };
+        drop(mesh_state);
     }
 
     pub async fn run(
