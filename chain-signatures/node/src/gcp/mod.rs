@@ -3,14 +3,16 @@ pub mod error;
 use crate::storage;
 
 use google_datastore1::api::Key;
-use google_datastore1::oauth2::AccessTokenAuthenticator;
-use google_secretmanager1::api::{AddSecretVersionRequest, SecretPayload};
-use google_secretmanager1::oauth2::authenticator::ApplicationDefaultCredentialsTypes;
-use google_secretmanager1::oauth2::{
-    ApplicationDefaultCredentialsAuthenticator, ApplicationDefaultCredentialsFlowOpts,
+use google_datastore1::hyper_util;
+use google_datastore1::hyper_util::client::legacy::connect::HttpConnector;
+use google_datastore1::hyper_util::client::legacy::Client;
+use google_datastore1::yup_oauth2::authenticator::ApplicationDefaultCredentialsTypes;
+use google_datastore1::yup_oauth2::{
+    AccessTokenAuthenticator, ApplicationDefaultCredentialsAuthenticator,
+    ApplicationDefaultCredentialsFlowOpts,
 };
+use google_secretmanager1::api::{AddSecretVersionRequest, SecretPayload};
 use google_secretmanager1::SecretManager;
-use hyper::client::HttpConnector;
 use hyper_rustls::HttpsConnector;
 
 use near_account_id::AccountId;
@@ -94,9 +96,9 @@ impl GcpService {
         let project_id = storage_options.gcp_project_id.clone();
         let secret_manager;
         if storage_options.env == "local-test" {
-            let client = hyper::Client::builder().build(
+            let client = Client::builder(hyper_util::rt::TokioExecutor::new()).build(
                 hyper_rustls::HttpsConnectorBuilder::new()
-                    .with_native_roots()
+                    .with_native_roots()?
                     .https_or_http()
                     .enable_http1()
                     .enable_http2()
@@ -109,9 +111,9 @@ impl GcpService {
             secret_manager = SecretManager::new(client.clone(), authenticator.clone());
         } else {
             // restring client to use https in production
-            let client = hyper::Client::builder().build(
+            let client = Client::builder(hyper_util::rt::TokioExecutor::new()).build(
                 hyper_rustls::HttpsConnectorBuilder::new()
-                    .with_native_roots()
+                    .with_native_roots()?
                     .https_only()
                     .enable_http1()
                     .enable_http2()
