@@ -33,12 +33,32 @@ impl TripleStorage {
 
     pub async fn insert(&self, triple: Triple, mine: bool) -> StoreResult<()> {
         let mut conn = self.connect().await?;
-        if mine {
-            conn.sadd::<&str, TripleId, ()>(&self.mine_key(), triple.id)
-                .await?;
-        }
-        conn.hset::<&str, TripleId, Triple, ()>(&self.triple_key(), triple.id, triple)
+
+        let script = r#"
+            local mine_key = KEYS[1]
+            local triple_key = KEYS[2]
+            local triple_id = ARGV[1]
+            local triple_value = ARGV[2]
+            local mine = ARGV[3]
+
+            if mine == "true" then
+                redis.call("SADD", mine_key, triple_id)
+            end
+
+            redis.call("HSET", triple_key, triple_id, triple_value)
+
+            return "OK"
+        "#;
+
+        let _: String = redis::Script::new(script)
+            .key(self.mine_key())
+            .key(self.triple_key())
+            .arg(triple.id)
+            .arg(triple)
+            .arg(mine)
+            .invoke_async(&mut conn)
             .await?;
+
         Ok(())
     }
 

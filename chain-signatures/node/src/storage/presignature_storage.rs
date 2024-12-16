@@ -32,16 +32,32 @@ impl PresignatureStorage {
 
     pub async fn insert(&self, presignature: Presignature, mine: bool) -> StoreResult<()> {
         let mut conn = self.connect().await?;
-        if mine {
-            conn.sadd::<&str, PresignatureId, ()>(&self.mine_key(), presignature.id)
-                .await?;
-        }
-        conn.hset::<&str, PresignatureId, Presignature, ()>(
-            &self.presig_key(),
-            presignature.id,
-            presignature,
-        )
-        .await?;
+
+        let script = r#"
+            local mine_key = KEYS[1]
+            local presig_key = KEYS[2]
+            local presig_id = ARGV[1]
+            local presig_value = ARGV[2]
+            local mine = ARGV[3]
+
+            if mine == "true" then
+                redis.call("SADD", mine_key, presig_id)
+            end
+
+            redis.call("HSET", presig_key, presig_id, presig_value)
+
+            return "OK"
+        "#;
+
+        let _: String = redis::Script::new(script)
+            .key(self.mine_key())
+            .key(self.presig_key())
+            .arg(presignature.id)
+            .arg(presignature)
+            .arg(mine)
+            .invoke_async(&mut conn)
+            .await?;
+
         Ok(())
     }
 
@@ -59,18 +75,57 @@ impl PresignatureStorage {
 
     pub async fn take(&self, id: &PresignatureId) -> StoreResult<Presignature> {
         let mut conn = self.connect().await?;
-        let presignature: Option<Presignature> = conn.hget(self.presig_key(), id).await?;
-        let presignature = presignature.ok_or_else(|| StoreError::PresignatureIsMissing(*id))?;
-        conn.hdel::<&str, PresignatureId, ()>(&self.presig_key(), *id)
-            .await?;
-        Ok(presignature)
+
+        let script = r#"
+            local presig_key = KEYS[1]
+            local presig_id = ARGV[1]
+    
+            local presig_value = redis.call("HGET", presig_key, presig_id)
+    
+            if not presig_value then
+                return {err = "Presignature " .. presig_id .. " is missing"}
+            end
+            redis.call("HDEL", presig_key, presig_id)
+            return presig_value
+        "#;
+
+        let result: Result<Presignature, redis::RedisError> = redis::Script::new(script)
+            .key(self.presig_key())
+            .arg(id)
+            .invoke_async(&mut conn)
+            .await;
+
+        result.map_err(StoreError::from)
     }
 
     pub async fn take_mine(&self) -> StoreResult<Presignature> {
         let mut conn = self.connect().await?;
-        let id: Option<PresignatureId> = conn.spop(self.mine_key()).await?;
-        let id = id.ok_or_else(|| StoreError::Empty("mine presignature stockpile"))?;
-        self.take(&id).await
+
+        let script = r#"
+            local mine_key = KEYS[1]
+            local presig_key = KEYS[2]
+    
+            local presig_id = redis.call("SPOP", mine_key)
+            if not presig_id then
+                return {err = "Mine presignature stockpile does not have enough triples"}
+            end
+    
+            local presig_value = redis.call("HGET", presig_key, presig_id)
+            if not presig_value then
+                return {err = "Unexpected behavior. Presignature " .. presig_id .. " is missing"}
+            end
+    
+            redis.call("HDEL", presig_key, presig_id)
+            return presig_value
+        "#;
+
+        let result: Result<Presignature, redis::RedisError> = redis::Script::new(script)
+            .key(self.mine_key())
+            .key(self.presig_key())
+            .invoke_async(&mut conn)
+            .await;
+
+        result.map_err(StoreError::from)
     }
 
     pub async fn len_generated(&self) -> StoreResult<usize> {
