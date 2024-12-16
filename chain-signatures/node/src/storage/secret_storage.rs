@@ -144,6 +144,7 @@ pub fn init(
             )) as SecretNodeStorageBox
         }
         _ => {
+            // test change
             if let Some(sk_share_local_path) = &opts.sk_share_local_path {
                 let path = format!("{sk_share_local_path}-{account_id}");
                 tracing::info!("using DiskNodeStorage with path: {}", path);
