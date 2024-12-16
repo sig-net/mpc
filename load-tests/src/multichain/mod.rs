@@ -12,7 +12,7 @@ use rand::Rng;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 
-use crate::fastauth::primitives::UserSession;
+use crate::common::primitives::UserSession;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SignRequest {

@@ -1,4 +1,4 @@
-name: Build Image & Deploy Multichain Dev
+name: Build Image & Deploy Nodes to Dev
 on:
   workflow_dispatch:
   pull_request:

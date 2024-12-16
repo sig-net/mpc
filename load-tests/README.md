@@ -1,14 +1,9 @@
-# MPC Recovery Load Tests
-This directory contains load tests for the FastAuth and Multichain services. It is build using [Goose](https://book.goose.rs/title-page.html), a load testing tool written in Rust.
+# SigNetwork Load Tests
+This directory contains load tests for SigNetwork services. It is build using [Goose](https://book.goose.rs/title-page.html), a load testing tool written in Rust.
 
 ## Running the tests
 To run the tests, you need to have Rust installed. You can install Rust using [rustup](https://rustup.rs/).
 To start the tests, run the following command:
-Fastauth:
-```bash
-RUST_LOG=info cargo run --release -- --host <host> --report-file=load_test_results.html --test-plan "$(cat ./src/fastauth/test_plans/short.txt)" --scenarios fastAuthSimpleMpcPublicKey
-```
-Multichain:
 ```bash
 RUST_LOG=info cargo run --release -- --host https://rpc.testnet.near.org --report-file=load_test_results.html --test-plan "$(cat ./src/multichain/test_plans/short.txt)" --scenarios multichainSign
 ```
