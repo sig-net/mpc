@@ -114,7 +114,7 @@ impl PresignatureStorage {
     
             local presig_id = redis.call("SPOP", mine_key)
             if not presig_id then
-                return {err = "Mine presignature stockpile does not have enough triples"}
+                return {err = "Mine presignature stockpile does not have enough presignatures"}
             end
     
             local presig_value = redis.call("HGET", presig_key, presig_id)
