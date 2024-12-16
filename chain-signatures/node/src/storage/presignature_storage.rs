@@ -77,19 +77,26 @@ impl PresignatureStorage {
         let mut conn = self.connect().await?;
 
         let script = r#"
-            local presig_key = KEYS[1]
+            local mine_key = KEYS[1]
+            local presig_key = KEYS[2]
             local presig_id = ARGV[1]
-    
+        
+            if redis.call('SISMEMBER', mine_key, presig_id) == 1 then
+                return {err = 'Cannot take mine presignature as foreign owned'}
+            end
+        
             local presig_value = redis.call("HGET", presig_key, presig_id)
-    
+        
             if not presig_value then
                 return {err = "Presignature " .. presig_id .. " is missing"}
             end
+
             redis.call("HDEL", presig_key, presig_id)
             return presig_value
         "#;
 
         let result: Result<Presignature, redis::RedisError> = redis::Script::new(script)
+            .key(self.mine_key())
             .key(self.presig_key())
             .arg(id)
             .invoke_async(&mut conn)
