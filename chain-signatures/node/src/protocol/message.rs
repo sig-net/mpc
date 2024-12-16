@@ -264,7 +264,7 @@ impl MessageHandler for RunningState {
 
             // if triple id is in GC, remove these messages because the triple is currently
             // being GC'ed, where this particular triple has previously failed or been utilized.
-            !triple_manager.refresh_gc(id)
+            !triple_manager.refresh_gc(*id)
         });
         for (id, queue) in triple_messages {
             let protocol = match triple_manager
@@ -343,7 +343,7 @@ impl MessageHandler for RunningState {
                 Err(
                     err @ (GenerationError::AlreadyGenerated
                     | GenerationError::TripleIsGarbageCollected(_)
-                    | GenerationError::TripleIsMissing(_)),
+                    | GenerationError::TripleStoreError(_)),
                 ) => {
                     // This triple has already been generated or removed from the triple manager, so we will have to bin
                     // the entirety of the messages we received for this presignature id, and have the other nodes timeout

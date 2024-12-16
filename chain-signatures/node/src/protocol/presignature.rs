@@ -131,8 +131,8 @@ pub enum GenerationError {
     AlreadyGenerated,
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
-    #[error("triple {0} is missing")]
-    TripleIsMissing(TripleId),
+    #[error("triple storage error: {0}")]
+    TripleStoreError(String),
     #[error("triple {0} is generating")]
     TripleIsGenerating(TripleId),
     #[error("triple {0} is in garbage collection")]
@@ -512,13 +512,13 @@ impl PresignatureManager {
                                 );
                                 return Err(error);
                             }
-                            GenerationError::TripleIsMissing(_) => {
+                            GenerationError::TripleStoreError(_) => {
                                 tracing::warn!(
                                     ?error,
                                     id,
                                     triple0,
                                     triple1,
-                                    "could not initiate non-introduced presignature: one triple is missing"
+                                    "could not initiate non-introduced presignature: triple store error"
                                 );
                                 return Err(error);
                             }
