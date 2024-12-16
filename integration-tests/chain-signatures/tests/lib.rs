@@ -48,13 +48,12 @@ impl Cluster {
             .take(state.threshold)
             .cloned()
             .collect::<Vec<_>>();
-        assert!(vote_join(
+        vote_join(
             &voting_participants,
             self.contract().id(),
             node_account.id(),
         )
-        .await
-        .is_ok());
+        .await?;
 
         let new_state = self.wait().running_on_epoch(state.epoch + 1).await?;
         assert_eq!(new_state.participants.len(), state.participants.len() + 1);
@@ -80,15 +79,7 @@ impl Cluster {
             .collect::<Vec<_>>();
 
         tracing::info!(?voting_accounts, %kick, at_epoch = state.epoch, "kicking participant");
-        let results = vote_leave(&voting_accounts, self.contract().id(), &kick).await;
-        // Check if any result has failures, and return early with an error if so
-        if results
-            .iter()
-            .any(|result| !result.as_ref().unwrap().failures().is_empty())
-        {
-            tracing::error!(?voting_accounts, "failed to vote");
-            anyhow::bail!("failed to vote_leave");
-        }
+        vote_leave(&voting_accounts, self.contract().id(), &kick).await?;
 
         let new_state = self.wait().running_on_epoch(state.epoch + 1).await?;
         tracing::info!(
@@ -106,7 +97,10 @@ impl Cluster {
             "public key must stay the same"
         );
 
-        Ok(self.nodes.kill_node(&kick).await)
+        let node_config = self.nodes.kill_node(&kick).await;
+        self.wait().running().await?;
+
+        Ok(node_config)
     }
 
     pub async fn propose_update(&self, args: ProposeUpdateArgs) -> mpc_contract::update::UpdateId {

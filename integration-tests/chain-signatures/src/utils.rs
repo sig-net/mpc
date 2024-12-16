@@ -1,6 +1,5 @@
 use anyhow::Context;
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
-use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::{Account, AccountId};
 use std::fs;
 
@@ -9,29 +8,43 @@ pub async fn vote_join(
     mpc_contract: &AccountId,
     account_id: &AccountId,
 ) -> anyhow::Result<()> {
-    let vote_futures = accounts
-        .iter()
-        .map(|account| {
-            tracing::info!(
-                "{} voting for new participant: {}",
-                account.id(),
-                account_id
-            );
-            account
-                .call(mpc_contract, "vote_join")
-                .args_json(serde_json::json!({
-                    "candidate": account_id
-                }))
-                .transact()
-        })
-        .collect::<Vec<_>>();
+    let vote_futures = accounts.iter().map(|account| {
+        tracing::info!(
+            "{} voting for new participant: {}",
+            account.id(),
+            account_id
+        );
+        account
+            .call(mpc_contract, "vote_join")
+            .args_json(serde_json::json!({
+                "candidate": account_id
+            }))
+            .transact()
+    });
 
-    futures::future::join_all(vote_futures)
-        .await
-        .iter()
-        .for_each(|result| {
-            assert!(result.as_ref().unwrap().failures().is_empty());
-        });
+    let mut errs = Vec::new();
+    for result in futures::future::join_all(vote_futures).await {
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                errs.push(anyhow::anyhow!("workspaces/rpc failed: {err:?}"));
+                continue;
+            }
+        };
+
+        if !outcome.failures().is_empty() {
+            errs.push(anyhow::anyhow!(
+                "contract(vote_join) failure: {:?}",
+                outcome.failures()
+            ))
+        }
+    }
+
+    if !errs.is_empty() {
+        let err = format!("failed to vote_join: {errs:#?}");
+        tracing::warn!(err);
+        anyhow::bail!(err);
+    }
 
     Ok(())
 }
@@ -40,7 +53,7 @@ pub async fn vote_leave(
     accounts: &[&Account],
     mpc_contract: &AccountId,
     account_id: &AccountId,
-) -> Vec<Result<ExecutionFinalResult, near_workspaces::error::Error>> {
+) -> anyhow::Result<()> {
     let vote_futures = accounts
         .iter()
         .filter(|account| account.id() != account_id)
@@ -54,7 +67,40 @@ pub async fn vote_leave(
         })
         .collect::<Vec<_>>();
 
-    futures::future::join_all(vote_futures).await
+    let mut kicked = false;
+    let mut errs = Vec::new();
+    for result in futures::future::join_all(vote_futures).await {
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                errs.push(anyhow::anyhow!("workspaces/rpc failed: {err:?}"));
+                continue;
+            }
+        };
+
+        if !outcome.failures().is_empty() {
+            errs.push(anyhow::anyhow!(
+                "contract(vote_leave) failure: {:?}",
+                outcome.failures()
+            ))
+        } else {
+            kicked = kicked || outcome.json::<bool>().unwrap();
+        }
+    }
+
+    if !errs.is_empty() {
+        let err = format!("failed to vote_leave: {errs:#?}");
+        tracing::warn!(err);
+        anyhow::bail!(err);
+    }
+
+    if !kicked {
+        let err = "failed to vote_leave on number of votes";
+        tracing::warn!(err);
+        anyhow::bail!(err);
+    }
+
+    Ok(())
 }
 
 pub async fn get<U>(uri: U) -> anyhow::Result<StatusCode>
