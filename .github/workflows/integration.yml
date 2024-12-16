@@ -6,7 +6,7 @@ on:
       - develop
   pull_request:
     paths:
-      - integration-tests/chain-signatures/**
+      - integration-tests/**
       - chain-signatures/**
 
 env:
@@ -91,11 +91,11 @@ jobs:
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
-        working-directory: ./integration-tests/chain-signatures
+        working-directory: ./integration-tests
         run: cargo build --tests
 
       - name: Test
-        working-directory: ./integration-tests/chain-signatures
+        working-directory: ./integration-tests
         run: cargo test --jobs 1 -- --test-threads 1
         env:
           RUST_LOG: info,workspaces=warn

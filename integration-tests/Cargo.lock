@@ -3304,7 +3304,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "integration-tests-chain-signatures"
+name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",

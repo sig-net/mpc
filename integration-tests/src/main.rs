@@ -4,8 +4,8 @@ use std::str::FromStr;
 use std::vec;
 
 use clap::Parser;
-use integration_tests_chain_signatures::containers::DockerClient;
-use integration_tests_chain_signatures::{dry_run, run, utils, MultichainConfig};
+use integration_tests::containers::DockerClient;
+use integration_tests::{dry_run, run, utils, MultichainConfig};
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cli::ContractCommands => {
             println!("Building a doc with example commands");
-            let path = "../../chain-signatures/contract/EXAMPLE.md";
+            let path = "../chain-signatures/contract/EXAMPLE.md";
             let mut file = File::create(path)?;
             let mut doc: Vec<String> = vec![];
             let contract_account_id = AccountId::from_str("v1.signer-dev.testnet")?;

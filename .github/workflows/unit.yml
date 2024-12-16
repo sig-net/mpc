@@ -46,17 +46,17 @@ jobs:
         run: |
           ( cd chain-signatures ; cargo check )
           ( cd load-tests ; cargo check )
-          ( cd integration-tests/chain-signatures ; cargo check )
+          ( cd integration-tests ; cargo check )
       - name: Test format
         run: |
           ( cd chain-signatures ; cargo fmt -- --check )
           ( cd load-tests ; cargo fmt -- --check )
-          ( cd integration-tests/chain-signatures ; cargo fmt -- --check )
+          ( cd integration-tests ; cargo fmt -- --check )
       - name: Test clippy
         run: |
           ( cd chain-signatures ; cargo clippy --tests -- -Dclippy::all )
           ( cd load-tests ; cargo clippy --tests -- -Dclippy::all )
-          ( cd integration-tests/chain-signatures ; cargo clippy --tests -- -Dclippy::all )
+          ( cd integration-tests ; cargo clippy --tests -- -Dclippy::all )
       - name: Unit tests
         working-directory: chain-signatures
         run: cargo test

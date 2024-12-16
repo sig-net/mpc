@@ -99,13 +99,13 @@ jobs:
         working-directory: ./chain-signatures
         run: cargo build -p mpc-node --release
 
-      - name: Build Chain-Signatures Integration Tests
-        working-directory: ./integration-tests/chain-signatures
+      - name: Build Integration Tests
+        working-directory: ./integration-tests
         run: cargo build --tests
 
       - name: Run Nightly
-        working-directory: ./integration-tests/chain-signatures
-        run: cargo test --package integration-tests-chain-signatures --test lib -- cases::nightly --show-output --ignored
+        working-directory: ./integration-tests
+        run: cargo test --package integration-tests --test lib -- cases::nightly --show-output --ignored
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1

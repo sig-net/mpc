@@ -5,19 +5,19 @@ use crate::actions::wait_for;
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 
 use futures::future::BoxFuture;
-use integration_tests_chain_signatures::containers::DockerClient;
-use integration_tests_chain_signatures::utils::{vote_join, vote_leave};
-use integration_tests_chain_signatures::{run, utils, MultichainConfig, Nodes};
+use integration_tests::containers::DockerClient;
+use integration_tests::utils::{vote_join, vote_leave};
+use integration_tests::{run, utils, MultichainConfig, Nodes};
 
 use near_workspaces::types::NearToken;
 use near_workspaces::{Account, AccountId, Contract};
 
-use integration_tests_chain_signatures::local::NodeConfig;
+use integration_tests::local::NodeConfig;
 use std::collections::HashSet;
 
 const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(9000);
 const CURRENT_CONTRACT_FILE_PATH: &str =
-    "../../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
+    "../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
 
 pub struct MultichainTestContext<'a> {
     nodes: Nodes<'a>,

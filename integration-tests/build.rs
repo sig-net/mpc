@@ -95,7 +95,7 @@ fn rerun_directory<T: AsRef<Path> + ?Sized>(dir: &T) {
 
 fn main() -> anyhow::Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
-    rerun_directory("../../chain-signatures/");
+    rerun_directory("../chain-signatures/");
 
     let release = true;
     let rt = tokio::runtime::Runtime::new().unwrap();

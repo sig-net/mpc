@@ -33,7 +33,7 @@ use std::time::Duration;
 
 const CHAIN_ID_ETH: u64 = 31337;
 
-use integration_tests_chain_signatures::containers::LakeIndexer;
+use integration_tests::containers::LakeIndexer;
 use k256::{
     ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
     PublicKey as K256PublicKey,

@@ -1,4 +1,4 @@
-use integration_tests_chain_signatures::MultichainConfig;
+use integration_tests::MultichainConfig;
 use mpc_contract::config::{ProtocolConfig, TripleConfig};
 use test_log::test;
 
