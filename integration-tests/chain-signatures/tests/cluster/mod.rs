@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use integration_tests_chain_signatures::local::NodeEnvConfig;
 use mpc_contract::primitives::Participants;
 use near_workspaces::network::Sandbox;
+use near_workspaces::types::Finality;
 use spawner::ClusterSpawner;
 
 use mpc_contract::{ProtocolContractState, RunningContractState};
@@ -90,6 +91,7 @@ impl Cluster {
         let state: ProtocolContractState = self
             .contract()
             .view("state")
+            .finality(Finality::Final)
             .await
             .with_context(|| "could not view state")?
             .json()?;

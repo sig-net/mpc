@@ -292,7 +292,7 @@ pub async fn running_mpc(
 
     let strategy = ConstantBuilder::default()
         .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(if epoch.is_some() { 300 } else { 100 });
+        .with_max_times(100);
 
     is_running.retry(&strategy).await.with_context(|| {
         format!(
