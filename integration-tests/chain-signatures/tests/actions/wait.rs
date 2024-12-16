@@ -248,12 +248,12 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
         match &state {
             ContractState::Candidate(candidate, present) => {
                 if *present == current_state.candidates.contains_key(candidate) {
-                    anyhow::bail!("candidate not found in contract state");
+                    anyhow::bail!("candidate invalid in contract state: expect_present={present} for {candidate:?}");
                 }
             }
             ContractState::Participant(participant, present) => {
                 if *present == current_state.participants.contains_key(participant) {
-                    anyhow::bail!("participant not found in contract state");
+                    anyhow::bail!("participant invalid in contract state: expect_present={present} for {participant:?}");
                 }
             }
         }
@@ -265,12 +265,12 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
         .with_delay(std::time::Duration::from_secs(3))
         .with_max_times(100);
 
-    let state = is_ready
+    is_ready
         .retry(&strategy)
         .await
         .context("did not reach contract state in time")?;
 
-    Ok(state)
+    Ok(())
 }
 
 pub async fn running_mpc(
