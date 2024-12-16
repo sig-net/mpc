@@ -760,17 +760,15 @@ impl TripleManager {
                 tracing::warn!(?err, "running: failed to stockpile triples");
             }
 
-            let mut messages = messages.write().await;
-            messages.extend(
-                self.poke(&protocol_cfg)
-                    .await
-                    .into_iter()
-                    .map(|(p, msg)| (p, MpcMessage::Triple(msg))),
-            );
-            crate::metrics::MESSAGE_QUEUE_SIZE
-                .with_label_values(&[self.my_account_id.as_str()])
-                .set(messages.len() as i64);
-            drop(messages);
+            {
+                let mut messages = messages.write().await;
+                messages.extend(
+                    self.poke(&protocol_cfg)
+                        .await
+                        .into_iter()
+                        .map(|(p, msg)| (p, MpcMessage::Triple(msg))),
+                );
+            }
 
             crate::metrics::NUM_TRIPLES_MINE
                 .with_label_values(&[self.my_account_id.as_str()])

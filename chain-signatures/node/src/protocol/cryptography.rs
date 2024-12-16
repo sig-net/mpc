@@ -1,10 +1,12 @@
 use std::sync::PoisonError;
 
+use super::signature::SignatureManager;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
 use crate::http_client::SendError;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
+use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::protocol::MpcMessage;
@@ -23,6 +25,7 @@ pub trait CryptographicCtx {
     fn signer(&self) -> &InMemorySigner;
     fn mpc_contract_id(&self) -> &AccountId;
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox;
+    fn my_account_id(&self) -> &AccountId;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -374,103 +377,12 @@ impl CryptographicProtocol for RunningState {
                 .clone()
                 .execute(&active, &cfg.protocol, self.messages.clone());
 
-        let messages = self.messages.clone();
-        let triple_manager = self.triple_manager.clone();
-        let presignature_manager = self.presignature_manager.clone();
-        let active = mesh_state.active_participants.clone();
-        let protocol_cfg = cfg.protocol.clone();
-        let presig_task = tokio::task::spawn(async move {
-            let mut presignature_manager = presignature_manager.write().await;
-            if let Err(err) = presignature_manager
-                .stockpile(
-                    &active,
-                    &self.public_key,
-                    &self.private_share,
-                    &triple_manager,
-                    &protocol_cfg,
-                )
-                .await
-            {
-                tracing::warn!(?err, "running: failed to stockpile presignatures");
-            }
-            let my_account_id = triple_manager.my_account_id.clone();
-
-            let mut messages = messages.write().await;
-            for (p, msg) in presignature_manager.poke().await {
-                messages.push(p, MpcMessage::Presignature(msg));
-            }
-            drop(messages);
-
-            crate::metrics::NUM_PRESIGNATURES_MINE
-                .with_label_values(&[my_account_id.as_str()])
-                .set(presignature_manager.len_mine().await as i64);
-            crate::metrics::NUM_PRESIGNATURES_TOTAL
-                .with_label_values(&[my_account_id.as_str()])
-                .set(presignature_manager.len_generated().await as i64);
-            crate::metrics::NUM_PRESIGNATURE_GENERATORS_TOTAL
-                .with_label_values(&[my_account_id.as_str()])
-                .set(
-                    presignature_manager.len_potential().await as i64
-                        - presignature_manager.len_generated().await as i64,
-                );
-        });
-
-        // NOTE: signatures should only use stable and not active participants. The difference here is that
-        // stable participants utilizes more than the online status of a node, such as whether or not their
-        // block height is up to date, such that they too can process signature requests. If they cannot
-        // then they are considered unstable and should not be a part of signature generation this round.
-        let stable = mesh_state.stable_participants.clone();
-        tracing::debug!(?stable, "stable participants");
-        let my_account_id = self.triple_manager.my_account_id.clone();
+        let presig_task = PresignatureManager::execute(&self, &active, &cfg.protocol);
 
         let me = ctx.me().await;
-        let sig_task = tokio::task::spawn({
-            let presignature_manager = self.presignature_manager.clone();
-            let signature_manager = self.signature_manager.clone();
-            let messages = self.messages.clone();
-            let protocol_cfg = cfg.protocol.clone();
-            let sign_queue = self.sign_queue.clone();
-            let rpc_client = ctx.rpc_client().clone();
-            let signer = ctx.signer().clone();
-            let mpc_contract_id = ctx.mpc_contract_id().clone();
-
-            tokio::task::unconstrained(async move {
-                tracing::debug!(?stable, "stable participants");
-
-                let mut sign_queue = sign_queue.write().await;
-                crate::metrics::SIGN_QUEUE_SIZE
-                    .with_label_values(&[my_account_id.as_str()])
-                    .set(sign_queue.len() as i64);
-                sign_queue.organize(self.threshold, &stable, me, &my_account_id);
-
-                let my_requests = sign_queue.my_requests(me);
-                crate::metrics::SIGN_QUEUE_MINE_SIZE
-                    .with_label_values(&[my_account_id.as_str()])
-                    .set(my_requests.len() as i64);
-
-                let mut presignature_manager = presignature_manager.write().await;
-                let mut signature_manager = signature_manager.write().await;
-                signature_manager
-                    .handle_requests(
-                        self.threshold,
-                        &stable,
-                        my_requests,
-                        &mut presignature_manager,
-                        &protocol_cfg,
-                    )
-                    .await;
-                drop(presignature_manager);
-
-                let mut messages = messages.write().await;
-                for (p, msg) in signature_manager.poke() {
-                    messages.push(p, MpcMessage::Signature(msg));
-                }
-                drop(messages);
-                signature_manager
-                    .publish(&rpc_client, &signer, &mpc_contract_id)
-                    .await;
-            })
-        });
+        let stable = mesh_state.stable_participants;
+        tracing::debug!(?stable, "stable participants");
+        let sig_task = SignatureManager::execute(&self, &stable, me, &cfg.protocol, &ctx);
 
         match tokio::try_join!(triple_task, presig_task, sig_task) {
             Ok(_result) => (),
@@ -480,6 +392,10 @@ impl CryptographicProtocol for RunningState {
         }
 
         let mut messages = self.messages.write().await;
+        crate::metrics::MESSAGE_QUEUE_SIZE
+            .with_label_values(&[ctx.my_account_id().as_str()])
+            .set(messages.len() as i64);
+
         let failures = messages
             .send_encrypted(
                 me,
