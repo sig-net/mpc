@@ -54,7 +54,7 @@ impl PresignatureStorage {
             .key(self.presig_key())
             .arg(presignature.id)
             .arg(presignature)
-            .arg(mine)
+            .arg(mine.to_string())
             .invoke_async(&mut conn)
             .await?;
 

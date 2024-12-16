@@ -55,7 +55,7 @@ impl TripleStorage {
             .key(self.triple_key())
             .arg(triple.id)
             .arg(triple)
-            .arg(mine)
+            .arg(mine.to_string())
             .invoke_async(&mut conn)
             .await?;
 
