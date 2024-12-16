@@ -79,7 +79,7 @@ impl Cluster {
             .cloned()
             .collect::<Vec<_>>();
 
-        tracing::info!(?voting_accounts, %kick, "kicking participant");
+        tracing::info!(?voting_accounts, %kick, at_epoch = state.epoch, "kicking participant");
         let results = vote_leave(&voting_accounts, self.contract().id(), &kick).await;
         // Check if any result has failures, and return early with an error if so
         if results
