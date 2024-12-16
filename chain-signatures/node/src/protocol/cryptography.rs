@@ -121,7 +121,7 @@ impl CryptographicProtocol for GeneratingState {
                             continue;
                         }
                         messages.push(
-                            info.clone(),
+                            Participant::from(info.id),
                             MpcMessage::Generating(GeneratingMessage {
                                 from: ctx.me().await,
                                 data: data.clone(),
@@ -131,9 +131,8 @@ impl CryptographicProtocol for GeneratingState {
                 }
                 Action::SendPrivate(to, data) => {
                     tracing::debug!("generating: sending a private message to {to:?}");
-                    let info = self.fetch_participant(&to)?;
                     self.messages.write().await.push(
-                        info.clone(),
+                        to,
                         MpcMessage::Generating(GeneratingMessage {
                             from: ctx.me().await,
                             data,
@@ -277,14 +276,14 @@ impl CryptographicProtocol for ResharingState {
                     tracing::debug!("resharing: sending a message to all participants");
                     let me = ctx.me().await;
                     let mut messages = self.messages.write().await;
-                    for (p, info) in self.new_participants.iter() {
+                    for (p, _info) in self.new_participants.iter() {
                         if p == &me {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;
                         }
 
                         messages.push(
-                            info.clone(),
+                            p.clone(),
                             MpcMessage::Resharing(ResharingMessage {
                                 epoch: self.old_epoch,
                                 from: me,
@@ -296,8 +295,8 @@ impl CryptographicProtocol for ResharingState {
                 Action::SendPrivate(to, data) => {
                     tracing::debug!("resharing: sending a private message to {to:?}");
                     match self.new_participants.get(&to) {
-                        Some(info) => self.messages.write().await.push(
-                            info.clone(),
+                        Some(_) => self.messages.write().await.push(
+                            to,
                             MpcMessage::Resharing(ResharingMessage {
                                 epoch: self.old_epoch,
                                 from: ctx.me().await,
@@ -370,56 +369,17 @@ impl CryptographicProtocol for RunningState {
             return Ok(NodeState::Running(self));
         }
 
-        let participant_map = active
-            .iter()
-            .map(|(p, info)| (p.clone(), info.clone()))
-            .collect::<std::collections::HashMap<_, _>>();
-
-        let my_account_id = self.triple_manager.my_account_id.clone();
-        let protocol_cfg = cfg.protocol.clone();
-        let messages = self.messages.clone();
-        let triple_par = participant_map.clone();
-        let triple_manager = self.triple_manager.clone();
-        let triple_task = tokio::task::spawn(async move {
-            let participant_map = triple_par;
-            let my_account_id = triple_manager.my_account_id.clone();
-            if let Err(err) = triple_manager.stockpile(&active, &protocol_cfg).await {
-                tracing::warn!(?err, "running: failed to stockpile triples");
-            }
-            let mut messages = messages.write().await;
-            for (p, msg) in triple_manager.poke(&protocol_cfg).await {
-                messages.push(
-                    participant_map.get(&p).unwrap().clone(),
-                    MpcMessage::Triple(msg),
-                );
-            }
-            crate::metrics::MESSAGE_QUEUE_SIZE
-                .with_label_values(&[my_account_id.as_str()])
-                .set(messages.len() as i64);
-            drop(messages);
-
-            crate::metrics::NUM_TRIPLES_MINE
-                .with_label_values(&[my_account_id.as_str()])
-                .set(triple_manager.len_mine().await as i64);
-            crate::metrics::NUM_TRIPLES_TOTAL
-                .with_label_values(&[my_account_id.as_str()])
-                .set(triple_manager.len_generated().await as i64);
-            crate::metrics::NUM_TRIPLE_GENERATORS_INTRODUCED
-                .with_label_values(&[my_account_id.as_str()])
-                .set(triple_manager.len_introduced().await as i64);
-            crate::metrics::NUM_TRIPLE_GENERATORS_TOTAL
-                .with_label_values(&[my_account_id.as_str()])
-                .set(triple_manager.len_ongoing().await as i64);
-        });
+        let triple_task =
+            self.triple_manager
+                .clone()
+                .execute(&active, &cfg.protocol, self.messages.clone());
 
         let messages = self.messages.clone();
         let triple_manager = self.triple_manager.clone();
         let presignature_manager = self.presignature_manager.clone();
-        let presig_par = participant_map.clone();
         let active = mesh_state.active_participants.clone();
         let protocol_cfg = cfg.protocol.clone();
         let presig_task = tokio::task::spawn(async move {
-            let participant_map = presig_par;
             let mut presignature_manager = presignature_manager.write().await;
             if let Err(err) = presignature_manager
                 .stockpile(
@@ -434,14 +394,10 @@ impl CryptographicProtocol for RunningState {
                 tracing::warn!(?err, "running: failed to stockpile presignatures");
             }
             let my_account_id = triple_manager.my_account_id.clone();
-            drop(triple_manager);
 
             let mut messages = messages.write().await;
             for (p, msg) in presignature_manager.poke().await {
-                messages.push(
-                    participant_map.get(&p).unwrap().clone(),
-                    MpcMessage::Presignature(msg),
-                );
+                messages.push(p, MpcMessage::Presignature(msg));
             }
             drop(messages);
 
@@ -465,6 +421,7 @@ impl CryptographicProtocol for RunningState {
         // then they are considered unstable and should not be a part of signature generation this round.
         let stable = mesh_state.stable_participants.clone();
         tracing::debug!(?stable, "stable participants");
+        let my_account_id = self.triple_manager.my_account_id.clone();
 
         let me = ctx.me().await;
         let sig_task = tokio::task::spawn({
@@ -476,7 +433,6 @@ impl CryptographicProtocol for RunningState {
             let rpc_client = ctx.rpc_client().clone();
             let signer = ctx.signer().clone();
             let mpc_contract_id = ctx.mpc_contract_id().clone();
-            let participant_map = participant_map.clone();
 
             tokio::task::unconstrained(async move {
                 tracing::debug!(?stable, "stable participants");
@@ -507,10 +463,7 @@ impl CryptographicProtocol for RunningState {
 
                 let mut messages = messages.write().await;
                 for (p, msg) in signature_manager.poke() {
-                    messages.push(
-                        participant_map.get(&p).unwrap().clone(),
-                        MpcMessage::Signature(msg),
-                    );
+                    messages.push(p, MpcMessage::Signature(msg));
                 }
                 drop(messages);
                 signature_manager

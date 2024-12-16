@@ -2,6 +2,7 @@ use super::contract::primitives::Participants;
 use super::cryptography::CryptographicError;
 use super::message::TripleMessage;
 use super::presignature::GenerationError;
+use crate::protocol::MpcMessage;
 use crate::storage::triple_storage::TripleStorage;
 use crate::types::TripleProtocol;
 use crate::util::AffinePointExt;
@@ -743,5 +744,46 @@ impl TripleManager {
         }
 
         messages
+    }
+
+    pub fn execute(
+        self,
+        active: &Participants,
+        protocol_cfg: &ProtocolConfig,
+        messages: Arc<RwLock<crate::http_client::MessageQueue>>,
+    ) -> JoinHandle<()> {
+        let active = active.clone();
+        let protocol_cfg = protocol_cfg.clone();
+
+        tokio::task::spawn(async move {
+            if let Err(err) = self.stockpile(&active, &protocol_cfg).await {
+                tracing::warn!(?err, "running: failed to stockpile triples");
+            }
+
+            let mut messages = messages.write().await;
+            messages.extend(
+                self.poke(&protocol_cfg)
+                    .await
+                    .into_iter()
+                    .map(|(p, msg)| (p, MpcMessage::Triple(msg))),
+            );
+            crate::metrics::MESSAGE_QUEUE_SIZE
+                .with_label_values(&[self.my_account_id.as_str()])
+                .set(messages.len() as i64);
+            drop(messages);
+
+            crate::metrics::NUM_TRIPLES_MINE
+                .with_label_values(&[self.my_account_id.as_str()])
+                .set(self.len_mine().await as i64);
+            crate::metrics::NUM_TRIPLES_TOTAL
+                .with_label_values(&[self.my_account_id.as_str()])
+                .set(self.len_generated().await as i64);
+            crate::metrics::NUM_TRIPLE_GENERATORS_INTRODUCED
+                .with_label_values(&[self.my_account_id.as_str()])
+                .set(self.len_introduced().await as i64);
+            crate::metrics::NUM_TRIPLE_GENERATORS_TOTAL
+                .with_label_values(&[self.my_account_id.as_str()])
+                .set(self.len_ongoing().await as i64);
+        })
     }
 }
