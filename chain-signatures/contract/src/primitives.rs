@@ -125,8 +125,8 @@ impl Default for Participants {
 impl From<Candidates> for Participants {
     fn from(candidates: Candidates) -> Self {
         let mut participants = Participants::new();
-        for (account_id, candidate_info) in candidates.iter() {
-            participants.insert(account_id.clone(), candidate_info.clone().into());
+        for (account_id, candidate_info) in candidates.into_iter() {
+            participants.insert(account_id, candidate_info.into());
         }
         participants
     }
@@ -215,6 +215,10 @@ impl Candidates {
 
     pub fn iter(&self) -> impl Iterator<Item = (&AccountId, &CandidateInfo)> {
         self.candidates.iter()
+    }
+
+    pub fn into_iter(self) -> impl IntoIterator<Item = (AccountId, CandidateInfo)> {
+        self.candidates.into_iter()
     }
 }
 

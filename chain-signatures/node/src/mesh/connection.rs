@@ -71,18 +71,19 @@ impl Pool {
             }
         }
 
-        let connections = self.connections.read().await.clone(); // Clone connections for iteration
-        let mut join_set = JoinSet::new();
+        let connections = {
+            let conn = self.connections.read().await;
+            conn.clone()
+        };
 
         // Spawn tasks for each participant
-        for (participant, info) in connections.iter() {
-            let participant = *participant;
-            let info = info.clone();
-            let self_clone = Arc::clone(&self); // Clone Arc for use inside tasks
+        let mut join_set = JoinSet::new();
+        for (participant, info) in connections.into_iter() {
+            let pool = Arc::clone(&self);
 
             join_set.spawn(async move {
-                match self_clone.fetch_participant_state(&info).await {
-                    Ok(state) => match self_clone.send_empty_msg(&participant, &info).await {
+                match pool.fetch_participant_state(&info).await {
+                    Ok(state) => match pool.send_empty_msg(&participant, &info).await {
                         Ok(()) => Ok((participant, state, info)),
                         Err(e) => {
                             tracing::warn!(
@@ -139,19 +140,19 @@ impl Pool {
             }
         }
 
-        let connections = self.potential_connections.read().await;
-
-        let mut join_set = JoinSet::new();
+        let connections = {
+            let conn = self.potential_connections.read().await;
+            conn.clone()
+        };
 
         // Spawn tasks for each participant
-        for (participant, info) in connections.iter() {
-            let participant = *participant;
-            let info = info.clone();
-            let self_clone = Arc::clone(&self); // Clone Arc for use inside tasks
+        let mut join_set = JoinSet::new();
+        for (participant, info) in connections.into_iter() {
+            let pool = Arc::clone(&self); // Clone Arc for use inside tasks
 
             join_set.spawn(async move {
-                match self_clone.fetch_participant_state(&info).await {
-                    Ok(state) => match self_clone.send_empty_msg(&participant, &info).await {
+                match pool.fetch_participant_state(&info).await {
+                    Ok(state) => match pool.send_empty_msg(&participant, &info).await {
                         Ok(()) => Ok((participant, state, info)),
                         Err(e) => {
                             tracing::warn!(
