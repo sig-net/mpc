@@ -87,21 +87,11 @@ async fn test_signature_offline_node() -> anyhow::Result<()> {
     // Kill the node then have presignatures and signature generation only use the active set of nodes
     // to start generating presignatures and signatures.
     let account_id = nodes.account_ids().into_iter().last().unwrap().clone();
-    nodes.leave(Some(&account_id)).await.unwrap();
+    nodes.stop(&account_id).await.unwrap();
 
-    // This could potentially fail and timeout the first time if the participant set picked up is the
-    // one with the offline node. This is expected behavior for now if a user submits a request in between
-    // a node going offline and the system hasn't detected it yet.
     nodes.wait().signable().await.unwrap();
-    let outcome = nodes.sign().await;
-
-    // Try again if the first attempt failed. This second portion should not be needed when the NEP
-    // comes in for resumeable MPC.
-    if outcome.is_err() {
-        // Retry if the first attempt failed.
-        nodes.wait().signable().await.unwrap();
-        let _outcome = nodes.sign().await.unwrap();
-    }
+    let outcome = nodes.sign().await.unwrap();
+    dbg!(outcome);
 
     Ok(())
 }

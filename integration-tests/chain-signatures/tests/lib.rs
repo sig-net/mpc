@@ -65,6 +65,12 @@ impl Cluster {
         Ok(())
     }
 
+    pub async fn stop(&mut self, node: &AccountId) -> anyhow::Result<NodeEnvConfig> {
+        let config = self.nodes.kill_node(node).await;
+        self.wait().running().await?;
+        Ok(config)
+    }
+
     pub async fn leave(&mut self, kick: Option<&AccountId>) -> anyhow::Result<NodeEnvConfig> {
         let state = self.expect_running().await?;
         let participant_accounts = self.participant_accounts().await?;
@@ -97,10 +103,7 @@ impl Cluster {
             "public key must stay the same"
         );
 
-        let node_config = self.nodes.kill_node(&kick).await;
-        self.wait().running().await?;
-
-        Ok(node_config)
+        self.stop(&kick).await
     }
 
     pub async fn propose_update(&self, args: ProposeUpdateArgs) -> mpc_contract::update::UpdateId {
