@@ -49,6 +49,16 @@ describe("ChainSignatures", function () {
       expect(derivedKey.y).to.equal(expectedY);
     });
 
+    it.only("derive a key", async function () {
+      const epsilon = '0x0C38479E8053A632CC3E1CAC05ED33D7733C908FDC256AFEBB9396206A05D86D';
+      let pK = {
+        "x": "0xe54c037d9e680251f04eed2b71343e4d782ca57194b3498246858ea479ac7572",
+        "y": "0x9c1da00980127f9c3df8254b117aa22476320cb13b513c87c085d5d1c44de163"
+      };
+      const derivedKey = await chainSignatures.deriveKey(pK, epsilon);
+      console.log(derivedKey)
+    })
+
     it("should correctly derive a new key from derived epsilon", async function () {  
       const derivedEpsilon = "0x0C38479E8053A632CC3E1CAC05ED33D7733C908FDC256AFEBB9396206A05D86D";
 

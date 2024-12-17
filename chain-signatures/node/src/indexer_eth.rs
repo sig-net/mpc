@@ -12,6 +12,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use hex::ToHex;
 use tokio::sync::RwLock;
 use web3::{
     contract::Contract,
@@ -168,8 +169,8 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
             path: event.path,
             key_version: 0,
         };
-        let epsilon = derive_epsilon_eth(event.requester.to_string(), &request.path);
-        
+        let epsilon = derive_epsilon_eth(format!("0x{}", event.requester.encode_hex::<String>()), &request.path);
+        tracing::info!("from epsilon: {:?} event epsilon: {:?}", epsilon, event.epsilon);
         // Use transaction hash as entropy
         let entropy = log.transaction_hash
             .map(|h| *h.as_fixed_bytes())

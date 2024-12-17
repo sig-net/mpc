@@ -16,7 +16,7 @@ function convertPublicKey(base58PublicKey) {
 }
 
 // Your public key
-const publicKey = "secp256k1:2Ysz9jhCcem4wmfGpx2z57kCaorgiFhNZ1NDyDDJJDau5zuQh3afcQvYQfHMdTZ4Ax91j2NhE4qpsCXN4BUwzFwk";
+const publicKey = "secp256k1:2G7cpAUa73okr83hfMM8EkZC42cHoMqvicWBKNBRMRmeFZ1YuBi371ywRpMp6oRkJUSWmLhpXWtgeKGEsmQnbWZr";
 
 // Convert it
 const coordinates = convertPublicKey(publicKey);
