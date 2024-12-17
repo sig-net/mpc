@@ -1,3 +1,4 @@
+use std::fmt;
 use std::future::IntoFuture;
 
 use cait_sith::FullSignature;
@@ -30,6 +31,19 @@ pub struct SignOutcome {
     pub payload: [u8; 32],
     pub payload_hash: [u8; 32],
     pub signature: FullSignature<Secp256k1>,
+}
+
+impl fmt::Debug for SignOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SignOutcome")
+            .field("account", &self.account)
+            .field("rogue", &self.rogue)
+            .field("payload", &self.payload)
+            .field("payload_hash", &self.payload_hash)
+            .field("signature_big_r", &self.signature.big_r)
+            .field("signature_s", &self.signature.s)
+            .finish()
+    }
 }
 
 pub struct SignAction<'a> {

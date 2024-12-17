@@ -343,7 +343,6 @@ impl TripleTasks {
         if !self.queued.is_empty() && to_generate_len > 0 {
             for _ in 0..to_generate_len {
                 if let Some(id) = self.queued.pop_front() {
-                    tracing::info!(id, "spawning triple generation task");
                     self.ongoing.insert(id);
                     let generator = self.generators.get(&id).unwrap();
                     self.ongoing_tasks
