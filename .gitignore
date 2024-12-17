@@ -3,13 +3,12 @@
 .DS_Store
 .idea
 
-flamegraph*.svg
 tmp
 *.log
 
 # Artifacts that may be left over
 **/*-secret-manager-*
-integration-tests/chain-signatures/.project
+integration-tests/.project
 
 node_modules/
 chain-signatures/contract-eth/artifacts
