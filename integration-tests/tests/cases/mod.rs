@@ -240,8 +240,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_manager.is_empty().await);
     assert_eq!(triple_manager.len_potential().await, 0);
 
-    triple_manager.insert(triple_1, false).await;
-    triple_manager.insert(triple_2, false).await;
+    triple_manager.insert(triple_1.clone(), false).await;
+    triple_manager.insert(triple_2.clone(), false).await;
 
     // Check that the storage contains the foreign triple
     assert!(triple_manager.contains(triple_id_1).await);
@@ -279,8 +279,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let mine_triple_2 = dummy_triple(mine_id_2);
 
     // Add mine triple and check that it is in the storage
-    triple_manager.insert(mine_triple_1, true).await;
-    triple_manager.insert(mine_triple_2, true).await;
+    triple_manager.insert(mine_triple_1.clone(), true).await;
+    triple_manager.insert(mine_triple_2.clone(), true).await;
     assert!(triple_manager.contains(mine_id_1).await);
     assert!(triple_manager.contains(mine_id_2).await);
     assert!(triple_manager.contains_mine(mine_id_1).await);
@@ -332,7 +332,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         &presignature_storage,
     );
 
-    let presignature = dummy_presignature();
+    let presignature = dummy_presignature(1);
     let presignature_id: PresignatureId = presignature.id;
 
     // Check that the storage is empty at the start
@@ -365,10 +365,11 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         .unwrap());
 
     // Attempt to re-insert used presignature and check that it fails
+    let presignature = dummy_presignature(presignature_id);
     presignature_manager.insert(presignature, false).await;
     assert!(!presignature_manager.contains(&presignature_id).await);
 
-    let mine_presignature = dummy_presignature();
+    let mine_presignature = dummy_presignature(2);
     let mine_presig_id: PresignatureId = mine_presignature.id;
 
     // Add mine presignature and check that it is in the storage
@@ -393,15 +394,16 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         .unwrap());
 
     // Attempt to re-insert used mine presignature and check that it fails
+    let mine_presignature = dummy_presignature(mine_presig_id);
     presignature_manager.insert(mine_presignature, true).await;
     assert!(!presignature_manager.contains(&mine_presig_id).await);
 
     Ok(())
 }
 
-fn dummy_presignature() -> Presignature {
+fn dummy_presignature(id: u64) -> Presignature {
     Presignature {
-        id: 1,
+        id,
         output: PresignOutput {
             big_r: <Secp256k1 as CurveArithmetic>::AffinePoint::default(),
             k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
