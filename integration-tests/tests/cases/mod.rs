@@ -252,7 +252,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_mine().await, 0);
     assert_eq!(triple_manager.len_potential().await, 2);
 
-    // Take triple and check that it is removed from the storage
+    // Take triple and check that it is removed from the storage and added to used set
     triple_manager
         .take_two(triple_id_1, triple_id_2)
         .await
@@ -264,6 +264,14 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_generated().await, 0);
     assert_eq!(triple_manager.len_mine().await, 0);
     assert_eq!(triple_manager.len_potential().await, 0);
+    assert!(triple_storage.contains_used(triple_id_1).await.unwrap());
+    assert!(triple_storage.contains_used(triple_id_2).await.unwrap());
+
+    // Attempt to re-insert used triples and check that it fails
+    triple_manager.insert(triple_1, false).await;
+    assert!(!triple_manager.contains(triple_id_1).await);
+    triple_manager.insert(triple_2, false).await;
+    assert!(!triple_manager.contains(triple_id_2).await);
 
     let mine_id_1: u64 = 3;
     let mine_triple_1 = dummy_triple(mine_id_1);
@@ -281,7 +289,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_mine().await, 2);
     assert_eq!(triple_manager.len_potential().await, 2);
 
-    // Take mine triple and check that it is removed from the storage
+    // Take mine triple and check that it is removed from the storage and added to used set
     triple_manager.take_two_mine().await.unwrap();
     assert!(!triple_manager.contains(mine_id_1).await);
     assert!(!triple_manager.contains(mine_id_2).await);
@@ -291,6 +299,14 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_mine().await, 0);
     assert!(triple_manager.is_empty().await);
     assert_eq!(triple_manager.len_potential().await, 0);
+    assert!(triple_storage.contains_used(mine_id_1).await.unwrap());
+    assert!(triple_storage.contains_used(mine_id_2).await.unwrap());
+
+    // Attempt to re-insert used mine triples and check that it fails
+    triple_manager.insert(mine_triple_1, true).await;
+    assert!(!triple_manager.contains(mine_id_1).await);
+    triple_manager.insert(mine_triple_2, true).await;
+    assert!(!triple_manager.contains(mine_id_2).await);
 
     Ok(())
 }
@@ -336,13 +352,21 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert_eq!(presignature_manager.len_potential().await, 1);
 
-    // Take presignature and check that it is removed from the storage
+    // Take presignature and check that it is removed from the storage and added to used set
     presignature_manager.take(presignature_id).await.unwrap();
     assert!(!presignature_manager.contains(&presignature_id).await);
     assert!(!presignature_manager.contains_mine(&presignature_id).await);
     assert_eq!(presignature_manager.len_generated().await, 0);
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert_eq!(presignature_manager.len_potential().await, 0);
+    assert!(presignature_storage
+        .contains_used(&presignature_id)
+        .await
+        .unwrap());
+
+    // Attempt to re-insert used presignature and check that it fails
+    presignature_manager.insert(presignature, false).await;
+    assert!(!presignature_manager.contains(&presignature_id).await);
 
     let mine_presignature = dummy_presignature();
     let mine_presig_id: PresignatureId = mine_presignature.id;
@@ -355,7 +379,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_mine().await, 1);
     assert_eq!(presignature_manager.len_potential().await, 1);
 
-    // Take mine presignature and check that it is removed from the storage
+    // Take mine presignature and check that it is removed from the storage and added to used set
     presignature_manager.take_mine().await.unwrap();
     assert!(!presignature_manager.contains(&mine_presig_id).await);
     assert!(!presignature_manager.contains_mine(&mine_presig_id).await);
@@ -363,6 +387,14 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert!(presignature_manager.is_empty().await);
     assert_eq!(presignature_manager.len_potential().await, 0);
+    assert!(presignature_storage
+        .contains_used(&mine_presig_id)
+        .await
+        .unwrap());
+
+    // Attempt to re-insert used mine presignature and check that it fails
+    presignature_manager.insert(mine_presignature, true).await;
+    assert!(!presignature_manager.contains(&mine_presig_id).await);
 
     Ok(())
 }

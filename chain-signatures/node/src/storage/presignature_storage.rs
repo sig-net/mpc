@@ -36,9 +36,14 @@ impl PresignatureStorage {
         let script = r#"
             local mine_key = KEYS[1]
             local presig_key = KEYS[2]
+            local used_key = KEYS[3]
             local presig_id = ARGV[1]
             local presig_value = ARGV[2]
             local mine = ARGV[3]
+
+            if redis.call("SISMEMBER", used_key, presig_id) == 1 then
+                return {err = "Presignature " .. presig_id .. " has already been used"}
+            end
 
             if mine == "true" then
                 redis.call("SADD", mine_key, presig_id)
@@ -52,6 +57,7 @@ impl PresignatureStorage {
         let _: String = redis::Script::new(script)
             .key(self.mine_key())
             .key(self.presig_key())
+            .key(self.used_key())
             .arg(presignature.id)
             .arg(presignature)
             .arg(mine.to_string())
@@ -73,12 +79,19 @@ impl PresignatureStorage {
         Ok(result)
     }
 
+    pub async fn contains_used(&self, id: &PresignatureId) -> StoreResult<bool> {
+        let mut conn = self.connect().await?;
+        let result: bool = conn.sismember(self.used_key(), id).await?;
+        Ok(result)
+    }
+
     pub async fn take(&self, id: &PresignatureId) -> StoreResult<Presignature> {
         let mut conn = self.connect().await?;
 
         let script = r#"
             local mine_key = KEYS[1]
             local presig_key = KEYS[2]
+            local used_key = KEYS[3]
             local presig_id = ARGV[1]
         
             if redis.call('SISMEMBER', mine_key, presig_id) == 1 then
@@ -92,12 +105,14 @@ impl PresignatureStorage {
             end
 
             redis.call("HDEL", presig_key, presig_id)
+            redis.call("SADD", used_key, presig_id)
             return presig_value
         "#;
 
         let result: Result<Presignature, redis::RedisError> = redis::Script::new(script)
             .key(self.mine_key())
             .key(self.presig_key())
+            .key(self.used_key())
             .arg(id)
             .invoke_async(&mut conn)
             .await;
@@ -111,6 +126,7 @@ impl PresignatureStorage {
         let script = r#"
             local mine_key = KEYS[1]
             local presig_key = KEYS[2]
+            local used_key = KEYS[3]
     
             local presig_id = redis.call("SPOP", mine_key)
             if not presig_id then
@@ -123,12 +139,14 @@ impl PresignatureStorage {
             end
     
             redis.call("HDEL", presig_key, presig_id)
+            redis.call("SADD", used_key, presig_id)
             return presig_value
         "#;
 
         let result: Result<Presignature, redis::RedisError> = redis::Script::new(script)
             .key(self.mine_key())
             .key(self.presig_key())
+            .key(self.used_key())
             .invoke_async(&mut conn)
             .await;
 
@@ -164,6 +182,13 @@ impl PresignatureStorage {
     fn mine_key(&self) -> String {
         format!(
             "presignatures_mine:{}:{}",
+            PRESIGNATURE_STORAGE_VERSION, self.node_account_id
+        )
+    }
+
+    fn used_key(&self) -> String {
+        format!(
+            "used_presignatures:{}:{}",
             PRESIGNATURE_STORAGE_VERSION, self.node_account_id
         )
     }

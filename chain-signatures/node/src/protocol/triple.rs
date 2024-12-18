@@ -170,6 +170,14 @@ impl TripleManager {
             .unwrap_or(false)
     }
 
+    pub async fn contains_used(&self, id: TripleId) -> bool {
+        self.triple_storage
+            .contains_used(id)
+            .await
+            .map_err(|e| tracing::warn!(?e, "failed to check if triple is used"))
+            .unwrap_or(false)
+    }
+
     /// Take two unspent triple by theirs id with no way to return it. Only takes
     /// if both of them are present.
     /// It is very important to NOT reuse the same triple twice for two different

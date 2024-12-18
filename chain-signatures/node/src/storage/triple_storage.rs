@@ -37,9 +37,14 @@ impl TripleStorage {
         let script = r#"
             local mine_key = KEYS[1]
             local triple_key = KEYS[2]
+            local used_key = KEYS[3]
             local triple_id = ARGV[1]
             local triple_value = ARGV[2]
             local mine = ARGV[3]
+
+            if redis.call("SISMEMBER", used_key, triple_id) == 1 then
+                return {err = "Triple " .. triple_id .. " has already been used"}
+            end
 
             if mine == "true" then
                 redis.call("SADD", mine_key, triple_id)
@@ -53,6 +58,7 @@ impl TripleStorage {
         let _: String = redis::Script::new(script)
             .key(self.mine_key())
             .key(self.triple_key())
+            .key(self.used_key())
             .arg(triple.id)
             .arg(triple)
             .arg(mine.to_string())
@@ -71,6 +77,12 @@ impl TripleStorage {
     pub async fn contains_mine(&self, id: TripleId) -> StoreResult<bool> {
         let mut conn = self.connect().await?;
         let result: bool = conn.sismember(self.mine_key(), id).await?;
+        Ok(result)
+    }
+
+    pub async fn contains_used(&self, id: TripleId) -> StoreResult<bool> {
+        let mut conn = self.connect().await?;
+        let result: bool = conn.sismember(self.used_key(), id).await?;
         Ok(result)
     }
 
@@ -100,6 +112,9 @@ impl TripleStorage {
     
             -- Delete the triples from the hash map
             redis.call("HDEL", KEYS[1], ARGV[1], ARGV[2])
+
+            -- Add the triples to the used set
+            redis.call("SADD", KEYS[3], ARGV[1], ARGV[2])
     
             -- Return the triples
             return {v1, v2}
@@ -108,6 +123,7 @@ impl TripleStorage {
         let result: Result<(Triple, Triple), redis::RedisError> = redis::Script::new(lua_script)
             .key(self.triple_key())
             .key(self.mine_key())
+            .key(self.used_key())
             .arg(id1.to_string())
             .arg(id2.to_string())
             .invoke_async(&mut conn)
@@ -144,6 +160,9 @@ impl TripleStorage {
     
             -- Delete the triples from the hash map
             redis.call("HDEL", KEYS[2], id1, id2)
+
+            -- Add the triples to the used set
+            redis.call("SADD", KEYS[3], id1, id2)
     
             -- Return the triples as a response
             return {v1, v2}
@@ -152,6 +171,7 @@ impl TripleStorage {
         let result: Result<(Triple, Triple), redis::RedisError> = redis::Script::new(lua_script)
             .key(self.mine_key())
             .key(self.triple_key())
+            .key(self.used_key())
             .invoke_async(&mut conn)
             .await;
 
@@ -187,6 +207,13 @@ impl TripleStorage {
     fn mine_key(&self) -> String {
         format!(
             "triples_mine:{}:{}",
+            TRIPLE_STORAGE_VERSION, self.node_account_id
+        )
+    }
+
+    fn used_key(&self) -> String {
+        format!(
+            "used_triples:{}:{}",
             TRIPLE_STORAGE_VERSION, self.node_account_id
         )
     }

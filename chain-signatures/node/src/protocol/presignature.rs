@@ -222,6 +222,14 @@ impl PresignatureManager {
             .unwrap_or(false)
     }
 
+    pub async fn contains_used(&self, id: &PresignatureId) -> bool {
+        self.presignature_storage
+            .contains_used(id)
+            .await
+            .map_err(|e| tracing::warn!(?e, "failed to check if presignature is used"))
+            .unwrap_or(false)
+    }
+
     pub async fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
         let presignature = self
             .presignature_storage
