@@ -93,7 +93,7 @@ impl Cluster {
             .view("state")
             .finality(Finality::Final)
             .await
-            .with_context(|| "could not view state")?
+            .context("could not view state")?
             .json()?;
         Ok(state)
     }

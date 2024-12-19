@@ -98,9 +98,25 @@ impl<'a, R> WaitAction<'a, R> {
         self
     }
 
+    pub fn nodes_running(mut self) -> Self {
+        for id in 0..self.nodes.len() {
+            self.actions
+                .push(WaitActions::NodeState(NodeState::Running, id));
+        }
+        self
+    }
+
     pub fn node_running(mut self, id: usize) -> Self {
         self.actions
             .push(WaitActions::NodeState(NodeState::Running, id));
+        self
+    }
+
+    pub fn nodes_resharing(mut self) -> Self {
+        for id in 0..self.nodes.len() {
+            self.actions
+                .push(WaitActions::NodeState(NodeState::Resharing, id));
+        }
         self
     }
 
@@ -174,7 +190,7 @@ impl<'a, R> WaitAction<'a, R> {
                     require_presignatures(self.nodes, count, true).await?;
                 }
                 WaitActions::NodeState(state, id) => {
-                    node_ready(self.nodes, state, id).await?;
+                    require_node_state(self.nodes, state, id).await?;
                 }
                 WaitActions::ContractState(state) => {
                     require_contract_state(self.nodes, state).await?;
@@ -207,7 +223,7 @@ impl<'a> IntoFuture for WaitAction<'a, RunningContractState> {
     }
 }
 
-async fn node_ready(nodes: &Cluster, state: NodeState, id: usize) -> anyhow::Result<()> {
+async fn require_node_state(nodes: &Cluster, state: NodeState, id: usize) -> anyhow::Result<()> {
     let is_ready = || async {
         let node_state = match nodes.fetch_state(id).await? {
             StateView::Running { .. } => NodeState::Running,
@@ -217,7 +233,7 @@ async fn node_ready(nodes: &Cluster, state: NodeState, id: usize) -> anyhow::Res
             _ => anyhow::bail!("unexpected varian for checking node state"),
         };
 
-        if node_state == state {
+        if node_state != state {
             anyhow::bail!("node not ready yet {:?} != {:?}", node_state, state);
         }
 
@@ -226,7 +242,7 @@ async fn node_ready(nodes: &Cluster, state: NodeState, id: usize) -> anyhow::Res
 
     let strategy = ConstantBuilder::default()
         .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(100);
+        .with_max_times(20);
 
     let state = is_ready
         .retry(&strategy)
@@ -235,7 +251,7 @@ async fn node_ready(nodes: &Cluster, state: NodeState, id: usize) -> anyhow::Res
 
     if matches!(state, NodeState::Joining) {
         // wait a bit longer for voting to join
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 
     Ok(())
@@ -247,12 +263,12 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
 
         match &state {
             ContractState::Candidate(candidate, present) => {
-                if *present == current_state.candidates.contains_key(candidate) {
+                if *present != current_state.candidates.contains_key(candidate) {
                     anyhow::bail!("candidate invalid in contract state: expect_present={present} for {candidate:?}");
                 }
             }
             ContractState::Participant(participant, present) => {
-                if *present == current_state.participants.contains_key(participant) {
+                if *present != current_state.participants.contains_key(participant) {
                     anyhow::bail!("participant invalid in contract state: expect_present={present} for {participant:?}");
                 }
             }
@@ -263,7 +279,7 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
 
     let strategy = ConstantBuilder::default()
         .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(100);
+        .with_max_times(20);
 
     is_ready
         .retry(&strategy)
@@ -292,7 +308,7 @@ pub async fn running_mpc(
 
     let strategy = ConstantBuilder::default()
         .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(100);
+        .with_max_times(50);
 
     is_running.retry(&strategy).await.with_context(|| {
         format!(

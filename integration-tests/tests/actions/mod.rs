@@ -4,6 +4,7 @@ pub mod wait_for;
 
 use crate::cluster::Cluster;
 
+use anyhow::Context as _;
 use cait_sith::FullSignature;
 use crypto_shared::ScalarExt;
 use crypto_shared::{derive_epsilon, derive_key};
@@ -107,17 +108,23 @@ pub async fn request_batch_duplicate_sign(
     Ok((payload_hashed, sign_call_cnt, account, status))
 }
 
-pub async fn assert_signature(
+pub async fn validate_signature(
     account_id: &near_workspaces::AccountId,
     mpc_pk_bytes: &[u8],
     payload: [u8; 32],
     signature: &FullSignature<Secp256k1>,
-) {
+) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
     let epsilon = derive_epsilon(account_id, "test");
     let user_pk = derive_key(mpc_pk, epsilon);
-    assert!(signature.verify(&user_pk, &Scalar::from_bytes(payload).unwrap(),));
+    signature
+        .verify(
+            &user_pk,
+            &Scalar::from_bytes(payload).context("failed to convert payload to scalar")?, // .ok_or_else(|| anyhow::anyhow!("failed to convert payload to scalar"))?,
+        )
+        .then(|| Ok(()))
+        .ok_or_else(|| anyhow::anyhow!("failed to validate signature"))?
 }
 
 // add one of toxic to the toxiproxy-server to make indexer rpc slow down, congested, or unstable
@@ -185,7 +192,9 @@ pub async fn batch_random_signature_production(nodes: &Cluster) -> anyhow::Resul
     for i in 0..payloads.len() {
         let (_, payload_hash) = payloads.get(i).unwrap();
         let signature = signatures.get(i).unwrap();
-        assert_signature(account.id(), &mpc_pk_bytes, *payload_hash, signature).await;
+        validate_signature(account.id(), &mpc_pk_bytes, *payload_hash, signature)
+            .await
+            .unwrap();
     }
 
     Ok(())

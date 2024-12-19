@@ -129,55 +129,57 @@ impl<'a> IntoFuture for SignAction<'a> {
     type IntoFuture =
         std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'a>>;
 
-    fn into_future(mut self) -> Self::IntoFuture {
-        Box::pin(async move {
-            let state = self.nodes.expect_running().await?;
-            let account = self.account_or_new().await;
-            let payload = self.payload_or_random();
-            let payload_hash = self.payload_hash();
-            let status = self.transact_sign(&account, payload_hash).await?;
-
-            // We have to use seperate transactions because one could fail.
-            // This leads to a potential race condition where this transaction could get sent after the signature completes, but I think that's unlikely
-            let rogue = if self.execute_rogue {
-                let (rogue, rogue_status) = self
-                    .transact_rogue_respond(payload_hash, account.id())
-                    .await?;
-                let err = wait_for::rogue_message_responded(rogue_status).await?;
-
-                assert!(err.contains(&errors::RespondError::InvalidSignature.to_string()));
-                Some(rogue)
-            } else {
-                None
-            };
-
-            let signature = wait_for::signature_responded(status).await?;
-            let mut mpc_pk_bytes = vec![0x04];
-            mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
-
-            // Useful for populating the "signatures_havent_changed" test's hardcoded values
-            // dbg!(
-            //     hex::encode(signature.big_r.to_encoded_point(true).to_bytes()),
-            //     hex::encode(signature.s.to_bytes()),
-            //     hex::encode(&mpc_pk_bytes),
-            //     hex::encode(&payload_hash),
-            //     account.id(),
-            // );
-            actions::assert_signature(account.id(), &mpc_pk_bytes, payload_hash, &signature).await;
-
-            Ok(SignOutcome {
-                account,
-                rogue,
-                signature,
-                payload,
-                payload_hash,
-            })
-        })
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.execute())
     }
 }
 
 // Helper methods for the SignAction
 impl SignAction<'_> {
+    async fn execute(mut self) -> anyhow::Result<SignOutcome> {
+        let state = self.nodes.expect_running().await?;
+        let account = self.account_or_new().await;
+        let payload = self.payload_or_random();
+        let payload_hash = self.payload_hash();
+        let status = self.transact_sign(&account, payload_hash).await?;
+
+        // We have to use seperate transactions because one could fail.
+        // This leads to a potential race condition where this transaction could get sent after the signature completes, but I think that's unlikely
+        let rogue = if self.execute_rogue {
+            let (rogue, rogue_status) = self
+                .transact_rogue_respond(payload_hash, account.id())
+                .await?;
+            let err = wait_for::rogue_message_responded(rogue_status).await?;
+
+            assert!(err.contains(&errors::RespondError::InvalidSignature.to_string()));
+            Some(rogue)
+        } else {
+            None
+        };
+
+        let signature = wait_for::signature_responded(status).await?;
+        let mut mpc_pk_bytes = vec![0x04];
+        mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
+
+        // Useful for populating the "signatures_havent_changed" test's hardcoded values
+        // dbg!(
+        //     hex::encode(signature.big_r.to_encoded_point(true).to_bytes()),
+        //     hex::encode(signature.s.to_bytes()),
+        //     hex::encode(&mpc_pk_bytes),
+        //     hex::encode(&payload_hash),
+        //     account.id(),
+        // );
+        actions::validate_signature(account.id(), &mpc_pk_bytes, payload_hash, &signature).await?;
+
+        Ok(SignOutcome {
+            account,
+            rogue,
+            signature,
+            payload,
+            payload_hash,
+        })
+    }
+
     async fn account_or_new(&self) -> Account {
         if let Some(account) = &self.account {
             account.clone()

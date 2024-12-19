@@ -9,11 +9,7 @@ pub async fn vote_join(
     account_id: &AccountId,
 ) -> anyhow::Result<()> {
     let vote_futures = accounts.iter().map(|account| {
-        tracing::info!(
-            "{} voting for new participant: {}",
-            account.id(),
-            account_id
-        );
+        tracing::info!("{} voting for new participant {}", account.id(), account_id);
         account
             .call(mpc_contract, "vote_join")
             .args_json(serde_json::json!({
