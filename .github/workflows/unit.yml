@@ -36,10 +36,6 @@ jobs:
             target/
           key: "${{ runner.os }}-cargo-${{ hashFiles('mpc-recovery/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v1.1.2
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Compile Contract
         run: cd chain-signatures && cargo build -p mpc-contract --target wasm32-unknown-unknown --release
       - name: Compile
