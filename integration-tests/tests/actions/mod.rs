@@ -1,11 +1,13 @@
+pub mod sign;
+pub mod wait;
 pub mod wait_for;
 
-use crate::MultichainTestContext;
+use crate::cluster::Cluster;
 
+use anyhow::Context as _;
 use cait_sith::FullSignature;
 use crypto_shared::ScalarExt;
-use crypto_shared::SerializableAffinePoint;
-use crypto_shared::{derive_epsilon, derive_key, SerializableScalar, SignatureResponse};
+use crypto_shared::{derive_epsilon, derive_key};
 use elliptic_curve::sec1::ToEncodedPoint;
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::ops::{Invert, Reduce};
@@ -13,11 +15,8 @@ use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::elliptic_curve::ProjectivePoint;
 use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
-use mpc_contract::errors;
 use mpc_contract::errors::SignError;
 use mpc_contract::primitives::SignRequest;
-use mpc_contract::primitives::SignatureRequest;
-use mpc_contract::RunningContractState;
 use mpc_node::kdf::into_eth_sig;
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
@@ -40,44 +39,10 @@ use k256::{
 };
 use serde_json::json;
 
-pub async fn request_sign(
-    ctx: &MultichainTestContext<'_>,
-) -> anyhow::Result<([u8; 32], [u8; 32], Account, AsyncTransactionStatus)> {
-    let worker = &ctx.nodes.ctx().worker;
-    let account = worker.dev_create_account().await?;
-    let payload: [u8; 32] = rand::thread_rng().gen();
-    let payload_hashed = web3::signing::keccak256(&payload);
-
-    let signer = InMemorySigner {
-        account_id: account.id().clone(),
-        public_key: account.secret_key().public_key().to_string().parse()?,
-        secret_key: account.secret_key().to_string().parse()?,
-    };
-
-    let request = SignRequest {
-        payload: payload_hashed,
-        path: "test".to_string(),
-        key_version: 0,
-    };
-    let status = ctx
-        .rpc_client
-        .call(&signer, ctx.contract().id(), "sign")
-        .args_json(serde_json::json!({
-            "request": request,
-        }))
-        .gas(Gas::from_tgas(50))
-        .deposit(NearToken::from_yoctonear(1))
-        .transact_async()
-        .await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    Ok((payload, payload_hashed, account, status))
-}
-
 pub async fn request_batch_random_sign(
-    ctx: &MultichainTestContext<'_>,
+    nodes: &Cluster,
 ) -> anyhow::Result<(Vec<([u8; 32], [u8; 32])>, Account, AsyncTransactionStatus)> {
-    let worker = &ctx.nodes.ctx().worker;
-    let account = worker.dev_create_account().await?;
+    let account = nodes.worker().dev_create_account().await?;
     let signer = InMemorySigner {
         account_id: account.id().clone(),
         public_key: account.secret_key().public_key().to_string().parse()?,
@@ -85,7 +50,7 @@ pub async fn request_batch_random_sign(
     };
 
     let mut payloads: Vec<([u8; 32], [u8; 32])> = vec![];
-    let mut tx = ctx.rpc_client.batch(&signer, ctx.contract().id());
+    let mut tx = nodes.rpc_client.batch(&signer, nodes.contract().id());
     for _ in 0..3 {
         let payload: [u8; 32] = rand::thread_rng().gen();
         let payload_hashed = web3::signing::keccak256(&payload);
@@ -110,17 +75,16 @@ pub async fn request_batch_random_sign(
 }
 
 pub async fn request_batch_duplicate_sign(
-    ctx: &MultichainTestContext<'_>,
+    nodes: &Cluster,
 ) -> anyhow::Result<([u8; 32], u32, Account, AsyncTransactionStatus)> {
-    let worker = &ctx.nodes.ctx().worker;
-    let account = worker.dev_create_account().await?;
+    let account = nodes.worker().dev_create_account().await?;
     let signer = InMemorySigner {
         account_id: account.id().clone(),
         public_key: account.secret_key().public_key().to_string().parse()?,
         secret_key: account.secret_key().to_string().parse()?,
     };
 
-    let mut tx = ctx.rpc_client.batch(&signer, ctx.contract().id());
+    let mut tx = nodes.rpc_client.batch(&signer, nodes.contract().id());
     let payload: [u8; 32] = rand::thread_rng().gen();
     let payload_hashed = web3::signing::keccak256(&payload);
     let sign_call_cnt = 2;
@@ -144,182 +108,23 @@ pub async fn request_batch_duplicate_sign(
     Ok((payload_hashed, sign_call_cnt, account, status))
 }
 
-pub async fn assert_signature(
+pub async fn validate_signature(
     account_id: &near_workspaces::AccountId,
     mpc_pk_bytes: &[u8],
     payload: [u8; 32],
     signature: &FullSignature<Secp256k1>,
-) {
+) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
     let epsilon = derive_epsilon(account_id, "test");
     let user_pk = derive_key(mpc_pk, epsilon);
-    assert!(signature.verify(&user_pk, &Scalar::from_bytes(payload).unwrap(),));
-}
-
-// A normal signature, but we try to insert a bad response which fails and the signature is generated
-pub async fn single_signature_rogue_responder(
-    ctx: &MultichainTestContext<'_>,
-    state: &RunningContractState,
-) -> anyhow::Result<()> {
-    let (_, payload_hash, account, status) = request_sign(ctx).await?;
-
-    // We have to use seperate transactions because one could fail.
-    // This leads to a potential race condition where this transaction could get sent after the signature completes, but I think that's unlikely
-    let rogue_status = rogue_respond(ctx, payload_hash, account.id(), "test").await?;
-    let err = wait_for::rogue_message_responded(rogue_status).await?;
-
-    assert!(err.contains(&errors::RespondError::InvalidSignature.to_string()));
-    let signature = wait_for::signature_responded(status).await?;
-
-    let mut mpc_pk_bytes = vec![0x04];
-    mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
-
-    // Useful for populating the "signatures_havent_changed" test's hardcoded values
-    // dbg!(
-    //     hex::encode(signature.big_r.to_encoded_point(true).to_bytes()),
-    //     hex::encode(signature.s.to_bytes()),
-    //     hex::encode(&mpc_pk_bytes),
-    //     hex::encode(&payload_hash),
-    //     account.id(),
-    // );
-    assert_signature(account.id(), &mpc_pk_bytes, payload_hash, &signature).await;
-
-    Ok(())
-}
-
-pub async fn single_signature_production(
-    ctx: &MultichainTestContext<'_>,
-    state: &RunningContractState,
-) -> anyhow::Result<()> {
-    let (_, payload_hash, account, status) = request_sign(ctx).await?;
-    let signature = wait_for::signature_responded(status).await?;
-
-    let mut mpc_pk_bytes = vec![0x04];
-    mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
-    assert_signature(account.id(), &mpc_pk_bytes, payload_hash, &signature).await;
-
-    Ok(())
-}
-
-pub async fn rogue_respond(
-    ctx: &MultichainTestContext<'_>,
-    payload_hash: [u8; 32],
-    predecessor: &near_workspaces::AccountId,
-    path: &str,
-) -> anyhow::Result<AsyncTransactionStatus> {
-    let worker = &ctx.nodes.ctx().worker;
-    let account = worker.dev_create_account().await?;
-
-    let signer = InMemorySigner {
-        account_id: account.id().clone(),
-        public_key: account.secret_key().public_key().clone().into(),
-        secret_key: account.secret_key().to_string().parse()?,
-    };
-    let epsilon = derive_epsilon(predecessor, path);
-
-    let request = SignatureRequest {
-        payload_hash: Scalar::from_bytes(payload_hash).unwrap().into(),
-        epsilon: SerializableScalar { scalar: epsilon },
-    };
-
-    let big_r = serde_json::from_value(
-        "02EC7FA686BB430A4B700BDA07F2E07D6333D9E33AEEF270334EB2D00D0A6FEC6C".into(),
-    )?; // Fake BigR
-    let s = serde_json::from_value(
-        "20F90C540EE00133C911EA2A9ADE2ABBCC7AD820687F75E011DFEEC94DB10CD6".into(),
-    )?; // Fake S
-
-    let response = SignatureResponse {
-        big_r: SerializableAffinePoint {
-            affine_point: big_r,
-        },
-        s: SerializableScalar { scalar: s },
-        recovery_id: 0,
-    };
-
-    let status = ctx
-        .rpc_client
-        .call(&signer, ctx.contract().id(), "respond")
-        .args_json(serde_json::json!({
-            "request": request,
-            "response": response,
-        }))
-        .max_gas()
-        .transact_async()
-        .await?;
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    Ok(status)
-}
-
-pub async fn request_sign_non_random(
-    ctx: &MultichainTestContext<'_>,
-    account: Account,
-    payload: [u8; 32],
-    payload_hashed: [u8; 32],
-) -> Result<([u8; 32], [u8; 32], Account, AsyncTransactionStatus), WaitForError> {
-    let signer = InMemorySigner {
-        account_id: account.id().clone(),
-        public_key: account
-            .secret_key()
-            .public_key()
-            .to_string()
-            .parse()
-            .map_err(|_| WaitForError::Parsing)?,
-        secret_key: account
-            .secret_key()
-            .to_string()
-            .parse()
-            .map_err(|_| WaitForError::Parsing)?,
-    };
-
-    let request = SignRequest {
-        payload: payload_hashed,
-        path: "test".to_string(),
-        key_version: 0,
-    };
-
-    let status = ctx
-        .rpc_client
-        .call(&signer, ctx.contract().id(), "sign")
-        .args_json(serde_json::json!({
-            "request": request,
-        }))
-        .gas(Gas::from_tgas(50))
-        .deposit(NearToken::from_yoctonear(1))
-        .transact_async()
-        .await
-        .map_err(|error| WaitForError::JsonRpc(format!("{error:?}")))?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    Ok((payload, payload_hashed, account, status))
-}
-
-pub async fn single_payload_signature_production(
-    ctx: &MultichainTestContext<'_>,
-    state: &RunningContractState,
-) -> anyhow::Result<()> {
-    let (payload, payload_hash, account, status) = request_sign(ctx).await?;
-    let first_tx_result = wait_for::signature_responded(status).await;
-    let signature = match first_tx_result {
-        Ok(sig) => sig,
-        Err(error) => {
-            println!("single_payload_signature_production: first sign tx err out with {error:?}");
-            wait_for::signature_payload_responded(ctx, account.clone(), payload, payload_hash)
-                .await?
-        }
-    };
-    let mut mpc_pk_bytes = vec![0x04];
-    mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
-    assert_signature(
-        account.clone().id(),
-        &mpc_pk_bytes,
-        payload_hash,
-        &signature,
-    )
-    .await;
-
-    Ok(())
+    signature
+        .verify(
+            &user_pk,
+            &Scalar::from_bytes(payload).context("failed to convert payload to scalar")?, // .ok_or_else(|| anyhow::anyhow!("failed to convert payload to scalar"))?,
+        )
+        .then(|| Ok(()))
+        .ok_or_else(|| anyhow::anyhow!("failed to validate signature"))?
 }
 
 // add one of toxic to the toxiproxy-server to make indexer rpc slow down, congested, or unstable
@@ -376,30 +181,27 @@ pub async fn clear_toxics() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn batch_random_signature_production(
-    ctx: &MultichainTestContext<'_>,
-    state: &RunningContractState,
-) -> anyhow::Result<()> {
-    let (payloads, account, status) = request_batch_random_sign(ctx).await?;
+pub async fn batch_random_signature_production(nodes: &Cluster) -> anyhow::Result<()> {
+    let (payloads, account, status) = request_batch_random_sign(nodes).await?;
     let signatures = wait_for::batch_signature_responded(status).await?;
 
+    let mpc_pk = nodes.root_public_key().await?;
     let mut mpc_pk_bytes = vec![0x04];
-    mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
+    mpc_pk_bytes.extend_from_slice(&mpc_pk.as_bytes()[1..]);
     assert_eq!(payloads.len(), signatures.len());
     for i in 0..payloads.len() {
         let (_, payload_hash) = payloads.get(i).unwrap();
         let signature = signatures.get(i).unwrap();
-        assert_signature(account.id(), &mpc_pk_bytes, *payload_hash, signature).await;
+        validate_signature(account.id(), &mpc_pk_bytes, *payload_hash, signature)
+            .await
+            .unwrap();
     }
 
     Ok(())
 }
 
-pub async fn batch_duplicate_signature_production(
-    ctx: &MultichainTestContext<'_>,
-    _state: &RunningContractState,
-) -> anyhow::Result<()> {
-    let (_, _, _, status) = request_batch_duplicate_sign(ctx).await?;
+pub async fn batch_duplicate_signature_production(nodes: &Cluster) -> anyhow::Result<()> {
+    let (_, _, _, status) = request_batch_duplicate_sign(nodes).await?;
     let result = wait_for::batch_signature_responded(status).await;
     match result {
         Err(WaitForError::Signature(SignatureError::Failed(err_msg))) => {

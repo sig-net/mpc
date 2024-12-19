@@ -1,4 +1,6 @@
-use crate::{execute, utils, MultichainConfig};
+use std::fmt;
+
+use crate::{execute, utils, NodeConfig};
 
 use crate::containers::LakeIndexer;
 use crate::execute::executable;
@@ -15,7 +17,7 @@ pub struct Node {
     pub sign_sk: near_crypto::SecretKey,
     pub cipher_pk: hpke::PublicKey,
     cipher_sk: hpke::SecretKey,
-    cfg: MultichainConfig,
+    cfg: NodeConfig,
     web_port: u16,
 
     // process held so it's not dropped. Once dropped, process will be killed.
@@ -24,23 +26,35 @@ pub struct Node {
     pub near_rpc: String,
 }
 
-pub struct NodeConfig {
+pub struct NodeEnvConfig {
     pub web_port: u16,
     pub account: Account,
     pub cipher_pk: hpke::PublicKey,
     pub cipher_sk: hpke::SecretKey,
     pub sign_sk: near_crypto::SecretKey,
-    pub cfg: MultichainConfig,
+    pub cfg: NodeConfig,
     // near rpc address, after proxy
     pub near_rpc: String,
 }
 
+impl fmt::Debug for NodeEnvConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("web_port", &self.web_port)
+            .field("account", &self.account)
+            .field("cipher_pk", &self.cipher_pk)
+            .field("cfg", &self.cfg)
+            .field("near_rpc", &self.near_rpc)
+            .finish()
+    }
+}
+
 impl Node {
     pub async fn dry_run(
-        ctx: &super::Context<'_>,
+        ctx: &super::Context,
         account: &Account,
-        cfg: &MultichainConfig,
-    ) -> anyhow::Result<NodeConfig> {
+        cfg: &NodeConfig,
+    ) -> anyhow::Result<NodeEnvConfig> {
         let account_id = account.id();
         let account_sk = account.secret_key();
         let web_port = utils::pick_unused_port().await?;
@@ -90,7 +104,7 @@ impl Node {
             cmd.to_str().unwrap(),
             escaped_args.join(" ")
         );
-        let node_config = NodeConfig {
+        let node_config = NodeEnvConfig {
             web_port,
             account: account.clone(),
             cipher_pk,
@@ -103,8 +117,8 @@ impl Node {
     }
 
     pub async fn run(
-        ctx: &super::Context<'_>,
-        cfg: &MultichainConfig,
+        ctx: &super::Context,
+        cfg: &NodeConfig,
         account: &Account,
     ) -> anyhow::Result<Self> {
         let web_port = utils::pick_unused_port().await?;
@@ -127,7 +141,7 @@ impl Node {
 
         Self::spawn(
             ctx,
-            NodeConfig {
+            NodeEnvConfig {
                 web_port,
                 account: account.clone(),
                 cipher_pk,
@@ -140,7 +154,7 @@ impl Node {
         .await
     }
 
-    pub async fn spawn(ctx: &super::Context<'_>, config: NodeConfig) -> anyhow::Result<Self> {
+    pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
@@ -189,11 +203,11 @@ impl Node {
         })
     }
 
-    pub fn kill(self) -> NodeConfig {
+    pub fn kill(self) -> NodeEnvConfig {
         // NOTE: process gets killed after this function completes via the drop, due to taking ownership of self.
 
         tracing::info!(id = %self.account.id(), ?self.address, "node killed");
-        NodeConfig {
+        NodeEnvConfig {
             web_port: self.web_port,
             account: self.account.clone(),
             cipher_pk: self.cipher_pk.clone(),
