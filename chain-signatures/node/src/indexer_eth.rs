@@ -19,6 +19,7 @@ use web3::{
     types::{BlockNumber, FilterBuilder, Log, H160, H256, U256},
     Web3,
 };
+use crate::protocol::Chain::Ethereum;
 
 /// Configures Ethereum indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -168,6 +169,7 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
             payload,
             path: event.path,
             key_version: 0,
+            chain: Ethereum,
         };
         let epsilon = derive_epsilon_eth(format!("0x{}", event.requester.encode_hex::<String>()), &request.path);
         tracing::info!("from epsilon: {:?} event epsilon: {:?}", epsilon, event.epsilon);
@@ -183,7 +185,6 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
             entropy,
             // TODO: use indexer timestamp instead.
             time_added: Instant::now(),
-            chain: Chain::Ethereum,
         };
 
         pending_requests.push(sign_request);

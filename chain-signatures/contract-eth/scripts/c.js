@@ -16,8 +16,26 @@ function convertPublicKey(base58PublicKey) {
 }
 
 // Your public key
-const publicKey = "secp256k1:2G7cpAUa73okr83hfMM8EkZC42cHoMqvicWBKNBRMRmeFZ1YuBi371ywRpMp6oRkJUSWmLhpXWtgeKGEsmQnbWZr";
+if (process.argv.length < 3) {
+    console.error("Please provide a public key as argument");
+    process.exit(1);
+}
+const publicKey = process.argv[2].startsWith('secp256k1:') ? process.argv[2] : `secp256k1:${process.argv[2]}`;
 
 // Convert it
 const coordinates = convertPublicKey(publicKey);
 console.log(coordinates);
+
+// Save to params.json
+const fs = require('fs');
+const path = require('path');
+
+const params = {
+    ChainSignaturesModule: {
+        publicKey: coordinates
+    }
+};
+
+const paramsPath = path.join(__dirname, '../ignition/params.json');
+fs.writeFileSync(paramsPath, JSON.stringify(params, null, 4));
+console.log('Saved coordinates to', paramsPath);

@@ -13,7 +13,6 @@ pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::MpcMessage;
-pub use signature::Chain;
 pub use signature::SignQueue;
 pub use signature::SignRequest;
 pub use state::NodeState;
@@ -463,4 +462,10 @@ fn update_system_metrics(node_account_id: &str) {
     crate::metrics::TOTAL_DISK_SPACE_BYTES
         .with_label_values(&["total_disk", node_account_id])
         .set(total_disk_space);
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy)]
+pub enum Chain {
+    NEAR,
+    Ethereum,
 }

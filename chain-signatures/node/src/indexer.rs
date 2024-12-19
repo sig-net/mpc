@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use crate::protocol::Chain::NEAR;
 
 /// Configures indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -97,6 +98,7 @@ pub struct ContractSignRequest {
     pub payload: Scalar,
     pub path: String,
     pub key_version: u32,
+    pub chain: Chain,
 }
 
 #[derive(Debug, Clone)]
@@ -249,6 +251,7 @@ async fn handle_block(
                     payload,
                     path: arguments.request.path,
                     key_version: arguments.request.key_version,
+                    chain: NEAR,
                 };
                 pending_requests.push(SignRequest {
                     request_id: receipt_id.0,
@@ -257,7 +260,6 @@ async fn handle_block(
                     entropy,
                     // TODO: use indexer timestamp instead.
                     time_added: Instant::now(),
-                    chain: Chain::NEAR,
                 });
             }
         }

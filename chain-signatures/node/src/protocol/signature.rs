@@ -1,7 +1,9 @@
 use super::contract::primitives::Participants;
 use super::message::SignatureMessage;
 use super::presignature::{GenerationError, Presignature, PresignatureId, PresignatureManager};
-use crate::indexer::ContractSignRequest;
+use crate::indexer::{ContractSignRequest};
+use crate::protocol::Chain;
+use crate::protocol::Chain::Ethereum;
 use crate::kdf::{derive_delta, into_eth_sig};
 use crate::types::SignatureProtocol;
 use crate::util::AffinePointExt;
@@ -33,12 +35,6 @@ pub struct SignRequest {
     pub epsilon: Scalar,
     pub entropy: [u8; 32],
     pub time_added: Instant,
-    pub chain: Chain,
-}
-
-pub enum Chain {
-    NEAR,
-    Ethereum,
 }
 
 /// Type that preserves the insertion order of requests.
@@ -262,6 +258,7 @@ pub struct ToPublish {
     time_added: Instant,
     signature: FullSignature<Secp256k1>,
     retry_count: u8,
+    chain: Chain
 }
 
 impl ToPublish {
@@ -270,6 +267,7 @@ impl ToPublish {
         request: SignatureRequest,
         time_added: Instant,
         signature: FullSignature<Secp256k1>,
+        chain: Chain,
     ) -> ToPublish {
         ToPublish {
             request_id,
@@ -277,6 +275,7 @@ impl ToPublish {
             time_added,
             signature,
             retry_count: 0,
+            chain
         }
     }
 }
@@ -604,7 +603,7 @@ impl SignatureManager {
                         };
                         if generator.proposer == self.me {
                             self.signatures
-                                .push(ToPublish::new(sign_request_identifier.request_id, request, generator.sign_request_timestamp, output));
+                                .push(ToPublish::new(sign_request_identifier.request_id, request, generator.sign_request_timestamp, output, generator.request.chain));
                         }
                         // Do not retain the protocol
                         return false;
@@ -724,6 +723,7 @@ impl SignatureManager {
                 request,
                 time_added,
                 signature,
+                chain,
                 ..
             } = &to_publish;
             let expected_public_key = derive_key(self.public_key, request.epsilon.scalar);
@@ -737,6 +737,10 @@ impl SignatureManager {
                 tracing::error!(request_id = ?CryptoHash(*request_id), "Failed to generate a recovery ID");
                 continue;
             };
+            if *chain == Ethereum {
+                tracing::error!("publish ethereum signature is not implemented");
+                continue;
+            }
             let response = match rpc_client
                 .call(signer, mpc_contract_id, "respond")
                 .args_json(serde_json::json!({

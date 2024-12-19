@@ -9,15 +9,15 @@ async function main() {
   console.log("requestId:", requestId);
   // Decode base58 big_r value
   const bs58 = require('bs58');
-  const bigRBytes = bs58.decode("PNv4eHTzMjoNCBN81j3fxEzc4GNzinq4NKJ4EMNDSXon2Dxfc4cYzY1sh4DDGUWSTMsfCdCmCXGypTt8styCpcB");
+  const bigRBytes = bs58.decode("4cgiytAxS5LyPgJHPuwWms1CyJpGymDYyt5317UtGh1AbYDVsAqMjEqtwTTwdmvWwRgmnqqtZLbGsn2AjPG5UHkA");
   console.log("bigRBytes length:", bigRBytes.length);
   const signature = {
     bigR: {
       x: '0x' + Buffer.from(bigRBytes.slice(0,32)).toString('hex'),
       y: '0x' + Buffer.from(bigRBytes.slice(32,64)).toString('hex')
     },
-    s: "0x19644F453028EB4E32016E0494DA804DB762A17D09D248C09BE008A1B93DF22F",
-    recoveryId: 1
+    s: "0x6F87825CE327394BA991C58C5B27ECF6431C7EF3FB8BEBD2D22C66FB6028FC82",
+    recoveryId: 0
   };
 
   // Get the deployed contract address from deployments file
