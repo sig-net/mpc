@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 
 use near_account_id::AccountId;
 use near_fetch::signer::SignerExt;
+use web3::Web3;
+use web3::contract::Contract;
 
 pub type ReceiptId = near_primitives::hash::CryptoHash;
 
@@ -714,6 +716,7 @@ impl SignatureManager {
         rpc_client: &near_fetch::Client,
         signer: &T,
         mpc_contract_id: &AccountId,
+        eth_client: &Web3<web3::transports::Http>,
     ) {
         let mut to_retry: Vec<ToPublish> = Vec::new();
 
@@ -737,49 +740,87 @@ impl SignatureManager {
                 tracing::error!(request_id = ?CryptoHash(*request_id), "Failed to generate a recovery ID");
                 continue;
             };
-            if *chain == Ethereum {
-                tracing::error!("publish ethereum signature is not implemented");
-                continue;
-            }
-            let response = match rpc_client
-                .call(signer, mpc_contract_id, "respond")
-                .args_json(serde_json::json!({
-                    "request": request,
-                    "response": signature,
-                }))
-                .max_gas()
-                .retry_exponential(10, 5)
-                .transact()
-                .await
-            {
-                Ok(response) => response,
-                Err(err) => {
-                    tracing::error!(request_id = ?CryptoHash(*request_id), request = ?request, error = ?err, "Failed to publish the signature");
-                    crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                        .with_label_values(&[self.my_account_id.as_str()])
-                        .inc();
-                    // Push the response to the back of the queue if it hasn't been retried the max number of times
-                    if to_publish.retry_count < MAX_RETRY {
-                        to_publish.retry_count += 1;
-                        to_retry.push(to_publish);
+            match *chain {
+                Ethereum => {
+                    let contract = Contract::from_json(
+                        eth_client.eth(),
+                        eth_client.eth().accounts().await.unwrap()[0], // Use first account
+                        include_bytes!("../../../contract-eth/ignition/deployments/chain-31337/artifacts/ChainSignaturesModule#ChainSignatures.json")
+                    ).unwrap();
+
+                    let sig = serde_json::json!({
+                        "bigR": {
+                            "x": web3::types::U256::from_big_endian(&signature.big_r.affine_point.x().to_bytes()),
+                            "y": web3::types::U256::from_big_endian(&signature.big_r.affine_point.y().to_bytes())
+                        },
+                        "s": web3::types::U256::from_big_endian(&signature.s.to_bytes()),
+                        "recoveryId": signature.recovery_id as u8
+                    });
+
+                    match contract.call("respond", (*request_id, sig), None, None, None).await {
+                        Ok(tx_hash) => {
+                            tracing::info!(
+                                request_id = ?CryptoHash(*request_id),
+                                tx_hash = ?tx_hash,
+                                "published ethereum signature successfully"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                request_id = ?CryptoHash(*request_id),
+                                error = ?err,
+                                "Failed to publish ethereum signature"
+                            );
+                            if to_publish.retry_count < MAX_RETRY {
+                                to_publish.retry_count += 1;
+                                to_retry.push(to_publish);
+                            }
+                            continue;
+                        }
                     }
                     continue;
                 }
-            };
-
-            match response.json() {
-                Ok(()) => {
-                    tracing::info!(request_id = ?CryptoHash(*request_id), request = ?request, bi_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, "published signature sucessfully")
+                Near => {
+                    let response = match rpc_client
+                        .call(signer, mpc_contract_id, "respond")
+                        .args_json(serde_json::json!({
+                            "request": request,
+                            "response": signature,
+                        }))
+                        .max_gas()
+                        .retry_exponential(10, 5)
+                        .transact()
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(err) => {
+                            tracing::error!(request_id = ?CryptoHash(*request_id), request = ?request, error = ?err, "Failed to publish the signature");
+                            crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                                .with_label_values(&[self.my_account_id.as_str()])
+                                .inc();
+                            // Push the response to the back of the queue if it hasn't been retried the max number of times
+                            if to_publish.retry_count < MAX_RETRY {
+                                to_publish.retry_count += 1;
+                                to_retry.push(to_publish);
+                            }
+                            continue;
+                        }
+                    };
+                    match response.json() {
+                        Ok(()) => {
+                            tracing::info!(request_id = ?CryptoHash(*request_id), request = ?request, bi_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, "published signature sucessfully")
+                        }
+                        Err(err) => {
+                            tracing::error!(request_id = ?CryptoHash(*request_id), bi_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, error = ?err, "smart contract threw error");
+                            crate::metrics::SIGNATURE_PUBLISH_RESPONSE_ERRORS
+                                .with_label_values(&[self.my_account_id.as_str()])
+                                .inc();
+                            continue;
+                        }
+                    };
                 }
-                Err(err) => {
-                    tracing::error!(request_id = ?CryptoHash(*request_id), bi_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, error = ?err, "smart contract threw error");
-                    crate::metrics::SIGNATURE_PUBLISH_RESPONSE_ERRORS
-                        .with_label_values(&[self.my_account_id.as_str()])
-                        .inc();
-                    continue;
-                }
-            };
-
+            }
+            
             crate::metrics::NUM_SIGN_SUCCESS
                 .with_label_values(&[self.my_account_id.as_str()])
                 .inc();
@@ -819,3 +860,4 @@ impl SignatureManager {
         matches!(entry, Entry::Occupied(_))
     }
 }
+

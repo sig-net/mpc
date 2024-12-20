@@ -43,6 +43,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc::{self, error::TryRecvError};
 use tokio::sync::RwLock;
 use url::Url;
+use web3::Web3;
 
 struct Ctx {
     my_address: Url,
@@ -51,6 +52,7 @@ struct Ctx {
     signer: InMemorySigner,
     rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
+    eth_client: Web3<web3::transports::Http>,
     sign_queue: Arc<RwLock<SignQueue>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleRedisStorage,
@@ -122,6 +124,10 @@ impl CryptographicCtx for &mut MpcSignProtocol {
 
     fn rpc_client(&self) -> &near_fetch::Client {
         &self.ctx.rpc_client
+    }
+
+    fn eth_client(&self) -> &Web3<web3::transports::Http> {
+        &self.ctx.eth_client
     }
 
     fn signer(&self) -> &InMemorySigner {
@@ -196,12 +202,15 @@ impl MpcSignProtocol {
             "initializing protocol with parameters"
         );
         let state = Arc::new(RwLock::new(NodeState::Starting));
+        let transport = web3::transports::Http::new("http://localhost:8545").expect("failed to initialize eth client");
+        let web3 = Web3::new(transport);
         let ctx = Ctx {
             my_address,
             account_id,
             mpc_contract_id,
             rpc_client,
             http_client: reqwest::Client::new(),
+            eth_client: web3,
             sign_queue,
             signer,
             secret_storage,
