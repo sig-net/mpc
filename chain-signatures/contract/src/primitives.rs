@@ -3,7 +3,7 @@ use k256::Scalar;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
 
 pub mod hpke {
     pub type PublicKey = [u8; 32];
@@ -162,8 +162,12 @@ impl Participants {
         self.participants.get(account_id)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&AccountId, &ParticipantInfo)> {
+    pub fn iter(&self) -> btree_map::Iter<'_, AccountId, ParticipantInfo> {
         self.participants.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> btree_map::IterMut<'_, AccountId, ParticipantInfo> {
+        self.participants.iter_mut()
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &AccountId> {
@@ -176,6 +180,33 @@ impl Participants {
 
     pub fn is_empty(&self) -> bool {
         self.participants.is_empty()
+    }
+}
+
+impl<'a> IntoIterator for &'a Participants {
+    type Item = (&'a AccountId, &'a ParticipantInfo);
+    type IntoIter = btree_map::Iter<'a, AccountId, ParticipantInfo>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.participants.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Participants {
+    type Item = (&'a AccountId, &'a mut ParticipantInfo);
+    type IntoIter = btree_map::IterMut<'a, AccountId, ParticipantInfo>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.participants.iter_mut()
+    }
+}
+
+impl IntoIterator for Participants {
+    type Item = (AccountId, ParticipantInfo);
+    type IntoIter = btree_map::IntoIter<AccountId, ParticipantInfo>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.participants.into_iter()
     }
 }
 
@@ -213,11 +244,38 @@ impl Candidates {
         self.candidates.get(account_id)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&AccountId, &CandidateInfo)> {
+    pub fn iter(&self) -> btree_map::Iter<'_, AccountId, CandidateInfo> {
         self.candidates.iter()
     }
 
-    pub fn into_iter(self) -> impl IntoIterator<Item = (AccountId, CandidateInfo)> {
+    pub fn iter_mut(&mut self) -> btree_map::IterMut<'_, AccountId, CandidateInfo> {
+        self.candidates.iter_mut()
+    }
+}
+
+impl<'a> IntoIterator for &'a Candidates {
+    type Item = (&'a AccountId, &'a CandidateInfo);
+    type IntoIter = btree_map::Iter<'a, AccountId, CandidateInfo>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.candidates.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Candidates {
+    type Item = (&'a AccountId, &'a mut CandidateInfo);
+    type IntoIter = btree_map::IterMut<'a, AccountId, CandidateInfo>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.candidates.iter_mut()
+    }
+}
+
+impl IntoIterator for Candidates {
+    type Item = (AccountId, CandidateInfo);
+    type IntoIter = btree_map::IntoIter<AccountId, CandidateInfo>;
+
+    fn into_iter(self) -> Self::IntoIter {
         self.candidates.into_iter()
     }
 }
