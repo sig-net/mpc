@@ -54,6 +54,7 @@ crypto-shared = { path = "../../chain-signatures/crypto-shared" }
 mpc-contract = { path = "../../chain-signatures/contract" }
 mpc-keys = { path = "../../chain-signatures/keys" }
 mpc-node = { path = "../../chain-signatures/node" }
+forge = { path = "../forge" }
 
 [dev-dependencies]
 backon = "0.4"
@@ -68,6 +69,7 @@ secp256k1 = "0.28.2"
 anyhow = "1"
 async-process = "1"
 tokio = { version = "1", features = ["full"] }
+mpc-forge = { path = "../../chain-signatures/forge" }
 
 [workspace] # used to ignore higher level workspace
 

@@ -1,0 +1,9 @@
+[package]
+name = "forge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+async-process = "1"
+chrono = "0.4"
