@@ -224,14 +224,6 @@ impl PresignatureManager {
     }
 
     pub async fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
-        if self.contains_mine(&id).await {
-            tracing::error!(?id, "cannot take mine presignature as foreign owned");
-            return Err(GenerationError::PresignatureDenied(
-                id,
-                "cannot take mine presignature as foreign owned",
-            ));
-        }
-
         let presignature = self
             .presignature_storage
             .take(&id)

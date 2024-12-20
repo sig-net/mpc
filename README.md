@@ -7,5 +7,3 @@ Chain signatures is an MPC service that facilitates the ability to sign arbitrar
 - [Roadmap](ROADMAP.md)
 - [Architecure](ARCHITECTURE.md)
 - [Scaling and Security](SCALING_AND_SECURITY.md)
-
-If you are looking for FastAuth project, please check the [mpc-recovery](/mpc-recovery) folder.
