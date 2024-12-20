@@ -5,7 +5,8 @@ use std::vec;
 
 use clap::Parser;
 use integration_tests_chain_signatures::containers::DockerClient;
-use integration_tests_chain_signatures::{dry_run, run, utils, NodeConfig};
+use integration_tests_chain_signatures::types::NodeConfig;
+use integration_tests_chain_signatures::{dry_run, run};
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -49,11 +50,10 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             };
             println!("Full config: {:?}", config);
-            let nodes = run(config.clone(), &docker_client).await?;
+            let nodes = run(&config, &docker_client, None).await?;
             let ctx = nodes.ctx();
             let urls: Vec<_> = (0..config.nodes).map(|i| nodes.url(i)).collect();
             let near_accounts = nodes.near_accounts();
-            let sk_local_path = nodes.ctx().storage_options.sk_share_local_path.clone();
 
             println!("\nEnvironment is ready:");
             println!("  docker-network: {}", ctx.docker_network);
@@ -77,13 +77,12 @@ async fn main() -> anyhow::Result<()> {
 
             signal::ctrl_c().await.expect("Failed to listen for event");
             println!("Received Ctrl-C");
-            utils::clear_local_sk_shares(sk_local_path).await?;
             println!("Clean up finished");
         }
         Cli::DepServices => {
             println!("Setting up dependency services");
             let config = NodeConfig::default();
-            let _ctx = dry_run(config.clone(), &docker_client).await?;
+            let _ctx = dry_run(&config, &docker_client).await?;
 
             println!("Press Ctrl-C to stop dependency services");
             signal::ctrl_c().await.expect("Failed to listen for event");

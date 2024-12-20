@@ -2332,6 +2332,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
+name = "forge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-process",
+ "chrono",
+]
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3335,6 +3344,7 @@ dependencies = [
  "ecdsa 0.16.9",
  "elliptic-curve 0.13.8",
  "ethers-core",
+ "forge",
  "futures",
  "generic-array",
  "glob",
@@ -3343,7 +3353,6 @@ dependencies = [
  "k256",
  "lazy_static",
  "mpc-contract",
- "mpc-forge",
  "mpc-keys",
  "mpc-node",
  "near-account-id",
@@ -3729,15 +3738,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "mpc-forge"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-process",
- "chrono",
 ]
 
 [[package]]

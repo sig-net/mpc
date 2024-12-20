@@ -21,5 +21,5 @@ pub fn spawn_node(release: bool, node: &str, cli: mpc_node::cli::Cli) -> anyhow:
         .stderr(async_process::Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("failed to run {node} node: {executable}"))
+        .with_context(|| format!("failed to run {node} node: {}", executable.display()))
 }

@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use super::{local::NodeEnvConfig, utils, NodeConfig};
+use super::utils;
+use crate::types::{NodeConfig, NodeEnvConfig, NodeSpawnConfig, Secrets};
+
 use anyhow::{anyhow, Context};
 use async_process::Child;
 use bollard::container::LogsOptions;
@@ -9,18 +11,13 @@ use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
 use bollard::Docker;
 use futures::{lock::Mutex, StreamExt};
-use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
 use once_cell::sync::Lazy;
 use serde_json::json;
-use testcontainers::core::ExecCommand;
-use testcontainers::ContainerAsync;
-use testcontainers::{
-    core::{IntoContainerPort, WaitFor},
-    runners::AsyncRunner,
-    GenericImage, ImageExt,
-};
+use testcontainers::core::{ExecCommand, IntoContainerPort, WaitFor};
+use testcontainers::runners::AsyncRunner;
+use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::io::AsyncWriteExt;
 use tracing;
 
@@ -33,9 +30,7 @@ pub struct Node {
     pub address: String,
     pub account: Account,
     pub local_address: String,
-    pub cipher_pk: hpke::PublicKey,
-    pub cipher_sk: hpke::SecretKey,
-    pub sign_sk: near_crypto::SecretKey,
+    pub secrets: Secrets,
     cfg: NodeConfig,
     // near rpc address, after proxy
     near_rpc: String,
@@ -45,25 +40,18 @@ impl Node {
     // Container port used for the docker network, does not have to be unique
     const CONTAINER_PORT: u16 = 3000;
 
-    pub async fn run(
-        ctx: &super::Context,
-        cfg: &NodeConfig,
-        account: &Account,
-    ) -> anyhow::Result<Self> {
-        tracing::info!(id = %account.id(), "running node container");
-        let (cipher_sk, cipher_pk) = hpke::generate();
-        let sign_sk =
-            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
+    pub async fn run(ctx: &super::Context, spawn_cfg: NodeSpawnConfig) -> anyhow::Result<Self> {
+        tracing::info!(id = %spawn_cfg.account.id(), "running node container");
 
         // Use proxied address to mock slow, congested or unstable rpc connection
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
-        let proxy_name = format!("rpc_from_node_{}", account.id());
+        let proxy_name = format!("rpc_from_node_{}", spawn_cfg.account.id());
         let rpc_port_proxied = utils::pick_unused_port().await?;
         let rpc_address_proxied = format!("{near_rpc}:{rpc_port_proxied}");
         tracing::info!(
             "Proxy RPC address {} accessed by node@{} to {}",
             near_rpc,
-            account.id(),
+            spawn_cfg.account.id(),
             rpc_address_proxied
         );
         LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc)
@@ -74,11 +62,9 @@ impl Node {
             ctx,
             NodeEnvConfig {
                 web_port: Self::CONTAINER_PORT,
-                account: account.clone(),
-                cipher_pk,
-                cipher_sk,
-                sign_sk,
-                cfg: cfg.clone(),
+                account: spawn_cfg.account,
+                secrets: spawn_cfg.secrets,
+                cfg: spawn_cfg.cfg,
                 near_rpc: rpc_address_proxied,
             },
         )
@@ -90,9 +76,7 @@ impl Node {
         NodeEnvConfig {
             web_port: Self::CONTAINER_PORT,
             account: self.account,
-            cipher_pk: self.cipher_pk,
-            cipher_sk: self.cipher_sk,
-            sign_sk: self.sign_sk,
+            secrets: self.secrets,
             cfg: self.cfg,
             near_rpc: self.near_rpc,
         }
@@ -113,14 +97,14 @@ impl Node {
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
             web_port: Self::CONTAINER_PORT,
-            cipher_pk: hex::encode(config.cipher_pk.to_bytes()),
-            cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
+            cipher_pk: hex::encode(config.secrets.cipher_pk.to_bytes()),
+            cipher_sk: hex::encode(config.secrets.cipher_sk.to_bytes()),
             indexer_options: indexer_options.clone(),
             my_address: None,
             storage_options: ctx.storage_options.clone(),
-            sign_sk: Some(config.sign_sk.clone()),
+            sign_sk: Some(config.secrets.sign_sk.clone()),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
-                config.cfg.protocol.clone(),
+                &config.cfg.protocol,
             )?)),
             client_header_referer: None,
             mesh_options: ctx.mesh_options.clone(),
@@ -166,9 +150,7 @@ impl Node {
             address: full_address,
             account: config.account,
             local_address: format!("http://localhost:{host_port}"),
-            cipher_pk: config.cipher_pk,
-            cipher_sk: config.cipher_sk,
-            sign_sk: config.sign_sk,
+            secrets: config.secrets,
             cfg: config.cfg,
             near_rpc: config.near_rpc,
         })
@@ -237,7 +219,10 @@ impl LocalStack {
         let s3_address = format!("http://{}:{}", address, Self::S3_CONTAINER_PORT);
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         let s3_host_address = {
-            let s3_host_port = container.get_host_port_ipv4(Self::S3_CONTAINER_PORT);
+            let s3_host_port = container
+                .get_host_port_ipv4(Self::S3_CONTAINER_PORT)
+                .await
+                .unwrap();
             format!("http://127.0.0.1:{s3_host_port}")
         };
         #[cfg(target_arch = "x86_64")]

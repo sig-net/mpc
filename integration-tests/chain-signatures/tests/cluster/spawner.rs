@@ -1,19 +1,25 @@
-use mpc_contract::config::ProtocolConfig;
+use crate::cluster::Cluster;
 
 use std::future::{Future, IntoFuture};
 
 use integration_tests_chain_signatures::containers::DockerClient;
-use integration_tests_chain_signatures::{run, NodeConfig};
-
-// use crate::actions::wait_for;
-use crate::cluster::Cluster;
+use integration_tests_chain_signatures::run;
+use integration_tests_chain_signatures::types::NodeConfig;
+use mpc_contract::config::ProtocolConfig;
+use near_workspaces::Account;
 
 pub struct ClusterSpawner {
-    pub(crate) cfg: NodeConfig,
+    pub(crate) accounts: Option<Vec<Account>>,
     pub(crate) wait_for_running: bool,
+    pub(crate) cfg: NodeConfig,
 }
 
 impl ClusterSpawner {
+    pub fn accounts(mut self, accounts: Vec<Account>) -> Self {
+        self.accounts = Some(accounts);
+        self
+    }
+
     pub fn nodes(mut self, nodes: usize) -> Self {
         self.cfg.nodes = nodes;
         self
@@ -47,7 +53,7 @@ impl IntoFuture for ClusterSpawner {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             let docker_client = DockerClient::default();
-            let nodes = run(self.cfg.clone(), &docker_client).await?;
+            let nodes = run(&self.cfg, &docker_client, self.accounts).await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(&nodes.ctx().lake_indexer.rpc_host_address);
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);

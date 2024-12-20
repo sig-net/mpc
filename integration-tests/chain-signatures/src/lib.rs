@@ -1,20 +1,20 @@
 pub mod containers;
 pub mod execute;
 pub mod local;
+pub mod types;
 pub mod utils;
 
-use containers::Container;
-use deadpool_redis::Pool;
-use std::collections::HashMap;
+use crate::containers::Container;
+use crate::containers::{DockerClient, LocalStack};
+use crate::types::{NodeConfig, NodeEnvConfig, NodeSpawnConfig};
 
-use self::local::NodeEnvConfig;
-use crate::containers::DockerClient;
-use crate::containers::LocalStack;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use anyhow::Context as _;
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use deadpool_redis::Pool;
 use futures::StreamExt;
-use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
 use mpc_node::http_client;
@@ -22,41 +22,13 @@ use mpc_node::mesh;
 use mpc_node::storage;
 use mpc_node::storage::triple_storage::TripleStorage;
 use near_crypto::KeyFile;
+use near_sdk::NearToken;
 use near_workspaces::network::{Sandbox, ValidatorKey};
 use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
 
 const NETWORK: &str = "mpc_it_network";
-
-#[derive(Clone, Debug)]
-pub struct NodeConfig {
-    pub nodes: usize,
-    pub threshold: usize,
-    pub protocol: ProtocolConfig,
-}
-
-impl Default for NodeConfig {
-    fn default() -> Self {
-        Self {
-            nodes: 3,
-            threshold: 2,
-            protocol: ProtocolConfig {
-                triple: TripleConfig {
-                    min_triples: 8,
-                    max_triples: 80,
-                    ..Default::default()
-                },
-                presignature: PresignatureConfig {
-                    min_presignatures: 2,
-                    max_presignatures: 20,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        }
-    }
-}
 
 pub enum Nodes {
     Local {
@@ -102,18 +74,12 @@ impl Nodes {
         }
     }
 
-    pub async fn start_node(
-        &mut self,
-        cfg: &NodeConfig,
-        new_account: &Account,
-    ) -> anyhow::Result<()> {
-        tracing::info!(id = %new_account.id(), "adding one more node");
+    pub async fn start_node(&mut self, spawn_cfg: NodeSpawnConfig) -> anyhow::Result<()> {
+        tracing::info!(id = %spawn_cfg.account.id(), "adding one more node");
         match self {
-            Nodes::Local { ctx, nodes } => {
-                nodes.push(local::Node::run(ctx, cfg, new_account).await?)
-            }
+            Nodes::Local { ctx, nodes } => nodes.push(local::Node::run(ctx, spawn_cfg).await?),
             Nodes::Docker { ctx, nodes } => {
-                nodes.push(containers::Node::run(ctx, cfg, new_account).await?)
+                nodes.push(containers::Node::run(ctx, spawn_cfg).await?)
             }
         }
 
@@ -196,40 +162,110 @@ pub struct Context {
     pub docker_network: String,
     pub release: bool,
 
-    pub localstack: crate::containers::LocalStack,
-    pub lake_indexer: crate::containers::LakeIndexer,
+    pub localstack: containers::LocalStack,
+    pub lake_indexer: containers::LakeIndexer,
     pub worker: Worker<Sandbox>,
     pub mpc_contract: Contract,
-    pub redis: crate::containers::Redis,
+    pub redis: containers::Redis,
     pub storage_options: storage::Options,
     pub mesh_options: mesh::Options,
     pub message_options: http_client::Options,
+    pub candidates: HashMap<AccountId, CandidateInfo>,
+
+    /// Path to a temporary directory either located in /tmp or our target folder.
+    pub test_env: PathBuf,
 }
 
-pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context> {
+pub async fn setup(
+    cfg: &NodeConfig,
+    docker_client: &DockerClient,
+    accounts: Option<Vec<Account>>,
+) -> anyhow::Result<(Vec<NodeSpawnConfig>, Context)> {
     let release = true;
     let docker_network = NETWORK;
     docker_client.create_network(docker_network).await?;
 
-    let LakeIndexerCtx {
+    let LakeIndexer {
         localstack,
         lake_indexer,
         worker,
-    } = initialize_lake_indexer(docker_client, docker_network).await?;
+    } = LakeIndexer::spawn(docker_client, docker_network).await?;
+
+    let accounts = if let Some(accounts) = accounts {
+        accounts
+    } else {
+        let root = worker.root_account().unwrap();
+        let mut accounts = Vec::with_capacity(cfg.nodes);
+        for i in 0..cfg.nodes {
+            let account = root
+                .create_subaccount(&format!("node{i}"))
+                .initial_balance(NearToken::from_near(100))
+                .transact()
+                .await?
+                .into_result()?;
+            accounts.push(account);
+        }
+        accounts
+    };
+
+    let mut spawn_configs = Vec::with_capacity(cfg.nodes);
+    for account in &accounts {
+        spawn_configs.push(NodeSpawnConfig::new(cfg, account).await);
+    }
+
+    let candidates: HashMap<AccountId, CandidateInfo> = accounts
+        .iter()
+        .cloned()
+        .zip(&spawn_configs)
+        .map(|(account, spawn_cfg)| {
+            (
+                account.id().clone(),
+                CandidateInfo {
+                    account_id: account.id().as_str().parse().unwrap(),
+                    url: spawn_cfg.address(),
+                    cipher_pk: spawn_cfg.secrets.cipher_pk.to_bytes(),
+                    sign_pk: spawn_cfg
+                        .secrets
+                        .sign_sk
+                        .public_key()
+                        .to_string()
+                        .parse()
+                        .unwrap(),
+                },
+            )
+        })
+        .collect();
 
     let mpc_contract = worker
         .dev_deploy(&std::fs::read(
-            execute::target_dir()
+            forge::target_dir()
                 .context("could not find target dir")?
                 .join("wasm32-unknown-unknown/release/mpc_contract.wasm"),
         )?)
         .await?;
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
 
-    let redis = crate::containers::Redis::run(docker_client, docker_network).await;
+    mpc_contract
+        .call("init")
+        .args_json(json!({
+            "threshold": cfg.threshold,
+            "candidates": &candidates
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    tracing::info!("initialized mpc contract");
+
+    let redis = containers::Redis::run(docker_client, docker_network).await;
     let redis_url = redis.internal_address.clone();
 
-    let sk_share_local_path = "multichain-integration-secret-manager".to_string();
+    let test_env = forge::new_test_env_dir()?;
+    let sk_share_local_path = test_env.join("secrets");
+    std::fs::create_dir_all(&sk_share_local_path)?;
+    let sk_share_local_path = sk_share_local_path
+        .join("persistent-node-data")
+        .to_string_lossy()
+        .to_string();
     let storage_options = mpc_node::storage::Options {
         env: "local-test".to_string(),
         gcp_project_id: "multichain-integration".to_string(),
@@ -245,96 +281,50 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context> {
 
     let message_options = http_client::Options { timeout: 1000 };
 
-    Ok(Context {
-        docker_client: docker_client.clone(),
-        docker_network: docker_network.to_string(),
-        release,
-        localstack,
-        lake_indexer,
-        worker,
-        mpc_contract,
-        redis,
-        storage_options,
-        mesh_options,
-        message_options,
-    })
+    Ok((
+        spawn_configs,
+        Context {
+            docker_client: docker_client.clone(),
+            docker_network: docker_network.to_string(),
+            release,
+            localstack,
+            lake_indexer,
+            worker,
+            mpc_contract,
+            redis,
+            storage_options,
+            mesh_options,
+            message_options,
+            candidates,
+            test_env,
+        },
+    ))
 }
 
-pub async fn docker(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
-    let ctx = setup(docker_client).await?;
+pub async fn docker(
+    cfg: &NodeConfig,
+    docker_client: &DockerClient,
+    accounts: Option<Vec<Account>>,
+) -> anyhow::Result<Nodes> {
+    let (spawn_configs, ctx) = setup(cfg, docker_client, accounts).await?;
+    let node_futures = spawn_configs
+        .into_iter()
+        .map(|spawn_cfg| containers::Node::run(&ctx, spawn_cfg));
 
-    let accounts =
-        futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-    let mut node_futures = Vec::new();
-    for account in &accounts {
-        let node = containers::Node::run(&ctx, &cfg, account);
-        node_futures.push(node);
-    }
     let nodes = futures::future::join_all(node_futures)
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    let candidates: HashMap<AccountId, CandidateInfo> = accounts
-        .iter()
-        .cloned()
-        .zip(&nodes)
-        .map(|(account, node)| {
-            (
-                account.id().clone(),
-                CandidateInfo {
-                    account_id: account.id().as_str().parse().unwrap(),
-                    url: node.address.clone(),
-                    cipher_pk: node.cipher_pk.to_bytes(),
-                    sign_pk: node.sign_sk.public_key().to_string().parse().unwrap(),
-                },
-            )
-        })
-        .collect();
-    ctx.mpc_contract
-        .call("init")
-        .args_json(json!({
-            "threshold": cfg.threshold,
-            "candidates": candidates
-        }))
-        .transact()
-        .await?
-        .into_result()?;
 
     Ok(Nodes::Docker { ctx, nodes })
 }
 
-pub async fn dry_host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Context> {
-    let ctx = setup(docker_client).await?;
+pub async fn dry_host(cfg: &NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Context> {
+    let (spawn_configs, ctx) = setup(cfg, docker_client, None).await?;
 
-    let accounts =
-        futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-    let mut node_cfgs = Vec::new();
-    for account in accounts.iter().take(cfg.nodes) {
-        node_cfgs.push(local::Node::dry_run(&ctx, account, &cfg).await?);
-    }
-
-    let candidates: HashMap<AccountId, CandidateInfo> = accounts
-        .iter()
-        .cloned()
-        .zip(&node_cfgs)
-        .map(|(account, node_cfg)| {
-            (
-                account.id().clone(),
-                CandidateInfo {
-                    account_id: account.id().as_str().parse().unwrap(),
-                    url: format!("http://127.0.0.1:{0}", node_cfg.web_port),
-                    cipher_pk: node_cfg.cipher_pk.to_bytes(),
-                    sign_pk: node_cfg.sign_sk.public_key().to_string().parse().unwrap(),
-                },
-            )
-        })
-        .collect();
+    let _node_futures = spawn_configs
+        .into_iter()
+        .map(|spawn_cfg| local::Node::dry_run(&ctx, spawn_cfg));
 
     println!("\nPlease call below to update localnet:\n");
     let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
@@ -342,7 +332,7 @@ pub async fn dry_host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::
     println!("\nAfter run the nodes, please call the following command to init contract: ");
     let args = json!({
         "threshold": cfg.threshold,
-        "candidates": candidates
+        "candidates": ctx.candidates,
     })
     .to_string();
     let sk = SecretKey::from_seed(KeyType::ED25519, "testificate");
@@ -359,60 +349,47 @@ pub async fn dry_host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::
     Ok(ctx)
 }
 
-pub async fn host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
-    let ctx = setup(docker_client).await?;
+pub async fn host(
+    cfg: &NodeConfig,
+    docker_client: &DockerClient,
+    accounts: Option<Vec<Account>>,
+) -> anyhow::Result<Nodes> {
+    let (spawn_configs, ctx) = setup(cfg, docker_client, accounts).await?;
+    let node_futures = spawn_configs
+        .into_iter()
+        .map(|spawn_cfg| local::Node::run(&ctx, spawn_cfg));
 
-    let accounts =
-        futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-    let mut node_futures = Vec::with_capacity(cfg.nodes);
-    for account in &accounts {
-        node_futures.push(local::Node::run(&ctx, &cfg, account));
-    }
     let nodes = futures::future::join_all(node_futures)
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    let candidates: HashMap<AccountId, CandidateInfo> = accounts
-        .iter()
-        .cloned()
-        .zip(&nodes)
-        .map(|(account, node)| {
-            (
-                account.id().clone(),
-                CandidateInfo {
-                    account_id: account.id().as_str().parse().unwrap(),
-                    url: node.address.clone(),
-                    cipher_pk: node.cipher_pk.to_bytes(),
-                    sign_pk: node.sign_sk.public_key().to_string().parse().unwrap(),
-                },
-            )
-        })
-        .collect();
-    ctx.mpc_contract
-        .call("init")
-        .args_json(json!({
-            "threshold": cfg.threshold,
-            "candidates": candidates
-        }))
-        .transact()
-        .await?
-        .into_result()?;
 
     Ok(Nodes::Local { ctx, nodes })
 }
 
-pub async fn run(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
+pub async fn run(
+    cfg: &NodeConfig,
+    docker_client: &DockerClient,
+    accounts: Option<Vec<Account>>,
+) -> anyhow::Result<Nodes> {
+    if let Some(accounts) = &accounts {
+        if accounts.len() != cfg.nodes {
+            anyhow::bail!(
+                "number of accounts does not match number of nodes: {} != {}",
+                accounts.len(),
+                cfg.nodes
+            );
+        }
+    }
+
     #[cfg(feature = "docker-test")]
-    return docker(cfg, docker_client).await;
+    return docker(cfg, docker_client, accounts).await;
 
     #[cfg(not(feature = "docker-test"))]
-    return host(cfg, docker_client).await;
+    return host(cfg, docker_client, accounts).await;
 }
 
-pub async fn dry_run(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Context> {
+pub async fn dry_run(cfg: &NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Context> {
     #[cfg(feature = "docker-test")]
     unimplemented!("dry_run only works with native node");
 
@@ -468,45 +445,44 @@ async fn fetch_validator_keys(
     Ok(serde_json::from_slice(&key_data)?)
 }
 
-pub struct LakeIndexerCtx {
+pub struct LakeIndexer {
     pub localstack: containers::LocalStack,
     pub lake_indexer: containers::LakeIndexer,
     pub worker: Worker<Sandbox>,
 }
 
-pub async fn initialize_lake_indexer(
-    docker_client: &DockerClient,
-    network: &str,
-) -> anyhow::Result<LakeIndexerCtx> {
-    let s3_bucket = "near-lake-custom";
-    let s3_region = "us-east-1";
-    let localstack = LocalStack::run(docker_client, network, s3_bucket, s3_region).await;
+impl LakeIndexer {
+    pub async fn spawn(docker_client: &DockerClient, network: &str) -> anyhow::Result<Self> {
+        let s3_bucket = "near-lake-custom";
+        let s3_region = "us-east-1";
+        let localstack = LocalStack::run(docker_client, network, s3_bucket, s3_region).await;
 
-    let lake_indexer = containers::LakeIndexer::run(
-        docker_client,
-        network,
-        &localstack.s3_address,
-        s3_bucket,
-        s3_region,
-    )
-    .await;
+        let lake_indexer = containers::LakeIndexer::run(
+            docker_client,
+            network,
+            &localstack.s3_address,
+            s3_bucket,
+            s3_region,
+        )
+        .await;
 
-    let validator_key = fetch_validator_keys(docker_client, &lake_indexer.container).await?;
+        let validator_key = fetch_validator_keys(docker_client, &lake_indexer.container).await?;
 
-    tracing::info!("initializing sandbox worker");
-    let worker = near_workspaces::sandbox()
-        // use not proxied rpc address because workspace is used in setup (create dev account, deploy
-        // contract which we can assume succeed
-        .rpc_addr(&lake_indexer.rpc_host_address)
-        .validator_key(ValidatorKey::Known(
-            validator_key.account_id.to_string().parse()?,
-            validator_key.secret_key.to_string().parse()?,
-        ))
-        .await?;
+        tracing::info!("initializing sandbox worker");
+        let worker = near_workspaces::sandbox()
+            // use not proxied rpc address because workspace is used in setup (create dev account, deploy
+            // contract which we can assume succeed
+            .rpc_addr(&lake_indexer.rpc_host_address)
+            .validator_key(ValidatorKey::Known(
+                validator_key.account_id.to_string().parse()?,
+                validator_key.secret_key.to_string().parse()?,
+            ))
+            .await?;
 
-    Ok(LakeIndexerCtx {
-        localstack,
-        lake_indexer,
-        worker,
-    })
+        Ok(Self {
+            localstack,
+            lake_indexer,
+            worker,
+        })
+    }
 }

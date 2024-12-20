@@ -69,7 +69,7 @@ secp256k1 = "0.28.2"
 anyhow = "1"
 async-process = "1"
 tokio = { version = "1", features = ["full"] }
-mpc-forge = { path = "../../chain-signatures/forge" }
+forge = { path = "../forge" }
 
 [workspace] # used to ignore higher level workspace
 

@@ -1,12 +1,9 @@
-use std::fmt;
-
+use crate::types::{NodeEnvConfig, NodeSpawnConfig, Secrets};
 use crate::{execute, utils, NodeConfig};
 
 use crate::containers::LakeIndexer;
-use crate::execute::executable;
 use anyhow::Context;
 use async_process::Child;
-use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
 use shell_escape::escape;
@@ -14,9 +11,7 @@ use shell_escape::escape;
 pub struct Node {
     pub address: String,
     pub account: Account,
-    pub sign_sk: near_crypto::SecretKey,
-    pub cipher_pk: hpke::PublicKey,
-    cipher_sk: hpke::SecretKey,
+    pub secrets: Secrets,
     cfg: NodeConfig,
     web_port: u16,
 
@@ -26,41 +21,13 @@ pub struct Node {
     pub near_rpc: String,
 }
 
-pub struct NodeEnvConfig {
-    pub web_port: u16,
-    pub account: Account,
-    pub cipher_pk: hpke::PublicKey,
-    pub cipher_sk: hpke::SecretKey,
-    pub sign_sk: near_crypto::SecretKey,
-    pub cfg: NodeConfig,
-    // near rpc address, after proxy
-    pub near_rpc: String,
-}
-
-impl fmt::Debug for NodeEnvConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NodeConfig")
-            .field("web_port", &self.web_port)
-            .field("account", &self.account)
-            .field("cipher_pk", &self.cipher_pk)
-            .field("cfg", &self.cfg)
-            .field("near_rpc", &self.near_rpc)
-            .finish()
-    }
-}
-
 impl Node {
     pub async fn dry_run(
         ctx: &super::Context,
-        account: &Account,
-        cfg: &NodeConfig,
+        spawn_cfg: NodeSpawnConfig,
     ) -> anyhow::Result<NodeEnvConfig> {
-        let account_id = account.id();
-        let account_sk = account.secret_key();
-        let web_port = utils::pick_unused_port().await?;
-        let (cipher_sk, cipher_pk) = hpke::generate();
-        let sign_sk =
-            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
+        let account_id = spawn_cfg.account.id();
+        let account_sk = spawn_cfg.account.secret_key();
 
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
@@ -76,22 +43,22 @@ impl Node {
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
             account_sk: account_sk.to_string().parse()?,
-            web_port,
-            cipher_pk: hex::encode(cipher_pk.to_bytes()),
-            cipher_sk: hex::encode(cipher_sk.to_bytes()),
-            sign_sk: Some(sign_sk.clone()),
+            web_port: spawn_cfg.web_port,
+            cipher_pk: hex::encode(spawn_cfg.secrets.cipher_pk.to_bytes()),
+            cipher_sk: hex::encode(spawn_cfg.secrets.cipher_sk.to_bytes()),
+            sign_sk: Some(spawn_cfg.secrets.sign_sk.clone()),
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
-                cfg.protocol.clone(),
+                &spawn_cfg.cfg.protocol,
             )?)),
             client_header_referer: None,
             mesh_options: ctx.mesh_options.clone(),
             message_options: ctx.message_options.clone(),
         };
 
-        let cmd = executable(ctx.release, crate::execute::PACKAGE_MULTICHAIN)
+        let cmd = execute::node_executable(ctx.release)
             .with_context(|| "could not find target dir for mpc-node")?;
         let args = cli.into_str_args();
         let escaped_args: Vec<_> = args
@@ -105,32 +72,22 @@ impl Node {
             escaped_args.join(" ")
         );
         let node_config = NodeEnvConfig {
-            web_port,
-            account: account.clone(),
-            cipher_pk,
-            cipher_sk,
-            sign_sk,
-            cfg: cfg.clone(),
+            web_port: spawn_cfg.web_port,
+            secrets: spawn_cfg.secrets,
+            account: spawn_cfg.account,
+            cfg: spawn_cfg.cfg,
             near_rpc,
         };
         Ok(node_config)
     }
 
-    pub async fn run(
-        ctx: &super::Context,
-        cfg: &NodeConfig,
-        account: &Account,
-    ) -> anyhow::Result<Self> {
-        let web_port = utils::pick_unused_port().await?;
-        let (cipher_sk, cipher_pk) = hpke::generate();
-        let sign_sk =
-            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
+    pub async fn run(ctx: &super::Context, spawn_cfg: NodeSpawnConfig) -> anyhow::Result<Self> {
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
 
-        let proxy_name = format!("rpc_from_node_{}", account.id());
+        let proxy_name = format!("rpc_from_node_{}", spawn_cfg.account.id());
         let rpc_port_proxied = utils::pick_unused_port().await?;
         let rpc_address_proxied = format!("http://127.0.0.1:{}", rpc_port_proxied);
-        let address = format!("http://127.0.0.1:{web_port}");
+        let address = spawn_cfg.address();
         tracing::info!(
             "Proxy RPC address {} accessed by node@{} to {}",
             near_rpc,
@@ -142,12 +99,10 @@ impl Node {
         Self::spawn(
             ctx,
             NodeEnvConfig {
-                web_port,
-                account: account.clone(),
-                cipher_pk,
-                cipher_sk,
-                sign_sk,
-                cfg: cfg.clone(),
+                web_port: spawn_cfg.web_port,
+                secrets: spawn_cfg.secrets,
+                account: spawn_cfg.account,
+                cfg: spawn_cfg.cfg,
                 near_rpc: rpc_address_proxied,
             },
         )
@@ -169,9 +124,9 @@ impl Node {
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
             web_port,
-            cipher_pk: hex::encode(config.cipher_pk.to_bytes()),
-            cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
-            sign_sk: Some(config.sign_sk.clone()),
+            cipher_pk: hex::encode(config.secrets.cipher_pk.to_bytes()),
+            cipher_sk: hex::encode(config.secrets.cipher_sk.to_bytes()),
+            sign_sk: Some(config.secrets.sign_sk.clone()),
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
@@ -184,7 +139,7 @@ impl Node {
         };
 
         let mpc_node_id = format!("multichain/{}", config.account.id());
-        let process = execute::spawn_multichain(ctx.release, &mpc_node_id, cli)?;
+        let process = execute::spawn_node(ctx.release, &mpc_node_id, cli)?;
         let address = format!("http://127.0.0.1:{web_port}");
         tracing::info!("node is starting at {address}");
         utils::ping_until_ok(&address, 60).await?;
@@ -192,10 +147,8 @@ impl Node {
 
         Ok(Self {
             address,
+            secrets: config.secrets,
             account: config.account,
-            sign_sk: config.sign_sk,
-            cipher_pk: config.cipher_pk,
-            cipher_sk: config.cipher_sk,
             near_rpc: config.near_rpc,
             cfg: config.cfg,
             web_port,
@@ -209,10 +162,8 @@ impl Node {
         tracing::info!(id = %self.account.id(), ?self.address, "node killed");
         NodeEnvConfig {
             web_port: self.web_port,
+            secrets: self.secrets.clone(),
             account: self.account.clone(),
-            cipher_pk: self.cipher_pk.clone(),
-            cipher_sk: self.cipher_sk.clone(),
-            sign_sk: self.sign_sk.clone(),
             cfg: self.cfg.clone(),
             near_rpc: self.near_rpc.clone(),
         }
