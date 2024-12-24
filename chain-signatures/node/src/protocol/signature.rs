@@ -639,7 +639,7 @@ impl SignatureManager {
             if sig_participants.len() < threshold {
                 tracing::warn!(
                     participants = ?sig_participants.keys_vec(),
-                    "intersection of stable participants and presignature participants is less than threshold, treshing presignature"
+                    "intersection of stable participants and presignature participants is less than threshold, trashing presignature"
                 );
                 continue;
             }
