@@ -28,7 +28,9 @@ use near_account_id::AccountId;
 use near_fetch::signer::SignerExt;
 use web3::Web3;
 use web3::contract::Contract;
-
+use web3::ethabi::Token; 
+use k256::elliptic_curve::point::AffineCoordinates;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 pub type ReceiptId = near_primitives::hash::CryptoHash;
 
 pub struct SignRequest {
@@ -742,22 +744,30 @@ impl SignatureManager {
             };
             match *chain {
                 Ethereum => {
-                    let contract = Contract::from_json(
-                        eth_client.eth(),
-                        eth_client.eth().accounts().await.unwrap()[0], // Use first account
-                        include_bytes!("../../../contract-eth/ignition/deployments/chain-31337/artifacts/ChainSignaturesModule#ChainSignatures.json")
+                    let contract_json: serde_json::Value = serde_json::from_slice(
+                        include_bytes!("../../../contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json")
                     ).unwrap();
 
-                    let sig = serde_json::json!({
-                        "bigR": {
-                            "x": web3::types::U256::from_big_endian(&signature.big_r.affine_point.x().to_bytes()),
-                            "y": web3::types::U256::from_big_endian(&signature.big_r.affine_point.y().to_bytes())
-                        },
-                        "s": web3::types::U256::from_big_endian(&signature.s.to_bytes()),
-                        "recoveryId": signature.recovery_id as u8
-                    });
+                    let contract = Contract::from_json(
+                        eth_client.eth(),
+                        eth_client.eth().accounts().await.unwrap()[0],
+                        contract_json["abi"].to_string().as_bytes()
+                    ).unwrap();
 
-                    match contract.call("respond", (*request_id, sig), None, None, None).await {
+                    let params = vec![
+                        Token::FixedBytes(request_id.to_vec()),
+                        Token::Tuple(vec![
+                            Token::Tuple(vec![
+                                Token::Uint(web3::types::U256::from_big_endian(&signature.big_r.affine_point.x().to_vec())),
+                                Token::Uint(web3::types::U256::from_big_endian(&signature.big_r.affine_point.to_encoded_point(false).y().unwrap().to_vec()))
+                            ]),
+                            Token::Uint(web3::types::U256::from_big_endian(&signature.s.scalar.to_bytes())),
+                            Token::Uint(web3::types::U256::from(signature.recovery_id as u64))
+                        ])
+                    ];
+
+                    let options = web3::contract::Options::default();
+                    match contract.call("respond", params, eth_client.eth().accounts().await.unwrap()[0], options).await {
                         Ok(tx_hash) => {
                             tracing::info!(
                                 request_id = ?CryptoHash(*request_id),
@@ -778,7 +788,6 @@ impl SignatureManager {
                             continue;
                         }
                     }
-                    continue;
                 }
                 Near => {
                     let response = match rpc_client
