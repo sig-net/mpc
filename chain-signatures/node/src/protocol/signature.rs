@@ -23,6 +23,7 @@ use rand::SeedableRng;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
+use std::str::FromStr;
 
 use near_account_id::AccountId;
 use near_fetch::signer::SignerExt;
@@ -31,6 +32,8 @@ use web3::contract::Contract;
 use web3::ethabi::Token; 
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
+use web3::contract::tokens::Tokenizable;
+
 pub type ReceiptId = near_primitives::hash::CryptoHash;
 
 pub struct SignRequest {
@@ -750,11 +753,11 @@ impl SignatureManager {
 
                     let contract = Contract::from_json(
                         eth_client.eth(),
-                        eth_client.eth().accounts().await.unwrap()[0],
+                        web3::types::H160::from_str("0x5FbDB2315678afecb367f032d93F642f64180aa3").unwrap(),
                         contract_json["abi"].to_string().as_bytes()
                     ).unwrap();
 
-                    let params = vec![
+                    let params= (
                         Token::FixedBytes(request_id.to_vec()),
                         Token::Tuple(vec![
                             Token::Tuple(vec![
@@ -762,9 +765,11 @@ impl SignatureManager {
                                 Token::Uint(web3::types::U256::from_big_endian(&signature.big_r.affine_point.to_encoded_point(false).y().unwrap().to_vec()))
                             ]),
                             Token::Uint(web3::types::U256::from_big_endian(&signature.s.scalar.to_bytes())),
-                            Token::Uint(web3::types::U256::from(signature.recovery_id as u64))
+                            signature.recovery_id.into_token()
                         ])
-                    ];
+                    );
+
+                    println!("====== params: {:?}", params);
 
                     let options = web3::contract::Options::default();
                     match contract.call("respond", params, eth_client.eth().accounts().await.unwrap()[0], options).await {
