@@ -1,9 +1,9 @@
 use crate::protocol::triple::{Triple, TripleId};
 use crate::storage::error::{StoreError, StoreResult};
 
+use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
-use chrono::Duration;
 
 use near_account_id::AccountId;
 
