@@ -675,7 +675,7 @@ impl SignatureManager {
             }
 
             let Some(my_request) = my_requests.pop_front() else {
-                // TODO: we are loosing presignature now with no good reason
+                tracing::warn!("Unexpected state, no more requests to handle");
                 continue;
             };
 

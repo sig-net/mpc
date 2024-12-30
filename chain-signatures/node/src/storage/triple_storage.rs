@@ -12,16 +12,24 @@ const TRIPLE_STORAGE_VERSION: &str = "v2";
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
+    let triple_key = format!("triples:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
+    let mine_key = format!("triples_mine:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
+    let used_key = format!("triples_used:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
+
     TripleStorage {
         redis_pool: pool.clone(),
-        node_account_id: account_id.clone(),
+        triple_key,
+        mine_key,
+        used_key,
     }
 }
 
 #[derive(Clone)]
 pub struct TripleStorage {
     redis_pool: Pool,
-    node_account_id: AccountId,
+    triple_key: String,
+    mine_key: String,
+    used_key: String,
 }
 
 impl TripleStorage {
@@ -58,9 +66,9 @@ impl TripleStorage {
         "#;
 
         let _: String = redis::Script::new(script)
-            .key(self.mine_key())
-            .key(self.triple_key())
-            .key(self.used_key())
+            .key(&self.mine_key)
+            .key(&self.triple_key)
+            .key(&self.used_key)
             .arg(triple.id)
             .arg(triple)
             .arg(mine.to_string())
@@ -72,19 +80,19 @@ impl TripleStorage {
 
     pub async fn contains(&self, id: TripleId) -> StoreResult<bool> {
         let mut conn = self.connect().await?;
-        let result: bool = conn.hexists(self.triple_key(), id).await?;
+        let result: bool = conn.hexists(&self.triple_key, id).await?;
         Ok(result)
     }
 
     pub async fn contains_mine(&self, id: TripleId) -> StoreResult<bool> {
         let mut conn = self.connect().await?;
-        let result: bool = conn.sismember(self.mine_key(), id).await?;
+        let result: bool = conn.sismember(&self.mine_key, id).await?;
         Ok(result)
     }
 
     pub async fn contains_used(&self, id: TripleId) -> StoreResult<bool> {
         let mut conn = self.connect().await?;
-        let result: bool = conn.sismember(self.used_key(), id).await?;
+        let result: bool = conn.sismember(&self.used_key, id).await?;
         Ok(result)
     }
 
@@ -124,9 +132,9 @@ impl TripleStorage {
         "#;
 
         let result: Result<(Triple, Triple), redis::RedisError> = redis::Script::new(lua_script)
-            .key(self.triple_key())
-            .key(self.mine_key())
-            .key(self.used_key())
+            .key(&self.triple_key)
+            .key(&self.mine_key)
+            .key(&self.used_key)
             .arg(id1.to_string())
             .arg(id2.to_string())
             .arg(USED_EXPIRE_TIME.num_seconds())
@@ -174,9 +182,9 @@ impl TripleStorage {
         "#;
 
         let result: Result<(Triple, Triple), redis::RedisError> = redis::Script::new(lua_script)
-            .key(self.mine_key())
-            .key(self.triple_key())
-            .key(self.used_key())
+            .key(&self.mine_key)
+            .key(&self.triple_key)
+            .key(&self.used_key)
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await;
@@ -186,42 +194,21 @@ impl TripleStorage {
 
     pub async fn len_generated(&self) -> StoreResult<usize> {
         let mut conn = self.connect().await?;
-        let result: usize = conn.hlen(self.triple_key()).await?;
+        let result: usize = conn.hlen(&self.triple_key).await?;
         Ok(result)
     }
 
     pub async fn len_mine(&self) -> StoreResult<usize> {
         let mut conn = self.connect().await?;
-        let result: usize = conn.scard(self.mine_key()).await?;
+        let result: usize = conn.scard(&self.mine_key).await?;
         Ok(result)
     }
 
     pub async fn clear(&self) -> StoreResult<()> {
         let mut conn = self.connect().await?;
-        conn.del::<&str, ()>(&self.triple_key()).await?;
-        conn.del::<&str, ()>(&self.mine_key()).await?;
+        conn.del::<&str, ()>(&self.triple_key).await?;
+        conn.del::<&str, ()>(&self.mine_key).await?;
         Ok(())
-    }
-
-    fn triple_key(&self) -> String {
-        format!(
-            "triples:{}:{}",
-            TRIPLE_STORAGE_VERSION, self.node_account_id
-        )
-    }
-
-    fn mine_key(&self) -> String {
-        format!(
-            "triples_mine:{}:{}",
-            TRIPLE_STORAGE_VERSION, self.node_account_id
-        )
-    }
-
-    fn used_key(&self) -> String {
-        format!(
-            "used_triples:{}:{}",
-            TRIPLE_STORAGE_VERSION, self.node_account_id
-        )
     }
 }
 
