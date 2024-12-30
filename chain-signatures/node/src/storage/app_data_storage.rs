@@ -40,4 +40,24 @@ impl AppDataStorage {
             APP_DATA_PREFIX, APP_DATA_STORAGE_VERSION, self.node_account_id
         )
     }
+
+    pub async fn set_last_processed_block_eth(&self, height: u64) -> anyhow::Result<()> {
+        let mut conn = self.redis_pool.get().await?;
+        conn.set::<&str, u64, ()>(&self.last_block_key_eth(), height)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn last_processed_block_eth(&self) -> anyhow::Result<Option<u64>> {
+        let mut conn = self.redis_pool.get().await?;
+        let result: Option<u64> = conn.get(self.last_block_key_eth()).await?;
+        Ok(result)
+    }
+
+    fn last_block_key_eth(&self) -> String {
+        format!(
+            "{}:{}:{}:last_block_eth",
+            APP_DATA_PREFIX, APP_DATA_STORAGE_VERSION, self.node_account_id
+        )
+    }
 }

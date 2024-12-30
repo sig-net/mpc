@@ -1,12 +1,9 @@
-use crate::gcp::error::DatastoreStorageError;
-use crate::gcp::GcpService;
+use crate::storage::app_data_storage::AppDataStorage;
 use crate::indexer::ContractSignRequest;
-use crate::protocol::{Chain, SignQueue, SignRequest};
-use crate::types::EthLatestBlockHeight;
+use crate::protocol::{SignQueue, SignRequest};
 use crypto_shared::kdf::derive_epsilon_eth;
-use crypto_shared::{derive_epsilon, ScalarExt};
+use crypto_shared::ScalarExt;
 use k256::Scalar;
-use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -15,7 +12,6 @@ use std::time::{Duration, Instant};
 use hex::ToHex;
 use tokio::sync::RwLock;
 use web3::{
-    contract::Contract,
     types::{BlockNumber, FilterBuilder, Log, H160, H256, U256},
     Web3,
 };
@@ -72,57 +68,82 @@ pub struct EthSignRequest {
     pub key_version: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EthIndexer {
-    latest_block_height: Arc<RwLock<EthLatestBlockHeight>>,
+    app_data_storage: AppDataStorage,
     last_updated_timestamp: Arc<RwLock<Instant>>,
+    latest_block_timestamp: Arc<RwLock<Option<u64>>>,
     running_threshold: Duration,
     behind_threshold: Duration,
 }
 
 impl EthIndexer {
-    fn new(latest_block_height: EthLatestBlockHeight, options: &Options) -> Self {
-        tracing::info!(
-            "creating new ethereum indexer, latest block height: {}",
-            latest_block_height.block_height
-        );
+    fn new(app_data_storage: AppDataStorage, options: &Options) -> Self {
         Self {
-            latest_block_height: Arc::new(RwLock::new(latest_block_height)),
+            app_data_storage: app_data_storage.clone(),
             last_updated_timestamp: Arc::new(RwLock::new(Instant::now())),
+            latest_block_timestamp: Arc::new(RwLock::new(None)),
             running_threshold: Duration::from_secs(options.eth_running_threshold),
             behind_threshold: Duration::from_secs(options.eth_behind_threshold),
         }
     }
 
-    pub async fn latest_block_height(&self) -> u64 {
-        self.latest_block_height.read().await.block_height
+    pub async fn last_processed_block(&self) -> Option<u64> {
+        match self.app_data_storage.last_processed_block_eth().await {
+            Ok(Some(block_height)) => Some(block_height),
+            Ok(None) => {
+                tracing::warn!("no last processed eth block found");
+                None
+            }
+            Err(err) => {
+                tracing::warn!(%err, "failed to get last processed eth block");
+                None
+            }
+        }
     }
 
-    pub async fn is_on_track(&self) -> bool {
-        self.last_updated_timestamp.read().await.elapsed() <= self.behind_threshold
+    pub async fn set_last_processed_block(&self, block_height: u64) {
+        if let Err(err) = self
+            .app_data_storage
+            .set_last_processed_block_eth(block_height)
+            .await
+        {
+            tracing::error!(%err, "failed to set last processed eth block");
+        }
     }
 
+    /// Check whether the indexer is on track with the latest block height from the chain.
     pub async fn is_running(&self) -> bool {
         self.last_updated_timestamp.read().await.elapsed() <= self.running_threshold
     }
 
+    /// Check whether the indexer is behind with the latest block height from the chain.
     pub async fn is_behind(&self) -> bool {
-        self.last_updated_timestamp.read().await.elapsed() > self.behind_threshold
+        if let Some(latest_block_timestamp) =
+            *self.latest_block_timestamp.read().await
+        {
+            crate::util::is_elapsed_longer_than_timeout(
+                latest_block_timestamp,
+                self.behind_threshold.as_millis() as u64,
+            )
+        } else {
+            true
+        }
     }
 
-    async fn update_block_height(
+    pub async fn is_stable(&self) -> bool {
+        !self.is_behind().await && self.is_running().await
+    }
+
+    async fn update_block_height_and_timestamp(
         &self,
         block_height: u64,
-        gcp: &GcpService,
-    ) -> Result<(), DatastoreStorageError> {
-        tracing::debug!(block_height, "eth indexer update_block_height");
+        block_timestamp: u64,
+    ) {
+        tracing::debug!(block_height, "update_block_height_and_timestamp eth");
+        self.set_last_processed_block(block_height).await;
         *self.last_updated_timestamp.write().await = Instant::now();
-        self.latest_block_height
-            .write()
-            .await
-            .set(block_height)
-            .store(gcp)
-            .await
+        *self.latest_block_timestamp.write().await = Some(block_timestamp);
     }
 }
 
@@ -130,7 +151,6 @@ impl EthIndexer {
 struct Context {
     contract_address: H160,
     web3: Web3<web3::transports::Http>,
-    gcp_service: GcpService,
     queue: Arc<RwLock<SignQueue>>,
     indexer: EthIndexer,
 }
@@ -148,6 +168,12 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
         .address(vec![ctx.contract_address])
         .topics(Some(vec![signature_requested_topic]), None, None, None)
         .build();
+
+    let block = ctx.web3.eth().block(web3::types::BlockId::Number(block_number.into()))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+    
+    let block_timestamp = block.timestamp.as_u64();
 
     let logs = ctx.web3.eth().logs(filter).await?;
     tracing::info!("====== FILTERED RESULTS ====== Found {} filtered logs", logs.len());
@@ -196,11 +222,12 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
     drop(queue);
 
     ctx.indexer
-        .update_block_height(block_number, &ctx.gcp_service)
-        .await?;
+        .update_block_height_and_timestamp(block_number, block_timestamp)
+        .await;
 
     Ok(())
 }
+
 // Helper function to parse event logs
 fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
     // Ensure we have enough topics
@@ -242,34 +269,18 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
 
 pub fn run(
     options: &Options,
-    node_account_id: &AccountId,
     queue: &Arc<RwLock<SignQueue>>,
-    gcp_service: &GcpService,
-    rt: &tokio::runtime::Runtime,
+    app_data_storage: AppDataStorage,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, EthIndexer)> {
     let transport = web3::transports::Http::new(&options.eth_rpc_url)?;
     let web3 = Web3::new(transport);
 
     let contract_address = H160::from_str(&options.eth_contract_address)?;
 
-    let latest_block_height = rt.block_on(async {
-        match EthLatestBlockHeight::fetch(gcp_service).await {
-            Ok(latest) => latest,
-            Err(err) => {
-                tracing::warn!(%err, "failed to fetch eth latest block height; using start_block_height={} instead", options.eth_start_block_height);
-                EthLatestBlockHeight {
-                    account_id: node_account_id.clone(),
-                    block_height: options.eth_start_block_height,
-                }
-            }
-        }
-    });
-
-    let indexer = EthIndexer::new(latest_block_height, options);
+    let indexer = EthIndexer::new(app_data_storage, options);
     let context = Context {
         contract_address,
         web3,
-        gcp_service: gcp_service.clone(),
         queue: queue.clone(),
         indexer: indexer.clone(),
     };
@@ -282,7 +293,7 @@ pub fn run(
         rt.block_on(async {
             loop {
                 let latest_block = context.web3.eth().block_number().await?;
-                let latest_handled_block = context.indexer.latest_block_height().await;
+                let latest_handled_block = context.indexer.last_processed_block().await.unwrap_or(0);
                 tracing::warn!("=== eth latest_block {} latest_handled_block {} ===", latest_block, latest_handled_block);
 
                 if latest_handled_block < latest_block.as_u64() {
