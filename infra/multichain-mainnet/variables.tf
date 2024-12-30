@@ -17,7 +17,12 @@ variable "mig_name" {
 variable "image" {
   description = "The Docker image to deploy to GCE instances. Note: This is a public image repository used for updating your nodes, please do not change this"
   type        = string
-  default     = "us-east1-docker.pkg.dev/near-cs-mainnet/multichain-public/multichain-mainnet:latest"
+  default     = "europe-west1-docker.pkg.dev/near-cs-mainnet/multichain-public/multichain-mainnet:latest"
+}
+
+variable "source_image" {
+  type    = string
+  default = "projects/cos-cloud/global/images/cos-stable-117-18613-75-37"
 }
 
 variable "image_port" {
@@ -43,8 +48,8 @@ variable "network" {
 variable "additional_metadata" {
   type        = map(any)
   description = "Additional metadata to attach to the instance"
-  default     = {
-    cos-update-strategy:	"update_enabled"
+  default = {
+    cos-update-strategy : "update_enabled"
   }
 }
 
@@ -77,7 +82,7 @@ variable "node_configs" {
 }
 
 variable "env" {
-  type = string
+  type    = string
   default = "mainnet"
 }
 
@@ -89,7 +94,7 @@ variable "static_env" {
   default = [
     {
       name  = "MPC_NEAR_RPC"
-      value = "https://rpc.mainnet.near.org"
+      value = "https://rpc.mainnet.fastnear.com"
     },
     {
       name  = "MPC_CONTRACT_ID"
@@ -98,10 +103,6 @@ variable "static_env" {
     {
       name  = "MPC_INDEXER_S3_BUCKET"
       value = "near-lake-data-mainnet"
-    },
-    {
-      name  = "MPC_INDEXER_START_BLOCK_HEIGHT"
-      value = 131590539
     },
     {
       name  = "AWS_DEFAULT_REGION"
@@ -132,5 +133,10 @@ variable "static_env" {
 
 variable "domain" {
   description = "DNS name for your node"
-  default = null
+  default     = null
+}
+
+variable "redis_url" {
+  type    = string
+  default = "redis://127.0.0.1:6379"
 }

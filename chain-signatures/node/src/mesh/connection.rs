@@ -10,6 +10,8 @@ use crate::protocol::ParticipantInfo;
 use crate::protocol::ProtocolState;
 use crate::web::StateView;
 use mpc_keys::hpke::Ciphered;
+use std::sync::Arc;
+use tokio::task::JoinSet;
 
 // TODO: this is a basic connection pool and does not do most of the work yet. This is
 //       mostly here just to facilitate offline node handling for now.
@@ -59,41 +61,78 @@ impl Pool {
             refresh_active_timeout,
         }
     }
-    pub async fn ping(&self) -> Participants {
+
+    // self typed Arc<Self> so it can be passed between tokio tasks
+    pub async fn ping(self: Arc<Self>) -> Participants {
+        // Check if the current active participants are still valid
         if let Some((ref active, timestamp)) = *self.current_active.read().await {
             if timestamp.elapsed() < self.refresh_active_timeout {
                 return active.clone();
             }
         }
 
-        let connections = self.connections.read().await;
+        let connections = self.connections.read().await.clone(); // Clone connections for iteration
+        let mut join_set = JoinSet::new();
+
+        // Spawn tasks for each participant
+        for (participant, info) in connections.iter() {
+            let participant = *participant;
+            let info = info.clone();
+            let self_clone = Arc::clone(&self); // Clone Arc for use inside tasks
+
+            join_set.spawn(async move {
+                match self_clone.fetch_participant_state(&info).await {
+                    Ok(state) => match self_clone.send_empty_msg(&participant, &info).await {
+                        Ok(()) => Ok((participant, state, info)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Send empty msg for participant {participant:?} with url {} has failed with error {e}.",
+                                info.url
+                            );
+                            Err(())
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            "Fetch state for participant {participant:?} with url {} has failed with error {e}.",
+                            info.url
+                        );
+                        Err(())
+                    }
+                }
+            });
+        }
 
         let mut status = self.status.write().await;
         let mut participants = Participants::default();
-        for (participant, info) in connections.iter() {
-            match self.fetch_participant_state(info).await {
-                Ok(state) => match self.send_empty_msg(participant, info).await {
-                    Ok(()) => {
-                        status.insert(*participant, state);
-                        participants.insert(participant, info.clone());
-                    }
-                    Err(e) => {
-                        tracing::warn!("Send empty msg for participant {participant:?} with url {} has failed with error {e}.", info.url);
-                    }
-                },
+
+        // Process completed tasks
+        while let Some(result) = join_set.join_next().await {
+            match result {
+                Ok(Ok((participant, state, info))) => {
+                    status.insert(participant, state);
+                    participants.insert(&participant, info);
+                }
+                Ok(Err(())) => {
+                    // Already logged in task
+                }
                 Err(e) => {
-                    tracing::warn!("Fetch state for participant {participant:?} with url {} has failed with error {e}.", info.url);
+                    tracing::warn!("fetch participant state task panicked: {e}");
                 }
             }
         }
+
         drop(status);
 
+        // Update the active participants
         let mut active = self.current_active.write().await;
         *active = Some((participants.clone(), Instant::now()));
+
         participants
     }
 
-    pub async fn ping_potential(&self) -> Participants {
+    // self typed Arc<Self> so it can be passed between tokio tasks
+    pub async fn ping_potential(self: Arc<Self>) -> Participants {
         if let Some((ref active, timestamp)) = *self.potential_active.read().await {
             if timestamp.elapsed() < self.refresh_active_timeout {
                 return active.clone();
@@ -102,28 +141,62 @@ impl Pool {
 
         let connections = self.potential_connections.read().await;
 
+        let mut join_set = JoinSet::new();
+
+        // Spawn tasks for each participant
+        for (participant, info) in connections.iter() {
+            let participant = *participant;
+            let info = info.clone();
+            let self_clone = Arc::clone(&self); // Clone Arc for use inside tasks
+
+            join_set.spawn(async move {
+                match self_clone.fetch_participant_state(&info).await {
+                    Ok(state) => match self_clone.send_empty_msg(&participant, &info).await {
+                        Ok(()) => Ok((participant, state, info)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Send empty msg for participant {participant:?} with url {} has failed with error {e}.",
+                                info.url
+                            );
+                            Err(())
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            "Fetch state for participant {participant:?} with url {} has failed with error {e}.",
+                            info.url
+                        );
+                        Err(())
+                    }
+                }
+            });
+        }
+
         let mut status = self.status.write().await;
         let mut participants = Participants::default();
-        for (participant, info) in connections.iter() {
-            match self.fetch_participant_state(info).await {
-                Ok(state) => match self.send_empty_msg(participant, info).await {
-                    Ok(()) => {
-                        status.insert(*participant, state);
-                        participants.insert(participant, info.clone());
-                    }
-                    Err(e) => {
-                        tracing::warn!("Send empty msg for participant {participant:?} with url {} has failed with error {e}.", info.url);
-                    }
-                },
+
+        // Process completed tasks
+        while let Some(result) = join_set.join_next().await {
+            match result {
+                Ok(Ok((participant, state, info))) => {
+                    status.insert(participant, state);
+                    participants.insert(&participant, info);
+                }
+                Ok(Err(())) => {
+                    // Already logged in task
+                }
                 Err(e) => {
-                    tracing::warn!("Fetch state for participant {participant:?} with url {} has failed with error {e}.", info.url);
+                    tracing::warn!("fetch participant state task panicked: {e}");
                 }
             }
         }
+
         drop(status);
 
+        // Update the active participants
         let mut potential_active = self.potential_active.write().await;
         *potential_active = Some((participants.clone(), Instant::now()));
+
         participants
     }
 
@@ -165,7 +238,7 @@ impl Pool {
         self.potential_connections.read().await.clone()
     }
 
-    pub async fn is_participant_stable(&self, participant: &Participant) -> bool {
+    async fn is_participant_stable(&self, participant: &Participant) -> bool {
         self.status
             .read()
             .await
@@ -174,6 +247,20 @@ impl Pool {
                 StateView::Running { is_stable, .. } => *is_stable,
                 _ => false,
             })
+    }
+
+    /// Get active participants that have a stable connection. This is useful for arbitrary metrics to
+    /// say whether or not a node is stable, such as a node being on track with the latest block height.
+    pub async fn stable_participants(&self) -> Participants {
+        let mut stable = Participants::default();
+        if let Some((active_participants, _)) = self.current_active.read().await.clone() {
+            for (participant, info) in active_participants.iter() {
+                if self.is_participant_stable(participant).await {
+                    stable.insert(participant, info.clone());
+                }
+            }
+        }
+        stable
     }
 
     async fn fetch_participant_state(

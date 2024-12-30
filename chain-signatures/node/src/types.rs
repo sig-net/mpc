@@ -8,12 +8,7 @@ use crypto_shared::PublicKey;
 use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
-use crate::gcp::error::ConvertError;
-use crate::gcp::value::{FromValue, IntoValue, Value};
-use crate::gcp::{DatastoreResult, GcpService, KeyKind};
 use crate::protocol::contract::ResharingContractState;
-
-use near_account_id::AccountId;
 
 pub type SecretKeyShare = <Secp256k1 as CurveArithmetic>::Scalar;
 pub type TripleProtocol =

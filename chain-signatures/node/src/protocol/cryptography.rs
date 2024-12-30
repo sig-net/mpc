@@ -1,12 +1,12 @@
 use std::sync::PoisonError;
 
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
-use super::Config;
+use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
 use crate::http_client::SendError;
-use crate::mesh::Mesh;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
+use crate::protocol::MeshState;
 use crate::protocol::MpcMessage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use async_trait::async_trait;
@@ -25,10 +25,6 @@ pub trait CryptographicCtx {
     fn signer(&self) -> &InMemorySigner;
     fn mpc_contract_id(&self) -> &AccountId;
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox;
-    fn cfg(&self) -> &Config;
-
-    /// Active participants is the active participants at the beginning of each protocol loop.
-    fn mesh(&self) -> &Mesh;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -67,6 +63,8 @@ pub trait CryptographicProtocol {
     async fn progress<C: CryptographicCtx + Send + Sync>(
         self,
         ctx: C,
+        cfg: Config,
+        mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError>;
 }
 
@@ -75,8 +73,10 @@ impl CryptographicProtocol for GeneratingState {
     async fn progress<C: CryptographicCtx + Send + Sync>(
         mut self,
         mut ctx: C,
+        cfg: Config,
+        mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
-        tracing::info!(active = ?ctx.mesh().active_participants().keys_vec(), "generating: progressing key generation");
+        tracing::info!(active = ?mesh_state.active_participants.keys_vec(), "generating: progressing key generation");
         let mut protocol = self.protocol.write().await;
         loop {
             let action = match protocol.poke() {
@@ -99,15 +99,15 @@ impl CryptographicProtocol for GeneratingState {
                         .await
                         .send_encrypted(
                             ctx.me().await,
-                            &ctx.cfg().local.network.sign_sk,
+                            &cfg.local.network.sign_sk,
                             ctx.http_client(),
-                            ctx.mesh().active_participants(),
-                            &ctx.cfg().protocol,
+                            &mesh_state.active_participants,
+                            &cfg.protocol,
                         )
                         .await;
                     if !failures.is_empty() {
                         tracing::warn!(
-                            active = ?ctx.mesh().active_participants().keys_vec(),
+                            active = ?mesh_state.active_participants.keys_vec(),
                             "generating(wait): failed to send encrypted message; {failures:?}"
                         );
                     }
@@ -117,7 +117,7 @@ impl CryptographicProtocol for GeneratingState {
                 Action::SendMany(data) => {
                     tracing::debug!("generating: sending a message to many participants");
                     let mut messages = self.messages.write().await;
-                    for (p, info) in ctx.mesh().active_participants().iter() {
+                    for (p, info) in mesh_state.active_participants.iter() {
                         if p == &ctx.me().await {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;
@@ -161,15 +161,15 @@ impl CryptographicProtocol for GeneratingState {
                         .await
                         .send_encrypted(
                             ctx.me().await,
-                            &ctx.cfg().local.network.sign_sk,
+                            &cfg.local.network.sign_sk,
                             ctx.http_client(),
-                            ctx.mesh().active_participants(),
-                            &ctx.cfg().protocol,
+                            &mesh_state.active_participants,
+                            &cfg.protocol,
                         )
                         .await;
                     if !failures.is_empty() {
                         tracing::warn!(
-                            active = ?ctx.mesh().active_participants().keys_vec(),
+                            active = ?mesh_state.active_participants.keys_vec(),
                             "generating(return): failed to send encrypted message; {failures:?}"
                         );
                     }
@@ -192,6 +192,8 @@ impl CryptographicProtocol for WaitingForConsensusState {
     async fn progress<C: CryptographicCtx + Send + Sync>(
         mut self,
         ctx: C,
+        cfg: Config,
+        mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
         let failures = self
             .messages
@@ -199,15 +201,15 @@ impl CryptographicProtocol for WaitingForConsensusState {
             .await
             .send_encrypted(
                 ctx.me().await,
-                &ctx.cfg().local.network.sign_sk,
+                &cfg.local.network.sign_sk,
                 ctx.http_client(),
-                ctx.mesh().active_participants(),
-                &ctx.cfg().protocol,
+                &mesh_state.active_participants,
+                &cfg.protocol,
             )
             .await;
         if !failures.is_empty() {
             tracing::warn!(
-                active = ?ctx.mesh().active_participants().keys_vec(),
+                active = ?mesh_state.active_participants.keys_vec(),
                 "waitingForConsensus: failed to send encrypted message; {failures:?}"
             );
         }
@@ -222,14 +224,15 @@ impl CryptographicProtocol for ResharingState {
     async fn progress<C: CryptographicCtx + Send + Sync>(
         mut self,
         mut ctx: C,
+        cfg: Config,
+        mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
         // TODO: we are not using active potential participants here, but we should in the future.
         // Currently resharing protocol does not timeout and restart with new set of participants.
         // So if it picks up a participant that is not active, it will never be able to send a message to it.
-        let active = ctx
-            .mesh()
-            .active_participants()
-            .and(&ctx.mesh().potential_participants().await);
+        let active = mesh_state
+            .active_participants
+            .and(&mesh_state.potential_participants);
         tracing::info!(active = ?active.keys().collect::<Vec<_>>(), "progressing key reshare");
         let mut protocol = self.protocol.write().await;
         loop {
@@ -255,10 +258,10 @@ impl CryptographicProtocol for ResharingState {
                         .await
                         .send_encrypted(
                             ctx.me().await,
-                            &ctx.cfg().local.network.sign_sk,
+                            &cfg.local.network.sign_sk,
                             ctx.http_client(),
                             &active,
-                            &ctx.cfg().protocol,
+                            &cfg.protocol,
                         )
                         .await;
                     if !failures.is_empty() {
@@ -323,10 +326,10 @@ impl CryptographicProtocol for ResharingState {
                         .await
                         .send_encrypted(
                             ctx.me().await,
-                            &ctx.cfg().local.network.sign_sk,
+                            &cfg.local.network.sign_sk,
                             ctx.http_client(),
                             &active,
-                            &ctx.cfg().protocol,
+                            &cfg.protocol,
                         )
                         .await;
                     if !failures.is_empty() {
@@ -357,9 +360,11 @@ impl CryptographicProtocol for RunningState {
     async fn progress<C: CryptographicCtx + Send + Sync>(
         mut self,
         ctx: C,
+        cfg: Config,
+        mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
-        let protocol_cfg = &ctx.cfg().protocol;
-        let active = ctx.mesh().active_participants();
+        let protocol_cfg = &cfg.protocol;
+        let active = &mesh_state.active_participants;
         if active.len() < self.threshold {
             tracing::warn!(
                 active = ?active.keys_vec(),
@@ -431,7 +436,7 @@ impl CryptographicProtocol for RunningState {
         // stable participants utilizes more than the online status of a node, such as whether or not their
         // block height is up to date, such that they too can process signature requests. If they cannot
         // then they are considered unstable and should not be a part of signature generation this round.
-        let stable = ctx.mesh().stable_participants().await;
+        let stable = mesh_state.stable_participants;
         tracing::debug!(?stable, "stable participants");
 
         let mut sign_queue = self.sign_queue.write().await;
@@ -470,7 +475,7 @@ impl CryptographicProtocol for RunningState {
         let failures = messages
             .send_encrypted(
                 ctx.me().await,
-                &ctx.cfg().local.network.sign_sk,
+                &cfg.local.network.sign_sk,
                 ctx.http_client(),
                 active,
                 protocol_cfg,
@@ -493,12 +498,14 @@ impl CryptographicProtocol for NodeState {
     async fn progress<C: CryptographicCtx + Send + Sync>(
         self,
         ctx: C,
+        cfg: Config,
+        mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
         match self {
-            NodeState::Generating(state) => state.progress(ctx).await,
-            NodeState::Resharing(state) => state.progress(ctx).await,
-            NodeState::Running(state) => state.progress(ctx).await,
-            NodeState::WaitingForConsensus(state) => state.progress(ctx).await,
+            NodeState::Generating(state) => state.progress(ctx, cfg, mesh_state).await,
+            NodeState::Resharing(state) => state.progress(ctx, cfg, mesh_state).await,
+            NodeState::Running(state) => state.progress(ctx, cfg, mesh_state).await,
+            NodeState::WaitingForConsensus(state) => state.progress(ctx, cfg, mesh_state).await,
             _ => Ok(self),
         }
     }
