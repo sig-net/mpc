@@ -1,12 +1,14 @@
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
+use chrono::Duration;
 
 use crate::protocol::presignature::{Presignature, PresignatureId};
 use crate::storage::error::{StoreError, StoreResult};
 
 // Can be used to "clear" redis storage in case of a breaking change
 const PRESIGNATURE_STORAGE_VERSION: &str = "v2";
+const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureStorage {
     PresignatureStorage {
@@ -106,6 +108,7 @@ impl PresignatureStorage {
 
             redis.call("HDEL", presig_key, presig_id)
             redis.call("SADD", used_key, presig_id)
+            redis.call("EXPIRE", used_key, ARGV[2])
             return presig_value
         "#;
 
@@ -114,6 +117,7 @@ impl PresignatureStorage {
             .key(self.presig_key())
             .key(self.used_key())
             .arg(id)
+            .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await;
 
@@ -140,6 +144,7 @@ impl PresignatureStorage {
     
             redis.call("HDEL", presig_key, presig_id)
             redis.call("SADD", used_key, presig_id)
+            redis.call("EXPIRE", used_key, ARGV[1])
             return presig_value
         "#;
 
@@ -147,6 +152,7 @@ impl PresignatureStorage {
             .key(self.mine_key())
             .key(self.presig_key())
             .key(self.used_key())
+            .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await;
 

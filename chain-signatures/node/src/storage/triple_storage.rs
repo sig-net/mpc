@@ -3,11 +3,13 @@ use crate::storage::error::{StoreError, StoreResult};
 
 use deadpool_redis::{Connection, Pool};
 use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
+use chrono::Duration;
 
 use near_account_id::AccountId;
 
 // Can be used to "clear" redis storage in case of a breaking change
 const TRIPLE_STORAGE_VERSION: &str = "v2";
+const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
     TripleStorage {
@@ -113,8 +115,9 @@ impl TripleStorage {
             -- Delete the triples from the hash map
             redis.call("HDEL", KEYS[1], ARGV[1], ARGV[2])
 
-            -- Add the triples to the used set
+            -- Add the triples to the used set and set expiration time
             redis.call("SADD", KEYS[3], ARGV[1], ARGV[2])
+            redis.call("EXPIRE", KEYS[3], ARGV[3])
     
             -- Return the triples
             return {v1, v2}
@@ -126,6 +129,7 @@ impl TripleStorage {
             .key(self.used_key())
             .arg(id1.to_string())
             .arg(id2.to_string())
+            .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await;
 
@@ -161,8 +165,9 @@ impl TripleStorage {
             -- Delete the triples from the hash map
             redis.call("HDEL", KEYS[2], id1, id2)
 
-            -- Add the triples to the used set
+            -- Add the triples to the used set and set expiration time
             redis.call("SADD", KEYS[3], id1, id2)
+            redis.call("EXPIRE", KEYS[3], ARGV[1])
     
             -- Return the triples as a response
             return {v1, v2}
@@ -172,6 +177,7 @@ impl TripleStorage {
             .key(self.mine_key())
             .key(self.triple_key())
             .key(self.used_key())
+            .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await;
 
