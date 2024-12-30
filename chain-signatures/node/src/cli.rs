@@ -228,16 +228,14 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 &mpc_contract_id,
                 &account_id,
                 &sign_queue,
-                app_data_storage,
+                app_data_storage.clone(),
                 rpc_client.clone(),
             )?;
 
             let (eth_indexer_handle, eth_indexer) = indexer_eth::run(
                 &indexer_eth_options,
-                &account_id,
                 &sign_queue,
-                &gcp_service,
-                &rt,
+                app_data_storage,
             )?;
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
