@@ -1,48 +1,53 @@
 use std::path::Path;
 
-use super::{local::NodeConfig, utils, MultichainConfig};
+use super::{local::NodeEnvConfig, utils, NodeConfig};
 use anyhow::{anyhow, Context};
 use async_process::Child;
+use bollard::container::LogsOptions;
 use bollard::exec::CreateExecOptions;
-use bollard::{container::LogsOptions, network::CreateNetworkOptions, service::Ipam, Docker};
+use bollard::network::CreateNetworkOptions;
+use bollard::secret::Ipam;
+use bollard::Docker;
 use futures::{lock::Mutex, StreamExt};
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
 use once_cell::sync::Lazy;
 use serde_json::json;
-use testcontainers::clients::Cli;
-use testcontainers::core::Port;
-use testcontainers::Image;
+use testcontainers::core::ExecCommand;
+use testcontainers::ContainerAsync;
 use testcontainers::{
-    core::{ExecCommand, WaitFor},
-    Container, GenericImage, RunnableImage,
+    core::{IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+    GenericImage, ImageExt,
 };
 use tokio::io::AsyncWriteExt;
 use tracing;
 
+pub type Container = ContainerAsync<GenericImage>;
+
 static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 
-pub struct Node<'a> {
-    pub container: Container<'a, GenericImage>,
+pub struct Node {
+    pub container: Container,
     pub address: String,
     pub account: Account,
     pub local_address: String,
     pub cipher_pk: hpke::PublicKey,
     pub cipher_sk: hpke::SecretKey,
     pub sign_sk: near_crypto::SecretKey,
-    cfg: MultichainConfig,
+    cfg: NodeConfig,
     // near rpc address, after proxy
     near_rpc: String,
 }
 
-impl<'a> Node<'a> {
+impl Node {
     // Container port used for the docker network, does not have to be unique
     const CONTAINER_PORT: u16 = 3000;
 
     pub async fn run(
-        ctx: &super::Context<'a>,
-        cfg: &MultichainConfig,
+        ctx: &super::Context,
+        cfg: &NodeConfig,
         account: &Account,
     ) -> anyhow::Result<Self> {
         tracing::info!(id = %account.id(), "running node container");
@@ -54,18 +59,20 @@ impl<'a> Node<'a> {
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let proxy_name = format!("rpc_from_node_{}", account.id());
         let rpc_port_proxied = utils::pick_unused_port().await?;
-        let rpc_address_proxied = format!("{}:{}", near_rpc, rpc_port_proxied);
+        let rpc_address_proxied = format!("{near_rpc}:{rpc_port_proxied}");
         tracing::info!(
             "Proxy RPC address {} accessed by node@{} to {}",
             near_rpc,
             account.id(),
             rpc_address_proxied
         );
-        LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc).await?;
+        LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc)
+            .await
+            .unwrap();
 
         Self::spawn(
             ctx,
-            NodeConfig {
+            NodeEnvConfig {
                 web_port: Self::CONTAINER_PORT,
                 account: account.clone(),
                 cipher_pk,
@@ -78,9 +85,9 @@ impl<'a> Node<'a> {
         .await
     }
 
-    pub fn kill(self) -> NodeConfig {
-        self.container.stop();
-        NodeConfig {
+    pub async fn kill(self) -> NodeEnvConfig {
+        self.container.stop().await.unwrap();
+        NodeEnvConfig {
             web_port: Self::CONTAINER_PORT,
             account: self.account,
             cipher_pk: self.cipher_pk,
@@ -91,7 +98,7 @@ impl<'a> Node<'a> {
         }
     }
 
-    pub async fn spawn(ctx: &super::Context<'a>, config: NodeConfig) -> anyhow::Result<Self> {
+    pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
             s3_region: ctx.localstack.s3_region.clone(),
@@ -120,24 +127,33 @@ impl<'a> Node<'a> {
             message_options: ctx.message_options.clone(),
         }
         .into_str_args();
-        let image: GenericImage = GenericImage::new("near/mpc-node", "latest")
+        let container = GenericImage::new("near/mpc-node", "latest")
             .with_wait_for(WaitFor::Nothing)
-            .with_exposed_port(Self::CONTAINER_PORT)
+            .with_exposed_port(Self::CONTAINER_PORT.tcp())
             .with_env_var("RUST_LOG", "mpc_node=DEBUG")
-            .with_env_var("RUST_BACKTRACE", "1");
-        let image: RunnableImage<GenericImage> = (image, args).into();
-        let image = image.with_network(&ctx.docker_network);
-        let container = ctx.docker_client.cli.run(image);
+            .with_env_var("RUST_BACKTRACE", "1")
+            .with_network(&ctx.docker_network)
+            .with_cmd(args)
+            .start()
+            .await
+            .unwrap();
+
         let ip_address = ctx
             .docker_client
             .get_network_ip_address(&container, &ctx.docker_network)
-            .await?;
-        let host_port = container.get_host_port_ipv4(Self::CONTAINER_PORT);
+            .await
+            .unwrap();
+        let host_port = container
+            .get_host_port_ipv4(Self::CONTAINER_PORT)
+            .await
+            .unwrap();
 
-        container.exec(ExecCommand {
-            cmd: format!("bash -c 'while [[ \"$(curl -s -o /dev/null -w ''%{{http_code}}'' localhost:{})\" != \"200\" ]]; do sleep 1; done'", Self::CONTAINER_PORT),
-            ready_conditions: vec![WaitFor::message_on_stdout("node is ready to accept connections")]
-        });
+        container.exec(ExecCommand::new(
+                format!("bash -c 'while [[ \"$(curl -s -o /dev/null -w ''%{{http_code}}'' localhost:{})\" != \"200\" ]]; do sleep 1; done'", Self::CONTAINER_PORT)
+                    .split_whitespace()
+            )
+            .with_container_ready_conditions(vec![WaitFor::message_on_stdout("node is ready to accept connections")])
+        ).await.unwrap();
 
         let full_address = format!("http://{ip_address}:{}", Self::CONTAINER_PORT);
         tracing::info!(
@@ -159,8 +175,8 @@ impl<'a> Node<'a> {
     }
 }
 
-pub struct LocalStack<'a> {
-    pub container: Container<'a, GenericImage>,
+pub struct LocalStack {
+    pub container: Container,
     pub address: String,
     pub s3_address: String,
     pub s3_host_address: String,
@@ -168,24 +184,26 @@ pub struct LocalStack<'a> {
     pub s3_region: String,
 }
 
-impl<'a> LocalStack<'a> {
+impl LocalStack {
     const S3_CONTAINER_PORT: u16 = 4566;
 
     pub async fn run(
-        docker_client: &'a DockerClient,
+        docker_client: &DockerClient,
         network: &str,
         s3_bucket: &str,
         s3_region: &str,
-    ) -> anyhow::Result<LocalStack<'a>> {
+    ) -> Self {
         tracing::info!("running LocalStack container...");
-        let image = GenericImage::new("localstack/localstack", "3.5.0")
-            .with_wait_for(WaitFor::message_on_stdout("Ready."));
-        let image: RunnableImage<GenericImage> = image.into();
-        let image = image.with_network(network);
-        let container = docker_client.cli.run(image);
+        let container = GenericImage::new("localstack/localstack", "3.5.0")
+            .with_wait_for(WaitFor::message_on_stdout("Ready."))
+            .with_network(network)
+            .start()
+            .await
+            .unwrap();
         let address = docker_client
             .get_network_ip_address(&container, network)
-            .await?;
+            .await
+            .unwrap();
 
         // Create the bucket
         let create_result = docker_client
@@ -207,22 +225,30 @@ impl<'a> LocalStack<'a> {
                     ..Default::default()
                 },
             )
-            .await?;
+            .await
+            .unwrap();
         let result = docker_client
             .docker
             .start_exec(&create_result.id, None)
-            .await?;
+            .await
+            .unwrap();
         tracing::info!(?result, s3_bucket, s3_region, "localstack created bucket");
 
         let s3_address = format!("http://{}:{}", address, Self::S3_CONTAINER_PORT);
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         let s3_host_address = {
-            let s3_host_port = container.get_host_port_ipv4(Self::S3_CONTAINER_PORT);
+            let s3_host_port = container
+                .get_host_port_ipv4(Self::S3_CONTAINER_PORT)
+                .await
+                .unwrap();
             format!("http://127.0.0.1:{s3_host_port}")
         };
         #[cfg(target_arch = "x86_64")]
         let s3_host_address = {
-            let s3_host_port = container.get_host_port_ipv6(Self::S3_CONTAINER_PORT);
+            let s3_host_port = container
+                .get_host_port_ipv6(Self::S3_CONTAINER_PORT)
+                .await
+                .unwrap();
             format!("http://[::1]:{s3_host_port}")
         };
 
@@ -231,19 +257,19 @@ impl<'a> LocalStack<'a> {
             s3_host_address,
             "LocalStack container is running"
         );
-        Ok(LocalStack {
+        LocalStack {
             container,
             address,
             s3_address,
             s3_host_address,
             s3_bucket: s3_bucket.to_string(),
             s3_region: s3_region.to_string(),
-        })
+        }
     }
 }
 
-pub struct LakeIndexer<'a> {
-    pub container: Container<'a, GenericImage>,
+pub struct LakeIndexer {
+    pub container: Container,
     pub bucket_name: String,
     pub region: String,
     pub rpc_address: String,
@@ -253,10 +279,10 @@ pub struct LakeIndexer<'a> {
     // Child process is used for proxy host (local node) to container
     pub toxi_server_process: Child,
     // Container toxi server is used for proxy container to container
-    pub toxi_server_container: Container<'a, GenericImage>,
+    pub toxi_server_container: Container,
 }
 
-impl<'a> LakeIndexer<'a> {
+impl LakeIndexer {
     pub const CONTAINER_RPC_PORT: u16 = 3030;
 
     pub const S3_PORT_PROXIED: u16 = 4566;
@@ -279,22 +305,24 @@ impl<'a> LakeIndexer<'a> {
         Ok(toxi_server)
     }
 
-    async fn spin_up_toxi_server_container(
-        docker_client: &'a DockerClient,
-        network: &str,
-    ) -> anyhow::Result<Container<'a, GenericImage>> {
-        let image = GenericImage::new("ghcr.io/shopify/toxiproxy", "2.9.0")
-            .with_exposed_port(Self::CONTAINER_RPC_PORT);
-        let image: RunnableImage<GenericImage> = image.into();
-        let image = image.with_network(network).with_mapped_port(Port {
-            local: Self::TOXI_SERVER_EXPOSE_PORT,
-            internal: Self::TOXI_SERVER_PROCESS_PORT,
-        });
-        let container = docker_client.cli.run(image);
-        container.exec(ExecCommand {
-            cmd: format!("bash -c 'while [[ \"$(curl -s -o /dev/null -w ''%{{http_code}}'' localhost:{}/version)\" != \"200\" ]]; do sleep 1; done'", Self::TOXI_SERVER_PROCESS_PORT),
-            ready_conditions: vec![WaitFor::message_on_stdout("version")]
-        });
+    async fn spin_up_toxi_server_container(network: &str) -> anyhow::Result<Container> {
+        let container = GenericImage::new("ghcr.io/shopify/toxiproxy", "2.9.0")
+            .with_exposed_port(Self::CONTAINER_RPC_PORT.tcp())
+            .with_network(network)
+            .with_mapped_port(
+                Self::TOXI_SERVER_EXPOSE_PORT,
+                Self::TOXI_SERVER_PROCESS_PORT.tcp(),
+            )
+            .start()
+            .await
+            .unwrap();
+
+        container.exec(ExecCommand::new(
+            format!("bash -c 'while [[ \"$(curl -s -o /dev/null -w ''%{{http_code}}'' localhost:{})\" != \"200\" ]]; do sleep 1; done'", Self::TOXI_SERVER_PROCESS_PORT)
+                .split_whitespace()
+        )
+        .with_container_ready_conditions(vec![WaitFor::message_on_stdout("version")])
+        ).await.unwrap();
 
         Ok(container)
     }
@@ -345,19 +373,19 @@ impl<'a> LakeIndexer<'a> {
     }
 
     pub async fn run(
-        docker_client: &'a DockerClient,
+        docker_client: &DockerClient,
         network: &str,
         s3_address: &str,
         bucket_name: &str,
         region: &str,
-    ) -> anyhow::Result<LakeIndexer<'a>> {
+    ) -> LakeIndexer {
         tracing::info!("initializing toxi proxy servers");
-        let toxi_server_process = Self::spin_up_toxi_server_process().await?;
-        let toxi_server_container =
-            Self::spin_up_toxi_server_container(docker_client, network).await?;
+        let toxi_server_process = Self::spin_up_toxi_server_process().await.unwrap();
+        let toxi_server_container = Self::spin_up_toxi_server_container(network).await.unwrap();
         let toxi_server_container_address = docker_client
             .get_network_ip_address(&toxi_server_container, network)
-            .await?;
+            .await
+            .unwrap();
         let s3_address_proxied = format!(
             "{}:{}",
             &toxi_server_container_address,
@@ -368,7 +396,9 @@ impl<'a> LakeIndexer<'a> {
             s3_address_proxied,
             "Proxy S3 access from Lake Indexer"
         );
-        Self::populate_proxy("lake-s3", false, &s3_address_proxied, s3_address).await?;
+        Self::populate_proxy("lake-s3", false, &s3_address_proxied, s3_address)
+            .await
+            .unwrap();
 
         tracing::info!(
             network,
@@ -378,14 +408,13 @@ impl<'a> LakeIndexer<'a> {
             "running NEAR Lake Indexer container..."
         );
 
-        let image = GenericImage::new("ghcr.io/near/near-lake-indexer", "node-2.3.0")
+        let container = GenericImage::new("ghcr.io/near/near-lake-indexer", "node-2.3.0")
+            .with_wait_for(WaitFor::message_on_stderr("Starting Streamer"))
+            .with_exposed_port(Self::CONTAINER_RPC_PORT.tcp())
             .with_env_var("AWS_ACCESS_KEY_ID", "FAKE_LOCALSTACK_KEY_ID")
             .with_env_var("AWS_SECRET_ACCESS_KEY", "FAKE_LOCALSTACK_ACCESS_KEY")
-            .with_wait_for(WaitFor::message_on_stderr("Starting Streamer"))
-            .with_exposed_port(Self::CONTAINER_RPC_PORT);
-        let image: RunnableImage<GenericImage> = (
-            image,
-            vec![
+            .with_network(network)
+            .with_cmd(vec![
                 "--endpoint".to_string(),
                 format!("http://{}", s3_address_proxied),
                 "--bucket".to_string(),
@@ -394,16 +423,20 @@ impl<'a> LakeIndexer<'a> {
                 region.to_string(),
                 "--stream-while-syncing".to_string(),
                 "sync-from-latest".to_string(),
-            ],
-        )
-            .into();
-        let image = image.with_network(network);
-        let container = docker_client.cli.run(image);
+            ])
+            .start()
+            .await
+            .unwrap();
+
         let address = docker_client
             .get_network_ip_address(&container, network)
-            .await?;
+            .await
+            .unwrap();
         let rpc_address = format!("http://{}:{}", address, Self::CONTAINER_RPC_PORT);
-        let rpc_host_port = container.get_host_port_ipv4(Self::CONTAINER_RPC_PORT);
+        let rpc_host_port = container
+            .get_host_port_ipv4(Self::CONTAINER_RPC_PORT)
+            .await
+            .unwrap();
         let rpc_host_address = format!("http://127.0.0.1:{rpc_host_port}");
 
         tracing::info!(
@@ -413,7 +446,7 @@ impl<'a> LakeIndexer<'a> {
             rpc_host_address,
             "NEAR Lake Indexer container is running"
         );
-        Ok(LakeIndexer {
+        LakeIndexer {
             container,
             bucket_name: bucket_name.to_string(),
             region: region.to_string(),
@@ -421,19 +454,19 @@ impl<'a> LakeIndexer<'a> {
             rpc_host_address,
             toxi_server_process,
             toxi_server_container,
-        })
+        }
     }
 }
 
+#[derive(Clone)]
 pub struct DockerClient {
     pub docker: Docker,
-    pub cli: Cli,
 }
 
 impl DockerClient {
-    pub async fn get_network_ip_address<I: Image>(
+    pub async fn get_network_ip_address(
         &self,
-        container: &Container<'_, I>,
+        container: &Container,
         network: &str,
     ) -> anyhow::Result<String> {
         let network_settings = self
@@ -557,47 +590,51 @@ impl Default for DockerClient {
                 bollard::API_DEFAULT_VERSION,
             )
             .unwrap(),
-            cli: Default::default(),
         }
     }
 }
 
-pub struct Redis<'a> {
-    pub container: Container<'a, GenericImage>,
+pub struct Redis {
+    pub container: Container,
     pub internal_address: String,
     pub external_address: String,
 }
 
-impl<'a> Redis<'a> {
+impl Redis {
     const DEFAULT_REDIS_PORT: u16 = 6379;
 
-    pub async fn run(docker_client: &'a DockerClient, network: &str) -> anyhow::Result<Redis<'a>> {
+    pub async fn run(docker_client: &DockerClient, network: &str) -> Self {
         tracing::info!("Running Redis container...");
-        let image = GenericImage::new("redis", "7.0.15")
-            .with_exposed_port(Self::DEFAULT_REDIS_PORT)
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"));
-        let image: RunnableImage<GenericImage> = image.into();
-        let image = image.with_network(network);
-        let container = docker_client.cli.run(image);
+        let container = GenericImage::new("redis", "7.0.15")
+            .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+            .with_network(network)
+            .start()
+            .await
+            .unwrap();
         let network_ip = docker_client
             .get_network_ip_address(&container, network)
-            .await?;
+            .await
+            .unwrap();
 
         let external_address = format!("redis://{}:{}", network_ip, Self::DEFAULT_REDIS_PORT);
 
-        let host_port = container.get_host_port_ipv4(Self::DEFAULT_REDIS_PORT);
+        let host_port = container
+            .get_host_port_ipv4(Self::DEFAULT_REDIS_PORT)
+            .await
+            .unwrap();
         let internal_address = format!("redis://127.0.0.1:{host_port}");
 
         tracing::info!(
-            "Redis container is running. External address: {}. Internal address: {}",
             external_address,
-            internal_address
+            internal_address,
+            "Redis container is running",
         );
 
-        Ok(Redis {
+        Self {
             container,
             internal_address,
             external_address,
-        })
+        }
     }
 }
