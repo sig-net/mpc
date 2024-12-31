@@ -22,6 +22,10 @@ enum Cli {
         nodes: usize,
         #[arg(short, long, default_value_t = 2)]
         threshold: usize,
+        #[arg(long, default_value = "http://localhost:8545")]
+        eth_rpc_url: String,
+        #[arg(long, default_value = "0x5FbDB2315678afecb367f032d93F642f64180aa3")]
+        eth_contract_address: String,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
@@ -38,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
     let docker_client = DockerClient::default();
 
     match Cli::parse() {
-        Cli::SetupEnv { nodes, threshold } => {
+        Cli::SetupEnv { nodes, threshold, eth_rpc_url, eth_contract_address } => {
             println!(
                 "Setting up an environment with {} nodes, {} threshold ...",
                 nodes, threshold
@@ -46,6 +50,8 @@ async fn main() -> anyhow::Result<()> {
             let config = NodeConfig {
                 nodes,
                 threshold,
+                eth_rpc_url,
+                eth_contract_address,
                 ..Default::default()
             };
             println!("Full config: {:?}", config);

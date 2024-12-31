@@ -725,6 +725,7 @@ impl SignatureManager {
         signer: &T,
         mpc_contract_id: &AccountId,
         eth_client: &Web3<web3::transports::Http>,
+        eth_contract_address: &str,
     ) {
         let mut to_retry: Vec<ToPublish> = Vec::new();
 
@@ -756,7 +757,7 @@ impl SignatureManager {
 
                     let contract = Contract::from_json(
                         eth_client.eth(),
-                        web3::types::H160::from_str("0x5FbDB2315678afecb367f032d93F642f64180aa3").unwrap(),
+                        web3::types::H160::from_str(eth_contract_address).unwrap(),
                         contract_json["abi"].to_string().as_bytes()
                     ).unwrap();
 

@@ -51,6 +51,7 @@ struct Ctx {
     rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
     eth_client: Web3<web3::transports::Http>,
+    eth_contract_address: String,
     sign_queue: Arc<RwLock<SignQueue>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
@@ -122,6 +123,10 @@ impl CryptographicCtx for &mut MpcSignProtocol {
         &self.ctx.eth_client
     }
 
+    fn eth_contract_address(&self) -> &str {
+        &self.ctx.eth_contract_address
+    }
+
     fn signer(&self) -> &InMemorySigner {
         &self.ctx.signer
     }
@@ -162,6 +167,8 @@ impl MpcSignProtocol {
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
         message_options: http_client::Options,
+        eth_rpc_url: String,
+        eth_contract_address: String,
     ) -> (Self, Arc<RwLock<NodeState>>) {
         let my_address = my_address.into_url().unwrap();
         let rpc_url = rpc_client.rpc_addr();
@@ -175,7 +182,7 @@ impl MpcSignProtocol {
             "initializing protocol with parameters"
         );
         let state = Arc::new(RwLock::new(NodeState::Starting));
-        let transport = web3::transports::Http::new("http://localhost:8545").expect("failed to initialize eth client");
+        let transport = web3::transports::Http::new(&eth_rpc_url).expect("failed to initialize eth client");
         let web3 = Web3::new(transport);
         let ctx = Ctx {
             my_address,
@@ -184,6 +191,7 @@ impl MpcSignProtocol {
             rpc_client,
             http_client: reqwest::Client::new(),
             eth_client: web3,
+            eth_contract_address,
             sign_queue,
             signer,
             secret_storage,

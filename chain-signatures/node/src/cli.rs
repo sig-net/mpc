@@ -274,6 +274,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage,
                 presignature_storage,
                 message_options,
+                indexer_eth_options.eth_rpc_url.clone(),
+                indexer_eth_options.eth_contract_address.clone(),
             );
 
             let contract_updater =

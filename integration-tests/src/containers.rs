@@ -107,8 +107,8 @@ impl Node {
             behind_threshold: 120,
         };
         let indexer_eth_options = mpc_node::indexer_eth::Options {
-            eth_rpc_url: "http://localhost:8545".to_string(),
-            eth_contract_address: "0x5FbDB2315678afecb367f032d93F642f64180aa3".to_string(),
+            eth_rpc_url: config.cfg.eth_rpc_url.clone(),
+            eth_contract_address: config.cfg.eth_contract_address.clone(),
             eth_start_block_height: 0,
             eth_behind_threshold: 120,
             eth_running_threshold: 120,
