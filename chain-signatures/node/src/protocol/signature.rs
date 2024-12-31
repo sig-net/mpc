@@ -486,8 +486,7 @@ impl SignatureManager {
                 ) {
                     Ok(generator) => generator,
                     Err((presignature, err @ InitializationError::BadParameters(_))) => {
-                        presignature_manager.insert(presignature, true).await;
-                        tracing::warn!(sign_request = ?sign_request_identifier, presignature_id, ?err, "failed to start signature generation");
+                        tracing::warn!(sign_request = ?sign_request_identifier, presignature.id, ?err, "failed to start signature generation");
                         return Err(GenerationError::CaitSithInitializationError(err));
                     }
                 };
@@ -629,7 +628,6 @@ impl SignatureManager {
             );
             return;
         }
-        let mut failed_presigs = Vec::new();
         while let Some(mut presignature) = {
             if self.failed.is_empty() && my_requests.is_empty() {
                 None
@@ -641,12 +639,10 @@ impl SignatureManager {
             if sig_participants.len() < threshold {
                 tracing::warn!(
                     participants = ?sig_participants.keys_vec(),
-                    "intersection of stable participants and presignature participants is less than threshold"
+                    "intersection of stable participants and presignature participants is less than threshold, trashing presignature"
                 );
-                failed_presigs.push(presignature);
                 continue;
             }
-            let presig_id = presignature.id;
 
             // NOTE: this prioritizes old requests first then tries to do new ones if there's enough presignatures.
             // TODO: we need to decide how to prioritize certain requests over others such as with gas or time of
@@ -664,11 +660,10 @@ impl SignatureManager {
                 {
                     tracing::warn!(
                         ?sign_request_identifier,
-                        presig_id,
+                        presignature.id,
                         ?err,
                         "failed to retry signature generation: trashing presignature"
                     );
-                    failed_presigs.push(presignature);
                     continue;
                 }
 
@@ -680,7 +675,7 @@ impl SignatureManager {
             }
 
             let Some(my_request) = my_requests.pop_front() else {
-                failed_presigs.push(presignature);
+                tracing::warn!("Unexpected state, no more requests to handle");
                 continue;
             };
 
@@ -694,16 +689,9 @@ impl SignatureManager {
                 my_request.time_added,
                 cfg,
             ) {
-                failed_presigs.push(presignature);
-                tracing::warn!(request_id = ?CryptoHash(my_request.request_id), presig_id, ?err, "failed to start signature generation: trashing presignature");
+                tracing::warn!(request_id = ?CryptoHash(my_request.request_id), presignature.id, ?err, "failed to start signature generation: trashing presignature");
                 continue;
             }
-        }
-
-        // add back the failed presignatures that were incompatible to be made into
-        // signatures due to failures or lack of participants.
-        for presignature in failed_presigs {
-            presignature_manager.insert(presignature, true).await;
         }
     }
 

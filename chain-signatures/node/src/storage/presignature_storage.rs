@@ -1,3 +1,4 @@
+use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
@@ -7,18 +8,36 @@ use crate::storage::error::{StoreError, StoreResult};
 
 // Can be used to "clear" redis storage in case of a breaking change
 const PRESIGNATURE_STORAGE_VERSION: &str = "v2";
+const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureStorage {
+    let presig_key = format!(
+        "presignatures:{}:{}",
+        PRESIGNATURE_STORAGE_VERSION, node_account_id
+    );
+    let mine_key = format!(
+        "presignatures_mine:{}:{}",
+        PRESIGNATURE_STORAGE_VERSION, node_account_id
+    );
+    let used_key = format!(
+        "presignatures_used:{}:{}",
+        PRESIGNATURE_STORAGE_VERSION, node_account_id
+    );
+
     PresignatureStorage {
         redis_pool: pool.clone(),
-        node_account_id: node_account_id.clone(),
+        presig_key,
+        mine_key,
+        used_key,
     }
 }
 
 #[derive(Clone)]
 pub struct PresignatureStorage {
     redis_pool: Pool,
-    node_account_id: AccountId,
+    presig_key: String,
+    mine_key: String,
+    used_key: String,
 }
 
 impl PresignatureStorage {
@@ -36,9 +55,14 @@ impl PresignatureStorage {
         let script = r#"
             local mine_key = KEYS[1]
             local presig_key = KEYS[2]
+            local used_key = KEYS[3]
             local presig_id = ARGV[1]
             local presig_value = ARGV[2]
             local mine = ARGV[3]
+
+            if redis.call("SISMEMBER", used_key, presig_id) == 1 then
+                return {err = "Presignature " .. presig_id .. " has already been used"}
+            end
 
             if mine == "true" then
                 redis.call("SADD", mine_key, presig_id)
@@ -50,8 +74,9 @@ impl PresignatureStorage {
         "#;
 
         let _: String = redis::Script::new(script)
-            .key(self.mine_key())
-            .key(self.presig_key())
+            .key(&self.mine_key)
+            .key(&self.presig_key)
+            .key(&self.used_key)
             .arg(presignature.id)
             .arg(presignature)
             .arg(mine.to_string())
@@ -63,13 +88,19 @@ impl PresignatureStorage {
 
     pub async fn contains(&self, id: &PresignatureId) -> StoreResult<bool> {
         let mut conn = self.connect().await?;
-        let result: bool = conn.hexists(self.presig_key(), id).await?;
+        let result: bool = conn.hexists(&self.presig_key, id).await?;
         Ok(result)
     }
 
     pub async fn contains_mine(&self, id: &PresignatureId) -> StoreResult<bool> {
         let mut connection = self.connect().await?;
-        let result: bool = connection.sismember(self.mine_key(), id).await?;
+        let result: bool = connection.sismember(&self.mine_key, id).await?;
+        Ok(result)
+    }
+
+    pub async fn contains_used(&self, id: &PresignatureId) -> StoreResult<bool> {
+        let mut conn = self.connect().await?;
+        let result: bool = conn.sismember(&self.used_key, id).await?;
         Ok(result)
     }
 
@@ -79,6 +110,7 @@ impl PresignatureStorage {
         let script = r#"
             local mine_key = KEYS[1]
             local presig_key = KEYS[2]
+            local used_key = KEYS[3]
             local presig_id = ARGV[1]
         
             if redis.call('SISMEMBER', mine_key, presig_id) == 1 then
@@ -92,13 +124,17 @@ impl PresignatureStorage {
             end
 
             redis.call("HDEL", presig_key, presig_id)
+            redis.call("SADD", used_key, presig_id)
+            redis.call("EXPIRE", used_key, ARGV[2])
             return presig_value
         "#;
 
         let result: Result<Presignature, redis::RedisError> = redis::Script::new(script)
-            .key(self.mine_key())
-            .key(self.presig_key())
+            .key(&self.mine_key)
+            .key(&self.presig_key)
+            .key(&self.used_key)
             .arg(id)
+            .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await;
 
@@ -111,6 +147,7 @@ impl PresignatureStorage {
         let script = r#"
             local mine_key = KEYS[1]
             local presig_key = KEYS[2]
+            local used_key = KEYS[3]
     
             local presig_id = redis.call("SPOP", mine_key)
             if not presig_id then
@@ -123,12 +160,16 @@ impl PresignatureStorage {
             end
     
             redis.call("HDEL", presig_key, presig_id)
+            redis.call("SADD", used_key, presig_id)
+            redis.call("EXPIRE", used_key, ARGV[1])
             return presig_value
         "#;
 
         let result: Result<Presignature, redis::RedisError> = redis::Script::new(script)
-            .key(self.mine_key())
-            .key(self.presig_key())
+            .key(&self.mine_key)
+            .key(&self.presig_key)
+            .key(&self.used_key)
+            .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await;
 
@@ -137,35 +178,21 @@ impl PresignatureStorage {
 
     pub async fn len_generated(&self) -> StoreResult<usize> {
         let mut conn = self.connect().await?;
-        let result: usize = conn.hlen(self.presig_key()).await?;
+        let result: usize = conn.hlen(&self.presig_key).await?;
         Ok(result)
     }
 
     pub async fn len_mine(&self) -> StoreResult<usize> {
         let mut conn = self.connect().await?;
-        let result: usize = conn.scard(self.mine_key()).await?;
+        let result: usize = conn.scard(&self.mine_key).await?;
         Ok(result)
     }
 
     pub async fn clear(&self) -> StoreResult<()> {
         let mut conn = self.connect().await?;
-        conn.del::<&str, ()>(&self.presig_key()).await?;
-        conn.del::<&str, ()>(&self.mine_key()).await?;
+        conn.del::<&str, ()>(&self.presig_key).await?;
+        conn.del::<&str, ()>(&self.mine_key).await?;
         Ok(())
-    }
-
-    fn presig_key(&self) -> String {
-        format!(
-            "presignatures:{}:{}",
-            PRESIGNATURE_STORAGE_VERSION, self.node_account_id
-        )
-    }
-
-    fn mine_key(&self) -> String {
-        format!(
-            "presignatures_mine:{}:{}",
-            PRESIGNATURE_STORAGE_VERSION, self.node_account_id
-        )
     }
 }
 
