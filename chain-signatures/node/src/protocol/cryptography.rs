@@ -23,6 +23,7 @@ pub trait CryptographicCtx {
     fn rpc_client(&self) -> &near_fetch::Client;
     fn eth_client(&self) -> &Web3<web3::transports::Http>;
     fn eth_contract_address(&self) -> &str;
+    fn eth_account_sk(&self) -> &str;
     fn signer(&self) -> &InMemorySigner;
     fn mpc_contract_id(&self) -> &AccountId;
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox;
@@ -470,7 +471,7 @@ impl CryptographicProtocol for RunningState {
             messages.push(info.clone(), MpcMessage::Signature(msg));
         }
         signature_manager
-            .publish(ctx.rpc_client(), ctx.signer(), ctx.mpc_contract_id(), ctx.eth_client(), ctx.eth_contract_address())
+            .publish(ctx.rpc_client(), ctx.signer(), ctx.mpc_contract_id(), ctx.eth_client(), ctx.eth_contract_address(), ctx.eth_account_sk())
             .await;
         drop(signature_manager);
         let failures = messages

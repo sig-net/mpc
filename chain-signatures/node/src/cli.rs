@@ -37,6 +37,12 @@ pub enum Cli {
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"))]
         account_sk: SecretKey,
+        /// The ethereum account secret key used to sign eth respond txn.
+        #[arg(long, env("MPC_ETH_ACCOUNT_SK"))]
+        eth_account_sk: String,
+        /// The ethereum account address used to sign eth respond txn.
+        #[arg(long, env("MPC_ETH_ACCOUNT_ADDR"))]
+        eth_account_addr: String,
         /// The web port for this server
         #[arg(long, env("MPC_WEB_PORT"))]
         web_port: u16,
@@ -83,6 +89,8 @@ impl Cli {
                 account_id,
                 mpc_contract_id,
                 account_sk,
+                eth_account_sk,
+                eth_account_addr,
                 web_port,
                 cipher_pk,
                 cipher_sk,
@@ -106,6 +114,10 @@ impl Cli {
                     account_id.to_string(),
                     "--account-sk".to_string(),
                     account_sk.to_string(),
+                    "--eth-account-sk".to_string(),
+                    eth_account_sk.to_string(),
+                    "--eth-account-addr".to_string(), 
+                    eth_account_addr.to_string(),
                     "--web-port".to_string(),
                     web_port.to_string(),
                     "--cipher-pk".to_string(),
@@ -185,6 +197,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             mpc_contract_id,
             account_id,
             account_sk,
+            eth_account_sk,
+            eth_account_addr,
             cipher_pk,
             cipher_sk,
             sign_sk,
@@ -276,6 +290,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 message_options,
                 indexer_eth_options.eth_rpc_url.clone(),
                 indexer_eth_options.eth_contract_address.clone(),
+                eth_account_sk,
+                eth_account_addr,
             );
 
             let contract_updater =

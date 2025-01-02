@@ -726,6 +726,7 @@ impl SignatureManager {
         mpc_contract_id: &AccountId,
         eth_client: &Web3<web3::transports::Http>,
         eth_contract_address: &str,
+        eth_account_sk: &str,
     ) {
         let mut to_retry: Vec<ToPublish> = Vec::new();
 
@@ -774,9 +775,25 @@ impl SignatureManager {
                     );
 
                     println!("====== params: {:?}", params);
+                    println!("====== eth_account_sk: {:?}", eth_account_sk);
+                    let eth_account_sk = web3::signing::SecretKey::from_str(&eth_account_sk).unwrap();
+                    let data = contract.abi().function("respond").unwrap().encode_input(&[
+                        params.0.clone(),
+                        params.1.clone()
+                    ]).unwrap();
+                    
+                    let txn = web3::types::TransactionParameters {
+                        to: Some(contract.address()),
+                        data: web3::types::Bytes(data),
+                        gas: web3::types::U256::from(4_000_000),
+                        ..Default::default()
+                    };
 
-                    let options = web3::contract::Options::default();
-                    match contract.call("respond", params, eth_client.eth().accounts().await.unwrap()[0], options).await {
+                    let signed = eth_client.accounts().sign_transaction(txn, &eth_account_sk).await.unwrap();
+                    let result = eth_client.eth().send_raw_transaction(signed.raw_transaction).await;
+
+                    // contract.call("respond", params, eth_account, options).await
+                    match result {
                         Ok(tx_hash) => {
                             tracing::info!(
                                 request_id = ?CryptoHash(*request_id),

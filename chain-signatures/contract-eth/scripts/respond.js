@@ -36,8 +36,11 @@ async function main() {
     .then(factory => factory.attach(contractAddress));
 
   console.log("Responding to request...");
+  const estimatedGas = await contract.respond.estimateGas(requestId, signature);
+  console.log("Estimated gas:", estimatedGas.toString());
   const tx = await contract.respond(requestId, signature);
-  await tx.wait();
+  const receipt = await tx.wait();
+  console.log("Actual gas used:", receipt.gasUsed.toString());
   console.log("Response submitted! Transaction:", tx.hash);
 }
 
