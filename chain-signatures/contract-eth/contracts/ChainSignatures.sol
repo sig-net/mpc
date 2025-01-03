@@ -54,11 +54,6 @@ contract ChainSignatures {
         return publicKey;
     }
 
-    // For debugging purposes for now, should be replaced by node vote_eth_contract_address and contract public key should be read-only
-    function setPublicKey(PublicKey memory _publicKey) public {
-        publicKey = _publicKey;
-    }
-
     function derivedPublicKey(string memory path, address _predecessor) public view returns (PublicKey memory) {
         address predecessor = _predecessor == address(0) ? msg.sender : _predecessor;
         uint256 epsilon = deriveEpsilon(path, predecessor);
