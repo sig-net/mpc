@@ -2,8 +2,9 @@ const hre = require("hardhat");
 
 async function main() {
   // Get the deployed contract address
-  const deployments = require('../ignition/deployments/chain-31337/deployed_addresses.json');
-  const contractAddress = deployments[Object.keys(deployments).pop()];
+  // const deployments = require('../ignition/deployments/chain-31337/deployed_addresses.json');
+  // const contractAddress = deployments[Object.keys(deployments).pop()];
+  const contractAddress = "0x9036E97368B887edbC54562717939f98A703D95f";
   
   const chainSignatures = await hre.ethers.getContractFactory("ChainSignatures")
     .then(factory => factory.attach(contractAddress));
@@ -36,7 +37,8 @@ async function main() {
     console.log("Required deposit:", signatureDeposit.toString(), "wei");
 
     // Get signer and make sure it's connected to the provider
-    const signer = (await hre.ethers.getSigners())[1];
+    // const signer = (await hre.ethers.getSigners())[1];
+    const signer = (await hre.ethers.getSigners())[0];
     const chainSignaturesWithSigner = chainSignatures.connect(signer);
     
     const tx = await chainSignaturesWithSigner.sign({payload: testMessage, path: testPath, keyVersion: 0}, {

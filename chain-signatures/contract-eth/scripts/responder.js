@@ -3,7 +3,8 @@ const hre = require("hardhat");
 async function main() {
   // Get the deployed contract address
   const deployments = require('../ignition/deployments/chain-31337/deployed_addresses.json');
-  const contractAddress = deployments[Object.keys(deployments).pop()];
+  // const contractAddress = deployments[Object.keys(deployments).pop()];
+  const contractAddress = "0x5413d6E6e13D09c073fB5dAB0096BD669361ae79";
   
   const chainSignatures = await hre.ethers.getContractFactory("ChainSignatures")
     .then(factory => factory.attach(contractAddress));

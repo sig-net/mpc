@@ -10,6 +10,7 @@ module.exports = buildModule("ChainSignaturesModule", (m) => {
   console.log("Deploying with public key:", deployPublicKey);
   const chainSignatures = m.contract("ChainSignatures", [deployPublicKey]);
 
+  
   return { chainSignatures };
 });
 

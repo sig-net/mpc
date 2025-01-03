@@ -30,7 +30,7 @@ pub struct Options {
     pub eth_contract_address: String,
 
     /// The block height to start indexing from
-    #[clap(long, env("MPC_INDEXER_ETH_START_BLOCK"), default_value = "0")]
+    #[clap(long, env("MPC_INDEXER_ETH_START_BLOCK"), default_value = "7412218")]
     pub eth_start_block_height: u64,
 
     /// The amount of time before we consider the indexer behind
@@ -285,6 +285,8 @@ pub fn run(
         indexer: indexer.clone(),
     };
 
+    let start_block_height = options.eth_start_block_height;
+
     let join_handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -292,14 +294,25 @@ pub fn run(
 
         rt.block_on(async {
             loop {
-                let latest_block = context.web3.eth().block_number().await?;
-                let latest_handled_block = context.indexer.last_processed_block().await.unwrap_or(0);
+                let latest_block = match context.web3.eth().block_number().await {
+                    Ok(block) => block,
+                    Err(err) => {
+                        tracing::warn!(%err, "failed to get latest eth block number");
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        continue;
+                    }
+                };
+                let latest_handled_block = context.indexer.last_processed_block().await.unwrap_or(start_block_height);
                 tracing::warn!("=== eth latest_block {} latest_handled_block {} ===", latest_block, latest_handled_block);
 
                 if latest_handled_block < latest_block.as_u64() {
-                    handle_block(latest_handled_block + 1, &context).await?;
+                    if let Err(err) = handle_block(latest_handled_block + 1, &context).await {
+                        tracing::warn!(%err, "failed to handle eth block");
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        continue;
+                    }
                 } else {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    tokio::time::sleep(Duration::from_secs(10)).await;
                 }
             }
         })
