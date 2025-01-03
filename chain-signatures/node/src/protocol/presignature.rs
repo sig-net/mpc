@@ -223,6 +223,14 @@ impl PresignatureManager {
             .unwrap_or(false)
     }
 
+    pub async fn contains_used(&self, id: &PresignatureId) -> bool {
+        self.presignature_storage
+            .contains_used(id)
+            .await
+            .map_err(|e| tracing::warn!(?e, "failed to check if presignature is used"))
+            .unwrap_or(false)
+    }
+
     pub async fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
         let presignature = self
             .presignature_storage
@@ -429,11 +437,9 @@ impl PresignatureManager {
                         participants = ?presig_participants.keys_vec(),
                         "running: the intersection of participants is less than the threshold"
                     );
-
-                    // Insert back the triples to be used later since this active set of
-                    // participants were not able to make use of these triples.
-                    triple_manager.insert(triple0, true).await;
-                    triple_manager.insert(triple1, true).await;
+                    // We are not inserting triples back to
+                    //    - prevent triple reusage
+                    //    - prevent a situation where we have a full stockpile of triples that can not be used
                 } else {
                     self.generate(
                         &presig_participants,
