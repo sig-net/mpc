@@ -56,4 +56,4 @@ jobs:
         run: 'gcloud container clusters get-credentials dev'
 
       - name: 'Rollout k8s node'
-        run: 'kubectl rollout restart multichain-dev-11'
+        run: 'kubectl rollout restart deployment multichain-dev-11'
