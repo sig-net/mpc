@@ -96,8 +96,8 @@ pub struct TripleManager {
     /// The set of triples that were introduced to the system by the current node.
     pub introduced: HashSet<TripleId>,
 
-    /// The set of triple ids that were already taken or failed. This will be maintained for at most
-    /// triple timeout period just so messages are cycled through the system.
+    /// The set of triple ids that were already generated or failed. This will be maintained for at most
+    /// triple timeout period to prevent protocol restarts.
     pub gc: HashMap<TripleId, Instant>,
 
     pub me: Participant,
@@ -149,8 +149,6 @@ impl TripleManager {
         tracing::debug!(id, mine, "inserting triple");
         if let Err(e) = self.triple_storage.insert(triple, mine).await {
             tracing::warn!(?e, mine, "failed to insert triple");
-        } else {
-            self.gc.remove(&id);
         }
     }
 
@@ -213,8 +211,6 @@ impl TripleManager {
                     ))
                 })?;
 
-        self.gc.insert(id0, Instant::now());
-        self.gc.insert(id1, Instant::now());
         tracing::debug!(id0, id1, "took two triples");
         Ok((triple_0, triple_1))
     }
@@ -231,8 +227,6 @@ impl TripleManager {
                 tracing::warn!(?store_error, "failed to take two mine triples");
             })
             .ok()?;
-        self.gc.insert(triple_0.id, Instant::now());
-        self.gc.insert(triple_1.id, Instant::now());
 
         tracing::debug!(triple_0.id, triple_1.id, "took two mine triples");
 
@@ -264,7 +258,7 @@ impl TripleManager {
         self.len_mine().await >= cfg.triple.min_triples as usize
     }
 
-    /// Clears an entry from failed triples if that triple protocol was created more than 2 hrs ago
+    /// Clears an entry from failed or generated triples if that triple protocol was created more than 2 hrs ago
     pub fn garbage_collect(&mut self, cfg: &ProtocolConfig) {
         let before = self.gc.len();
         self.gc.retain(|_, timestamp| {
@@ -290,16 +284,6 @@ impl TripleManager {
         timeout: u64,
     ) -> Result<(), InitializationError> {
         let id = rand::random();
-
-        // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        if self.generators.contains_key(&id) || self.contains(id).await || self.gc.contains_key(&id)
-        {
-            tracing::warn!(id, "triple id collision");
-            return Err(InitializationError::BadParameters(format!(
-                "id collision: triple_id={id}"
-            )));
-        }
-
         tracing::debug!(id, "starting protocol to generate a new triple");
         let participants: Vec<_> = participants.keys().cloned().collect();
         let protocol: TripleProtocol = Box::new(cait_sith::triples::generate_triple::<Secp256k1>(
@@ -359,39 +343,35 @@ impl TripleManager {
         participants: &Participants,
         cfg: &ProtocolConfig,
     ) -> Result<Option<&mut TripleProtocol>, CryptographicError> {
-        if self.contains(id).await || self.gc.contains_key(&id) {
-            Ok(None)
-        } else {
-            let potential_len = self.len_potential().await;
-            match self.generators.entry(id) {
-                Entry::Vacant(e) => {
-                    if potential_len >= cfg.triple.max_triples as usize {
-                        // We are at the maximum amount of triples, we cannot generate more. So just in case a node
-                        // sends more triple generation requests, reject them and have them tiemout.
-                        return Ok(None);
-                    }
-
-                    tracing::info!(id, "joining protocol to generate a new triple");
-                    let participants = participants.keys_vec();
-                    let protocol = Box::new(cait_sith::triples::generate_triple::<Secp256k1>(
-                        &participants,
-                        self.me,
-                        self.threshold,
-                    )?);
-                    let generator = e.insert(TripleGenerator::new(
-                        id,
-                        participants,
-                        protocol,
-                        cfg.triple.generation_timeout,
-                    ));
-                    self.queued.push_back(id);
-                    crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
-                        .with_label_values(&[self.my_account_id.as_str()])
-                        .inc();
-                    Ok(Some(&mut generator.protocol))
+        let potential_len = self.len_potential().await;
+        match self.generators.entry(id) {
+            Entry::Vacant(e) => {
+                if potential_len >= cfg.triple.max_triples as usize {
+                    // We are at the maximum amount of triples, we cannot generate more. So just in case a node
+                    // sends more triple generation requests, reject them and have them tiemout.
+                    return Ok(None);
                 }
-                Entry::Occupied(e) => Ok(Some(&mut e.into_mut().protocol)),
+
+                tracing::info!(id, "joining protocol to generate a new triple");
+                let participants = participants.keys_vec();
+                let protocol = Box::new(cait_sith::triples::generate_triple::<Secp256k1>(
+                    &participants,
+                    self.me,
+                    self.threshold,
+                )?);
+                let generator = e.insert(TripleGenerator::new(
+                    id,
+                    participants,
+                    protocol,
+                    cfg.triple.generation_timeout,
+                ));
+                self.queued.push_back(id);
+                crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
+                    .with_label_values(&[self.my_account_id.as_str()])
+                    .inc();
+                Ok(Some(&mut generator.protocol))
             }
+            Entry::Occupied(e) => Ok(Some(&mut e.into_mut().protocol)),
         }
     }
 
@@ -523,6 +503,7 @@ impl TripleManager {
                         // Protocol done, remove it from the ongoing pool.
                         self.ongoing.remove(id);
                         self.introduced.remove(id);
+                        self.gc.insert(*id, Instant::now());
                         // Do not retain the protocol
                         break false;
                     }

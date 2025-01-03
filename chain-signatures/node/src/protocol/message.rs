@@ -247,8 +247,8 @@ impl MessageHandler for RunningState {
         let participants = &mesh_state.active_participants;
         let mut triple_manager = self.triple_manager.write().await;
 
-        // remove the triple_id that has already failed or taken from the triple_bins
-        // and refresh the timestamp of failed and taken
+        // Remove messages for triple generations that have already failed or completed,
+        // and refresh their timestamps.
         let triple_messages = queue.triple_bins.entry(self.epoch).or_default();
         triple_messages.retain(|id, queue| {
             if queue.is_empty()
@@ -262,7 +262,7 @@ impl MessageHandler for RunningState {
                 return false;
             }
 
-            // if triple id is in GC, remove these messages because the triple is currently
+            // If triple id is in GC, remove these messages because the triple is currently
             // being GC'ed, where this particular triple has previously failed or been utilized.
             !triple_manager.refresh_gc(*id)
         });
