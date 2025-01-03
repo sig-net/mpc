@@ -46,7 +46,7 @@ impl ContractUpdater {
                     tracing::error!("could not fetch contract's config: {error:?}");
                 }
             }
-            tokio::time::sleep(Duration::from_millis(1000)).await;
+            tokio::time::sleep(Duration::from_millis(3000)).await;
         }
     }
 }
