@@ -446,7 +446,7 @@ impl SignatureManager {
         let sign_request_identifier =
             SignRequestIdentifier::new(request_id, epsilon, request.payload);
         if self.completed.contains_key(&sign_request_identifier) {
-            tracing::warn!(sign_request_identifier = ?sign_request_identifier.clone(), presignature_id, "presignature has already been used to generate a signature");
+            tracing::warn!(sign_request_identifier = ?sign_request_identifier.clone(), "signature already generated or time out");
             return Err(GenerationError::AlreadyGenerated);
         }
         match self.generators.entry(sign_request_identifier.clone()) {
