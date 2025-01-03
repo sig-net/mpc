@@ -303,7 +303,7 @@ impl MessageHandler for RunningState {
             }
 
             // if presignature id is in GC, remove these messages because the presignature is currently
-            // being GC'ed, where this particular presignature has previously failed or been utilized.
+            // being GC'ed, where this particular presignature has previously failed or been generated.
             !presignature_manager.refresh_gc(id)
         });
         for (id, queue) in presignature_messages {

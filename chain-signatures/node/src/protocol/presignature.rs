@@ -159,9 +159,8 @@ pub struct PresignatureManager {
     generators: HashMap<PresignatureId, PresignatureGenerator>,
     /// The set of presignatures that were introduced to the system by the current node.
     introduced: HashSet<PresignatureId>,
-    /// Garbage collection for presignatures that have either been taken or failed. This
-    /// will be maintained for at most presignature timeout period just so messages are
-    /// cycled through the system.
+    /// Garbage collection for presignatures that have failed or been already generated. This
+    /// will be maintained for at most presignature timeout period to prevent protocol restarts.
     gc: HashMap<PresignatureId, Instant>,
     me: Participant,
     threshold: usize,
@@ -194,9 +193,6 @@ impl PresignatureManager {
         tracing::debug!(id, mine, "inserting presignature");
         if let Err(store_err) = self.presignature_storage.insert(presignature, mine).await {
             tracing::error!(?store_err, mine, "failed to insert presignature");
-        } else {
-            // Remove from taken list if it was there
-            self.gc.remove(&id);
         }
     }
 
@@ -247,8 +243,6 @@ impl PresignatureManager {
                     GenerationError::PresignatureIsMissing(id)
                 }
             })?;
-
-        self.gc.insert(id, Instant::now());
         tracing::debug!(id, "took presignature");
         Ok(presignature)
     }
@@ -367,18 +361,6 @@ impl PresignatureManager {
         timeout: u64,
     ) -> Result<(), InitializationError> {
         let id = hash_as_id(triple0.id, triple1.id);
-
-        // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        if self.generators.contains_key(&id)
-            || self.contains(&id).await
-            || self.gc.contains_key(&id)
-        {
-            tracing::warn!(id, "presignature id collision");
-            return Err(InitializationError::BadParameters(format!(
-                "id collision: presignature_id={id}"
-            )));
-        }
-
         tracing::info!(id, "starting protocol to generate a new presignature");
         let generator = Self::generate_internal(
             participants,
@@ -477,12 +459,6 @@ impl PresignatureManager {
         if id != hash_as_id(triple0, triple1) {
             tracing::error!(id, "presignature id does not match the expected hash");
             Err(GenerationError::PresignatureBadParameters)
-        } else if self.contains(&id).await {
-            tracing::debug!(id, "presignature already generated");
-            Err(GenerationError::AlreadyGenerated)
-        } else if self.gc.contains_key(&id) {
-            tracing::warn!(id, "presignature was garbage collected");
-            Err(GenerationError::PresignatureIsGarbageCollected(id))
         } else {
             match self.generators.entry(id) {
                 Entry::Vacant(entry) => {
@@ -624,6 +600,7 @@ impl PresignatureManager {
                         }
                         presignatures.push((presignature, generator.mine));
                         self.introduced.remove(id);
+                        self.gc.insert(*id, Instant::now());
 
                         crate::metrics::PRESIGNATURE_LATENCY
                             .with_label_values(&[self.my_account_id.as_str()])
