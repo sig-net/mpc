@@ -286,7 +286,7 @@ impl CryptographicProtocol for ResharingState {
                         }
 
                         messages.push(
-                            p.clone(),
+                            *p,
                             MpcMessage::Resharing(ResharingMessage {
                                 epoch: self.old_epoch,
                                 from: me,
@@ -363,7 +363,7 @@ impl CryptographicProtocol for RunningState {
         cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
-        let active = mesh_state.active_participants.clone();
+        let active = mesh_state.active_participants;
         if active.len() < self.threshold {
             tracing::warn!(
                 active = ?active.keys_vec(),
@@ -401,13 +401,13 @@ impl CryptographicProtocol for RunningState {
                 me,
                 &cfg.local.network.sign_sk,
                 ctx.http_client(),
-                &mesh_state.active_participants,
+                &active,
                 &cfg.protocol,
             )
             .await;
         if !failures.is_empty() {
             tracing::warn!(
-                active = ?mesh_state.active_participants.keys_vec(),
+                active = ?active.keys_vec(),
                 "running: failed to send encrypted message; {failures:?}"
             );
         }

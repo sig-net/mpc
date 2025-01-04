@@ -659,8 +659,8 @@ impl PresignatureManager {
         let presignature_manager = state.presignature_manager.clone();
         let active = active.clone();
         let protocol_cfg = protocol_cfg.clone();
-        let pk = state.public_key.clone();
-        let sk_share = state.private_share.clone();
+        let pk = state.public_key;
+        let sk_share = state.private_share;
         let messages = state.messages.clone();
 
         tokio::task::spawn(async move {

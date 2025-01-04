@@ -55,9 +55,9 @@ pub struct TripleGenerator {
 
 impl TripleGenerator {
     pub fn new(
+        id: TripleId,
         me: Participant,
         threshold: usize,
-        id: TripleId,
         participants: Vec<Participant>,
         timeout: u64,
     ) -> Result<Self, InitializationError> {
@@ -243,6 +243,10 @@ pub struct TripleTasks {
     /// back to the main loop.
     protocol_budget: Duration,
 
+    /// The threshold for the number of participants required to generate a triple. This is
+    /// the same as the threshold for signing: we maintain a copy here for easy access.
+    threshold: usize,
+
     /// The pool of triple protocols that have yet to be completed.
     pub generators: HashMap<TripleId, TripleGenerator>,
 
@@ -273,9 +277,10 @@ impl std::fmt::Debug for TripleTasks {
 }
 
 impl TripleTasks {
-    pub fn new(budget: Duration) -> Self {
+    pub fn new(threshold: usize, protocol_budget: Duration) -> Self {
         Self {
-            protocol_budget: budget,
+            protocol_budget,
+            threshold,
             generators: HashMap::new(),
             queued: VecDeque::new(),
             ongoing: HashSet::new(),
@@ -293,7 +298,6 @@ impl TripleTasks {
     pub fn entry(
         &mut self,
         me: Participant,
-        threshold: usize,
         id: TripleId,
         potential_len: usize,
         cfg: &ProtocolConfig,
@@ -311,9 +315,9 @@ impl TripleTasks {
                 tracing::info!(id, "joining protocol to generate a new triple");
                 let participants = participants.keys_vec();
                 let generator = e.insert(TripleGenerator::new(
-                    me,
-                    threshold,
                     id,
+                    me,
+                    self.threshold,
                     participants,
                     cfg.triple.generation_timeout,
                 )?);
@@ -358,7 +362,7 @@ impl TripleTasks {
                 .iter()
                 .any(|(running_id, _)| running_id == id)
             {
-                let generator = self.generators.get(&id).unwrap();
+                let generator = self.generators.get(id).unwrap();
                 self.ongoing_tasks
                     .push_back((*id, generator.spawn_execution(me, my_account_id, epoch)));
             }
@@ -458,7 +462,10 @@ impl TripleManager {
         storage: &TripleStorage,
     ) -> Self {
         Self {
-            tasks: Arc::new(RwLock::new(TripleTasks::new(Duration::from_millis(100)))),
+            tasks: Arc::new(RwLock::new(TripleTasks::new(
+                threshold,
+                Duration::from_millis(100),
+            ))),
             gc: Arc::new(RwLock::new(HashMap::new())),
             me,
             threshold,
@@ -644,12 +651,12 @@ impl TripleManager {
         }
 
         tracing::debug!(id, "starting protocol to generate a new triple");
-        let participants: Vec<_> = participants.keys().cloned().collect();
         {
+            let participants = participants.keys_vec();
             let mut tasks = self.tasks.write().await;
             tasks.generators.insert(
                 id,
-                TripleGenerator::new(self.me, self.threshold, id, participants, timeout)?,
+                TripleGenerator::new(id, self.me, self.threshold, participants, timeout)?,
             );
             tasks.queued.push_back(id);
             tasks.introduced.insert(id);
@@ -716,7 +723,6 @@ impl TripleManager {
             let mut tasks = self.tasks.write().await;
             tasks.entry(
                 self.me,
-                self.threshold,
                 id,
                 potential_len,
                 cfg,
