@@ -2,6 +2,7 @@ mod error;
 
 use self::error::Error;
 use crate::indexer::Indexer;
+use crate::indexer_eth::EthIndexer;
 use crate::protocol::message::SignedMessage;
 use crate::protocol::{MpcMessage, NodeState};
 use crate::web::error::Result;
@@ -31,6 +32,7 @@ pub async fn run(
     cipher_sk: hpke::SecretKey,
     protocol_state: Arc<RwLock<NodeState>>,
     indexer: Indexer,
+    eth_indexer: EthIndexer,
 ) -> anyhow::Result<()> {
     tracing::info!("running a node");
     let axum_state = AxumState {
@@ -38,6 +40,7 @@ pub async fn run(
         protocol_state,
         cipher_sk,
         indexer,
+        eth_indexer,
     };
 
     let app = Router::new()

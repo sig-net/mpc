@@ -30,7 +30,7 @@ pub struct Options {
     pub eth_contract_address: String,
 
     /// The block height to start indexing from
-    #[clap(long, env("MPC_INDEXER_ETH_START_BLOCK"), default_value = "7412218")]
+    #[clap(long, env("MPC_INDEXER_ETH_START_BLOCK"), default_value = "0")]
     pub eth_start_block_height: u64,
 
     /// The amount of time before we consider the indexer behind
@@ -156,7 +156,7 @@ struct Context {
 }
 
 async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
-    tracing::warn!(block_height = block_number, "handle eth block");
+    tracing::debug!(block_height = block_number, "handle eth block");
 
     let signature_requested_topic = H256::from_slice(&web3::signing::keccak256(
         b"SignatureRequested(bytes32,address,uint256,uint256,string)",
@@ -171,18 +171,18 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
 
     let block = ctx.web3.eth().block(web3::types::BlockId::Number(block_number.into()))
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+        .ok_or_else(|| anyhow::anyhow!("eth block {block_number} not found"))?;
     
     let block_timestamp = block.timestamp.as_u64();
 
     let logs = ctx.web3.eth().logs(filter).await?;
-    tracing::info!("====== FILTERED RESULTS ====== Found {} filtered logs", logs.len());
+    tracing::debug!("found {} filtered logs", logs.len());
 
     let mut pending_requests = Vec::new();
     // Get logs using filter
     for log in logs {
         let event = parse_event(&log)?;
-        tracing::info!("Found eth event: {:?}", event);
+        tracing::debug!("found eth event: {:?}", event);
         // Create sign request from event
         let Some(payload) = Scalar::from_bytes(event.payload_hash) else {
             tracing::warn!(
@@ -197,8 +197,20 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
             key_version: 0,
             chain: Ethereum,
         };
+
         let epsilon = derive_epsilon_eth(format!("0x{}", event.requester.encode_hex::<String>()), &request.path);
-        tracing::info!("from epsilon: {:?} event epsilon: {:?}", epsilon, event.epsilon);
+        let mut event_epsilon_bytes: [u8; 32] = [0; 32];
+        event.epsilon.to_big_endian(&mut event_epsilon_bytes);
+        let event_epsilon_scalar = Scalar::from_bytes(event_epsilon_bytes).ok_or(anyhow::anyhow!("failed to convert event epsilon to scalar"))?;
+        if epsilon != event_epsilon_scalar {
+            tracing::warn!(
+                "epsilon mismatch: derived={:?}, event={:?}",
+                epsilon,
+                event.epsilon
+            );
+            continue;
+        }
+        tracing::debug!("from epsilon: {:?} event epsilon: {:?}", epsilon, event.epsilon);
         // Use transaction hash as entropy
         let entropy = log.transaction_hash
             .map(|h| *h.as_fixed_bytes())
@@ -298,21 +310,21 @@ pub fn run(
                     Ok(block) => block,
                     Err(err) => {
                         tracing::warn!(%err, "failed to get latest eth block number");
-                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
                         continue;
                     }
                 };
                 let latest_handled_block = context.indexer.last_processed_block().await.unwrap_or(start_block_height);
-                tracing::warn!("=== eth latest_block {} latest_handled_block {} ===", latest_block, latest_handled_block);
+                tracing::debug!("eth latest_block {} latest_handled_block {}", latest_block, latest_handled_block);
 
                 if latest_handled_block < latest_block.as_u64() {
                     if let Err(err) = handle_block(latest_handled_block + 1, &context).await {
                         tracing::warn!(%err, "failed to handle eth block");
-                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
                         continue;
                     }
                 } else {
-                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                 }
             }
         })
