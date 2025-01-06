@@ -53,7 +53,6 @@ struct Ctx {
     eth_client: Web3<web3::transports::Http>,
     eth_contract_address: String,
     eth_account_sk: String,
-    eth_account_addr: String,
     sign_queue: Arc<RwLock<SignQueue>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
@@ -176,7 +175,6 @@ impl MpcSignProtocol {
         eth_rpc_url: String,
         eth_contract_address: String,
         eth_account_sk: String,
-        eth_account_addr: String,
     ) -> (Self, Arc<RwLock<NodeState>>) {
         let my_address = my_address.into_url().unwrap();
         let rpc_url = rpc_client.rpc_addr();
@@ -201,7 +199,6 @@ impl MpcSignProtocol {
             eth_client: web3,
             eth_contract_address,
             eth_account_sk,
-            eth_account_addr,
             sign_queue,
             signer,
             secret_storage,

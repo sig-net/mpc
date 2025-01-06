@@ -118,7 +118,6 @@ impl Node {
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
-            eth_account_addr: config.cfg.eth_account_addr.clone(),
             eth_account_sk: config.cfg.eth_account_sk.clone(),
             web_port: Self::CONTAINER_PORT,
             cipher_pk: hex::encode(config.cipher_pk.to_bytes()),

@@ -40,9 +40,6 @@ pub enum Cli {
         /// The ethereum account secret key used to sign eth respond txn.
         #[arg(long, env("MPC_ETH_ACCOUNT_SK"))]
         eth_account_sk: String,
-        /// The ethereum account address used to sign eth respond txn.
-        #[arg(long, env("MPC_ETH_ACCOUNT_ADDR"))]
-        eth_account_addr: String,
         /// The web port for this server
         #[arg(long, env("MPC_WEB_PORT"))]
         web_port: u16,
@@ -90,7 +87,6 @@ impl Cli {
                 mpc_contract_id,
                 account_sk,
                 eth_account_sk,
-                eth_account_addr,
                 web_port,
                 cipher_pk,
                 cipher_sk,
@@ -116,8 +112,6 @@ impl Cli {
                     account_sk.to_string(),
                     "--eth-account-sk".to_string(),
                     eth_account_sk.to_string(),
-                    "--eth-account-addr".to_string(), 
-                    eth_account_addr.to_string(),
                     "--web-port".to_string(),
                     web_port.to_string(),
                     "--cipher-pk".to_string(),
@@ -198,7 +192,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             account_id,
             account_sk,
             eth_account_sk,
-            eth_account_addr,
             cipher_pk,
             cipher_sk,
             sign_sk,
@@ -291,7 +284,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 indexer_eth_options.eth_rpc_url.clone(),
                 indexer_eth_options.eth_contract_address.clone(),
                 eth_account_sk,
-                eth_account_addr,
             );
 
             let contract_updater =
