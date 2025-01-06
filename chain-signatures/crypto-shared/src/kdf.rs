@@ -34,10 +34,7 @@ pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
     let mut hasher = Keccak256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
-    let ret = Scalar::from_non_biased(hash);
-    println!("derive_epsilon({}) {}", &requester, requester.len());
-    println!("derive_epsilon({}, {}) = {:?}", &requester, path, ret);
-    ret
+    Scalar::from_non_biased(hash)
 }
 
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {

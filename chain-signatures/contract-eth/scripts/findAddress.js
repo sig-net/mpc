@@ -18,8 +18,6 @@ async function getContractAddress() {
     console.log("Future contract address:", futureAddress);
 }
 
-// You can either run this as a standalone script
-// or add it to your deploy script
 getContractAddress()
     .then(() => process.exit(0))
     .catch((error) => {

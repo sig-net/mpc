@@ -1,10 +1,24 @@
 const hre = require("hardhat");
 
 async function main() {
-  // Get the deployed contract address
-  // const deployments = require('../ignition/deployments/chain-31337/deployed_addresses.json');
-  // const contractAddress = deployments[Object.keys(deployments).pop()];
-  const contractAddress = "0x9036E97368B887edbC54562717939f98A703D95f";
+  const args = process.argv.slice(2);
+  const network = args[0] || 'local';
+  let contractAddress;
+
+  if (args[1]) {
+    contractAddress = args[1];
+  } else {
+    if (network === 'local') {
+      const deployments = require('../ignition/deployments/chain-31337/deployed_addresses.json');
+      contractAddress = deployments[Object.keys(deployments).pop()];
+    } else if (network === 'sepolia') {
+      const deployments = require('../ignition/deployments/chain-11155111/deployed_addresses.json'); 
+      contractAddress = deployments[Object.keys(deployments).pop()];
+    } else {
+      console.log("Use default local network");
+      throw new Error('Invalid network specified. Use "local" or "sepolia"');
+    }
+  }
   
   const chainSignatures = await hre.ethers.getContractFactory("ChainSignatures")
     .then(factory => factory.attach(contractAddress));
@@ -26,7 +40,7 @@ async function main() {
   }
 
 
-  // Sign a test message
+  // Request to ign a test message
   try {
     const testMessage = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9";
     const testPath = "test";

@@ -2,7 +2,7 @@
 members = [
     "contract",
     "keys",
-    "node"
+    "node",
 ]
 resolver = "2"
 
