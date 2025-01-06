@@ -309,7 +309,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 tracing::info!("protocol thread spawned");
                 let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
                 let web_handle = tokio::spawn(async move {
-                    web::run(web_port, sender, cipher_sk, protocol_state, indexer).await
+                    web::run(web_port, sender, cipher_sk, protocol_state, indexer, eth_indexer).await
                 });
                 tracing::info!("protocol http server spawned");
 

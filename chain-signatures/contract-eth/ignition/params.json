@@ -1,8 +1,8 @@
 {
     "ChainSignaturesModule": {
         "publicKey": {
-            "x": "0x2de9c07143706ec886f6218a5a76bc43b82ec521a6515ba20a6ef1e6c82b1699",
-            "y": "0x76150f2dbeabc89827aa4f5f8e929e08116a3049a8207b66b1ded59588bcfce1"
+            "x": "0x9b1d9ad81b26cf681d06dc445047046baca95b3eb14e3b8c59db16c0164f43f4",
+            "y": "0x94e32f300fffce9a14cd193388b0ba0e043be3920a07d5e2e48bcd1bbef0b67b"
         }
     }
 }

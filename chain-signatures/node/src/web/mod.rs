@@ -24,6 +24,7 @@ struct AxumState {
     protocol_state: Arc<RwLock<NodeState>>,
     cipher_sk: hpke::SecretKey,
     indexer: Indexer,
+    eth_indexer: EthIndexer,
 }
 
 pub async fn run(

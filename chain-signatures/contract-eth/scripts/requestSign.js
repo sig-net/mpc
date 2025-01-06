@@ -42,8 +42,8 @@ async function main() {
 
   // Request to ign a test message
   try {
-    const testMessage = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9";
-    const testPath = "test";
+    const testMessage = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE4";
+    const testPath = "test3";
     const signatureDeposit = await chainSignatures.getSignatureDeposit();
     
     console.log("Requesting signature for message:", testMessage);
@@ -75,13 +75,13 @@ async function main() {
       console.log("Waiting for signature response...");
       const filter = chainSignatures.filters.SignatureResponded(parsedEvent.args.requestId);
       
-      chainSignatures.once(filter, (requestId, signature, event) => {
+      chainSignatures.once(filter, (event) => {
         console.log("\nSignature response received!");
-        console.log("Request ID:", requestId.toString());
-        console.log("Signature:", {
-          r: signature.r.toString(),
-          s: signature.s.toString()
-        });
+        console.log("Request ID:", event.args.requestId);
+        console.log("Response:")
+        console.log("  bigR:", event.args.response.bigR);
+        console.log("  s:", event.args.response.s);
+        console.log("  recoveryId:", event.args.response.recoveryId);
       });
     }
 
