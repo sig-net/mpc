@@ -5,7 +5,7 @@ use near_sdk::AccountId;
 use redis::AsyncCommands;
 
 const APP_DATA_PREFIX: &str = "app_data";
-const APP_DATA_STORAGE_VERSION: &str = "v5";
+const APP_DATA_STORAGE_VERSION: &str = "v6";
 
 pub fn init(pool: &Pool, node_account_id: &AccountId) -> AppDataStorage {
     AppDataStorage {
