@@ -8,7 +8,7 @@ use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
 use near_account_id::AccountId;
 
 // Can be used to "clear" redis storage in case of a breaking change
-const TRIPLE_STORAGE_VERSION: &str = "v5";
+const TRIPLE_STORAGE_VERSION: &str = "v6";
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
