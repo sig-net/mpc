@@ -191,7 +191,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             mesh_options,
             message_options,
         } => {
-            let sign_queue = Arc::new(RwLock::new(SignQueue::new()));
+            let (sign_tx, sign_queue) = SignQueue::new();
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
@@ -221,7 +221,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 &indexer_options,
                 &mpc_contract_id,
                 &account_id,
-                &sign_queue,
+                sign_tx,
                 app_data_storage,
                 rpc_client.clone(),
             )?;

@@ -22,11 +22,16 @@ use rand::SeedableRng;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TryRecvError;
 
 use near_account_id::AccountId;
 use near_fetch::signer::SignerExt;
 
 pub type ReceiptId = near_primitives::hash::CryptoHash;
+
+/// This is the maximum amount of sign requests that we can accept in the network.
+const MAX_SIGN_REQUESTS: usize = 1024;
 
 pub struct SignRequest {
     pub request_id: [u8; 32],
@@ -60,33 +65,29 @@ impl ParticipantRequests {
     }
 }
 
-#[derive(Default)]
 pub struct SignQueue {
-    unorganized_requests: Vec<SignRequest>,
     requests: HashMap<Participant, ParticipantRequests>,
+    sign_rx: mpsc::Receiver<SignRequest>,
 }
 
 impl SignQueue {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new() -> (mpsc::Sender<SignRequest>, Self) {
+        let (sign_tx, sign_rx) = mpsc::channel(MAX_SIGN_REQUESTS);
+        (
+            sign_tx,
+            Self {
+                requests: HashMap::new(),
+                sign_rx,
+            },
+        )
     }
 
     pub fn len(&self) -> usize {
-        self.unorganized_requests.len()
+        self.requests.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    pub fn add(&mut self, request: SignRequest) {
-        tracing::info!(
-            request_id = ?CryptoHash(request.request_id),
-            payload = hex::encode(request.request.payload.to_bytes()),
-            entropy = hex::encode(request.entropy),
-            "new sign request"
-        );
-        self.unorganized_requests.push(request);
     }
 
     pub fn organize(
@@ -105,7 +106,16 @@ impl SignQueue {
             );
             return;
         }
-        for request in self.unorganized_requests.drain(..) {
+
+        while let Ok(request) = {
+            match self.sign_rx.try_recv() {
+                err @ Err(TryRecvError::Disconnected) => {
+                    tracing::error!("sign queue channel disconnected");
+                    err
+                }
+                other => other,
+            }
+        } {
             let mut rng = StdRng::from_seed(request.entropy);
             let subset = stable.keys().choose_multiple(&mut rng, threshold);
             let proposer = **subset.choose(&mut rng).unwrap();

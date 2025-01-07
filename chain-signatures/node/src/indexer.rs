@@ -1,4 +1,4 @@
-use crate::protocol::{SignQueue, SignRequest};
+use crate::protocol::SignRequest;
 use crate::storage::app_data_storage::AppDataStorage;
 use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
@@ -13,7 +13,7 @@ use std::ops::Mul;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 
 /// Configures indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -169,7 +169,7 @@ impl Indexer {
 struct Context {
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
-    queue: Arc<RwLock<SignQueue>>,
+    sign_tx: mpsc::Sender<SignRequest>,
     indexer: Indexer,
 }
 
@@ -267,14 +267,20 @@ async fn handle_block(
 
     // Add the requests after going through the whole block to avoid partial processing if indexer fails somewhere.
     // This way we can revisit the same block if we failed while not having added the requests partially.
-    let mut queue = ctx.queue.write().await;
     for request in pending_requests {
-        queue.add(request);
+        tracing::info!(
+            request_id = ?near_primitives::hash::CryptoHash(request.request_id),
+            payload = hex::encode(request.request.payload.to_bytes()),
+            entropy = hex::encode(request.entropy),
+            "new sign request"
+        );
+        if let Err(err) = ctx.sign_tx.send(request).await {
+            tracing::error!(?err, "failed to send the sign request into sign queue");
+        }
         crate::metrics::NUM_SIGN_REQUESTS
             .with_label_values(&[ctx.node_account_id.as_str()])
             .inc();
     }
-    drop(queue);
 
     let log_indexing_interval = 1000;
     if block.block_height() % log_indexing_interval == 0 {
@@ -292,7 +298,7 @@ pub fn run(
     options: &Options,
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
-    queue: &Arc<RwLock<SignQueue>>,
+    sign_tx: mpsc::Sender<SignRequest>,
     app_data_storage: AppDataStorage,
     rpc_client: near_fetch::Client,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, Indexer)> {
@@ -308,7 +314,7 @@ pub fn run(
     let context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
         node_account_id: node_account_id.clone(),
-        queue: queue.clone(),
+        sign_tx,
         indexer: indexer.clone(),
     };
 
