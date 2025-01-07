@@ -191,7 +191,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             mesh_options,
             message_options,
         } => {
-            let (sign_tx, sign_queue) = SignQueue::new();
+            let (sign_tx, sign_rx) = SignQueue::channel();
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
@@ -257,7 +257,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 rpc_client.clone(),
                 signer,
                 receiver,
-                sign_queue,
+                sign_rx,
                 key_storage,
                 triple_storage,
                 presignature_storage,

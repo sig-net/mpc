@@ -379,10 +379,9 @@ impl CryptographicProtocol for RunningState {
 
         let presig_task = PresignatureManager::execute(&self, &active, &cfg.protocol);
 
-        let me = ctx.me().await;
         let stable = mesh_state.stable_participants;
         tracing::debug!(?stable, "stable participants");
-        let sig_task = SignatureManager::execute(&self, &stable, me, &cfg.protocol, &ctx);
+        let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol, &ctx);
 
         match tokio::try_join!(triple_task, presig_task, sig_task) {
             Ok(_result) => (),
@@ -398,7 +397,7 @@ impl CryptographicProtocol for RunningState {
 
         let failures = messages
             .send_encrypted(
-                me,
+                ctx.me().await,
                 &cfg.local.network.sign_sk,
                 ctx.http_client(),
                 &active,
