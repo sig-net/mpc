@@ -146,9 +146,10 @@ impl ConsensusProtocol for StartedState {
                                     let signature_manager =
                                         Arc::new(RwLock::new(SignatureManager::new(
                                             me,
+                                            ctx.my_account_id(),
+                                            contract_state.threshold,
                                             public_key,
                                             epoch,
-                                            ctx.my_account_id(),
                                             ctx.sign_rx(),
                                         )));
 
@@ -387,9 +388,10 @@ impl ConsensusProtocol for WaitingForConsensusState {
 
                     let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
                         me,
+                        ctx.my_account_id(),
+                        self.threshold,
                         self.public_key,
                         self.epoch,
-                        ctx.my_account_id(),
                         ctx.sign_rx(),
                     )));
 

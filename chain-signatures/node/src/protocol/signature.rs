@@ -228,9 +228,10 @@ pub struct SignatureManager {
     /// Vec<(receipt_id, msg_hash, timestamp, output)>
     signatures: Vec<ToPublish>,
     me: Participant,
+    my_account_id: AccountId,
+    threshold: usize,
     public_key: PublicKey,
     epoch: u64,
-    my_account_id: AccountId,
 
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
@@ -265,9 +266,10 @@ impl ToPublish {
 impl SignatureManager {
     pub fn new(
         me: Participant,
+        my_account_id: &AccountId,
+        threshold: usize,
         public_key: PublicKey,
         epoch: u64,
-        my_account_id: &AccountId,
         sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
     ) -> Self {
         Self {
@@ -276,9 +278,10 @@ impl SignatureManager {
             completed: HashMap::new(),
             signatures: Vec::new(),
             me,
+            my_account_id: my_account_id.clone(),
+            threshold,
             public_key,
             epoch,
-            my_account_id: my_account_id.clone(),
             sign_queue: SignQueue::new(me, sign_rx),
         }
     }
@@ -602,15 +605,14 @@ impl SignatureManager {
 
     pub async fn handle_requests(
         &mut self,
-        threshold: usize,
         stable: &Participants,
         presignature_manager: &mut PresignatureManager,
         cfg: &ProtocolConfig,
     ) {
-        if stable.len() < threshold {
+        if stable.len() < self.threshold {
             tracing::warn!(
                 "Require at least {} stable participants to handle_requests, got {}: {:?}",
-                threshold,
+                self.threshold,
                 stable.len(),
                 stable.keys_vec()
             );
@@ -618,7 +620,7 @@ impl SignatureManager {
         }
 
         self.sign_queue
-            .organize(threshold, stable, &self.my_account_id)
+            .organize(self.threshold, stable, &self.my_account_id)
             .await;
         crate::metrics::SIGN_QUEUE_SIZE
             .with_label_values(&[self.my_account_id.as_str()])
@@ -636,7 +638,7 @@ impl SignatureManager {
             }
         } {
             let sig_participants = stable.intersection(&[&presignature.participants]);
-            if sig_participants.len() < threshold {
+            if sig_participants.len() < self.threshold {
                 tracing::warn!(
                     participants = ?sig_participants.keys_vec(),
                     "intersection of stable participants and presignature participants is less than threshold, trashing presignature"
@@ -812,7 +814,6 @@ impl SignatureManager {
         protocol_cfg: &ProtocolConfig,
         ctx: &impl super::cryptography::CryptographicCtx,
     ) -> tokio::task::JoinHandle<()> {
-        let threshold = state.threshold;
         let presignature_manager = state.presignature_manager.clone();
         let signature_manager = state.signature_manager.clone();
         let messages = state.messages.clone();
@@ -831,7 +832,7 @@ impl SignatureManager {
             let mut signature_manager = signature_manager.write().await;
             let mut presignature_manager = presignature_manager.write().await;
             signature_manager
-                .handle_requests(threshold, &stable, &mut presignature_manager, &protocol_cfg)
+                .handle_requests(&stable, &mut presignature_manager, &protocol_cfg)
                 .await;
             drop(presignature_manager);
 
