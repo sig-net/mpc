@@ -21,8 +21,25 @@ fn main() -> anyhow::Result<()> {
     let release = true;
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        forge::build_contract(release).await?;
-        forge::build_node(release).await?;
+        let contract_task = tokio::task::spawn(forge::build_contract(release));
+        let node_task = tokio::task::spawn(forge::build_node(release));
+        let (contract, node) = tokio::try_join!(contract_task, node_task)?;
+        match (contract, node) {
+            (Ok(contract), Ok(node)) => {
+                let mut msg = String::new();
+                if !contract.success() {
+                    msg.push_str(&format!("failed to build contract {contract:?}"));
+                }
+                if !node.success() {
+                    msg.push_str(&format!("failed to build node {node:?}"));
+                }
+                if !msg.is_empty() {
+                    anyhow::bail!(msg);
+                }
+            }
+            (Err(e), _) => anyhow::bail!("failed to build contract: {e}"),
+            (_, Err(e)) => anyhow::bail!("failed to build node: {e}"),
+        }
 
         Ok(())
     })
