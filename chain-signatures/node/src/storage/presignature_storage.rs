@@ -7,7 +7,7 @@ use crate::protocol::presignature::{Presignature, PresignatureId};
 use crate::storage::error::{StoreError, StoreResult};
 
 // Can be used to "clear" redis storage in case of a breaking change
-const PRESIGNATURE_STORAGE_VERSION: &str = "v2";
+const PRESIGNATURE_STORAGE_VERSION: &str = "v6";
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureStorage {
