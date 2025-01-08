@@ -62,7 +62,7 @@ impl SignQueue {
     }
 
     pub fn len(&self) -> usize {
-        self.requests.len()
+        self.requests.values().map(|v| v.len()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
