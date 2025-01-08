@@ -49,7 +49,14 @@ impl PresignatureStorage {
             .map_err(StoreError::Connect)
     }
 
-    pub async fn insert(&self, presignature: Presignature, mine: bool) -> StoreResult<()> {
+    /// Insert a presignature into the storage. If `mine` is true, the presignature will be
+    /// owned by the current node. If `back` is true, the presignature will be marked as unused.
+    pub async fn insert(
+        &self,
+        presignature: Presignature,
+        mine: bool,
+        back: bool,
+    ) -> StoreResult<()> {
         let mut conn = self.connect().await?;
 
         let script = r#"
@@ -59,9 +66,12 @@ impl PresignatureStorage {
             local presig_id = ARGV[1]
             local presig_value = ARGV[2]
             local mine = ARGV[3]
+            local back = ARGV[4]
 
-            if redis.call("SISMEMBER", used_key, presig_id) == 1 then
-                return {err = "Presignature " .. presig_id .. " has already been used"}
+            if back == "true" then
+                redis.call("HDEL", used_key, presig_id)
+            elseif redis.call('HEXISTS', used_key, presig_id) == 1 then
+                return {err = 'Presignature ' .. presig_id .. ' is already used'}
             end
 
             if mine == "true" then
@@ -80,6 +90,7 @@ impl PresignatureStorage {
             .arg(presignature.id)
             .arg(presignature)
             .arg(mine.to_string())
+            .arg(back.to_string())
             .invoke_async(&mut conn)
             .await?;
 
@@ -100,7 +111,7 @@ impl PresignatureStorage {
 
     pub async fn contains_used(&self, id: &PresignatureId) -> StoreResult<bool> {
         let mut conn = self.connect().await?;
-        let result: bool = conn.sismember(&self.used_key, id).await?;
+        let result: bool = conn.hexists(&self.used_key, id).await?;
         Ok(result)
     }
 
@@ -112,20 +123,21 @@ impl PresignatureStorage {
             local presig_key = KEYS[2]
             local used_key = KEYS[3]
             local presig_id = ARGV[1]
-        
+
             if redis.call('SISMEMBER', mine_key, presig_id) == 1 then
                 return {err = 'Cannot take mine presignature as foreign owned'}
             end
-        
+
             local presig_value = redis.call("HGET", presig_key, presig_id)
-        
+
             if not presig_value then
                 return {err = "Presignature " .. presig_id .. " is missing"}
             end
 
             redis.call("HDEL", presig_key, presig_id)
-            redis.call("SADD", used_key, presig_id)
-            redis.call("EXPIRE", used_key, ARGV[2])
+            redis.call("HSET", used_key, presig_id, "1")
+            redis.call("HEXPIRE", used_key, ARGV[2], "FIELDS", "1", presig_id)
+
             return presig_value
         "#;
 
@@ -148,20 +160,21 @@ impl PresignatureStorage {
             local mine_key = KEYS[1]
             local presig_key = KEYS[2]
             local used_key = KEYS[3]
-    
+
             local presig_id = redis.call("SPOP", mine_key)
             if not presig_id then
                 return {err = "Mine presignature stockpile does not have enough presignatures"}
             end
-    
+
             local presig_value = redis.call("HGET", presig_key, presig_id)
             if not presig_value then
                 return {err = "Unexpected behavior. Presignature " .. presig_id .. " is missing"}
             end
-    
+
             redis.call("HDEL", presig_key, presig_id)
-            redis.call("SADD", used_key, presig_id)
-            redis.call("EXPIRE", used_key, ARGV[1])
+            redis.call("HSET", used_key, presig_id, "1")
+            redis.call("HEXPIRE", used_key, ARGV[1], "FIELDS", "1", presig_id)
+
             return presig_value
         "#;
 

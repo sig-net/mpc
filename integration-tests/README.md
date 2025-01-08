@@ -5,14 +5,7 @@
 Running integration tests requires you to have redis and sandbox docker images present on your machine:
 
 ```BASH
-docker pull ghcr.io/near/sandbox
-docker pull redis:7.0.15
-```
-
-For M1 you may want to pull the following image instead:
-
-```BASH
-docker pull ghcr.io/near/sandbox:latest-aarch64
+docker pull redis:7.4.2
 ```
 
 In case of authorization issues make sure you have logged into docker using your [access token](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).

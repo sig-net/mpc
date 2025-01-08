@@ -642,6 +642,9 @@ impl SignatureManager {
                     participants = ?sig_participants.keys_vec(),
                     "intersection of stable participants and presignature participants is less than threshold, trashing presignature"
                 );
+                // TODO: do not insert back presignature when we have a clear model for data consistency
+                // between nodes and utilizing only presignatures that meet threshold requirements.
+                presignature_manager.insert(presignature, true, true).await;
                 continue;
             }
 

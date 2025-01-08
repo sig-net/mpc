@@ -190,10 +190,14 @@ impl PresignatureManager {
         }
     }
 
-    pub async fn insert(&mut self, presignature: Presignature, mine: bool) {
+    pub async fn insert(&mut self, presignature: Presignature, mine: bool, back: bool) {
         let id = presignature.id;
         tracing::debug!(id, mine, "inserting presignature");
-        if let Err(store_err) = self.presignature_storage.insert(presignature, mine).await {
+        if let Err(store_err) = self
+            .presignature_storage
+            .insert(presignature, mine, back)
+            .await
+        {
             tracing::error!(?store_err, mine, "failed to insert presignature");
         } else {
             // Remove from taken list if it was there
@@ -437,9 +441,10 @@ impl PresignatureManager {
                         participants = ?presig_participants.keys_vec(),
                         "running: the intersection of participants is less than the threshold"
                     );
-                    // We are not inserting triples back to
-                    //    - prevent triple reusage
-                    //    - prevent a situation where we have a full stockpile of triples that can not be used
+                    // TODO: do not insert back triples when we have a clear model for data consistency
+                    // between nodes and utilizing only triples that meet threshold requirements.
+                    triple_manager.insert(triple0, true, true).await;
+                    triple_manager.insert(triple1, true, true).await;
                 } else {
                     self.generate(
                         &presig_participants,
@@ -640,7 +645,7 @@ impl PresignatureManager {
         });
 
         for (presignature, mine) in presignatures {
-            self.insert(presignature, mine).await;
+            self.insert(presignature, mine, false).await;
         }
 
         if !errors.is_empty() {
