@@ -1,10 +1,12 @@
 use std::sync::PoisonError;
 
+use super::signature::SignatureManager;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
 use crate::http_client::SendError;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
+use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::protocol::MpcMessage;
@@ -23,6 +25,7 @@ pub trait CryptographicCtx {
     fn signer(&self) -> &InMemorySigner;
     fn mpc_contract_id(&self) -> &AccountId;
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox;
+    fn my_account_id(&self) -> &AccountId;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -121,7 +124,7 @@ impl CryptographicProtocol for GeneratingState {
                             continue;
                         }
                         messages.push(
-                            info.clone(),
+                            Participant::from(info.id),
                             MpcMessage::Generating(GeneratingMessage {
                                 from: ctx.me().await,
                                 data: data.clone(),
@@ -131,9 +134,8 @@ impl CryptographicProtocol for GeneratingState {
                 }
                 Action::SendPrivate(to, data) => {
                     tracing::debug!("generating: sending a private message to {to:?}");
-                    let info = self.fetch_participant(&to)?;
                     self.messages.write().await.push(
-                        info.clone(),
+                        to,
                         MpcMessage::Generating(GeneratingMessage {
                             from: ctx.me().await,
                             data,
@@ -277,14 +279,14 @@ impl CryptographicProtocol for ResharingState {
                     tracing::debug!("resharing: sending a message to all participants");
                     let me = ctx.me().await;
                     let mut messages = self.messages.write().await;
-                    for (p, info) in self.new_participants.iter() {
+                    for (p, _info) in self.new_participants.iter() {
                         if p == &me {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;
                         }
 
                         messages.push(
-                            info.clone(),
+                            *p,
                             MpcMessage::Resharing(ResharingMessage {
                                 epoch: self.old_epoch,
                                 from: me,
@@ -296,8 +298,8 @@ impl CryptographicProtocol for ResharingState {
                 Action::SendPrivate(to, data) => {
                     tracing::debug!("resharing: sending a private message to {to:?}");
                     match self.new_participants.get(&to) {
-                        Some(info) => self.messages.write().await.push(
-                            info.clone(),
+                        Some(_) => self.messages.write().await.push(
+                            to,
                             MpcMessage::Resharing(ResharingMessage {
                                 epoch: self.old_epoch,
                                 from: ctx.me().await,
@@ -361,8 +363,7 @@ impl CryptographicProtocol for RunningState {
         cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
-        let protocol_cfg = &cfg.protocol;
-        let active = &mesh_state.active_participants;
+        let active = mesh_state.active_participants;
         if active.len() < self.threshold {
             tracing::warn!(
                 active = ?active.keys_vec(),
@@ -371,112 +372,37 @@ impl CryptographicProtocol for RunningState {
             return Ok(NodeState::Running(self));
         }
 
-        let mut messages = self.messages.write().await;
-        let mut triple_manager = self.triple_manager.write().await;
-        let my_account_id = triple_manager.my_account_id.clone();
-        crate::metrics::MESSAGE_QUEUE_SIZE
-            .with_label_values(&[my_account_id.as_str()])
-            .set(messages.len() as i64);
-        if let Err(err) = triple_manager.stockpile(active, protocol_cfg).await {
-            tracing::warn!(?err, "running: failed to stockpile triples");
-        }
-        for (p, msg) in triple_manager.poke(protocol_cfg).await {
-            let info = self.fetch_participant(&p)?;
-            messages.push(info.clone(), MpcMessage::Triple(msg));
-        }
+        let triple_task =
+            self.triple_manager
+                .clone()
+                .execute(&active, &cfg.protocol, self.messages.clone());
 
-        crate::metrics::NUM_TRIPLES_MINE
-            .with_label_values(&[my_account_id.as_str()])
-            .set(triple_manager.len_mine().await as i64);
-        crate::metrics::NUM_TRIPLES_TOTAL
-            .with_label_values(&[my_account_id.as_str()])
-            .set(triple_manager.len_generated().await as i64);
-        crate::metrics::NUM_TRIPLE_GENERATORS_INTRODUCED
-            .with_label_values(&[my_account_id.as_str()])
-            .set(triple_manager.introduced.len() as i64);
-        crate::metrics::NUM_TRIPLE_GENERATORS_TOTAL
-            .with_label_values(&[my_account_id.as_str()])
-            .set(triple_manager.ongoing.len() as i64);
+        let presig_task = PresignatureManager::execute(&self, &active, &cfg.protocol);
 
-        let mut presignature_manager = self.presignature_manager.write().await;
-        if let Err(err) = presignature_manager
-            .stockpile(
-                active,
-                &self.public_key,
-                &self.private_share,
-                &mut triple_manager,
-                protocol_cfg,
-            )
-            .await
-        {
-            tracing::warn!(?err, "running: failed to stockpile presignatures");
-        }
-        drop(triple_manager);
-        for (p, msg) in presignature_manager.poke().await {
-            let info = self.fetch_participant(&p)?;
-            messages.push(info.clone(), MpcMessage::Presignature(msg));
-        }
-
-        crate::metrics::NUM_PRESIGNATURES_MINE
-            .with_label_values(&[my_account_id.as_str()])
-            .set(presignature_manager.len_mine().await as i64);
-        crate::metrics::NUM_PRESIGNATURES_TOTAL
-            .with_label_values(&[my_account_id.as_str()])
-            .set(presignature_manager.len_generated().await as i64);
-        crate::metrics::NUM_PRESIGNATURE_GENERATORS_TOTAL
-            .with_label_values(&[my_account_id.as_str()])
-            .set(
-                presignature_manager.len_potential().await as i64
-                    - presignature_manager.len_generated().await as i64,
-            );
-
-        // NOTE: signatures should only use stable and not active participants. The difference here is that
-        // stable participants utilizes more than the online status of a node, such as whether or not their
-        // block height is up to date, such that they too can process signature requests. If they cannot
-        // then they are considered unstable and should not be a part of signature generation this round.
+        let me = ctx.me().await;
         let stable = mesh_state.stable_participants;
         tracing::debug!(?stable, "stable participants");
+        let sig_task = SignatureManager::execute(&self, &stable, me, &cfg.protocol, &ctx);
 
-        let mut sign_queue = self.sign_queue.write().await;
-        crate::metrics::SIGN_QUEUE_SIZE
-            .with_label_values(&[my_account_id.as_str()])
-            .set(sign_queue.len() as i64);
-        let me = ctx.me().await;
-        sign_queue.organize(self.threshold, &stable, me, &my_account_id);
-
-        let my_requests = sign_queue.my_requests(me);
-        crate::metrics::SIGN_QUEUE_MINE_SIZE
-            .with_label_values(&[my_account_id.as_str()])
-            .set(my_requests.len() as i64);
-
-        let mut signature_manager = self.signature_manager.write().await;
-        signature_manager
-            .handle_requests(
-                self.threshold,
-                &stable,
-                my_requests,
-                &mut presignature_manager,
-                protocol_cfg,
-            )
-            .await;
-        drop(sign_queue);
-        drop(presignature_manager);
-
-        for (p, msg) in signature_manager.poke() {
-            let info = self.fetch_participant(&p)?;
-            messages.push(info.clone(), MpcMessage::Signature(msg));
+        match tokio::try_join!(triple_task, presig_task, sig_task) {
+            Ok(_result) => (),
+            Err(err) => {
+                tracing::warn!(?err, "running: failed to progress cryptographic protocol");
+            }
         }
-        signature_manager
-            .publish(ctx.rpc_client(), ctx.signer(), ctx.mpc_contract_id())
-            .await;
-        drop(signature_manager);
+
+        let mut messages = self.messages.write().await;
+        crate::metrics::MESSAGE_QUEUE_SIZE
+            .with_label_values(&[ctx.my_account_id().as_str()])
+            .set(messages.len() as i64);
+
         let failures = messages
             .send_encrypted(
-                ctx.me().await,
+                me,
                 &cfg.local.network.sign_sk,
                 ctx.http_client(),
-                active,
-                protocol_cfg,
+                &active,
+                &cfg.protocol,
             )
             .await;
         if !failures.is_empty() {

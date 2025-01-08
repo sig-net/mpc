@@ -1,4 +1,5 @@
 use super::message::PresignatureMessage;
+use super::state::RunningState;
 use super::triple::{Triple, TripleId, TripleManager};
 use crate::protocol::contract::primitives::Participants;
 use crate::storage::presignature_storage::PresignatureStorage;
@@ -407,7 +408,7 @@ impl PresignatureManager {
         active: &Participants,
         pk: &PublicKey,
         sk_share: &SecretKeyShare,
-        triple_manager: &mut TripleManager,
+        triple_manager: &TripleManager,
         cfg: &ProtocolConfig,
     ) -> Result<(), InitializationError> {
         let not_enough_presignatures = {
@@ -469,7 +470,7 @@ impl PresignatureManager {
         id: PresignatureId,
         triple0: TripleId,
         triple1: TripleId,
-        triple_manager: &mut TripleManager,
+        triple_manager: &TripleManager,
         public_key: &PublicKey,
         private_share: &SecretKeyShare,
         cfg: &ProtocolConfig,
@@ -647,6 +648,54 @@ impl PresignatureManager {
         }
 
         messages
+    }
+
+    pub fn execute(
+        state: &RunningState,
+        active: &Participants,
+        protocol_cfg: &ProtocolConfig,
+    ) -> tokio::task::JoinHandle<()> {
+        let triple_manager = state.triple_manager.clone();
+        let presignature_manager = state.presignature_manager.clone();
+        let active = active.clone();
+        let protocol_cfg = protocol_cfg.clone();
+        let pk = state.public_key;
+        let sk_share = state.private_share;
+        let messages = state.messages.clone();
+
+        tokio::task::spawn(async move {
+            let mut presignature_manager = presignature_manager.write().await;
+            if let Err(err) = presignature_manager
+                .stockpile(&active, &pk, &sk_share, &triple_manager, &protocol_cfg)
+                .await
+            {
+                tracing::warn!(?err, "running: failed to stockpile presignatures");
+            }
+
+            {
+                let mut messages = messages.write().await;
+                messages.extend(
+                    presignature_manager
+                        .poke()
+                        .await
+                        .into_iter()
+                        .map(|(p, msg)| (p, super::MpcMessage::Presignature(msg))),
+                );
+            }
+
+            crate::metrics::NUM_PRESIGNATURES_MINE
+                .with_label_values(&[presignature_manager.my_account_id.as_str()])
+                .set(presignature_manager.len_mine().await as i64);
+            crate::metrics::NUM_PRESIGNATURES_TOTAL
+                .with_label_values(&[presignature_manager.my_account_id.as_str()])
+                .set(presignature_manager.len_generated().await as i64);
+            crate::metrics::NUM_PRESIGNATURE_GENERATORS_TOTAL
+                .with_label_values(&[presignature_manager.my_account_id.as_str()])
+                .set(
+                    presignature_manager.len_potential().await as i64
+                        - presignature_manager.len_generated().await as i64,
+                );
+        })
     }
 }
 

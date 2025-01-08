@@ -1,6 +1,7 @@
 use super::contract::primitives::Participants;
 use super::message::SignatureMessage;
 use super::presignature::{GenerationError, Presignature, PresignatureId, PresignatureManager};
+use super::state::RunningState;
 use crate::indexer::ContractSignRequest;
 use crate::kdf::{derive_delta, into_eth_sig};
 use crate::types::SignatureProtocol;
@@ -798,5 +799,70 @@ impl SignatureManager {
             .entry(id.clone())
             .and_modify(|e| *e = Instant::now());
         matches!(entry, Entry::Occupied(_))
+    }
+
+    pub fn execute(
+        state: &RunningState,
+        stable: &Participants,
+        me: Participant,
+        protocol_cfg: &ProtocolConfig,
+        ctx: &impl super::cryptography::CryptographicCtx,
+    ) -> tokio::task::JoinHandle<()> {
+        let threshold = state.threshold;
+        let my_account_id = state.triple_manager.my_account_id.clone();
+        let presignature_manager = state.presignature_manager.clone();
+        let signature_manager = state.signature_manager.clone();
+        let messages = state.messages.clone();
+        let stable = stable.clone();
+        let protocol_cfg = protocol_cfg.clone();
+        let sign_queue = state.sign_queue.clone();
+        let rpc_client = ctx.rpc_client().clone();
+        let signer = ctx.signer().clone();
+        let mpc_contract_id = ctx.mpc_contract_id().clone();
+
+        // NOTE: signatures should only use stable and not active participants. The difference here is that
+        // stable participants utilizes more than the online status of a node, such as whether or not their
+        // block height is up to date, such that they too can process signature requests. If they cannot
+        // then they are considered unstable and should not be a part of signature generation this round.
+
+        tokio::task::spawn(tokio::task::unconstrained(async move {
+            let mut sign_queue = sign_queue.write().await;
+            crate::metrics::SIGN_QUEUE_SIZE
+                .with_label_values(&[my_account_id.as_str()])
+                .set(sign_queue.len() as i64);
+            sign_queue.organize(threshold, &stable, me, &my_account_id);
+
+            let my_requests = sign_queue.my_requests(me);
+            crate::metrics::SIGN_QUEUE_MINE_SIZE
+                .with_label_values(&[my_account_id.as_str()])
+                .set(my_requests.len() as i64);
+
+            let mut presignature_manager = presignature_manager.write().await;
+            let mut signature_manager = signature_manager.write().await;
+            signature_manager
+                .handle_requests(
+                    threshold,
+                    &stable,
+                    my_requests,
+                    &mut presignature_manager,
+                    &protocol_cfg,
+                )
+                .await;
+            drop(presignature_manager);
+
+            {
+                let mut messages = messages.write().await;
+                messages.extend(
+                    signature_manager
+                        .poke()
+                        .into_iter()
+                        .map(|(p, msg)| (p, crate::protocol::MpcMessage::Signature(msg))),
+                );
+            }
+
+            signature_manager
+                .publish(&rpc_client, &signer, &mpc_contract_id)
+                .await;
+        }))
     }
 }

@@ -1,4 +1,4 @@
-use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+use crate::protocol::contract::primitives::Participants;
 use crate::protocol::message::SignedMessage;
 use crate::protocol::MpcMessage;
 use cait_sith::protocol::Participant;
@@ -95,7 +95,7 @@ pub async fn send_encrypted<U: IntoUrl>(
 // TODO: add in retry logic either in struct or at call site.
 // TODO: add check for participant list to see if the messages to be sent are still valid.
 pub struct MessageQueue {
-    deque: VecDeque<(ParticipantInfo, MpcMessage, Instant)>,
+    deque: VecDeque<(Participant, MpcMessage, Instant)>,
     seen_counts: HashSet<String>,
     message_options: Options,
 }
@@ -117,8 +117,13 @@ impl MessageQueue {
         self.deque.is_empty()
     }
 
-    pub fn push(&mut self, info: ParticipantInfo, msg: MpcMessage) {
-        self.deque.push_back((info, msg, Instant::now()));
+    pub fn push(&mut self, node: Participant, msg: MpcMessage) {
+        self.deque.push_back((node, msg, Instant::now()));
+    }
+
+    pub fn extend(&mut self, other: impl IntoIterator<Item = (Participant, MpcMessage)>) {
+        self.deque
+            .extend(other.into_iter().map(|(i, msg)| (i, msg, Instant::now())));
     }
 
     pub async fn send_encrypted(
@@ -126,7 +131,7 @@ impl MessageQueue {
         from: Participant,
         sign_sk: &near_crypto::SecretKey,
         client: &Client,
-        participants: &Participants,
+        active: &Participants,
         cfg: &ProtocolConfig,
     ) -> Vec<SendError> {
         let mut failed = VecDeque::new();
@@ -136,21 +141,22 @@ impl MessageQueue {
         let outer = Instant::now();
         let uncompacted = self.deque.len();
         let mut encrypted = HashMap::new();
-        while let Some((info, msg, instant)) = self.deque.pop_front() {
+        while let Some((id, msg, instant)) = self.deque.pop_front() {
             if instant.elapsed() > timeout(&msg, cfg) {
                 errors.push(SendError::Timeout(format!(
-                    "{} message has timed out: {info:?}",
+                    "{} message has timed out for node={id:?}",
                     msg.typename(),
                 )));
                 continue;
             }
 
-            if !participants.contains_key(&Participant::from(info.id)) {
-                let counter = participant_counter.entry(info.id).or_insert(0);
+            let Some(info) = active.get(&id) else {
+                let counter = participant_counter.entry(id).or_insert(0);
                 *counter += 1;
-                failed.push_back((info, msg, instant));
+                failed.push_back((id, msg, instant));
                 continue;
-            }
+            };
+
             let encrypted_msg = match SignedMessage::encrypt(&msg, from, sign_sk, &info.cipher_pk) {
                 Ok(encrypted) => encrypted,
                 Err(err) => {
@@ -159,7 +165,7 @@ impl MessageQueue {
                 }
             };
             let encrypted = encrypted.entry(info.id).or_insert_with(Vec::new);
-            encrypted.push((encrypted_msg, (info, msg, instant)));
+            encrypted.push((encrypted_msg, (id, msg, instant)));
         }
 
         let mut compacted = 0;
@@ -167,7 +173,7 @@ impl MessageQueue {
             for partition in partition_ciphered_256kb(encrypted) {
                 let (encrypted_partition, msgs): (Vec<_>, Vec<_>) = partition.into_iter().unzip();
                 // guaranteed to unwrap due to our previous loop check:
-                let info = participants.get(&Participant::from(id)).unwrap();
+                let info = active.get(&Participant::from(id)).unwrap();
                 let account_id = &info.account_id;
                 let number_of_messages = encrypted_partition.len() as f64;
 
@@ -231,7 +237,7 @@ impl MessageQueue {
 /// Encrypted message with a reference to the old message. Only the ciphered portion of this
 /// type will be sent over the wire, while the original message is kept just in case things
 /// go wrong somewhere and the message needs to be requeued to be sent later.
-type EncryptedMessage = (Ciphered, (ParticipantInfo, MpcMessage, Instant));
+type EncryptedMessage = (Ciphered, (Participant, MpcMessage, Instant));
 
 fn partition_ciphered_256kb(encrypted: Vec<EncryptedMessage>) -> Vec<Vec<EncryptedMessage>> {
     let mut result = Vec::new();

@@ -124,6 +124,10 @@ impl CryptographicCtx for &mut MpcSignProtocol {
         &self.ctx.mpc_contract_id
     }
 
+    fn my_account_id(&self) -> &AccountId {
+        &self.ctx.account_id
+    }
+
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox {
         &mut self.ctx.secret_storage
     }

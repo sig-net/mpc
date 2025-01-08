@@ -127,13 +127,13 @@ impl ConsensusProtocol for StartedState {
                                     tracing::info!(
                                         "started: contract state is running and we are already a participant"
                                     );
-                                    let triple_manager = Arc::new(RwLock::new(TripleManager::new(
+                                    let triple_manager = TripleManager::new(
                                         me,
                                         contract_state.threshold,
                                         epoch,
                                         ctx.my_account_id(),
                                         ctx.triple_storage(),
-                                    )));
+                                    );
 
                                     let presignature_manager =
                                         Arc::new(RwLock::new(PresignatureManager::new(
@@ -370,13 +370,13 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         );
                     }
 
-                    let triple_manager = Arc::new(RwLock::new(TripleManager::new(
+                    let triple_manager = TripleManager::new(
                         me,
                         self.threshold,
                         self.epoch,
                         ctx.my_account_id(),
                         ctx.triple_storage(),
-                    )));
+                    );
 
                     let presignature_manager = Arc::new(RwLock::new(PresignatureManager::new(
                         me,
