@@ -49,7 +49,7 @@ struct Ctx {
     signer: InMemorySigner,
     rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
-    sign_queue: Arc<RwLock<SignQueue>>,
+    sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
@@ -81,8 +81,8 @@ impl ConsensusCtx for &mut MpcSignProtocol {
         &self.ctx.my_address
     }
 
-    fn sign_queue(&self) -> Arc<RwLock<SignQueue>> {
-        self.ctx.sign_queue.clone()
+    fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<SignRequest>>> {
+        self.ctx.sign_rx.clone()
     }
 
     fn secret_storage(&self) -> &SecretNodeStorageBox {
@@ -155,7 +155,7 @@ impl MpcSignProtocol {
         rpc_client: near_fetch::Client,
         signer: InMemorySigner,
         receiver: mpsc::Receiver<MpcMessage>,
-        sign_queue: Arc<RwLock<SignQueue>>,
+        sign_rx: mpsc::Receiver<SignRequest>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
@@ -179,7 +179,7 @@ impl MpcSignProtocol {
             mpc_contract_id,
             rpc_client,
             http_client: reqwest::Client::new(),
-            sign_queue,
+            sign_rx: Arc::new(RwLock::new(sign_rx)),
             signer,
             secret_storage,
             triple_storage,
