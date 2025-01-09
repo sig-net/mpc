@@ -79,7 +79,7 @@ npx hardhat --network sepolia run scripts/findAddress.js
 
 4. Go to Etherscan Sepolia: https://sepolia.etherscan.io/, check the latest block number.
 
-5. Make sure you have docker daemon running. Go to `integration-tests/chain-signatures` and run the following command to start the MPC cluster connected to Ethereum Sepolia Testnet:
+5. Make sure you have docker daemon running. Go to `integration-tests` and run the following command to start the MPC cluster connected to Ethereum Sepolia Testnet:
 ```bash
 cargo run -- setup-env --eth-rpc-url https://sepolia.infura.io/v3/<infura-api-key> --eth-account-sk <eth-account-secret-key-without-0x-prefix> --eth-contract-address <future-contract-address> --eth-start-block-height <latest-block-number>
 ```
