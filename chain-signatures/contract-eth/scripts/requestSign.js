@@ -1,24 +1,19 @@
 const hre = require("hardhat");
 
 async function main() {
-  const args = process.argv.slice(2);
-  const network = args[0] || 'local';
   let contractAddress;
-
-  if (args[1]) {
-    contractAddress = args[1];
+  let network = hre.network.name;
+  if (network === 'localhost') {
+    const deployments = require('../ignition/deployments/chain-31337/deployed_addresses.json');
+    contractAddress = deployments[Object.keys(deployments).pop()];
+    console.log(contractAddress)
+  } else if (network === 'sepolia') {
+    const deployments = require('../ignition/deployments/chain-11155111/deployed_addresses.json'); 
+    contractAddress = deployments[Object.keys(deployments).pop()];
   } else {
-    if (network === 'local') {
-      const deployments = require('../ignition/deployments/chain-31337/deployed_addresses.json');
-      contractAddress = deployments[Object.keys(deployments).pop()];
-    } else if (network === 'sepolia') {
-      const deployments = require('../ignition/deployments/chain-11155111/deployed_addresses.json'); 
-      contractAddress = deployments[Object.keys(deployments).pop()];
-    } else {
-      console.log("Use default local network");
-      throw new Error('Invalid network specified. Use "local" or "sepolia"');
-    }
+    throw new Error('Unsupported network specified. Use "localhost" or "sepolia"');
   }
+
   
   const chainSignatures = await hre.ethers.getContractFactory("ChainSignatures")
     .then(factory => factory.attach(contractAddress));
@@ -42,8 +37,8 @@ async function main() {
 
   // Request to ign a test message
   try {
-    const testMessage = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE4";
-    const testPath = "test3";
+    const testMessage = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9";
+    const testPath = "test";
     const signatureDeposit = await chainSignatures.getSignatureDeposit();
     
     console.log("Requesting signature for message:", testMessage);

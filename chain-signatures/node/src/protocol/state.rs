@@ -3,7 +3,6 @@ use super::cryptography::CryptographicError;
 use super::presignature::PresignatureManager;
 use super::signature::SignatureManager;
 use super::triple::TripleManager;
-use super::SignQueue;
 use crate::http_client::MessageQueue;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 
@@ -91,8 +90,7 @@ pub struct RunningState {
     pub threshold: usize,
     pub private_share: SecretKeyShare,
     pub public_key: PublicKey,
-    pub sign_queue: Arc<RwLock<SignQueue>>,
-    pub triple_manager: Arc<RwLock<TripleManager>>,
+    pub triple_manager: TripleManager,
     pub presignature_manager: Arc<RwLock<PresignatureManager>>,
     pub signature_manager: Arc<RwLock<SignatureManager>>,
     pub messages: Arc<RwLock<MessageQueue>>,

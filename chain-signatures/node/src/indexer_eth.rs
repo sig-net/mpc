@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use hex::ToHex;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use web3::{
     types::{BlockNumber, FilterBuilder, Log, H160, H256, U256},
     Web3,
@@ -151,7 +151,7 @@ impl EthIndexer {
 struct Context {
     contract_address: H160,
     web3: Web3<web3::transports::Http>,
-    queue: Arc<RwLock<SignQueue>>,
+    sign_tx: mpsc::Sender<SignRequest>,
     indexer: EthIndexer,
 }
 
@@ -227,11 +227,12 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
 
         pending_requests.push(sign_request);
     }
-    let mut queue = ctx.queue.write().await;
-    for sign_request in pending_requests {
-        queue.add(sign_request);
+
+    for request in pending_requests {
+        if let Err(err) = ctx.sign_tx.send(request).await {
+            tracing::error!(?err, "failed to send the eth sign request into sign queue");
+        }
     }
-    drop(queue);
 
     ctx.indexer
         .update_block_height_and_timestamp(block_number, block_timestamp)
@@ -281,7 +282,7 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
 
 pub fn run(
     options: &Options,
-    queue: &Arc<RwLock<SignQueue>>,
+    sign_tx: mpsc::Sender<SignRequest>,
     app_data_storage: AppDataStorage,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, EthIndexer)> {
     let transport = web3::transports::Http::new(&options.eth_rpc_url)?;
@@ -293,7 +294,7 @@ pub fn run(
     let context = Context {
         contract_address,
         web3,
-        queue: queue.clone(),
+        sign_tx,
         indexer: indexer.clone(),
     };
 

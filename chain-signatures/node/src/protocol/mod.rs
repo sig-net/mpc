@@ -53,7 +53,7 @@ struct Ctx {
     eth_client: Web3<web3::transports::Http>,
     eth_contract_address: String,
     eth_account_sk: String,
-    sign_queue: Arc<RwLock<SignQueue>>,
+    sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
@@ -85,8 +85,8 @@ impl ConsensusCtx for &mut MpcSignProtocol {
         &self.ctx.my_address
     }
 
-    fn sign_queue(&self) -> Arc<RwLock<SignQueue>> {
-        self.ctx.sign_queue.clone()
+    fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<SignRequest>>> {
+        self.ctx.sign_rx.clone()
     }
 
     fn secret_storage(&self) -> &SecretNodeStorageBox {
@@ -124,12 +124,12 @@ impl CryptographicCtx for &mut MpcSignProtocol {
         &self.ctx.eth_client
     }
 
-    fn eth_contract_address(&self) -> &str {
-        &self.ctx.eth_contract_address
+    fn eth_contract_address(&self) -> String {
+        self.ctx.eth_contract_address.to_string()
     }
 
-    fn eth_account_sk(&self) -> &str {
-        &self.ctx.eth_account_sk
+    fn eth_account_sk(&self) -> String {
+        self.ctx.eth_account_sk.to_string()
     }
 
     fn signer(&self) -> &InMemorySigner {
@@ -138,6 +138,10 @@ impl CryptographicCtx for &mut MpcSignProtocol {
 
     fn mpc_contract_id(&self) -> &AccountId {
         &self.ctx.mpc_contract_id
+    }
+
+    fn my_account_id(&self) -> &AccountId {
+        &self.ctx.account_id
     }
 
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox {
@@ -167,7 +171,7 @@ impl MpcSignProtocol {
         rpc_client: near_fetch::Client,
         signer: InMemorySigner,
         receiver: mpsc::Receiver<MpcMessage>,
-        sign_queue: Arc<RwLock<SignQueue>>,
+        sign_rx: mpsc::Receiver<SignRequest>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
@@ -199,7 +203,7 @@ impl MpcSignProtocol {
             eth_client: web3,
             eth_contract_address,
             eth_account_sk,
-            sign_queue,
+            sign_rx: Arc::new(RwLock::new(sign_rx)),
             signer,
             secret_storage,
             triple_storage,

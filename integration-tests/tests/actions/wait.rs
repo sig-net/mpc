@@ -230,7 +230,7 @@ async fn require_node_state(nodes: &Cluster, state: NodeState, id: usize) -> any
             StateView::Resharing { .. } => NodeState::Resharing,
             StateView::Joining { .. } => NodeState::Joining,
             StateView::NotRunning => NodeState::NotRunning,
-            _ => anyhow::bail!("unexpected varian for checking node state"),
+            _ => anyhow::bail!("unexpected variant for checking node state"),
         };
 
         if node_state != state {

@@ -3,7 +3,6 @@ use super::state::{
     JoiningState, NodeState, PersistentNodeData, RunningState, StartedState,
     WaitingForConsensusState,
 };
-use super::SignQueue;
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
 use crate::http_client::MessageQueue;
@@ -12,6 +11,7 @@ use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
+use crate::protocol::SignRequest;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -25,7 +25,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cait_sith::protocol::InitializationError;
 use serde_json::json;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use url::Url;
 
 use near_account_id::AccountId;
@@ -38,7 +38,7 @@ pub trait ConsensusCtx {
     fn signer(&self) -> &InMemorySigner;
     fn mpc_contract_id(&self) -> &AccountId;
     fn my_address(&self) -> &Url;
-    fn sign_queue(&self) -> Arc<RwLock<SignQueue>>;
+    fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<SignRequest>>>;
     fn secret_storage(&self) -> &SecretNodeStorageBox;
     fn triple_storage(&self) -> &TripleStorage;
     fn presignature_storage(&self) -> &PresignatureStorage;
@@ -118,7 +118,6 @@ impl ConsensusProtocol for StartedState {
                         }
                         Ordering::Less => Err(ConsensusError::EpochRollback),
                         Ordering::Equal => {
-                            let sign_queue = ctx.sign_queue();
                             match contract_state
                                 .participants
                                 .find_participant(ctx.my_account_id())
@@ -127,13 +126,13 @@ impl ConsensusProtocol for StartedState {
                                     tracing::info!(
                                         "started: contract state is running and we are already a participant"
                                     );
-                                    let triple_manager = Arc::new(RwLock::new(TripleManager::new(
+                                    let triple_manager = TripleManager::new(
                                         me,
                                         contract_state.threshold,
                                         epoch,
                                         ctx.my_account_id(),
                                         ctx.triple_storage(),
-                                    )));
+                                    );
 
                                     let presignature_manager =
                                         Arc::new(RwLock::new(PresignatureManager::new(
@@ -147,9 +146,11 @@ impl ConsensusProtocol for StartedState {
                                     let signature_manager =
                                         Arc::new(RwLock::new(SignatureManager::new(
                                             me,
+                                            ctx.my_account_id(),
+                                            contract_state.threshold,
                                             public_key,
                                             epoch,
-                                            ctx.my_account_id(),
+                                            ctx.sign_rx(),
                                         )));
 
                                     Ok(NodeState::Running(RunningState {
@@ -158,7 +159,6 @@ impl ConsensusProtocol for StartedState {
                                         threshold: contract_state.threshold,
                                         private_share,
                                         public_key,
-                                        sign_queue,
                                         triple_manager,
                                         presignature_manager,
                                         signature_manager,
@@ -370,13 +370,13 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         );
                     }
 
-                    let triple_manager = Arc::new(RwLock::new(TripleManager::new(
+                    let triple_manager = TripleManager::new(
                         me,
                         self.threshold,
                         self.epoch,
                         ctx.my_account_id(),
                         ctx.triple_storage(),
-                    )));
+                    );
 
                     let presignature_manager = Arc::new(RwLock::new(PresignatureManager::new(
                         me,
@@ -388,9 +388,11 @@ impl ConsensusProtocol for WaitingForConsensusState {
 
                     let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
                         me,
+                        ctx.my_account_id(),
+                        self.threshold,
                         self.public_key,
                         self.epoch,
-                        ctx.my_account_id(),
+                        ctx.sign_rx(),
                     )));
 
                     Ok(NodeState::Running(RunningState {
@@ -399,7 +401,6 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         threshold: self.threshold,
                         private_share: self.private_share,
                         public_key: self.public_key,
-                        sign_queue: ctx.sign_queue(),
                         triple_manager,
                         presignature_manager,
                         signature_manager,

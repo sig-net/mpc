@@ -1,4 +1,5 @@
 use super::message::PresignatureMessage;
+use super::state::RunningState;
 use super::triple::{Triple, TripleId, TripleManager};
 use crate::protocol::contract::primitives::Participants;
 use crate::storage::presignature_storage::PresignatureStorage;
@@ -189,10 +190,14 @@ impl PresignatureManager {
         }
     }
 
-    pub async fn insert(&mut self, presignature: Presignature, mine: bool) {
+    pub async fn insert(&mut self, presignature: Presignature, mine: bool, back: bool) {
         let id = presignature.id;
         tracing::debug!(id, mine, "inserting presignature");
-        if let Err(store_err) = self.presignature_storage.insert(presignature, mine).await {
+        if let Err(store_err) = self
+            .presignature_storage
+            .insert(presignature, mine, back)
+            .await
+        {
             tracing::error!(?store_err, mine, "failed to insert presignature");
         } else {
             // Remove from taken list if it was there
@@ -219,6 +224,14 @@ impl PresignatureManager {
             .map_err(|e| {
                 tracing::warn!(?e, "failed to check if mine presignature exist");
             })
+            .unwrap_or(false)
+    }
+
+    pub async fn contains_used(&self, id: &PresignatureId) -> bool {
+        self.presignature_storage
+            .contains_used(id)
+            .await
+            .map_err(|e| tracing::warn!(?e, "failed to check if presignature is used"))
             .unwrap_or(false)
     }
 
@@ -399,7 +412,7 @@ impl PresignatureManager {
         active: &Participants,
         pk: &PublicKey,
         sk_share: &SecretKeyShare,
-        triple_manager: &mut TripleManager,
+        triple_manager: &TripleManager,
         cfg: &ProtocolConfig,
     ) -> Result<(), InitializationError> {
         let not_enough_presignatures = {
@@ -428,11 +441,10 @@ impl PresignatureManager {
                         participants = ?presig_participants.keys_vec(),
                         "running: the intersection of participants is less than the threshold"
                     );
-
-                    // Insert back the triples to be used later since this active set of
-                    // participants were not able to make use of these triples.
-                    triple_manager.insert(triple0, true).await;
-                    triple_manager.insert(triple1, true).await;
+                    // TODO: do not insert back triples when we have a clear model for data consistency
+                    // between nodes and utilizing only triples that meet threshold requirements.
+                    triple_manager.insert(triple0, true, true).await;
+                    triple_manager.insert(triple1, true, true).await;
                 } else {
                     self.generate(
                         &presig_participants,
@@ -463,7 +475,7 @@ impl PresignatureManager {
         id: PresignatureId,
         triple0: TripleId,
         triple1: TripleId,
-        triple_manager: &mut TripleManager,
+        triple_manager: &TripleManager,
         public_key: &PublicKey,
         private_share: &SecretKeyShare,
         cfg: &ProtocolConfig,
@@ -633,7 +645,7 @@ impl PresignatureManager {
         });
 
         for (presignature, mine) in presignatures {
-            self.insert(presignature, mine).await;
+            self.insert(presignature, mine, false).await;
         }
 
         if !errors.is_empty() {
@@ -641,6 +653,54 @@ impl PresignatureManager {
         }
 
         messages
+    }
+
+    pub fn execute(
+        state: &RunningState,
+        active: &Participants,
+        protocol_cfg: &ProtocolConfig,
+    ) -> tokio::task::JoinHandle<()> {
+        let triple_manager = state.triple_manager.clone();
+        let presignature_manager = state.presignature_manager.clone();
+        let active = active.clone();
+        let protocol_cfg = protocol_cfg.clone();
+        let pk = state.public_key;
+        let sk_share = state.private_share;
+        let messages = state.messages.clone();
+
+        tokio::task::spawn(async move {
+            let mut presignature_manager = presignature_manager.write().await;
+            if let Err(err) = presignature_manager
+                .stockpile(&active, &pk, &sk_share, &triple_manager, &protocol_cfg)
+                .await
+            {
+                tracing::warn!(?err, "running: failed to stockpile presignatures");
+            }
+
+            {
+                let mut messages = messages.write().await;
+                messages.extend(
+                    presignature_manager
+                        .poke()
+                        .await
+                        .into_iter()
+                        .map(|(p, msg)| (p, super::MpcMessage::Presignature(msg))),
+                );
+            }
+
+            crate::metrics::NUM_PRESIGNATURES_MINE
+                .with_label_values(&[presignature_manager.my_account_id.as_str()])
+                .set(presignature_manager.len_mine().await as i64);
+            crate::metrics::NUM_PRESIGNATURES_TOTAL
+                .with_label_values(&[presignature_manager.my_account_id.as_str()])
+                .set(presignature_manager.len_generated().await as i64);
+            crate::metrics::NUM_PRESIGNATURE_GENERATORS_TOTAL
+                .with_label_values(&[presignature_manager.my_account_id.as_str()])
+                .set(
+                    presignature_manager.len_potential().await as i64
+                        - presignature_manager.len_generated().await as i64,
+                );
+        })
     }
 }
 

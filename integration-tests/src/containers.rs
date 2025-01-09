@@ -613,7 +613,7 @@ impl Redis {
 
     pub async fn run(docker_client: &DockerClient, network: &str) -> Self {
         tracing::info!("Running Redis container...");
-        let container = GenericImage::new("redis", "7.0.15")
+        let container = GenericImage::new("redis", "7.4.2")
             .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
             .with_network(network)

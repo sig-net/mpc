@@ -9,7 +9,7 @@ use cait_sith::PresignOutput;
 use crypto_shared::{self, derive_epsilon, derive_key, x_coordinate, ScalarExt};
 use deadpool_redis::Runtime;
 use elliptic_curve::CurveArithmetic;
-use integration_tests::containers::{self, DockerClient};
+use integration_tests_chain_signatures::containers::{self, DockerClient};
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::Secp256k1;
 use mpc_contract::config::Config;
@@ -22,7 +22,6 @@ use mpc_node::util::NearPublicKeyExt as _;
 use near_account_id::AccountId;
 use test_log::test;
 use url::Url;
-
 pub mod nightly;
 
 #[test(tokio::test)]
@@ -180,8 +179,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_manager.is_empty().await);
     assert_eq!(triple_manager.len_potential().await, 0);
 
-    triple_manager.insert(triple_1.clone(), false, false).await;
-    triple_manager.insert(triple_2.clone(), false, false).await;
+    triple_manager.insert(triple_1, false).await;
+    triple_manager.insert(triple_2, false).await;
 
     // Check that the storage contains the foreign triple
     assert!(triple_manager.contains(triple_id_1).await);
@@ -192,7 +191,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_mine().await, 0);
     assert_eq!(triple_manager.len_potential().await, 2);
 
-    // Take triple and check that it is removed from the storage and added to used set
+    // Take triple and check that it is removed from the storage
     triple_manager
         .take_two(triple_id_1, triple_id_2)
         .await
@@ -204,14 +203,6 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_generated().await, 0);
     assert_eq!(triple_manager.len_mine().await, 0);
     assert_eq!(triple_manager.len_potential().await, 0);
-    assert!(triple_storage.contains_used(triple_id_1).await.unwrap());
-    assert!(triple_storage.contains_used(triple_id_2).await.unwrap());
-
-    // Attempt to re-insert used triples and check that it fails
-    triple_manager.insert(triple_1, false, false).await;
-    assert!(!triple_manager.contains(triple_id_1).await);
-    triple_manager.insert(triple_2, false, false).await;
-    assert!(!triple_manager.contains(triple_id_2).await);
 
     let mine_id_1: u64 = 3;
     let mine_triple_1 = dummy_triple(mine_id_1);
@@ -219,12 +210,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let mine_triple_2 = dummy_triple(mine_id_2);
 
     // Add mine triple and check that it is in the storage
-    triple_manager
-        .insert(mine_triple_1.clone(), true, false)
-        .await;
-    triple_manager
-        .insert(mine_triple_2.clone(), true, false)
-        .await;
+    triple_manager.insert(mine_triple_1, true).await;
+    triple_manager.insert(mine_triple_2, true).await;
     assert!(triple_manager.contains(mine_id_1).await);
     assert!(triple_manager.contains(mine_id_2).await);
     assert!(triple_manager.contains_mine(mine_id_1).await);
@@ -233,7 +220,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_mine().await, 2);
     assert_eq!(triple_manager.len_potential().await, 2);
 
-    // Take mine triple and check that it is removed from the storage and added to used set
+    // Take mine triple and check that it is removed from the storage
     triple_manager.take_two_mine().await.unwrap();
     assert!(!triple_manager.contains(mine_id_1).await);
     assert!(!triple_manager.contains(mine_id_2).await);
@@ -243,14 +230,6 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_mine().await, 0);
     assert!(triple_manager.is_empty().await);
     assert_eq!(triple_manager.len_potential().await, 0);
-    assert!(triple_storage.contains_used(mine_id_1).await.unwrap());
-    assert!(triple_storage.contains_used(mine_id_2).await.unwrap());
-
-    // Attempt to re-insert used mine triples and check that it fails
-    triple_manager.insert(mine_triple_1, true, false).await;
-    assert!(!triple_manager.contains(mine_id_1).await);
-    triple_manager.insert(mine_triple_2, true, false).await;
-    assert!(!triple_manager.contains(mine_id_2).await);
 
     Ok(())
 }
@@ -276,7 +255,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         &presignature_storage,
     );
 
-    let presignature = dummy_presignature(1);
+    let presignature = dummy_presignature();
     let presignature_id: PresignatureId = presignature.id;
 
     // Check that the storage is empty at the start
@@ -287,9 +266,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert!(presignature_manager.is_empty().await);
     assert_eq!(presignature_manager.len_potential().await, 0);
 
-    presignature_manager
-        .insert(presignature, false, false)
-        .await;
+    presignature_manager.insert(presignature, false).await;
 
     // Check that the storage contains the foreign presignature
     assert!(presignature_manager.contains(&presignature_id).await);
@@ -298,39 +275,26 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert_eq!(presignature_manager.len_potential().await, 1);
 
-    // Take presignature and check that it is removed from the storage and added to used set
+    // Take presignature and check that it is removed from the storage
     presignature_manager.take(presignature_id).await.unwrap();
     assert!(!presignature_manager.contains(&presignature_id).await);
     assert!(!presignature_manager.contains_mine(&presignature_id).await);
     assert_eq!(presignature_manager.len_generated().await, 0);
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert_eq!(presignature_manager.len_potential().await, 0);
-    assert!(presignature_storage
-        .contains_used(&presignature_id)
-        .await
-        .unwrap());
 
-    // Attempt to re-insert used presignature and check that it fails
-    let presignature = dummy_presignature(presignature_id);
-    presignature_manager
-        .insert(presignature, false, false)
-        .await;
-    assert!(!presignature_manager.contains(&presignature_id).await);
-
-    let mine_presignature = dummy_presignature(2);
+    let mine_presignature = dummy_presignature();
     let mine_presig_id: PresignatureId = mine_presignature.id;
 
     // Add mine presignature and check that it is in the storage
-    presignature_manager
-        .insert(mine_presignature, true, false)
-        .await;
+    presignature_manager.insert(mine_presignature, true).await;
     assert!(presignature_manager.contains(&mine_presig_id).await);
     assert!(presignature_manager.contains_mine(&mine_presig_id).await);
     assert_eq!(presignature_manager.len_generated().await, 1);
     assert_eq!(presignature_manager.len_mine().await, 1);
     assert_eq!(presignature_manager.len_potential().await, 1);
 
-    // Take mine presignature and check that it is removed from the storage and added to used set
+    // Take mine presignature and check that it is removed from the storage
     presignature_manager.take_mine().await.unwrap();
     assert!(!presignature_manager.contains(&mine_presig_id).await);
     assert!(!presignature_manager.contains_mine(&mine_presig_id).await);
@@ -338,24 +302,13 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert!(presignature_manager.is_empty().await);
     assert_eq!(presignature_manager.len_potential().await, 0);
-    assert!(presignature_storage
-        .contains_used(&mine_presig_id)
-        .await
-        .unwrap());
-
-    // Attempt to re-insert used mine presignature and check that it fails
-    let mine_presignature = dummy_presignature(mine_presig_id);
-    presignature_manager
-        .insert(mine_presignature, true, false)
-        .await;
-    assert!(!presignature_manager.contains(&mine_presig_id).await);
 
     Ok(())
 }
 
-fn dummy_presignature(id: u64) -> Presignature {
+fn dummy_presignature() -> Presignature {
     Presignature {
-        id,
+        id: 1,
         output: PresignOutput {
             big_r: <Secp256k1 as CurveArithmetic>::AffinePoint::default(),
             k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,

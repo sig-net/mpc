@@ -43,7 +43,7 @@ jobs:
         run: |
           docker pull ghcr.io/near/near-lake-indexer:node-2.3.0
           docker pull localstack/localstack:3.5.0
-          docker pull redis:7.0.15
+          docker pull redis:7.4.2
 
       - name: Install stable toolchain
         uses: actions-rs/toolchain@v1
