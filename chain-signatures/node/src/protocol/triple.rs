@@ -475,10 +475,10 @@ impl TripleManager {
         }
     }
 
-    pub async fn insert(&self, triple: Triple, mine: bool) {
+    pub async fn insert(&self, triple: Triple, mine: bool, back: bool) {
         let id = triple.id;
         tracing::debug!(id, mine, "inserting triple");
-        if let Err(e) = self.triple_storage.insert(triple, mine).await {
+        if let Err(e) = self.triple_storage.insert(triple, mine, back).await {
             tracing::warn!(?e, mine, "failed to insert triple");
         } else {
             self.gc.write().await.remove(&id);
@@ -753,7 +753,7 @@ impl TripleManager {
         }
 
         for (triple, mine) in triples {
-            self.insert(triple, mine).await;
+            self.insert(triple, mine, false).await;
         }
 
         messages
