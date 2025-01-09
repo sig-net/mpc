@@ -98,7 +98,7 @@ npx hardhat vars set SEPOLIA_PRIVATE_KEY
 npx hardhat --network sepolia run scripts/findAddress.js
 ```
 
-4. Go to Etherscan Sepolia: https://sepolia.etherscan.io/,check the latest block number.
+4. Go to Etherscan Sepolia: https://sepolia.etherscan.io/, check the latest block number.
 
 5. Make sure you have docker daemon running. Go to `integration-tests/chain-signatures` and run the following command to start the MPC cluster connected to Ethereum Sepolia Testnet:
 ```bash
