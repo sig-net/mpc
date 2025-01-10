@@ -158,7 +158,9 @@ impl MessageInbox {
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
-                    tracing::error!("communication was disconnected, no more messages will be received, spinning down");
+                    tracing::error!(
+                        "inbox: communication disconnected, no more messages will be received"
+                    );
                     break;
                 }
             };
@@ -745,7 +747,9 @@ impl MessageOutbox {
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
-                    tracing::error!("communication was disconnected for sending outcoming messages, no more messages will be received, spinning down");
+                    tracing::error!(
+                        "outbox: communication disconnected, no more messages will be received"
+                    );
                     break;
                 }
             };
@@ -756,6 +760,7 @@ impl MessageOutbox {
             .set(self.messages.len() as i64);
     }
 
+    /// Expire messages that have been in the outbox for too long.
     pub fn expire(&mut self, cfg: &ProtocolConfig) {
         // timeout errors are very common for a message expiring, so map them to counts here:
         let mut timeouts = HashMap::<String, usize>::new();
@@ -779,6 +784,7 @@ impl MessageOutbox {
         }
     }
 
+    /// Encrypt all the messages in the outbox and return a map of participant to encrypted messages.
     pub fn encrypt(
         &mut self,
         sign_sk: &near_crypto::SecretKey,
@@ -809,7 +815,7 @@ impl MessageOutbox {
         }
 
         if !errors.is_empty() {
-            tracing::warn!(?errors, "got errors when sending encrypted messages");
+            tracing::warn!(?errors, "outbox: encrypting messages failed on some");
         }
 
         if !not_active.is_empty() {
@@ -824,53 +830,69 @@ impl MessageOutbox {
         encrypted
     }
 
+    /// Compact together all the requests up to 256kb per request, and then send them out.
     pub async fn send(
         &mut self,
         active: &Participants,
         encrypted: HashMap<Participant, Vec<EncryptedWithOriginal>>,
     ) {
-        let mut failed = VecDeque::new();
-        let mut errors = Vec::new();
-
-        let mut uncompacted = 0;
-        let mut compacted = 0;
         let start = Instant::now();
+        let mut send_tasks = Vec::new();
         for (id, encrypted) in encrypted {
             for partition in partition_ciphered_256kb(encrypted) {
                 let (encrypted_partition, msgs): (Vec<_>, Vec<_>) = partition.into_iter().unzip();
                 // guaranteed to unwrap due to our previous loop check:
                 let info = active.get(&id).unwrap();
-                let account_id = &info.account_id;
+                let account_id = info.account_id.clone();
+                let url = info.url.clone();
 
-                let start = Instant::now();
                 crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
                     .with_label_values(&[account_id.as_str()])
                     .inc_by(msgs.len() as f64);
 
-                if let Err(err) = self.client.msg(&info.url, &encrypted_partition).await {
-                    crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
-                        .with_label_values(&[account_id.as_str()])
-                        .inc_by(msgs.len() as f64);
-                    crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
-                        .with_label_values(&[account_id.as_str()])
-                        .observe(start.elapsed().as_millis() as f64);
+                let client = self.client.clone();
+                send_tasks.push(tokio::spawn(async move {
+                    let start = Instant::now();
+                    if let Err(err) = client.msg(url, &encrypted_partition).await {
+                        crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
+                            .with_label_values(&[account_id.as_str()])
+                            .inc_by(msgs.len() as f64);
+                        crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
+                            .with_label_values(&[account_id.as_str()])
+                            .observe(start.elapsed().as_millis() as f64);
+                        Err((msgs, err))
+                    } else {
+                        crate::metrics::SEND_ENCRYPTED_LATENCY
+                            .with_label_values(&[account_id.as_str()])
+                            .observe(start.elapsed().as_millis() as f64);
+                        Ok(msgs.len())
+                    }
+                }));
+            }
+        }
 
-                    // since we failed, put back all the messages related to this
-                    failed.extend(msgs);
-                    errors.push(err);
-                } else {
-                    uncompacted += msgs.len();
+        let mut errors = Vec::new();
+        let mut retry = VecDeque::new();
+        let mut uncompacted = 0;
+        let mut compacted = 0;
+        for task in send_tasks {
+            match task.await {
+                Ok(Ok(msgs_len)) => {
+                    uncompacted += msgs_len;
                     compacted += 1;
-                    crate::metrics::SEND_ENCRYPTED_LATENCY
-                        .with_label_values(&[account_id.as_str()])
-                        .observe(start.elapsed().as_millis() as f64);
+                }
+                Ok(Err((msgs, err))) => {
+                    // since we failed, put back all the messages related to this
+                    retry.extend(msgs);
+                    errors.push(err);
+                }
+                Err(err) => {
+                    tracing::warn!(?err, "outbox: task failed to send message");
                 }
             }
         }
 
-        // Add back the failed attempts for next time.
-        self.messages.extend(failed);
-        if compacted > 0 {
+        if uncompacted > 0 {
             tracing::debug!(
                 uncompacted,
                 compacted,
@@ -878,6 +900,13 @@ impl MessageOutbox {
                 start.elapsed()
             );
         }
+
+        if !errors.is_empty() {
+            tracing::warn!(?errors, "outbox: failed sending encrypted messages");
+        }
+
+        // Add back the failed attempts for next time.
+        self.messages.extend(retry);
     }
 }
 
