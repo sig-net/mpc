@@ -256,7 +256,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 crate::contract_updater::ContractUpdater::init(&rpc_client, &mpc_contract_id);
 
             rt.block_on(async {
-                let (sender, channel) = MessageChannel::spawn(client, &config, &mesh_state).await;
+                let (sender, channel) = MessageChannel::spawn(client, &account_id, &config, &mesh_state).await;
                 let (protocol, protocol_state) = MpcSignProtocol::init(
                     my_address,
                     mpc_contract_id,

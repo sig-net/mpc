@@ -17,6 +17,7 @@ use cait_sith::protocol::{InitializationError, MessageData, Participant, Protoco
 use k256::Scalar;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
+use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -199,10 +200,6 @@ impl MessageExecutor {
             self.outbox.expire(&protocol);
             let encrypted = self.outbox.encrypt(&sign_sk, &active);
             self.outbox.send(&active, encrypted).await;
-
-            // crate::metrics::MESSAGE_QUEUE_SIZE
-            //     .with_label_values(&[ctx.my_account_id().as_str()])
-            //     .set(self.queue.len() as i64);
         }
     }
 }
@@ -217,6 +214,7 @@ pub struct MessageChannel {
 impl MessageChannel {
     pub async fn spawn(
         client: NodeClient,
+        id: &AccountId,
         config: &Arc<RwLock<Config>>,
         mesh_state: &Arc<RwLock<MeshState>>,
     ) -> (mpsc::Sender<MpcMessage>, Self) {
@@ -230,7 +228,7 @@ impl MessageChannel {
             inbox: inbox.clone(),
             config: config.clone(),
             mesh_state: mesh_state.clone(),
-            outbox: MessageOutbox::new(client),
+            outbox: MessageOutbox::new(client, id),
         };
 
         (
@@ -727,13 +725,15 @@ type EncryptedWithOriginal = (Ciphered, Message);
 pub struct MessageOutbox {
     client: NodeClient,
     messages: VecDeque<Message>,
+    account_id: AccountId,
 }
 
 impl MessageOutbox {
-    pub fn new(client: NodeClient) -> Self {
+    pub fn new(client: NodeClient, id: &AccountId) -> Self {
         Self {
             client,
             messages: VecDeque::default(),
+            account_id: id.clone(),
         }
     }
 
@@ -751,6 +751,9 @@ impl MessageOutbox {
             };
             self.messages.push_back((from, to, msg, instant));
         }
+        crate::metrics::MESSAGE_QUEUE_SIZE
+            .with_label_values(&[self.account_id.as_str()])
+            .set(self.messages.len() as i64);
     }
 
     pub fn expire(&mut self, cfg: &ProtocolConfig) {
