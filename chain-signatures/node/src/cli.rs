@@ -1,17 +1,18 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::http_client::NodeClient;
 use crate::mesh::Mesh;
+use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::{MpcSignProtocol, SignQueue};
 use crate::storage::app_data_storage;
-use crate::{http_client, indexer, mesh, storage, web};
+use crate::{indexer, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
 use local_ip_address::local_ip;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing_stackdriver::layer as stackdriver_layer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
@@ -69,7 +70,7 @@ pub enum Cli {
         #[clap(flatten)]
         mesh_options: mesh::Options,
         #[clap(flatten)]
-        message_options: http_client::Options,
+        message_options: node_client::Options,
     },
 }
 

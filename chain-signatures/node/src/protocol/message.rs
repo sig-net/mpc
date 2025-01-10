@@ -5,8 +5,8 @@ use super::signature::SignRequestIdentifier;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
 use crate::gcp::error::SecretStorageError;
-use crate::node_client::{NodeClient, SendError};
 use crate::indexer::ContractSignRequest;
+use crate::node_client::{NodeClient, SendError};
 use crate::protocol::Config;
 use crate::protocol::MeshState;
 use crate::types::Epoch;
@@ -100,7 +100,7 @@ impl MpcMessage {
 }
 
 #[derive(Default)]
-pub struct MessageIncomingBins {
+pub struct MessageInbox {
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
@@ -108,7 +108,7 @@ pub struct MessageIncomingBins {
     signature: HashMap<Epoch, HashMap<SignRequestIdentifier, VecDeque<SignatureMessage>>>,
 }
 
-impl MessageIncomingBins {
+impl MessageInbox {
     pub fn push(&mut self, message: MpcMessage) {
         match message {
             MpcMessage::Generating(message) => self.generating.push_back(message),
@@ -170,10 +170,11 @@ impl MessageIncomingBins {
 struct MessageExecutor {
     incoming: mpsc::Receiver<MpcMessage>,
     outgoing: mpsc::Receiver<(Participant, Participant, MpcMessage, Instant)>,
-    bins: Arc<RwLock<MessageIncomingBins>>,
+    inbox: Arc<RwLock<MessageInbox>>,
+    outbox: MessageOutbox,
+
     config: Arc<RwLock<Config>>,
     mesh_state: Arc<RwLock<MeshState>>,
-    queue: MessageSender,
 }
 
 impl MessageExecutor {
@@ -181,7 +182,7 @@ impl MessageExecutor {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
             interval.tick().await;
-            self.bins.write().await.extend(&mut self.incoming);
+            self.inbox.write().await.extend(&mut self.incoming);
 
             let (sign_sk, protocol) = {
                 let config = self.config.read().await;
@@ -194,10 +195,10 @@ impl MessageExecutor {
                 let mesh_state = self.mesh_state.read().await;
                 mesh_state.active.clone()
             };
-            self.queue.extend(&mut self.outgoing);
-            self.queue.expire(&protocol);
-            let encrypted = self.queue.encrypt(&sign_sk, &active);
-            self.queue.send(&active, encrypted).await;
+            self.outbox.extend(&mut self.outgoing);
+            self.outbox.expire(&protocol);
+            let encrypted = self.outbox.encrypt(&sign_sk, &active);
+            self.outbox.send(&active, encrypted).await;
 
             // crate::metrics::MESSAGE_QUEUE_SIZE
             //     .with_label_values(&[ctx.my_account_id().as_str()])
@@ -209,7 +210,7 @@ impl MessageExecutor {
 #[derive(Clone)]
 pub struct MessageChannel {
     outgoing: mpsc::Sender<(Participant, Participant, MpcMessage, Instant)>,
-    bins: Arc<RwLock<MessageIncomingBins>>,
+    inbox: Arc<RwLock<MessageInbox>>,
     _task: Arc<tokio::task::JoinHandle<()>>,
 }
 
@@ -222,28 +223,28 @@ impl MessageChannel {
         let (incoming_tx, incoming_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
 
-        let bins = Arc::new(RwLock::new(MessageIncomingBins::default()));
+        let inbox = Arc::new(RwLock::new(MessageInbox::default()));
         let processor = MessageExecutor {
             incoming: incoming_rx,
             outgoing: outgoing_rx,
-            bins: bins.clone(),
+            inbox: inbox.clone(),
             config: config.clone(),
             mesh_state: mesh_state.clone(),
-            queue: MessageSender::new(client),
+            outbox: MessageOutbox::new(client),
         };
 
         (
             incoming_tx,
             Self {
-                bins,
+                inbox,
                 outgoing: outgoing_tx,
                 _task: Arc::new(tokio::spawn(processor.execute())),
             },
         )
     }
 
-    pub fn bins(&self) -> &Arc<RwLock<MessageIncomingBins>> {
-        &self.bins
+    pub fn inbox(&self) -> &Arc<RwLock<MessageInbox>> {
+        &self.inbox
     }
 
     pub async fn send(&self, from: Participant, to: Participant, message: MpcMessage) {
@@ -327,9 +328,9 @@ impl MessageReceiver for GeneratingState {
         _cfg: Config,
         _mesh_state: MeshState,
     ) -> Result<(), MessageRecvError> {
-        let mut bins = channel.bins().write().await;
+        let mut inbox = channel.inbox().write().await;
         let mut protocol = self.protocol.write().await;
-        while let Some(msg) = bins.generating.pop_front() {
+        while let Some(msg) = inbox.generating.pop_front() {
             tracing::debug!("handling new generating message");
             protocol.message(msg.from, msg.data);
         }
@@ -345,9 +346,9 @@ impl MessageReceiver for ResharingState {
         _cfg: Config,
         _mesh_state: MeshState,
     ) -> Result<(), MessageRecvError> {
-        let mut bins = channel.bins().write().await;
-        tracing::debug!("handling {} resharing messages", bins.resharing.len());
-        let q = bins.resharing.entry(self.old_epoch).or_default();
+        let mut inbox = channel.inbox().write().await;
+        tracing::debug!("handling {} resharing messages", inbox.resharing.len());
+        let q = inbox.resharing.entry(self.old_epoch).or_default();
         let mut protocol = self.protocol.write().await;
         while let Some(msg) = q.pop_front() {
             protocol.message(msg.from, msg.data);
@@ -366,11 +367,11 @@ impl MessageReceiver for RunningState {
     ) -> Result<(), MessageRecvError> {
         let protocol_cfg = &cfg.protocol;
         let participants = &mesh_state.active;
-        let mut bins = channel.bins().write().await;
+        let mut inbox = channel.inbox().write().await;
 
         // remove the triple_id that has already failed or taken from the triple_bins
         // and refresh the timestamp of failed and taken
-        let triple_messages = bins.triple.remove(&self.epoch).unwrap_or_default();
+        let triple_messages = inbox.triple.remove(&self.epoch).unwrap_or_default();
         for (id, mut queue) in triple_messages {
             if queue.is_empty()
                 || queue.iter().any(|msg| {
@@ -411,7 +412,7 @@ impl MessageReceiver for RunningState {
         }
 
         let mut presignature_manager = self.presignature_manager.write().await;
-        let presignature_messages = bins.presignature.entry(self.epoch).or_default();
+        let presignature_messages = inbox.presignature.entry(self.epoch).or_default();
         presignature_messages.retain(|id, queue| {
             // Skip message if it already timed out
             if queue.is_empty()
@@ -502,7 +503,7 @@ impl MessageReceiver for RunningState {
         }
 
         let mut signature_manager = self.signature_manager.write().await;
-        let signature_messages = bins.signature.entry(self.epoch).or_default();
+        let signature_messages = inbox.signature.entry(self.epoch).or_default();
         signature_messages.retain(|sign_request_identifier, queue| {
             // Skip message if it already timed out
             if queue.is_empty()
@@ -723,12 +724,12 @@ type EncryptedWithOriginal = (Ciphered, Message);
 
 // TODO: add in retry logic either in struct or at call site.
 // TODO: add check for participant list to see if the messages to be sent are still valid.
-pub struct MessageSender {
+pub struct MessageOutbox {
     client: NodeClient,
     messages: VecDeque<Message>,
 }
 
-impl MessageSender {
+impl MessageOutbox {
     pub fn new(client: NodeClient) -> Self {
         Self {
             client,
