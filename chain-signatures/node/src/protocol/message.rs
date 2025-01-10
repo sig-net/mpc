@@ -788,7 +788,7 @@ impl MessageOutbox {
         // timeout errors are very common for a message expiring, so map them to counts here:
         let mut timeouts = HashMap::<String, usize>::new();
         self.messages.retain(|(_, to, msg, instant)| {
-            if instant.elapsed() > timeout(&msg, cfg) {
+            if instant.elapsed() > timeout(msg, cfg) {
                 let counter = timeouts
                     .entry(format!(
                         "timeout message={} for node={to:?}",
