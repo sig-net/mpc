@@ -1,9 +1,9 @@
 use super::contract::primitives::Participants;
-use super::message::SignatureMessage;
 use super::presignature::{GenerationError, Presignature, PresignatureId, PresignatureManager};
 use super::state::RunningState;
 use crate::indexer::ContractSignRequest;
 use crate::kdf::{derive_delta, into_eth_sig};
+use crate::protocol::message::{MessageChannel, SignatureMessage};
 use crate::types::SignatureProtocol;
 use crate::util::AffinePointExt;
 use near_primitives::hash::CryptoHash;
@@ -492,19 +492,17 @@ impl SignatureManager {
         }
     }
 
-    /// Pokes all of the ongoing generation protocols and returns a vector of
-    /// messages to be sent to the respective participant.
-    ///
-    /// An empty vector means we cannot progress until we receive a new message.
-    pub fn poke(&mut self) -> Vec<(Participant, SignatureMessage)> {
-        let mut messages = Vec::new();
-        self.generators.retain(|sign_request_identifier, generator| {
+    /// Pokes all of the ongoing generation protocols to completion
+    pub async fn poke(&mut self, channel: MessageChannel) {
+        let mut remove = Vec::new();
+        for (sign_request_id, generator) in self.generators.iter_mut() {
             loop {
                 let action = match generator.poke() {
                     Ok(action) => action,
                     Err(err) => {
                         if generator.proposer == self.me {
-                            if generator.sign_request_timestamp.elapsed() < generator.timeout_total {
+                            if generator.sign_request_timestamp.elapsed() < generator.timeout_total
+                            {
                                 tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
                                 crate::metrics::SIGNATURE_GENERATOR_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])
@@ -512,45 +510,73 @@ impl SignatureManager {
                                 // only retry the signature generation if it was initially proposed by us. We do not
                                 // want any nodes to be proposing the same signature multiple times.
                                 self.failed.push_back((
-                                    sign_request_identifier.clone(),
+                                    sign_request_id.clone(),
                                     GenerationRequest {
                                         proposer: generator.proposer,
                                         request: generator.request.clone(),
                                         epsilon: generator.epsilon,
                                         request_id: generator.request_id,
                                         entropy: generator.entropy,
-                                        sign_request_timestamp: generator.sign_request_timestamp
+                                        sign_request_timestamp: generator.sign_request_timestamp,
                                     },
                                 ));
                             } else {
-                                self.completed.insert(sign_request_identifier.clone(), Instant::now());
+                                self.completed
+                                    .insert(sign_request_id.clone(), Instant::now());
                                 crate::metrics::SIGNATURE_GENERATOR_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])
                                     .inc();
                                 crate::metrics::SIGNATURE_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])
                                     .inc();
-                                tracing::warn!(?err, "signature failed to be produced; trashing request");
+                                tracing::warn!(
+                                    ?err,
+                                    "signature failed to be produced; trashing request"
+                                );
                             }
                         }
-                        break false;
+                        remove.push(sign_request_id.clone());
+                        break;
                     }
                 };
                 match action {
                     Action::Wait => {
                         tracing::debug!("signature: waiting");
                         // Retain protocol until we are finished
-                        return true;
+                        break;
                     }
                     Action::SendMany(data) => {
                         for to in generator.participants.iter() {
                             if *to == self.me {
                                 continue;
                             }
-                            messages.push((
-                                *to,
+                            channel
+                                .send(
+                                    self.me,
+                                    *to,
+                                    SignatureMessage {
+                                        request_id: sign_request_id.request_id,
+                                        proposer: generator.proposer,
+                                        presignature_id: generator.presignature_id,
+                                        request: generator.request.clone(),
+                                        epsilon: generator.epsilon,
+                                        entropy: generator.entropy,
+                                        epoch: self.epoch,
+                                        from: self.me,
+                                        data: data.clone(),
+                                        timestamp: Utc::now().timestamp() as u64,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                    Action::SendPrivate(to, data) => {
+                        channel
+                            .send(
+                                self.me,
+                                to,
                                 SignatureMessage {
-                                    request_id: sign_request_identifier.request_id,
+                                    request_id: sign_request_id.request_id,
                                     proposer: generator.proposer,
                                     presignature_id: generator.presignature_id,
                                     request: generator.request.clone(),
@@ -558,52 +584,47 @@ impl SignatureManager {
                                     entropy: generator.entropy,
                                     epoch: self.epoch,
                                     from: self.me,
-                                    data: data.clone(),
-                                    timestamp: Utc::now().timestamp() as u64
+                                    data,
+                                    timestamp: Utc::now().timestamp() as u64,
                                 },
-                            ))
-                        }
+                            )
+                            .await
                     }
-                    Action::SendPrivate(p, data) => messages.push((
-                        p,
-                        SignatureMessage {
-                            request_id: sign_request_identifier.request_id,
-                            proposer: generator.proposer,
-                            presignature_id: generator.presignature_id,
-                            request: generator.request.clone(),
-                            epsilon: generator.epsilon,
-                            entropy: generator.entropy,
-                            epoch: self.epoch,
-                            from: self.me,
-                            data,
-                            timestamp: Utc::now().timestamp() as u64
-                        },
-                    )),
                     Action::Return(output) => {
                         tracing::info!(
-                            sign_request_identifier =?sign_request_identifier.clone(),
+                            ?sign_request_id,
                             me = ?self.me,
                             presignature_id = generator.presignature_id,
                             big_r = ?output.big_r.to_base58(),
                             s = ?output.s,
                             "completed signature generation"
                         );
-                        self.completed.insert(sign_request_identifier.clone(), Instant::now());
+                        self.completed
+                            .insert(sign_request_id.clone(), Instant::now());
                         let request = SignatureRequest {
-                            epsilon: SerializableScalar {scalar: generator.epsilon},
+                            epsilon: SerializableScalar {
+                                scalar: generator.epsilon,
+                            },
                             payload_hash: generator.request.payload.into(),
                         };
                         if generator.proposer == self.me {
-                            self.signatures
-                                .push(ToPublish::new(sign_request_identifier.request_id, request, generator.sign_request_timestamp, output));
+                            self.signatures.push(ToPublish::new(
+                                sign_request_id.request_id,
+                                request,
+                                generator.sign_request_timestamp,
+                                output,
+                            ));
                         }
                         // Do not retain the protocol
-                        return false;
+                        remove.push(sign_request_id.clone());
                     }
                 }
             }
-        });
-        messages
+        }
+
+        for sign_request_id in remove {
+            self.generators.remove(&sign_request_id);
+        }
     }
 
     pub async fn handle_requests(
@@ -841,18 +862,7 @@ impl SignatureManager {
                 .handle_requests(&stable, &mut presignature_manager, &protocol_cfg)
                 .await;
             drop(presignature_manager);
-
-            {
-                let messages = signature_manager.poke().into_iter().map(|(p, msg)| {
-                    (
-                        signature_manager.me,
-                        p,
-                        crate::protocol::MpcMessage::Signature(msg),
-                    )
-                });
-                channel.send_many(messages).await;
-            }
-
+            signature_manager.poke(channel).await;
             signature_manager
                 .publish(&rpc_client, &signer, &mpc_contract_id)
                 .await;

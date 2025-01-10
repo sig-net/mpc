@@ -10,7 +10,6 @@ use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
-use crate::protocol::MpcMessage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use async_trait::async_trait;
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
@@ -107,10 +106,10 @@ impl CryptographicProtocol for GeneratingState {
                             .send(
                                 self.me,
                                 *p,
-                                MpcMessage::Generating(GeneratingMessage {
+                                GeneratingMessage {
                                     from: self.me,
                                     data: data.clone(),
-                                }),
+                                },
                             )
                             .await;
                     }
@@ -121,10 +120,10 @@ impl CryptographicProtocol for GeneratingState {
                         .send(
                             self.me,
                             to,
-                            MpcMessage::Generating(GeneratingMessage {
+                            GeneratingMessage {
                                 from: self.me,
                                 data,
-                            }),
+                            },
                         )
                         .await;
                 }
@@ -209,11 +208,11 @@ impl CryptographicProtocol for ResharingState {
                             .send(
                                 self.me,
                                 *p,
-                                MpcMessage::Resharing(ResharingMessage {
+                                ResharingMessage {
                                     epoch: self.old_epoch,
                                     from: self.me,
                                     data: data.clone(),
-                                }),
+                                },
                             )
                             .await;
                     }
@@ -226,11 +225,11 @@ impl CryptographicProtocol for ResharingState {
                                 .send(
                                     self.me,
                                     to,
-                                    MpcMessage::Resharing(ResharingMessage {
+                                    ResharingMessage {
                                         epoch: self.old_epoch,
                                         from: self.me,
                                         data,
-                                    }),
+                                    },
                                 )
                                 .await;
                         }

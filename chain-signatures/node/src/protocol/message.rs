@@ -35,11 +35,23 @@ pub struct GeneratingMessage {
     pub data: MessageData,
 }
 
+impl From<GeneratingMessage> for Message {
+    fn from(msg: GeneratingMessage) -> Self {
+        Message::Generating(msg)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct ResharingMessage {
     pub epoch: Epoch,
     pub from: Participant,
     pub data: MessageData,
+}
+
+impl From<ResharingMessage> for Message {
+    fn from(msg: ResharingMessage) -> Self {
+        Message::Resharing(msg)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -52,6 +64,12 @@ pub struct TripleMessage {
     pub timestamp: u64,
 }
 
+impl From<TripleMessage> for Message {
+    fn from(msg: TripleMessage) -> Self {
+        Message::Triple(msg)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct PresignatureMessage {
     pub id: u64,
@@ -62,6 +80,12 @@ pub struct PresignatureMessage {
     pub data: MessageData,
     // UNIX timestamp as seconds since the epoch
     pub timestamp: u64,
+}
+
+impl From<PresignatureMessage> for Message {
+    fn from(msg: PresignatureMessage) -> Self {
+        Message::Presignature(msg)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -79,8 +103,14 @@ pub struct SignatureMessage {
     pub timestamp: u64,
 }
 
+impl From<SignatureMessage> for Message {
+    fn from(msg: SignatureMessage) -> Self {
+        Message::Signature(msg)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub enum MpcMessage {
+pub enum Message {
     Generating(GeneratingMessage),
     Resharing(ResharingMessage),
     Triple(TripleMessage),
@@ -88,14 +118,14 @@ pub enum MpcMessage {
     Signature(SignatureMessage),
 }
 
-impl MpcMessage {
+impl Message {
     pub const fn typename(&self) -> &'static str {
         match self {
-            MpcMessage::Generating(_) => "Generating",
-            MpcMessage::Resharing(_) => "Resharing",
-            MpcMessage::Triple(_) => "Triple",
-            MpcMessage::Presignature(_) => "Presignature",
-            MpcMessage::Signature(_) => "Signature",
+            Message::Generating(_) => "Generating",
+            Message::Resharing(_) => "Resharing",
+            Message::Triple(_) => "Triple",
+            Message::Presignature(_) => "Presignature",
+            Message::Signature(_) => "Signature",
         }
     }
 }
@@ -110,29 +140,29 @@ pub struct MessageInbox {
 }
 
 impl MessageInbox {
-    pub fn push(&mut self, message: MpcMessage) {
+    pub fn push(&mut self, message: Message) {
         match message {
-            MpcMessage::Generating(message) => self.generating.push_back(message),
-            MpcMessage::Resharing(message) => self
+            Message::Generating(message) => self.generating.push_back(message),
+            Message::Resharing(message) => self
                 .resharing
                 .entry(message.epoch)
                 .or_default()
                 .push_back(message),
-            MpcMessage::Triple(message) => self
+            Message::Triple(message) => self
                 .triple
                 .entry(message.epoch)
                 .or_default()
                 .entry(message.id)
                 .or_default()
                 .push_back(message),
-            MpcMessage::Presignature(message) => self
+            Message::Presignature(message) => self
                 .presignature
                 .entry(message.epoch)
                 .or_default()
                 .entry(message.id)
                 .or_default()
                 .push_back(message),
-            MpcMessage::Signature(message) => self
+            Message::Signature(message) => self
                 .signature
                 .entry(message.epoch)
                 .or_default()
@@ -146,7 +176,7 @@ impl MessageInbox {
         }
     }
 
-    pub fn extend(&mut self, incoming: &mut mpsc::Receiver<MpcMessage>) -> usize {
+    pub fn extend(&mut self, incoming: &mut mpsc::Receiver<Message>) -> usize {
         let mut count = 0;
         loop {
             let msg = match incoming.try_recv() {
@@ -171,7 +201,7 @@ impl MessageInbox {
 }
 
 struct MessageExecutor {
-    incoming: mpsc::Receiver<MpcMessage>,
+    incoming: mpsc::Receiver<Message>,
     outgoing: mpsc::Receiver<SendMessage>,
     inbox: Arc<RwLock<MessageInbox>>,
     outbox: MessageOutbox,
@@ -219,7 +249,7 @@ impl MessageChannel {
         id: &AccountId,
         config: &Arc<RwLock<Config>>,
         mesh_state: &Arc<RwLock<MeshState>>,
-    ) -> (mpsc::Sender<MpcMessage>, Self) {
+    ) -> (mpsc::Sender<Message>, Self) {
         let (incoming_tx, incoming_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
 
@@ -243,26 +273,19 @@ impl MessageChannel {
         )
     }
 
+    /// Grab the inbox for all the messages we received from the network.
     pub fn inbox(&self) -> &Arc<RwLock<MessageInbox>> {
         &self.inbox
     }
 
-    pub async fn send(&self, from: Participant, to: Participant, message: MpcMessage) {
+    /// Send a message to the participants in the network.
+    pub async fn send(&self, from: Participant, to: Participant, message: impl Into<Message>) {
         if let Err(err) = self
             .outgoing
-            .send((from, to, message, Instant::now()))
+            .send((from, to, message.into(), Instant::now()))
             .await
         {
             tracing::error!(?err, "failed to send message to participants");
-        }
-    }
-
-    pub async fn send_many(
-        &self,
-        other: impl IntoIterator<Item = (Participant, Participant, MpcMessage)>,
-    ) {
-        for (from, to, message) in other {
-            self.send(from, to, message).await
         }
     }
 }
@@ -715,7 +738,7 @@ where
     }
 }
 
-type SendMessage = (Participant, Participant, MpcMessage, Instant);
+type SendMessage = (Participant, Participant, Message, Instant);
 
 /// Encrypted message with a reference to the old message. Only the ciphered portion of this
 /// type will be sent over the wire, while the original message is kept just in case things
@@ -791,7 +814,7 @@ impl MessageOutbox {
         active: &Participants,
     ) -> HashMap<Participant, Vec<EncryptedWithOriginal>> {
         // failed for when a participant is not active, so keep this message for next round.
-        let mut failed = VecDeque::new();
+        let mut retry = VecDeque::new();
         let mut errors = Vec::new();
         let mut not_active = HashSet::new();
 
@@ -799,7 +822,7 @@ impl MessageOutbox {
         while let Some((from, to, msg, instant)) = self.messages.pop_front() {
             let Some(info) = active.get(&to) else {
                 not_active.insert(to);
-                failed.push_back((from, to, msg, instant));
+                retry.push_back((from, to, msg, instant));
                 continue;
             };
 
@@ -826,7 +849,7 @@ impl MessageOutbox {
         }
 
         // Add back the failed attempts for next time.
-        self.messages.extend(failed);
+        self.messages.extend(retry);
         encrypted
     }
 
@@ -937,26 +960,25 @@ fn partition_ciphered_256kb(
     result
 }
 
-fn timeout(msg: &MpcMessage, cfg: &ProtocolConfig) -> Duration {
+fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {
     match msg {
-        MpcMessage::Generating(_) => Duration::from_millis(cfg.message_timeout),
-        MpcMessage::Resharing(_) => Duration::from_millis(cfg.message_timeout),
-        MpcMessage::Triple(_) => Duration::from_millis(cfg.triple.generation_timeout),
-        MpcMessage::Presignature(_) => Duration::from_millis(cfg.presignature.generation_timeout),
-        MpcMessage::Signature(_) => Duration::from_millis(cfg.signature.generation_timeout),
+        Message::Generating(_) => Duration::from_millis(cfg.message_timeout),
+        Message::Resharing(_) => Duration::from_millis(cfg.message_timeout),
+        Message::Triple(_) => Duration::from_millis(cfg.triple.generation_timeout),
+        Message::Presignature(_) => Duration::from_millis(cfg.presignature.generation_timeout),
+        Message::Signature(_) => Duration::from_millis(cfg.signature.generation_timeout),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::message::GeneratingMessage;
-    use crate::protocol::MpcMessage;
+    use crate::protocol::message::{GeneratingMessage, Message};
 
     #[test]
     fn test_sending_encrypted_message() {
         let associated_data = b"";
         let (sk, pk) = mpc_keys::hpke::generate();
-        let starting_message = MpcMessage::Generating(GeneratingMessage {
+        let starting_message = Message::Generating(GeneratingMessage {
             from: cait_sith::protocol::Participant::from(0),
             data: vec![],
         });
@@ -967,7 +989,7 @@ mod tests {
         let message = serde_json::to_vec(&message).unwrap();
         let cipher = serde_json::from_slice(&message).unwrap();
         let message = sk.decrypt(&cipher, associated_data).unwrap();
-        let message: MpcMessage = serde_json::from_slice(&message).unwrap();
+        let message: Message = serde_json::from_slice(&message).unwrap();
 
         assert_eq!(starting_message, message);
     }

@@ -12,10 +12,8 @@ pub use consensus::ConsensusError;
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
-use message::MessageChannel;
-pub use message::MpcMessage;
-pub use signature::SignQueue;
-pub use signature::SignRequest;
+pub use message::{Message, MessageChannel};
+pub use signature::{SignQueue, SignRequest};
 pub use state::NodeState;
 pub use sysinfo::{Components, CpuRefreshKind, Disks, RefreshKind, System};
 

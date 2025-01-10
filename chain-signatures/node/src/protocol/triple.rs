@@ -2,7 +2,6 @@ use super::contract::primitives::Participants;
 use super::cryptography::CryptographicError;
 use super::message::{MessageChannel, TripleMessage};
 use super::presignature::GenerationError;
-use crate::protocol::MpcMessage;
 use crate::storage::triple_storage::TripleStorage;
 use crate::types::TripleProtocol;
 use crate::util::AffinePointExt;
@@ -161,13 +160,13 @@ impl TripleGenerator {
                             .send(
                                 me,
                                 *to,
-                                MpcMessage::Triple(TripleMessage {
+                                TripleMessage {
                                     id: self.id,
                                     epoch,
                                     from: me,
                                     data: data.clone(),
                                     timestamp: Utc::now().timestamp() as u64,
-                                }),
+                                },
                             )
                             .await;
                     }
@@ -177,24 +176,28 @@ impl TripleGenerator {
                         .send(
                             me,
                             to,
-                            MpcMessage::Triple(TripleMessage {
+                            TripleMessage {
                                 id: self.id,
                                 epoch,
                                 from: me,
                                 data,
                                 timestamp: Utc::now().timestamp() as u64,
-                            }),
+                            },
                         )
                         .await
                 }
                 Action::Return(output) => {
-                    // elapsed = ?generator.timestamp.unwrap().elapsed(),
+                    let elapsed = {
+                        let timestamp = self.timestamp.read().await;
+                        timestamp.map(|t| t.elapsed()).unwrap_or_default()
+                    };
                     tracing::info!(
                         id = self.id,
                         ?me,
                         big_a = ?output.1.big_a.to_base58(),
                         big_b = ?output.1.big_b.to_base58(),
                         big_c = ?output.1.big_c.to_base58(),
+                        ?elapsed,
                         "completed triple generation"
                     );
 
