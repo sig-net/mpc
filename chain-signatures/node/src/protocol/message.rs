@@ -5,7 +5,7 @@ use super::signature::SignRequestIdentifier;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
 use crate::gcp::error::SecretStorageError;
-use crate::http_client::{NodeClient, SendError};
+use crate::node_client::{NodeClient, SendError};
 use crate::indexer::ContractSignRequest;
 use crate::protocol::Config;
 use crate::protocol::MeshState;

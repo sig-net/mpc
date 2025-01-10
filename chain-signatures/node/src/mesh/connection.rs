@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use cait_sith::protocol::Participant;
 use tokio::sync::RwLock;
 
-use crate::http_client::NodeClient;
+use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ProtocolState;
 use crate::web::StateView;

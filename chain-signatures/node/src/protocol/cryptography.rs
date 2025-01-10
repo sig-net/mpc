@@ -5,7 +5,7 @@ use super::signature::SignatureManager;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
-use crate::http_client::SendError;
+use crate::node_client::SendError;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
