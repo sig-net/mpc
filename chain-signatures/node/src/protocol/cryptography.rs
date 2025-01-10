@@ -18,9 +18,7 @@ use k256::elliptic_curve::group::GroupEncoding;
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 
-#[async_trait::async_trait]
 pub trait CryptographicCtx {
-    async fn me(&self) -> Participant;
     fn rpc_client(&self) -> &near_fetch::Client;
     fn signer(&self) -> &InMemorySigner;
     fn mpc_contract_id(&self) -> &AccountId;
@@ -99,19 +97,18 @@ impl CryptographicProtocol for GeneratingState {
                 }
                 Action::SendMany(data) => {
                     tracing::debug!("generating: sending a message to many participants");
-                    let me = ctx.me().await;
                     for p in mesh_state.active.keys() {
-                        if p == &me {
+                        if p == &self.me {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;
                         }
 
                         ctx.channel()
                             .send(
-                                me,
+                                self.me,
                                 *p,
                                 MpcMessage::Generating(GeneratingMessage {
-                                    from: me,
+                                    from: self.me,
                                     data: data.clone(),
                                 }),
                             )
@@ -120,12 +117,14 @@ impl CryptographicProtocol for GeneratingState {
                 }
                 Action::SendPrivate(to, data) => {
                     tracing::debug!("generating: sending a private message to {to:?}");
-                    let me = ctx.me().await;
                     ctx.channel()
                         .send(
-                            me,
+                            self.me,
                             to,
-                            MpcMessage::Generating(GeneratingMessage { from: me, data }),
+                            MpcMessage::Generating(GeneratingMessage {
+                                from: self.me,
+                                data,
+                            }),
                         )
                         .await;
                 }
@@ -201,19 +200,18 @@ impl CryptographicProtocol for ResharingState {
                 }
                 Action::SendMany(data) => {
                     tracing::debug!("resharing: sending a message to all participants");
-                    let me = ctx.me().await;
                     for p in self.new_participants.keys() {
-                        if p == &me {
+                        if p == &self.me {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;
                         }
                         ctx.channel()
                             .send(
-                                me,
+                                self.me,
                                 *p,
                                 MpcMessage::Resharing(ResharingMessage {
                                     epoch: self.old_epoch,
-                                    from: me,
+                                    from: self.me,
                                     data: data.clone(),
                                 }),
                             )
@@ -224,14 +222,13 @@ impl CryptographicProtocol for ResharingState {
                     tracing::debug!("resharing: sending a private message to {to:?}");
                     match self.new_participants.get(&to) {
                         Some(_) => {
-                            let me = ctx.me().await;
                             ctx.channel()
                                 .send(
-                                    me,
+                                    self.me,
                                     to,
                                     MpcMessage::Resharing(ResharingMessage {
                                         epoch: self.old_epoch,
-                                        from: me,
+                                        from: self.me,
                                         data,
                                     }),
                                 )

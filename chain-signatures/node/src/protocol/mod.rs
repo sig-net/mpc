@@ -21,7 +21,6 @@ pub use sysinfo::{Components, CpuRefreshKind, Disks, RefreshKind, System};
 
 use self::consensus::ConsensusCtx;
 use self::cryptography::CryptographicCtx;
-use self::message::MessageCtx;
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
@@ -31,7 +30,6 @@ use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
 
-use cait_sith::protocol::Participant;
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use reqwest::IntoUrl;
@@ -92,12 +90,7 @@ impl ConsensusCtx for &mut MpcSignProtocol {
     }
 }
 
-#[async_trait::async_trait]
 impl CryptographicCtx for &mut MpcSignProtocol {
-    async fn me(&self) -> Participant {
-        get_my_participant(self).await
-    }
-
     fn rpc_client(&self) -> &near_fetch::Client {
         &self.ctx.rpc_client
     }
@@ -120,13 +113,6 @@ impl CryptographicCtx for &mut MpcSignProtocol {
 
     fn channel(&self) -> &MessageChannel {
         &self.channel
-    }
-}
-
-#[async_trait::async_trait]
-impl MessageCtx for &MpcSignProtocol {
-    async fn me(&self) -> Participant {
-        get_my_participant(self).await
     }
 }
 
@@ -187,8 +173,10 @@ impl MpcSignProtocol {
         config: Arc<RwLock<Config>>,
         mesh_state: Arc<RwLock<MeshState>>,
     ) -> anyhow::Result<()> {
-        let my_account_id = self.ctx.account_id.to_string();
+        let my_account_id = self.ctx.account_id.as_str();
         let _span = tracing::info_span!("running", my_account_id);
+        let my_account_id = self.ctx.account_id.clone();
+
         crate::metrics::NODE_RUNNING
             .with_label_values(&[my_account_id.as_str()])
             .set(1);
@@ -202,7 +190,7 @@ impl MpcSignProtocol {
             tracing::debug!("trying to advance chain signatures protocol");
             // Hardware metric refresh
             if last_hardware_pull.elapsed() > Duration::from_secs(5) {
-                update_system_metrics(&my_account_id);
+                update_system_metrics(my_account_id.as_str());
                 last_hardware_pull = Instant::now();
             }
 
@@ -247,8 +235,8 @@ impl MpcSignProtocol {
                 .with_label_values(&[my_account_id.as_str()])
                 .observe(crypto_time.elapsed().as_secs_f64());
 
-            let consensus_time = Instant::now();
             if let Some(contract_state) = contract_state {
+                let consensus_time = Instant::now();
                 let from_state = format!("{state}");
                 state = match state.advance(&mut self, contract_state, cfg.clone()).await {
                     Ok(state) => {
@@ -261,10 +249,10 @@ impl MpcSignProtocol {
                         continue;
                     }
                 };
+                crate::metrics::PROTOCOL_LATENCY_ITER_CONSENSUS
+                    .with_label_values(&[my_account_id.as_str()])
+                    .observe(consensus_time.elapsed().as_secs_f64());
             }
-            crate::metrics::PROTOCOL_LATENCY_ITER_CONSENSUS
-                .with_label_values(&[my_account_id.as_str()])
-                .observe(consensus_time.elapsed().as_secs_f64());
 
             let message_time = Instant::now();
             if let Err(err) = state.recv(&self.channel, cfg, mesh_state).await {
@@ -295,18 +283,6 @@ impl MpcSignProtocol {
             tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
         }
     }
-}
-
-async fn get_my_participant(protocol: &MpcSignProtocol) -> Participant {
-    let my_near_acc_id = &protocol.ctx.account_id;
-    let state = protocol.state.read().await;
-    let participant_info = state
-        .find_participant_info(my_near_acc_id)
-        .unwrap_or_else(|| {
-            tracing::error!("could not find participant info for {my_near_acc_id}");
-            panic!("could not find participant info for {my_near_acc_id}");
-        });
-    participant_info.id.into()
 }
 
 /// our release versions take the form of "1.0.0-rc.2"

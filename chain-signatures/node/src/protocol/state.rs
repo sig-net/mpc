@@ -37,6 +37,7 @@ pub struct StartedState {
 
 #[derive(Clone)]
 pub struct GeneratingState {
+    pub me: Participant,
     pub participants: Participants,
     pub threshold: usize,
     pub protocol: KeygenProtocol,
@@ -103,6 +104,7 @@ impl RunningState {
 
 #[derive(Clone)]
 pub struct ResharingState {
+    pub me: Participant,
     pub old_epoch: u64,
     pub old_participants: Participants,
     pub new_participants: Participants,

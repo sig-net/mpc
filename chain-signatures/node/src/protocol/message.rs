@@ -26,11 +26,6 @@ use tokio::sync::{mpsc, RwLock};
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 
-#[async_trait::async_trait]
-pub trait MessageCtx {
-    async fn me(&self) -> Participant;
-}
-
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct GeneratingMessage {
     pub from: Participant,
