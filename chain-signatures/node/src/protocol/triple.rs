@@ -30,10 +30,7 @@ use near_account_id::AccountId;
 /// messages.
 pub type TripleId = u64;
 
-type GeneratorOutcome = (
-    TripleId,
-    Result<(Vec<(Participant, TripleMessage)>, Option<(Triple, bool)>), ProtocolError>,
-);
+type GeneratorOutcome = (TripleId, Result<Option<(Triple, bool)>, ProtocolError>);
 
 // TODO: why do we have Clone here? Triples can not be reused.
 /// A completed triple.
@@ -91,11 +88,12 @@ impl TripleGenerator {
         me: Participant,
         my_account_id: &AccountId,
         epoch: u64,
+        channel: MessageChannel,
     ) -> JoinHandle<GeneratorOutcome> {
         tokio::task::spawn({
             let mut generator = self.clone();
             let my_account_id = my_account_id.clone();
-            async move { generator.execute(me, &my_account_id, epoch).await }
+            async move { generator.execute(me, &my_account_id, epoch, channel).await }
         })
     }
 
@@ -121,8 +119,8 @@ impl TripleGenerator {
         me: Participant,
         my_account_id: &AccountId,
         epoch: u64,
+        channel: MessageChannel,
     ) -> GeneratorOutcome {
-        let mut messages = Vec::new();
         loop {
             let action = match self.poke().await {
                 Ok(action) => action,
@@ -151,32 +149,44 @@ impl TripleGenerator {
                 Action::Wait => {
                     tracing::debug!("triple: waiting");
                     // Retain protocol until we are finished
-                    break (self.id, Ok((messages, None)));
+                    break (self.id, Ok(None));
                 }
                 Action::SendMany(data) => {
-                    for p in &self.participants {
-                        messages.push((
-                            *p,
-                            TripleMessage {
+                    for to in &self.participants {
+                        if *to == me {
+                            continue;
+                        }
+
+                        channel
+                            .send(
+                                me,
+                                *to,
+                                MpcMessage::Triple(TripleMessage {
+                                    id: self.id,
+                                    epoch,
+                                    from: me,
+                                    data: data.clone(),
+                                    timestamp: Utc::now().timestamp() as u64,
+                                }),
+                            )
+                            .await;
+                    }
+                }
+                Action::SendPrivate(to, data) => {
+                    channel
+                        .send(
+                            me,
+                            to,
+                            MpcMessage::Triple(TripleMessage {
                                 id: self.id,
                                 epoch,
                                 from: me,
-                                data: data.clone(),
+                                data,
                                 timestamp: Utc::now().timestamp() as u64,
-                            },
-                        ))
-                    }
+                            }),
+                        )
+                        .await
                 }
-                Action::SendPrivate(p, data) => messages.push((
-                    p,
-                    TripleMessage {
-                        id: self.id,
-                        epoch,
-                        from: me,
-                        data,
-                        timestamp: Utc::now().timestamp() as u64,
-                    },
-                )),
                 Action::Return(output) => {
                     // elapsed = ?generator.timestamp.unwrap().elapsed(),
                     tracing::info!(
@@ -231,7 +241,7 @@ impl TripleGenerator {
                             .inc();
                     }
 
-                    break (self.id, Ok((messages, Some((triple, triple_is_mine)))));
+                    break (self.id, Ok(Some((triple, triple_is_mine))));
                 }
             }
         }
@@ -337,11 +347,8 @@ impl TripleTasks {
         my_account_id: &AccountId,
         epoch: u64,
         cfg: &ProtocolConfig,
-    ) -> (
-        Vec<(Triple, bool)>,
-        Vec<(Participant, TripleMessage)>,
-        HashMap<TripleId, ProtocolError>,
-    ) {
+        channel: MessageChannel,
+    ) -> (Vec<(Triple, bool)>, HashMap<TripleId, ProtocolError>) {
         // Add more protocols to the ongoing pool if there is space.
         let to_generate_len = cfg.max_concurrent_generation as usize - self.ongoing.len();
         if !self.queued.is_empty() && to_generate_len > 0 {
@@ -349,8 +356,10 @@ impl TripleTasks {
                 if let Some(id) = self.queued.pop_front() {
                     self.ongoing.insert(id);
                     let generator = self.generators.get(&id).unwrap();
-                    self.ongoing_tasks
-                        .push_back((id, generator.spawn_execution(me, my_account_id, epoch)));
+                    self.ongoing_tasks.push_back((
+                        id,
+                        generator.spawn_execution(me, my_account_id, epoch, channel.clone()),
+                    ));
                 }
             }
         }
@@ -363,13 +372,14 @@ impl TripleTasks {
                 .any(|(running_id, _)| running_id == id)
             {
                 let generator = self.generators.get(id).unwrap();
-                self.ongoing_tasks
-                    .push_back((*id, generator.spawn_execution(me, my_account_id, epoch)));
+                self.ongoing_tasks.push_back((
+                    *id,
+                    generator.spawn_execution(me, my_account_id, epoch, channel.clone()),
+                ));
             }
         }
 
         let mut triples = Vec::new();
-        let mut messages = Vec::new();
         let mut errors = HashMap::new();
 
         let mut interval = tokio::time::interval(Duration::from_millis(5));
@@ -400,12 +410,10 @@ impl TripleTasks {
                 }
             };
             match outcome {
-                Ok((mut msgs, triple)) => {
-                    if let Some((triple, mine)) = triple {
-                        self.remove(id);
-                        triples.push((triple, mine));
-                    }
-                    messages.append(&mut msgs);
+                Ok(None) => {}
+                Ok(Some((triple, mine))) => {
+                    self.remove(id);
+                    triples.push((triple, mine));
                 }
                 Err(e) => {
                     tracing::info!(id, ?e, "triple completed with error");
@@ -415,7 +423,7 @@ impl TripleTasks {
             }
         }
 
-        (triples, messages, errors)
+        (triples, errors)
     }
 }
 
@@ -736,11 +744,11 @@ impl TripleManager {
     /// messages to be sent to the respective participant.
     ///
     /// An empty vector means we cannot progress until we receive a new message.
-    pub async fn poke(&self, cfg: &ProtocolConfig) -> Vec<(Participant, TripleMessage)> {
-        let (triples, messages, errors) = {
+    pub async fn poke(&self, cfg: &ProtocolConfig, channel: MessageChannel) {
+        let (triples, errors) = {
             let mut tasks = self.tasks.write().await;
             tasks
-                .poke(self.me, &self.my_account_id, self.epoch, cfg)
+                .poke(self.me, &self.my_account_id, self.epoch, cfg, channel)
                 .await
         };
 
@@ -755,8 +763,6 @@ impl TripleManager {
         for (triple, mine) in triples {
             self.insert(triple, mine, false).await;
         }
-
-        messages
     }
 
     pub fn execute(
@@ -773,15 +779,7 @@ impl TripleManager {
             if let Err(err) = self.stockpile(&active, &protocol_cfg).await {
                 tracing::warn!(?err, "running: failed to stockpile triples");
             }
-
-            {
-                let messages = self
-                    .poke(&protocol_cfg)
-                    .await
-                    .into_iter()
-                    .map(|(p, msg)| (self.me, p, MpcMessage::Triple(msg)));
-                channel.send_many(messages).await;
-            }
+            self.poke(&protocol_cfg, channel).await;
 
             crate::metrics::NUM_TRIPLES_MINE
                 .with_label_values(&[self.my_account_id.as_str()])

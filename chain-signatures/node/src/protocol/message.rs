@@ -170,7 +170,7 @@ impl MessageInbox {
 
 struct MessageExecutor {
     incoming: mpsc::Receiver<MpcMessage>,
-    outgoing: mpsc::Receiver<(Participant, Participant, MpcMessage, Instant)>,
+    outgoing: mpsc::Receiver<SendMessage>,
     inbox: Arc<RwLock<MessageInbox>>,
     outbox: MessageOutbox,
 
@@ -206,7 +206,7 @@ impl MessageExecutor {
 
 #[derive(Clone)]
 pub struct MessageChannel {
-    outgoing: mpsc::Sender<(Participant, Participant, MpcMessage, Instant)>,
+    outgoing: mpsc::Sender<SendMessage>,
     inbox: Arc<RwLock<MessageInbox>>,
     _task: Arc<tokio::task::JoinHandle<()>>,
 }
@@ -713,18 +713,18 @@ where
     }
 }
 
-type Message = (Participant, Participant, MpcMessage, Instant);
+type SendMessage = (Participant, Participant, MpcMessage, Instant);
 
 /// Encrypted message with a reference to the old message. Only the ciphered portion of this
 /// type will be sent over the wire, while the original message is kept just in case things
 /// go wrong somewhere and the message needs to be requeued to be sent later.
-type EncryptedWithOriginal = (Ciphered, Message);
+type EncryptedWithOriginal = (Ciphered, SendMessage);
 
-// TODO: add in retry logic either in struct or at call site.
-// TODO: add check for participant list to see if the messages to be sent are still valid.
+/// Message outbox is the set of messages that are pending to be sent to other nodes.
+/// These messages will be signed and encrypted before being sent out.
 pub struct MessageOutbox {
     client: NodeClient,
-    messages: VecDeque<Message>,
+    messages: VecDeque<SendMessage>,
     account_id: AccountId,
 }
 
@@ -737,7 +737,7 @@ impl MessageOutbox {
         }
     }
 
-    pub fn extend(&mut self, outgoing: &mut mpsc::Receiver<Message>) {
+    pub fn extend(&mut self, outgoing: &mut mpsc::Receiver<SendMessage>) {
         loop {
             let (from, to, msg, instant) = match outgoing.try_recv() {
                 Ok(msg) => msg,

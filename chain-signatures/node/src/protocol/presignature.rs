@@ -583,9 +583,12 @@ impl PresignatureManager {
                         return true;
                     }
                     Action::SendMany(data) => {
-                        for p in generator.participants.iter() {
+                        for to in generator.participants.iter() {
+                            if *to == self.me {
+                                continue;
+                            }
                             messages.push((
-                                *p,
+                                *to,
                                 PresignatureMessage {
                                     id: *id,
                                     triple0: generator.triple0,

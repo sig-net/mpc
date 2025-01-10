@@ -543,9 +543,12 @@ impl SignatureManager {
                         return true;
                     }
                     Action::SendMany(data) => {
-                        for p in generator.participants.iter() {
+                        for to in generator.participants.iter() {
+                            if *to == self.me {
+                                continue;
+                            }
                             messages.push((
-                                *p,
+                                *to,
                                 SignatureMessage {
                                     request_id: sign_request_identifier.request_id,
                                     proposer: generator.proposer,
