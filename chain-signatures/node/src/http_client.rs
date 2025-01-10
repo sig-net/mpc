@@ -117,13 +117,8 @@ impl MessageQueue {
         self.deque.is_empty()
     }
 
-    pub fn push(&mut self, node: Participant, msg: MpcMessage) {
-        self.deque.push_back((node, msg, Instant::now()));
-    }
-
-    pub fn extend(&mut self, other: impl IntoIterator<Item = (Participant, MpcMessage)>) {
-        self.deque
-            .extend(other.into_iter().map(|(i, msg)| (i, msg, Instant::now())));
+    pub fn push(&mut self, to: Participant, msg: MpcMessage) {
+        self.deque.push_back((to, msg, Instant::now()));
     }
 
     pub async fn send_encrypted(

@@ -23,7 +23,6 @@ use self::consensus::ConsensusCtx;
 use self::cryptography::CryptographicCtx;
 use self::message::MessageCtx;
 use crate::config::Config;
-use crate::http_client;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
@@ -49,21 +48,15 @@ struct Ctx {
     mpc_contract_id: AccountId,
     signer: InMemorySigner,
     rpc_client: near_fetch::Client,
-    http_client: reqwest::Client,
     sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
-    message_options: http_client::Options,
 }
 
 impl ConsensusCtx for &mut MpcSignProtocol {
     fn my_account_id(&self) -> &AccountId {
         &self.ctx.account_id
-    }
-
-    fn http_client(&self) -> &reqwest::Client {
-        &self.ctx.http_client
     }
 
     fn rpc_client(&self) -> &near_fetch::Client {
@@ -97,20 +90,12 @@ impl ConsensusCtx for &mut MpcSignProtocol {
     fn presignature_storage(&self) -> &PresignatureStorage {
         &self.ctx.presignature_storage
     }
-
-    fn message_options(&self) -> http_client::Options {
-        self.ctx.message_options.clone()
-    }
 }
 
 #[async_trait::async_trait]
 impl CryptographicCtx for &mut MpcSignProtocol {
     async fn me(&self) -> Participant {
         get_my_participant(self).await
-    }
-
-    fn http_client(&self) -> &reqwest::Client {
-        &self.ctx.http_client
     }
 
     fn rpc_client(&self) -> &near_fetch::Client {
@@ -131,6 +116,10 @@ impl CryptographicCtx for &mut MpcSignProtocol {
 
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox {
         &mut self.ctx.secret_storage
+    }
+
+    fn channel(&self) -> &MessageChannel {
+        &self.channel
     }
 }
 
@@ -160,7 +149,6 @@ impl MpcSignProtocol {
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
-        message_options: http_client::Options,
     ) -> (Self, Arc<RwLock<NodeState>>) {
         let my_address = my_address.into_url().unwrap();
         let rpc_url = rpc_client.rpc_addr();
@@ -179,13 +167,11 @@ impl MpcSignProtocol {
             account_id,
             mpc_contract_id,
             rpc_client,
-            http_client: reqwest::Client::new(),
             sign_rx: Arc::new(RwLock::new(sign_rx)),
             signer,
             secret_storage,
             triple_storage,
             presignature_storage,
-            message_options,
         };
         let protocol = MpcSignProtocol {
             ctx,

@@ -1,6 +1,6 @@
 use super::contract::primitives::Participants;
 use super::cryptography::CryptographicError;
-use super::message::TripleMessage;
+use super::message::{MessageChannel, TripleMessage};
 use super::presignature::GenerationError;
 use crate::protocol::MpcMessage;
 use crate::storage::triple_storage::TripleStorage;
@@ -763,10 +763,11 @@ impl TripleManager {
         self,
         active: &Participants,
         protocol_cfg: &ProtocolConfig,
-        messages: Arc<RwLock<crate::http_client::MessageQueue>>,
+        channel: &MessageChannel,
     ) -> JoinHandle<()> {
         let active = active.clone();
         let protocol_cfg = protocol_cfg.clone();
+        let channel = channel.clone();
 
         tokio::task::spawn(async move {
             if let Err(err) = self.stockpile(&active, &protocol_cfg).await {
@@ -774,13 +775,12 @@ impl TripleManager {
             }
 
             {
-                let mut messages = messages.write().await;
-                messages.extend(
-                    self.poke(&protocol_cfg)
-                        .await
-                        .into_iter()
-                        .map(|(p, msg)| (p, MpcMessage::Triple(msg))),
-                );
+                let messages = self
+                    .poke(&protocol_cfg)
+                    .await
+                    .into_iter()
+                    .map(|(p, msg)| (self.me, p, MpcMessage::Triple(msg)));
+                channel.send_many(messages).await;
             }
 
             crate::metrics::NUM_TRIPLES_MINE

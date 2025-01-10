@@ -1,4 +1,4 @@
-use super::message::PresignatureMessage;
+use super::message::{MessageChannel, PresignatureMessage};
 use super::state::RunningState;
 use super::triple::{Triple, TripleId, TripleManager};
 use crate::protocol::contract::primitives::Participants;
@@ -659,6 +659,7 @@ impl PresignatureManager {
         state: &RunningState,
         active: &Participants,
         protocol_cfg: &ProtocolConfig,
+        channel: &MessageChannel,
     ) -> tokio::task::JoinHandle<()> {
         let triple_manager = state.triple_manager.clone();
         let presignature_manager = state.presignature_manager.clone();
@@ -666,7 +667,7 @@ impl PresignatureManager {
         let protocol_cfg = protocol_cfg.clone();
         let pk = state.public_key;
         let sk_share = state.private_share;
-        let messages = state.messages.clone();
+        let channel = channel.clone();
 
         tokio::task::spawn(async move {
             let mut presignature_manager = presignature_manager.write().await;
@@ -678,14 +679,18 @@ impl PresignatureManager {
             }
 
             {
-                let mut messages = messages.write().await;
-                messages.extend(
-                    presignature_manager
-                        .poke()
-                        .await
-                        .into_iter()
-                        .map(|(p, msg)| (p, super::MpcMessage::Presignature(msg))),
-                );
+                let messages = presignature_manager
+                    .poke()
+                    .await
+                    .into_iter()
+                    .map(|(p, msg)| {
+                        (
+                            presignature_manager.me,
+                            p,
+                            super::MpcMessage::Presignature(msg),
+                        )
+                    });
+                channel.send_many(messages).await;
             }
 
             crate::metrics::NUM_PRESIGNATURES_MINE

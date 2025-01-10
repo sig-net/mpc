@@ -254,7 +254,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 crate::contract_updater::ContractUpdater::init(&rpc_client, &mpc_contract_id);
 
             rt.block_on(async {
-                let (sender, channel) = MessageChannel::spawn().await;
+                let (sender, channel) =
+                    MessageChannel::spawn(&config, &mesh_state, message_options).await;
                 let (protocol, protocol_state) = MpcSignProtocol::init(
                     my_address,
                     mpc_contract_id,
@@ -266,7 +267,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     key_storage,
                     triple_storage,
                     presignature_storage,
-                    message_options,
                 );
 
                 tracing::info!("protocol initialized");

@@ -819,12 +819,12 @@ impl SignatureManager {
     ) -> tokio::task::JoinHandle<()> {
         let presignature_manager = state.presignature_manager.clone();
         let signature_manager = state.signature_manager.clone();
-        let messages = state.messages.clone();
         let stable = stable.clone();
         let protocol_cfg = protocol_cfg.clone();
         let rpc_client = ctx.rpc_client().clone();
         let signer = ctx.signer().clone();
         let mpc_contract_id = ctx.mpc_contract_id().clone();
+        let channel = ctx.channel().clone();
 
         // NOTE: signatures should only use stable and not active participants. The difference here is that
         // stable participants utilizes more than the online status of a node, such as whether or not their
@@ -840,13 +840,14 @@ impl SignatureManager {
             drop(presignature_manager);
 
             {
-                let mut messages = messages.write().await;
-                messages.extend(
-                    signature_manager
-                        .poke()
-                        .into_iter()
-                        .map(|(p, msg)| (p, crate::protocol::MpcMessage::Signature(msg))),
-                );
+                let messages = signature_manager.poke().into_iter().map(|(p, msg)| {
+                    (
+                        signature_manager.me,
+                        p,
+                        crate::protocol::MpcMessage::Signature(msg),
+                    )
+                });
+                channel.send_many(messages).await;
             }
 
             signature_manager

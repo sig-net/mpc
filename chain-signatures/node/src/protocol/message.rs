@@ -19,11 +19,12 @@ use near_crypto::Signature;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, RwLock};
 
-pub const MAX_MESSAGE_RECEIVED: usize = 1024 * 1024;
+pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
+pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 
 #[async_trait::async_trait]
 pub trait MessageCtx {
@@ -102,7 +103,7 @@ impl MpcMessage {
 }
 
 #[derive(Default)]
-pub struct MessageBins {
+pub struct MessageIncomingBins {
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
@@ -110,7 +111,7 @@ pub struct MessageBins {
     signature: HashMap<Epoch, HashMap<SignRequestIdentifier, VecDeque<SignatureMessage>>>,
 }
 
-impl MessageBins {
+impl MessageIncomingBins {
     pub fn push(&mut self, message: MpcMessage) {
         match message {
             MpcMessage::Generating(message) => self.generating.push_back(message),
@@ -169,48 +170,130 @@ impl MessageBins {
     }
 }
 
-struct MessageProcessor {
+struct MessageExecutor {
     incoming: mpsc::Receiver<MpcMessage>,
-    bins: Arc<RwLock<MessageBins>>,
+    outgoing: mpsc::Receiver<(Participant, Participant, MpcMessage, Instant)>,
+    http: reqwest::Client,
+    bins: Arc<RwLock<MessageIncomingBins>>,
+    config: Arc<RwLock<Config>>,
+    mesh_state: Arc<RwLock<MeshState>>,
+    queue: crate::http_client::MessageQueue,
 }
 
-impl MessageProcessor {
+impl MessageExecutor {
     pub async fn execute(mut self) {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
             interval.tick().await;
             self.bins.write().await.extend(&mut self.incoming);
+
+            let mut me = None;
+            loop {
+                let (from, to, msg, _timestamp) = match self.outgoing.try_recv() {
+                    Ok(msg) => msg,
+                    Err(TryRecvError::Empty) => {
+                        break;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        tracing::error!("communication was disconnected for sending outcoming messages, no more messages will be received, spinning down");
+                        break;
+                    }
+                };
+                self.queue.push(to, msg);
+                me = Some(from);
+            }
+
+            // crate::metrics::MESSAGE_QUEUE_SIZE
+            //     .with_label_values(&[ctx.my_account_id().as_str()])
+            //     .set(self.queue.len() as i64);
+
+            if let Some(me) = me {
+                let (sign_sk, protocol) = {
+                    let config = self.config.read().await;
+                    (
+                        config.local.network.sign_sk.clone(),
+                        config.protocol.clone(),
+                    )
+                };
+                let active = {
+                    let mesh_state = self.mesh_state.read().await;
+                    mesh_state.active_participants.clone()
+                };
+
+                let failures = self
+                    .queue
+                    .send_encrypted(me, &sign_sk, &self.http, &active, &protocol)
+                    .await;
+                if !failures.is_empty() {
+                    tracing::warn!(
+                        active = ?active.keys_vec(),
+                        ?failures,
+                        "failed to send messages to participants"
+                    );
+                }
+            }
         }
     }
 }
 
 #[derive(Clone)]
 pub struct MessageChannel {
-    bins: Arc<RwLock<MessageBins>>,
+    outgoing: mpsc::Sender<(Participant, Participant, MpcMessage, Instant)>,
+    bins: Arc<RwLock<MessageIncomingBins>>,
     _task: Arc<tokio::task::JoinHandle<()>>,
 }
 
 impl MessageChannel {
-    pub async fn spawn() -> (mpsc::Sender<MpcMessage>, Self) {
-        let (sender, incoming) = mpsc::channel(MAX_MESSAGE_RECEIVED);
+    pub async fn spawn(
+        config: &Arc<RwLock<Config>>,
+        mesh_state: &Arc<RwLock<MeshState>>,
+        options: crate::http_client::Options,
+    ) -> (mpsc::Sender<MpcMessage>, Self) {
+        let (incoming_tx, incoming_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
 
-        let bins = Arc::new(RwLock::new(MessageBins::default()));
-        let processor = MessageProcessor {
-            incoming,
+        let bins = Arc::new(RwLock::new(MessageIncomingBins::default()));
+        let processor = MessageExecutor {
+            incoming: incoming_rx,
+            outgoing: outgoing_rx,
+            http: reqwest::Client::new(),
             bins: bins.clone(),
+            config: config.clone(),
+            mesh_state: mesh_state.clone(),
+            queue: crate::http_client::MessageQueue::new(options),
         };
 
         (
-            sender,
+            incoming_tx,
             Self {
                 bins,
+                outgoing: outgoing_tx,
                 _task: Arc::new(tokio::spawn(processor.execute())),
             },
         )
     }
 
-    pub fn bins(&self) -> &Arc<RwLock<MessageBins>> {
+    pub fn bins(&self) -> &Arc<RwLock<MessageIncomingBins>> {
         &self.bins
+    }
+
+    pub async fn send(&self, from: Participant, to: Participant, message: MpcMessage) {
+        if let Err(err) = self
+            .outgoing
+            .send((from, to, message, Instant::now()))
+            .await
+        {
+            tracing::error!(?err, "failed to send message to participants");
+        }
+    }
+
+    pub async fn send_many(
+        &self,
+        other: impl IntoIterator<Item = (Participant, Participant, MpcMessage)>,
+    ) {
+        for (from, to, message) in other {
+            self.send(from, to, message).await
+        }
     }
 }
 

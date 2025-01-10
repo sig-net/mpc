@@ -5,19 +5,18 @@ use super::state::{
 };
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
-use crate::http_client::MessageQueue;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
 use crate::protocol::SignRequest;
+use crate::rpc_client;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
-use crate::{http_client, rpc_client};
 
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -33,7 +32,6 @@ use near_crypto::InMemorySigner;
 
 pub trait ConsensusCtx {
     fn my_account_id(&self) -> &AccountId;
-    fn http_client(&self) -> &reqwest::Client;
     fn rpc_client(&self) -> &near_fetch::Client;
     fn signer(&self) -> &InMemorySigner;
     fn mpc_contract_id(&self) -> &AccountId;
@@ -42,7 +40,6 @@ pub trait ConsensusCtx {
     fn secret_storage(&self) -> &SecretNodeStorageBox;
     fn triple_storage(&self) -> &TripleStorage;
     fn presignature_storage(&self) -> &PresignatureStorage;
-    fn message_options(&self) -> http_client::Options;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -162,9 +159,6 @@ impl ConsensusProtocol for StartedState {
                                         triple_manager,
                                         presignature_manager,
                                         signature_manager,
-                                        messages: Arc::new(RwLock::new(MessageQueue::new(
-                                            ctx.message_options().clone(),
-                                        ))),
                                     }))
                                 }
                                 None => Ok(NodeState::Joining(JoiningState {
@@ -218,9 +212,6 @@ impl ConsensusProtocol for StartedState {
                                 participants,
                                 threshold: contract_state.threshold,
                                 protocol,
-                                messages: Arc::new(RwLock::new(MessageQueue::new(
-                                    ctx.message_options().clone(),
-                                ))),
                             }))
                         }
                         None => {
@@ -404,7 +395,6 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         triple_manager,
                         presignature_manager,
                         signature_manager,
-                        messages: self.messages,
                     }))
                 }
             },
@@ -748,8 +738,5 @@ async fn start_resharing<C: ConsensusCtx>(
         threshold: contract_state.threshold,
         public_key: contract_state.public_key,
         protocol,
-        messages: Arc::new(RwLock::new(MessageQueue::new(
-            ctx.message_options().clone(),
-        ))),
     }))
 }
