@@ -239,11 +239,13 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context> {
     };
 
     let mesh_options = mpc_node::mesh::Options {
-        fetch_participant_timeout: 1000,
         refresh_active_timeout: 1000,
     };
 
-    let message_options = http_client::Options { timeout: 1000 };
+    let message_options = http_client::Options {
+        timeout: 1000,
+        state_timeout: 1000,
+    };
 
     Ok(Context {
         docker_client: docker_client.clone(),

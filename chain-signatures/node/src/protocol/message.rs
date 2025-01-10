@@ -4,7 +4,7 @@ use super::signature::SignRequestIdentifier;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
 use crate::gcp::error::SecretStorageError;
-use crate::http_client::SendError;
+use crate::http_client::{NodeClient, SendError};
 use crate::indexer::ContractSignRequest;
 use crate::protocol::Config;
 use crate::protocol::MeshState;
@@ -173,7 +173,6 @@ impl MessageIncomingBins {
 struct MessageExecutor {
     incoming: mpsc::Receiver<MpcMessage>,
     outgoing: mpsc::Receiver<(Participant, Participant, MpcMessage, Instant)>,
-    http: reqwest::Client,
     bins: Arc<RwLock<MessageIncomingBins>>,
     config: Arc<RwLock<Config>>,
     mesh_state: Arc<RwLock<MeshState>>,
@@ -217,12 +216,12 @@ impl MessageExecutor {
                 };
                 let active = {
                     let mesh_state = self.mesh_state.read().await;
-                    mesh_state.active_participants.clone()
+                    mesh_state.active.clone()
                 };
 
                 let failures = self
                     .queue
-                    .send_encrypted(me, &sign_sk, &self.http, &active, &protocol)
+                    .send_encrypted(me, &sign_sk, &active, &protocol)
                     .await;
                 if !failures.is_empty() {
                     tracing::warn!(
@@ -245,9 +244,9 @@ pub struct MessageChannel {
 
 impl MessageChannel {
     pub async fn spawn(
+        client: NodeClient,
         config: &Arc<RwLock<Config>>,
         mesh_state: &Arc<RwLock<MeshState>>,
-        options: crate::http_client::Options,
     ) -> (mpsc::Sender<MpcMessage>, Self) {
         let (incoming_tx, incoming_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
@@ -256,11 +255,10 @@ impl MessageChannel {
         let processor = MessageExecutor {
             incoming: incoming_rx,
             outgoing: outgoing_rx,
-            http: reqwest::Client::new(),
             bins: bins.clone(),
             config: config.clone(),
             mesh_state: mesh_state.clone(),
-            queue: crate::http_client::MessageQueue::new(options),
+            queue: crate::http_client::MessageQueue::new(client),
         };
 
         (
@@ -396,7 +394,7 @@ impl MessageReceiver for RunningState {
         mesh_state: MeshState,
     ) -> Result<(), MessageRecvError> {
         let protocol_cfg = &cfg.protocol;
-        let participants = &mesh_state.active_participants;
+        let participants = &mesh_state.active;
         let mut bins = channel.bins().write().await;
 
         // remove the triple_id that has already failed or taken from the triple_bins

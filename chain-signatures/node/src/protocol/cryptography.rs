@@ -78,7 +78,7 @@ impl CryptographicProtocol for GeneratingState {
         _cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
-        tracing::info!(active = ?mesh_state.active_participants.keys_vec(), "generating: progressing key generation");
+        tracing::info!(active = ?mesh_state.active.keys_vec(), "generating: progressing key generation");
         let mut protocol = self.protocol.write().await;
         loop {
             let action = match protocol.poke() {
@@ -100,7 +100,7 @@ impl CryptographicProtocol for GeneratingState {
                 Action::SendMany(data) => {
                     tracing::debug!("generating: sending a message to many participants");
                     let me = ctx.me().await;
-                    for p in mesh_state.active_participants.keys() {
+                    for p in mesh_state.active.keys() {
                         if p == &me {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;
@@ -178,9 +178,7 @@ impl CryptographicProtocol for ResharingState {
         // TODO: we are not using active potential participants here, but we should in the future.
         // Currently resharing protocol does not timeout and restart with new set of participants.
         // So if it picks up a participant that is not active, it will never be able to send a message to it.
-        let active = mesh_state
-            .active_participants
-            .and(&mesh_state.potential_participants);
+        let active = mesh_state.active.and(&mesh_state.potential);
         tracing::info!(active = ?active.keys().collect::<Vec<_>>(), "progressing key reshare");
         let mut protocol = self.protocol.write().await;
         loop {
@@ -273,7 +271,7 @@ impl CryptographicProtocol for RunningState {
         cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
-        let active = mesh_state.active_participants;
+        let active = mesh_state.active;
         if active.len() < self.threshold {
             tracing::warn!(
                 active = ?active.keys_vec(),
@@ -290,7 +288,7 @@ impl CryptographicProtocol for RunningState {
         let presig_task =
             PresignatureManager::execute(&self, &active, &cfg.protocol, ctx.channel());
 
-        let stable = mesh_state.stable_participants;
+        let stable = mesh_state.stable;
         tracing::debug!(?stable, "stable participants");
         let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol, &ctx);
 

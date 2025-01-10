@@ -1,5 +1,6 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
+use crate::http_client::NodeClient;
 use crate::mesh::Mesh;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::{MpcSignProtocol, SignQueue};
@@ -11,7 +12,6 @@ use local_ip_address::local_ip;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing_stackdriver::layer as stackdriver_layer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
@@ -239,8 +239,9 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 });
 
             tracing::info!(%my_address, "address detected");
+            let client = NodeClient::new(&message_options);
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
-            let (mesh, mesh_state) = Mesh::init(mesh_options);
+            let (mesh, mesh_state) = Mesh::init(&client, mesh_options);
             let config = Arc::new(RwLock::new(Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network: NetworkConfig {
@@ -254,8 +255,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 crate::contract_updater::ContractUpdater::init(&rpc_client, &mpc_contract_id);
 
             rt.block_on(async {
-                let (sender, channel) =
-                    MessageChannel::spawn(&config, &mesh_state, message_options).await;
+                let (sender, channel) = MessageChannel::spawn(client, &config, &mesh_state).await;
                 let (protocol, protocol_state) = MpcSignProtocol::init(
                     my_address,
                     mpc_contract_id,

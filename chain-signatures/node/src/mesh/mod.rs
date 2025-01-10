@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::http_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ProtocolState;
 use std::sync::Arc;
@@ -10,12 +11,6 @@ pub mod connection;
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "mesh_options")]
 pub struct Options {
-    #[clap(
-        long,
-        env("MPC_MESH_FETCH_PARTICIPANT_TIMEOUT"),
-        default_value = "1000"
-    )]
-    pub fetch_participant_timeout: u64,
     #[clap(long, env("MPC_MESH_REFRESH_ACTIVE_TIMEOUT"), default_value = "1000")]
     pub refresh_active_timeout: u64,
 }
@@ -23,8 +18,6 @@ pub struct Options {
 impl Options {
     pub fn into_str_args(self) -> Vec<String> {
         vec![
-            "--fetch-participant-timeout".to_string(),
-            self.fetch_participant_timeout.to_string(),
             "--refresh-active-timeout".to_string(),
             self.refresh_active_timeout.to_string(),
         ]
@@ -33,14 +26,18 @@ impl Options {
 
 #[derive(Clone, Default)]
 pub struct MeshState {
-    pub active_participants: Participants,
+    /// Participants that are active in the network; as in they respond when pinged.
+    pub active: Participants,
 
     /// Potential participants that are active including participants belonging to the next epoch.
-    pub active_potential_participants: Participants,
+    pub active_potential: Participants,
 
-    pub potential_participants: Participants,
+    /// Full list of potential participants that have yet to join the network.
+    pub potential: Participants,
 
-    pub stable_participants: Participants,
+    /// Participants that are stable in the network; as in they have met certain criterias such
+    /// as indexing the latest blocks.
+    pub stable: Participants,
 }
 
 pub struct Mesh {
@@ -50,11 +47,11 @@ pub struct Mesh {
 }
 
 impl Mesh {
-    pub fn init(options: Options) -> (Self, Arc<RwLock<MeshState>>) {
+    pub fn init(client: &NodeClient, options: Options) -> (Self, Arc<RwLock<MeshState>>) {
         let state = Arc::new(RwLock::new(MeshState::default()));
         let mesh = Self {
             connections: Arc::new(connection::Pool::new(
-                Duration::from_millis(options.fetch_participant_timeout),
+                client,
                 Duration::from_millis(options.refresh_active_timeout),
             )),
             state: state.clone(),
@@ -65,10 +62,10 @@ impl Mesh {
     async fn ping(&mut self) {
         let mut mesh_state = self.state.write().await;
         *mesh_state = MeshState {
-            active_participants: Arc::clone(&self.connections).ping().await,
-            active_potential_participants: Arc::clone(&self.connections).ping_potential().await,
-            potential_participants: self.connections.potential_participants().await,
-            stable_participants: self.connections.stable_participants().await,
+            active: Arc::clone(&self.connections).ping().await,
+            active_potential: Arc::clone(&self.connections).ping_potential().await,
+            potential: self.connections.potential_participants().await,
+            stable: self.connections.stable_participants().await,
         };
         drop(mesh_state);
     }

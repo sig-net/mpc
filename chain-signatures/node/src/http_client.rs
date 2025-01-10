@@ -1,26 +1,38 @@
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::message::SignedMessage;
 use crate::protocol::MpcMessage;
+use crate::web::StateView;
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::Ciphered;
-use reqwest::{Client, IntoUrl};
+use reqwest::IntoUrl;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::Utf8Error;
 use std::time::{Duration, Instant};
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
+use url::Url;
 
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "message_options")]
 pub struct Options {
-    #[clap(long, env("MPC_MESSAGE_TIMEOUT"), default_value = "1000")]
+    /// Default timeout used for all outbound requests to other nodes.
+    #[clap(long, env("MPC_NODE_TIMEOUT"), default_value = "1000")]
     pub timeout: u64,
+
+    /// Timeout used for fetching the state of a node.
+    #[clap(long, env("MPC_NODE_STATE_TIMEOUT"), default_value = "1000")]
+    pub state_timeout: u64,
 }
 
 impl Options {
     pub fn into_str_args(self) -> Vec<String> {
-        vec!["--timeout".to_string(), self.timeout.to_string()]
+        vec![
+            "--timeout".to_string(),
+            self.timeout.to_string(),
+            "--state-timeout".to_string(),
+            self.state_timeout.to_string(),
+        ]
     }
 }
 
@@ -42,70 +54,88 @@ pub enum SendError {
     Timeout(String),
     #[error("participant is not alive: {0}")]
     ParticipantNotAlive(String),
+    #[error("cannot convert into json: {0}")]
+    Conversion(#[from] serde_json::Error),
 }
 
-pub async fn send_encrypted<U: IntoUrl>(
-    from: Participant,
-    client: &Client,
-    url: U,
-    message: Vec<Ciphered>,
-    request_timeout: Duration,
-) -> Result<(), SendError> {
-    let _span = tracing::info_span!("message_request");
-    let mut url = url.into_url()?;
-    url.set_path("msg");
-    tracing::debug!(?from, to = %url, "making http request: sending encrypted message");
-    let action = || async {
-        let response = tokio::time::timeout(
-            request_timeout,
-            client
-                .post(url.clone())
-                .header("content-type", "application/json")
-                .json(&message)
-                .send(),
-        )
-        .await
-        .map_err(|_| SendError::Timeout(format!("send encrypted from {from:?} to {url}")))?
-        .map_err(SendError::ReqwestClientError)?;
+#[derive(Debug, Clone)]
+pub struct NodeClient {
+    http: reqwest::Client,
+    options: Options,
+}
 
-        let status = response.status();
-        let response_bytes = response
-            .bytes()
-            .await
-            .map_err(SendError::ReqwestBodyError)?;
-        let response_str =
-            std::str::from_utf8(&response_bytes).map_err(SendError::MalformedResponse)?;
+impl NodeClient {
+    pub fn new(options: &Options) -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_millis(options.timeout))
+                .build()
+                .unwrap(),
+            options: options.clone(),
+        }
+    }
+
+    async fn post_msg(&self, url: &Url, msg: &[Ciphered]) -> Result<(), SendError> {
+        let resp = self
+            .http
+            .post(url.clone())
+            .header("content-type", "application/json")
+            .json(&msg)
+            .send()
+            .await?;
+
+        let status = resp.status();
         if status.is_success() {
             Ok(())
         } else {
-            tracing::warn!(
-                "failed to send a message to {} with code {}: {}",
-                url,
-                status,
-                response_str
-            );
-            Err(SendError::Unsuccessful(response_str.into()))
+            let bytes = resp.bytes().await.map_err(SendError::ReqwestBodyError)?;
+            let resp = std::str::from_utf8(&bytes).map_err(SendError::MalformedResponse)?;
+            tracing::warn!("failed to send a message to {url} with code {status}: {resp}");
+            Err(SendError::Unsuccessful(resp.into()))
         }
-    };
+    }
 
-    let retry_strategy = ExponentialBackoff::from_millis(10).map(jitter).take(3);
-    Retry::spawn(retry_strategy, action).await
+    pub async fn msg(&self, base: impl IntoUrl, msg: &[Ciphered]) -> Result<(), SendError> {
+        let mut url = base.into_url()?;
+        url.set_path("msg");
+
+        let strategy = ExponentialBackoff::from_millis(10).map(jitter).take(3);
+        Retry::spawn(strategy, || self.post_msg(&url, msg)).await
+    }
+
+    pub async fn msg_empty(&self, base: impl IntoUrl) -> Result<(), SendError> {
+        self.msg(base, &[]).await
+    }
+
+    pub async fn state(&self, base: impl IntoUrl) -> Result<StateView, SendError> {
+        let mut url = base.into_url()?;
+        url.set_path("state");
+
+        let resp = self
+            .http
+            .get(url)
+            .timeout(Duration::from_millis(self.options.state_timeout))
+            .send()
+            .await?;
+
+        Ok(resp.json::<StateView>().await?)
+    }
 }
 
 // TODO: add in retry logic either in struct or at call site.
 // TODO: add check for participant list to see if the messages to be sent are still valid.
 pub struct MessageQueue {
+    client: NodeClient,
     deque: VecDeque<(Participant, MpcMessage, Instant)>,
     seen_counts: HashSet<String>,
-    message_options: Options,
 }
 
 impl MessageQueue {
-    pub fn new(options: Options) -> Self {
+    pub fn new(client: NodeClient) -> Self {
         Self {
+            client,
             deque: VecDeque::default(),
             seen_counts: HashSet::default(),
-            message_options: options,
         }
     }
 
@@ -125,7 +155,6 @@ impl MessageQueue {
         &mut self,
         from: Participant,
         sign_sk: &near_crypto::SecretKey,
-        client: &Client,
         active: &Participants,
         cfg: &ProtocolConfig,
     ) -> Vec<SendError> {
@@ -176,15 +205,7 @@ impl MessageQueue {
                 crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
                     .with_label_values(&[account_id.as_str()])
                     .inc_by(number_of_messages);
-                if let Err(err) = send_encrypted(
-                    from,
-                    client,
-                    &info.url,
-                    encrypted_partition,
-                    Duration::from_millis(self.message_options.timeout),
-                )
-                .await
-                {
+                if let Err(err) = self.client.msg(&info.url, &encrypted_partition).await {
                     crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
                         .with_label_values(&[account_id.as_str()])
                         .inc_by(number_of_messages);
