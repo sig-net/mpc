@@ -40,6 +40,12 @@ pub struct MeshState {
     pub stable: Participants,
 }
 
+impl MeshState {
+    pub fn active_with_potential(&self) -> Participants {
+        self.active.and(&self.active_potential)
+    }
+}
+
 pub struct Mesh {
     /// Pool of connections to participants. Used to check who is alive in the network.
     connections: Arc<connection::Pool>,
