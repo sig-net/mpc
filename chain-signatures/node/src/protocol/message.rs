@@ -8,6 +8,7 @@ use crate::http_client::SendError;
 use crate::indexer::ContractSignRequest;
 use crate::protocol::Config;
 use crate::protocol::MeshState;
+use crate::types::Epoch;
 use crate::util;
 
 use async_trait::async_trait;
@@ -18,7 +19,11 @@ use near_crypto::Signature;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::time::Duration;
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::{mpsc, RwLock};
+
+pub const MAX_MESSAGE_RECEIVED: usize = 1024 * 1024;
 
 #[async_trait::async_trait]
 pub trait MessageCtx {
@@ -33,7 +38,7 @@ pub struct GeneratingMessage {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct ResharingMessage {
-    pub epoch: u64,
+    pub epoch: Epoch,
     pub from: Participant,
     pub data: MessageData,
 }
@@ -41,7 +46,7 @@ pub struct ResharingMessage {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct TripleMessage {
     pub id: u64,
-    pub epoch: u64,
+    pub epoch: Epoch,
     pub from: Participant,
     pub data: MessageData,
     // UNIX timestamp as seconds since the epoch
@@ -53,7 +58,7 @@ pub struct PresignatureMessage {
     pub id: u64,
     pub triple0: TripleId,
     pub triple1: TripleId,
-    pub epoch: u64,
+    pub epoch: Epoch,
     pub from: Participant,
     pub data: MessageData,
     // UNIX timestamp as seconds since the epoch
@@ -97,39 +102,39 @@ impl MpcMessage {
 }
 
 #[derive(Default)]
-pub struct MpcMessageQueue {
+pub struct MessageBins {
     generating: VecDeque<GeneratingMessage>,
-    resharing_bins: HashMap<u64, VecDeque<ResharingMessage>>,
-    triple_bins: HashMap<u64, HashMap<TripleId, VecDeque<TripleMessage>>>,
-    presignature_bins: HashMap<u64, HashMap<PresignatureId, VecDeque<PresignatureMessage>>>,
-    signature_bins: HashMap<u64, HashMap<SignRequestIdentifier, VecDeque<SignatureMessage>>>,
+    resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
+    triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
+    presignature: HashMap<Epoch, HashMap<PresignatureId, VecDeque<PresignatureMessage>>>,
+    signature: HashMap<Epoch, HashMap<SignRequestIdentifier, VecDeque<SignatureMessage>>>,
 }
 
-impl MpcMessageQueue {
+impl MessageBins {
     pub fn push(&mut self, message: MpcMessage) {
         match message {
             MpcMessage::Generating(message) => self.generating.push_back(message),
             MpcMessage::Resharing(message) => self
-                .resharing_bins
+                .resharing
                 .entry(message.epoch)
                 .or_default()
                 .push_back(message),
             MpcMessage::Triple(message) => self
-                .triple_bins
+                .triple
                 .entry(message.epoch)
                 .or_default()
                 .entry(message.id)
                 .or_default()
                 .push_back(message),
             MpcMessage::Presignature(message) => self
-                .presignature_bins
+                .presignature
                 .entry(message.epoch)
                 .or_default()
                 .entry(message.id)
                 .or_default()
                 .push_back(message),
             MpcMessage::Signature(message) => self
-                .signature_bins
+                .signature
                 .entry(message.epoch)
                 .or_default()
                 .entry(SignRequestIdentifier::new(
@@ -141,10 +146,76 @@ impl MpcMessageQueue {
                 .push_back(message),
         }
     }
+
+    pub fn extend(&mut self, incoming: &mut mpsc::Receiver<MpcMessage>) -> usize {
+        let mut count = 0;
+        loop {
+            let msg = match incoming.try_recv() {
+                Ok(msg) => {
+                    count += 1;
+                    msg
+                }
+                Err(TryRecvError::Empty) => {
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    tracing::error!("communication was disconnected, no more messages will be received, spinning down");
+                    break;
+                }
+            };
+            self.push(msg);
+        }
+        count
+    }
+}
+
+struct MessageProcessor {
+    incoming: mpsc::Receiver<MpcMessage>,
+    bins: Arc<RwLock<MessageBins>>,
+}
+
+impl MessageProcessor {
+    pub async fn execute(mut self) {
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        loop {
+            interval.tick().await;
+            self.bins.write().await.extend(&mut self.incoming);
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct MessageChannel {
+    bins: Arc<RwLock<MessageBins>>,
+    _task: Arc<tokio::task::JoinHandle<()>>,
+}
+
+impl MessageChannel {
+    pub async fn spawn() -> (mpsc::Sender<MpcMessage>, Self) {
+        let (sender, incoming) = mpsc::channel(MAX_MESSAGE_RECEIVED);
+
+        let bins = Arc::new(RwLock::new(MessageBins::default()));
+        let processor = MessageProcessor {
+            incoming,
+            bins: bins.clone(),
+        };
+
+        (
+            sender,
+            Self {
+                bins,
+                _task: Arc::new(tokio::spawn(processor.execute())),
+            },
+        )
+    }
+
+    pub fn bins(&self) -> &Arc<RwLock<MessageBins>> {
+        &self.bins
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum MessageHandleError {
+pub enum MessageRecvError {
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
     #[error("cait-sith protocol error: {0}")]
@@ -167,7 +238,7 @@ pub enum MessageHandleError {
     SecretStorageError(#[from] SecretStorageError),
 }
 
-impl From<CryptographicError> for MessageHandleError {
+impl From<CryptographicError> for MessageRecvError {
     fn from(value: CryptographicError) -> Self {
         match value {
             CryptographicError::CaitSithInitializationError(e) => {
@@ -187,27 +258,26 @@ impl From<CryptographicError> for MessageHandleError {
 }
 
 #[async_trait]
-pub trait MessageHandler {
-    async fn handle<C: MessageCtx + Send + Sync>(
+pub trait MessageReceiver {
+    async fn recv(
         &mut self,
-        ctx: C,
-        queue: &mut MpcMessageQueue,
+        channel: &MessageChannel,
         cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<(), MessageHandleError>;
+    ) -> Result<(), MessageRecvError>;
 }
 
 #[async_trait]
-impl MessageHandler for GeneratingState {
-    async fn handle<C: MessageCtx + Send + Sync>(
+impl MessageReceiver for GeneratingState {
+    async fn recv(
         &mut self,
-        _ctx: C,
-        queue: &mut MpcMessageQueue,
+        channel: &MessageChannel,
         _cfg: Config,
         _mesh_state: MeshState,
-    ) -> Result<(), MessageHandleError> {
+    ) -> Result<(), MessageRecvError> {
+        let mut bins = channel.bins().write().await;
         let mut protocol = self.protocol.write().await;
-        while let Some(msg) = queue.generating.pop_front() {
+        while let Some(msg) = bins.generating.pop_front() {
             tracing::debug!("handling new generating message");
             protocol.message(msg.from, msg.data);
         }
@@ -216,16 +286,16 @@ impl MessageHandler for GeneratingState {
 }
 
 #[async_trait]
-impl MessageHandler for ResharingState {
-    async fn handle<C: MessageCtx + Send + Sync>(
+impl MessageReceiver for ResharingState {
+    async fn recv(
         &mut self,
-        _ctx: C,
-        queue: &mut MpcMessageQueue,
+        channel: &MessageChannel,
         _cfg: Config,
         _mesh_state: MeshState,
-    ) -> Result<(), MessageHandleError> {
-        tracing::debug!("handling {} resharing messages", queue.resharing_bins.len());
-        let q = queue.resharing_bins.entry(self.old_epoch).or_default();
+    ) -> Result<(), MessageRecvError> {
+        let mut bins = channel.bins().write().await;
+        tracing::debug!("handling {} resharing messages", bins.resharing.len());
+        let q = bins.resharing.entry(self.old_epoch).or_default();
         let mut protocol = self.protocol.write().await;
         while let Some(msg) = q.pop_front() {
             protocol.message(msg.from, msg.data);
@@ -235,20 +305,20 @@ impl MessageHandler for ResharingState {
 }
 
 #[async_trait]
-impl MessageHandler for RunningState {
-    async fn handle<C: MessageCtx + Send + Sync>(
+impl MessageReceiver for RunningState {
+    async fn recv(
         &mut self,
-        _ctx: C,
-        queue: &mut MpcMessageQueue,
+        channel: &MessageChannel,
         cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<(), MessageHandleError> {
+    ) -> Result<(), MessageRecvError> {
         let protocol_cfg = &cfg.protocol;
         let participants = &mesh_state.active_participants;
+        let mut bins = channel.bins().write().await;
 
         // remove the triple_id that has already failed or taken from the triple_bins
         // and refresh the timestamp of failed and taken
-        let triple_messages = queue.triple_bins.remove(&self.epoch).unwrap_or_default();
+        let triple_messages = bins.triple.remove(&self.epoch).unwrap_or_default();
         for (id, mut queue) in triple_messages {
             if queue.is_empty()
                 || queue.iter().any(|msg| {
@@ -289,7 +359,7 @@ impl MessageHandler for RunningState {
         }
 
         let mut presignature_manager = self.presignature_manager.write().await;
-        let presignature_messages = queue.presignature_bins.entry(self.epoch).or_default();
+        let presignature_messages = bins.presignature.entry(self.epoch).or_default();
         presignature_messages.retain(|id, queue| {
             // Skip message if it already timed out
             if queue.is_empty()
@@ -380,7 +450,7 @@ impl MessageHandler for RunningState {
         }
 
         let mut signature_manager = self.signature_manager.write().await;
-        let signature_messages = queue.signature_bins.entry(self.epoch).or_default();
+        let signature_messages = bins.signature.entry(self.epoch).or_default();
         signature_messages.retain(|sign_request_identifier, queue| {
             // Skip message if it already timed out
             if queue.is_empty()
@@ -498,18 +568,17 @@ impl MessageHandler for RunningState {
 }
 
 #[async_trait]
-impl MessageHandler for NodeState {
-    async fn handle<C: MessageCtx + Send + Sync>(
+impl MessageReceiver for NodeState {
+    async fn recv(
         &mut self,
-        ctx: C,
-        queue: &mut MpcMessageQueue,
+        channel: &MessageChannel,
         cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<(), MessageHandleError> {
+    ) -> Result<(), MessageRecvError> {
         match self {
-            NodeState::Generating(state) => state.handle(ctx, queue, cfg, mesh_state).await,
-            NodeState::Resharing(state) => state.handle(ctx, queue, cfg, mesh_state).await,
-            NodeState::Running(state) => state.handle(ctx, queue, cfg, mesh_state).await,
+            NodeState::Generating(state) => state.recv(channel, cfg, mesh_state).await,
+            NodeState::Resharing(state) => state.recv(channel, cfg, mesh_state).await,
+            NodeState::Running(state) => state.recv(channel, cfg, mesh_state).await,
             _ => {
                 tracing::debug!("skipping message processing");
                 Ok(())

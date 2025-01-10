@@ -12,6 +12,7 @@ pub use consensus::ConsensusError;
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
+use message::MessageChannel;
 pub use message::MpcMessage;
 pub use signature::SignQueue;
 pub use signature::SignRequest;
@@ -26,7 +27,7 @@ use crate::http_client;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
-use crate::protocol::message::{MessageHandler, MpcMessageQueue};
+use crate::protocol::message::MessageReceiver as _;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -38,7 +39,7 @@ use reqwest::IntoUrl;
 use std::path::Path;
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::mpsc::{self, error::TryRecvError};
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use url::Url;
 
@@ -142,7 +143,7 @@ impl MessageCtx for &MpcSignProtocol {
 
 pub struct MpcSignProtocol {
     ctx: Ctx,
-    receiver: mpsc::Receiver<MpcMessage>,
+    channel: MessageChannel,
     state: Arc<RwLock<NodeState>>,
 }
 
@@ -154,7 +155,7 @@ impl MpcSignProtocol {
         account_id: AccountId,
         rpc_client: near_fetch::Client,
         signer: InMemorySigner,
-        receiver: mpsc::Receiver<MpcMessage>,
+        channel: MessageChannel,
         sign_rx: mpsc::Receiver<SignRequest>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
@@ -188,7 +189,7 @@ impl MpcSignProtocol {
         };
         let protocol = MpcSignProtocol {
             ctx,
-            receiver,
+            channel,
             state: state.clone(),
         };
         (protocol, state)
@@ -208,7 +209,6 @@ impl MpcSignProtocol {
         crate::metrics::NODE_VERSION
             .with_label_values(&[my_account_id.as_str()])
             .set(node_version());
-        let mut queue = MpcMessageQueue::default();
         let mut last_hardware_pull = Instant::now();
 
         loop {
@@ -223,23 +223,6 @@ impl MpcSignProtocol {
             crate::metrics::PROTOCOL_ITER_CNT
                 .with_label_values(&[my_account_id.as_str()])
                 .inc();
-            loop {
-                let msg_result = self.receiver.try_recv();
-                match msg_result {
-                    Ok(msg) => {
-                        tracing::debug!("received a new message");
-                        queue.push(msg);
-                    }
-                    Err(TryRecvError::Empty) => {
-                        tracing::debug!("no new messages received");
-                        break;
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        tracing::warn!("communication was disconnected, no more messages will be received, spinning down");
-                        return Ok(());
-                    }
-                }
-            }
 
             let contract_state = {
                 let state = contract_state.read().await;
@@ -298,8 +281,8 @@ impl MpcSignProtocol {
                 .observe(consensus_time.elapsed().as_secs_f64());
 
             let message_time = Instant::now();
-            if let Err(err) = state.handle(&self, &mut queue, cfg, mesh_state).await {
-                tracing::warn!("protocol unable to handle messages: {err:?}");
+            if let Err(err) = state.recv(&self.channel, cfg, mesh_state).await {
+                tracing::warn!("protocol unable to receive messages: {err:?}");
             }
             crate::metrics::PROTOCOL_LATENCY_ITER_MESSAGE
                 .with_label_values(&[my_account_id.as_str()])

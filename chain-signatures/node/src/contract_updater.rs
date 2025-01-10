@@ -12,9 +12,9 @@ pub struct ContractUpdater {
 }
 
 impl ContractUpdater {
-    pub fn init(rpc_client: near_fetch::Client, mpc_contract_id: AccountId) -> Self {
+    pub fn init(rpc_client: &near_fetch::Client, mpc_contract_id: &AccountId) -> Self {
         Self {
-            rpc_client,
+            rpc_client: rpc_client.clone(),
             mpc_contract_id: mpc_contract_id.clone(),
         }
     }
