@@ -60,14 +60,14 @@ impl Mesh {
     }
 
     async fn ping(&mut self) {
-        let mut mesh_state = self.state.write().await;
-        *mesh_state = MeshState {
+        let state = MeshState {
             active: Arc::clone(&self.connections).ping().await,
             active_potential: Arc::clone(&self.connections).ping_potential().await,
             potential: self.connections.potential_participants().await,
             stable: self.connections.stable_participants().await,
         };
-        drop(mesh_state);
+
+        *self.state.write().await = state;
     }
 
     pub async fn run(

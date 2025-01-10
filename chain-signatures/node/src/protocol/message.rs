@@ -171,7 +171,7 @@ struct MessageExecutor {
     bins: Arc<RwLock<MessageIncomingBins>>,
     config: Arc<RwLock<Config>>,
     mesh_state: Arc<RwLock<MeshState>>,
-    queue: crate::http_client::MessageQueue,
+    queue: crate::http_client::MessageSender,
 }
 
 impl MessageExecutor {
@@ -181,51 +181,25 @@ impl MessageExecutor {
             interval.tick().await;
             self.bins.write().await.extend(&mut self.incoming);
 
-            let mut me = None;
-            loop {
-                let (from, to, msg, _timestamp) = match self.outgoing.try_recv() {
-                    Ok(msg) => msg,
-                    Err(TryRecvError::Empty) => {
-                        break;
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        tracing::error!("communication was disconnected for sending outcoming messages, no more messages will be received, spinning down");
-                        break;
-                    }
-                };
-                self.queue.push(to, msg);
-                me = Some(from);
-            }
+            let (sign_sk, protocol) = {
+                let config = self.config.read().await;
+                (
+                    config.local.network.sign_sk.clone(),
+                    config.protocol.clone(),
+                )
+            };
+            let active = {
+                let mesh_state = self.mesh_state.read().await;
+                mesh_state.active.clone()
+            };
+            self.queue.extend(&mut self.outgoing);
+            self.queue.expire(&protocol);
+            let encrypted = self.queue.encrypt(&sign_sk, &active);
+            self.queue.send(&active, encrypted).await;
 
             // crate::metrics::MESSAGE_QUEUE_SIZE
             //     .with_label_values(&[ctx.my_account_id().as_str()])
             //     .set(self.queue.len() as i64);
-
-            if let Some(me) = me {
-                let (sign_sk, protocol) = {
-                    let config = self.config.read().await;
-                    (
-                        config.local.network.sign_sk.clone(),
-                        config.protocol.clone(),
-                    )
-                };
-                let active = {
-                    let mesh_state = self.mesh_state.read().await;
-                    mesh_state.active.clone()
-                };
-
-                let failures = self
-                    .queue
-                    .send_encrypted(me, &sign_sk, &active, &protocol)
-                    .await;
-                if !failures.is_empty() {
-                    tracing::warn!(
-                        active = ?active.keys_vec(),
-                        ?failures,
-                        "failed to send messages to participants"
-                    );
-                }
-            }
         }
     }
 }
@@ -253,7 +227,7 @@ impl MessageChannel {
             bins: bins.clone(),
             config: config.clone(),
             mesh_state: mesh_state.clone(),
-            queue: crate::http_client::MessageQueue::new(client),
+            queue: crate::http_client::MessageSender::new(client),
         };
 
         (

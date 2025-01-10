@@ -9,6 +9,8 @@ use reqwest::IntoUrl;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::Utf8Error;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
 use url::Url;
@@ -122,62 +124,82 @@ impl NodeClient {
     }
 }
 
+type Message = (Participant, Participant, MpcMessage, Instant);
+
+/// Encrypted message with a reference to the old message. Only the ciphered portion of this
+/// type will be sent over the wire, while the original message is kept just in case things
+/// go wrong somewhere and the message needs to be requeued to be sent later.
+type EncryptedWithOriginal = (Ciphered, Message);
+
 // TODO: add in retry logic either in struct or at call site.
 // TODO: add check for participant list to see if the messages to be sent are still valid.
-pub struct MessageQueue {
+pub struct MessageSender {
     client: NodeClient,
-    deque: VecDeque<(Participant, MpcMessage, Instant)>,
-    seen_counts: HashSet<String>,
+    messages: VecDeque<Message>,
 }
 
-impl MessageQueue {
+impl MessageSender {
     pub fn new(client: NodeClient) -> Self {
         Self {
             client,
-            deque: VecDeque::default(),
-            seen_counts: HashSet::default(),
+            messages: VecDeque::default(),
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.deque.len()
+    pub fn extend(&mut self, outgoing: &mut mpsc::Receiver<Message>) {
+        loop {
+            let (from, to, msg, instant) = match outgoing.try_recv() {
+                Ok(msg) => msg,
+                Err(TryRecvError::Empty) => {
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    tracing::error!("communication was disconnected for sending outcoming messages, no more messages will be received, spinning down");
+                    break;
+                }
+            };
+            self.messages.push_back((from, to, msg, instant));
+        }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.deque.is_empty()
+    pub fn expire(&mut self, cfg: &ProtocolConfig) {
+        // timeout errors are very common for a message expiring, so map them to counts here:
+        let mut timeouts = HashMap::<String, usize>::new();
+        self.messages.retain(|(_, to, msg, instant)| {
+            if instant.elapsed() > timeout(&msg, cfg) {
+                let counter = timeouts
+                    .entry(format!(
+                        "timeout message={} for node={to:?}",
+                        msg.typename(),
+                    ))
+                    .or_insert(0);
+                *counter += 1;
+                false
+            } else {
+                true
+            }
+        });
+
+        if !timeouts.is_empty() {
+            tracing::warn!(?timeouts, "messages expired");
+        }
     }
 
-    pub fn push(&mut self, to: Participant, msg: MpcMessage) {
-        self.deque.push_back((to, msg, Instant::now()));
-    }
-
-    pub async fn send_encrypted(
+    pub fn encrypt(
         &mut self,
-        from: Participant,
         sign_sk: &near_crypto::SecretKey,
         active: &Participants,
-        cfg: &ProtocolConfig,
-    ) -> Vec<SendError> {
+    ) -> HashMap<Participant, Vec<EncryptedWithOriginal>> {
+        // failed for when a participant is not active, so keep this message for next round.
         let mut failed = VecDeque::new();
         let mut errors = Vec::new();
-        let mut participant_counter = HashMap::new();
+        let mut not_active = HashSet::new();
 
-        let outer = Instant::now();
-        let uncompacted = self.deque.len();
         let mut encrypted = HashMap::new();
-        while let Some((id, msg, instant)) = self.deque.pop_front() {
-            if instant.elapsed() > timeout(&msg, cfg) {
-                errors.push(SendError::Timeout(format!(
-                    "{} message has timed out for node={id:?}",
-                    msg.typename(),
-                )));
-                continue;
-            }
-
-            let Some(info) = active.get(&id) else {
-                let counter = participant_counter.entry(id).or_insert(0);
-                *counter += 1;
-                failed.push_back((id, msg, instant));
+        while let Some((from, to, msg, instant)) = self.messages.pop_front() {
+            let Some(info) = active.get(&to) else {
+                not_active.insert(to);
+                failed.push_back((from, to, msg, instant));
                 continue;
             };
 
@@ -188,27 +210,53 @@ impl MessageQueue {
                     continue;
                 }
             };
-            let encrypted = encrypted.entry(info.id).or_insert_with(Vec::new);
-            encrypted.push((encrypted_msg, (id, msg, instant)));
+            let encrypted = encrypted.entry(to).or_insert_with(Vec::new);
+            encrypted.push((encrypted_msg, (from, to, msg, instant)));
         }
 
+        if !errors.is_empty() {
+            tracing::warn!(?errors, "got errors when sending encrypted messages");
+        }
+
+        if !not_active.is_empty() {
+            tracing::warn!(
+                ?not_active,
+                "some participants are not active even though mesh says they are"
+            );
+        }
+
+        // Add back the failed attempts for next time.
+        self.messages.extend(failed);
+        encrypted
+    }
+
+    pub async fn send(
+        &mut self,
+        active: &Participants,
+        encrypted: HashMap<Participant, Vec<EncryptedWithOriginal>>,
+    ) {
+        let mut failed = VecDeque::new();
+        let mut errors = Vec::new();
+
+        let mut uncompacted = 0;
         let mut compacted = 0;
+        let start = Instant::now();
         for (id, encrypted) in encrypted {
             for partition in partition_ciphered_256kb(encrypted) {
                 let (encrypted_partition, msgs): (Vec<_>, Vec<_>) = partition.into_iter().unzip();
                 // guaranteed to unwrap due to our previous loop check:
-                let info = active.get(&Participant::from(id)).unwrap();
+                let info = active.get(&id).unwrap();
                 let account_id = &info.account_id;
-                let number_of_messages = encrypted_partition.len() as f64;
 
                 let start = Instant::now();
                 crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
                     .with_label_values(&[account_id.as_str()])
-                    .inc_by(number_of_messages);
+                    .inc_by(msgs.len() as f64);
+
                 if let Err(err) = self.client.msg(&info.url, &encrypted_partition).await {
                     crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
                         .with_label_values(&[account_id.as_str()])
-                        .inc_by(number_of_messages);
+                        .inc_by(msgs.len() as f64);
                     crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
                         .with_label_values(&[account_id.as_str()])
                         .observe(start.elapsed().as_millis() as f64);
@@ -217,7 +265,8 @@ impl MessageQueue {
                     failed.extend(msgs);
                     errors.push(err);
                 } else {
-                    compacted += msgs.len();
+                    uncompacted += msgs.len();
+                    compacted += 1;
                     crate::metrics::SEND_ENCRYPTED_LATENCY
                         .with_label_values(&[account_id.as_str()])
                         .observe(start.elapsed().as_millis() as f64);
@@ -225,37 +274,22 @@ impl MessageQueue {
             }
         }
 
-        if uncompacted > 0 {
+        // Add back the failed attempts for next time.
+        self.messages.extend(failed);
+        if compacted > 0 {
             tracing::debug!(
                 uncompacted,
                 compacted,
-                "{from:?} sent messages in {:?};",
-                outer.elapsed()
+                "sent messages in {:?}",
+                start.elapsed()
             );
         }
-        // only add the participant count if it hasn't been seen before.
-        let counts = format!("{participant_counter:?}");
-        if !participant_counter.is_empty() && self.seen_counts.insert(counts.clone()) {
-            errors.push(SendError::ParticipantNotAlive(format!(
-                "participants not responding: {counts:?}",
-            )));
-        }
-
-        // Add back the failed attempts for next time.
-        self.deque = failed;
-        if !errors.is_empty() {
-            tracing::warn!("got errors when sending encrypted messages: {errors:?}");
-        }
-        errors
     }
 }
 
-/// Encrypted message with a reference to the old message. Only the ciphered portion of this
-/// type will be sent over the wire, while the original message is kept just in case things
-/// go wrong somewhere and the message needs to be requeued to be sent later.
-type EncryptedMessage = (Ciphered, (Participant, MpcMessage, Instant));
-
-fn partition_ciphered_256kb(encrypted: Vec<EncryptedMessage>) -> Vec<Vec<EncryptedMessage>> {
+fn partition_ciphered_256kb(
+    encrypted: Vec<EncryptedWithOriginal>,
+) -> Vec<Vec<EncryptedWithOriginal>> {
     let mut result = Vec::new();
     let mut current_partition = Vec::new();
     let mut current_size: usize = 0;
