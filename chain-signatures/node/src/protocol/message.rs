@@ -1,3 +1,4 @@
+use super::contract::primitives::Participants;
 use super::cryptography::CryptographicError;
 use super::presignature::{GenerationError, PresignatureId};
 use super::signature::SignRequestIdentifier;
@@ -14,10 +15,11 @@ use crate::util;
 use async_trait::async_trait;
 use cait_sith::protocol::{InitializationError, MessageData, Participant, ProtocolError};
 use k256::Scalar;
+use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
 use near_crypto::Signature;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -171,7 +173,7 @@ struct MessageExecutor {
     bins: Arc<RwLock<MessageIncomingBins>>,
     config: Arc<RwLock<Config>>,
     mesh_state: Arc<RwLock<MeshState>>,
-    queue: crate::http_client::MessageSender,
+    queue: MessageSender,
 }
 
 impl MessageExecutor {
@@ -227,7 +229,7 @@ impl MessageChannel {
             bins: bins.clone(),
             config: config.clone(),
             mesh_state: mesh_state.clone(),
-            queue: crate::http_client::MessageSender::new(client),
+            queue: MessageSender::new(client),
         };
 
         (
@@ -709,5 +711,231 @@ where
         }
 
         Ok(serde_json::from_slice(&msg)?)
+    }
+}
+
+type Message = (Participant, Participant, MpcMessage, Instant);
+
+/// Encrypted message with a reference to the old message. Only the ciphered portion of this
+/// type will be sent over the wire, while the original message is kept just in case things
+/// go wrong somewhere and the message needs to be requeued to be sent later.
+type EncryptedWithOriginal = (Ciphered, Message);
+
+// TODO: add in retry logic either in struct or at call site.
+// TODO: add check for participant list to see if the messages to be sent are still valid.
+pub struct MessageSender {
+    client: NodeClient,
+    messages: VecDeque<Message>,
+}
+
+impl MessageSender {
+    pub fn new(client: NodeClient) -> Self {
+        Self {
+            client,
+            messages: VecDeque::default(),
+        }
+    }
+
+    pub fn extend(&mut self, outgoing: &mut mpsc::Receiver<Message>) {
+        loop {
+            let (from, to, msg, instant) = match outgoing.try_recv() {
+                Ok(msg) => msg,
+                Err(TryRecvError::Empty) => {
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    tracing::error!("communication was disconnected for sending outcoming messages, no more messages will be received, spinning down");
+                    break;
+                }
+            };
+            self.messages.push_back((from, to, msg, instant));
+        }
+    }
+
+    pub fn expire(&mut self, cfg: &ProtocolConfig) {
+        // timeout errors are very common for a message expiring, so map them to counts here:
+        let mut timeouts = HashMap::<String, usize>::new();
+        self.messages.retain(|(_, to, msg, instant)| {
+            if instant.elapsed() > timeout(&msg, cfg) {
+                let counter = timeouts
+                    .entry(format!(
+                        "timeout message={} for node={to:?}",
+                        msg.typename(),
+                    ))
+                    .or_insert(0);
+                *counter += 1;
+                false
+            } else {
+                true
+            }
+        });
+
+        if !timeouts.is_empty() {
+            tracing::warn!(?timeouts, "messages expired");
+        }
+    }
+
+    pub fn encrypt(
+        &mut self,
+        sign_sk: &near_crypto::SecretKey,
+        active: &Participants,
+    ) -> HashMap<Participant, Vec<EncryptedWithOriginal>> {
+        // failed for when a participant is not active, so keep this message for next round.
+        let mut failed = VecDeque::new();
+        let mut errors = Vec::new();
+        let mut not_active = HashSet::new();
+
+        let mut encrypted = HashMap::new();
+        while let Some((from, to, msg, instant)) = self.messages.pop_front() {
+            let Some(info) = active.get(&to) else {
+                not_active.insert(to);
+                failed.push_back((from, to, msg, instant));
+                continue;
+            };
+
+            let encrypted_msg = match SignedMessage::encrypt(&msg, from, sign_sk, &info.cipher_pk) {
+                Ok(encrypted) => encrypted,
+                Err(err) => {
+                    errors.push(SendError::EncryptionError(err.to_string()));
+                    continue;
+                }
+            };
+            let encrypted = encrypted.entry(to).or_insert_with(Vec::new);
+            encrypted.push((encrypted_msg, (from, to, msg, instant)));
+        }
+
+        if !errors.is_empty() {
+            tracing::warn!(?errors, "got errors when sending encrypted messages");
+        }
+
+        if !not_active.is_empty() {
+            tracing::warn!(
+                ?not_active,
+                "some participants are not active even though mesh says they are"
+            );
+        }
+
+        // Add back the failed attempts for next time.
+        self.messages.extend(failed);
+        encrypted
+    }
+
+    pub async fn send(
+        &mut self,
+        active: &Participants,
+        encrypted: HashMap<Participant, Vec<EncryptedWithOriginal>>,
+    ) {
+        let mut failed = VecDeque::new();
+        let mut errors = Vec::new();
+
+        let mut uncompacted = 0;
+        let mut compacted = 0;
+        let start = Instant::now();
+        for (id, encrypted) in encrypted {
+            for partition in partition_ciphered_256kb(encrypted) {
+                let (encrypted_partition, msgs): (Vec<_>, Vec<_>) = partition.into_iter().unzip();
+                // guaranteed to unwrap due to our previous loop check:
+                let info = active.get(&id).unwrap();
+                let account_id = &info.account_id;
+
+                let start = Instant::now();
+                crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
+                    .with_label_values(&[account_id.as_str()])
+                    .inc_by(msgs.len() as f64);
+
+                if let Err(err) = self.client.msg(&info.url, &encrypted_partition).await {
+                    crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
+                        .with_label_values(&[account_id.as_str()])
+                        .inc_by(msgs.len() as f64);
+                    crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
+                        .with_label_values(&[account_id.as_str()])
+                        .observe(start.elapsed().as_millis() as f64);
+
+                    // since we failed, put back all the messages related to this
+                    failed.extend(msgs);
+                    errors.push(err);
+                } else {
+                    uncompacted += msgs.len();
+                    compacted += 1;
+                    crate::metrics::SEND_ENCRYPTED_LATENCY
+                        .with_label_values(&[account_id.as_str()])
+                        .observe(start.elapsed().as_millis() as f64);
+                }
+            }
+        }
+
+        // Add back the failed attempts for next time.
+        self.messages.extend(failed);
+        if compacted > 0 {
+            tracing::debug!(
+                uncompacted,
+                compacted,
+                "sent messages in {:?}",
+                start.elapsed()
+            );
+        }
+    }
+}
+
+fn partition_ciphered_256kb(
+    encrypted: Vec<EncryptedWithOriginal>,
+) -> Vec<Vec<EncryptedWithOriginal>> {
+    let mut result = Vec::new();
+    let mut current_partition = Vec::new();
+    let mut current_size: usize = 0;
+
+    for ciphered in encrypted {
+        let bytesize = ciphered.0.text.len();
+        if current_size + bytesize > 256 * 1024 {
+            // If adding this byte vector exceeds 256kb, start a new partition
+            result.push(current_partition);
+            current_partition = Vec::new();
+            current_size = 0;
+        }
+        current_partition.push(ciphered);
+        current_size += bytesize;
+    }
+
+    if !current_partition.is_empty() {
+        // Add the last partition
+        result.push(current_partition);
+    }
+
+    result
+}
+
+fn timeout(msg: &MpcMessage, cfg: &ProtocolConfig) -> Duration {
+    match msg {
+        MpcMessage::Generating(_) => Duration::from_millis(cfg.message_timeout),
+        MpcMessage::Resharing(_) => Duration::from_millis(cfg.message_timeout),
+        MpcMessage::Triple(_) => Duration::from_millis(cfg.triple.generation_timeout),
+        MpcMessage::Presignature(_) => Duration::from_millis(cfg.presignature.generation_timeout),
+        MpcMessage::Signature(_) => Duration::from_millis(cfg.signature.generation_timeout),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::message::GeneratingMessage;
+    use crate::protocol::MpcMessage;
+
+    #[test]
+    fn test_sending_encrypted_message() {
+        let associated_data = b"";
+        let (sk, pk) = mpc_keys::hpke::generate();
+        let starting_message = MpcMessage::Generating(GeneratingMessage {
+            from: cait_sith::protocol::Participant::from(0),
+            data: vec![],
+        });
+
+        let message = serde_json::to_vec(&starting_message).unwrap();
+        let message = pk.encrypt(&message, associated_data).unwrap();
+
+        let message = serde_json::to_vec(&message).unwrap();
+        let cipher = serde_json::from_slice(&message).unwrap();
+        let message = sk.decrypt(&cipher, associated_data).unwrap();
+        let message: MpcMessage = serde_json::from_slice(&message).unwrap();
+
+        assert_eq!(starting_message, message);
     }
 }
