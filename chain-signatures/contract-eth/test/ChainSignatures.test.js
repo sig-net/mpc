@@ -119,13 +119,14 @@ describe("ChainSignatures", function () {
         .to.be.revertedWith("Insufficient deposit");
     });
 
-    it("Respond to a signature request", async function () {
+    it.only("Respond to a signature request", async function () {
       const payload = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9"
       const path = "test";
       const requiredDeposit = await chainSignatures.getSignatureDeposit();
 
       const tx = await chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0}, { value: requiredDeposit });
       const receipt = await tx.wait();
+      console.log("Gas used for signature request:", receipt.gasUsed.toString());
       console.log(receipt)
       const requestId = receipt.logs[0].args[0];
 
@@ -148,6 +149,7 @@ describe("ChainSignatures", function () {
       const responseEvent = receipt2.logs.find(log => 
         chainSignatures.interface.parseLog(log)?.name === "SignatureResponded"
       );
+      console.log("Gas used for signature response:", receipt2.gasUsed.toString());
       const parsedEvent = chainSignatures.interface.parseLog(responseEvent);
       
       expect(parsedEvent.args[0]).to.equal(requestId);

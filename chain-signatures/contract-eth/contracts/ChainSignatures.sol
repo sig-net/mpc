@@ -119,18 +119,12 @@ contract ChainSignatures {
         require(request.requester != address(0), "Request not found");
 
         PublicKey memory expectedPublicKey = deriveKey(publicKey, request.epsilon);
-
-        // Check the signature
-        require(
-            checkECSignature(
-                expectedPublicKey,
-                _response.bigR,
-                uint256(_response.s),
-                request.payloadHash,
-                _response.recoveryId
-            ),
-            "Invalid signature"
-        );
+        // Derive Ethereum address from public key
+        bytes32 pkHash = keccak256(abi.encodePacked(expectedPublicKey.x, expectedPublicKey.y));
+        address expectedSigner = address(uint160(uint256(pkHash)));
+        // Verify the signer is the derived address using ecrecover
+        address recoveredSigner = ecrecover(bytes32(request.payloadHash), _response.recoveryId+27, bytes32(_response.bigR.x), bytes32(_response.s));
+        require(recoveredSigner == expectedSigner, "Invalid signature");
 
         emit SignatureResponded(_requestId, _response);
 
