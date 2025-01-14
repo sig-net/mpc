@@ -119,6 +119,22 @@ resource "google_cloud_run_v2_service" "node" {
         value = var.sk_share_secret_id
       }
       env {
+        name  = "MPC_INDEXER_ETH_RPC_URL"
+        value = var.eth_rpc_url
+      }
+      env {
+        name  = "MPC_INDEXER_ETH_CONTRACT_ADDRESS"
+        value = var.eth_contract_address
+      }
+      env {
+        name  = "MPC_INDEXER_ETH_START_BLOCK"
+        value = var.eth_start_block
+      }
+      env {
+        name  = "MPC_ETH_ACCOUNT_SK"
+        value = var.eth_account_sk
+      }
+      env {
         name  = "MPC_ENV"
         value = var.env
       }

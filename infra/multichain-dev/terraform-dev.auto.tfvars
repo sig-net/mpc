@@ -7,6 +7,9 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-dev-0"
     sign_sk_secret_id    = "multichain-sign-sk-dev-0"
     sk_share_secret_id   = "multichain-sk-share-dev-0"
+    eth_rpc_url          = "https://sepolia.infura.io/v3/<infura-api-key>"
+    eth_start_block      = 0
+    eth_account_sk       = "multichain-eth-account-sk-dev-0" 
     ip_address           = "10.101.0.56"
   },
   {
@@ -16,6 +19,9 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-dev-1"
     sign_sk_secret_id    = "multichain-sign-sk-dev-1"
     sk_share_secret_id   = "multichain-sk-share-dev-1"
+    eth_rpc_url          = "https://sepolia.infura.io/v3/<infura-api-key>"
+    eth_start_block      = 0
+    eth_account_sk       = "multichain-eth-account-sk-dev-1" 
     ip_address           = "10.101.0.81"
   },
   {
@@ -25,6 +31,9 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-dev-2"
     sign_sk_secret_id    = "multichain-sign-sk-dev-2"
     sk_share_secret_id   = "multichain-sk-share-dev-2"
+    eth_rpc_url          = "https://sepolia.infura.io/v3/<infura-api-key>"
+    eth_start_block      = 0
+    eth_account_sk       = "multichain-eth-account-sk-dev-2" 
     ip_address           = "10.101.0.57"
   },
   {
@@ -34,6 +43,9 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-dev-3"
     sign_sk_secret_id    = "multichain-sign-sk-dev-3"
     sk_share_secret_id   = "multichain-sk-share-dev-3"
+    eth_rpc_url          = "https://sepolia.infura.io/v3/<infura-api-key>"
+    eth_start_block      = 0
+    eth_account_sk       = "multichain-eth-account-sk-dev-3" 
     ip_address           = "10.101.0.129"
   },
   {
@@ -43,6 +55,9 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-dev-4"
     sign_sk_secret_id    = "multichain-sign-sk-dev-4"
     sk_share_secret_id   = "multichain-sk-share-dev-4"
+    eth_rpc_url          = "https://sepolia.infura.io/v3/<infura-api-key>"
+    eth_start_block      = 0
+    eth_account_sk       = "multichain-eth-account-sk-dev-4" 
     ip_address           = "10.101.0.124"
   },
   {
@@ -52,6 +67,9 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-dev-5"
     sign_sk_secret_id    = "multichain-sign-sk-dev-5"
     sk_share_secret_id   = "multichain-sk-share-dev-5"
+    eth_rpc_url          = "https://sepolia.infura.io/v3/<infura-api-key>"
+    eth_start_block      = 0
+    eth_account_sk       = "multichain-eth-account-sk-dev-5" 
     ip_address           = "10.101.0.101"
   },
   {
@@ -61,6 +79,9 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-dev-6"
     sign_sk_secret_id    = "multichain-sign-sk-dev-6"
     sk_share_secret_id   = "multichain-sk-share-dev-6"
+    eth_rpc_url          = "https://sepolia.infura.io/v3/<infura-api-key>"
+    eth_start_block      = 0
+    eth_account_sk       = "multichain-eth-account-sk-dev-6" 
     ip_address           = "10.101.0.122"
   },
   {
@@ -70,6 +91,9 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-dev-7"
     sign_sk_secret_id    = "multichain-sign-sk-dev-7"
     sk_share_secret_id   = "multichain-sk-share-dev-7"
+    eth_rpc_url          = "https://sepolia.infura.io/v3/<infura-api-key>"
+    eth_start_block      = 0
+    eth_account_sk       = "multichain-eth-account-sk-dev-7" 
     ip_address           = "10.101.0.123"
   },
   {
@@ -79,6 +103,9 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-dev-8"
     sign_sk_secret_id    = "multichain-sign-sk-dev-8"
     sk_share_secret_id   = "multichain-sk-share-dev-8"
+    eth_rpc_url          = "https://sepolia.infura.io/v3/<infura-api-key>"
+    eth_start_block      = 0
+    eth_account_sk       = "multichain-eth-account-sk-dev-8" 
     ip_address           = "10.101.0.125"
   },
   {
@@ -88,6 +115,9 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-dev-9"
     sign_sk_secret_id    = "multichain-sign-sk-dev-9"
     sk_share_secret_id   = "multichain-sk-share-dev-9"
+    eth_rpc_url          = "https://sepolia.infura.io/v3/<infura-api-key>"
+    eth_start_block      = 0
+    eth_account_sk       = "multichain-eth-account-sk-dev-9" 
     ip_address           = "10.101.0.126"
   },
   {
@@ -97,6 +127,9 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-dev-10"
     sign_sk_secret_id    = "multichain-sign-sk-dev-10"
     sk_share_secret_id   = "multichain-sk-share-dev-10"
+    eth_rpc_url          = "https://sepolia.infura.io/v3/<infura-api-key>"
+    eth_start_block      = 0
+    eth_account_sk       = "multichain-eth-account-sk-dev-10" 
     ip_address           = "10.101.0.127"
   },
   {
@@ -106,6 +139,9 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-dev-11"
     sign_sk_secret_id    = "multichain-sign-sk-dev-11"
     sk_share_secret_id   = "multichain-sk-share-dev-11"
+    eth_rpc_url          = "https://sepolia.infura.io/v3/<infura-api-key>"
+    eth_start_block      = 0
+    eth_account_sk       = "multichain-eth-account-sk-dev-11" 
     ip_address           = "10.101.0.128"
   },
 ]

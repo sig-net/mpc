@@ -71,8 +71,24 @@ module "gce-container" {
         value = var.node_configs["${count.index}"].sk_share_secret_id
       },
       {
+        name  = "MPC_INDEXER_ETH_RPC_URL"
+        value = var.node_configs["${count.index}"].eth_rpc_url
+      },
+      {
+        name  = "MPC_INDEXER_ETH_START_BLOCK"
+        value = var.node_configs["${count.index}"].eth_start_block
+      },
+      {
+        name  = "MPC_ETH_ACCOUNT_SK"
+        value = var.node_configs["${count.index}"].eth_account_sk
+      },
+      {
         name  = "MPC_ENV",
         value = var.env
+      },
+      {
+        name  = "MPC_INDEXER_ETH_CONTRACT_ADDRESS"
+        value = var.eth_contract_address
       },
       {
         name  = "MPC_REDIS_URL",

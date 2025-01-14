@@ -83,3 +83,19 @@ variable "aws_secret_key_secret_id" {
 variable "sk_share_secret_id" {
   type = string
 }
+
+variable "eth_rpc_url" {
+  type = string
+}
+
+variable "eth_contract_address" {
+  type = string
+}
+
+variable "eth_start_block" {
+  type = int
+}
+
+variable "eth_account_sk" {
+  type = string
+}

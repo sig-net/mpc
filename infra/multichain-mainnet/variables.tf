@@ -77,6 +77,9 @@ variable "node_configs" {
     cipher_sk_secret_id  = string
     sign_sk_secret_id    = string
     sk_share_secret_id   = string
+    eth_rpc_url          = string
+    eth_start_block      = int
+    eth_account_sk       = string
     domain               = string
   }))
 }
@@ -127,6 +130,10 @@ variable "static_env" {
     {
       name  = "MPC_CLIENT_HEADER_REFERER"
       value = "https://multichain-partner-mainnet-pagoda.api.pagoda.co"
+    },
+    {
+      name  = "MPC_INDEXER_ETH_CONTRACT_ADDRESS"
+      value = "tbd"
     }
   ]
 }

@@ -75,6 +75,9 @@ variable "node_configs" {
     cipher_sk_secret_id  = string
     sign_sk_secret_id    = string
     sk_share_secret_id   = string
+    eth_rpc_url          = string
+    eth_start_block      = int
+    eth_account_sk       = string
     ip_address           = string
   }))
 }
@@ -122,6 +125,10 @@ variable "static_env" {
     {
       name  = "MPC_INDEXER_S3_REGION"
       value = "eu-central-1"
+    },
+    {
+      name  = "MPC_INDEXER_ETH_CONTRACT_ADDRESS"
+      value = "tbd"
     }
   ]
 }
