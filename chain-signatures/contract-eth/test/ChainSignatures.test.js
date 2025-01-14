@@ -104,8 +104,9 @@ describe("ChainSignatures", function () {
           ["bytes32", "address", "string"],
           [payload, addr1.address, path]
         );
+      const derivedPublicKey = await chainSignatures.derivedPublicKey(path, addr1.address);
 
-      await expect(chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0}, { value: requiredDeposit }))
+      await expect(chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0, derivedPublicKey: {x: derivedPublicKey.x, y: derivedPublicKey.y}}, { value: requiredDeposit }))
         .to.emit(chainSignatures, "SignatureRequested")
         .withArgs(requestId, addr1.address, epsilon, payload, path);
     });
@@ -114,25 +115,26 @@ describe("ChainSignatures", function () {
       const payload = ethers.keccak256(ethers.toUtf8Bytes("Test payload"));
       const path = "test/path";
       const requiredDeposit = await chainSignatures.getSignatureDeposit();
+      const derivedPublicKey = await chainSignatures.derivedPublicKey(path, addr1.address);
 
-      await expect(chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0}, { value: requiredDeposit - 1n }))
+      await expect(chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0, derivedPublicKey: {x: derivedPublicKey.x, y: derivedPublicKey.y}}, { value: requiredDeposit - 1n }))
         .to.be.revertedWith("Insufficient deposit");
     });
 
-    it.only("Respond to a signature request", async function () {
+    it("Respond to a signature request", async function () {
       const payload = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9"
       const path = "test";
       const requiredDeposit = await chainSignatures.getSignatureDeposit();
+      const derivedKey = [4, 190, 143, 8, 126, 40, 72, 115, 4, 123, 130, 29, 196, 122, 34, 228, 26, 20, 35, 250, 206, 151, 165, 156, 80, 108, 174, 28, 201, 170, 194, 76, 62, 12, 129, 226, 158, 161, 199, 99, 154, 106, 237, 60, 51, 66, 251, 34, 189, 109, 197, 189, 114, 141, 17, 10, 82, 55, 232, 178, 0, 131, 170, 202, 41];
+      const derivedKeyX = '0x' + derivedKey.slice(1, 33).map(byte => byte.toString(16).padStart(2, '0')).join('');
+      const derivedKeyY = '0x' + derivedKey.slice(33).map(byte => byte.toString(16).padStart(2, '0')).join('');
 
-      const tx = await chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0}, { value: requiredDeposit });
+      const tx = await chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0, derivedPublicKey: {x: derivedKeyX, y: derivedKeyY}}, { value: requiredDeposit });
       const receipt = await tx.wait();
       console.log("Gas used for signature request:", receipt.gasUsed.toString());
       console.log(receipt)
       const requestId = receipt.logs[0].args[0];
 
-      const derivedKey = [4, 190, 143, 8, 126, 40, 72, 115, 4, 123, 130, 29, 196, 122, 34, 228, 26, 20, 35, 250, 206, 151, 165, 156, 80, 108, 174, 28, 201, 170, 194, 76, 62, 12, 129, 226, 158, 161, 199, 99, 154, 106, 237, 60, 51, 66, 251, 34, 189, 109, 197, 189, 114, 141, 17, 10, 82, 55, 232, 178, 0, 131, 170, 202, 41];
-      const derivedKeyX = '0x' + derivedKey.slice(1, 33).map(byte => byte.toString(16).padStart(2, '0')).join('');
-      const derivedKeyY = '0x' + derivedKey.slice(33).map(byte => byte.toString(16).padStart(2, '0')).join('');
       const bigR = [4, 235, 32, 243, 182, 197, 136, 46, 1, 139, 239, 143, 68, 206, 69, 33, 21, 197, 53, 152, 61, 231, 35, 110, 41, 52, 59, 59, 197, 198, 72, 248, 149, 64, 216, 248, 234, 27, 102, 47, 185, 225, 141, 23, 254, 91, 155, 253, 111, 45, 62, 172, 73, 217, 254, 251, 168, 191, 184, 149, 228, 119, 12, 209, 248];
       const bigRX = '0x' + bigR.slice(1, 33).map(byte => byte.toString(16).padStart(2, '0')).join('');
       const bigRY = '0x' + bigR.slice(33).map(byte => byte.toString(16).padStart(2, '0')).join('');
@@ -168,7 +170,8 @@ describe("ChainSignatures", function () {
         const payload = ethers.keccak256(ethers.toUtf8Bytes(`Test payload ${i}`));
         const path = `test/path/${i}`;
         const requiredDeposit = await chainSignatures.getSignatureDeposit();
-        await chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0}, { value: requiredDeposit });
+        const derivedPublicKey = await chainSignatures.derivedPublicKey(path, addr1.address);
+        await chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0, derivedPublicKey: {x: derivedPublicKey.x, y: derivedPublicKey.y}}, { value: requiredDeposit });
       }
 
       expect(await chainSignatures.getSignatureDeposit()).to.equal(ethers.parseEther("0.004"));

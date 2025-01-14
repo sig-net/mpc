@@ -13,6 +13,7 @@ async function main() {
   } else {
     throw new Error('Unsupported network specified. Use "localhost" or "sepolia"');
   }
+  console.log("network", network, "contractAddress", contractAddress);
 
   
   const chainSignatures = await hre.ethers.getContractFactory("ChainSignatures")
@@ -38,19 +39,18 @@ async function main() {
   // Request to ign a test message
   try {
     const testMessage = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9";
-    const testPath = "test";
+    const testPath = "test2";
     const signatureDeposit = await chainSignatures.getSignatureDeposit();
+    const signer = (await hre.ethers.getSigners())[0];
+    const derivedPublicKey = await chainSignatures.derivedPublicKey(testPath, signer.address);
     
     console.log("Requesting signature for message:", testMessage);
     console.log("Using path:", testPath);
     console.log("Required deposit:", signatureDeposit.toString(), "wei");
 
-    // Get signer and make sure it's connected to the provider
-    // const signer = (await hre.ethers.getSigners())[1];
-    const signer = (await hre.ethers.getSigners())[0];
     const chainSignaturesWithSigner = chainSignatures.connect(signer);
     
-    const tx = await chainSignaturesWithSigner.sign({payload: testMessage, path: testPath, keyVersion: 0}, {
+    const tx = await chainSignaturesWithSigner.sign({payload: testMessage, path: testPath, keyVersion: 0, derivedPublicKey: {x: derivedPublicKey.x, y: derivedPublicKey.y}}, {
       value: signatureDeposit
     });
     const receipt = await tx.wait();

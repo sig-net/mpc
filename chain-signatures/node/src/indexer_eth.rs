@@ -1,6 +1,6 @@
 use crate::storage::app_data_storage::AppDataStorage;
 use crate::indexer::ContractSignRequest;
-use crate::protocol::{SignQueue, SignRequest};
+use crate::protocol::SignRequest;
 use crypto_shared::kdf::derive_epsilon_eth;
 use crypto_shared::ScalarExt;
 use k256::Scalar;
