@@ -17,10 +17,8 @@ use futures::StreamExt;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
-use mpc_node::http_client;
-use mpc_node::mesh;
-use mpc_node::storage;
 use mpc_node::storage::triple_storage::TripleStorage;
+use mpc_node::{mesh, node_client, storage};
 use near_crypto::KeyFile;
 use near_workspaces::network::{Sandbox, ValidatorKey};
 use near_workspaces::types::{KeyType, SecretKey};
@@ -203,7 +201,7 @@ pub struct Context {
     pub redis: crate::containers::Redis,
     pub storage_options: storage::Options,
     pub mesh_options: mesh::Options,
-    pub message_options: http_client::Options,
+    pub message_options: node_client::Options,
 }
 
 pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context> {
@@ -239,11 +237,13 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context> {
     };
 
     let mesh_options = mpc_node::mesh::Options {
-        fetch_participant_timeout: 1000,
         refresh_active_timeout: 1000,
     };
 
-    let message_options = http_client::Options { timeout: 1000 };
+    let message_options = node_client::Options {
+        timeout: 1000,
+        state_timeout: 1000,
+    };
 
     Ok(Context {
         docker_client: docker_client.clone(),

@@ -3,22 +3,19 @@ use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
 use tokio::sync::RwLock;
-use url::Url;
 
+use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
-use crate::protocol::ParticipantInfo;
 use crate::protocol::ProtocolState;
 use crate::web::StateView;
-use mpc_keys::hpke::Ciphered;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
 // TODO: this is a basic connection pool and does not do most of the work yet. This is
 //       mostly here just to facilitate offline node handling for now.
 // TODO/NOTE: we can use libp2p to facilitate most the of low level TCP connection work.
-#[derive(Default)]
 pub struct Pool {
-    http: reqwest::Client,
+    client: NodeClient,
     connections: RwLock<Participants>,
     potential_connections: RwLock<Participants>,
     status: RwLock<HashMap<Participant, StateView>>,
@@ -27,37 +24,19 @@ pub struct Pool {
     current_active: RwLock<Option<(Participants, Instant)>>,
     // Potentially active participants that we can use to establish a connection in the next epoch.
     potential_active: RwLock<Option<(Participants, Instant)>>,
-    fetch_participant_timeout: Duration,
     refresh_active_timeout: Duration,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum FetchParticipantError {
-    #[error("request timed out")]
-    Timeout,
-    #[error("Response cannot be converted to JSON")]
-    JsonConversion,
-    #[error("Invalid URL")]
-    InvalidUrl,
-    #[error("Network error: {0}")]
-    NetworkError(String),
-}
-
 impl Pool {
-    pub fn new(fetch_participant_timeout: Duration, refresh_active_timeout: Duration) -> Self {
-        tracing::info!(
-            ?fetch_participant_timeout,
-            ?refresh_active_timeout,
-            "creating a new pool"
-        );
+    pub fn new(client: &NodeClient, refresh_active_timeout: Duration) -> Self {
+        tracing::info!(?refresh_active_timeout, "creating a new pool");
         Self {
-            http: reqwest::Client::new(),
+            client: client.clone(),
             connections: RwLock::new(Participants::default()),
             potential_connections: RwLock::new(Participants::default()),
             status: RwLock::new(HashMap::default()),
             current_active: RwLock::new(Option::default()),
             potential_active: RwLock::new(Option::default()),
-            fetch_participant_timeout,
             refresh_active_timeout,
         }
     }
@@ -82,8 +61,8 @@ impl Pool {
             let pool = Arc::clone(&self);
 
             join_set.spawn(async move {
-                match pool.fetch_participant_state(&info).await {
-                    Ok(state) => match pool.send_empty_msg(&participant, &info).await {
+                match pool.client.state(&info.url).await {
+                    Ok(state) => match pool.client.msg_empty(&info.url).await {
                         Ok(()) => Ok((participant, state, info)),
                         Err(e) => {
                             tracing::warn!(
@@ -151,8 +130,8 @@ impl Pool {
             let pool = Arc::clone(&self); // Clone Arc for use inside tasks
 
             join_set.spawn(async move {
-                match pool.fetch_participant_state(&info).await {
-                    Ok(state) => match pool.send_empty_msg(&participant, &info).await {
+                match pool.client.state(&info.url).await {
+                    Ok(state) => match pool.client.msg_empty(&info.url).await {
                         Ok(()) => Ok((participant, state, info)),
                         Err(e) => {
                             tracing::warn!(
@@ -262,43 +241,5 @@ impl Pool {
             }
         }
         stable
-    }
-
-    async fn fetch_participant_state(
-        &self,
-        participant_info: &ParticipantInfo,
-    ) -> Result<StateView, FetchParticipantError> {
-        let Ok(Ok(url)) = Url::parse(&participant_info.url).map(|url| url.join("/state")) else {
-            return Err(FetchParticipantError::InvalidUrl);
-        };
-        match tokio::time::timeout(
-            self.fetch_participant_timeout,
-            self.http.get(url.clone()).send(),
-        )
-        .await
-        {
-            Ok(Ok(resp)) => match resp.json::<StateView>().await {
-                Ok(state) => Ok(state),
-                Err(_) => Err(FetchParticipantError::JsonConversion),
-            },
-            Ok(Err(e)) => Err(FetchParticipantError::NetworkError(e.to_string())),
-            Err(_) => Err(FetchParticipantError::Timeout),
-        }
-    }
-
-    async fn send_empty_msg(
-        &self,
-        participant: &Participant,
-        participant_info: &ParticipantInfo,
-    ) -> Result<(), crate::http_client::SendError> {
-        let empty_msg: Vec<Ciphered> = Vec::new();
-        crate::http_client::send_encrypted(
-            *participant,
-            &self.http,
-            participant_info.url.clone(),
-            empty_msg,
-            self.fetch_participant_timeout,
-        )
-        .await
     }
 }
