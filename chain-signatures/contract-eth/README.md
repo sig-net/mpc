@@ -106,3 +106,19 @@ npx hardhat run scripts/requestSign.js --network sepolia
 ```
 
 Wait a moment, you should see the signature response from MPC printed by requestSign.js.
+
+Note that everything is slower on Sepolia compared to local. Expect more than 10 seconds to deploy the contract and request a signature.
+
+## Gas Optimization
+
+Contract before [this commit](https://github.com/sig-net/mpc/pull/58/commits/b4fab2a22195efef8c86dd7e620a130b76d6708c) uses 3.8M unit of gas to respond, which is too high, about 10x of a uniswap swap. It was using the most gas efficient [implementation](https://github.com/witnet/elliptic-curve-solidity) of Secp256k1 curve and strictly follows the verification logic of the NEAR contract.
+
+After [this commit](https://github.com/sig-net/mpc/pull/58/commits/f2308fe3c7352aa0fb6cec6eb868895e6c5bd4ed), the gas cost is reduced to only 53k, this is only 1/7 of a uniswap swap, or only 2.5x of a eth transfer. (Uniswap swap is about 356k gas, eth transfer is about 21k gas). The optimizations are making the contract not the same logic and not the same interface as the NEAR version, described below:
+
+1. Use eth precompiled ecrecover instead of library implemented ecrecover. The precompiled ecrecover is considered as native version and use very little gas. However, it doesn't recover a public key, but an address, which you can consider as a hash of the public key. Previously we compare recovered public key with expected public key. Now we verify the recover by comparing the recovered addresswith the expected public key's hash address.
+
+2. Use ecrecover to hack the ECMUL operation. Ethereum has a ECMUL precompiled contract, but it is not for Secp256k1 curve. Based on [this calculation](https://ethresear.ch/t/you-can-kinda-abuse-ecrecover-to-do-ecmul-in-secp256k1-today/2384), we can verify a ECMUL on Secp256k1 curve cheaply by using ecrecover. Note that it is a verify of ECMUL, not ECMUL itself, therefore user has to calculate the ECMUL result and pass to the contract.
+
+After 1, the respond gas cost is reduced to 1.2M. After 2, the respond gas cost is reduced to 260K. Then we can further reduce the respond gas cost by moving the verify ECMUL operation to sign, so sign gas cost increased from 140k to 350k, and respond gas cost reduced to 53k. The sign gas cost, paid by user, is similar to a uniswap swap and the respond gas, which is paid by the mpc node runner to a very cheap level.
+
+There are certain small gas optimizations possible to reduce a little more gas, but at this stage I think it is not a priority.

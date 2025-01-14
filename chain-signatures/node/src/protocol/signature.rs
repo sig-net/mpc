@@ -847,7 +847,7 @@ impl SignatureManager {
                     let txn = web3::types::TransactionParameters {
                         to: Some(contract.address()),
                         data: web3::types::Bytes(data),
-                        gas: web3::types::U256::from(53_000),
+                        gas: web3::types::U256::from(100_000),
                         ..Default::default()
                     };
 
