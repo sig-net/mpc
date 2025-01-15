@@ -126,6 +126,7 @@ impl MpcSignProtocol {
         my_address: U,
         mpc_contract_id: AccountId,
         account_id: AccountId,
+        state: Arc<RwLock<NodeState>>,
         rpc_client: near_fetch::Client,
         signer: InMemorySigner,
         channel: MessageChannel,
@@ -133,7 +134,7 @@ impl MpcSignProtocol {
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
-    ) -> (Self, Arc<RwLock<NodeState>>) {
+    ) -> Self {
         let my_address = my_address.into_url().unwrap();
         let rpc_url = rpc_client.rpc_addr();
         let signer_account_id: AccountId = signer.clone().account_id;
@@ -145,7 +146,6 @@ impl MpcSignProtocol {
             ?signer_account_id,
             "initializing protocol with parameters"
         );
-        let state = Arc::new(RwLock::new(NodeState::Starting));
         let ctx = Ctx {
             my_address,
             account_id,
@@ -157,12 +157,11 @@ impl MpcSignProtocol {
             triple_storage,
             presignature_storage,
         };
-        let protocol = MpcSignProtocol {
+        MpcSignProtocol {
             ctx,
             channel,
-            state: state.clone(),
-        };
-        (protocol, state)
+            state,
+        }
     }
 
     pub async fn run(

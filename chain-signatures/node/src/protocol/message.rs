@@ -188,14 +188,16 @@ impl MessageInbox {
         }
     }
 
-    pub fn extend(&mut self, incoming: &mut mpsc::Receiver<Message>) -> usize {
+    pub async fn extend_decrypt(
+        &mut self,
+        cipher_sk: &hpke::SecretKey,
+        protocol_state: &Arc<RwLock<NodeState>>,
+        incoming: &mut mpsc::Receiver<Ciphered>,
+    ) -> usize {
         let mut count = 0;
         loop {
-            let msg = match incoming.try_recv() {
-                Ok(msg) => {
-                    count += 1;
-                    msg
-                }
+            let encrypted = match incoming.try_recv() {
+                Ok(msg) => msg,
                 Err(TryRecvError::Empty) => {
                     break;
                 }
@@ -206,19 +208,33 @@ impl MessageInbox {
                     break;
                 }
             };
-            self.push(msg);
+
+            let messages: Vec<Message> =
+                match SignedMessage::decrypt(cipher_sk, protocol_state, encrypted).await {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        tracing::error!(?err, "failed to decrypt or verify an encrypted message");
+                        continue;
+                    }
+                };
+
+            count += messages.len();
+            for msg in messages {
+                self.push(msg);
+            }
         }
         count
     }
 }
 
 struct MessageExecutor {
-    incoming: mpsc::Receiver<Message>,
+    incoming: mpsc::Receiver<Ciphered>,
     outgoing: mpsc::Receiver<SendMessage>,
     inbox: Arc<RwLock<MessageInbox>>,
     outbox: MessageOutbox,
 
     config: Arc<RwLock<Config>>,
+    protocol_state: Arc<RwLock<NodeState>>,
     mesh_state: Arc<RwLock<MeshState>>,
 }
 
@@ -227,15 +243,21 @@ impl MessageExecutor {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
             interval.tick().await;
-            self.inbox.write().await.extend(&mut self.incoming);
-
-            let (sign_sk, protocol) = {
+            let (sign_sk, cipher_sk, protocol) = {
                 let config = self.config.read().await;
                 (
                     config.local.network.sign_sk.clone(),
+                    config.local.network.cipher_sk.clone(),
                     config.protocol.clone(),
                 )
             };
+
+            self.inbox
+                .write()
+                .await
+                .extend_decrypt(&cipher_sk, &self.protocol_state, &mut self.incoming)
+                .await;
+
             let active = {
                 let mesh_state = self.mesh_state.read().await;
                 mesh_state.active_with_potential()
@@ -261,8 +283,9 @@ impl MessageChannel {
         client: NodeClient,
         id: &AccountId,
         config: &Arc<RwLock<Config>>,
+        protocol_state: &Arc<RwLock<NodeState>>,
         mesh_state: &Arc<RwLock<MeshState>>,
-    ) -> (mpsc::Sender<Message>, Self) {
+    ) -> (mpsc::Sender<Ciphered>, Self) {
         let (incoming_tx, incoming_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
 
@@ -271,9 +294,11 @@ impl MessageChannel {
             incoming: incoming_rx,
             outgoing: outgoing_rx,
             inbox: inbox.clone(),
-            config: config.clone(),
-            mesh_state: mesh_state.clone(),
             outbox: MessageOutbox::new(client, id),
+
+            config: config.clone(),
+            protocol_state: protocol_state.clone(),
+            mesh_state: mesh_state.clone(),
         };
 
         (
@@ -745,15 +770,6 @@ impl MessageOutbox {
         }
     }
 
-    pub fn compact(&mut self) -> HashMap<MessageRoute, Vec<Partition>> {
-        let mut compacted = HashMap::new();
-        for (route, messages) in self.messages.drain() {
-            let entry = compacted.entry(route).or_insert_with(Vec::new);
-            entry.extend(partition_256kb(messages));
-        }
-        compacted
-    }
-
     pub fn extend(&mut self, outgoing: &mut mpsc::Receiver<SendMessage>) {
         let mut message_count: i64 = 0;
         loop {
@@ -770,7 +786,7 @@ impl MessageOutbox {
                 }
             };
             // add it to the outbox and sort it by from and to participant
-            let entry = self.messages.entry((from, to)).or_insert_with(Vec::new);
+            let entry = self.messages.entry((from, to)).or_default();
             entry.push((msg, timestamp));
             message_count += 1;
         }
@@ -803,6 +819,16 @@ impl MessageOutbox {
         if !timeouts.is_empty() {
             tracing::warn!(?timeouts, "messages expired");
         }
+    }
+
+    /// Compact the messages in the outbox into partitions of at most 256kb.
+    pub fn compact(&mut self) -> HashMap<MessageRoute, Vec<Partition>> {
+        let mut compacted = HashMap::new();
+        for (route, messages) in self.messages.drain() {
+            let entry = compacted.entry(route).or_insert_with(Vec::new);
+            entry.extend(partition_256kb(messages));
+        }
+        compacted
     }
 
     /// Encrypt all the messages in the outbox and return a map of participant to encrypted messages.
@@ -859,7 +885,7 @@ impl MessageOutbox {
 
         // Add back the failed attempts for next time.
         for (route, partitions) in retry {
-            let entry = self.messages.entry(route).or_insert_with(Vec::new);
+            let entry = self.messages.entry(route).or_default();
             for partition in partitions {
                 entry.extend(
                     partition
@@ -949,7 +975,7 @@ impl MessageOutbox {
 
         // Add back the failed attempts for next time.
         for (route, partition) in retry {
-            let entry = self.messages.entry(route).or_insert_with(Vec::new);
+            let entry = self.messages.entry(route).or_default();
             entry.extend(
                 partition
                     .messages
@@ -973,8 +999,8 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
         if current_size + bytesize > 256 * 1024 {
             // If adding this byte vector exceeds 256kb, start a new partition
             partitions.push(Partition {
-                messages: std::mem::replace(&mut current_messages, Vec::new()),
-                timestamps: std::mem::replace(&mut current_timestamps, Vec::new()),
+                messages: std::mem::take(&mut current_messages),
+                timestamps: std::mem::take(&mut current_timestamps),
             });
             current_size = 0;
         }

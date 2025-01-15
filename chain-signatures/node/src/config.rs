@@ -72,6 +72,7 @@ pub struct LocalConfig {
 #[derive(Clone, Debug)]
 pub struct NetworkConfig {
     pub sign_sk: near_crypto::SecretKey,
+    pub cipher_sk: hpke::SecretKey,
     pub cipher_pk: hpke::PublicKey,
 }
 
@@ -82,6 +83,7 @@ impl Default for NetworkConfig {
                 near_crypto::KeyType::ED25519,
                 "test-entropy",
             ),
+            cipher_sk: hpke::SecretKey::from_bytes(&[0; 32]),
             cipher_pk: hpke::PublicKey::from_bytes(&[0; 32]),
         }
     }
