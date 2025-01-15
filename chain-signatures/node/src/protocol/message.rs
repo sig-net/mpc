@@ -1,19 +1,17 @@
 use super::contract::primitives::Participants;
-use super::cryptography::CryptographicError;
 use super::presignature::{GenerationError, PresignatureId};
 use super::signature::SignRequestIdentifier;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
-use crate::gcp::error::SecretStorageError;
 use crate::indexer::ContractSignRequest;
-use crate::node_client::{NodeClient, SendError};
+use crate::node_client::NodeClient;
 use crate::protocol::Config;
 use crate::protocol::MeshState;
 use crate::types::Epoch;
 use crate::util;
 
 use async_trait::async_trait;
-use cait_sith::protocol::{InitializationError, MessageData, Participant, ProtocolError};
+use cait_sith::protocol::{MessageData, Participant};
 use k256::Scalar;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
@@ -306,46 +304,15 @@ impl MessageChannel {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum MessageRecvError {
-    #[error("cait-sith initialization error: {0}")]
-    CaitSithInitializationError(#[from] InitializationError),
-    #[error("cait-sith protocol error: {0}")]
-    CaitSithProtocolError(#[from] ProtocolError),
-    #[error("sync failed: {0}")]
-    SyncError(String),
-    #[error("failed to send a message: {0}")]
-    SendError(SendError),
+pub enum MessageError {
     #[error("unknown participant: {0:?}")]
     UnknownParticipant(Participant),
     #[error(transparent)]
-    DataConversion(#[from] serde_json::Error),
+    JsonConversion(#[from] serde_json::Error),
+    #[error(transparent)]
+    BinaryConversion(#[from] bincode::Error),
     #[error("encryption failed: {0}")]
     Encryption(String),
-    #[error("invalid state")]
-    InvalidStateHandle(String),
-    #[error("rpc error: {0}")]
-    RpcError(#[from] near_fetch::Error),
-    #[error("secret storage error: {0}")]
-    SecretStorageError(#[from] SecretStorageError),
-}
-
-impl From<CryptographicError> for MessageRecvError {
-    fn from(value: CryptographicError) -> Self {
-        match value {
-            CryptographicError::CaitSithInitializationError(e) => {
-                Self::CaitSithInitializationError(e)
-            }
-            CryptographicError::CaitSithProtocolError(e) => Self::CaitSithProtocolError(e),
-            CryptographicError::SyncError(e) => Self::SyncError(e),
-            CryptographicError::SendError(e) => Self::SendError(e),
-            CryptographicError::UnknownParticipant(e) => Self::UnknownParticipant(e),
-            CryptographicError::DataConversion(e) => Self::DataConversion(e),
-            CryptographicError::Encryption(e) => Self::Encryption(e),
-            CryptographicError::InvalidStateHandle(e) => Self::InvalidStateHandle(e),
-            CryptographicError::RpcError(e) => Self::RpcError(e),
-            CryptographicError::SecretStorageError(e) => Self::SecretStorageError(e),
-        }
-    }
 }
 
 #[async_trait]
@@ -355,7 +322,7 @@ pub trait MessageReceiver {
         channel: &MessageChannel,
         cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<(), MessageRecvError>;
+    ) -> Result<(), MessageError>;
 }
 
 #[async_trait]
@@ -365,7 +332,7 @@ impl MessageReceiver for GeneratingState {
         channel: &MessageChannel,
         _cfg: Config,
         _mesh_state: MeshState,
-    ) -> Result<(), MessageRecvError> {
+    ) -> Result<(), MessageError> {
         let mut inbox = channel.inbox().write().await;
         let mut protocol = self.protocol.write().await;
         while let Some(msg) = inbox.generating.pop_front() {
@@ -383,7 +350,7 @@ impl MessageReceiver for ResharingState {
         channel: &MessageChannel,
         _cfg: Config,
         _mesh_state: MeshState,
-    ) -> Result<(), MessageRecvError> {
+    ) -> Result<(), MessageError> {
         let mut inbox = channel.inbox().write().await;
         tracing::debug!("handling {} resharing messages", inbox.resharing.len());
         let q = inbox.resharing.entry(self.old_epoch).or_default();
@@ -402,7 +369,7 @@ impl MessageReceiver for RunningState {
         channel: &MessageChannel,
         cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<(), MessageRecvError> {
+    ) -> Result<(), MessageError> {
         let protocol_cfg = &cfg.protocol;
         let participants = &mesh_state.active;
         let mut inbox = channel.inbox().write().await;
@@ -665,7 +632,7 @@ impl MessageReceiver for NodeState {
         channel: &MessageChannel,
         cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<(), MessageRecvError> {
+    ) -> Result<(), MessageError> {
         match self {
             NodeState::Generating(state) => state.recv(channel, cfg, mesh_state).await,
             NodeState::Resharing(state) => state.recv(channel, cfg, mesh_state).await,
@@ -700,7 +667,7 @@ impl SignedMessage {
         from: Participant,
         sign_sk: &near_crypto::SecretKey,
         cipher_pk: &hpke::PublicKey,
-    ) -> Result<Ciphered, CryptographicError> {
+    ) -> Result<Ciphered, MessageError> {
         let msg = bincode::serialize(&msg).unwrap();
         let sig = sign_sk.sign(&msg);
         let msg = Self { msg, sig, from };
@@ -709,7 +676,7 @@ impl SignedMessage {
             .encrypt(&msg, Self::ASSOCIATED_DATA)
             .map_err(|e| {
                 tracing::error!(error = ?e, "failed to encrypt message");
-                CryptographicError::Encryption(e.to_string())
+                MessageError::Encryption(e.to_string())
             })?;
         Ok(ciphered)
     }
@@ -718,12 +685,12 @@ impl SignedMessage {
         cipher_sk: &hpke::SecretKey,
         protocol_state: &Arc<RwLock<NodeState>>,
         encrypted: Ciphered,
-    ) -> Result<T, CryptographicError> {
+    ) -> Result<T, MessageError> {
         let msg = cipher_sk
             .decrypt(&encrypted, Self::ASSOCIATED_DATA)
             .map_err(|err| {
                 tracing::error!(error = ?err, "failed to decrypt message");
-                CryptographicError::Encryption(err.to_string())
+                MessageError::Encryption(err.to_string())
             })?;
         let Self { msg, sig, from } = bincode::deserialize(&msg).unwrap();
         if !sig.verify(
@@ -735,7 +702,7 @@ impl SignedMessage {
                 .sign_pk,
         ) {
             tracing::error!(from = ?from, "signed message erred out with invalid signature");
-            return Err(CryptographicError::Encryption(
+            return Err(MessageError::Encryption(
                 "invalid signature while verifying authenticity of encrypted protocol message"
                     .to_string(),
             ));
@@ -867,7 +834,7 @@ impl MessageOutbox {
                 ) {
                     Ok(encrypted) => encrypted,
                     Err(err) => {
-                        errors.push(SendError::EncryptionError(err.to_string()));
+                        errors.push(err);
                         continue;
                     }
                 };

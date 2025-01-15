@@ -93,7 +93,7 @@ async fn msg(
         for message in messages {
             if let Err(err) = state.sender.send(message).await {
                 tracing::error!(?err, "failed to forward an encrypted protocol message");
-                return Err(err.into());
+                return Err(Error::Internal("failed to forward an encrypted protocol message"));
             }
         }
     }

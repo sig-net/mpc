@@ -63,13 +63,7 @@ pub enum ConsensusError {
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
     #[error("secret storage error: {0}")]
-    SecretStorageError(SecretStorageError),
-}
-
-impl From<SecretStorageError> for ConsensusError {
-    fn from(err: SecretStorageError) -> Self {
-        ConsensusError::SecretStorageError(err)
-    }
+    SecretStorageError(#[from] SecretStorageError),
 }
 
 #[async_trait]

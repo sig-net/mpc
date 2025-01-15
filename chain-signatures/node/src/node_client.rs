@@ -1,4 +1,5 @@
 use crate::web::StateView;
+use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
 use reqwest::IntoUrl;
 use std::str::Utf8Error;
@@ -31,25 +32,15 @@ impl Options {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SendError {
-    #[error("http request was unsuccessful: {0}")]
-    Unsuccessful(String),
-    #[error("serialization unsuccessful: {0}")]
-    DataConversionError(serde_json::Error),
+pub enum RequestError {
+    #[error("http request was unsuccessful: {0} => {1}")]
+    Unsuccessful(StatusCode, String),
     #[error("http client error: {0}")]
-    ReqwestClientError(#[from] reqwest::Error),
+    ReqwestClient(#[from] reqwest::Error),
     #[error("http response could not be parsed: {0}")]
-    ReqwestBodyError(reqwest::Error),
+    MalformedBody(reqwest::Error),
     #[error("http response body is not valid utf-8: {0}")]
     MalformedResponse(Utf8Error),
-    #[error("encryption error: {0}")]
-    EncryptionError(String),
-    #[error("http request timeout: {0}")]
-    Timeout(String),
-    #[error("participant is not alive: {0}")]
-    ParticipantNotAlive(String),
-    #[error("cannot convert into json: {0}")]
-    Conversion(#[from] serde_json::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +60,7 @@ impl NodeClient {
         }
     }
 
-    async fn post_msg(&self, url: &Url, msg: &[Ciphered]) -> Result<(), SendError> {
+    async fn post_msg(&self, url: &Url, msg: &[Ciphered]) -> Result<(), RequestError> {
         let resp = self
             .http
             .post(url.clone())
@@ -82,14 +73,15 @@ impl NodeClient {
         if status.is_success() {
             Ok(())
         } else {
-            let bytes = resp.bytes().await.map_err(SendError::ReqwestBodyError)?;
-            let resp = std::str::from_utf8(&bytes).map_err(SendError::MalformedResponse)?;
+            // TODO: parse response body and convert to mpc_node::Error type.
+            let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+            let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
             tracing::warn!("failed to send a message to {url} with code {status}: {resp}");
-            Err(SendError::Unsuccessful(resp.into()))
+            Err(RequestError::Unsuccessful(status, resp.into()))
         }
     }
 
-    pub async fn msg(&self, base: impl IntoUrl, msg: &[Ciphered]) -> Result<(), SendError> {
+    pub async fn msg(&self, base: impl IntoUrl, msg: &[Ciphered]) -> Result<(), RequestError> {
         let mut url = base.into_url()?;
         url.set_path("msg");
 
@@ -97,11 +89,11 @@ impl NodeClient {
         Retry::spawn(strategy, || self.post_msg(&url, msg)).await
     }
 
-    pub async fn msg_empty(&self, base: impl IntoUrl) -> Result<(), SendError> {
+    pub async fn msg_empty(&self, base: impl IntoUrl) -> Result<(), RequestError> {
         self.msg(base, &[]).await
     }
 
-    pub async fn state(&self, base: impl IntoUrl) -> Result<StateView, SendError> {
+    pub async fn state(&self, base: impl IntoUrl) -> Result<StateView, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("state");
 

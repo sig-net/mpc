@@ -1,18 +1,16 @@
-use std::sync::PoisonError;
-
 use super::message::MessageChannel;
 use super::signature::SignatureManager;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
-use crate::node_client::SendError;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::storage::secret_storage::SecretNodeStorageBox;
+
 use async_trait::async_trait;
-use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
+use cait_sith::protocol::{Action, InitializationError, ProtocolError};
 use k256::elliptic_curve::group::GroupEncoding;
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
@@ -28,33 +26,12 @@ pub trait CryptographicCtx {
 
 #[derive(thiserror::Error, Debug)]
 pub enum CryptographicError {
-    #[error("failed to send a message: {0}")]
-    SendError(#[from] SendError),
-    #[error("unknown participant: {0:?}")]
-    UnknownParticipant(Participant),
-    #[error("rpc error: {0}")]
-    RpcError(#[from] near_fetch::Error),
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
     #[error("cait-sith protocol error: {0}")]
     CaitSithProtocolError(#[from] ProtocolError),
-    #[error("sync failed: {0}")]
-    SyncError(String),
-    #[error(transparent)]
-    DataConversion(#[from] serde_json::Error),
-    #[error("encryption failed: {0}")]
-    Encryption(String),
-    #[error("more than one writing to state: {0}")]
-    InvalidStateHandle(String),
     #[error("secret storage error: {0}")]
     SecretStorageError(#[from] SecretStorageError),
-}
-
-impl<T> From<PoisonError<T>> for CryptographicError {
-    fn from(_: PoisonError<T>) -> Self {
-        let typename = std::any::type_name::<T>();
-        Self::SyncError(format!("PoisonError: {typename}"))
-    }
 }
 
 #[async_trait]
@@ -132,6 +109,7 @@ impl CryptographicProtocol for GeneratingState {
                         public_key = hex::encode(r.public_key.to_bytes()),
                         "generating: successfully completed key generation"
                     );
+                    // TODO: handle secret storage error
                     ctx.secret_storage()
                         .store(&PersistentNodeData {
                             epoch: 0,
@@ -219,22 +197,20 @@ impl CryptographicProtocol for ResharingState {
                 }
                 Action::SendPrivate(to, data) => {
                     tracing::debug!("resharing: sending a private message to {to:?}");
-                    match self.new_participants.get(&to) {
-                        Some(_) => {
-                            ctx.channel()
-                                .send(
-                                    self.me,
-                                    to,
-                                    ResharingMessage {
-                                        epoch: self.old_epoch,
-                                        from: self.me,
-                                        data,
-                                    },
-                                )
-                                .await;
-                        }
-                        None => return Err(CryptographicError::UnknownParticipant(to)),
+                    if self.new_participants.get(&to).is_none() {
+                        tracing::error!("resharing: send_private unknown participant {to:?}");
                     }
+                    ctx.channel()
+                        .send(
+                            self.me,
+                            to,
+                            ResharingMessage {
+                                epoch: self.old_epoch,
+                                from: self.me,
+                                data,
+                            },
+                        )
+                        .await;
                 }
                 Action::Return(private_share) => {
                     tracing::debug!("resharing: successfully completed key reshare");
