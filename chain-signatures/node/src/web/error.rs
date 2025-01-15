@@ -2,7 +2,7 @@ use axum::extract::rejection::JsonRejection;
 use reqwest::StatusCode;
 use tokio::sync::mpsc::error::SendError;
 
-use crate::protocol::{ConsensusError, CryptographicError, MpcMessage};
+use crate::protocol::{ConsensusError, CryptographicError, Message};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -17,7 +17,7 @@ pub enum Error {
     #[error(transparent)]
     Cryptography(#[from] CryptographicError),
     #[error(transparent)]
-    Message(#[from] SendError<MpcMessage>),
+    Message(#[from] SendError<Message>),
     #[error(transparent)]
     Rpc(#[from] near_fetch::Error),
 }

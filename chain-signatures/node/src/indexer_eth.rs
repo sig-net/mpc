@@ -1,21 +1,21 @@
-use crate::storage::app_data_storage::AppDataStorage;
 use crate::indexer::ContractSignRequest;
+use crate::protocol::Chain::Ethereum;
 use crate::protocol::SignRequest;
+use crate::storage::app_data_storage::AppDataStorage;
 use crypto_shared::kdf::derive_epsilon_eth;
 use crypto_shared::ScalarExt;
+use hex::ToHex;
 use k256::Scalar;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use hex::ToHex;
 use tokio::sync::{mpsc, RwLock};
 use web3::{
     types::{BlockNumber, FilterBuilder, Log, H160, H256, U256},
     Web3,
 };
-use crate::protocol::Chain::Ethereum;
 
 /// Configures Ethereum indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -119,9 +119,7 @@ impl EthIndexer {
 
     /// Check whether the indexer is behind with the latest block height from the chain.
     pub async fn is_behind(&self) -> bool {
-        if let Some(latest_block_timestamp) =
-            *self.latest_block_timestamp.read().await
-        {
+        if let Some(latest_block_timestamp) = *self.latest_block_timestamp.read().await {
             crate::util::is_elapsed_longer_than_timeout(
                 latest_block_timestamp,
                 self.behind_threshold.as_millis() as u64,
@@ -135,11 +133,7 @@ impl EthIndexer {
         !self.is_behind().await && self.is_running().await
     }
 
-    async fn update_block_height_and_timestamp(
-        &self,
-        block_height: u64,
-        block_timestamp: u64,
-    ) {
+    async fn update_block_height_and_timestamp(&self, block_height: u64, block_timestamp: u64) {
         tracing::debug!(block_height, "update_block_height_and_timestamp eth");
         self.set_last_processed_block(block_height).await;
         *self.last_updated_timestamp.write().await = Instant::now();
@@ -169,10 +163,13 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
         .topics(Some(vec![signature_requested_topic]), None, None, None)
         .build();
 
-    let block = ctx.web3.eth().block(web3::types::BlockId::Number(block_number.into()))
+    let block = ctx
+        .web3
+        .eth()
+        .block(web3::types::BlockId::Number(block_number.into()))
         .await?
         .ok_or_else(|| anyhow::anyhow!("eth block {block_number} not found"))?;
-    
+
     let block_timestamp = block.timestamp.as_u64();
 
     let logs = ctx.web3.eth().logs(filter).await?;
@@ -198,10 +195,14 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
             chain: Ethereum,
         };
 
-        let epsilon = derive_epsilon_eth(format!("0x{}", event.requester.encode_hex::<String>()), &request.path);
+        let epsilon = derive_epsilon_eth(
+            format!("0x{}", event.requester.encode_hex::<String>()),
+            &request.path,
+        );
         let mut event_epsilon_bytes: [u8; 32] = [0; 32];
         event.epsilon.to_big_endian(&mut event_epsilon_bytes);
-        let event_epsilon_scalar = Scalar::from_bytes(event_epsilon_bytes).ok_or(anyhow::anyhow!("failed to convert event epsilon to scalar"))?;
+        let event_epsilon_scalar = Scalar::from_bytes(event_epsilon_bytes)
+            .ok_or(anyhow::anyhow!("failed to convert event epsilon to scalar"))?;
         if epsilon != event_epsilon_scalar {
             tracing::warn!(
                 "epsilon mismatch: derived={:?}, event={:?}",
@@ -210,9 +211,14 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
             );
             continue;
         }
-        tracing::debug!("from epsilon: {:?} event epsilon: {:?}", epsilon, event.epsilon);
+        tracing::debug!(
+            "from epsilon: {:?} event epsilon: {:?}",
+            epsilon,
+            event.epsilon
+        );
         // Use transaction hash as entropy
-        let entropy = log.transaction_hash
+        let entropy = log
+            .transaction_hash
             .map(|h| *h.as_fixed_bytes())
             .unwrap_or([0u8; 32]);
 
@@ -315,8 +321,16 @@ pub fn run(
                         continue;
                     }
                 };
-                let latest_handled_block = context.indexer.last_processed_block().await.unwrap_or(start_block_height);
-                tracing::debug!("eth latest_block {} latest_handled_block {}", latest_block, latest_handled_block);
+                let latest_handled_block = context
+                    .indexer
+                    .last_processed_block()
+                    .await
+                    .unwrap_or(start_block_height);
+                tracing::debug!(
+                    "eth latest_block {} latest_handled_block {}",
+                    latest_block,
+                    latest_handled_block
+                );
 
                 if latest_handled_block < latest_block.as_u64() {
                     if let Err(err) = handle_block(latest_handled_block + 1, &context).await {

@@ -1,4 +1,4 @@
-use super::message::PresignatureMessage;
+use super::message::{MessageChannel, PresignatureMessage};
 use super::state::RunningState;
 use super::triple::{Triple, TripleId, TripleManager};
 use crate::protocol::contract::primitives::Participants;
@@ -554,15 +554,13 @@ impl PresignatureManager {
         }
     }
 
-    /// Pokes all of the ongoing generation protocols and returns a vector of
-    /// messages to be sent to the respective participant.
-    ///
-    /// An empty vector means we cannot progress until we receive a new message.
-    pub async fn poke(&mut self) -> Vec<(Participant, PresignatureMessage)> {
-        let mut messages = Vec::new();
+    /// Poke all ongoing presignature generation protocols to completion.
+    pub async fn poke(&mut self, channel: MessageChannel) {
         let mut errors = Vec::new();
         let mut presignatures = Vec::new();
-        self.generators.retain(|id, generator| {
+
+        let mut remove = Vec::new();
+        for (id, generator) in self.generators.iter_mut() {
             loop {
                 let action = match generator.poke() {
                     Ok(action) => action,
@@ -573,43 +571,55 @@ impl PresignatureManager {
                         self.gc.insert(*id, Instant::now());
                         self.introduced.remove(id);
                         errors.push(e);
-                        break false;
+                        remove.push(*id);
+                        break;
                     }
                 };
                 match action {
                     Action::Wait => {
                         tracing::debug!("presignature: waiting");
                         // Retain protocol until we are finished
-                        return true;
+                        break;
                     }
                     Action::SendMany(data) => {
-                        for p in generator.participants.iter() {
-                            messages.push((
-                                *p,
+                        for to in generator.participants.iter() {
+                            if *to == self.me {
+                                continue;
+                            }
+                            channel
+                                .send(
+                                    self.me,
+                                    *to,
+                                    PresignatureMessage {
+                                        id: *id,
+                                        triple0: generator.triple0,
+                                        triple1: generator.triple1,
+                                        epoch: self.epoch,
+                                        from: self.me,
+                                        data: data.clone(),
+                                        timestamp: Utc::now().timestamp() as u64,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                    Action::SendPrivate(to, data) => {
+                        channel
+                            .send(
+                                self.me,
+                                to,
                                 PresignatureMessage {
                                     id: *id,
                                     triple0: generator.triple0,
                                     triple1: generator.triple1,
                                     epoch: self.epoch,
                                     from: self.me,
-                                    data: data.clone(),
-                                    timestamp: Utc::now().timestamp() as u64
+                                    data,
+                                    timestamp: Utc::now().timestamp() as u64,
                                 },
-                            ))
-                        }
+                            )
+                            .await;
                     }
-                    Action::SendPrivate(p, data) => messages.push((
-                        p,
-                        PresignatureMessage {
-                            id: *id,
-                            triple0: generator.triple0,
-                            triple1: generator.triple1,
-                            epoch: self.epoch,
-                            from: self.me,
-                            data,
-                            timestamp: Utc::now().timestamp() as u64
-                        },
-                    )),
                     Action::Return(output) => {
                         tracing::info!(
                             id,
@@ -638,11 +648,16 @@ impl PresignatureManager {
                             .with_label_values(&[self.my_account_id.as_str()])
                             .inc();
                         // Do not retain the protocol
-                        return false;
+                        remove.push(*id);
+                        break;
                     }
                 }
             }
-        });
+        }
+
+        for id in remove {
+            self.generators.remove(&id);
+        }
 
         for (presignature, mine) in presignatures {
             self.insert(presignature, mine, false).await;
@@ -651,14 +666,13 @@ impl PresignatureManager {
         if !errors.is_empty() {
             tracing::warn!(?errors, "failed to generate some presignatures");
         }
-
-        messages
     }
 
     pub fn execute(
         state: &RunningState,
         active: &Participants,
         protocol_cfg: &ProtocolConfig,
+        channel: &MessageChannel,
     ) -> tokio::task::JoinHandle<()> {
         let triple_manager = state.triple_manager.clone();
         let presignature_manager = state.presignature_manager.clone();
@@ -666,7 +680,7 @@ impl PresignatureManager {
         let protocol_cfg = protocol_cfg.clone();
         let pk = state.public_key;
         let sk_share = state.private_share;
-        let messages = state.messages.clone();
+        let channel = channel.clone();
 
         tokio::task::spawn(async move {
             let mut presignature_manager = presignature_manager.write().await;
@@ -676,17 +690,7 @@ impl PresignatureManager {
             {
                 tracing::warn!(?err, "running: failed to stockpile presignatures");
             }
-
-            {
-                let mut messages = messages.write().await;
-                messages.extend(
-                    presignature_manager
-                        .poke()
-                        .await
-                        .into_iter()
-                        .map(|(p, msg)| (p, super::MpcMessage::Presignature(msg))),
-                );
-            }
+            presignature_manager.poke(channel).await;
 
             crate::metrics::NUM_PRESIGNATURES_MINE
                 .with_label_values(&[presignature_manager.my_account_id.as_str()])

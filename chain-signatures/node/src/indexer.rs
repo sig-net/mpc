@@ -1,6 +1,6 @@
+use crate::protocol::Chain::NEAR;
 use crate::protocol::{Chain, SignRequest};
 use crate::storage::app_data_storage::AppDataStorage;
-use crate::protocol::Chain::NEAR;
 use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
 use near_account_id::AccountId;

@@ -12,33 +12,29 @@ pub use consensus::ConsensusError;
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
-pub use message::MpcMessage;
-pub use signature::SignQueue;
-pub use signature::SignRequest;
+pub use message::{Message, MessageChannel};
+pub use signature::{SignQueue, SignRequest};
 pub use state::NodeState;
 pub use sysinfo::{Components, CpuRefreshKind, Disks, RefreshKind, System};
 
 use self::consensus::ConsensusCtx;
 use self::cryptography::CryptographicCtx;
-use self::message::MessageCtx;
 use crate::config::Config;
-use crate::http_client;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
-use crate::protocol::message::{MessageHandler, MpcMessageQueue};
+use crate::protocol::message::MessageReceiver as _;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
 
-use cait_sith::protocol::Participant;
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use reqwest::IntoUrl;
 use std::path::Path;
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::mpsc::{self, error::TryRecvError};
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use url::Url;
 use web3::Web3;
@@ -49,7 +45,6 @@ struct Ctx {
     mpc_contract_id: AccountId,
     signer: InMemorySigner,
     rpc_client: near_fetch::Client,
-    http_client: reqwest::Client,
     eth_client: Web3<web3::transports::Http>,
     eth_contract_address: String,
     eth_account_sk: String,
@@ -57,16 +52,11 @@ struct Ctx {
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
-    message_options: http_client::Options,
 }
 
 impl ConsensusCtx for &mut MpcSignProtocol {
     fn my_account_id(&self) -> &AccountId {
         &self.ctx.account_id
-    }
-
-    fn http_client(&self) -> &reqwest::Client {
-        &self.ctx.http_client
     }
 
     fn rpc_client(&self) -> &near_fetch::Client {
@@ -100,22 +90,9 @@ impl ConsensusCtx for &mut MpcSignProtocol {
     fn presignature_storage(&self) -> &PresignatureStorage {
         &self.ctx.presignature_storage
     }
-
-    fn message_options(&self) -> http_client::Options {
-        self.ctx.message_options.clone()
-    }
 }
 
-#[async_trait::async_trait]
 impl CryptographicCtx for &mut MpcSignProtocol {
-    async fn me(&self) -> Participant {
-        get_my_participant(self).await
-    }
-
-    fn http_client(&self) -> &reqwest::Client {
-        &self.ctx.http_client
-    }
-
     fn rpc_client(&self) -> &near_fetch::Client {
         &self.ctx.rpc_client
     }
@@ -147,18 +124,15 @@ impl CryptographicCtx for &mut MpcSignProtocol {
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox {
         &mut self.ctx.secret_storage
     }
-}
 
-#[async_trait::async_trait]
-impl MessageCtx for &MpcSignProtocol {
-    async fn me(&self) -> Participant {
-        get_my_participant(self).await
+    fn channel(&self) -> &MessageChannel {
+        &self.channel
     }
 }
 
 pub struct MpcSignProtocol {
     ctx: Ctx,
-    receiver: mpsc::Receiver<MpcMessage>,
+    channel: MessageChannel,
     state: Arc<RwLock<NodeState>>,
 }
 
@@ -170,12 +144,11 @@ impl MpcSignProtocol {
         account_id: AccountId,
         rpc_client: near_fetch::Client,
         signer: InMemorySigner,
-        receiver: mpsc::Receiver<MpcMessage>,
+        channel: MessageChannel,
         sign_rx: mpsc::Receiver<SignRequest>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
-        message_options: http_client::Options,
         eth_rpc_url: String,
         eth_contract_address: String,
         eth_account_sk: String,
@@ -192,14 +165,14 @@ impl MpcSignProtocol {
             "initializing protocol with parameters"
         );
         let state = Arc::new(RwLock::new(NodeState::Starting));
-        let transport = web3::transports::Http::new(&eth_rpc_url).expect("failed to initialize eth client");
+        let transport =
+            web3::transports::Http::new(&eth_rpc_url).expect("failed to initialize eth client");
         let web3 = Web3::new(transport);
         let ctx = Ctx {
             my_address,
             account_id,
             mpc_contract_id,
             rpc_client,
-            http_client: reqwest::Client::new(),
             eth_client: web3,
             eth_contract_address,
             eth_account_sk,
@@ -208,11 +181,10 @@ impl MpcSignProtocol {
             secret_storage,
             triple_storage,
             presignature_storage,
-            message_options,
         };
         let protocol = MpcSignProtocol {
             ctx,
-            receiver,
+            channel,
             state: state.clone(),
         };
         (protocol, state)
@@ -224,15 +196,16 @@ impl MpcSignProtocol {
         config: Arc<RwLock<Config>>,
         mesh_state: Arc<RwLock<MeshState>>,
     ) -> anyhow::Result<()> {
-        let my_account_id = self.ctx.account_id.to_string();
+        let my_account_id = self.ctx.account_id.as_str();
         let _span = tracing::info_span!("running", my_account_id);
+        let my_account_id = self.ctx.account_id.clone();
+
         crate::metrics::NODE_RUNNING
             .with_label_values(&[my_account_id.as_str()])
             .set(1);
         crate::metrics::NODE_VERSION
             .with_label_values(&[my_account_id.as_str()])
             .set(node_version());
-        let mut queue = MpcMessageQueue::default();
         let mut last_hardware_pull = Instant::now();
 
         loop {
@@ -240,30 +213,13 @@ impl MpcSignProtocol {
             tracing::debug!("trying to advance chain signatures protocol");
             // Hardware metric refresh
             if last_hardware_pull.elapsed() > Duration::from_secs(5) {
-                update_system_metrics(&my_account_id);
+                update_system_metrics(my_account_id.as_str());
                 last_hardware_pull = Instant::now();
             }
 
             crate::metrics::PROTOCOL_ITER_CNT
                 .with_label_values(&[my_account_id.as_str()])
                 .inc();
-            loop {
-                let msg_result = self.receiver.try_recv();
-                match msg_result {
-                    Ok(msg) => {
-                        tracing::debug!("received a new message");
-                        queue.push(msg);
-                    }
-                    Err(TryRecvError::Empty) => {
-                        tracing::debug!("no new messages received");
-                        break;
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        tracing::warn!("communication was disconnected, no more messages will be received, spinning down");
-                        return Ok(());
-                    }
-                }
-            }
 
             let contract_state = {
                 let state = contract_state.read().await;
@@ -302,8 +258,8 @@ impl MpcSignProtocol {
                 .with_label_values(&[my_account_id.as_str()])
                 .observe(crypto_time.elapsed().as_secs_f64());
 
-            let consensus_time = Instant::now();
             if let Some(contract_state) = contract_state {
+                let consensus_time = Instant::now();
                 let from_state = format!("{state}");
                 state = match state.advance(&mut self, contract_state, cfg.clone()).await {
                     Ok(state) => {
@@ -316,14 +272,14 @@ impl MpcSignProtocol {
                         continue;
                     }
                 };
+                crate::metrics::PROTOCOL_LATENCY_ITER_CONSENSUS
+                    .with_label_values(&[my_account_id.as_str()])
+                    .observe(consensus_time.elapsed().as_secs_f64());
             }
-            crate::metrics::PROTOCOL_LATENCY_ITER_CONSENSUS
-                .with_label_values(&[my_account_id.as_str()])
-                .observe(consensus_time.elapsed().as_secs_f64());
 
             let message_time = Instant::now();
-            if let Err(err) = state.handle(&self, &mut queue, cfg, mesh_state).await {
-                tracing::warn!("protocol unable to handle messages: {err:?}");
+            if let Err(err) = state.recv(&self.channel, cfg, mesh_state).await {
+                tracing::warn!("protocol unable to receive messages: {err:?}");
             }
             crate::metrics::PROTOCOL_LATENCY_ITER_MESSAGE
                 .with_label_values(&[my_account_id.as_str()])
@@ -350,18 +306,6 @@ impl MpcSignProtocol {
             tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
         }
     }
-}
-
-async fn get_my_participant(protocol: &MpcSignProtocol) -> Participant {
-    let my_near_acc_id = &protocol.ctx.account_id;
-    let state = protocol.state.read().await;
-    let participant_info = state
-        .find_participant_info(my_near_acc_id)
-        .unwrap_or_else(|| {
-            tracing::error!("could not find participant info for {my_near_acc_id}");
-            panic!("could not find participant info for {my_near_acc_id}");
-        });
-    participant_info.id.into()
 }
 
 /// our release versions take the form of "1.0.0-rc.2"

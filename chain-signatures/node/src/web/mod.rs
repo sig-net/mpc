@@ -4,7 +4,7 @@ use self::error::Error;
 use crate::indexer::Indexer;
 use crate::indexer_eth::EthIndexer;
 use crate::protocol::message::SignedMessage;
-use crate::protocol::{MpcMessage, NodeState};
+use crate::protocol::{Message, NodeState};
 use crate::web::error::Result;
 use anyhow::Context;
 use axum::http::StatusCode;
@@ -20,7 +20,7 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc::Sender, RwLock};
 
 struct AxumState {
-    sender: Sender<MpcMessage>,
+    sender: Sender<Message>,
     protocol_state: Arc<RwLock<NodeState>>,
     cipher_sk: hpke::SecretKey,
     indexer: Indexer,
@@ -29,7 +29,7 @@ struct AxumState {
 
 pub async fn run(
     port: u16,
-    sender: Sender<MpcMessage>,
+    sender: Sender<Message>,
     cipher_sk: hpke::SecretKey,
     protocol_state: Arc<RwLock<NodeState>>,
     indexer: Indexer,

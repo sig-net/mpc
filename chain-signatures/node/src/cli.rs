@@ -1,9 +1,11 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::mesh::Mesh;
+use crate::node_client::{self, NodeClient};
+use crate::protocol::message::MessageChannel;
 use crate::protocol::{MpcSignProtocol, SignQueue};
 use crate::storage::app_data_storage;
-use crate::{http_client, indexer, indexer_eth, mesh, storage, web};
+use crate::{indexer, indexer_eth, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
 use local_ip_address::local_ip;
@@ -11,7 +13,7 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tracing_stackdriver::layer as stackdriver_layer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 use url::Url;
@@ -74,7 +76,7 @@ pub enum Cli {
         #[clap(flatten)]
         mesh_options: mesh::Options,
         #[clap(flatten)]
-        message_options: http_client::Options,
+        message_options: node_client::Options,
     },
 }
 
@@ -239,11 +241,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 rpc_client.clone(),
             )?;
 
-            let (eth_indexer_handle, eth_indexer) = indexer_eth::run(
-                &indexer_eth_options,
-                sign_tx,
-                app_data_storage,
-            )?;
+            let (eth_indexer_handle, eth_indexer) =
+                indexer_eth::run(&indexer_eth_options, sign_tx, app_data_storage)?;
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
@@ -256,11 +255,10 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
                 });
 
-            let (sender, receiver) = mpsc::channel(16384);
-
             tracing::info!(%my_address, "address detected");
+            let client = NodeClient::new(&message_options);
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
-            let (mesh, mesh_state) = Mesh::init(mesh_options);
+            let (mesh, mesh_state) = Mesh::init(&client, mesh_options);
             let config = Arc::new(RwLock::new(Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network: NetworkConfig {
@@ -269,27 +267,29 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 },
             })));
             let contract_state = Arc::new(RwLock::new(None));
-            let (protocol, protocol_state) = MpcSignProtocol::init(
-                my_address,
-                mpc_contract_id.clone(),
-                account_id,
-                rpc_client.clone(),
-                signer,
-                receiver,
-                sign_rx,
-                key_storage,
-                triple_storage,
-                presignature_storage,
-                message_options,
-                indexer_eth_options.eth_rpc_url.clone(),
-                indexer_eth_options.eth_contract_address.clone(),
-                eth_account_sk,
-            );
 
             let contract_updater =
-                crate::contract_updater::ContractUpdater::init(rpc_client, mpc_contract_id);
+                crate::contract_updater::ContractUpdater::init(&rpc_client, &mpc_contract_id);
 
             rt.block_on(async {
+                let (sender, channel) =
+                    MessageChannel::spawn(client, &account_id, &config, &mesh_state).await;
+                let (protocol, protocol_state) = MpcSignProtocol::init(
+                    my_address,
+                    mpc_contract_id,
+                    account_id,
+                    rpc_client,
+                    signer,
+                    channel,
+                    sign_rx,
+                    key_storage,
+                    triple_storage,
+                    presignature_storage,
+                    indexer_eth_options.eth_rpc_url.clone(),
+                    indexer_eth_options.eth_contract_address.clone(),
+                    eth_account_sk,
+                );
+
                 tracing::info!("protocol initialized");
                 let contract_handle = tokio::spawn({
                     let contract_state = Arc::clone(&contract_state);
@@ -300,16 +300,20 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     let contract_state = Arc::clone(&contract_state);
                     async move { mesh.run(contract_state).await }
                 });
-                let protocol_handle = tokio::spawn({
-                    let contract_state = Arc::clone(&contract_state);
-                    let config = Arc::clone(&config);
-                    let mesh_state = Arc::clone(&mesh_state);
-                    async move { protocol.run(contract_state, config, mesh_state).await }
-                });
+                let protocol_handle =
+                    tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
                 let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
                 let web_handle = tokio::spawn(async move {
-                    web::run(web_port, sender, cipher_sk, protocol_state, indexer, eth_indexer).await
+                    web::run(
+                        web_port,
+                        sender,
+                        cipher_sk,
+                        protocol_state,
+                        indexer,
+                        eth_indexer,
+                    )
+                    .await
                 });
                 tracing::info!("protocol http server spawned");
 

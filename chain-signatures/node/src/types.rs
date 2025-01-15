@@ -16,6 +16,8 @@ pub type TripleProtocol =
 pub type PresignatureProtocol = Box<dyn Protocol<Output = PresignOutput<Secp256k1>> + Send + Sync>;
 pub type SignatureProtocol = Box<dyn Protocol<Output = FullSignature<Secp256k1>> + Send + Sync>;
 
+pub type Epoch = u64;
+
 #[derive(Clone)]
 pub struct KeygenProtocol {
     me: Participant,
