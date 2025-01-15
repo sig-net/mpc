@@ -19,6 +19,7 @@ use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
 use near_account_id::AccountId;
 use near_crypto::Signature;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -128,6 +129,19 @@ impl Message {
             Message::Signature(_) => "Signature",
         }
     }
+
+    /// The size of the message in bytes.
+    pub fn size(&self) -> usize {
+        match self {
+            Message::Generating(msg) => std::mem::size_of::<GeneratingMessage>() + msg.data.len(),
+            Message::Resharing(msg) => std::mem::size_of::<ResharingMessage>() + msg.data.len(),
+            Message::Triple(msg) => std::mem::size_of::<TripleMessage>() + msg.data.len(),
+            Message::Presignature(msg) => {
+                std::mem::size_of::<PresignatureMessage>() + msg.data.len()
+            }
+            Message::Signature(msg) => std::mem::size_of::<SignatureMessage>() + msg.data.len(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -228,9 +242,10 @@ impl MessageExecutor {
                 let mesh_state = self.mesh_state.read().await;
                 mesh_state.active_with_potential()
             };
-            self.outbox.extend(&mut self.outgoing);
             self.outbox.expire(&protocol);
-            let encrypted = self.outbox.encrypt(&sign_sk, &active);
+            self.outbox.extend(&mut self.outgoing);
+            let compacted = self.outbox.compact();
+            let encrypted = self.outbox.encrypt(&sign_sk, &active, compacted);
             self.outbox.send(&active, encrypted).await;
         }
     }
@@ -282,7 +297,7 @@ impl MessageChannel {
     pub async fn send(&self, from: Participant, to: Participant, message: impl Into<Message>) {
         if let Err(err) = self
             .outgoing
-            .send((from, to, message.into(), Instant::now()))
+            .send((message.into(), (from, to, Instant::now())))
             .await
         {
             tracing::error!(?err, "failed to send message to participants");
@@ -666,59 +681,51 @@ impl MessageReceiver for NodeState {
 /// A signed message that can be encrypted. Note that the message's signature is included
 /// in the encrypted message to avoid from it being tampered with without first decrypting.
 #[derive(Serialize, Deserialize)]
-pub struct SignedMessage<T> {
+pub struct SignedMessage {
     /// The message with all it's related info.
-    pub msg: T,
+    pub msg: Vec<u8>,
     /// The signature used to verify the authenticity of the encrypted message.
     pub sig: Signature,
     /// From which particpant the message was sent.
     pub from: Participant,
 }
 
-impl<T> SignedMessage<T> {
+impl SignedMessage {
     pub const ASSOCIATED_DATA: &'static [u8] = b"";
 }
 
-impl<T> SignedMessage<T>
-where
-    T: Serialize,
-{
-    pub fn encrypt(
+impl SignedMessage {
+    pub fn encrypt<T: Serialize>(
         msg: &T,
         from: Participant,
         sign_sk: &near_crypto::SecretKey,
         cipher_pk: &hpke::PublicKey,
     ) -> Result<Ciphered, CryptographicError> {
-        let msg = serde_json::to_vec(msg)?;
+        let msg = bincode::serialize(&msg).unwrap();
         let sig = sign_sk.sign(&msg);
-        let msg = SignedMessage { msg, sig, from };
-        let msg = serde_json::to_vec(&msg)?;
+        let msg = Self { msg, sig, from };
+        let msg = bincode::serialize(&msg).unwrap();
         let ciphered = cipher_pk
-            .encrypt(&msg, SignedMessage::<T>::ASSOCIATED_DATA)
+            .encrypt(&msg, Self::ASSOCIATED_DATA)
             .map_err(|e| {
                 tracing::error!(error = ?e, "failed to encrypt message");
                 CryptographicError::Encryption(e.to_string())
             })?;
         Ok(ciphered)
     }
-}
 
-impl<T> SignedMessage<T>
-where
-    T: for<'a> Deserialize<'a>,
-{
-    pub async fn decrypt(
+    pub async fn decrypt<T: DeserializeOwned>(
         cipher_sk: &hpke::SecretKey,
         protocol_state: &Arc<RwLock<NodeState>>,
         encrypted: Ciphered,
     ) -> Result<T, CryptographicError> {
-        let message = cipher_sk
-            .decrypt(&encrypted, SignedMessage::<T>::ASSOCIATED_DATA)
+        let msg = cipher_sk
+            .decrypt(&encrypted, Self::ASSOCIATED_DATA)
             .map_err(|err| {
                 tracing::error!(error = ?err, "failed to decrypt message");
                 CryptographicError::Encryption(err.to_string())
             })?;
-        let SignedMessage::<Vec<u8>> { msg, sig, from } = serde_json::from_slice(&message)?;
+        let Self { msg, sig, from } = bincode::deserialize(&msg).unwrap();
         if !sig.verify(
             &msg,
             &protocol_state
@@ -734,73 +741,97 @@ where
             ));
         }
 
-        Ok(serde_json::from_slice(&msg)?)
+        Ok(bincode::deserialize(&msg).unwrap())
     }
 }
 
-type SendMessage = (Participant, Participant, Message, Instant);
+type FromParticipant = Participant;
+type ToParticipant = Participant;
+type MessageRoute = (FromParticipant, ToParticipant);
+type SendMessage = (Message, (FromParticipant, ToParticipant, Instant));
 
-/// Encrypted message with a reference to the old message. Only the ciphered portion of this
-/// type will be sent over the wire, while the original message is kept just in case things
-/// go wrong somewhere and the message needs to be requeued to be sent later.
-type EncryptedWithOriginal = (Ciphered, SendMessage);
+pub struct Partition {
+    messages: Vec<Message>,
+    timestamps: Vec<Instant>,
+}
 
 /// Message outbox is the set of messages that are pending to be sent to other nodes.
 /// These messages will be signed and encrypted before being sent out.
 pub struct MessageOutbox {
     client: NodeClient,
-    messages: VecDeque<SendMessage>,
     account_id: AccountId,
+
+    // NOTE: we have FromParticipant here to circumvent the chance that we change Participant
+    // id for our own node in the middle of something like resharing or adding another curve
+    // type.
+    /// Messsages sorted by participant map to a list of partitioned messages to be sent as
+    /// a single request to other participants.
+    messages: HashMap<MessageRoute, Vec<(Message, Instant)>>,
 }
 
 impl MessageOutbox {
     pub fn new(client: NodeClient, id: &AccountId) -> Self {
         Self {
             client,
-            messages: VecDeque::default(),
+            messages: HashMap::new(),
             account_id: id.clone(),
         }
     }
 
+    pub fn compact(&mut self) -> HashMap<MessageRoute, Vec<Partition>> {
+        let mut compacted = HashMap::new();
+        for (route, messages) in self.messages.drain() {
+            let entry = compacted.entry(route).or_insert_with(Vec::new);
+            entry.extend(partition_256kb(messages));
+        }
+        compacted
+    }
+
     pub fn extend(&mut self, outgoing: &mut mpsc::Receiver<SendMessage>) {
+        let mut message_count: i64 = 0;
         loop {
-            let (from, to, msg, instant) = match outgoing.try_recv() {
+            let (msg, (from, to, timestamp)) = match outgoing.try_recv() {
                 Ok(msg) => msg,
                 Err(TryRecvError::Empty) => {
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
                     tracing::error!(
-                        "outbox: communication disconnected, no more messages will be received"
+                        "outbox: channel disconnected, no more messages will be received"
                     );
                     break;
                 }
             };
-            self.messages.push_back((from, to, msg, instant));
+            // add it to the outbox and sort it by from and to participant
+            let entry = self.messages.entry((from, to)).or_insert_with(Vec::new);
+            entry.push((msg, timestamp));
+            message_count += 1;
         }
         crate::metrics::MESSAGE_QUEUE_SIZE
             .with_label_values(&[self.account_id.as_str()])
-            .set(self.messages.len() as i64);
+            .set(message_count);
     }
 
     /// Expire messages that have been in the outbox for too long.
     pub fn expire(&mut self, cfg: &ProtocolConfig) {
         // timeout errors are very common for a message expiring, so map them to counts here:
         let mut timeouts = HashMap::<String, usize>::new();
-        self.messages.retain(|(_, to, msg, instant)| {
-            if instant.elapsed() > timeout(msg, cfg) {
-                let counter = timeouts
-                    .entry(format!(
-                        "timeout message={} for node={to:?}",
-                        msg.typename(),
-                    ))
-                    .or_insert(0);
-                *counter += 1;
-                false
-            } else {
-                true
-            }
-        });
+        for ((_from, to), messages) in self.messages.iter_mut() {
+            messages.retain(|(msg, timestamp)| {
+                if timestamp.elapsed() > timeout(msg, cfg) {
+                    let counter = timeouts
+                        .entry(format!(
+                            "timeout message={} for node={to:?}",
+                            msg.typename(),
+                        ))
+                        .or_insert(0);
+                    *counter += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
 
         if !timeouts.is_empty() {
             tracing::warn!(?timeouts, "messages expired");
@@ -812,29 +843,40 @@ impl MessageOutbox {
         &mut self,
         sign_sk: &near_crypto::SecretKey,
         active: &Participants,
-    ) -> HashMap<Participant, Vec<EncryptedWithOriginal>> {
+        compacted: HashMap<MessageRoute, Vec<Partition>>,
+    ) -> HashMap<MessageRoute, Vec<(Ciphered, Partition)>> {
         // failed for when a participant is not active, so keep this message for next round.
         let mut retry = VecDeque::new();
         let mut errors = Vec::new();
         let mut not_active = HashSet::new();
 
-        let mut encrypted = HashMap::new();
-        while let Some((from, to, msg, instant)) = self.messages.pop_front() {
+        let mut encrypted_with_original = HashMap::new();
+        for ((from, to), compacted) in compacted {
             let Some(info) = active.get(&to) else {
                 not_active.insert(to);
-                retry.push_back((from, to, msg, instant));
+                retry.push_back(((from, to), compacted));
                 continue;
             };
 
-            let encrypted_msg = match SignedMessage::encrypt(&msg, from, sign_sk, &info.cipher_pk) {
-                Ok(encrypted) => encrypted,
-                Err(err) => {
-                    errors.push(SendError::EncryptionError(err.to_string()));
-                    continue;
-                }
-            };
-            let encrypted = encrypted.entry(to).or_insert_with(Vec::new);
-            encrypted.push((encrypted_msg, (from, to, msg, instant)));
+            for partition in compacted {
+                let encrypted = match SignedMessage::encrypt(
+                    &partition.messages,
+                    from,
+                    sign_sk,
+                    &info.cipher_pk,
+                ) {
+                    Ok(encrypted) => encrypted,
+                    Err(err) => {
+                        errors.push(SendError::EncryptionError(err.to_string()));
+                        continue;
+                    }
+                };
+
+                encrypted_with_original
+                    .entry((from, to))
+                    .or_insert_with(Vec::new)
+                    .push((encrypted, partition));
+            }
         }
 
         if !errors.is_empty() {
@@ -849,46 +891,56 @@ impl MessageOutbox {
         }
 
         // Add back the failed attempts for next time.
-        self.messages.extend(retry);
-        encrypted
+        for (route, partitions) in retry {
+            let entry = self.messages.entry(route).or_insert_with(Vec::new);
+            for partition in partitions {
+                entry.extend(
+                    partition
+                        .messages
+                        .into_iter()
+                        .zip(partition.timestamps.into_iter()),
+                );
+            }
+        }
+
+        encrypted_with_original
     }
 
-    /// Compact together all the requests up to 256kb per request, and then send them out.
+    /// Send the encrypted messages to other participants.
     pub async fn send(
         &mut self,
         active: &Participants,
-        encrypted: HashMap<Participant, Vec<EncryptedWithOriginal>>,
+        encrypted: HashMap<MessageRoute, Vec<(Ciphered, Partition)>>,
     ) {
         let start = Instant::now();
         let mut send_tasks = Vec::new();
-        for (id, encrypted) in encrypted {
-            for partition in partition_ciphered_256kb(encrypted) {
-                let (encrypted_partition, msgs): (Vec<_>, Vec<_>) = partition.into_iter().unzip();
+        for ((from, to), encrypted) in encrypted {
+            for (encrypted_partition, partition) in encrypted {
                 // guaranteed to unwrap due to our previous loop check:
-                let info = active.get(&id).unwrap();
+                let info = active.get(&to).unwrap();
                 let account_id = info.account_id.clone();
                 let url = info.url.clone();
 
                 crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
                     .with_label_values(&[account_id.as_str()])
-                    .inc_by(msgs.len() as f64);
+                    .inc_by(partition.messages.len() as f64);
 
                 let client = self.client.clone();
                 send_tasks.push(tokio::spawn(async move {
                     let start = Instant::now();
-                    if let Err(err) = client.msg(url, &encrypted_partition).await {
+                    if let Err(err) = client.msg(url, &[encrypted_partition]).await {
                         crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
                             .with_label_values(&[account_id.as_str()])
-                            .inc_by(msgs.len() as f64);
+                            .inc_by(partition.messages.len() as f64);
                         crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
                             .with_label_values(&[account_id.as_str()])
                             .observe(start.elapsed().as_millis() as f64);
-                        Err((msgs, err))
+                        Err(((from, to), partition, err))
                     } else {
                         crate::metrics::SEND_ENCRYPTED_LATENCY
                             .with_label_values(&[account_id.as_str()])
                             .observe(start.elapsed().as_millis() as f64);
-                        Ok(msgs.len())
+                        Ok(partition.messages.len())
                     }
                 }));
             }
@@ -904,9 +956,9 @@ impl MessageOutbox {
                     uncompacted += msgs_len;
                     compacted += 1;
                 }
-                Ok(Err((msgs, err))) => {
+                Ok(Err((route, partition, err))) => {
                     // since we failed, put back all the messages related to this
-                    retry.extend(msgs);
+                    retry.push_back((route, partition));
                     errors.push(err);
                 }
                 Err(err) => {
@@ -929,35 +981,50 @@ impl MessageOutbox {
         }
 
         // Add back the failed attempts for next time.
-        self.messages.extend(retry);
+        for (route, partition) in retry {
+            let entry = self.messages.entry(route).or_insert_with(Vec::new);
+            entry.extend(
+                partition
+                    .messages
+                    .into_iter()
+                    .zip(partition.timestamps.into_iter()),
+            );
+        }
     }
 }
 
-fn partition_ciphered_256kb(
-    encrypted: Vec<EncryptedWithOriginal>,
-) -> Vec<Vec<EncryptedWithOriginal>> {
-    let mut result = Vec::new();
-    let mut current_partition = Vec::new();
+/// Partition a list of messages into a list of partitions where each partition is at most 256kb
+/// worth of `Message`s.
+fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Vec<Partition> {
+    let mut partitions = Vec::new();
+    let mut current_messages = Vec::new();
+    let mut current_timestamps = Vec::new();
     let mut current_size: usize = 0;
 
-    for ciphered in encrypted {
-        let bytesize = ciphered.0.text.len();
+    for (msg, timestamp) in outgoing {
+        let bytesize = msg.size();
         if current_size + bytesize > 256 * 1024 {
             // If adding this byte vector exceeds 256kb, start a new partition
-            result.push(current_partition);
-            current_partition = Vec::new();
+            partitions.push(Partition {
+                messages: std::mem::replace(&mut current_messages, Vec::new()),
+                timestamps: std::mem::replace(&mut current_timestamps, Vec::new()),
+            });
             current_size = 0;
         }
-        current_partition.push(ciphered);
+        current_messages.push(msg);
+        current_timestamps.push(timestamp);
         current_size += bytesize;
     }
 
-    if !current_partition.is_empty() {
+    if !current_messages.is_empty() {
         // Add the last partition
-        result.push(current_partition);
+        partitions.push(Partition {
+            messages: current_messages,
+            timestamps: current_timestamps,
+        });
     }
 
-    result
+    partitions
 }
 
 fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {

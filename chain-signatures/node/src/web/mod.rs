@@ -76,7 +76,7 @@ async fn msg(
     WithRejection(Json(encrypted), _): WithRejection<Json<Vec<Ciphered>>, Error>,
 ) -> Result<()> {
     for encrypted in encrypted.into_iter() {
-        let message = match SignedMessage::decrypt(
+        let messages: Vec<Message> = match SignedMessage::decrypt(
             &state.cipher_sk,
             &state.protocol_state,
             encrypted,
@@ -90,9 +90,11 @@ async fn msg(
             }
         };
 
-        if let Err(err) = state.sender.send(message).await {
-            tracing::error!(?err, "failed to forward an encrypted protocol message");
-            return Err(err.into());
+        for message in messages {
+            if let Err(err) = state.sender.send(message).await {
+                tracing::error!(?err, "failed to forward an encrypted protocol message");
+                return Err(err.into());
+            }
         }
     }
     Ok(())
