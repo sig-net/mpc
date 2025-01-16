@@ -26,6 +26,10 @@ jobs:
           profile: minimal
           toolchain: stable
           target: wasm32-unknown-unknown
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
       - uses: WarpBuilds/cache@v1
         with:
           path: |
