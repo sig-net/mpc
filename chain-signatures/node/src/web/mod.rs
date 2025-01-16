@@ -2,6 +2,7 @@ mod error;
 
 use self::error::Error;
 use crate::indexer::Indexer;
+use crate::indexer_eth::EthIndexer;
 use crate::protocol::NodeState;
 use crate::web::error::Result;
 use anyhow::Context;
@@ -21,6 +22,7 @@ struct AxumState {
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
     indexer: Indexer,
+    eth_indexer: EthIndexer,
 }
 
 pub async fn run(
@@ -28,12 +30,14 @@ pub async fn run(
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
     indexer: Indexer,
+    eth_indexer: EthIndexer,
 ) -> anyhow::Result<()> {
     tracing::info!("running a node");
     let axum_state = AxumState {
         sender,
         protocol_state,
         indexer,
+        eth_indexer,
     };
 
     let app = Router::new()
@@ -96,6 +100,7 @@ pub enum StateView {
         presignature_mine_count: usize,
         presignature_potential_count: usize,
         latest_block_height: BlockHeight,
+        latest_eth_block_height: BlockHeight,
         is_stable: bool,
     },
     Resharing {
@@ -116,6 +121,7 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<State
     tracing::debug!("fetching state");
     // TODO: rename to last_processed_block when making other breaking changes
     let latest_block_height = state.indexer.last_processed_block().await.unwrap_or(0);
+    let latest_eth_block_height = state.eth_indexer.last_processed_block().await.unwrap_or(0);
     let is_stable = state.indexer.is_stable().await;
     let protocol_state = state.protocol_state.read().await;
 
@@ -139,6 +145,7 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<State
                 presignature_mine_count,
                 presignature_potential_count,
                 latest_block_height,
+                latest_eth_block_height,
                 is_stable,
             }))
         }

@@ -3806,6 +3806,7 @@ dependencies = [
  "tracing-stackdriver",
  "tracing-subscriber",
  "url 2.5.1",
+ "web3",
 ]
 
 [[package]]

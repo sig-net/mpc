@@ -18,7 +18,7 @@ library Secp256k1 {
     uint256 public constant B = 7;
     uint256 public constant P =
         0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F;
-    uint256 private constant N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
+    uint256 public constant N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
 
     function ecMul(uint256 _k, uint256 _x, uint256 _y) internal pure returns (uint256, uint256) {
         return EllipticCurve.ecMul(_k, _x, _y, A, P);
@@ -26,6 +26,10 @@ library Secp256k1 {
 
     function ecAdd(uint256 _x1, uint256 _y1, uint256 _x2, uint256 _y2) internal pure returns (uint256, uint256) {
         return EllipticCurve.ecAdd(_x1, _y1, _x2, _y2, A, P);
+    }
+
+    function ecSub(uint256 _x1, uint256 _y1, uint256 _x2, uint256 _y2) internal pure returns (uint256, uint256) {
+        return EllipticCurve.ecSub(_x1, _y1, _x2, _y2, A, P);
     }
 
     /// @dev recovers signer public key point value.

@@ -69,6 +69,13 @@ impl Node {
             running_threshold: 120,
             behind_threshold: 120,
         };
+        let indexer_eth_options = mpc_node::indexer_eth::Options {
+            eth_rpc_url: cfg.eth_rpc_url.clone(),
+            eth_contract_address: cfg.eth_contract_address.clone(),
+            eth_start_block_height: cfg.eth_start_block_height,
+            eth_behind_threshold: 120,
+            eth_running_threshold: 120,
+        };
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = mpc_node::cli::Cli::Start {
@@ -76,11 +83,13 @@ impl Node {
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
             account_sk: account_sk.to_string().parse()?,
+            eth_account_sk: cfg.eth_account_sk.clone(),
             web_port,
             cipher_pk: hex::encode(cipher_pk.to_bytes()),
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
             sign_sk: Some(sign_sk.clone()),
             indexer_options,
+            indexer_eth_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
@@ -163,16 +172,25 @@ impl Node {
             running_threshold: 120,
             behind_threshold: 120,
         };
+        let indexer_eth_options = mpc_node::indexer_eth::Options {
+            eth_rpc_url: config.cfg.eth_rpc_url.clone(),
+            eth_contract_address: config.cfg.eth_contract_address.clone(),
+            eth_start_block_height: config.cfg.eth_start_block_height,
+            eth_behind_threshold: 120,
+            eth_running_threshold: 120,
+        };
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
+            eth_account_sk: config.cfg.eth_account_sk.clone(),
             web_port,
             cipher_pk: hex::encode(config.cipher_pk.to_bytes()),
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             sign_sk: Some(config.sign_sk.clone()),
             indexer_options,
+            indexer_eth_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(

@@ -11,12 +11,14 @@ contract ChainSignatures {
         bytes32 payload;
         string path;
         uint32 keyVersion;
+        PublicKey derivedPublicKey;
     }
 
     struct SignatureRequest {
         uint256 epsilon;
         uint256 payloadHash;
         address requester;
+        PublicKey derivedPublicKey;
     }
 
     struct SignatureResponse {
@@ -68,6 +70,18 @@ contract ChainSignatures {
         return PublicKey(resultX, resultY);
     }
 
+    function verifyDerivedKey(uint256 epsilon, PublicKey memory derivedPk) private view returns (bool) {
+        (uint256 epsilonGx, uint256 epsilonGy) = Secp256k1.ecSub(derivedPk.x, derivedPk.y, publicKey.x, publicKey.y);
+        // verify epsilonGx, epsilonGy is G * epsilon, based on:
+        // https://ethresear.ch/t/you-can-kinda-abuse-ecrecover-to-do-ecmul-in-secp256k1-today/2384
+        address recovered = ecrecover(bytes32(0), 27, bytes32(Secp256k1.GX), bytes32(mulmod(Secp256k1.GX, epsilon, Secp256k1.N)));
+
+        // epsilonG should match recovered
+        bytes32 epsilonGHash = keccak256(abi.encodePacked(epsilonGx, epsilonGy));
+        address epsilonGAddr = address(uint160(uint256(epsilonGHash)));
+        return epsilonGAddr == recovered;
+    }
+
     function deriveEpsilon(string memory path, address requester) public pure returns (uint256) {
         string memory requesterStr = Strings.toHexString(uint256(uint160(requester)), 20);
         string memory epsilonString = string.concat("near-mpc-recovery v0.2.0 epsilon derivation:", requesterStr, ",", path);
@@ -104,7 +118,9 @@ contract ChainSignatures {
         require(pendingRequests[requestId].requester == address(0), "Request already exists");
 
         uint256 epsilon = deriveEpsilon(path, msg.sender);
-        SignatureRequest memory request = SignatureRequest(epsilon, payloadHash, msg.sender);
+        PublicKey memory derivedPk = _request.derivedPublicKey;
+        require(verifyDerivedKey(epsilon, derivedPk), "Derived key verification failed");
+        SignatureRequest memory request = SignatureRequest(epsilon, payloadHash, msg.sender, derivedPk);
         pendingRequests[requestId] = request;
         depositToRefund[requestId] = msg.value - requiredDeposit;
         requestCounter++;
@@ -118,19 +134,13 @@ contract ChainSignatures {
         SignatureRequest storage request = pendingRequests[_requestId];
         require(request.requester != address(0), "Request not found");
 
-        PublicKey memory expectedPublicKey = deriveKey(publicKey, request.epsilon);
-
-        // Check the signature
-        require(
-            checkECSignature(
-                expectedPublicKey,
-                _response.bigR,
-                uint256(_response.s),
-                request.payloadHash,
-                _response.recoveryId
-            ),
-            "Invalid signature"
-        );
+        PublicKey memory expectedPublicKey = request.derivedPublicKey;
+        // Derive Ethereum address from public key
+        bytes32 pkHash = keccak256(abi.encodePacked(expectedPublicKey.x, expectedPublicKey.y));
+        address expectedSigner = address(uint160(uint256(pkHash)));
+        // Verify the virtual signer is the derived address using ecrecover
+        address recoveredSigner = ecrecover(bytes32(request.payloadHash), _response.recoveryId+27, bytes32(_response.bigR.x), bytes32(_response.s));
+        require(recoveredSigner == expectedSigner, "Invalid signature");
 
         emit SignatureResponded(_requestId, _response);
 

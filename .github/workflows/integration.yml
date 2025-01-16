@@ -52,6 +52,11 @@ jobs:
           toolchain: stable
           target: wasm32-unknown-unknown
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
       - uses: WarpBuilds/cache@v1
         with:
           path: |
@@ -78,6 +83,10 @@ jobs:
       - name: Build Chain-Signatures Contract
         working-directory: ./chain-signatures
         run: cargo build -p mpc-contract --target wasm32-unknown-unknown --release
+
+      - name: Build eth contract
+        working-directory: ./chain-signatures/contract-eth
+        run: npm i && npx hardhat compile
 
       - name: Build Chain-Signatures Node
         working-directory: ./chain-signatures

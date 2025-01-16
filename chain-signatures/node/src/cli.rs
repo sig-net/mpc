@@ -5,7 +5,7 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::{MpcSignProtocol, SignQueue};
 use crate::storage::app_data_storage;
-use crate::{indexer, mesh, storage, web};
+use crate::{indexer, indexer_eth, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
 use local_ip_address::local_ip;
@@ -39,6 +39,9 @@ pub enum Cli {
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"))]
         account_sk: SecretKey,
+        /// The ethereum account secret key used to sign eth respond txn.
+        #[arg(long, env("MPC_ETH_ACCOUNT_SK"))]
+        eth_account_sk: String,
         /// The web port for this server
         #[arg(long, env("MPC_WEB_PORT"))]
         web_port: u16,
@@ -55,6 +58,9 @@ pub enum Cli {
         /// NEAR Lake Indexer options
         #[clap(flatten)]
         indexer_options: indexer::Options,
+        /// Ethereum Indexer options
+        #[clap(flatten)]
+        indexer_eth_options: indexer_eth::Options,
         /// Local address that other peers can use to message this node.
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
@@ -82,11 +88,13 @@ impl Cli {
                 account_id,
                 mpc_contract_id,
                 account_sk,
+                eth_account_sk,
                 web_port,
                 cipher_pk,
                 cipher_sk,
                 sign_sk,
                 indexer_options,
+                indexer_eth_options,
                 my_address,
                 storage_options,
                 override_config,
@@ -104,6 +112,8 @@ impl Cli {
                     account_id.to_string(),
                     "--account-sk".to_string(),
                     account_sk.to_string(),
+                    "--eth-account-sk".to_string(),
+                    eth_account_sk.to_string(),
                     "--web-port".to_string(),
                     web_port.to_string(),
                     "--cipher-pk".to_string(),
@@ -131,6 +141,7 @@ impl Cli {
                 }
 
                 args.extend(indexer_options.into_str_args());
+                args.extend(indexer_eth_options.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(mesh_options.into_str_args());
                 args.extend(message_options.into_str_args());
@@ -182,10 +193,12 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             mpc_contract_id,
             account_id,
             account_sk,
+            eth_account_sk,
             cipher_pk,
             cipher_sk,
             sign_sk,
             indexer_options,
+            indexer_eth_options,
             my_address,
             storage_options,
             override_config,
@@ -223,10 +236,13 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 &indexer_options,
                 &mpc_contract_id,
                 &account_id,
-                sign_tx,
-                app_data_storage,
+                sign_tx.clone(),
+                app_data_storage.clone(),
                 rpc_client.clone(),
             )?;
+
+            let (eth_indexer_handle, eth_indexer) =
+                indexer_eth::run(&indexer_eth_options, sign_tx, app_data_storage)?;
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
@@ -272,6 +288,9 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     key_storage,
                     triple_storage,
                     presignature_storage,
+                    indexer_eth_options.eth_rpc_url.clone(),
+                    indexer_eth_options.eth_contract_address.clone(),
+                    eth_account_sk,
                 );
 
                 tracing::info!("protocol initialized");
@@ -281,7 +300,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol task spawned");
-                let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
+                let web_handle =
+                    tokio::spawn(web::run(web_port, sender, state, indexer, eth_indexer));
                 tracing::info!("protocol http server spawned");
 
                 contract_handle.await??;
@@ -291,6 +311,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 tracing::info!("spinning down");
 
                 indexer_handle.join().unwrap()?;
+                eth_indexer_handle.join().unwrap()?;
+
                 anyhow::Ok(())
             })?;
         }
