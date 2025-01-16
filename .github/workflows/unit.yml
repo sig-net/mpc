@@ -26,6 +26,10 @@ jobs:
           profile: minimal
           toolchain: stable
           target: wasm32-unknown-unknown
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
       - uses: WarpBuilds/cache@v1
         with:
           path: |
@@ -38,6 +42,8 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
       - name: Compile Contract
         run: cd chain-signatures && cargo build -p mpc-contract --target wasm32-unknown-unknown --release
+      - name: Compile eth contract
+        run: cd chain-signatures/contract-eth && npm i && npx hardhat compile
       - name: Compile
         run: |
           ( cd chain-signatures ; cargo check )

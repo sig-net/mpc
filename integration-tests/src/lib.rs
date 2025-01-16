@@ -32,6 +32,10 @@ pub struct NodeConfig {
     pub nodes: usize,
     pub threshold: usize,
     pub protocol: ProtocolConfig,
+    pub eth_rpc_url: String,
+    pub eth_contract_address: String,
+    pub eth_account_sk: String,
+    pub eth_start_block_height: u64,
 }
 
 impl Default for NodeConfig {
@@ -52,6 +56,11 @@ impl Default for NodeConfig {
                 },
                 ..Default::default()
             },
+            eth_rpc_url: "http://localhost:8545".to_string(),
+            eth_contract_address: "0x5FbDB2315678afecb367f032d93F642f64180aa3".to_string(),
+            eth_account_sk: "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+                .to_string(),
+            eth_start_block_height: 0,
         }
     }
 }

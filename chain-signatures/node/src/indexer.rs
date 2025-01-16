@@ -1,4 +1,5 @@
-use crate::protocol::SignRequest;
+use crate::protocol::Chain::NEAR;
+use crate::protocol::{Chain, SignRequest};
 use crate::storage::app_data_storage::AppDataStorage;
 use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
@@ -84,6 +85,7 @@ pub struct ContractSignRequest {
     pub payload: Scalar,
     pub path: String,
     pub key_version: u32,
+    pub chain: Chain,
 }
 
 #[derive(Clone)]
@@ -244,6 +246,7 @@ async fn handle_block(
                     payload,
                     path: arguments.request.path,
                     key_version: arguments.request.key_version,
+                    chain: NEAR,
                 };
                 pending_requests.push(SignRequest {
                     request_id: receipt_id.0,
