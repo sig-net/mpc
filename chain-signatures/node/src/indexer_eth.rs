@@ -256,7 +256,7 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
 
     // Parse request_id from topics[1]
     let mut request_id = [0u8; 32];
-    request_id.copy_from_slice(&log.topics[1].as_bytes());
+    request_id.copy_from_slice(log.topics[1].as_bytes());
 
     // Parse data fields
     let data = log.data.0.as_slice();

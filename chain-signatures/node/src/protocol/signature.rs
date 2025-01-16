@@ -843,7 +843,7 @@ impl SignatureManager {
                         Token::Tuple(vec![
                             Token::Tuple(vec![
                                 Token::Uint(U256::from_big_endian(
-                                    &signature.big_r.affine_point.x().to_vec(),
+                                    &signature.big_r.affine_point.x(),
                                 )),
                                 Token::Uint(U256::from_big_endian(
                                     &signature
@@ -851,8 +851,7 @@ impl SignatureManager {
                                         .affine_point
                                         .to_encoded_point(false)
                                         .y()
-                                        .unwrap()
-                                        .to_vec(),
+                                        .unwrap(),
                                 )),
                             ]),
                             Token::Uint(U256::from_big_endian(&signature.s.scalar.to_bytes())),
@@ -860,7 +859,7 @@ impl SignatureManager {
                         ]),
                     );
 
-                    let eth_account_sk = web3::signing::SecretKey::from_str(&eth_account_sk)
+                    let eth_account_sk = web3::signing::SecretKey::from_str(eth_account_sk)
                         .expect("failed to parse eth account sk, should not begin with 0x");
                     let data = contract
                         .abi()
