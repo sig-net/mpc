@@ -27,6 +27,7 @@ pub fn spawn() -> ClusterSpawner {
             nodes: 3,
             threshold: 2,
             protocol: Default::default(),
+            ..Default::default()
         },
     }
 }
