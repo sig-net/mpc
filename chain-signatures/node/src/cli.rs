@@ -242,7 +242,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             )?;
 
             let (eth_indexer_handle, eth_indexer) =
-                indexer_eth::run(&indexer_eth_options, sign_tx, app_data_storage)?;
+                indexer_eth::run(&indexer_eth_options, &account_id, sign_tx, app_data_storage)?;
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
