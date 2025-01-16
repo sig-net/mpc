@@ -846,7 +846,7 @@ impl SignatureManager {
                                     &signature.big_r.affine_point.x(),
                                 )),
                                 Token::Uint(U256::from_big_endian(
-                                    &signature
+                                    signature
                                         .big_r
                                         .affine_point
                                         .to_encoded_point(false)
