@@ -154,8 +154,8 @@ impl CryptographicProtocol for ResharingState {
         // TODO: we are not using active potential participants here, but we should in the future.
         // Currently resharing protocol does not timeout and restart with new set of participants.
         // So if it picks up a participant that is not active, it will never be able to send a message to it.
-        let active = mesh_state.active.and(&mesh_state.potential);
-        tracing::info!(active = ?active.keys().collect::<Vec<_>>(), "progressing key reshare");
+        let active = mesh_state.active.and(&mesh_state.active_potential);
+        tracing::info!(active = ?active.keys_vec(), "progressing key reshare");
         let mut protocol = self.protocol.write().await;
         loop {
             let action = match protocol.poke() {
@@ -199,18 +199,19 @@ impl CryptographicProtocol for ResharingState {
                     tracing::debug!("resharing: sending a private message to {to:?}");
                     if self.new_participants.get(&to).is_none() {
                         tracing::error!("resharing: send_private unknown participant {to:?}");
+                    } else {
+                        ctx.channel()
+                            .send(
+                                self.me,
+                                to,
+                                ResharingMessage {
+                                    epoch: self.old_epoch,
+                                    from: self.me,
+                                    data,
+                                },
+                            )
+                            .await;
                     }
-                    ctx.channel()
-                        .send(
-                            self.me,
-                            to,
-                            ResharingMessage {
-                                epoch: self.old_epoch,
-                                from: self.me,
-                                data,
-                            },
-                        )
-                        .await;
                 }
                 Action::Return(private_share) => {
                     tracing::debug!("resharing: successfully completed key reshare");

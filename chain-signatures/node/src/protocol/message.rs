@@ -144,6 +144,11 @@ impl Message {
 
 #[derive(Default)]
 pub struct MessageInbox {
+    /// encrypted messages that are pending to be decrypted. These are messages that we received
+    /// from other nodes that weren't able to be processed yet due to missing info such as the
+    /// participant id in the case of slow resharing.
+    retry_decrypt: VecDeque<(Ciphered, Instant)>,
+
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
@@ -188,6 +193,12 @@ impl MessageInbox {
         }
     }
 
+    pub fn expire(&mut self, protocol: &ProtocolConfig) {
+        self.retry_decrypt.retain(|(_, timestamp)| {
+            timestamp.elapsed() < Duration::from_secs(protocol.message_timeout)
+        });
+    }
+
     pub async fn extend_decrypt(
         &mut self,
         cipher_sk: &hpke::SecretKey,
@@ -195,6 +206,27 @@ impl MessageInbox {
         incoming: &mut mpsc::Receiver<Ciphered>,
     ) -> usize {
         let mut count = 0;
+        let mut retry = Vec::new();
+        while let Some((encrypted, timestamp)) = self.retry_decrypt.pop_front() {
+            let messages: Vec<Message> =
+                match SignedMessage::decrypt(cipher_sk, protocol_state, &encrypted).await {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        if matches!(err, MessageError::UnknownParticipant(_)) {
+                            retry.push((encrypted, timestamp));
+                        } else {
+                            tracing::error!(?err, "failed to decrypt/verify retried messages");
+                        }
+                        continue;
+                    }
+                };
+
+            count += messages.len();
+            for msg in messages {
+                self.push(msg);
+            }
+        }
+
         loop {
             let encrypted = match incoming.try_recv() {
                 Ok(msg) => msg,
@@ -210,10 +242,14 @@ impl MessageInbox {
             };
 
             let messages: Vec<Message> =
-                match SignedMessage::decrypt(cipher_sk, protocol_state, encrypted).await {
+                match SignedMessage::decrypt(cipher_sk, protocol_state, &encrypted).await {
                     Ok(msg) => msg,
                     Err(err) => {
-                        tracing::error!(?err, "failed to decrypt or verify an encrypted message");
+                        if matches!(err, MessageError::UnknownParticipant(_)) {
+                            retry.push((encrypted, Instant::now()));
+                        } else {
+                            tracing::error!(?err, "failed to decrypt/verify received messages");
+                        }
                         continue;
                     }
                 };
@@ -223,6 +259,8 @@ impl MessageInbox {
                 self.push(msg);
             }
         }
+
+        self.retry_decrypt.extend(retry);
         count
     }
 }
@@ -252,11 +290,13 @@ impl MessageExecutor {
                 )
             };
 
-            self.inbox
-                .write()
-                .await
-                .extend_decrypt(&cipher_sk, &self.protocol_state, &mut self.incoming)
-                .await;
+            {
+                let mut inbox = self.inbox.write().await;
+                inbox
+                    .extend_decrypt(&cipher_sk, &self.protocol_state, &mut self.incoming)
+                    .await;
+                inbox.expire(&protocol);
+            }
 
             let active = {
                 let mesh_state = self.mesh_state.read().await;
@@ -709,10 +749,10 @@ impl SignedMessage {
     pub async fn decrypt<T: DeserializeOwned>(
         cipher_sk: &hpke::SecretKey,
         protocol_state: &Arc<RwLock<NodeState>>,
-        encrypted: Ciphered,
+        encrypted: &Ciphered,
     ) -> Result<T, MessageError> {
         let msg = cipher_sk
-            .decrypt(&encrypted, Self::ASSOCIATED_DATA)
+            .decrypt(encrypted, Self::ASSOCIATED_DATA)
             .map_err(|err| {
                 tracing::error!(error = ?err, "failed to decrypt message");
                 MessageError::Encryption(err.to_string())

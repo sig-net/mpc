@@ -481,10 +481,10 @@ impl ConsensusProtocol for RunningState {
             ProtocolState::Running(contract_state) => match contract_state.epoch.cmp(&self.epoch) {
                 Ordering::Greater => {
                     tracing::warn!(
-                            "running(running): our current epoch is {} while contract state's is {}, trying to rejoin as a new participant",
-                            self.epoch,
-                            contract_state.epoch
-                        );
+                        "running(running): our current epoch is {} while contract state's is {}, trying to rejoin as a new participant",
+                        self.epoch,
+                        contract_state.epoch
+                    );
 
                     Ok(NodeState::Joining(JoiningState {
                         participants: contract_state.participants,

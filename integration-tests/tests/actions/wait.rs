@@ -234,7 +234,7 @@ async fn require_node_state(nodes: &Cluster, state: NodeState, id: usize) -> any
         };
 
         if node_state != state {
-            anyhow::bail!("node not ready yet {:?} != {:?}", node_state, state);
+            anyhow::bail!("node(id={id}) not ready yet {node_state:?} != {state:?}",);
         }
 
         Ok(state)
