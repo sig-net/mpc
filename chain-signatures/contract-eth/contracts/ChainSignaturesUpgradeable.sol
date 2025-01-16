@@ -3,10 +3,11 @@ pragma solidity ^0.8.17;
 
 import "./Secp256k1.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
-import "hardhat/console.sol"; // Import Hardhat's console library
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "hardhat/console.sol";
 
-
-contract ChainSignatures {
+contract ChainSignaturesUpgradeable is Initializable, OwnableUpgradeable {
     struct SignRequest {
         bytes32 payload;
         string path;
@@ -48,7 +49,17 @@ contract ChainSignatures {
     event SignatureRequested(bytes32 indexed requestId, address requester, uint256 epsilon, uint256 payloadHash, string path);
     event SignatureResponded(bytes32 indexed requestId, SignatureResponse response);
 
-    constructor(PublicKey memory _publicKey) {
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(PublicKey calldata _publicKey) public initializer {
+        __Ownable_init(msg.sender);
+        publicKey = _publicKey;
+    }
+
+    function reinitialize(PublicKey calldata _publicKey) public reinitializer(2) onlyOwner {
         publicKey = _publicKey;
     }
 

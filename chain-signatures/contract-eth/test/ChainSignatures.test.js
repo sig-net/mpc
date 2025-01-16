@@ -1,13 +1,15 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, upgrades } = require("hardhat");
 
 describe("ChainSignatures", function () {
   let ChainSignatures;
   let chainSignatures;
+  let chainSignaturesV2;
   let owner;
   let addr1;
   let addr2;
   let publicKey;
+  let proxyAdmin;
 
   beforeEach(async function () {
     [owner, addr1, addr2] = await ethers.getSigners();
@@ -17,10 +19,98 @@ describe("ChainSignatures", function () {
     const y = publicKeyArray.slice(33);
     const xHex = '0x' + x.map(byte => byte.toString(16).padStart(2, '0')).join('');
     const yHex = '0x' + y.map(byte => byte.toString(16).padStart(2, '0')).join('');
-    console.log("===", xHex, yHex);
-    ChainSignatures = await ethers.getContractFactory("ChainSignatures");
+    
+    // Deploy the upgradeable contract
+    ChainSignatures = await ethers.getContractFactory("ChainSignaturesUpgradeable");
     publicKey = { x: xHex, y: yHex };
-    chainSignatures = await ChainSignatures.deploy(publicKey);
+    
+    // Deploy proxy and implementation
+    chainSignatures = await upgrades.deployProxy(ChainSignatures, [publicKey], {
+      initializer: 'initialize',
+    });
+    await chainSignatures.waitForDeployment();
+
+    // Get the ProxyAdmin contract
+    const proxyAdminAddress = await upgrades.erc1967.getAdminAddress(await chainSignatures.getAddress());
+    proxyAdmin = await ethers.getContractAt("ChainSignaturesProxyAdmin", proxyAdminAddress);
+  });
+
+  // Add a test for upgrading the contract
+  describe("Upgrades", function () {
+    it("Should upgrade the contract", async function () {
+      // Deploy a new version of the contract
+      const ChainSignaturesV2 = await ethers.getContractFactory("ChainSignaturesUpgradeable");
+      chainSignaturesV2 = await upgrades.upgradeProxy(await chainSignatures.getAddress(), ChainSignaturesV2);
+      
+      // Verify the upgrade
+      expect(await chainSignaturesV2.getAddress()).to.equal(await chainSignatures.getAddress());
+      
+      // Test that state is preserved
+      const storedPublicKey = await chainSignaturesV2.getPublicKey();
+      expect(storedPublicKey.x).to.equal(publicKey.x);
+      expect(storedPublicKey.y).to.equal(publicKey.y);
+    });
+
+    it("Should only allow admin to upgrade", async function () {
+      const ChainSignaturesV2 = await ethers.getContractFactory("ChainSignaturesUpgradeable");
+      const chainSignaturesV2 = await ChainSignaturesV2.deploy();
+      await chainSignaturesV2.waitForDeployment();
+      
+      // Try to upgrade from non-admin account
+      await expect(
+        proxyAdmin.connect(addr1).upgradeAndCall(
+          await chainSignatures.getAddress(),
+          await chainSignaturesV2.getAddress(),
+          "0x"
+        )
+      ).to.be.revertedWithCustomError(proxyAdmin, "OwnableUnauthorizedAccount")
+       .withArgs(addr1.address);
+    });
+
+    it("Should upgrade and allow new initialization arguments", async function () {
+      // Create a new public key
+      const newX = "0x1234567890123456789012345678901234567890123456789012345678901234";
+      const newY = "0x5678901234567890123456789012345678901234567890123456789012345678";
+      const newPublicKey = { x: newX, y: newY };
+
+      // Deploy a new version of the contract
+      const ChainSignaturesV2 = await ethers.getContractFactory("ChainSignaturesUpgradeable", owner);
+      
+      // Upgrade and initialize in one step, ensuring we're using the owner account
+      chainSignaturesV2 = await upgrades.upgradeProxy(
+        await chainSignatures.getAddress(), 
+        ChainSignaturesV2.connect(owner), 
+        {
+          call: { fn: 'reinitialize', args: [newPublicKey] }
+        }
+      );
+
+      // Verify the new state is set
+      const storedPublicKey = await chainSignaturesV2.getPublicKey();
+      expect(storedPublicKey.x).to.equal(newPublicKey.x);
+      expect(storedPublicKey.y).to.equal(newPublicKey.y);
+    });
+
+    it("Should not allow reinitialize more than twice", async function () {
+      // Create new public keys
+      const newPublicKey1 = {
+        x: "0x1234567890123456789012345678901234567890123456789012345678901234",
+        y: "0x5678901234567890123456789012345678901234567890123456789012345678"
+      };
+      
+      const newPublicKey2 = {
+        x: "0x2234567890123456789012345678901234567890123456789012345678901234", 
+        y: "0x6678901234567890123456789012345678901234567890123456789012345678"
+      };
+
+      // First reinitialize should succeed
+      await chainSignatures.reinitialize(newPublicKey1);
+
+      // Second reinitialize should fail
+      await expect(
+        chainSignatures.reinitialize(newPublicKey2)
+      ).to.be.revertedWithCustomError(chainSignatures, "InvalidInitialization");
+    });
   });
 
   describe("deriveEpsilon", function () {
