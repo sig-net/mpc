@@ -41,7 +41,7 @@ pub async fn run(
         protocol_state,
         cipher_sk,
         indexer,
-        #[allow(unused)]
+        #[allow(dead_code)]
         eth_indexer,
     };
 
