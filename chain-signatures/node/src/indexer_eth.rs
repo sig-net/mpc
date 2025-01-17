@@ -234,7 +234,7 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
     crate::metrics::NUM_SIGN_REQUESTS_ETH
         .with_label_values(&[ctx.node_account_id.as_str()])
         .inc_by(pending_requests.len() as f64);
-    
+
     for request in pending_requests {
         if let Err(err) = ctx.sign_tx.send(request).await {
             tracing::error!(?err, "failed to send the eth sign request into sign queue");
@@ -326,13 +326,10 @@ pub fn run(
                         continue;
                     }
                 };
-        
-                let latest_handled_block = context
-                    .indexer
-                    .last_processed_block()
-                    .await
-                    .unwrap_or(0);
-                
+
+                let latest_handled_block =
+                    context.indexer.last_processed_block().await.unwrap_or(0);
+
                 const MAX_DELAYED_BLOCKS: u64 = 15;
                 let next_block_to_handle: u64 = {
                     if latest_block - latest_handled_block < MAX_DELAYED_BLOCKS {
@@ -352,7 +349,7 @@ pub fn run(
                 }
 
                 if next_block_to_handle <= latest_block {
-                    if let Err(err) = handle_block(next_block_to_handle , &context).await {
+                    if let Err(err) = handle_block(next_block_to_handle, &context).await {
                         tracing::warn!(%err, "failed to handle eth block");
                         tokio::time::sleep(Duration::from_secs(5)).await;
                         continue;

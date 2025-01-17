@@ -30,7 +30,7 @@ enum Cli {
             long,
             default_value = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
         )]
-        eth_account_sk: String
+        eth_account_sk: String,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
             threshold,
             eth_rpc_url,
             eth_contract_address,
-            eth_account_sk
+            eth_account_sk,
         } => {
             println!(
                 "Setting up an environment with {} nodes, {} threshold ...",
