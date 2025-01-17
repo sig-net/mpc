@@ -65,10 +65,12 @@ impl Default for NodeConfig {
 
 pub enum Nodes {
     Local {
+        next_id: usize,
         ctx: Context,
         nodes: Vec<local::Node>,
     },
     Docker {
+        next_id: usize,
         ctx: Context,
         nodes: Vec<containers::Node>,
     },
@@ -114,12 +116,22 @@ impl Nodes {
     ) -> anyhow::Result<usize> {
         tracing::info!(id = %new_account.id(), "adding one more node");
         match self {
-            Nodes::Local { ctx, nodes } => {
-                nodes.push(local::Node::run(ctx, cfg, new_account).await?);
+            Nodes::Local {
+                next_id,
+                ctx,
+                nodes,
+            } => {
+                nodes.push(local::Node::run(*next_id, ctx, cfg, new_account).await?);
+                *next_id += 1;
                 Ok(nodes.len() - 1)
             }
-            Nodes::Docker { ctx, nodes } => {
-                nodes.push(containers::Node::run(ctx, cfg, new_account).await?);
+            Nodes::Docker {
+                next_id,
+                ctx,
+                nodes,
+            } => {
+                nodes.push(containers::Node::run(*next_id, ctx, cfg, new_account).await?);
+                *next_id += 1;
                 Ok(nodes.len() - 1)
             }
         }
@@ -152,8 +164,22 @@ impl Nodes {
     pub async fn restart_node(&mut self, config: NodeEnvConfig) -> anyhow::Result<()> {
         tracing::info!(node_account_id = %config.account.id(), "restarting node");
         match self {
-            Nodes::Local { ctx, nodes } => nodes.push(local::Node::spawn(ctx, config).await?),
-            Nodes::Docker { ctx, nodes } => nodes.push(containers::Node::spawn(ctx, config).await?),
+            Nodes::Local {
+                next_id,
+                ctx,
+                nodes,
+            } => {
+                nodes.push(local::Node::spawn(*next_id, ctx, config).await?);
+                *next_id += 1;
+            }
+            Nodes::Docker {
+                next_id,
+                ctx,
+                nodes,
+            } => {
+                nodes.push(containers::Node::spawn(*next_id, ctx, config).await?);
+                *next_id += 1;
+            }
         }
         // wait for the node to be added to the network
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -276,8 +302,8 @@ pub async fn docker(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Re
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
     let mut node_futures = Vec::new();
-    for account in &accounts {
-        let node = containers::Node::run(&ctx, &cfg, account);
+    for (node_id, account) in accounts.iter().enumerate() {
+        let node = containers::Node::run(node_id, &ctx, &cfg, account);
         node_futures.push(node);
     }
     let nodes = futures::future::join_all(node_futures)
@@ -310,7 +336,11 @@ pub async fn docker(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Re
         .await?
         .into_result()?;
 
-    Ok(Nodes::Docker { ctx, nodes })
+    Ok(Nodes::Docker {
+        next_id: nodes.len(),
+        ctx,
+        nodes,
+    })
 }
 
 pub async fn dry_host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Context> {
@@ -322,8 +352,8 @@ pub async fn dry_host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
     let mut node_cfgs = Vec::new();
-    for account in accounts.iter().take(cfg.nodes) {
-        node_cfgs.push(local::Node::dry_run(&ctx, account, &cfg).await?);
+    for (node_id, account) in accounts.iter().enumerate() {
+        node_cfgs.push(local::Node::dry_run(node_id, &ctx, account, &cfg).await?);
     }
 
     let candidates: HashMap<AccountId, CandidateInfo> = accounts
@@ -375,8 +405,8 @@ pub async fn host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Resu
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
     let mut node_futures = Vec::with_capacity(cfg.nodes);
-    for account in &accounts {
-        node_futures.push(local::Node::run(&ctx, &cfg, account));
+    for (node_id, account) in accounts.iter().enumerate() {
+        node_futures.push(local::Node::run(node_id, &ctx, &cfg, account));
     }
     let nodes = futures::future::join_all(node_futures)
         .await
@@ -408,7 +438,11 @@ pub async fn host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Resu
         .await?
         .into_result()?;
 
-    Ok(Nodes::Local { ctx, nodes })
+    Ok(Nodes::Local {
+        next_id: nodes.len(),
+        ctx,
+        nodes,
+    })
 }
 
 pub async fn run(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
