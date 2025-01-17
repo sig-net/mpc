@@ -3,7 +3,7 @@ use crate::storage::error::{StoreError, StoreResult};
 
 use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
-use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
+use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
 use near_account_id::AccountId;
 
@@ -136,7 +136,7 @@ impl TripleStorage {
             return {v1, v2}
         "#;
 
-        let result: Result<(Triple, Triple), redis::RedisError> = redis::Script::new(lua_script)
+        let result: Result<(Triple, Triple), RedisError> = redis::Script::new(lua_script)
             .key(&self.triple_key)
             .key(&self.mine_key)
             .key(&self.used_key)
@@ -149,7 +149,7 @@ impl TripleStorage {
         result.map_err(StoreError::from)
     }
 
-    pub async fn take_two_mine(&self) -> StoreResult<(Triple, Triple)> {
+    pub async fn take_two_mine(&self) -> StoreResult<Option<(Triple, Triple)>> {
         let mut conn = self.connect().await?;
 
         let lua_script = r#"
@@ -157,7 +157,7 @@ impl TripleStorage {
             local count = redis.call("SCARD", KEYS[1])
 
             if count < 2 then
-                return {err = "Mine triple stockpile does not have enough triples"}
+                return nil
             end
 
             -- Pop two IDs atomically
@@ -187,15 +187,14 @@ impl TripleStorage {
             return {v1, v2}
         "#;
 
-        let result: Result<(Triple, Triple), redis::RedisError> = redis::Script::new(lua_script)
+        redis::Script::new(lua_script)
             .key(&self.mine_key)
             .key(&self.triple_key)
             .key(&self.used_key)
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
-            .await;
-
-        result.map_err(StoreError::from)
+            .await
+            .map_err(StoreError::from)
     }
 
     pub async fn len_generated(&self) -> StoreResult<usize> {
@@ -238,7 +237,7 @@ impl FromRedisValue for Triple {
         let json = String::from_redis_value(v)?;
 
         serde_json::from_str(&json).map_err(|e| {
-            redis::RedisError::from((
+            RedisError::from((
                 redis::ErrorKind::TypeError,
                 "Failed to deserialize Triple",
                 e.to_string(),

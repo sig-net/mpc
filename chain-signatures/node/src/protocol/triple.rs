@@ -583,7 +583,7 @@ impl TripleManager {
             .map_err(|store_error| {
                 tracing::warn!(?store_error, "failed to take two mine triples");
             })
-            .ok()?;
+            .ok()??;
 
         {
             let mut gc = self.gc.write().await;

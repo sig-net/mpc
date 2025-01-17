@@ -1,7 +1,7 @@
 use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
-use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
+use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
 use crate::protocol::presignature::{Presignature, PresignatureId};
 use crate::storage::error::{StoreError, StoreResult};
@@ -141,7 +141,7 @@ impl PresignatureStorage {
             return presig_value
         "#;
 
-        let result: Result<Presignature, redis::RedisError> = redis::Script::new(script)
+        let result: Result<Presignature, RedisError> = redis::Script::new(script)
             .key(&self.mine_key)
             .key(&self.presig_key)
             .key(&self.used_key)
@@ -153,7 +153,7 @@ impl PresignatureStorage {
         result.map_err(StoreError::from)
     }
 
-    pub async fn take_mine(&self) -> StoreResult<Presignature> {
+    pub async fn take_mine(&self) -> StoreResult<Option<Presignature>> {
         let mut conn = self.connect().await?;
 
         let script = r#"
@@ -163,7 +163,7 @@ impl PresignatureStorage {
 
             local presig_id = redis.call("SPOP", mine_key)
             if not presig_id then
-                return {err = "Mine presignature stockpile does not have enough presignatures"}
+                return nil
             end
 
             local presig_value = redis.call("HGET", presig_key, presig_id)
@@ -178,15 +178,14 @@ impl PresignatureStorage {
             return presig_value
         "#;
 
-        let result: Result<Presignature, redis::RedisError> = redis::Script::new(script)
+        redis::Script::new(script)
             .key(&self.mine_key)
             .key(&self.presig_key)
             .key(&self.used_key)
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
-            .await;
-
-        result.map_err(StoreError::from)
+            .await
+            .map_err(StoreError::from)
     }
 
     pub async fn len_generated(&self) -> StoreResult<usize> {
@@ -229,7 +228,7 @@ impl FromRedisValue for Presignature {
         let json = String::from_redis_value(v)?;
 
         serde_json::from_str(&json).map_err(|e| {
-            redis::RedisError::from((
+            RedisError::from((
                 redis::ErrorKind::TypeError,
                 "Failed to deserialize Presignature",
                 e.to_string(),
