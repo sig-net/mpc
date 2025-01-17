@@ -330,7 +330,7 @@ pub fn run(
                 let latest_handled_block =
                     context.indexer.last_processed_block().await.unwrap_or(0);
 
-                const MAX_DELAYED_BLOCKS: u64 = 15;
+                const MAX_DELAYED_BLOCKS: u64 = 100;
                 let next_block_to_handle: u64 = {
                     if latest_block - latest_handled_block < MAX_DELAYED_BLOCKS {
                         latest_handled_block + 1
