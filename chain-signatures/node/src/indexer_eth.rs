@@ -6,6 +6,7 @@ use crypto_shared::kdf::derive_epsilon_eth;
 use crypto_shared::ScalarExt;
 use hex::ToHex;
 use k256::Scalar;
+use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -29,10 +30,6 @@ pub struct Options {
     #[clap(long, env("MPC_INDEXER_ETH_CONTRACT_ADDRESS"))]
     pub eth_contract_address: String,
 
-    /// The block height to start indexing from
-    #[clap(long, env("MPC_INDEXER_ETH_START_BLOCK"), default_value = "0")]
-    pub eth_start_block_height: u64,
-
     /// The amount of time before we consider the indexer behind
     #[clap(long, env("MPC_INDEXER_ETH_BEHIND_THRESHOLD"), default_value = "180")]
     pub eth_behind_threshold: u64,
@@ -50,8 +47,6 @@ impl Options {
             self.eth_rpc_url,
             "--eth-contract-address".to_string(),
             self.eth_contract_address,
-            "--eth-start-block-height".to_string(),
-            self.eth_start_block_height.to_string(),
             "--eth-behind-threshold".to_string(),
             self.eth_behind_threshold.to_string(),
             "--eth-running-threshold".to_string(),
@@ -144,14 +139,13 @@ impl EthIndexer {
 #[derive(Clone)]
 struct Context {
     contract_address: H160,
+    node_account_id: AccountId,
     web3: Web3<web3::transports::Http>,
     sign_tx: mpsc::Sender<SignRequest>,
     indexer: EthIndexer,
 }
 
 async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
-    tracing::debug!(block_height = block_number, "handle eth block");
-
     let signature_requested_topic = H256::from_slice(&web3::signing::keccak256(
         b"SignatureRequested(bytes32,address,uint256,uint256,string)",
     ));
@@ -173,7 +167,10 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
     let block_timestamp = block.timestamp.as_u64();
 
     let logs = ctx.web3.eth().logs(filter).await?;
-    tracing::debug!("found {} filtered logs", logs.len());
+    let logs_cnt = logs.len();
+    if logs_cnt > 0 {
+        tracing::debug!("found {logs_cnt} filtered logs");
+    }
 
     let mut pending_requests = Vec::new();
     // Get logs using filter
@@ -234,6 +231,10 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
         pending_requests.push(sign_request);
     }
 
+    crate::metrics::NUM_SIGN_REQUESTS_ETH
+        .with_label_values(&[ctx.node_account_id.as_str()])
+        .inc_by(pending_requests.len() as f64);
+
     for request in pending_requests {
         if let Err(err) = ctx.sign_tx.send(request).await {
             tracing::error!(?err, "failed to send the eth sign request into sign queue");
@@ -243,6 +244,10 @@ async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
     ctx.indexer
         .update_block_height_and_timestamp(block_number, block_timestamp)
         .await;
+
+    crate::metrics::LATEST_BLOCK_HEIGHT_ETH
+        .with_label_values(&[ctx.node_account_id.as_str()])
+        .set(block_number as i64);
 
     Ok(())
 }
@@ -288,6 +293,7 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
 
 pub fn run(
     options: &Options,
+    node_account_id: &AccountId,
     sign_tx: mpsc::Sender<SignRequest>,
     app_data_storage: AppDataStorage,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, EthIndexer)> {
@@ -299,12 +305,11 @@ pub fn run(
     let indexer = EthIndexer::new(app_data_storage, options);
     let context = Context {
         contract_address,
+        node_account_id: node_account_id.clone(),
         web3,
         sign_tx,
         indexer: indexer.clone(),
     };
-
-    let start_block_height = options.eth_start_block_height;
 
     let join_handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -314,26 +319,37 @@ pub fn run(
         rt.block_on(async {
             loop {
                 let latest_block = match context.web3.eth().block_number().await {
-                    Ok(block) => block,
+                    Ok(block) => block.as_u64(),
                     Err(err) => {
                         tracing::warn!(%err, "failed to get latest eth block number");
                         tokio::time::sleep(Duration::from_secs(5)).await;
                         continue;
                     }
                 };
-                let latest_handled_block = context
-                    .indexer
-                    .last_processed_block()
-                    .await
-                    .unwrap_or(start_block_height);
-                tracing::debug!(
-                    "eth latest_block {} latest_handled_block {}",
-                    latest_block,
-                    latest_handled_block
-                );
 
-                if latest_handled_block < latest_block.as_u64() {
-                    if let Err(err) = handle_block(latest_handled_block + 1, &context).await {
+                let latest_handled_block =
+                    context.indexer.last_processed_block().await.unwrap_or(0);
+
+                const MAX_DELAYED_BLOCKS: u64 = 100;
+                let next_block_to_handle: u64 = {
+                    if latest_block - latest_handled_block < MAX_DELAYED_BLOCKS {
+                        latest_handled_block + 1
+                    } else {
+                        latest_block.saturating_sub(MAX_DELAYED_BLOCKS) + 1
+                    }
+                };
+
+                if latest_block % 100 == 0 {
+                    tracing::debug!(
+                        next_block_to_handle,
+                        latest_block,
+                        latest_handled_block,
+                        "Eth indexer running"
+                    )
+                }
+
+                if next_block_to_handle <= latest_block {
+                    if let Err(err) = handle_block(next_block_to_handle, &context).await {
                         tracing::warn!(%err, "failed to handle eth block");
                         tokio::time::sleep(Duration::from_secs(5)).await;
                         continue;
