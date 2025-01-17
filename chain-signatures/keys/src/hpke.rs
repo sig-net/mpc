@@ -19,6 +19,7 @@ const INFO_ENTROPY: &[u8] = b"mpc-key-v1";
 pub type Kem = X25519HkdfSha256;
 pub type Aead = ChaCha20Poly1305;
 pub type Kdf = HkdfSha384;
+pub type Error = hpke::HpkeError;
 
 #[derive(Serialize, Deserialize)]
 pub struct Ciphered {

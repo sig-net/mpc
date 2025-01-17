@@ -160,6 +160,17 @@ impl NodeState {
             _ => Err(MessageError::UnknownParticipant(*p)),
         }
     }
+
+    pub fn participants(&self) -> Option<&Participants> {
+        match self {
+            NodeState::Generating(state) => Some(&state.participants),
+            NodeState::WaitingForConsensus(state) => Some(&state.participants),
+            NodeState::Running(state) => Some(&state.participants),
+            NodeState::Resharing(state) => Some(&state.new_participants),
+            NodeState::Joining(state) => Some(&state.participants),
+            _ => None,
+        }
+    }
 }
 
 fn fetch_participant<'a>(

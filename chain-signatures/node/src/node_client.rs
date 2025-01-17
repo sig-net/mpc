@@ -60,7 +60,7 @@ impl NodeClient {
         }
     }
 
-    async fn post_msg(&self, url: &Url, msg: &[Ciphered]) -> Result<(), RequestError> {
+    async fn post_msg(&self, url: &Url, msg: &[&Ciphered]) -> Result<(), RequestError> {
         let resp = self
             .http
             .post(url.clone())
@@ -81,7 +81,7 @@ impl NodeClient {
         }
     }
 
-    pub async fn msg(&self, base: impl IntoUrl, msg: &[Ciphered]) -> Result<(), RequestError> {
+    pub async fn msg(&self, base: impl IntoUrl, msg: &[&Ciphered]) -> Result<(), RequestError> {
         let mut url = base.into_url()?;
         url.set_path("msg");
 

@@ -28,9 +28,10 @@ use tokio::sync::{mpsc, RwLock};
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct GeneratingMessage {
     pub from: Participant,
+    #[serde(with = "serde_bytes")]
     pub data: MessageData,
 }
 
@@ -40,10 +41,11 @@ impl From<GeneratingMessage> for Message {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ResharingMessage {
     pub epoch: Epoch,
     pub from: Participant,
+    #[serde(with = "serde_bytes")]
     pub data: MessageData,
 }
 
@@ -53,11 +55,12 @@ impl From<ResharingMessage> for Message {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct TripleMessage {
     pub id: u64,
     pub epoch: Epoch,
     pub from: Participant,
+    #[serde(with = "serde_bytes")]
     pub data: MessageData,
     // UNIX timestamp as seconds since the epoch
     pub timestamp: u64,
@@ -69,13 +72,14 @@ impl From<TripleMessage> for Message {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct PresignatureMessage {
     pub id: u64,
     pub triple0: TripleId,
     pub triple1: TripleId,
     pub epoch: Epoch,
     pub from: Participant,
+    #[serde(with = "serde_bytes")]
     pub data: MessageData,
     // UNIX timestamp as seconds since the epoch
     pub timestamp: u64,
@@ -87,7 +91,7 @@ impl From<PresignatureMessage> for Message {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct SignatureMessage {
     pub request_id: [u8; 32],
     pub proposer: Participant,
@@ -97,6 +101,7 @@ pub struct SignatureMessage {
     pub entropy: [u8; 32],
     pub epoch: u64,
     pub from: Participant,
+    #[serde(with = "serde_bytes")]
     pub data: MessageData,
     // UNIX timestamp as seconds since the epoch
     pub timestamp: u64,
@@ -108,13 +113,18 @@ impl From<SignatureMessage> for Message {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Message {
     Generating(GeneratingMessage),
     Resharing(ResharingMessage),
     Triple(TripleMessage),
     Presignature(PresignatureMessage),
     Signature(SignatureMessage),
+
+    /// Future compatibility with other messages. If in the future, we were to add a new
+    /// enum variant here, we can still deserialize the message as Unknown.
+    #[serde(untagged)]
+    Unknown(HashMap<String, ciborium::Value>),
 }
 
 impl Message {
@@ -125,6 +135,7 @@ impl Message {
             Message::Triple(_) => "Triple",
             Message::Presignature(_) => "Presignature",
             Message::Signature(_) => "Signature",
+            Message::Unknown(_) => "Unknown",
         }
     }
 
@@ -138,6 +149,7 @@ impl Message {
                 std::mem::size_of::<PresignatureMessage>() + msg.data.len()
             }
             Message::Signature(msg) => std::mem::size_of::<SignatureMessage>() + msg.data.len(),
+            Message::Unknown(_msg) => usize::MAX,
         }
     }
 }
@@ -147,7 +159,7 @@ pub struct MessageInbox {
     /// encrypted messages that are pending to be decrypted. These are messages that we received
     /// from other nodes that weren't able to be processed yet due to missing info such as the
     /// participant id in the case of slow resharing.
-    retry_decrypt: VecDeque<(Ciphered, Instant)>,
+    try_decrypt: VecDeque<(Ciphered, Instant)>,
 
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
@@ -190,43 +202,22 @@ impl MessageInbox {
                 ))
                 .or_default()
                 .push_back(message),
+            Message::Unknown(entries) => {
+                tracing::warn!(
+                    entries = ?entries.iter().map(|(k, v)| (k, cbor_name(v))).collect::<Vec<_>>(),
+                    "inbox: received unknown message type",
+                );
+            }
         }
     }
 
     pub fn expire(&mut self, protocol: &ProtocolConfig) {
-        self.retry_decrypt.retain(|(_, timestamp)| {
+        self.try_decrypt.retain(|(_, timestamp)| {
             timestamp.elapsed() < Duration::from_secs(protocol.message_timeout)
         });
     }
 
-    pub async fn extend_decrypt(
-        &mut self,
-        cipher_sk: &hpke::SecretKey,
-        protocol_state: &Arc<RwLock<NodeState>>,
-        incoming: &mut mpsc::Receiver<Ciphered>,
-    ) -> usize {
-        let mut count = 0;
-        let mut retry = Vec::new();
-        while let Some((encrypted, timestamp)) = self.retry_decrypt.pop_front() {
-            let messages: Vec<Message> =
-                match SignedMessage::decrypt(cipher_sk, protocol_state, &encrypted).await {
-                    Ok(msg) => msg,
-                    Err(err) => {
-                        if matches!(err, MessageError::UnknownParticipant(_)) {
-                            retry.push((encrypted, timestamp));
-                        } else {
-                            tracing::error!(?err, "failed to decrypt/verify retried messages");
-                        }
-                        continue;
-                    }
-                };
-
-            count += messages.len();
-            for msg in messages {
-                self.push(msg);
-            }
-        }
-
+    pub async fn extend(&mut self, incoming: &mut mpsc::Receiver<Ciphered>) {
         loop {
             let encrypted = match incoming.try_recv() {
                 Ok(msg) => msg,
@@ -241,14 +232,23 @@ impl MessageInbox {
                 }
             };
 
+            self.try_decrypt.push_back((encrypted, Instant::now()));
+        }
+    }
+
+    pub fn decrypt(&mut self, cipher_sk: &hpke::SecretKey, participants: &Participants) -> usize {
+        let mut count = 0;
+        let mut retry = Vec::new();
+
+        while let Some((encrypted, timestamp)) = self.try_decrypt.pop_front() {
             let messages: Vec<Message> =
-                match SignedMessage::decrypt(cipher_sk, protocol_state, &encrypted).await {
+                match SignedMessage::decrypt(&encrypted, cipher_sk, participants) {
                     Ok(msg) => msg,
                     Err(err) => {
                         if matches!(err, MessageError::UnknownParticipant(_)) {
-                            retry.push((encrypted, Instant::now()));
+                            retry.push((encrypted, timestamp));
                         } else {
-                            tracing::error!(?err, "failed to decrypt/verify received messages");
+                            tracing::error!(?err, "inbox: failed to decrypt/verify messages");
                         }
                         continue;
                     }
@@ -260,7 +260,7 @@ impl MessageInbox {
             }
         }
 
-        self.retry_decrypt.extend(retry);
+        self.try_decrypt.extend(retry);
         count
     }
 }
@@ -291,11 +291,13 @@ impl MessageExecutor {
             };
 
             {
+                let participants = { self.protocol_state.read().await.participants().cloned() };
                 let mut inbox = self.inbox.write().await;
-                inbox
-                    .extend_decrypt(&cipher_sk, &self.protocol_state, &mut self.incoming)
-                    .await;
                 inbox.expire(&protocol);
+                inbox.extend(&mut self.incoming).await;
+                if let Some(participants) = participants {
+                    inbox.decrypt(&cipher_sk, &participants);
+                }
             }
 
             let active = {
@@ -363,7 +365,7 @@ impl MessageChannel {
             .send((message.into(), (from, to, Instant::now())))
             .await
         {
-            tracing::error!(?err, "failed to send message to participants");
+            tracing::error!(?err, "outbox: failed to send message to participants");
         }
     }
 }
@@ -374,10 +376,12 @@ pub enum MessageError {
     UnknownParticipant(Participant),
     #[error(transparent)]
     JsonConversion(#[from] serde_json::Error),
-    #[error(transparent)]
-    BinaryConversion(#[from] bincode::Error),
+    #[error("cbor: {0:?}")]
+    CborConversion(String),
     #[error("encryption failed: {0}")]
-    Encryption(String),
+    Encryption(#[from] hpke::Error),
+    #[error("verify failed: {0}")]
+    Verification(String),
 }
 
 #[async_trait]
@@ -715,6 +719,7 @@ impl MessageReceiver for NodeState {
 #[derive(Serialize, Deserialize)]
 pub struct SignedMessage {
     /// The message with all it's related info.
+    #[serde(with = "serde_bytes")]
     pub msg: Vec<u8>,
     /// The signature used to verify the authenticity of the encrypted message.
     pub sig: Signature,
@@ -733,47 +738,43 @@ impl SignedMessage {
         sign_sk: &near_crypto::SecretKey,
         cipher_pk: &hpke::PublicKey,
     ) -> Result<Ciphered, MessageError> {
-        let msg = bincode::serialize(&msg).unwrap();
+        let msg = cbor_to_bytes(msg)?;
         let sig = sign_sk.sign(&msg);
         let msg = Self { msg, sig, from };
-        let msg = bincode::serialize(&msg).unwrap();
+        let msg = cbor_to_bytes(&msg)?;
         let ciphered = cipher_pk
             .encrypt(&msg, Self::ASSOCIATED_DATA)
-            .map_err(|e| {
-                tracing::error!(error = ?e, "failed to encrypt message");
-                MessageError::Encryption(e.to_string())
+            .inspect_err(|err| {
+                tracing::error!(?err, "failed to encrypt message");
             })?;
         Ok(ciphered)
     }
+}
 
-    pub async fn decrypt<T: DeserializeOwned>(
-        cipher_sk: &hpke::SecretKey,
-        protocol_state: &Arc<RwLock<NodeState>>,
+impl SignedMessage {
+    pub fn decrypt<T: DeserializeOwned>(
         encrypted: &Ciphered,
+        cipher_sk: &hpke::SecretKey,
+        participants: &Participants,
     ) -> Result<T, MessageError> {
         let msg = cipher_sk
             .decrypt(encrypted, Self::ASSOCIATED_DATA)
-            .map_err(|err| {
-                tracing::error!(error = ?err, "failed to decrypt message");
-                MessageError::Encryption(err.to_string())
+            .inspect_err(|err| {
+                tracing::error!(?err, "failed to decrypt message");
             })?;
-        let Self { msg, sig, from } = bincode::deserialize(&msg).unwrap();
-        if !sig.verify(
-            &msg,
-            &protocol_state
-                .read()
-                .await
-                .fetch_participant(&from)?
-                .sign_pk,
-        ) {
-            tracing::error!(from = ?from, "signed message erred out with invalid signature");
-            return Err(MessageError::Encryption(
+        let Self { msg, sig, from } = cbor_from_bytes(&msg)?;
+        let info = participants
+            .get(&from)
+            .ok_or_else(|| MessageError::UnknownParticipant(from))?;
+        if !sig.verify(&msg, &info.sign_pk) {
+            tracing::error!(?from, "signed message erred out with invalid signature");
+            return Err(MessageError::Verification(
                 "invalid signature while verifying authenticity of encrypted protocol message"
                     .to_string(),
             ));
         }
 
-        Ok(bincode::deserialize(&msg).unwrap())
+        cbor_from_bytes(&msg)
     }
 }
 
@@ -961,7 +962,7 @@ impl MessageOutbox {
                 let client = self.client.clone();
                 send_tasks.push(tokio::spawn(async move {
                     let start = Instant::now();
-                    if let Err(err) = client.msg(url, &[encrypted_partition]).await {
+                    if let Err(err) = client.msg(url, &[&encrypted_partition]).await {
                         crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
                             .with_label_values(&[account_id.as_str()])
                             .inc_by(partition.messages.len() as f64);
@@ -1035,6 +1036,15 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
     let mut current_size: usize = 0;
 
     for (msg, timestamp) in outgoing {
+        if matches!(msg, Message::Unknown(_)) {
+            // Unknown messages should never be created directly by us. The outbox should never
+            // be sending these out to other nodes. We should only be receiving them from the
+            // inbox and processed as such there. If we get to this point, that means our system
+            // is wrong somewhere such that the node is creating an Unknown message itself.
+            tracing::warn!("trying to send unknown message out?");
+            continue;
+        }
+
         let bytesize = msg.size();
         if current_size + bytesize > 256 * 1024 {
             // If adding this byte vector exceeds 256kb, start a new partition
@@ -1067,30 +1077,296 @@ fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {
         Message::Triple(_) => Duration::from_millis(cfg.triple.generation_timeout),
         Message::Presignature(_) => Duration::from_millis(cfg.presignature.generation_timeout),
         Message::Signature(_) => Duration::from_millis(cfg.signature.generation_timeout),
+
+        // unknown message cannot be handled at all, so we just expire them immediately.
+        Message::Unknown(_) => Duration::from_millis(1),
+    }
+}
+
+fn cbor_to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, MessageError> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(value, &mut buf)
+        .map_err(|err| MessageError::CborConversion(err.to_string()))?;
+    Ok(buf)
+}
+
+fn cbor_from_bytes<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, MessageError> {
+    ciborium::from_reader(bytes).map_err(|err| MessageError::CborConversion(err.to_string()))
+}
+
+const fn cbor_name(value: &ciborium::Value) -> &'static str {
+    match value {
+        ciborium::Value::Integer(_) => "integer",
+        ciborium::Value::Bytes(_) => "bytes",
+        ciborium::Value::Text(_) => "text",
+        ciborium::Value::Float(_) => "float",
+        ciborium::Value::Null => "null",
+        ciborium::Value::Bool(_) => "bool",
+        ciborium::Value::Array(_) => "array",
+        ciborium::Value::Map(_) => "map",
+        ciborium::Value::Tag(_, _) => "tag",
+        _ => "unknown",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::message::{GeneratingMessage, Message};
+    use cait_sith::protocol::Participant;
+    use mpc_keys::hpke::{self, Ciphered};
+    use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+    use crate::protocol::{
+        contract::primitives::Participants,
+        message::{GeneratingMessage, Message, SignedMessage, TripleMessage},
+        ParticipantInfo,
+    };
 
     #[test]
     fn test_sending_encrypted_message() {
         let associated_data = b"";
-        let (sk, pk) = mpc_keys::hpke::generate();
+        let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
         let starting_message = Message::Generating(GeneratingMessage {
             from: cait_sith::protocol::Participant::from(0),
             data: vec![],
         });
 
         let message = serde_json::to_vec(&starting_message).unwrap();
-        let message = pk.encrypt(&message, associated_data).unwrap();
+        let message = cipher_pk.encrypt(&message, associated_data).unwrap();
 
         let message = serde_json::to_vec(&message).unwrap();
         let cipher = serde_json::from_slice(&message).unwrap();
-        let message = sk.decrypt(&cipher, associated_data).unwrap();
+        let message = cipher_sk.decrypt(&cipher, associated_data).unwrap();
         let message: Message = serde_json::from_slice(&message).unwrap();
 
         assert_eq!(starting_message, message);
+    }
+
+    #[test]
+    fn test_encrypt_then_decrypt() {
+        let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
+        let from = Participant::from(7);
+        let mut participants = Participants::default();
+        participants.insert(
+            &from,
+            ParticipantInfo {
+                sign_pk: sign_sk.public_key(),
+                cipher_pk: cipher_pk.clone(),
+                id: from.into(),
+                url: "http://localhost:3030".to_string(),
+                account_id: "test.near".parse().unwrap(),
+            },
+        );
+
+        let batch = vec![Message::Triple(TripleMessage {
+            id: 1234,
+            epoch: 0,
+            from,
+            data: vec![128u8; 1024],
+            timestamp: 1234567,
+        })];
+        let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+        let decrypted_batch: Vec<Message> =
+            SignedMessage::decrypt(&encrypted, &cipher_sk, &participants).unwrap();
+
+        assert_eq!(
+            batch, decrypted_batch,
+            "batch messages did not get encrypted and decrypted correctly"
+        );
+    }
+
+    #[test]
+    fn test_serialization_change() {
+        #[derive(Serialize, Deserialize)]
+        struct NewSignedMessage {
+            #[serde(with = "serde_bytes")]
+            msg: Vec<u8>,
+            sig: near_crypto::Signature,
+            from: Participant,
+
+            // default will call Default::default() if missing in serialized bytes.
+            #[serde(default)]
+            added_field: Vec<u32>,
+        }
+
+        impl NewSignedMessage {
+            const ASSOCIATED_DATA: &'static [u8] = SignedMessage::ASSOCIATED_DATA;
+
+            fn encrypt<T: Serialize>(
+                batch: &T,
+                from: Participant,
+                sign_sk: &near_crypto::SecretKey,
+                cipher_pk: &hpke::PublicKey,
+            ) -> Ciphered {
+                let msg = super::cbor_to_bytes(batch).unwrap();
+                let sig = sign_sk.sign(&msg);
+                let msg = Self {
+                    msg,
+                    sig,
+                    from,
+                    added_field: vec![127; 1024],
+                };
+                let msg = super::cbor_to_bytes(&msg).unwrap();
+                cipher_pk.encrypt(&msg, Self::ASSOCIATED_DATA).unwrap()
+            }
+
+            fn decrypt<T: DeserializeOwned>(
+                encrypted: &Ciphered,
+                cipher_sk: &hpke::SecretKey,
+                _participants: &Participants,
+            ) -> T {
+                let msg = cipher_sk.decrypt(encrypted, Self::ASSOCIATED_DATA).unwrap();
+                let Self { msg, .. } = super::cbor_from_bytes(&msg).unwrap();
+                super::cbor_from_bytes(&msg).unwrap()
+            }
+        }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        enum NewMessage {
+            Triple(NewTripleMessage),
+            NewVariant(String),
+            #[serde(untagged)]
+            Unknown(ciborium::Value),
+        }
+
+        impl PartialEq<Message> for NewMessage {
+            fn eq(&self, other: &Message) -> bool {
+                match (self, other) {
+                    (NewMessage::Triple(a), Message::Triple(b)) => a == b,
+                    // ignore the unknowns for comparison since we don't care about them here.
+                    _ => true,
+                }
+            }
+        }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        struct NewTripleMessage {
+            id: u64,
+            epoch: u64,
+            from: Participant,
+            #[serde(with = "serde_bytes")]
+            data: Vec<u8>,
+            timestamp: u64,
+            // added this new timestamp in the future:
+            #[serde(default)]
+            new_timestamp: Option<u64>,
+        }
+
+        impl PartialEq<TripleMessage> for NewTripleMessage {
+            fn eq(&self, other: &TripleMessage) -> bool {
+                self.id == other.id
+                    && self.epoch == other.epoch
+                    && self.from == other.from
+                    && self.data == other.data
+                    && self.timestamp == other.timestamp
+            }
+        }
+
+        let from = Participant::from(1337);
+        let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt1");
+        let mut participants = Participants::default();
+        participants.insert(
+            &from,
+            ParticipantInfo {
+                sign_pk: sign_sk.public_key(),
+                cipher_pk: cipher_pk.clone(),
+                id: from.into(),
+                url: "http://localhost:3030".to_string(),
+                account_id: "test.near".parse().unwrap(),
+            },
+        );
+
+        // Test forward compatibility
+        let old_batch = vec![
+            Message::Triple(TripleMessage {
+                id: 1234,
+                epoch: 0,
+                from,
+                data: vec![128u8; 1024],
+                timestamp: 1234567,
+            }),
+            Message::Generating(GeneratingMessage {
+                from,
+                data: vec![8; 512],
+            }),
+        ];
+        let encrypted = SignedMessage::encrypt(&old_batch, from, &sign_sk, &cipher_pk).unwrap();
+        let new_batch: Vec<NewMessage> =
+            NewSignedMessage::decrypt(&encrypted, &cipher_sk, &participants);
+        assert_eq!(
+            new_batch, old_batch,
+            "encrypt/decrypt failed forward compatibility"
+        );
+
+        // Test backward compatibility
+        let new_batch = vec![
+            NewMessage::Triple(NewTripleMessage {
+                id: 1234,
+                epoch: 0,
+                from,
+                data: vec![128u8; 1024],
+                timestamp: 1234567,
+                new_timestamp: Some(777),
+            }),
+            NewMessage::NewVariant("hello".to_string()),
+        ];
+        let new_ciphered = NewSignedMessage::encrypt(&new_batch, from, &sign_sk, &cipher_pk);
+        let old_batch: Vec<Message> =
+            SignedMessage::decrypt(&new_ciphered, &cipher_sk, &participants).unwrap();
+        assert_eq!(
+            new_batch, old_batch,
+            "encrypt/decrypt failed backward compatibility"
+        );
+    }
+
+    #[test]
+    fn test_encrypt_size() {
+        let epoch = 1;
+        let from = Participant::from(0);
+        let batch = vec![
+            Message::Triple(TripleMessage {
+                id: 1,
+                epoch,
+                from,
+                data: vec![128u8; 1024],
+                timestamp: 1,
+            }),
+            Message::Triple(crate::protocol::message::TripleMessage {
+                id: 2,
+                epoch,
+                from,
+                data: vec![255u8; 2048],
+                timestamp: 2,
+            }),
+            Message::Triple(TripleMessage {
+                id: 3,
+                epoch,
+                from,
+                data: vec![101u8; 1337],
+                timestamp: 3,
+            }),
+        ];
+
+        let batch_bytesize = batch.iter().map(|msg| msg.size()).sum::<usize>();
+        dbg!(batch_bytesize);
+
+        let (_cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
+        let ciphered = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+        let ciphered_bytesize = ciphered.text.len();
+        dbg!(ciphered_bytesize);
+
+        let margin_percent = 0.05;
+        let margin_of_err = (batch_bytesize as f64 * margin_percent) as usize;
+        dbg!(margin_of_err);
+        assert!(
+            ((batch_bytesize - margin_of_err)..(batch_bytesize + margin_of_err))
+                .contains(&ciphered_bytesize),
+            "ciphered message size is not within 5% of the original message size"
+        );
     }
 }
