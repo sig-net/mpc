@@ -263,10 +263,10 @@ impl PresignatureManager {
             .presignature_storage
             .take_mine()
             .await
-            .map_err(|e| {
-                tracing::error!(?e, "failed to look for mine presignature");
+            .map_err(|store_error| {
+                tracing::error!(?store_error, "failed to look for mine presignature");
             })
-            .ok()?;
+            .ok()??;
         tracing::debug!(id = ?presignature.id, "took presignature of mine");
         Some(presignature)
     }
