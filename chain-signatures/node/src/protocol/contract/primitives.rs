@@ -194,6 +194,26 @@ impl Participants {
     }
 }
 
+/// ParticipantMap used to find a participant by specific amount of participants.
+#[derive(Clone, Debug)]
+pub enum ParticipantMap {
+    Zero,
+    One(Participants),
+    Two(Participants, Participants),
+}
+
+impl ParticipantMap {
+    pub fn get(&self, p: &Participant) -> Option<&ParticipantInfo> {
+        match self {
+            ParticipantMap::Zero => None,
+            ParticipantMap::One(participants) => participants.get(p),
+            ParticipantMap::Two(participants1, participants2) => {
+                participants1.get(p).or_else(|| participants2.get(p))
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CandidateInfo {
     pub account_id: AccountId,

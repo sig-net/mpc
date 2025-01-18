@@ -1,4 +1,4 @@
-use super::contract::primitives::Participants;
+use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::{GenerationError, PresignatureId};
 use super::signature::SignRequestIdentifier;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
@@ -236,7 +236,7 @@ impl MessageInbox {
         }
     }
 
-    pub fn decrypt(&mut self, cipher_sk: &hpke::SecretKey, participants: &Participants) -> usize {
+    pub fn decrypt(&mut self, cipher_sk: &hpke::SecretKey, participants: &ParticipantMap) -> usize {
         let mut count = 0;
         let mut retry = Vec::new();
 
@@ -290,14 +290,15 @@ impl MessageExecutor {
                 )
             };
 
+            let participants = {
+                let state = self.protocol_state.read().await;
+                state.participants().clone()
+            };
             {
-                let participants = { self.protocol_state.read().await.participants().cloned() };
                 let mut inbox = self.inbox.write().await;
                 inbox.expire(&protocol);
                 inbox.extend(&mut self.incoming).await;
-                if let Some(participants) = participants {
-                    inbox.decrypt(&cipher_sk, &participants);
-                }
+                inbox.decrypt(&cipher_sk, &participants);
             }
 
             let active = {
@@ -755,7 +756,7 @@ impl SignedMessage {
     pub fn decrypt<T: DeserializeOwned>(
         encrypted: &Ciphered,
         cipher_sk: &hpke::SecretKey,
-        participants: &Participants,
+        participants: &ParticipantMap,
     ) -> Result<T, MessageError> {
         let msg = cipher_sk
             .decrypt(encrypted, Self::ASSOCIATED_DATA)
@@ -1116,7 +1117,7 @@ mod tests {
     use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
     use crate::protocol::{
-        contract::primitives::Participants,
+        contract::primitives::{ParticipantMap, Participants},
         message::{GeneratingMessage, Message, SignedMessage, TripleMessage},
         ParticipantInfo,
     };
@@ -1158,6 +1159,7 @@ mod tests {
                 account_id: "test.near".parse().unwrap(),
             },
         );
+        let participants = ParticipantMap::One(participants);
 
         let batch = vec![Message::Triple(TripleMessage {
             id: 1234,
@@ -1278,6 +1280,7 @@ mod tests {
                 account_id: "test.near".parse().unwrap(),
             },
         );
+        let participants = ParticipantMap::One(participants);
 
         // Test forward compatibility
         let old_batch = vec![

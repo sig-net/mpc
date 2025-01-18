@@ -1,5 +1,4 @@
-use super::contract::primitives::{ParticipantInfo, Participants};
-use super::message::MessageError;
+use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::PresignatureManager;
 use super::signature::SignatureManager;
 use super::triple::TripleManager;
@@ -42,12 +41,6 @@ pub struct GeneratingState {
     pub protocol: KeygenProtocol,
 }
 
-impl GeneratingState {
-    pub fn fetch_participant(&self, p: &Participant) -> Result<&ParticipantInfo, MessageError> {
-        fetch_participant(p, &self.participants)
-    }
-}
-
 #[derive(Clone)]
 pub struct WaitingForConsensusState {
     pub epoch: u64,
@@ -68,12 +61,6 @@ impl fmt::Debug for WaitingForConsensusState {
     }
 }
 
-impl WaitingForConsensusState {
-    pub fn fetch_participant(&self, p: &Participant) -> Result<&ParticipantInfo, MessageError> {
-        fetch_participant(p, &self.participants)
-    }
-}
-
 #[derive(Clone)]
 pub struct RunningState {
     pub epoch: u64,
@@ -84,12 +71,6 @@ pub struct RunningState {
     pub triple_manager: TripleManager,
     pub presignature_manager: Arc<RwLock<PresignatureManager>>,
     pub signature_manager: Arc<RwLock<SignatureManager>>,
-}
-
-impl RunningState {
-    pub fn fetch_participant(&self, p: &Participant) -> Result<&ParticipantInfo, MessageError> {
-        fetch_participant(p, &self.participants)
-    }
 }
 
 #[derive(Clone)]
@@ -103,23 +84,10 @@ pub struct ResharingState {
     pub protocol: ReshareProtocol,
 }
 
-impl ResharingState {
-    pub fn fetch_participant(&self, p: &Participant) -> Result<&ParticipantInfo, MessageError> {
-        fetch_participant(p, &self.new_participants)
-            .or_else(|_| fetch_participant(p, &self.old_participants))
-    }
-}
-
 #[derive(Clone)]
 pub struct JoiningState {
     pub participants: Participants,
     pub public_key: PublicKey,
-}
-
-impl JoiningState {
-    pub fn fetch_participant(&self, p: &Participant) -> Result<&ParticipantInfo, MessageError> {
-        fetch_participant(p, &self.participants)
-    }
 }
 
 #[derive(Clone, Default)]
@@ -150,34 +118,19 @@ impl Display for NodeState {
 }
 
 impl NodeState {
-    pub fn fetch_participant(&self, p: &Participant) -> Result<&ParticipantInfo, MessageError> {
+    pub fn participants(&self) -> ParticipantMap {
         match self {
-            NodeState::Running(state) => state.fetch_participant(p),
-            NodeState::Generating(state) => state.fetch_participant(p),
-            NodeState::WaitingForConsensus(state) => state.fetch_participant(p),
-            NodeState::Resharing(state) => state.fetch_participant(p),
-            NodeState::Joining(state) => state.fetch_participant(p),
-            _ => Err(MessageError::UnknownParticipant(*p)),
+            NodeState::Generating(state) => ParticipantMap::One(state.participants.clone()),
+            NodeState::WaitingForConsensus(state) => {
+                ParticipantMap::One(state.participants.clone())
+            }
+            NodeState::Running(state) => ParticipantMap::One(state.participants.clone()),
+            NodeState::Resharing(state) => ParticipantMap::Two(
+                state.new_participants.clone(),
+                state.old_participants.clone(),
+            ),
+            NodeState::Joining(state) => ParticipantMap::One(state.participants.clone()),
+            _ => ParticipantMap::Zero,
         }
     }
-
-    pub fn participants(&self) -> Option<&Participants> {
-        match self {
-            NodeState::Generating(state) => Some(&state.participants),
-            NodeState::WaitingForConsensus(state) => Some(&state.participants),
-            NodeState::Running(state) => Some(&state.participants),
-            NodeState::Resharing(state) => Some(&state.new_participants),
-            NodeState::Joining(state) => Some(&state.participants),
-            _ => None,
-        }
-    }
-}
-
-fn fetch_participant<'a>(
-    p: &Participant,
-    participants: &'a Participants,
-) -> Result<&'a ParticipantInfo, MessageError> {
-    participants
-        .get(p)
-        .ok_or_else(|| MessageError::UnknownParticipant(*p))
 }
