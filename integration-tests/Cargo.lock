@@ -1584,7 +1584,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3",
- "subtle",
 ]
 
 [[package]]
@@ -3341,7 +3340,6 @@ dependencies = [
  "hex",
  "hyper 0.14.29",
  "k256",
- "lazy_static",
  "mpc-contract",
  "mpc-keys",
  "mpc-node",
@@ -3349,8 +3347,6 @@ dependencies = [
  "near-crypto 0.26.0",
  "near-fetch",
  "near-jsonrpc-client",
- "near-lake-framework",
- "near-lake-primitives",
  "near-primitives 0.26.0",
  "near-sdk",
  "near-workspaces",
@@ -3536,9 +3532,9 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libc"
-version = "0.2.155"
+version = "0.2.169"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97b3888a4aecf77e811145cadf6eef5901f4782c53886191b2f693f24761847c"
+checksum = "b5aba8db14291edd000dfcc4d620c7ebfb122c613afb886ca8803fa4e128a20a"
 
 [[package]]
 name = "libloading"
@@ -3722,9 +3718,7 @@ dependencies = [
  "borsh",
  "crypto-shared",
  "k256",
- "near-gas",
  "near-sdk",
- "schemars",
  "serde",
  "serde_json",
  "thiserror",
@@ -3748,7 +3742,6 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-s3",
- "aws-types",
  "axum",
  "axum-extra",
  "borsh",
@@ -3765,7 +3758,6 @@ dependencies = [
  "http 1.1.0",
  "hyper 0.14.29",
  "hyper-rustls 0.24.2",
- "itertools 0.12.1",
  "k256",
  "local-ip-address",
  "mpc-contract",
@@ -3785,7 +3777,6 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "sha2",
  "sha3",
  "sysinfo",
  "thiserror",
@@ -6612,9 +6603,9 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.32.0"
+version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3b5ae3f4f7d64646c46c4cae4e3f01d1c5d255c7406fdd7c7f999a94e488791"
+checksum = "4c33cd241af0f2e9e3b5c32163b873b29956890b5342e6745b917ce9d490f4af"
 dependencies = [
  "core-foundation-sys",
  "libc",
