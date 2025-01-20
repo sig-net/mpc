@@ -40,8 +40,10 @@ pub struct SecretKey(<Kem as hpke::Kem>::PrivateKey);
 
 impl fmt::Debug for SecretKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let key = hex::encode(self.to_bytes());
+        let debug_key = format!("{}[..]", &key[..key.len() - 4]);
         f.debug_struct("SecretKey")
-            .field("key", &hex::encode(self.to_bytes()))
+            .field("key", &debug_key)
             .finish()
     }
 }
