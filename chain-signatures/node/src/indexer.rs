@@ -182,82 +182,90 @@ async fn handle_block(
     tracing::debug!(block_height = block.block_height(), "handle_block");
     let mut pending_requests = Vec::new();
     for action in block.actions().cloned().collect::<Vec<_>>() {
-        if action.receiver_id() == ctx.mpc_contract_id {
-            tracing::debug!("got action targeting {}", ctx.mpc_contract_id);
-            let Some(receipt) = block.receipt_by_id(&action.receipt_id()) else {
-                let err = format!(
-                    "indexer unable to find block for receipt_id={}",
-                    action.receipt_id()
-                );
-                tracing::warn!("{err}");
-                anyhow::bail!(err);
-            };
-            let ExecutionStatus::SuccessReceiptId(receipt_id) = receipt.status() else {
-                continue;
-            };
-            let Some(function_call) = action.as_function_call() else {
-                continue;
-            };
-            if function_call.method_name() == "sign" {
-                tracing::debug!("found `sign` function call");
-                let arguments =
-                    match serde_json::from_slice::<'_, SignArguments>(function_call.args()) {
-                        Ok(arguments) => arguments,
-                        Err(err) => {
-                            tracing::warn!(%err, "failed to parse `sign` arguments");
-                            continue;
-                        }
-                    };
-
-                if receipt.logs().is_empty() {
-                    tracing::warn!("`sign` did not produce entropy");
-                    continue;
-                }
-
-                let Some(payload) = Scalar::from_bytes(arguments.request.payload) else {
-                    tracing::warn!(
-                        "`sign` did not produce payload correctly: {:?}",
-                        arguments.request.payload,
-                    );
-                    continue;
-                };
-
-                let entropy_log_index = 1;
-                let Ok(entropy) =
-                    serde_json::from_str::<'_, [u8; 32]>(&receipt.logs()[entropy_log_index])
-                else {
-                    tracing::warn!(
-                        "`sign` did not produce entropy correctly: {:?}",
-                        receipt.logs()[entropy_log_index]
-                    );
-                    continue;
-                };
-                let epsilon = derive_epsilon(&action.predecessor_id(), &arguments.request.path);
-                tracing::info!(
-                    receipt_id = %receipt_id,
-                    caller_id = receipt.predecessor_id().to_string(),
-                    our_account = ctx.node_account_id.to_string(),
-                    payload = hex::encode(arguments.request.payload),
-                    key_version = arguments.request.key_version,
-                    entropy = hex::encode(entropy),
-                    "indexed new `sign` function call"
-                );
-                let request = ContractSignRequest {
-                    payload,
-                    path: arguments.request.path,
-                    key_version: arguments.request.key_version,
-                    chain: NEAR,
-                };
-                pending_requests.push(SignRequest {
-                    request_id: receipt_id.0,
-                    request,
-                    epsilon,
-                    entropy,
-                    // TODO: use indexer timestamp instead.
-                    time_added: Instant::now(),
-                });
-            }
+        if action.receiver_id() != ctx.mpc_contract_id {
+            continue;
         }
+
+        tracing::debug!("got action targeting {}", ctx.mpc_contract_id);
+        let Some(function_call) = action.as_function_call() else {
+            continue;
+        };
+        if function_call.method_name() != "sign" {
+            tracing::debug!("ignoring call {}", function_call.method_name());
+            continue;
+        }
+        let Some(receipt) = block.receipt_by_id(&action.receipt_id()) else {
+            tracing::warn!(
+                block_id = ?block.header().hash(),
+                receipt_id = ?action.receipt_id(),
+                "unable to find receipt for block",
+            );
+            continue;
+        };
+        let ExecutionStatus::SuccessReceiptId(receipt_id) = receipt.status() else {
+            continue;
+        };
+        tracing::debug!(?receipt_id, "found `sign` function call");
+        let arguments = match serde_json::from_slice::<'_, SignArguments>(function_call.args()) {
+            Ok(arguments) => arguments,
+            Err(err) => {
+                tracing::warn!(%err, "failed to parse `sign` arguments");
+                continue;
+            }
+        };
+
+        const ENTROPY_LOG_INDEX: usize = 1;
+        let entropy_log_entry = if receipt.logs().len() < ENTROPY_LOG_INDEX + 1 {
+            &receipt.logs()[ENTROPY_LOG_INDEX]
+        } else {
+            tracing::warn!(
+                ?receipt_id,
+                logs = ?receipt.logs(),
+                "`sign` did not produce entropy correctly (missing log entry)",
+            );
+            continue;
+        };
+
+        let Ok(entropy) = serde_json::from_str::<'_, [u8; 32]>(entropy_log_entry) else {
+            tracing::warn!(
+                ?receipt_id,
+                logs = ?receipt.logs(),
+                "`sign` did not produce entropy correctly (unable to parse log entry)",
+            );
+            continue;
+        };
+        let epsilon = derive_epsilon(&action.predecessor_id(), &arguments.request.path);
+        let Some(payload) = Scalar::from_bytes(arguments.request.payload) else {
+            tracing::warn!(
+                "`sign` did not produce payload correctly: {:?}",
+                arguments.request.payload,
+            );
+            continue;
+        };
+
+        tracing::info!(
+            receipt_id = %receipt_id,
+            caller_id = ?receipt.predecessor_id(),
+            our_account = ?ctx.node_account_id,
+            payload = hex::encode(arguments.request.payload),
+            key_version = arguments.request.key_version,
+            entropy = hex::encode(entropy),
+            "indexed new `sign` function call"
+        );
+        let request = ContractSignRequest {
+            payload,
+            path: arguments.request.path,
+            key_version: arguments.request.key_version,
+            chain: NEAR,
+        };
+        pending_requests.push(SignRequest {
+            request_id: receipt_id.0,
+            request,
+            epsilon,
+            entropy,
+            // TODO: use indexer timestamp instead.
+            time_added: Instant::now(),
+        });
     }
 
     ctx.indexer
