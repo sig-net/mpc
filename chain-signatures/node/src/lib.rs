@@ -5,6 +5,7 @@ pub mod gcp;
 pub mod indexer;
 pub mod indexer_eth;
 pub mod kdf;
+pub mod logs;
 pub mod mesh;
 pub mod metrics;
 pub mod node_client;
