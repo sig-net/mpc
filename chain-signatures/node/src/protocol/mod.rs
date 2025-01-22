@@ -237,17 +237,24 @@ impl MpcSignProtocol {
                 guard.clone()
             };
 
+            let start_state = format!("{state}");
             let crypto_time = Instant::now();
             let mut state = match state
                 .progress(&mut self, cfg.clone(), mesh_state.clone())
                 .await
             {
                 Ok(state) => {
-                    tracing::debug!("progress ok: {state}");
+                    let new_state = format!("{state}");
+                    if new_state != start_state {
+                        tracing::info!("progress ok: {start_state} => {new_state}");
+                    }
                     state
                 }
                 Err(err) => {
-                    tracing::warn!("protocol unable to progress: {err:?}");
+                    tracing::warn!(
+                        ?err,
+                        "protocol unable to progress, backtracking to {start_state}"
+                    );
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
@@ -256,16 +263,21 @@ impl MpcSignProtocol {
                 .with_label_values(&[my_account_id.as_str()])
                 .observe(crypto_time.elapsed().as_secs_f64());
 
+            let post_progress = format!("{state}");
             if let Some(contract_state) = contract_state {
                 let consensus_time = Instant::now();
-                let from_state = format!("{state}");
                 state = match state.advance(&mut self, contract_state, cfg.clone()).await {
                     Ok(state) => {
-                        tracing::debug!("advance ok: {from_state} => {state}");
+                        let new_state = format!("{state}");
+                        if new_state != start_state || new_state != post_progress {
+                            tracing::info!(
+                                "advance ok: {start_state} => {post_progress} => {new_state}"
+                            );
+                        }
                         state
                     }
                     Err(err) => {
-                        tracing::warn!("protocol unable to advance: {err:?}");
+                        tracing::warn!(?err, "protocol unable to advance, backtracking from {post_progress} to {start_state}");
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
@@ -277,7 +289,13 @@ impl MpcSignProtocol {
 
             let message_time = Instant::now();
             if let Err(err) = state.recv(&self.channel, cfg, mesh_state).await {
-                tracing::warn!("protocol unable to receive messages: {err:?}");
+                tracing::warn!(
+                    start_state,
+                    post_progress,
+                    post_advance = format!("{state}"),
+                    ?err,
+                    "protocol unable to receive messages"
+                );
             }
             crate::metrics::PROTOCOL_LATENCY_ITER_MESSAGE
                 .with_label_values(&[my_account_id.as_str()])

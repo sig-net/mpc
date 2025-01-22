@@ -397,6 +397,11 @@ impl ConsensusProtocol for WaitingForConsensusState {
                 }
             },
             ProtocolState::Resharing(contract_state) => {
+                tracing::info!(
+                    our_epoch = self.epoch,
+                    old_epoch = contract_state.old_epoch,
+                    "waiting(resharing): waiting for resharing consensus"
+                );
                 match (contract_state.old_epoch + 1).cmp(&self.epoch) {
                     Ordering::Greater if contract_state.old_epoch + 2 == self.epoch => {
                         tracing::info!("waiting(resharing): contract state is resharing, joining");
@@ -515,6 +520,9 @@ impl ConsensusProtocol for RunningState {
                             contract_state.old_epoch
                         );
 
+                        // TODO: check if we are in the old participant set
+                        // TODO: check if we are in the new participant set. if so, then that means
+                        //       we are a part of the network but do not have the right epoch.
                         Ok(NodeState::Joining(JoiningState {
                             participants: contract_state.old_participants,
                             public_key: contract_state.public_key,
@@ -529,6 +537,9 @@ impl ConsensusProtocol for RunningState {
                         let is_in_new_participant_set = contract_state
                             .new_participants
                             .contains_account_id(ctx.my_account_id());
+                        // TODO: this logic seems wrong. HasBeenKicked should only be for if we were
+                        //       in the old participant set but not in the new participant set. And if
+                        //       so, we should not try to enter the resharing phase.
                         if !is_in_old_participant_set || !is_in_new_participant_set {
                             return Err(ConsensusError::HasBeenKicked);
                         }
@@ -727,11 +738,6 @@ async fn start_resharing<C: ConsensusCtx>(
     let me = contract_state
         .new_participants
         .find_participant(ctx.my_account_id())
-        .or_else(|| {
-            contract_state
-                .old_participants
-                .find_participant(ctx.my_account_id())
-        })
         .expect("unexpected: cannot find us in the participant set while starting resharing");
     let protocol = ReshareProtocol::new(private_share, *me, &contract_state)?;
     Ok(NodeState::Resharing(ResharingState {

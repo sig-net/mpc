@@ -121,6 +121,11 @@ impl CryptographicProtocol for GeneratingState {
                             public_key: r.public_key,
                         })
                         .await?;
+
+                    tracing::info!(
+                        epoch = 0,
+                        "generating(return): creating new WaitingForConsensusState"
+                    );
                     return Ok(NodeState::WaitingForConsensus(WaitingForConsensusState {
                         epoch: 0,
                         participants: self.participants,
@@ -166,11 +171,11 @@ impl CryptographicProtocol for ResharingState {
                 Ok(action) => action,
                 Err(err) => {
                     drop(protocol);
-                    tracing::debug!("got action fail, {}", err);
+                    tracing::error!(?err, "reshare failed");
                     if let Err(refresh_err) = self.protocol.refresh().await {
                         tracing::warn!(?refresh_err, "unable to refresh reshare protocol");
                     }
-                    return Err(err)?;
+                    return Ok(NodeState::Resharing(self));
                 }
             };
             match action {
@@ -219,6 +224,8 @@ impl CryptographicProtocol for ResharingState {
                 }
                 Action::Return(private_share) => {
                     tracing::debug!("resharing: successfully completed key reshare");
+
+                    // TODO: make sure to handle secret storage error and try again later.
                     ctx.secret_storage()
                         .store(&PersistentNodeData {
                             epoch: self.old_epoch + 1,
@@ -227,6 +234,10 @@ impl CryptographicProtocol for ResharingState {
                         })
                         .await?;
 
+                    tracing::info!(
+                        epoch = self.old_epoch + 1,
+                        "resharing(return): creating new WaitingForConsensusState"
+                    );
                     return Ok(NodeState::WaitingForConsensus(WaitingForConsensusState {
                         epoch: self.old_epoch + 1,
                         participants: self.new_participants,
