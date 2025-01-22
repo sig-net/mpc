@@ -50,7 +50,7 @@ node scripts/convertPk.js <public_key>
 ```
 For example:
 ```bash
-node scripts/convertPk.js 46sdkzwo46ga8B3K2J9i57akBsfgtFYbj4JzdnTuyhWiNaorz96qkExE3ei7djX25bzV6rmLJ435FJMpAYUs9JRg
+node scripts/convertPk.js 4WDg9sxbEnMTrsSJo78ckEWJ3yTFitoLfiDnGReMuL3hoSwuSQyFp8nFq9uvdtWQh6cp2ZEDcvuHNKvyezyKVpP7
 ```
 
 5. Then run the following command to deploy the contract:
@@ -92,7 +92,7 @@ node scripts/convertPk.js <public_key>
 ```
 For example:
 ```bash
-node scripts/convertPk.js 46sdkzwo46ga8B3K2J9i57akBsfgtFYbj4JzdnTuyhWiNaorz96qkExE3ei7djX25bzV6rmLJ435FJMpAYUs9JRg
+node scripts/convertPk.js pkqFQkRgYsZx4pNwuitXSDYAKsGML1P6JboVKP5qSG4HVatFHUqA8Fzcan49uxBZFyNwCHvr1tJo5KNJMcuWCQ6
 ```
 
 8. Then run the following command to deploy the contract to Ethereum Sepolia Testnet:

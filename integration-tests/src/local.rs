@@ -71,10 +71,9 @@ impl Node {
             behind_threshold: 120,
         };
         let indexer_eth_options = mpc_node::indexer_eth::Options {
-            eth_rpc_url: cfg.eth_rpc_url.clone(),
+            eth_rpc_ws_url: cfg.eth_rpc_ws_url.clone(),
+            eth_rpc_http_url: cfg.eth_rpc_http_url.clone(),
             eth_contract_address: cfg.eth_contract_address.clone(),
-            eth_behind_threshold: 120,
-            eth_running_threshold: 120,
         };
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
@@ -180,10 +179,9 @@ impl Node {
             behind_threshold: 120,
         };
         let indexer_eth_options = mpc_node::indexer_eth::Options {
-            eth_rpc_url: config.cfg.eth_rpc_url.clone(),
+            eth_rpc_ws_url: config.cfg.eth_rpc_ws_url.clone(),
+            eth_rpc_http_url: config.cfg.eth_rpc_http_url.clone(),
             eth_contract_address: config.cfg.eth_contract_address.clone(),
-            eth_behind_threshold: 120,
-            eth_running_threshold: 120,
         };
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
