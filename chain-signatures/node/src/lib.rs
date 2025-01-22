@@ -1,6 +1,6 @@
 pub mod cli;
 pub mod config;
-pub mod contract_updater;
+pub mod rpc;
 pub mod gcp;
 pub mod indexer;
 pub mod indexer_eth;

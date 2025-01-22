@@ -6,12 +6,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-pub struct ContractUpdater {
+pub struct RpcExecutor {
     rpc_client: near_fetch::Client,
     mpc_contract_id: AccountId,
 }
 
-impl ContractUpdater {
+impl RpcExecutor {
     pub fn init(rpc_client: &near_fetch::Client, mpc_contract_id: &AccountId) -> Self {
         Self {
             rpc_client: rpc_client.clone(),

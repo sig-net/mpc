@@ -242,9 +242,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 },
             })));
             let contract_state = Arc::new(RwLock::new(None));
-
-            let contract_updater =
-                crate::contract_updater::ContractUpdater::init(&rpc_client, &mpc_contract_id);
+            let rpc = crate::rpc::RpcExecutor::init(&rpc_client, &mpc_contract_id);
 
             rt.block_on(async {
                 let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
@@ -269,7 +267,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
 
                 tracing::info!("protocol initialized");
                 let contract_handle =
-                    tokio::spawn(contract_updater.run(contract_state.clone(), config.clone()));
+                    tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
                 let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
