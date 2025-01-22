@@ -20,7 +20,7 @@ impl ContractUpdater {
     }
 
     pub async fn run(
-        &self,
+        self,
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
         config: Arc<RwLock<Config>>,
     ) -> anyhow::Result<()> {

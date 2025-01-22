@@ -433,22 +433,22 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
     // this fails if the latency above is too long (10s)
     nodes.leave(None).await.unwrap();
 
-    let state = nodes.wait().running().await?;
+    let state = nodes.expect_running().await?;
     assert!(state.participants.len() == 2);
 
     // Going below T should error out
     nodes.leave(None).await.unwrap_err();
-    let state = nodes.wait().running().await?;
+    let state = nodes.expect_running().await?;
     assert!(state.participants.len() == 2);
 
     nodes.join(None).await.unwrap();
     // add latency to node2->rpc
     add_latency(&nodes.nodes.proxy_name_for_node(2), true, 1.0, 1_000, 100).await?;
-    let state = nodes.wait().running().await?;
+    let state = nodes.expect_running().await?;
     assert!(state.participants.len() == 3);
 
     nodes.leave(None).await.unwrap();
-    let state = nodes.wait().running().await?;
+    let state = nodes.expect_running().await?;
     assert!(state.participants.len() == 2);
 
     // make sure signing works after reshare

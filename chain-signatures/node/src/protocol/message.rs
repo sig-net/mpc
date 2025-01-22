@@ -1,24 +1,23 @@
-use super::contract::primitives::Participants;
-use super::cryptography::CryptographicError;
+use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::{GenerationError, PresignatureId};
 use super::signature::SignRequestIdentifier;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
-use crate::gcp::error::SecretStorageError;
 use crate::indexer::ContractSignRequest;
-use crate::node_client::{NodeClient, SendError};
+use crate::node_client::NodeClient;
 use crate::protocol::Config;
 use crate::protocol::MeshState;
 use crate::types::Epoch;
 use crate::util;
 
 use async_trait::async_trait;
-use cait_sith::protocol::{InitializationError, MessageData, Participant, ProtocolError};
+use cait_sith::protocol::{MessageData, Participant};
 use k256::Scalar;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
 use near_account_id::AccountId;
 use near_crypto::Signature;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -29,9 +28,10 @@ use tokio::sync::{mpsc, RwLock};
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct GeneratingMessage {
     pub from: Participant,
+    #[serde(with = "serde_bytes")]
     pub data: MessageData,
 }
 
@@ -41,10 +41,11 @@ impl From<GeneratingMessage> for Message {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ResharingMessage {
     pub epoch: Epoch,
     pub from: Participant,
+    #[serde(with = "serde_bytes")]
     pub data: MessageData,
 }
 
@@ -54,11 +55,12 @@ impl From<ResharingMessage> for Message {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct TripleMessage {
     pub id: u64,
     pub epoch: Epoch,
     pub from: Participant,
+    #[serde(with = "serde_bytes")]
     pub data: MessageData,
     // UNIX timestamp as seconds since the epoch
     pub timestamp: u64,
@@ -70,13 +72,14 @@ impl From<TripleMessage> for Message {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct PresignatureMessage {
     pub id: u64,
     pub triple0: TripleId,
     pub triple1: TripleId,
     pub epoch: Epoch,
     pub from: Participant,
+    #[serde(with = "serde_bytes")]
     pub data: MessageData,
     // UNIX timestamp as seconds since the epoch
     pub timestamp: u64,
@@ -88,16 +91,20 @@ impl From<PresignatureMessage> for Message {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct SignatureMessage {
+    #[serde(with = "serde_bytes")]
     pub request_id: [u8; 32],
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
     pub request: ContractSignRequest,
+    #[serde(with = "cbor_scalar")]
     pub epsilon: Scalar,
+    #[serde(with = "serde_bytes")]
     pub entropy: [u8; 32],
     pub epoch: u64,
     pub from: Participant,
+    #[serde(with = "serde_bytes")]
     pub data: MessageData,
     // UNIX timestamp as seconds since the epoch
     pub timestamp: u64,
@@ -109,13 +116,18 @@ impl From<SignatureMessage> for Message {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Message {
     Generating(GeneratingMessage),
     Resharing(ResharingMessage),
     Triple(TripleMessage),
     Presignature(PresignatureMessage),
     Signature(SignatureMessage),
+
+    /// Future compatibility with other messages. If in the future, we were to add a new
+    /// enum variant here, we can still deserialize the message as Unknown.
+    #[serde(untagged)]
+    Unknown(HashMap<String, ciborium::Value>),
 }
 
 impl Message {
@@ -126,12 +138,32 @@ impl Message {
             Message::Triple(_) => "Triple",
             Message::Presignature(_) => "Presignature",
             Message::Signature(_) => "Signature",
+            Message::Unknown(_) => "Unknown",
+        }
+    }
+
+    /// The size of the message in bytes.
+    pub fn size(&self) -> usize {
+        match self {
+            Message::Generating(msg) => std::mem::size_of::<GeneratingMessage>() + msg.data.len(),
+            Message::Resharing(msg) => std::mem::size_of::<ResharingMessage>() + msg.data.len(),
+            Message::Triple(msg) => std::mem::size_of::<TripleMessage>() + msg.data.len(),
+            Message::Presignature(msg) => {
+                std::mem::size_of::<PresignatureMessage>() + msg.data.len()
+            }
+            Message::Signature(msg) => std::mem::size_of::<SignatureMessage>() + msg.data.len(),
+            Message::Unknown(_msg) => usize::MAX,
         }
     }
 }
 
 #[derive(Default)]
 pub struct MessageInbox {
+    /// encrypted messages that are pending to be decrypted. These are messages that we received
+    /// from other nodes that weren't able to be processed yet due to missing info such as the
+    /// participant id in the case of slow resharing.
+    try_decrypt: VecDeque<(Ciphered, Instant)>,
+
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
@@ -173,17 +205,25 @@ impl MessageInbox {
                 ))
                 .or_default()
                 .push_back(message),
+            Message::Unknown(entries) => {
+                tracing::warn!(
+                    entries = ?entries.iter().map(|(k, v)| (k, cbor_name(v))).collect::<Vec<_>>(),
+                    "inbox: received unknown message type",
+                );
+            }
         }
     }
 
-    pub fn extend(&mut self, incoming: &mut mpsc::Receiver<Message>) -> usize {
-        let mut count = 0;
+    pub fn expire(&mut self, protocol: &ProtocolConfig) {
+        self.try_decrypt.retain(|(_, timestamp)| {
+            timestamp.elapsed() < Duration::from_secs(protocol.message_timeout)
+        });
+    }
+
+    pub async fn extend(&mut self, incoming: &mut mpsc::Receiver<Ciphered>) {
         loop {
-            let msg = match incoming.try_recv() {
-                Ok(msg) => {
-                    count += 1;
-                    msg
-                }
+            let encrypted = match incoming.try_recv() {
+                Ok(msg) => msg,
                 Err(TryRecvError::Empty) => {
                     break;
                 }
@@ -194,19 +234,48 @@ impl MessageInbox {
                     break;
                 }
             };
-            self.push(msg);
+
+            self.try_decrypt.push_back((encrypted, Instant::now()));
         }
+    }
+
+    pub fn decrypt(&mut self, cipher_sk: &hpke::SecretKey, participants: &ParticipantMap) -> usize {
+        let mut count = 0;
+        let mut retry = Vec::new();
+
+        while let Some((encrypted, timestamp)) = self.try_decrypt.pop_front() {
+            let messages: Vec<Message> =
+                match SignedMessage::decrypt(&encrypted, cipher_sk, participants) {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        if matches!(err, MessageError::UnknownParticipant(_)) {
+                            retry.push((encrypted, timestamp));
+                        } else {
+                            tracing::error!(?err, "inbox: failed to decrypt/verify messages");
+                        }
+                        continue;
+                    }
+                };
+
+            count += messages.len();
+            for msg in messages {
+                self.push(msg);
+            }
+        }
+
+        self.try_decrypt.extend(retry);
         count
     }
 }
 
 struct MessageExecutor {
-    incoming: mpsc::Receiver<Message>,
+    incoming: mpsc::Receiver<Ciphered>,
     outgoing: mpsc::Receiver<SendMessage>,
     inbox: Arc<RwLock<MessageInbox>>,
     outbox: MessageOutbox,
 
     config: Arc<RwLock<Config>>,
+    protocol_state: Arc<RwLock<NodeState>>,
     mesh_state: Arc<RwLock<MeshState>>,
 }
 
@@ -215,22 +284,34 @@ impl MessageExecutor {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
             interval.tick().await;
-            self.inbox.write().await.extend(&mut self.incoming);
-
-            let (sign_sk, protocol) = {
+            let (sign_sk, cipher_sk, protocol) = {
                 let config = self.config.read().await;
                 (
                     config.local.network.sign_sk.clone(),
+                    config.local.network.cipher_sk.clone(),
                     config.protocol.clone(),
                 )
             };
+
+            let participants = {
+                let state = self.protocol_state.read().await;
+                state.participants()
+            };
+            {
+                let mut inbox = self.inbox.write().await;
+                inbox.expire(&protocol);
+                inbox.extend(&mut self.incoming).await;
+                inbox.decrypt(&cipher_sk, &participants);
+            }
+
             let active = {
                 let mesh_state = self.mesh_state.read().await;
                 mesh_state.active_with_potential()
             };
-            self.outbox.extend(&mut self.outgoing);
             self.outbox.expire(&protocol);
-            let encrypted = self.outbox.encrypt(&sign_sk, &active);
+            self.outbox.extend(&mut self.outgoing);
+            let compacted = self.outbox.compact();
+            let encrypted = self.outbox.encrypt(&sign_sk, &active, compacted);
             self.outbox.send(&active, encrypted).await;
         }
     }
@@ -248,8 +329,9 @@ impl MessageChannel {
         client: NodeClient,
         id: &AccountId,
         config: &Arc<RwLock<Config>>,
+        protocol_state: &Arc<RwLock<NodeState>>,
         mesh_state: &Arc<RwLock<MeshState>>,
-    ) -> (mpsc::Sender<Message>, Self) {
+    ) -> (mpsc::Sender<Ciphered>, Self) {
         let (incoming_tx, incoming_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
 
@@ -258,9 +340,11 @@ impl MessageChannel {
             incoming: incoming_rx,
             outgoing: outgoing_rx,
             inbox: inbox.clone(),
-            config: config.clone(),
-            mesh_state: mesh_state.clone(),
             outbox: MessageOutbox::new(client, id),
+
+            config: config.clone(),
+            protocol_state: protocol_state.clone(),
+            mesh_state: mesh_state.clone(),
         };
 
         (
@@ -282,55 +366,26 @@ impl MessageChannel {
     pub async fn send(&self, from: Participant, to: Participant, message: impl Into<Message>) {
         if let Err(err) = self
             .outgoing
-            .send((from, to, message.into(), Instant::now()))
+            .send((message.into(), (from, to, Instant::now())))
             .await
         {
-            tracing::error!(?err, "failed to send message to participants");
+            tracing::error!(?err, "outbox: failed to send message to participants");
         }
     }
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum MessageRecvError {
-    #[error("cait-sith initialization error: {0}")]
-    CaitSithInitializationError(#[from] InitializationError),
-    #[error("cait-sith protocol error: {0}")]
-    CaitSithProtocolError(#[from] ProtocolError),
-    #[error("sync failed: {0}")]
-    SyncError(String),
-    #[error("failed to send a message: {0}")]
-    SendError(SendError),
+pub enum MessageError {
     #[error("unknown participant: {0:?}")]
     UnknownParticipant(Participant),
     #[error(transparent)]
-    DataConversion(#[from] serde_json::Error),
+    JsonConversion(#[from] serde_json::Error),
+    #[error("cbor: {0:?}")]
+    CborConversion(String),
     #[error("encryption failed: {0}")]
-    Encryption(String),
-    #[error("invalid state")]
-    InvalidStateHandle(String),
-    #[error("rpc error: {0}")]
-    RpcError(#[from] near_fetch::Error),
-    #[error("secret storage error: {0}")]
-    SecretStorageError(#[from] SecretStorageError),
-}
-
-impl From<CryptographicError> for MessageRecvError {
-    fn from(value: CryptographicError) -> Self {
-        match value {
-            CryptographicError::CaitSithInitializationError(e) => {
-                Self::CaitSithInitializationError(e)
-            }
-            CryptographicError::CaitSithProtocolError(e) => Self::CaitSithProtocolError(e),
-            CryptographicError::SyncError(e) => Self::SyncError(e),
-            CryptographicError::SendError(e) => Self::SendError(e),
-            CryptographicError::UnknownParticipant(e) => Self::UnknownParticipant(e),
-            CryptographicError::DataConversion(e) => Self::DataConversion(e),
-            CryptographicError::Encryption(e) => Self::Encryption(e),
-            CryptographicError::InvalidStateHandle(e) => Self::InvalidStateHandle(e),
-            CryptographicError::RpcError(e) => Self::RpcError(e),
-            CryptographicError::SecretStorageError(e) => Self::SecretStorageError(e),
-        }
-    }
+    Encryption(#[from] hpke::Error),
+    #[error("verify failed: {0}")]
+    Verification(String),
 }
 
 #[async_trait]
@@ -340,7 +395,7 @@ pub trait MessageReceiver {
         channel: &MessageChannel,
         cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<(), MessageRecvError>;
+    ) -> Result<(), MessageError>;
 }
 
 #[async_trait]
@@ -350,7 +405,7 @@ impl MessageReceiver for GeneratingState {
         channel: &MessageChannel,
         _cfg: Config,
         _mesh_state: MeshState,
-    ) -> Result<(), MessageRecvError> {
+    ) -> Result<(), MessageError> {
         let mut inbox = channel.inbox().write().await;
         let mut protocol = self.protocol.write().await;
         while let Some(msg) = inbox.generating.pop_front() {
@@ -368,7 +423,7 @@ impl MessageReceiver for ResharingState {
         channel: &MessageChannel,
         _cfg: Config,
         _mesh_state: MeshState,
-    ) -> Result<(), MessageRecvError> {
+    ) -> Result<(), MessageError> {
         let mut inbox = channel.inbox().write().await;
         tracing::debug!("handling {} resharing messages", inbox.resharing.len());
         let q = inbox.resharing.entry(self.old_epoch).or_default();
@@ -387,7 +442,7 @@ impl MessageReceiver for RunningState {
         channel: &MessageChannel,
         cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<(), MessageRecvError> {
+    ) -> Result<(), MessageError> {
         let protocol_cfg = &cfg.protocol;
         let participants = &mesh_state.active;
         let mut inbox = channel.inbox().write().await;
@@ -650,7 +705,7 @@ impl MessageReceiver for NodeState {
         channel: &MessageChannel,
         cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<(), MessageRecvError> {
+    ) -> Result<(), MessageError> {
         match self {
             NodeState::Generating(state) => state.recv(channel, cfg, mesh_state).await,
             NodeState::Resharing(state) => state.recv(channel, cfg, mesh_state).await,
@@ -666,145 +721,159 @@ impl MessageReceiver for NodeState {
 /// A signed message that can be encrypted. Note that the message's signature is included
 /// in the encrypted message to avoid from it being tampered with without first decrypting.
 #[derive(Serialize, Deserialize)]
-pub struct SignedMessage<T> {
+pub struct SignedMessage {
     /// The message with all it's related info.
-    pub msg: T,
+    #[serde(with = "serde_bytes")]
+    pub msg: Vec<u8>,
     /// The signature used to verify the authenticity of the encrypted message.
     pub sig: Signature,
     /// From which particpant the message was sent.
     pub from: Participant,
 }
 
-impl<T> SignedMessage<T> {
+impl SignedMessage {
     pub const ASSOCIATED_DATA: &'static [u8] = b"";
 }
 
-impl<T> SignedMessage<T>
-where
-    T: Serialize,
-{
-    pub fn encrypt(
+impl SignedMessage {
+    pub fn encrypt<T: Serialize>(
         msg: &T,
         from: Participant,
         sign_sk: &near_crypto::SecretKey,
         cipher_pk: &hpke::PublicKey,
-    ) -> Result<Ciphered, CryptographicError> {
-        let msg = serde_json::to_vec(msg)?;
+    ) -> Result<Ciphered, MessageError> {
+        let msg = cbor_to_bytes(msg)?;
         let sig = sign_sk.sign(&msg);
-        let msg = SignedMessage { msg, sig, from };
-        let msg = serde_json::to_vec(&msg)?;
+        let msg = Self { msg, sig, from };
+        let msg = cbor_to_bytes(&msg)?;
         let ciphered = cipher_pk
-            .encrypt(&msg, SignedMessage::<T>::ASSOCIATED_DATA)
-            .map_err(|e| {
-                tracing::error!(error = ?e, "failed to encrypt message");
-                CryptographicError::Encryption(e.to_string())
+            .encrypt(&msg, Self::ASSOCIATED_DATA)
+            .inspect_err(|err| {
+                tracing::error!(?err, "failed to encrypt message");
             })?;
         Ok(ciphered)
     }
 }
 
-impl<T> SignedMessage<T>
-where
-    T: for<'a> Deserialize<'a>,
-{
-    pub async fn decrypt(
+impl SignedMessage {
+    pub fn decrypt<T: DeserializeOwned>(
+        encrypted: &Ciphered,
         cipher_sk: &hpke::SecretKey,
-        protocol_state: &Arc<RwLock<NodeState>>,
-        encrypted: Ciphered,
-    ) -> Result<T, CryptographicError> {
-        let message = cipher_sk
-            .decrypt(&encrypted, SignedMessage::<T>::ASSOCIATED_DATA)
-            .map_err(|err| {
-                tracing::error!(error = ?err, "failed to decrypt message");
-                CryptographicError::Encryption(err.to_string())
+        participants: &ParticipantMap,
+    ) -> Result<T, MessageError> {
+        let msg = cipher_sk
+            .decrypt(encrypted, Self::ASSOCIATED_DATA)
+            .inspect_err(|err| {
+                tracing::error!(?err, "failed to decrypt message");
             })?;
-        let SignedMessage::<Vec<u8>> { msg, sig, from } = serde_json::from_slice(&message)?;
-        if !sig.verify(
-            &msg,
-            &protocol_state
-                .read()
-                .await
-                .fetch_participant(&from)?
-                .sign_pk,
-        ) {
-            tracing::error!(from = ?from, "signed message erred out with invalid signature");
-            return Err(CryptographicError::Encryption(
+        let Self { msg, sig, from } = cbor_from_bytes(&msg)?;
+        let info = participants
+            .get(&from)
+            .ok_or_else(|| MessageError::UnknownParticipant(from))?;
+        if !sig.verify(&msg, &info.sign_pk) {
+            tracing::error!(?from, "signed message erred out with invalid signature");
+            return Err(MessageError::Verification(
                 "invalid signature while verifying authenticity of encrypted protocol message"
                     .to_string(),
             ));
         }
 
-        Ok(serde_json::from_slice(&msg)?)
+        cbor_from_bytes(&msg)
     }
 }
 
-type SendMessage = (Participant, Participant, Message, Instant);
+type FromParticipant = Participant;
+type ToParticipant = Participant;
+type MessageRoute = (FromParticipant, ToParticipant);
+type SendMessage = (Message, (FromParticipant, ToParticipant, Instant));
 
-/// Encrypted message with a reference to the old message. Only the ciphered portion of this
-/// type will be sent over the wire, while the original message is kept just in case things
-/// go wrong somewhere and the message needs to be requeued to be sent later.
-type EncryptedWithOriginal = (Ciphered, SendMessage);
+pub struct Partition {
+    messages: Vec<Message>,
+    timestamps: Vec<Instant>,
+}
 
 /// Message outbox is the set of messages that are pending to be sent to other nodes.
 /// These messages will be signed and encrypted before being sent out.
 pub struct MessageOutbox {
     client: NodeClient,
-    messages: VecDeque<SendMessage>,
     account_id: AccountId,
+
+    // NOTE: we have FromParticipant here to circumvent the chance that we change Participant
+    // id for our own node in the middle of something like resharing or adding another curve
+    // type.
+    /// Messsages sorted by participant map to a list of partitioned messages to be sent as
+    /// a single request to other participants.
+    messages: HashMap<MessageRoute, Vec<(Message, Instant)>>,
 }
 
 impl MessageOutbox {
     pub fn new(client: NodeClient, id: &AccountId) -> Self {
         Self {
             client,
-            messages: VecDeque::default(),
+            messages: HashMap::new(),
             account_id: id.clone(),
         }
     }
 
     pub fn extend(&mut self, outgoing: &mut mpsc::Receiver<SendMessage>) {
+        let mut message_count: i64 = 0;
         loop {
-            let (from, to, msg, instant) = match outgoing.try_recv() {
+            let (msg, (from, to, timestamp)) = match outgoing.try_recv() {
                 Ok(msg) => msg,
                 Err(TryRecvError::Empty) => {
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
                     tracing::error!(
-                        "outbox: communication disconnected, no more messages will be received"
+                        "outbox: channel disconnected, no more messages will be received"
                     );
                     break;
                 }
             };
-            self.messages.push_back((from, to, msg, instant));
+            // add it to the outbox and sort it by from and to participant
+            let entry = self.messages.entry((from, to)).or_default();
+            entry.push((msg, timestamp));
+            message_count += 1;
         }
         crate::metrics::MESSAGE_QUEUE_SIZE
             .with_label_values(&[self.account_id.as_str()])
-            .set(self.messages.len() as i64);
+            .set(message_count);
     }
 
     /// Expire messages that have been in the outbox for too long.
     pub fn expire(&mut self, cfg: &ProtocolConfig) {
         // timeout errors are very common for a message expiring, so map them to counts here:
         let mut timeouts = HashMap::<String, usize>::new();
-        self.messages.retain(|(_, to, msg, instant)| {
-            if instant.elapsed() > timeout(msg, cfg) {
-                let counter = timeouts
-                    .entry(format!(
-                        "timeout message={} for node={to:?}",
-                        msg.typename(),
-                    ))
-                    .or_insert(0);
-                *counter += 1;
-                false
-            } else {
-                true
-            }
-        });
+        for ((_from, to), messages) in self.messages.iter_mut() {
+            messages.retain(|(msg, timestamp)| {
+                if timestamp.elapsed() > timeout(msg, cfg) {
+                    let counter = timeouts
+                        .entry(format!(
+                            "timeout message={} for node={to:?}",
+                            msg.typename(),
+                        ))
+                        .or_insert(0);
+                    *counter += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
 
         if !timeouts.is_empty() {
             tracing::warn!(?timeouts, "messages expired");
         }
+    }
+
+    /// Compact the messages in the outbox into partitions of at most 256kb.
+    pub fn compact(&mut self) -> HashMap<MessageRoute, Vec<Partition>> {
+        let mut compacted = HashMap::new();
+        for (route, messages) in self.messages.drain() {
+            let entry = compacted.entry(route).or_insert_with(Vec::new);
+            entry.extend(partition_256kb(messages));
+        }
+        compacted
     }
 
     /// Encrypt all the messages in the outbox and return a map of participant to encrypted messages.
@@ -812,29 +881,40 @@ impl MessageOutbox {
         &mut self,
         sign_sk: &near_crypto::SecretKey,
         active: &Participants,
-    ) -> HashMap<Participant, Vec<EncryptedWithOriginal>> {
+        compacted: HashMap<MessageRoute, Vec<Partition>>,
+    ) -> HashMap<MessageRoute, Vec<(Ciphered, Partition)>> {
         // failed for when a participant is not active, so keep this message for next round.
         let mut retry = VecDeque::new();
         let mut errors = Vec::new();
         let mut not_active = HashSet::new();
 
-        let mut encrypted = HashMap::new();
-        while let Some((from, to, msg, instant)) = self.messages.pop_front() {
+        let mut encrypted_with_original = HashMap::new();
+        for ((from, to), compacted) in compacted {
             let Some(info) = active.get(&to) else {
                 not_active.insert(to);
-                retry.push_back((from, to, msg, instant));
+                retry.push_back(((from, to), compacted));
                 continue;
             };
 
-            let encrypted_msg = match SignedMessage::encrypt(&msg, from, sign_sk, &info.cipher_pk) {
-                Ok(encrypted) => encrypted,
-                Err(err) => {
-                    errors.push(SendError::EncryptionError(err.to_string()));
-                    continue;
-                }
-            };
-            let encrypted = encrypted.entry(to).or_insert_with(Vec::new);
-            encrypted.push((encrypted_msg, (from, to, msg, instant)));
+            for partition in compacted {
+                let encrypted = match SignedMessage::encrypt(
+                    &partition.messages,
+                    from,
+                    sign_sk,
+                    &info.cipher_pk,
+                ) {
+                    Ok(encrypted) => encrypted,
+                    Err(err) => {
+                        errors.push(err);
+                        continue;
+                    }
+                };
+
+                encrypted_with_original
+                    .entry((from, to))
+                    .or_insert_with(Vec::new)
+                    .push((encrypted, partition));
+            }
         }
 
         if !errors.is_empty() {
@@ -849,46 +929,56 @@ impl MessageOutbox {
         }
 
         // Add back the failed attempts for next time.
-        self.messages.extend(retry);
-        encrypted
+        for (route, partitions) in retry {
+            let entry = self.messages.entry(route).or_default();
+            for partition in partitions {
+                entry.extend(
+                    partition
+                        .messages
+                        .into_iter()
+                        .zip(partition.timestamps.into_iter()),
+                );
+            }
+        }
+
+        encrypted_with_original
     }
 
-    /// Compact together all the requests up to 256kb per request, and then send them out.
+    /// Send the encrypted messages to other participants.
     pub async fn send(
         &mut self,
         active: &Participants,
-        encrypted: HashMap<Participant, Vec<EncryptedWithOriginal>>,
+        encrypted: HashMap<MessageRoute, Vec<(Ciphered, Partition)>>,
     ) {
         let start = Instant::now();
         let mut send_tasks = Vec::new();
-        for (id, encrypted) in encrypted {
-            for partition in partition_ciphered_256kb(encrypted) {
-                let (encrypted_partition, msgs): (Vec<_>, Vec<_>) = partition.into_iter().unzip();
+        for ((from, to), encrypted) in encrypted {
+            for (encrypted_partition, partition) in encrypted {
                 // guaranteed to unwrap due to our previous loop check:
-                let info = active.get(&id).unwrap();
+                let info = active.get(&to).unwrap();
                 let account_id = info.account_id.clone();
                 let url = info.url.clone();
 
                 crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
                     .with_label_values(&[account_id.as_str()])
-                    .inc_by(msgs.len() as f64);
+                    .inc_by(partition.messages.len() as f64);
 
                 let client = self.client.clone();
                 send_tasks.push(tokio::spawn(async move {
                     let start = Instant::now();
-                    if let Err(err) = client.msg(url, &encrypted_partition).await {
+                    if let Err(err) = client.msg(url, &[&encrypted_partition]).await {
                         crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
                             .with_label_values(&[account_id.as_str()])
-                            .inc_by(msgs.len() as f64);
+                            .inc_by(partition.messages.len() as f64);
                         crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
                             .with_label_values(&[account_id.as_str()])
                             .observe(start.elapsed().as_millis() as f64);
-                        Err((msgs, err))
+                        Err(((from, to), partition, err))
                     } else {
                         crate::metrics::SEND_ENCRYPTED_LATENCY
                             .with_label_values(&[account_id.as_str()])
                             .observe(start.elapsed().as_millis() as f64);
-                        Ok(msgs.len())
+                        Ok(partition.messages.len())
                     }
                 }));
             }
@@ -904,9 +994,9 @@ impl MessageOutbox {
                     uncompacted += msgs_len;
                     compacted += 1;
                 }
-                Ok(Err((msgs, err))) => {
+                Ok(Err((route, partition, err))) => {
                     // since we failed, put back all the messages related to this
-                    retry.extend(msgs);
+                    retry.push_back((route, partition));
                     errors.push(err);
                 }
                 Err(err) => {
@@ -929,35 +1019,59 @@ impl MessageOutbox {
         }
 
         // Add back the failed attempts for next time.
-        self.messages.extend(retry);
+        for (route, partition) in retry {
+            let entry = self.messages.entry(route).or_default();
+            entry.extend(
+                partition
+                    .messages
+                    .into_iter()
+                    .zip(partition.timestamps.into_iter()),
+            );
+        }
     }
 }
 
-fn partition_ciphered_256kb(
-    encrypted: Vec<EncryptedWithOriginal>,
-) -> Vec<Vec<EncryptedWithOriginal>> {
-    let mut result = Vec::new();
-    let mut current_partition = Vec::new();
+/// Partition a list of messages into a list of partitions where each partition is at most 256kb
+/// worth of `Message`s.
+fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Vec<Partition> {
+    let mut partitions = Vec::new();
+    let mut current_messages = Vec::new();
+    let mut current_timestamps = Vec::new();
     let mut current_size: usize = 0;
 
-    for ciphered in encrypted {
-        let bytesize = ciphered.0.text.len();
+    for (msg, timestamp) in outgoing {
+        if matches!(msg, Message::Unknown(_)) {
+            // Unknown messages should never be created directly by us. The outbox should never
+            // be sending these out to other nodes. We should only be receiving them from the
+            // inbox and processed as such there. If we get to this point, that means our system
+            // is wrong somewhere such that the node is creating an Unknown message itself.
+            tracing::warn!("trying to send unknown message out?");
+            continue;
+        }
+
+        let bytesize = msg.size();
         if current_size + bytesize > 256 * 1024 {
             // If adding this byte vector exceeds 256kb, start a new partition
-            result.push(current_partition);
-            current_partition = Vec::new();
+            partitions.push(Partition {
+                messages: std::mem::take(&mut current_messages),
+                timestamps: std::mem::take(&mut current_timestamps),
+            });
             current_size = 0;
         }
-        current_partition.push(ciphered);
+        current_messages.push(msg);
+        current_timestamps.push(timestamp);
         current_size += bytesize;
     }
 
-    if !current_partition.is_empty() {
+    if !current_messages.is_empty() {
         // Add the last partition
-        result.push(current_partition);
+        partitions.push(Partition {
+            messages: current_messages,
+            timestamps: current_timestamps,
+        });
     }
 
-    result
+    partitions
 }
 
 fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {
@@ -967,30 +1081,351 @@ fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {
         Message::Triple(_) => Duration::from_millis(cfg.triple.generation_timeout),
         Message::Presignature(_) => Duration::from_millis(cfg.presignature.generation_timeout),
         Message::Signature(_) => Duration::from_millis(cfg.signature.generation_timeout),
+
+        // unknown message cannot be handled at all, so we just expire them immediately.
+        Message::Unknown(_) => Duration::from_millis(1),
+    }
+}
+
+/// Scalar module for any scalars to be sent through messaging other nodes.
+/// There's an issue with serializing with ciborium when it comes to
+/// forward and backward compatibility, so we need to implement our own
+/// custom serialization here.
+pub mod cbor_scalar {
+    use k256::elliptic_curve::bigint::Encoding as _;
+    use k256::elliptic_curve::scalar::FromUintUnchecked as _;
+    use k256::Scalar;
+    use serde::{de, Deserialize as _, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(scalar: &Scalar, ser: S) -> Result<S::Ok, S::Error> {
+        let num = k256::U256::from(scalar);
+        let bytes = num.to_le_bytes();
+        serde_bytes::Bytes::new(&bytes).serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Scalar, D::Error> {
+        let bytes = match ciborium::Value::deserialize(deserializer)? {
+            ciborium::Value::Bytes(bytes) if bytes.len() != 32 => {
+                return Err(de::Error::custom("expected 32 bytes for Scalar"))
+            }
+            ciborium::Value::Bytes(bytes) => bytes,
+            _ => return Err(de::Error::custom("expected ciborium::Value::Bytes")),
+        };
+
+        let mut buf = [0u8; 32];
+        buf.copy_from_slice(&bytes[0..32]);
+
+        let num = k256::U256::from_le_bytes(buf);
+        let scalar = k256::Scalar::from_uint_unchecked(num);
+        Ok(scalar)
+    }
+}
+
+fn cbor_to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, MessageError> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(value, &mut buf)
+        .map_err(|err| MessageError::CborConversion(err.to_string()))?;
+    Ok(buf)
+}
+
+fn cbor_from_bytes<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, MessageError> {
+    ciborium::from_reader(bytes).map_err(|err| MessageError::CborConversion(err.to_string()))
+}
+
+const fn cbor_name(value: &ciborium::Value) -> &'static str {
+    match value {
+        ciborium::Value::Integer(_) => "integer",
+        ciborium::Value::Bytes(_) => "bytes",
+        ciborium::Value::Text(_) => "text",
+        ciborium::Value::Float(_) => "float",
+        ciborium::Value::Null => "null",
+        ciborium::Value::Bool(_) => "bool",
+        ciborium::Value::Array(_) => "array",
+        ciborium::Value::Map(_) => "map",
+        ciborium::Value::Tag(_, _) => "tag",
+        _ => "unknown",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::message::{GeneratingMessage, Message};
+    use cait_sith::protocol::Participant;
+    use k256::Scalar;
+    use mpc_keys::hpke::{self, Ciphered};
+    use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+    use crate::{
+        indexer::ContractSignRequest,
+        protocol::{
+            contract::primitives::{ParticipantMap, Participants},
+            message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
+            ParticipantInfo,
+        },
+    };
 
     #[test]
     fn test_sending_encrypted_message() {
         let associated_data = b"";
-        let (sk, pk) = mpc_keys::hpke::generate();
+        let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
         let starting_message = Message::Generating(GeneratingMessage {
             from: cait_sith::protocol::Participant::from(0),
             data: vec![],
         });
 
         let message = serde_json::to_vec(&starting_message).unwrap();
-        let message = pk.encrypt(&message, associated_data).unwrap();
+        let message = cipher_pk.encrypt(&message, associated_data).unwrap();
 
         let message = serde_json::to_vec(&message).unwrap();
         let cipher = serde_json::from_slice(&message).unwrap();
-        let message = sk.decrypt(&cipher, associated_data).unwrap();
+        let message = cipher_sk.decrypt(&cipher, associated_data).unwrap();
         let message: Message = serde_json::from_slice(&message).unwrap();
 
         assert_eq!(starting_message, message);
+    }
+
+    #[test]
+    fn test_encrypt_then_decrypt() {
+        let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
+        let from = Participant::from(7);
+        let mut participants = Participants::default();
+        participants.insert(
+            &from,
+            ParticipantInfo {
+                sign_pk: sign_sk.public_key(),
+                cipher_pk: cipher_pk.clone(),
+                id: from.into(),
+                url: "http://localhost:3030".to_string(),
+                account_id: "test.near".parse().unwrap(),
+            },
+        );
+        let participants = ParticipantMap::One(participants);
+
+        let batch = vec![Message::Triple(TripleMessage {
+            id: 1234,
+            epoch: 0,
+            from,
+            data: vec![128u8; 1024],
+            timestamp: 1234567,
+        })];
+        let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+        let decrypted_batch: Vec<Message> =
+            SignedMessage::decrypt(&encrypted, &cipher_sk, &participants).unwrap();
+
+        assert_eq!(
+            batch, decrypted_batch,
+            "batch messages did not get encrypted and decrypted correctly"
+        );
+    }
+
+    #[test]
+    fn test_serialization_change() {
+        #[derive(Serialize, Deserialize)]
+        struct NewSignedMessage {
+            #[serde(with = "serde_bytes")]
+            msg: Vec<u8>,
+            sig: near_crypto::Signature,
+            from: Participant,
+
+            // default will call Default::default() if missing in serialized bytes.
+            #[serde(default)]
+            added_field: Vec<u32>,
+        }
+
+        impl NewSignedMessage {
+            const ASSOCIATED_DATA: &'static [u8] = SignedMessage::ASSOCIATED_DATA;
+
+            fn encrypt<T: Serialize>(
+                batch: &T,
+                from: Participant,
+                sign_sk: &near_crypto::SecretKey,
+                cipher_pk: &hpke::PublicKey,
+            ) -> Ciphered {
+                let msg = super::cbor_to_bytes(batch).unwrap();
+                let sig = sign_sk.sign(&msg);
+                let msg = Self {
+                    msg,
+                    sig,
+                    from,
+                    added_field: vec![127; 1024],
+                };
+                let msg = super::cbor_to_bytes(&msg).unwrap();
+                cipher_pk.encrypt(&msg, Self::ASSOCIATED_DATA).unwrap()
+            }
+
+            fn decrypt<T: DeserializeOwned>(
+                encrypted: &Ciphered,
+                cipher_sk: &hpke::SecretKey,
+            ) -> T {
+                let msg = cipher_sk.decrypt(encrypted, Self::ASSOCIATED_DATA).unwrap();
+                let Self { msg, .. } = super::cbor_from_bytes(&msg).unwrap();
+                super::cbor_from_bytes(&msg).unwrap()
+            }
+        }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        enum NewMessage {
+            Triple(NewTripleMessage),
+            NewVariant(String),
+            #[serde(untagged)]
+            Unknown(ciborium::Value),
+        }
+
+        impl PartialEq<Message> for NewMessage {
+            fn eq(&self, other: &Message) -> bool {
+                match (self, other) {
+                    (NewMessage::Triple(a), Message::Triple(b)) => a == b,
+                    // ignore the unknowns for comparison since we don't care about them here.
+                    _ => true,
+                }
+            }
+        }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        struct NewTripleMessage {
+            id: u64,
+            epoch: u64,
+            from: Participant,
+            #[serde(with = "serde_bytes")]
+            data: Vec<u8>,
+            timestamp: u64,
+            // added this new timestamp in the future:
+            #[serde(default)]
+            new_timestamp: Option<u64>,
+        }
+
+        impl PartialEq<TripleMessage> for NewTripleMessage {
+            fn eq(&self, other: &TripleMessage) -> bool {
+                self.id == other.id
+                    && self.epoch == other.epoch
+                    && self.from == other.from
+                    && self.data == other.data
+                    && self.timestamp == other.timestamp
+            }
+        }
+
+        let from = Participant::from(1337);
+        let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt1");
+        let mut participants = Participants::default();
+        participants.insert(
+            &from,
+            ParticipantInfo {
+                sign_pk: sign_sk.public_key(),
+                cipher_pk: cipher_pk.clone(),
+                id: from.into(),
+                url: "http://localhost:3030".to_string(),
+                account_id: "test.near".parse().unwrap(),
+            },
+        );
+        let participants = ParticipantMap::One(participants);
+
+        // Test forward compatibility
+        let old_batch = vec![
+            Message::Triple(TripleMessage {
+                id: 1234,
+                epoch: 0,
+                from,
+                data: vec![128; 1024],
+                timestamp: 1234567,
+            }),
+            Message::Generating(GeneratingMessage {
+                from,
+                data: vec![8; 512],
+            }),
+            Message::Signature(SignatureMessage {
+                proposer: from,
+                presignature_id: 1234,
+                request_id: [7; 32],
+                epoch: 0,
+                request: ContractSignRequest {
+                    payload: Scalar::ZERO,
+                    path: "test-something".to_string(),
+                    key_version: 1,
+                    chain: crate::protocol::Chain::NEAR,
+                },
+                epsilon: Scalar::ONE,
+                entropy: [9; 32],
+                from,
+                data: vec![78; 1222],
+                timestamp: 1234567,
+            }),
+        ];
+        let encrypted = SignedMessage::encrypt(&old_batch, from, &sign_sk, &cipher_pk).unwrap();
+        let new_batch: Vec<NewMessage> = NewSignedMessage::decrypt(&encrypted, &cipher_sk);
+        assert_eq!(
+            new_batch, old_batch,
+            "encrypt/decrypt failed forward compatibility"
+        );
+
+        // Test backward compatibility
+        let new_batch = vec![
+            NewMessage::Triple(NewTripleMessage {
+                id: 1234,
+                epoch: 0,
+                from,
+                data: vec![128u8; 1024],
+                timestamp: 1234567,
+                new_timestamp: Some(777),
+            }),
+            NewMessage::NewVariant("hello".to_string()),
+        ];
+        let new_ciphered = NewSignedMessage::encrypt(&new_batch, from, &sign_sk, &cipher_pk);
+        let old_batch: Vec<Message> =
+            SignedMessage::decrypt(&new_ciphered, &cipher_sk, &participants).unwrap();
+        assert_eq!(
+            new_batch, old_batch,
+            "encrypt/decrypt failed backward compatibility"
+        );
+    }
+
+    #[test]
+    fn test_encrypt_size() {
+        let epoch = 1;
+        let from = Participant::from(0);
+        let batch = vec![
+            Message::Triple(TripleMessage {
+                id: 1,
+                epoch,
+                from,
+                data: vec![128u8; 1024],
+                timestamp: 1,
+            }),
+            Message::Triple(crate::protocol::message::TripleMessage {
+                id: 2,
+                epoch,
+                from,
+                data: vec![255u8; 2048],
+                timestamp: 2,
+            }),
+            Message::Triple(TripleMessage {
+                id: 3,
+                epoch,
+                from,
+                data: vec![101u8; 1337],
+                timestamp: 3,
+            }),
+        ];
+
+        let batch_bytesize = batch.iter().map(|msg| msg.size()).sum::<usize>();
+        dbg!(batch_bytesize);
+
+        let (_cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
+        let ciphered = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+        let ciphered_bytesize = ciphered.text.len();
+        dbg!(ciphered_bytesize);
+
+        let margin_percent = 0.05;
+        let margin_of_err = (batch_bytesize as f64 * margin_percent) as usize;
+        dbg!(margin_of_err);
+        assert!(
+            ((batch_bytesize - margin_of_err)..(batch_bytesize + margin_of_err))
+                .contains(&ciphered_bytesize),
+            "ciphered message size is not within 5% of the original message size"
+        );
     }
 }

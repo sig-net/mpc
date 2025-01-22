@@ -1,4 +1,4 @@
-use std::io;
+use std::{fmt, io};
 
 use borsh::{self, BorshDeserialize, BorshSerialize};
 use hpke::{
@@ -19,6 +19,7 @@ const INFO_ENTROPY: &[u8] = b"mpc-key-v1";
 pub type Kem = X25519HkdfSha256;
 pub type Aead = ChaCha20Poly1305;
 pub type Kdf = HkdfSha384;
+pub type Error = hpke::HpkeError;
 
 #[derive(Serialize, Deserialize)]
 pub struct Ciphered {
@@ -36,6 +37,16 @@ pub struct PublicKey(<Kem as hpke::Kem>::PublicKey);
 // NOTE: Arc is used to hack up the fact that the internal private key does not have Send constraint.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretKey(<Kem as hpke::Kem>::PrivateKey);
+
+impl fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let key = hex::encode(self.to_bytes());
+        let debug_key = format!("{}[..]", &key[..key.len() - 4]);
+        f.debug_struct("SecretKey")
+            .field("key", &debug_key)
+            .finish()
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EncappedKey(<Kem as hpke::Kem>::EncappedKey);
@@ -99,6 +110,10 @@ impl BorshDeserialize for PublicKey {
 impl SecretKey {
     pub fn to_bytes(&self) -> [u8; 32] {
         hpke::Serializable::to_bytes(&self.0).into()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self(hpke::Deserializable::from_bytes(bytes).expect("invalid bytes"))
     }
 
     pub fn try_from_bytes(bytes: &[u8]) -> Result<Self, hpke::HpkeError> {

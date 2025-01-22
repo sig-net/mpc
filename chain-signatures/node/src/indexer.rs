@@ -82,6 +82,7 @@ struct UnvalidatedContractSignRequest {
 /// A validated version of the sign request
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct ContractSignRequest {
+    #[serde(with = "crate::protocol::message::cbor_scalar")]
     pub payload: Scalar,
     pub path: String,
     pub key_version: u32,

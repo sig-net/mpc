@@ -68,7 +68,7 @@ pub async fn signature_responded(
 
     let strategy = ConstantBuilder::default()
         .with_delay(Duration::from_secs(20))
-        .with_max_times(5);
+        .with_max_times(10);
 
     match is_tx_ready.retry(&strategy).await? {
         Outcome::Signature(signature) => Ok(signature),

@@ -142,6 +142,7 @@ impl MpcSignProtocol {
         my_address: U,
         mpc_contract_id: AccountId,
         account_id: AccountId,
+        state: Arc<RwLock<NodeState>>,
         rpc_client: near_fetch::Client,
         signer: InMemorySigner,
         channel: MessageChannel,
@@ -152,19 +153,17 @@ impl MpcSignProtocol {
         eth_rpc_url: String,
         eth_contract_address: String,
         eth_account_sk: String,
-    ) -> (Self, Arc<RwLock<NodeState>>) {
+    ) -> Self {
         let my_address = my_address.into_url().unwrap();
         let rpc_url = rpc_client.rpc_addr();
-        let signer_account_id: AccountId = signer.clone().account_id;
         tracing::info!(
             ?my_address,
             ?mpc_contract_id,
             ?account_id,
             ?rpc_url,
-            ?signer_account_id,
+            signer_id = ?signer.account_id,
             "initializing protocol with parameters"
         );
-        let state = Arc::new(RwLock::new(NodeState::Starting));
         let transport =
             web3::transports::Http::new(&eth_rpc_url).expect("failed to initialize eth client");
         let web3 = Web3::new(transport);
@@ -182,12 +181,11 @@ impl MpcSignProtocol {
             triple_storage,
             presignature_storage,
         };
-        let protocol = MpcSignProtocol {
+        MpcSignProtocol {
             ctx,
             channel,
-            state: state.clone(),
-        };
-        (protocol, state)
+            state,
+        }
     }
 
     pub async fn run(

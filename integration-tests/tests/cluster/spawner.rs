@@ -60,7 +60,7 @@ impl IntoFuture for ClusterSpawner {
             };
 
             if self.wait_for_running {
-                cluster.wait().running().await?;
+                cluster.wait().running().nodes_running().await?;
             }
 
             Ok(cluster)
