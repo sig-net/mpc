@@ -1,54 +1,7 @@
-use crate::config::{Config, ContractConfig};
-use crate::protocol::ProtocolState;
-
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 
 use serde_json::json;
-
-pub async fn fetch_mpc_contract_state(
-    rpc_client: &near_fetch::Client,
-    mpc_contract_id: &AccountId,
-) -> anyhow::Result<ProtocolState> {
-    let contract_state: mpc_contract::ProtocolContractState = rpc_client
-        .view(mpc_contract_id, "state")
-        .await
-        .map_err(|e| {
-            tracing::warn!(%e, "failed to fetch protocol state");
-            e
-        })?
-        .json()?;
-
-    let protocol_state: ProtocolState = contract_state.try_into().map_err(|_| {
-        let msg = "failed to parse protocol state, has it been initialized?".to_string();
-        tracing::error!(msg);
-        anyhow::anyhow!(msg)
-    })?;
-
-    tracing::debug!(?protocol_state, "protocol state");
-    Ok(protocol_state)
-}
-
-pub async fn fetch_mpc_config(
-    rpc_client: &near_fetch::Client,
-    mpc_contract_id: &AccountId,
-    original: &Config,
-) -> anyhow::Result<Config> {
-    let contract_config: ContractConfig = rpc_client
-        .view(mpc_contract_id, "config")
-        .await
-        .map_err(|e| {
-            tracing::warn!(%e, "failed to fetch contract config");
-            e
-        })?
-        .json()?;
-    tracing::debug!(?contract_config, "contract config");
-    Config::try_from_contract(contract_config, original).ok_or_else(|| {
-        let msg = "failed to parse contract config";
-        tracing::error!(msg);
-        anyhow::anyhow!(msg)
-    })
-}
 
 pub async fn vote_for_public_key(
     rpc_client: &near_fetch::Client,

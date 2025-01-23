@@ -266,8 +266,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 );
 
                 tracing::info!("protocol initialized");
-                let contract_handle =
-                    tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
+                let rpc_handle = tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
                 let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
@@ -276,7 +275,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     tokio::spawn(web::run(web_port, sender, state, indexer, eth_indexer));
                 tracing::info!("protocol http server spawned");
 
-                contract_handle.await??;
+                rpc_handle.await??;
                 mesh_handle.await??;
                 protocol_handle.await??;
                 web_handle.await??;
