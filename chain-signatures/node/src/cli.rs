@@ -250,7 +250,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 let protocol = MpcSignProtocol::init(
                     my_address,
                     mpc_contract_id,
-                    account_id,
+                    account_id.clone(),
                     state.clone(),
                     rpc_client,
                     signer,
@@ -275,10 +275,9 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 let web_handle = tokio::spawn(async move {
                     web::run(web_port, sender, cipher_sk, protocol_state, indexer).await
                 });
-                let eth_indexer_handle =
-                    tokio::spawn(
-                        async move { indexer_eth::run(&indexer_eth_options, sign_tx).await },
-                    );
+                let eth_indexer_handle = tokio::spawn(async move {
+                    indexer_eth::run(&indexer_eth_options, sign_tx, &account_id).await
+                });
                 tracing::info!("protocol http server spawned");
 
                 contract_handle.await??;

@@ -24,7 +24,7 @@ module.exports = {
       loggingEnabled: true,
       mining: {
         auto: true,
-        interval: 4000,
+        interval: 3000,
       },
     },
     sepolia: {

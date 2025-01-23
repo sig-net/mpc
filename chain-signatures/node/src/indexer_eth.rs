@@ -5,6 +5,7 @@ use crypto_shared::kdf::derive_epsilon_eth;
 use crypto_shared::ScalarExt;
 use hex::ToHex;
 use k256::Scalar;
+use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -24,7 +25,7 @@ pub struct Options {
     #[clap(long, env("MPC_INDEXER_ETH_RPC_HTTP_URL"))]
     pub eth_rpc_http_url: String,
 
-    /// The contract address to watch
+    /// The contract address to watch without the `0x` prefix
     #[clap(long, env("MPC_INDEXER_ETH_CONTRACT_ADDRESS"))]
     pub eth_contract_address: String,
 }
@@ -146,7 +147,11 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
     })
 }
 
-pub async fn run(options: &Options, sign_tx: mpsc::Sender<SignRequest>) -> anyhow::Result<()> {
+pub async fn run(
+    options: &Options,
+    sign_tx: mpsc::Sender<SignRequest>,
+    node_near_account_id: &AccountId,
+) -> anyhow::Result<()> {
     let contract_address = H160::from_str(&options.eth_contract_address)?;
 
     let signature_requested_topic = H256::from_slice(&web3::signing::keccak256(
@@ -158,24 +163,25 @@ pub async fn run(options: &Options, sign_tx: mpsc::Sender<SignRequest>) -> anyho
         .topics(Some(vec![signature_requested_topic]), None, None, None)
         .build();
 
-    let eth_rpc_ws_url = options.eth_rpc_ws_url.clone();
-
     loop {
-        match web3::transports::WebSocket::new(&eth_rpc_ws_url).await {
+        match web3::transports::WebSocket::new(&options.eth_rpc_ws_url).await {
             Ok(ws) => {
                 let web3_ws = web3::Web3::new(ws);
-
                 match web3_ws.eth_subscribe().subscribe_logs(filter.clone()).await {
                     Ok(mut filtered_logs_sub) => {
                         tracing::info!("Ethereum indexer connected and listening for logs");
+
                         let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
+
                         loop {
                             tokio::select! {
                                 Some(log) = filtered_logs_sub.next() => {
                                     match log {
                                         Ok(log) => {
-                                            tracing::info!("Received new Ethereum log");
-
+                                            tracing::info!("Received new Ethereum sign request: {:?}", log);
+                                            crate::metrics::NUM_SIGN_REQUESTS_ETH
+                                                .with_label_values(&[node_near_account_id.as_str()])
+                                                .inc();
                                             let sign_tx = sign_tx.clone();
                                             if let Ok(sign_request) = sign_request_from_filtered_log(log) {
                                                 tokio::spawn(async move {
@@ -187,7 +193,7 @@ pub async fn run(options: &Options, sign_tx: mpsc::Sender<SignRequest>) -> anyho
                                         }
                                         Err(err) => {
                                             tracing::warn!("Ethereum log subscription error: {:?}", err);
-                                            break; // Exit loop and reconnect
+                                            break;
                                         }
                                     }
                                 }
@@ -203,8 +209,8 @@ pub async fn run(options: &Options, sign_tx: mpsc::Sender<SignRequest>) -> anyho
             Err(err) => tracing::error!("Failed to connect to Ethereum WebSocket: {:?}", err),
         }
 
-        tracing::warn!("Ethereum WebSocket disconnected, reconnecting in 5 seconds...");
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tracing::warn!("Ethereum WebSocket disconnected, reconnecting in 2 seconds...");
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
 
