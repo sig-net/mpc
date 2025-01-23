@@ -22,6 +22,7 @@ module.exports = {
     hardhat: {
       chainId: 31337,
       loggingEnabled: true,
+      // make local eth node auto-mine blocks every 3 seconds
       mining: {
         auto: true,
         interval: 3000,
