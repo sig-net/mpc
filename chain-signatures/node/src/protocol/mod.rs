@@ -164,7 +164,6 @@ impl MpcSignProtocol {
             signer_id = ?signer.account_id,
             "initializing protocol with parameters"
         );
-        let state = Arc::new(RwLock::new(NodeState::Starting));
         let transport = web3::transports::Http::new(&eth_rpc_http_url)
             .expect("failed to initialize eth client");
         let web3 = Web3::new(transport);
