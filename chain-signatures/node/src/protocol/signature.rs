@@ -225,19 +225,15 @@ pub struct SignatureManager {
     failed: VecDeque<(SignRequestIdentifier, GenerationRequest)>,
     /// Set of completed signatures
     completed: HashMap<SignRequestIdentifier, Instant>,
-    /// Generated signatures assigned to the current node that are yet to be published.
-    /// Vec<(receipt_id, msg_hash, timestamp, output)>
+    /// Sign queue that maintains all requests coming in from indexer.
+    sign_queue: SignQueue,
+
     me: Participant,
     my_account_id: AccountId,
     threshold: usize,
     public_key: PublicKey,
     epoch: u64,
-
-    /// Sign queue that maintains all requests coming in from indexer.
-    sign_queue: SignQueue,
 }
-
-pub const MAX_RETRY: u8 = 10;
 
 #[derive(Clone)]
 pub struct ToPublish {
@@ -281,12 +277,12 @@ impl SignatureManager {
             generators: HashMap::new(),
             failed: VecDeque::new(),
             completed: HashMap::new(),
+            sign_queue: SignQueue::new(me, sign_rx),
             me,
             my_account_id: my_account_id.clone(),
             threshold,
             public_key,
             epoch,
-            sign_queue: SignQueue::new(me, sign_rx),
         }
     }
 
@@ -619,7 +615,7 @@ impl SignatureManager {
                                 output,
                                 generator.request.chain,
                             );
-                            rpc.publish(self.public_key, to_publish).await;
+                            tokio::spawn(rpc.clone().publish(self.public_key, to_publish));
                         }
                         // Do not retain the protocol
                         remove.push(sign_request_id.clone());

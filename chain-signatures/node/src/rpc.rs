@@ -7,12 +7,13 @@ use crypto_shared::SignatureResponse;
 use mpc_contract::primitives::SignatureRequest;
 use mpc_keys::hpke;
 
+use k256::elliptic_curve::point::AffineCoordinates;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
 use near_primitives::hash::CryptoHash;
 use serde_json::json;
-use std::collections::VecDeque;
 use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,10 +23,12 @@ use web3::contract::tokens::Tokenizable as _;
 use web3::ethabi::Token;
 use web3::types::U256;
 
-use k256::elliptic_curve::point::AffineCoordinates;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
-
-pub const PUBLISH_MAX_RETRY: u8 = 6;
+/// The maximum amount of times to retry publishing a signature.
+const MAX_PUBLISH_RETRY: u8 = 6;
+/// The maximum number of concurrent RPC requests the system can make
+const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
+/// The update interval to fetch and update the contract state and config
+const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
 
 enum RpcAction {
     Publish(crypto_shared::PublicKey, ToPublish),
@@ -37,7 +40,7 @@ pub struct RpcChannel {
 }
 
 impl RpcChannel {
-    pub async fn publish(&self, public_key: crypto_shared::PublicKey, to_publish: ToPublish) {
+    pub async fn publish(self, public_key: crypto_shared::PublicKey, to_publish: ToPublish) {
         if let Err(err) = self
             .tx
             .send(RpcAction::Publish(public_key, to_publish))
@@ -52,19 +55,17 @@ pub struct RpcExecutor {
     near: NearClient,
     eth: EthClient,
     action_rx: mpsc::Receiver<RpcAction>,
-    tasks: VecDeque<tokio::task::JoinHandle<()>>,
 }
 
 impl RpcExecutor {
     pub fn new(near: &NearClient, eth: &EthClient) -> (RpcChannel, Self) {
-        let (tx, rx) = mpsc::channel(1024);
+        let (tx, rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         (
             RpcChannel { tx },
             Self {
                 near: near.clone(),
                 eth: eth.clone(),
                 action_rx: rx,
-                tasks: VecDeque::new(),
             },
         )
     }
@@ -74,58 +75,37 @@ impl RpcExecutor {
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
         config: Arc<RwLock<Config>>,
     ) {
-        let mut update_interval = tokio::time::interval(Duration::from_millis(3000));
-        let mut action_interval = tokio::time::interval(Duration::from_millis(50));
-        loop {
-            tokio::select! {
-                action = self.action_rx.recv() => {
-                    if let Some(action) = action {
-                        let task = match action {
-                            RpcAction::Publish(public_key, to_publish) => {
-                                execute_publish(self.client(&to_publish.chain), public_key, to_publish)
-                            }
-                        };
-                        self.tasks.push_back(tokio::spawn(task));
-                    } else {
-                        tracing::error!("rpc channel closed unexpectedly");
-                        return;
-                    }
-                }
-                _ = action_interval.tick() => {
-                    // Remove finished tasks
-                    self.tasks.retain(|task| !task.is_finished());
-                }
-                _ = update_interval.tick() => {
-                    self.update_contract(&contract_state).await;
-                    self.update_config(&config).await;
-                }
+        // spin up update task for updating contract state and config
+        let near = self.near.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(UPDATE_INTERVAL);
+            loop {
+                interval.tick().await;
+                tokio::spawn(update_contract(near.clone(), contract_state.clone()));
+                tokio::spawn(update_config(near.clone(), config.clone()));
             }
+        });
+
+        // process incoming actions related to RPC
+        loop {
+            let Some(action) = self.action_rx.recv().await else {
+                tracing::error!("rpc channel closed unexpectedly");
+                return;
+            };
+            let task = match action {
+                RpcAction::Publish(public_key, to_publish) => {
+                    execute_publish(self.client(&to_publish.chain), public_key, to_publish)
+                }
+            };
+            tokio::spawn(task);
         }
     }
 
+    /// Get the client for the given chain
     fn client(&self, chain: &Chain) -> ChainClient {
         match chain {
             Chain::NEAR => ChainClient::Near(self.near.clone()),
             Chain::Ethereum => ChainClient::Ethereum(self.eth.clone()),
-        }
-    }
-
-    async fn update_contract(&mut self, contract_state: &Arc<RwLock<Option<ProtocolState>>>) {
-        match self.near.fetch_state().await {
-            Err(error) => {
-                tracing::error!(?error, "could not fetch contract's state");
-            }
-            Ok(state) => {
-                let mut contract_state_guard = contract_state.write().await;
-                *contract_state_guard = Some(state);
-            }
-        }
-    }
-
-    async fn update_config(&mut self, config: &Arc<RwLock<Config>>) {
-        let mut config = config.write().await;
-        if let Err(error) = config.fetch_inplace(&self.near).await {
-            tracing::error!("could not fetch contract's config: {error:?}");
         }
     }
 }
@@ -267,8 +247,7 @@ impl NearClient {
         request: &SignatureRequest,
         response: &SignatureResponse,
     ) -> Result<ExecutionFinalResult, near_fetch::Error> {
-        let response = self
-            .client
+        self.client
             .call(&self.signer, &self.contract_id, "respond")
             .args_json(json!({
                 "request": request,
@@ -276,9 +255,7 @@ impl NearClient {
             }))
             .max_gas()
             .transact()
-            .await?;
-
-        Ok(response)
+            .await
     }
 }
 
@@ -314,9 +291,28 @@ impl EthClient {
     }
 }
 
-enum ChainClient {
+/// Client related to a specific chain
+pub enum ChainClient {
     Near(NearClient),
     Ethereum(EthClient),
+}
+
+async fn update_contract(near: NearClient, contract_state: Arc<RwLock<Option<ProtocolState>>>) {
+    match near.fetch_state().await {
+        Ok(state) => {
+            *contract_state.write().await = Some(state);
+        }
+        Err(error) => {
+            tracing::error!(?error, "could not fetch contract state");
+        }
+    }
+}
+
+async fn update_config(near: NearClient, config: Arc<RwLock<Config>>) {
+    let mut config = config.write().await;
+    if let Err(error) = config.fetch_inplace(&near).await {
+        tracing::error!(?error, "could not fetch contract config");
+    }
 }
 
 /// Publish the signature and retry if it fails
@@ -325,14 +321,48 @@ async fn execute_publish(
     public_key: crypto_shared::PublicKey,
     mut to_publish: ToPublish,
 ) {
+    let ToPublish {
+        request_id,
+        request,
+        signature,
+        chain,
+        ..
+    } = &to_publish;
+
+    tracing::info!(
+        ?chain,
+        request_id = ?CryptoHash(*request_id),
+        "trying to publish signature",
+    );
+    let expected_public_key = crypto_shared::derive_key(public_key, request.epsilon.scalar);
+    // We do this here, rather than on the client side, so we can use the ecrecover system function on NEAR to validate our signature
+    let Ok(signature) = crate::kdf::into_eth_sig(
+        &expected_public_key,
+        &signature.big_r,
+        &signature.s,
+        request.payload_hash.scalar,
+    ) else {
+        tracing::error!(
+            request_id = ?CryptoHash(*request_id),
+            "failed to generate a recovery id; trashing publish request",
+        );
+        return;
+    };
+
     loop {
-        if try_publish(&client, &public_key, &to_publish).await.is_ok() {
+        let publish = match &client {
+            ChainClient::Near(near) => try_publish_near(near, &to_publish, &signature)
+                .await
+                .map_err(|_| ()),
+            ChainClient::Ethereum(eth) => try_publish_eth(eth, &to_publish, &signature).await,
+        };
+        if publish.is_ok() {
             break;
         }
 
         to_publish.retry_count += 1;
-        tokio::time::sleep(Duration::from_secs(500)).await;
-        if to_publish.retry_count >= PUBLISH_MAX_RETRY {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if to_publish.retry_count >= MAX_PUBLISH_RETRY {
             tracing::info!(
                 request_id = ?CryptoHash(to_publish.request_id),
                 "exceeded max retries, trashing publish request",
@@ -348,45 +378,10 @@ async fn execute_publish(
     }
 }
 
-async fn try_publish(
-    client: &ChainClient,
-    public_key: &crypto_shared::PublicKey,
-    to_publish: &ToPublish,
-) -> Result<(), ()> {
-    let ToPublish {
-        request_id,
-        request,
-        signature,
-        ..
-    } = &to_publish;
-    let expected_public_key = crypto_shared::derive_key(*public_key, request.epsilon.scalar);
-    // We do this here, rather than on the client side, so we can use the ecrecover system function on NEAR to validate our signature
-    let Ok(signature) = crate::kdf::into_eth_sig(
-        &expected_public_key,
-        &signature.big_r,
-        &signature.s,
-        request.payload_hash.scalar,
-    ) else {
-        tracing::error!(
-            request_id = ?CryptoHash(*request_id),
-            "failed to generate a recovery id -- trashing publish request",
-        );
-        return Ok(());
-    };
-
-    match client {
-        ChainClient::Near(near) => try_publish_near(near, to_publish, signature)
-            .await
-            .map_err(|_| ())?,
-        ChainClient::Ethereum(eth) => try_publish_eth(eth, to_publish, signature).await?,
-    }
-    Ok(())
-}
-
 async fn try_publish_near(
     near: &NearClient,
     to_publish: &ToPublish,
-    signature: SignatureResponse,
+    signature: &SignatureResponse,
 ) -> Result<(), near_fetch::Error> {
     let ToPublish {
         request_id,
@@ -396,14 +391,14 @@ async fn try_publish_near(
     } = to_publish;
 
     let outcome = near
-        .call_respond(request, &signature)
+        .call_respond(request, signature)
         .await
         .inspect_err(|err| {
             tracing::error!(
                 request_id = ?CryptoHash(*request_id),
                 ?request,
                 ?err,
-                "failed to publish the signature",
+                "failed to publish signature",
             );
             crate::metrics::SIGNATURE_PUBLISH_FAILURES
                 .with_label_values(&[near.my_account_id.as_str()])
@@ -449,7 +444,7 @@ async fn try_publish_near(
 async fn try_publish_eth(
     eth: &EthClient,
     to_publish: &ToPublish,
-    signature: SignatureResponse,
+    signature: &SignatureResponse,
 ) -> Result<(), ()> {
     let ToPublish { request_id, .. } = to_publish;
     let params = [
