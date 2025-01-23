@@ -1,4 +1,5 @@
 require("@nomicfoundation/hardhat-toolbox");
+require('@openzeppelin/hardhat-upgrades');
 
 // Ensure your configuration variables are set before executing the script
 const { vars } = require("hardhat/config");

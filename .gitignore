@@ -14,3 +14,5 @@ node_modules/
 chain-signatures/contract-eth/artifacts
 chain-signatures/contract-eth/cache
 chain-signatures/contract-eth/ignition/deployments
+chain-signatures/contract-eth/deployments
+chain-signatures/contract-eth/scripts/params.json

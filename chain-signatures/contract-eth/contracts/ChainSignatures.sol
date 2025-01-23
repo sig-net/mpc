@@ -3,10 +3,10 @@ pragma solidity ^0.8.17;
 
 import "./Secp256k1.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
-import "hardhat/console.sol"; // Import Hardhat's console library
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "hardhat/console.sol";
 
-
-contract ChainSignatures {
+contract ChainSignatures is Initializable {
     struct SignRequest {
         bytes32 payload;
         string path;
@@ -27,7 +27,6 @@ contract ChainSignatures {
         uint8 recoveryId;
     }
 
-    // public key in affine form
     struct PublicKey {
         uint256 x;
         uint256 y;
@@ -48,7 +47,10 @@ contract ChainSignatures {
     event SignatureRequested(bytes32 indexed requestId, address requester, uint256 epsilon, uint256 payloadHash, string path);
     event SignatureResponded(bytes32 indexed requestId, SignatureResponse response);
 
-    constructor(PublicKey memory _publicKey) {
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() initializer {}
+
+    function initialize(PublicKey memory _publicKey) public initializer {
         publicKey = _publicKey;
     }
 
@@ -164,20 +166,5 @@ contract ChainSignatures {
         } else {
             return (requestCounter - 3) * 4 * 1e15; // 0.004 ETH (~1 USD) first request after the first 3
         }
-    }
-
-    function checkECSignature(
-        PublicKey memory expectedPk,
-        AffinePoint memory bigR,
-        uint256 s,
-        uint256 msgHash,
-        uint8 recoveryId
-    ) public pure returns (bool) {
-        console.log("expectedPk", expectedPk.x, expectedPk.y);
-        console.log("signature", bigR.x, s);
-        console.log("msgHash", msgHash);
-        (uint256 pkX, uint256 pkY) = Secp256k1.recover(msgHash, recoveryId, bigR.x, s);
-        console.log("recovered", pkX, pkY);
-        return (pkX == expectedPk.x && pkY == expectedPk.y);
     }
 }
