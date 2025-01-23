@@ -244,7 +244,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             };
             let rpc_client =
                 RpcClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
-            let rpc = RpcExecutor::new(&rpc_client);
+            let (rpc_channel, rpc) = RpcExecutor::new(&rpc_client);
             let config = Arc::new(RwLock::new(Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network,
@@ -260,6 +260,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     account_id,
                     state.clone(),
                     rpc_client,
+                    rpc_channel,
                     channel,
                     sign_rx,
                     key_storage,
@@ -280,7 +281,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     tokio::spawn(web::run(web_port, sender, state, indexer, eth_indexer));
                 tracing::info!("protocol http server spawned");
 
-                rpc_handle.await??;
+                rpc_handle.await?;
                 mesh_handle.await??;
                 protocol_handle.await??;
                 web_handle.await??;

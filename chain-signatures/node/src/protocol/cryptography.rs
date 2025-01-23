@@ -7,7 +7,7 @@ use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
-use crate::rpc::RpcClient;
+use crate::rpc::{RpcChannel, RpcClient};
 use crate::storage::secret_storage::SecretNodeStorageBox;
 
 use async_trait::async_trait;
@@ -18,6 +18,7 @@ use web3::Web3;
 
 pub trait CryptographicCtx {
     fn rpc_client(&self) -> &RpcClient;
+    fn rpc_channel(&self) -> &RpcChannel;
     fn eth_client(&self) -> &Web3<web3::transports::Http>;
     fn eth_contract_address(&self) -> String;
     fn eth_account_sk(&self) -> String;

@@ -6,10 +6,9 @@ use crate::kdf::{derive_delta, into_eth_sig};
 use crate::protocol::message::{MessageChannel, SignatureMessage};
 use crate::protocol::Chain;
 use crate::protocol::Chain::{Ethereum, NEAR};
-use crate::rpc::RpcClient;
+use crate::rpc::RpcChannel;
 use crate::types::SignatureProtocol;
 use crate::util::AffinePointExt;
-use near_primitives::hash::CryptoHash;
 
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{FullSignature, PresignOutput};
@@ -33,6 +32,7 @@ use tokio::sync::{mpsc, RwLock};
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use near_account_id::AccountId;
+use near_primitives::hash::CryptoHash;
 use web3::contract::tokens::Tokenizable;
 use web3::contract::Contract;
 use web3::ethabi::Token;
@@ -248,13 +248,15 @@ pub struct SignatureManager {
 }
 
 pub const MAX_RETRY: u8 = 10;
+
+#[derive(Clone)]
 pub struct ToPublish {
-    request_id: [u8; 32],
-    request: SignatureRequest,
-    time_added: Instant,
-    signature: FullSignature<Secp256k1>,
-    retry_count: u8,
-    chain: Chain,
+    pub request_id: [u8; 32],
+    pub request: SignatureRequest,
+    pub time_added: Instant,
+    pub signature: FullSignature<Secp256k1>,
+    pub retry_count: u8,
+    pub chain: Chain,
 }
 
 impl ToPublish {
@@ -750,7 +752,7 @@ impl SignatureManager {
 
     pub async fn publish(
         &mut self,
-        rpc_client: &RpcClient,
+        rpc_channel: &RpcChannel,
         eth_client: &Web3<web3::transports::Http>,
         eth_contract_address: &str,
         eth_account_sk: &str,
@@ -761,7 +763,6 @@ impl SignatureManager {
             let ToPublish {
                 request_id,
                 request,
-                time_added,
                 signature,
                 chain,
                 ..
@@ -779,44 +780,9 @@ impl SignatureManager {
             };
             match *chain {
                 NEAR => {
-                    let response = match rpc_client.call_respond(&request, &signature).await {
-                        Ok(response) => response,
-                        Err(err) => {
-                            tracing::error!(request_id = ?CryptoHash(*request_id), request = ?request, error = ?err, "Failed to publish the signature");
-                            crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                                .with_label_values(&[self.my_account_id.as_str()])
-                                .inc();
-                            // Push the response to the back of the queue if it hasn't been retried the max number of times
-                            if to_publish.retry_count < MAX_RETRY {
-                                to_publish.retry_count += 1;
-                                to_retry.push(to_publish);
-                            }
-                            continue;
-                        }
-                    };
-                    match response.json() {
-                        Ok(()) => {
-                            tracing::info!(request_id = ?CryptoHash(*request_id), request = ?request, bi_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, "published signature sucessfully")
-                        }
-                        Err(err) => {
-                            tracing::error!(request_id = ?CryptoHash(*request_id), bi_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, error = ?err, "smart contract threw error");
-                            crate::metrics::SIGNATURE_PUBLISH_RESPONSE_ERRORS
-                                .with_label_values(&[self.my_account_id.as_str()])
-                                .inc();
-                            continue;
-                        }
-                    };
-                    crate::metrics::NUM_SIGN_SUCCESS
-                        .with_label_values(&[self.my_account_id.as_str()])
-                        .inc();
-                    crate::metrics::SIGN_LATENCY
-                        .with_label_values(&[self.my_account_id.as_str()])
-                        .observe(time_added.elapsed().as_secs_f64());
-                    if time_added.elapsed().as_secs() <= 30 {
-                        crate::metrics::NUM_SIGN_SUCCESS_30S
-                            .with_label_values(&[self.my_account_id.as_str()])
-                            .inc();
-                    }
+                    rpc_channel
+                        .publish(self.public_key, to_publish.clone())
+                        .await;
                 }
                 Ethereum => {
                     let contract_json: serde_json::Value = serde_json::from_slice(
@@ -940,7 +906,7 @@ impl SignatureManager {
         let signature_manager = state.signature_manager.clone();
         let stable = stable.clone();
         let protocol_cfg = protocol_cfg.clone();
-        let rpc_client = ctx.rpc_client().clone();
+        let rpc_channel = ctx.rpc_channel().clone();
         let eth_client = ctx.eth_client().clone();
         let eth_contract_address = ctx.eth_contract_address().clone();
         let eth_account_sk = ctx.eth_account_sk().clone();
@@ -961,7 +927,7 @@ impl SignatureManager {
             signature_manager.poke(channel).await;
             signature_manager
                 .publish(
-                    &rpc_client,
+                    &rpc_channel,
                     &eth_client,
                     &eth_contract_address,
                     &eth_account_sk,
