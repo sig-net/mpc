@@ -42,7 +42,7 @@ npx hardhat node
 npx hardhat --network localhost run scripts/findAddress.js
 ```
 
-3. Make sure you have docker daemon running. Open another terminal window, go to `integration-tests/chain-signatures` and run the following command to start the MPC cluster:
+3. Make sure you have docker daemon running. Open another terminal window, go to `integration-tests` and run the following command to start the MPC cluster:
 ```bash
 cargo run -- setup-env --eth-contract-address <future-contract-address>
 ```

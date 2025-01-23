@@ -2,8 +2,7 @@ mod error;
 
 use self::error::Error;
 use crate::indexer::Indexer;
-use crate::protocol::message::SignedMessage;
-use crate::protocol::{Message, NodeState};
+use crate::protocol::NodeState;
 use crate::web::error::Result;
 use anyhow::Context;
 use axum::http::StatusCode;

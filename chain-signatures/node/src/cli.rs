@@ -271,10 +271,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
-                let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
-                let web_handle = tokio::spawn(async move {
-                    web::run(web_port, sender, cipher_sk, protocol_state, indexer).await
-                });
+                let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
                 let eth_indexer_handle = tokio::spawn(async move {
                     indexer_eth::run(&indexer_eth_options, sign_tx, &account_id).await
                 });
