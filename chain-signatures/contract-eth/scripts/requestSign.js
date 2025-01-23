@@ -4,12 +4,11 @@ async function main() {
   let contractAddress;
   let network = hre.network.name;
   if (network === 'localhost') {
-    const deployments = require('../ignition/deployments/chain-31337/deployed_addresses.json');
-    contractAddress = deployments[Object.keys(deployments).pop()];
-    console.log(contractAddress)
+    const deployments = require('../deployments/localhost.json');
+    contractAddress = deployments.proxy;
   } else if (network === 'sepolia') {
-    const deployments = require('../ignition/deployments/chain-11155111/deployed_addresses.json'); 
-    contractAddress = deployments[Object.keys(deployments).pop()];
+    const deployments = require('../deployments/sepolia.json');
+    contractAddress = deployments.proxy;
   } else {
     throw new Error('Unsupported network specified. Use "localhost" or "sepolia"');
   }

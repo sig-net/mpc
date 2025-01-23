@@ -56,7 +56,7 @@ impl Default for NodeConfig {
                 ..Default::default()
             },
             eth_rpc_url: "http://localhost:8545".to_string(),
-            eth_contract_address: "0x5FbDB2315678afecb367f032d93F642f64180aa3".to_string(),
+            eth_contract_address: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512".to_string(),
             eth_account_sk: "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
                 .to_string(),
         }

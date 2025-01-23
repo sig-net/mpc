@@ -24,7 +24,7 @@ enum Cli {
         threshold: usize,
         #[arg(long, default_value = "http://localhost:8545")]
         eth_rpc_url: String,
-        #[arg(long, default_value = "0x5FbDB2315678afecb367f032d93F642f64180aa3")]
+        #[arg(long, default_value = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512")]
         eth_contract_address: String,
         #[arg(
             long,
