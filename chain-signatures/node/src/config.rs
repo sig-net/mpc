@@ -6,7 +6,7 @@ use mpc_keys::hpke;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::rpc::RpcClient;
+use crate::rpc::NearClient;
 
 /// The contract's config is a dynamic representation of all configurations possible.
 pub type ContractConfig = HashMap<String, Value>;
@@ -52,7 +52,7 @@ impl Config {
 
     /// Fetches the latest config from the contract and set the config inplace. The old config
     /// is returned when swap is completed.
-    pub async fn fetch_inplace(&mut self, rpc_client: &RpcClient) -> anyhow::Result<Self> {
+    pub async fn fetch_inplace(&mut self, rpc_client: &NearClient) -> anyhow::Result<Self> {
         let new_config = rpc_client.fetch_config(self).await?;
         Ok(std::mem::replace(self, new_config))
     }

@@ -4,7 +4,7 @@ use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::{MpcSignProtocol, SignQueue};
-use crate::rpc::{RpcClient, RpcExecutor};
+use crate::rpc::{EthClient, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, logs, mesh, storage, web};
 use clap::Parser;
@@ -242,9 +242,10 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
                 sign_sk,
             };
+            let eth_client = EthClient::new(&indexer_eth_options, &eth_account_sk);
             let rpc_client =
-                RpcClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
-            let (rpc_channel, rpc) = RpcExecutor::new(&rpc_client);
+                NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
+            let (rpc_channel, rpc) = RpcExecutor::new(&rpc_client, &eth_client);
             let config = Arc::new(RwLock::new(Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network,

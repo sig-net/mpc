@@ -24,7 +24,7 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::MessageReceiver as _;
-use crate::rpc::{RpcChannel, RpcClient};
+use crate::rpc::{NearClient, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -43,7 +43,7 @@ struct Ctx {
     my_address: Url,
     account_id: AccountId,
     mpc_contract_id: AccountId,
-    rpc_client: RpcClient,
+    rpc_client: NearClient,
     rpc_channel: RpcChannel,
     eth_client: Web3<web3::transports::Http>,
     eth_contract_address: String,
@@ -59,7 +59,7 @@ impl ConsensusCtx for &mut MpcSignProtocol {
         &self.ctx.account_id
     }
 
-    fn rpc_client(&self) -> &RpcClient {
+    fn rpc_client(&self) -> &NearClient {
         &self.ctx.rpc_client
     }
 
@@ -89,7 +89,7 @@ impl ConsensusCtx for &mut MpcSignProtocol {
 }
 
 impl CryptographicCtx for &mut MpcSignProtocol {
-    fn rpc_client(&self) -> &RpcClient {
+    fn rpc_client(&self) -> &NearClient {
         &self.ctx.rpc_client
     }
 
@@ -139,7 +139,7 @@ impl MpcSignProtocol {
         mpc_contract_id: AccountId,
         account_id: AccountId,
         state: Arc<RwLock<NodeState>>,
-        rpc_client: RpcClient,
+        rpc_client: NearClient,
         rpc_channel: RpcChannel,
         channel: MessageChannel,
         sign_rx: mpsc::Receiver<SignRequest>,

@@ -11,7 +11,7 @@ use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
 use crate::protocol::SignRequest;
-use crate::rpc::RpcClient;
+use crate::rpc::NearClient;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -30,7 +30,7 @@ use near_account_id::AccountId;
 
 pub trait ConsensusCtx {
     fn my_account_id(&self) -> &AccountId;
-    fn rpc_client(&self) -> &RpcClient;
+    fn rpc_client(&self) -> &NearClient;
     fn mpc_contract_id(&self) -> &AccountId;
     fn my_address(&self) -> &Url;
     fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<SignRequest>>>;
