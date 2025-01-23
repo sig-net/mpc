@@ -10,7 +10,6 @@ pub mod metrics;
 pub mod node_client;
 pub mod protocol;
 pub mod rpc;
-pub mod rpc_client;
 pub mod storage;
 pub mod types;
 pub mod util;

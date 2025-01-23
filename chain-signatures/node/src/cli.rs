@@ -4,6 +4,7 @@ use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::{MpcSignProtocol, SignQueue};
+use crate::rpc::{RpcClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, logs, mesh, storage, web};
 use clap::Parser;
@@ -179,6 +180,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
         } => {
             logs::install_global(debug_id);
             let _span = tracing::trace_span!("cli").entered();
+            tracing::info!(?account_id, "starting node");
 
             let (sign_tx, sign_rx) = SignQueue::channel();
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -233,16 +235,20 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let client = NodeClient::new(&message_options);
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let (mesh, mesh_state) = Mesh::init(&client, mesh_options);
+            let contract_state = Arc::new(RwLock::new(None));
+
+            let network = NetworkConfig {
+                cipher_sk: hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?,
+                cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
+                sign_sk,
+            };
+            let rpc_client =
+                RpcClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
+            let rpc = RpcExecutor::new(&rpc_client);
             let config = Arc::new(RwLock::new(Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
-                network: NetworkConfig {
-                    cipher_sk: hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?,
-                    cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
-                    sign_sk,
-                },
+                network,
             })));
-            let contract_state = Arc::new(RwLock::new(None));
-            let rpc = crate::rpc::RpcExecutor::init(&rpc_client, &mpc_contract_id);
 
             rt.block_on(async {
                 let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
@@ -254,7 +260,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     account_id,
                     state.clone(),
                     rpc_client,
-                    signer,
                     channel,
                     sign_rx,
                     key_storage,

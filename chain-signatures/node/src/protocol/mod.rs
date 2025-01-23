@@ -24,12 +24,12 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::MessageReceiver as _;
+use crate::rpc::RpcClient;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
-use near_crypto::InMemorySigner;
 use reqwest::IntoUrl;
 use std::path::Path;
 use std::time::Instant;
@@ -43,8 +43,7 @@ struct Ctx {
     my_address: Url,
     account_id: AccountId,
     mpc_contract_id: AccountId,
-    signer: InMemorySigner,
-    rpc_client: near_fetch::Client,
+    rpc_client: RpcClient,
     eth_client: Web3<web3::transports::Http>,
     eth_contract_address: String,
     eth_account_sk: String,
@@ -59,12 +58,8 @@ impl ConsensusCtx for &mut MpcSignProtocol {
         &self.ctx.account_id
     }
 
-    fn rpc_client(&self) -> &near_fetch::Client {
+    fn rpc_client(&self) -> &RpcClient {
         &self.ctx.rpc_client
-    }
-
-    fn signer(&self) -> &InMemorySigner {
-        &self.ctx.signer
     }
 
     fn mpc_contract_id(&self) -> &AccountId {
@@ -93,7 +88,7 @@ impl ConsensusCtx for &mut MpcSignProtocol {
 }
 
 impl CryptographicCtx for &mut MpcSignProtocol {
-    fn rpc_client(&self) -> &near_fetch::Client {
+    fn rpc_client(&self) -> &RpcClient {
         &self.ctx.rpc_client
     }
 
@@ -107,10 +102,6 @@ impl CryptographicCtx for &mut MpcSignProtocol {
 
     fn eth_account_sk(&self) -> String {
         self.ctx.eth_account_sk.to_string()
-    }
-
-    fn signer(&self) -> &InMemorySigner {
-        &self.ctx.signer
     }
 
     fn mpc_contract_id(&self) -> &AccountId {
@@ -143,8 +134,7 @@ impl MpcSignProtocol {
         mpc_contract_id: AccountId,
         account_id: AccountId,
         state: Arc<RwLock<NodeState>>,
-        rpc_client: near_fetch::Client,
-        signer: InMemorySigner,
+        rpc_client: RpcClient,
         channel: MessageChannel,
         sign_rx: mpsc::Receiver<SignRequest>,
         secret_storage: SecretNodeStorageBox,
@@ -155,13 +145,13 @@ impl MpcSignProtocol {
         eth_account_sk: String,
     ) -> Self {
         let my_address = my_address.into_url().unwrap();
-        let rpc_url = rpc_client.rpc_addr();
+        let near_rpc_url = rpc_client.rpc_addr();
         tracing::info!(
             ?my_address,
             ?mpc_contract_id,
             ?account_id,
-            ?rpc_url,
-            signer_id = ?signer.account_id,
+            ?near_rpc_url,
+            ?eth_rpc_url,
             "initializing protocol with parameters"
         );
         let transport =
@@ -176,7 +166,6 @@ impl MpcSignProtocol {
             eth_contract_address,
             eth_account_sk,
             sign_rx: Arc::new(RwLock::new(sign_rx)),
-            signer,
             secret_storage,
             triple_storage,
             presignature_storage,

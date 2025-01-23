@@ -11,7 +11,7 @@ use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
 use crate::protocol::SignRequest;
-use crate::rpc_client;
+use crate::rpc::RpcClient;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -23,17 +23,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cait_sith::protocol::InitializationError;
-use serde_json::json;
 use tokio::sync::{mpsc, RwLock};
 use url::Url;
 
 use near_account_id::AccountId;
-use near_crypto::InMemorySigner;
 
 pub trait ConsensusCtx {
     fn my_account_id(&self) -> &AccountId;
-    fn rpc_client(&self) -> &near_fetch::Client;
-    fn signer(&self) -> &InMemorySigner;
+    fn rpc_client(&self) -> &RpcClient;
     fn mpc_contract_id(&self) -> &AccountId;
     fn my_address(&self) -> &Url;
     fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<SignRequest>>>;
@@ -298,14 +295,10 @@ impl ConsensusProtocol for WaitingForConsensusState {
                     .unwrap_or_default();
                 if !has_voted {
                     tracing::info!("waiting(initializing): we haven't voted yet, voting for the generated public key");
-                    rpc_client::vote_for_public_key(
-                        ctx.rpc_client(),
-                        ctx.signer(),
-                        ctx.mpc_contract_id(),
-                        &public_key,
-                    )
-                    .await
-                    .map_err(|err| ConsensusError::CannotVote(format!("{err:?}")))?;
+                    ctx.rpc_client()
+                        .vote_public_key(&public_key)
+                        .await
+                        .map_err(|err| ConsensusError::CannotVote(format!("{err:?}")))?;
                 }
                 Ok(NodeState::WaitingForConsensus(self))
             }
@@ -439,16 +432,10 @@ impl ConsensusProtocol for WaitingForConsensusState {
                                         epoch = self.epoch,
                                         "waiting(resharing): we haven't voted yet, voting for resharing to complete"
                                     );
-                                    rpc_client::vote_reshared(
-                                        ctx.rpc_client(),
-                                        ctx.signer(),
-                                        ctx.mpc_contract_id(),
-                                        self.epoch,
-                                    )
-                                    .await
-                                    .map_err(|err| {
-                                        ConsensusError::CannotVote(format!("{err:?}"))
-                                    })?;
+
+                                    ctx.rpc_client().vote_reshared(self.epoch).await.map_err(
+                                        |err| ConsensusError::CannotVote(format!("{err:?}")),
+                                    )?;
                                 } else {
                                     tracing::info!(
                                         epoch = self.epoch,
@@ -626,7 +613,7 @@ impl ConsensusProtocol for JoiningState {
         self,
         ctx: C,
         contract_state: ProtocolState,
-        cfg: Config,
+        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
@@ -659,21 +646,10 @@ impl ConsensusProtocol for JoiningState {
                         tracing::info!(
                             "joining(running): sending a transaction to join the participant set"
                         );
-                        ctx.rpc_client()
-                            .call(ctx.signer(), ctx.mpc_contract_id(), "join")
-                            .args_json(json!({
-                                "url": ctx.my_address(),
-                                "cipher_pk": cfg.local.network.cipher_pk.to_bytes(),
-                                "sign_pk": cfg.local.network.sign_sk.public_key(),
-                            }))
-                            .max_gas()
-                            .retry_exponential(10, 3)
-                            .transact()
-                            .await
-                            .map_err(|err| {
-                                tracing::error!(?err, "failed to join the participant set");
-                                ConsensusError::CannotJoin(format!("{err:?}"))
-                            })?;
+                        ctx.rpc_client().propose_join().await.map_err(|err| {
+                            tracing::error!(?err, "failed to join the participant set");
+                            ConsensusError::CannotJoin(format!("{err:?}"))
+                        })?;
                         Ok(NodeState::Joining(self))
                     }
                 }

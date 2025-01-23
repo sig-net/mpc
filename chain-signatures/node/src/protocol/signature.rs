@@ -6,6 +6,7 @@ use crate::kdf::{derive_delta, into_eth_sig};
 use crate::protocol::message::{MessageChannel, SignatureMessage};
 use crate::protocol::Chain;
 use crate::protocol::Chain::{Ethereum, NEAR};
+use crate::rpc::RpcClient;
 use crate::types::SignatureProtocol;
 use crate::util::AffinePointExt;
 use near_primitives::hash::CryptoHash;
@@ -32,7 +33,6 @@ use tokio::sync::{mpsc, RwLock};
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use near_account_id::AccountId;
-use near_fetch::signer::SignerExt;
 use web3::contract::tokens::Tokenizable;
 use web3::contract::Contract;
 use web3::ethabi::Token;
@@ -748,11 +748,9 @@ impl SignatureManager {
         }
     }
 
-    pub async fn publish<T: SignerExt>(
+    pub async fn publish(
         &mut self,
-        rpc_client: &near_fetch::Client,
-        signer: &T,
-        mpc_contract_id: &AccountId,
+        rpc_client: &RpcClient,
         eth_client: &Web3<web3::transports::Http>,
         eth_contract_address: &str,
         eth_account_sk: &str,
@@ -781,17 +779,7 @@ impl SignatureManager {
             };
             match *chain {
                 NEAR => {
-                    let response = match rpc_client
-                        .call(signer, mpc_contract_id, "respond")
-                        .args_json(serde_json::json!({
-                            "request": request,
-                            "response": signature,
-                        }))
-                        .max_gas()
-                        .retry_exponential(10, 5)
-                        .transact()
-                        .await
-                    {
+                    let response = match rpc_client.call_respond(&request, &signature).await {
                         Ok(response) => response,
                         Err(err) => {
                             tracing::error!(request_id = ?CryptoHash(*request_id), request = ?request, error = ?err, "Failed to publish the signature");
@@ -953,8 +941,6 @@ impl SignatureManager {
         let stable = stable.clone();
         let protocol_cfg = protocol_cfg.clone();
         let rpc_client = ctx.rpc_client().clone();
-        let signer = ctx.signer().clone();
-        let mpc_contract_id = ctx.mpc_contract_id().clone();
         let eth_client = ctx.eth_client().clone();
         let eth_contract_address = ctx.eth_contract_address().clone();
         let eth_account_sk = ctx.eth_account_sk().clone();
@@ -976,8 +962,6 @@ impl SignatureManager {
             signature_manager
                 .publish(
                     &rpc_client,
-                    &signer,
-                    &mpc_contract_id,
                     &eth_client,
                     &eth_contract_address,
                     &eth_account_sk,
