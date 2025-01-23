@@ -37,17 +37,13 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use url::Url;
-use web3::Web3;
 
 struct Ctx {
     my_address: Url,
     account_id: AccountId,
     mpc_contract_id: AccountId,
-    rpc_client: NearClient,
+    near: NearClient,
     rpc_channel: RpcChannel,
-    eth_client: Web3<web3::transports::Http>,
-    eth_contract_address: String,
-    eth_account_sk: String,
     sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
@@ -59,8 +55,8 @@ impl ConsensusCtx for &mut MpcSignProtocol {
         &self.ctx.account_id
     }
 
-    fn rpc_client(&self) -> &NearClient {
-        &self.ctx.rpc_client
+    fn near_client(&self) -> &NearClient {
+        &self.ctx.near
     }
 
     fn mpc_contract_id(&self) -> &AccountId {
@@ -89,26 +85,6 @@ impl ConsensusCtx for &mut MpcSignProtocol {
 }
 
 impl CryptographicCtx for &mut MpcSignProtocol {
-    fn rpc_client(&self) -> &NearClient {
-        &self.ctx.rpc_client
-    }
-
-    fn rpc_channel(&self) -> &crate::rpc::RpcChannel {
-        &self.ctx.rpc_channel
-    }
-
-    fn eth_client(&self) -> &Web3<web3::transports::Http> {
-        &self.ctx.eth_client
-    }
-
-    fn eth_contract_address(&self) -> String {
-        self.ctx.eth_contract_address.to_string()
-    }
-
-    fn eth_account_sk(&self) -> String {
-        self.ctx.eth_account_sk.to_string()
-    }
-
     fn mpc_contract_id(&self) -> &AccountId {
         &self.ctx.mpc_contract_id
     }
@@ -123,6 +99,10 @@ impl CryptographicCtx for &mut MpcSignProtocol {
 
     fn channel(&self) -> &MessageChannel {
         &self.channel
+    }
+
+    fn rpc_channel(&self) -> &crate::rpc::RpcChannel {
+        &self.ctx.rpc_channel
     }
 }
 
@@ -139,39 +119,27 @@ impl MpcSignProtocol {
         mpc_contract_id: AccountId,
         account_id: AccountId,
         state: Arc<RwLock<NodeState>>,
-        rpc_client: NearClient,
+        near: NearClient,
         rpc_channel: RpcChannel,
         channel: MessageChannel,
         sign_rx: mpsc::Receiver<SignRequest>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
-        eth_rpc_url: String,
-        eth_contract_address: String,
-        eth_account_sk: String,
     ) -> Self {
         let my_address = my_address.into_url().unwrap();
-        let near_rpc_url = rpc_client.rpc_addr();
         tracing::info!(
             ?my_address,
             ?mpc_contract_id,
             ?account_id,
-            ?near_rpc_url,
-            ?eth_rpc_url,
             "initializing protocol with parameters"
         );
-        let transport =
-            web3::transports::Http::new(&eth_rpc_url).expect("failed to initialize eth client");
-        let web3 = Web3::new(transport);
         let ctx = Ctx {
             my_address,
             account_id,
             mpc_contract_id,
-            rpc_client,
+            near,
             rpc_channel,
-            eth_client: web3,
-            eth_contract_address,
-            eth_account_sk,
             sign_rx: Arc::new(RwLock::new(sign_rx)),
             secret_storage,
             triple_storage,

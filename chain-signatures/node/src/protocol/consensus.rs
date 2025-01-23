@@ -30,7 +30,7 @@ use near_account_id::AccountId;
 
 pub trait ConsensusCtx {
     fn my_account_id(&self) -> &AccountId;
-    fn rpc_client(&self) -> &NearClient;
+    fn near_client(&self) -> &NearClient;
     fn mpc_contract_id(&self) -> &AccountId;
     fn my_address(&self) -> &Url;
     fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<SignRequest>>>;
@@ -295,7 +295,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                     .unwrap_or_default();
                 if !has_voted {
                     tracing::info!("waiting(initializing): we haven't voted yet, voting for the generated public key");
-                    ctx.rpc_client()
+                    ctx.near_client()
                         .vote_public_key(&public_key)
                         .await
                         .map_err(|err| ConsensusError::CannotVote(format!("{err:?}")))?;
@@ -433,7 +433,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                                         "waiting(resharing): we haven't voted yet, voting for resharing to complete"
                                     );
 
-                                    ctx.rpc_client().vote_reshared(self.epoch).await.map_err(
+                                    ctx.near_client().vote_reshared(self.epoch).await.map_err(
                                         |err| ConsensusError::CannotVote(format!("{err:?}")),
                                     )?;
                                 } else {
@@ -646,7 +646,7 @@ impl ConsensusProtocol for JoiningState {
                         tracing::info!(
                             "joining(running): sending a transaction to join the participant set"
                         );
-                        ctx.rpc_client().propose_join().await.map_err(|err| {
+                        ctx.near_client().propose_join().await.map_err(|err| {
                             tracing::error!(?err, "failed to join the participant set");
                             ConsensusError::CannotJoin(format!("{err:?}"))
                         })?;

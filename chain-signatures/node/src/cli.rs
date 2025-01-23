@@ -180,7 +180,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
         } => {
             logs::install_global(debug_id);
             let _span = tracing::trace_span!("cli").entered();
-            tracing::info!(?account_id, "starting node");
 
             let (sign_tx, sign_rx) = SignQueue::channel();
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -243,14 +242,20 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_sk,
             };
             let eth_client = EthClient::new(&indexer_eth_options, &eth_account_sk);
-            let rpc_client =
+            let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
-            let (rpc_channel, rpc) = RpcExecutor::new(&rpc_client, &eth_client);
+            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth_client);
             let config = Arc::new(RwLock::new(Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network,
             })));
 
+            tracing::info!(
+                ?account_id,
+                near_rpc_url = ?near_client.rpc_addr(),
+                eth_rpc_url = ?indexer_eth_options.eth_rpc_url,
+                "starting node",
+            );
             rt.block_on(async {
                 let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
                 let (sender, channel) =
@@ -260,16 +265,13 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     mpc_contract_id,
                     account_id,
                     state.clone(),
-                    rpc_client,
+                    near_client,
                     rpc_channel,
                     channel,
                     sign_rx,
                     key_storage,
                     triple_storage,
                     presignature_storage,
-                    indexer_eth_options.eth_rpc_url.clone(),
-                    indexer_eth_options.eth_contract_address.clone(),
-                    eth_account_sk,
                 );
 
                 tracing::info!("protocol initialized");

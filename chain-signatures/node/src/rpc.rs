@@ -19,10 +19,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use url::Url;
 use web3::contract::tokens::Tokenizable as _;
-use web3::contract::Contract;
 use web3::ethabi::Token;
 use web3::types::U256;
-use web3::Web3;
 
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
@@ -286,8 +284,8 @@ impl NearClient {
 
 #[derive(Clone)]
 pub struct EthClient {
-    client: Web3<web3::transports::Http>,
-    contract: Contract<web3::transports::Http>,
+    client: web3::Web3<web3::transports::Http>,
+    contract: web3::contract::Contract<web3::transports::Http>,
     account_sk: web3::signing::SecretKey,
 }
 
@@ -333,7 +331,7 @@ async fn execute_publish(
         }
 
         to_publish.retry_count += 1;
-        tokio::time::sleep(Duration::from_secs(300)).await;
+        tokio::time::sleep(Duration::from_secs(500)).await;
         if to_publish.retry_count >= PUBLISH_MAX_RETRY {
             tracing::info!(
                 request_id = ?CryptoHash(to_publish.request_id),
@@ -398,7 +396,7 @@ async fn try_publish_near(
     } = to_publish;
 
     let outcome = near
-        .call_respond(&request, &signature)
+        .call_respond(request, &signature)
         .await
         .inspect_err(|err| {
             tracing::error!(
