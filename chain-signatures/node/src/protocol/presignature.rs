@@ -164,8 +164,8 @@ pub struct PresignatureManager {
     /// will be maintained for at most presignature timeout period just so messages are
     /// cycled through the system.
     gc: HashMap<PresignatureId, Instant>,
-    /// latest poked time and total acrued wait time per presignature protocol
-    poked_latest: HashMap<PresignatureId, (Instant, Duration)>,
+    /// latest poked time, total acrued wait time and total pokes per presignature protocol
+    poked_latest: HashMap<PresignatureId, (Instant, Duration, u64)>,
     me: Participant,
     threshold: usize,
     epoch: u64,
@@ -570,6 +570,8 @@ impl PresignatureManager {
         let presignature_accrued_wait_delay_metric =
             crate::metrics::PRESIGNATURE_ACCRUED_WAIT_DELAY
                 .with_label_values(&[self.my_account_id.as_str()]);
+        let presignature_pokes_cnt_metrics = crate::metrics::PRESIGNATURE_POKES_CNT
+            .with_label_values(&[self.my_account_id.as_str()]);
         let presignature_latency_metric =
             crate::metrics::PRESIGNATURE_LATENCY.with_label_values(&[self.my_account_id.as_str()]);
         let presignature_generator_success_mine_metric =
@@ -604,11 +606,13 @@ impl PresignatureManager {
                             presignature_before_poke_delay_metric
                                 .observe(generator.timestamp.elapsed().as_secs_f64());
                             self.poked_latest
-                                .insert(*id, (Instant::now(), Duration::from_micros(0)));
+                                .insert(*id, (Instant::now(), Duration::from_micros(0), 1));
                         } else {
                             let wait_since_last_poke = self.poked_latest[id].0.elapsed();
                             let total_wait = self.poked_latest[id].1 + wait_since_last_poke;
-                            self.poked_latest.insert(*id, (Instant::now(), total_wait));
+                            let total_pokes = self.poked_latest[id].2 + 1;
+                            self.poked_latest
+                                .insert(*id, (Instant::now(), total_wait, total_pokes));
                         }
                         for to in generator.participants.iter() {
                             if *to == self.me {
@@ -636,11 +640,13 @@ impl PresignatureManager {
                             presignature_before_poke_delay_metric
                                 .observe(generator.timestamp.elapsed().as_secs_f64());
                             self.poked_latest
-                                .insert(*id, (Instant::now(), Duration::from_micros(0)));
+                                .insert(*id, (Instant::now(), Duration::from_micros(0), 1));
                         } else {
                             let wait_since_last_poke = self.poked_latest[id].0.elapsed();
                             let total_wait = self.poked_latest[id].1 + wait_since_last_poke;
-                            self.poked_latest.insert(*id, (Instant::now(), total_wait));
+                            let total_pokes = self.poked_latest[id].2 + 1;
+                            self.poked_latest
+                                .insert(*id, (Instant::now(), total_wait, total_pokes));
                         }
                         channel
                             .send(
@@ -662,8 +668,10 @@ impl PresignatureManager {
                         if self.poked_latest.contains_key(id) {
                             let wait_since_last_poke = self.poked_latest[id].0.elapsed();
                             let total_wait = self.poked_latest[id].1 + wait_since_last_poke;
+                            let total_pokes = self.poked_latest[id].2 + 1;
                             presignature_accrued_wait_delay_metric
                                 .observe(total_wait.as_secs_f64());
+                            presignature_pokes_cnt_metrics.observe(total_pokes as f64);
                             self.poked_latest.remove(id);
                         }
                         tracing::info!(

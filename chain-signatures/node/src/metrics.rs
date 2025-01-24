@@ -545,9 +545,39 @@ pub(crate) static TRIPLE_LATENCY_TOTAL: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub(crate) static TRIPLE_POKES_CNT: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_triple_pokes_cnt",
+        "total pokes per triple protocol",
+        &["node_account_id"],
+        None,
+    )
+    .unwrap()
+});
+
+pub(crate) static PRESIGNATURE_POKES_CNT: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_presignature_pokes_cnt",
+        "total pokes per presignature protocol",
+        &["node_account_id"],
+        None,
+    )
+    .unwrap()
+});
+
+pub(crate) static SIGNATURE_POKES_CNT: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_signature_pokes_cnt",
+        "total pokes per signature protocol",
+        &["node_account_id"],
+        None,
+    )
+    .unwrap()
+});
+
 pub(crate) static MSG_CLIENT_SEND_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
     try_create_histogram_vec(
-        "multichain_client_send_delay_ms",
+        "multichain_msg_client_send_delay_ms",
         "Delay between message creation and sending to the client",
         &["node_account_id"],
         Some(exponential_buckets(0.5, 1.5, 20).unwrap()),

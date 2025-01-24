@@ -234,8 +234,8 @@ pub struct SignatureManager {
     failed: VecDeque<(SignRequestIdentifier, GenerationRequest)>,
     /// Set of completed signatures
     completed: HashMap<SignRequestIdentifier, Instant>,
-    /// latest poked time and total acrued wait time per signature protocol
-    poked_latest: HashMap<SignRequestIdentifier, (Instant, Duration)>,
+    /// latest poked time, total acrued wait time and total pokes per signature protocol
+    poked_latest: HashMap<SignRequestIdentifier, (Instant, Duration, u64)>,
     /// Generated signatures assigned to the current node that are yet to be published.
     /// Vec<(receipt_id, msg_hash, timestamp, output)>
     signatures: Vec<ToPublish>,
@@ -516,6 +516,8 @@ impl SignatureManager {
             .with_label_values(&[self.my_account_id.as_str()]);
         let signature_accrued_wait_delay_metric = crate::metrics::SIGNATURE_ACCRUED_WAIT_DELAY
             .with_label_values(&[self.my_account_id.as_str()]);
+        let signature_pokes_cnt_metric =
+            crate::metrics::SIGNATURE_POKES_CNT.with_label_values(&[self.my_account_id.as_str()]);
         let signature_generator_failures_metric = crate::metrics::SIGNATURE_GENERATOR_FAILURES
             .with_label_values(&[self.my_account_id.as_str()]);
         let signature_failures_metric =
@@ -571,15 +573,18 @@ impl SignatureManager {
                                 .observe(generator.generator_timestamp.elapsed().as_secs_f64());
                             self.poked_latest.insert(
                                 sign_request_id.clone(),
-                                (Instant::now(), Duration::from_micros(0)),
+                                (Instant::now(), Duration::from_micros(0), 1),
                             );
                         } else {
                             let wait_since_last_poke =
                                 self.poked_latest[sign_request_id].0.elapsed();
                             let total_wait =
                                 self.poked_latest[sign_request_id].1 + wait_since_last_poke;
-                            self.poked_latest
-                                .insert(sign_request_id.clone(), (Instant::now(), total_wait));
+                            let total_pokes = self.poked_latest[sign_request_id].2 + 1;
+                            self.poked_latest.insert(
+                                sign_request_id.clone(),
+                                (Instant::now(), total_wait, total_pokes),
+                            );
                         }
                         for to in generator.participants.iter() {
                             if *to == self.me {
@@ -611,15 +616,18 @@ impl SignatureManager {
                                 .observe(generator.generator_timestamp.elapsed().as_secs_f64());
                             self.poked_latest.insert(
                                 sign_request_id.clone(),
-                                (Instant::now(), Duration::from_micros(0)),
+                                (Instant::now(), Duration::from_micros(0), 1),
                             );
                         } else {
                             let wait_since_last_poke =
                                 self.poked_latest[sign_request_id].0.elapsed();
                             let total_wait =
                                 self.poked_latest[sign_request_id].1 + wait_since_last_poke;
-                            self.poked_latest
-                                .insert(sign_request_id.clone(), (Instant::now(), total_wait));
+                            let total_pokes = self.poked_latest[sign_request_id].2 + 1;
+                            self.poked_latest.insert(
+                                sign_request_id.clone(),
+                                (Instant::now(), total_wait, total_pokes),
+                            );
                         }
                         channel
                             .send(
@@ -646,6 +654,8 @@ impl SignatureManager {
                                 self.poked_latest[sign_request_id].0.elapsed();
                             let total_wait =
                                 self.poked_latest[sign_request_id].1 + wait_since_last_poke;
+                            let total_pokes = self.poked_latest[sign_request_id].2 + 1;
+                            signature_pokes_cnt_metric.observe(total_pokes as f64);
                             signature_accrued_wait_delay_metric.observe(total_wait.as_secs_f64());
                             self.poked_latest.remove(sign_request_id);
                         }

@@ -47,7 +47,7 @@ pub struct TripleGenerator {
     pub protocol: Arc<TripleProtocol>,
     pub timestamp: Arc<RwLock<Option<Instant>>>,
     pub timeout: Duration,
-    poked_latest: Option<(Instant, Duration)>,
+    poked_latest: Option<(Instant, Duration, u64)>,
     generator_created: Instant,
 }
 
@@ -128,6 +128,8 @@ impl TripleGenerator {
             crate::metrics::TRIPLE_BEFORE_POKE_DELAY.with_label_values(&[my_account_id.as_str()]);
         let triple_accrued_wait_delay_metric =
             crate::metrics::TRIPLE_ACCRUED_WAIT_DELAY.with_label_values(&[my_account_id.as_str()]);
+        let triple_pokes_cnt_metric =
+            crate::metrics::TRIPLE_POKES_CNT.with_label_values(&[my_account_id.as_str()]);
 
         loop {
             let action = match self.poke().await {
@@ -164,12 +166,12 @@ impl TripleGenerator {
                         let now = Instant::now();
                         let start_time = self.generator_created;
                         triple_before_poke_delay_metric.observe((now - start_time).as_secs_f64());
-                        self.poked_latest = Some((now, Duration::from_millis(0)));
+                        self.poked_latest = Some((now, Duration::from_millis(0), 1));
                     } else {
-                        let (last_poked, total_wait) = self.poked_latest.unwrap();
+                        let (last_poked, total_wait, total_pokes) = self.poked_latest.unwrap();
                         let now = Instant::now();
                         let elapsed = now - last_poked;
-                        self.poked_latest = Some((now, total_wait + elapsed));
+                        self.poked_latest = Some((now, total_wait + elapsed, total_pokes + 1));
                     }
                     for to in &self.participants {
                         if *to == me {
@@ -196,12 +198,12 @@ impl TripleGenerator {
                         let now = Instant::now();
                         let start_time = self.generator_created;
                         triple_before_poke_delay_metric.observe((now - start_time).as_secs_f64());
-                        self.poked_latest = Some((now, Duration::from_millis(0)));
+                        self.poked_latest = Some((now, Duration::from_millis(0), 1));
                     } else {
-                        let (last_poked, total_wait) = self.poked_latest.unwrap();
+                        let (last_poked, total_wait, total_pokes) = self.poked_latest.unwrap();
                         let now = Instant::now();
                         let elapsed = now - last_poked;
-                        self.poked_latest = Some((now, total_wait + elapsed));
+                        self.poked_latest = Some((now, total_wait + elapsed, total_pokes + 1));
                     }
                     channel
                         .send(
@@ -219,10 +221,13 @@ impl TripleGenerator {
                 }
                 Action::Return(output) => {
                     let now = Instant::now();
-                    if let Some((last_poked, total_wait)) = self.poked_latest {
+                    if let Some((last_poked, total_wait, total_pokes)) = self.poked_latest {
                         let elapsed = now - last_poked;
-                        self.poked_latest = Some((now, total_wait + elapsed));
+                        let total_wait = total_wait + elapsed;
+                        let total_pokes = total_pokes + 1;
+                        self.poked_latest = Some((now, total_wait, total_pokes));
                         triple_accrued_wait_delay_metric.observe(total_wait.as_secs_f64());
+                        triple_pokes_cnt_metric.observe(total_pokes as f64);
                     }
                     let elapsed = {
                         let timestamp = self.timestamp.read().await;
