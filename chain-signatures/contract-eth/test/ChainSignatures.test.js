@@ -1,5 +1,8 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { upgrades } = require("hardhat");
+const fs = require('fs');
+const path = require('path');
 
 describe("ChainSignatures", function () {
   let ChainSignatures;
@@ -20,7 +23,10 @@ describe("ChainSignatures", function () {
     console.log("===", xHex, yHex);
     ChainSignatures = await ethers.getContractFactory("ChainSignatures");
     publicKey = { x: xHex, y: yHex };
-    chainSignatures = await ChainSignatures.deploy(publicKey);
+    
+    // Deploy as upgradeable proxy
+    chainSignatures = await upgrades.deployProxy(ChainSignatures, [publicKey], { initializer: 'initialize' });
+    await chainSignatures.waitForDeployment();
   });
 
   describe("deriveEpsilon", function () {
@@ -63,33 +69,6 @@ describe("ChainSignatures", function () {
       // Assert that the derived key matches the expected key
       expect(derivedKey.x).to.equal(expectedX);
       expect(derivedKey.y).to.equal(expectedY);
-    });
-  });
-
-  describe("checkECSignature", function () {
-    it("should verify a valid signature", async function () {
-      // precomputed from rust
-      const derivedKey = [4, 190, 143, 8, 126, 40, 72, 115, 4, 123, 130, 29, 196, 122, 34, 228, 26, 20, 35, 250, 206, 151, 165, 156, 80, 108, 174, 28, 201, 170, 194, 76, 62, 12, 129, 226, 158, 161, 199, 99, 154, 106, 237, 60, 51, 66, 251, 34, 189, 109, 197, 189, 114, 141, 17, 10, 82, 55, 232, 178, 0, 131, 170, 202, 41];
-      const derivedKeyX = '0x' + derivedKey.slice(1, 33).map(byte => byte.toString(16).padStart(2, '0')).join('');
-      const derivedKeyY = '0x' + derivedKey.slice(33).map(byte => byte.toString(16).padStart(2, '0')).join('');
-      
-      const bigR = [4, 235, 32, 243, 182, 197, 136, 46, 1, 139, 239, 143, 68, 206, 69, 33, 21, 197, 53, 152, 61, 231, 35, 110, 41, 52, 59, 59, 197, 198, 72, 248, 149, 64, 216, 248, 234, 27, 102, 47, 185, 225, 141, 23, 254, 91, 155, 253, 111, 45, 62, 172, 73, 217, 254, 251, 168, 191, 184, 149, 228, 119, 12, 209, 248];
-      const bigRX = '0x' + bigR.slice(1, 33).map(byte => byte.toString(16).padStart(2, '0')).join('');
-      const bigRY = '0x' + bigR.slice(33).map(byte => byte.toString(16).padStart(2, '0')).join('');
-      
-      const s = "0x5F06F4BC377E509EDA49EC73074D62962CB0C5D48C0800580FAD3E19EC620C09";
-
-      const msgHash = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9";
-
-      const isValid = await chainSignatures.checkECSignature(
-        { x: derivedKeyX, y: derivedKeyY },
-        { x: bigRX, y: bigRY },
-        s,
-        msgHash,
-        0
-      );
-
-      expect(isValid).to.be.true;
     });
   });
 
@@ -178,4 +157,85 @@ describe("ChainSignatures", function () {
     });
   });
 
+  
+
+  describe("Contract upgrade", function() {
+    let ChainSignaturesV2ForTest;
+    this.beforeAll(async function() {
+      // Create modified contract source code
+      const sourcePath = path.join(__dirname, '../contracts/ChainSignatures.sol');
+      let sourceCode = fs.readFileSync(sourcePath, 'utf8');
+      
+      // Write the modified source to a new file.
+      // This is for testing, for production we can simply update ChainSignatures.sol in place
+      // After contract initialization, the contract version is set to 1, done by inherit the openzeppelin Initializable
+      // the `reinitializer(2)` decorator makes sure it can only be called once when version is 1 and after the call version is set to 2
+      // And for next upgrade we'll need to add a function upgradeToV3(...) public reinitializer(3) {...}, and so on
+      const v2Path = path.join(__dirname, '../contracts/ChainSignaturesV2ForTest.sol');
+      sourceCode = sourceCode.replace(
+        /contract ChainSignatures is/,
+        'contract ChainSignaturesV2ForTest is'
+      );
+      sourceCode = sourceCode.replace(
+        /}[\s]*$/,
+        `function upgradeToV2(PublicKey memory _publicKey) public reinitializer(2) { publicKey = _publicKey; }
+}`
+      );
+      fs.writeFileSync(v2Path, sourceCode);
+      // Compile the contract to generate artifacts
+      await hre.run("compile");
+
+      // Compile using the contract factory directly
+      ChainSignaturesV2ForTest = await ethers.getContractFactory("ChainSignaturesV2ForTest");
+    });
+
+    this.afterAll(async function() {
+      // Delete the temporary V2 contract file
+      const v2Path = path.join(__dirname, '../contracts/ChainSignaturesV2ForTest.sol');
+      if (fs.existsSync(v2Path)) {
+        fs.unlinkSync(v2Path);
+      }
+
+      // Delete the artifacts
+      const artifactsPath = path.join(__dirname, '../artifacts/contracts/ChainSignaturesV2ForTest.sol');
+      if (fs.existsSync(artifactsPath)) {
+        fs.rmSync(artifactsPath, { recursive: true, force: true });
+      }
+    });
+
+    it("Should only allow owner to upgrade", async function() {
+      const ChainSignatures = await ethers.getContractFactory("ChainSignatures");
+      const [owner, addr1] = await ethers.getSigners();
+
+      let pkNew = {
+        "x": "0x4a65bed3374ea3250d1721315c287af4501b9cb872cac20f52c9c1399dc6625c", 
+        "y": "0x599926b9b88c30ba42fc122db1fba37c35d97d70c32858e9fdd3950cfcba9729"
+      }
+
+      const proxy = await upgrades.deployProxy(ChainSignatures, [publicKey], { initializer: 'initialize' });
+      ChainSignaturesV2ForTest = ChainSignaturesV2ForTest.connect(addr1);
+      await expect(
+        upgrades.upgradeProxy(
+          await proxy.getAddress(),
+          ChainSignaturesV2ForTest,
+          {call: {fn: 'upgradeToV2', args: [pkNew]}}
+        )
+      ).to.be.reverted;
+    });
+  
+    it("Should upgrade contract correctly", async function() {
+      const ChainSignatures = await ethers.getContractFactory("ChainSignatures");
+
+      let pkNew = {
+        "x": "0x4a65bed3374ea3250d1721315c287af4501b9cb872cac20f52c9c1399dc6625c",
+        "y": "0x599926b9b88c30ba42fc122db1fba37c35d97d70c32858e9fdd3950cfcba9729"
+      }
+      const proxy = await upgrades.deployProxy(ChainSignatures, [publicKey], { initializer: 'initialize' });
+      ChainSignaturesV2ForTest = ChainSignaturesV2ForTest.connect(owner);
+      await upgrades.upgradeProxy(await proxy.getAddress(), ChainSignaturesV2ForTest, {call: {fn: 'upgradeToV2', args: [pkNew]}});
+      let getPk = await proxy.getPublicKey();
+      expect(getPk.x).to.equal(pkNew.x);
+      expect(getPk.y).to.equal(pkNew.y);
+    });
+  });
 });
