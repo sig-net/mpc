@@ -31,48 +31,4 @@ library Secp256k1 {
     function ecSub(uint256 _x1, uint256 _y1, uint256 _x2, uint256 _y2) internal pure returns (uint256, uint256) {
         return EllipticCurve.ecSub(_x1, _y1, _x2, _y2, A, P);
     }
-
-    /// @dev recovers signer public key point value.
-    /// @param digest hashed message
-    /// @param recoveryId recovery id
-    /// @param r first 32 bytes of signature
-    /// @param s last 32 bytes of signature
-    /// @return (x, y) EC point
-    function recover(
-        uint256 digest,
-        uint8 recoveryId,
-        uint256 r,
-        uint256 s
-    ) internal pure returns (uint256, uint256) {
-        require(r < P && s < N, "Invalid signature");
-        require(recoveryId == 0 || recoveryId == 1, "Invalid recovery id");
-        
-        // Calculate curve point R
-        uint256 x = r;
-        if (recoveryId >> 1 == 1) {
-            x += N;
-        }
-        require(x < P, "Invalid x coordinate");
-
-        // Calculate R.y = ±sqrt(x³ + 7)
-        uint256 y = EllipticCurve.deriveY(recoveryId == 0 ? 0x02 : 0x03, x, A, B, P);
-        if ((y % 2 != 0) != (recoveryId % 2 != 0)) {
-            y = P - y;
-        }
-
-        // Calculate r_inv = r^(-1) mod n
-        uint256 r_inv = EllipticCurve.invMod(r, N);
-        
-        // u1 = -z * r^(-1) mod n
-        uint256 u1 = mulmod(N - digest % N, r_inv, N);
-        // u2 = s * r^(-1) mod n
-        uint256 u2 = mulmod(s, r_inv, N);
-
-        // Q = u1*G + u2*R
-        (uint256 x1, uint256 y1) = ecMul(u1, GX, GY);
-        (uint256 x2, uint256 y2) = ecMul(u2, x, y);
-        (uint256 qx, uint256 qy) = ecAdd(x1, y1, x2, y2);
-
-        return (qx, qy);
-    }
 }

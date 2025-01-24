@@ -44,6 +44,8 @@ jobs:
         run: cd chain-signatures && cargo build -p mpc-contract --target wasm32-unknown-unknown --release
       - name: Compile eth contract
         run: cd chain-signatures/contract-eth && npm i && npx hardhat compile
+      - name: Eth contract unit tests
+        run: cd chain-signatures/contract-eth && npx hardhat test
       - name: Compile
         run: |
           ( cd chain-signatures ; cargo check )

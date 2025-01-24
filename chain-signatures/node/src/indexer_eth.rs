@@ -1,7 +1,6 @@
 use crate::indexer::ContractSignRequest;
 use crate::protocol::Chain::Ethereum;
 use crate::protocol::SignRequest;
-use crate::storage::app_data_storage::AppDataStorage;
 use crypto_shared::kdf::derive_epsilon_eth;
 use crypto_shared::ScalarExt;
 use hex::ToHex;
@@ -9,48 +8,38 @@ use k256::Scalar;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
-use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
-use web3::{
-    types::{BlockNumber, FilterBuilder, Log, H160, H256, U256},
-    Web3,
-};
+use tokio::sync::mpsc;
+use web3::futures::StreamExt;
+use web3::types::{FilterBuilder, Log, H160, H256, U256};
 
 /// Configures Ethereum indexer.
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_eth_options")]
 pub struct Options {
-    /// Ethereum RPC URL
-    #[clap(long, env("MPC_INDEXER_ETH_RPC_URL"))]
-    pub eth_rpc_url: String,
+    /// Ethereum WebSocket RPC URL
+    #[clap(long, env("MPC_INDEXER_ETH_RPC_WS_URL"))]
+    pub eth_rpc_ws_url: String,
 
-    /// The contract address to watch
+    /// Ethereum HTTP RPC URL
+    #[clap(long, env("MPC_INDEXER_ETH_RPC_HTTP_URL"))]
+    pub eth_rpc_http_url: String,
+
+    /// The contract address to watch without the `0x` prefix
     #[clap(long, env("MPC_INDEXER_ETH_CONTRACT_ADDRESS"))]
     pub eth_contract_address: String,
-
-    /// The amount of time before we consider the indexer behind
-    #[clap(long, env("MPC_INDEXER_ETH_BEHIND_THRESHOLD"), default_value = "180")]
-    pub eth_behind_threshold: u64,
-
-    /// The threshold to check if indexer needs restart
-    #[clap(long, env("MPC_INDEXER_ETH_RUNNING_THRESHOLD"), default_value = "300")]
-    pub eth_running_threshold: u64,
 }
 
 impl Options {
     pub fn into_str_args(self) -> Vec<String> {
         let mut args = Vec::new();
         args.extend([
-            "--eth-rpc-url".to_string(),
-            self.eth_rpc_url,
+            "--eth-rpc-ws-url".to_string(),
+            self.eth_rpc_ws_url,
+            "--eth-rpc-http-url".to_string(),
+            self.eth_rpc_http_url,
             "--eth-contract-address".to_string(),
             self.eth_contract_address,
-            "--eth-behind-threshold".to_string(),
-            self.eth_behind_threshold.to_string(),
-            "--eth-running-threshold".to_string(),
-            self.eth_running_threshold.to_string(),
         ]);
         args
     }
@@ -63,193 +52,60 @@ pub struct EthSignRequest {
     pub key_version: u32,
 }
 
-#[derive(Clone)]
-pub struct EthIndexer {
-    app_data_storage: AppDataStorage,
-    last_updated_timestamp: Arc<RwLock<Instant>>,
-    latest_block_timestamp: Arc<RwLock<Option<u64>>>,
-    running_threshold: Duration,
-    behind_threshold: Duration,
-}
-
-impl EthIndexer {
-    fn new(app_data_storage: AppDataStorage, options: &Options) -> Self {
-        Self {
-            app_data_storage: app_data_storage.clone(),
-            last_updated_timestamp: Arc::new(RwLock::new(Instant::now())),
-            latest_block_timestamp: Arc::new(RwLock::new(None)),
-            running_threshold: Duration::from_secs(options.eth_running_threshold),
-            behind_threshold: Duration::from_secs(options.eth_behind_threshold),
-        }
-    }
-
-    pub async fn last_processed_block(&self) -> Option<u64> {
-        match self.app_data_storage.last_processed_block_eth().await {
-            Ok(Some(block_height)) => Some(block_height),
-            Ok(None) => {
-                tracing::warn!("no last processed eth block found");
-                None
-            }
-            Err(err) => {
-                tracing::warn!(%err, "failed to get last processed eth block");
-                None
-            }
-        }
-    }
-
-    pub async fn set_last_processed_block(&self, block_height: u64) {
-        if let Err(err) = self
-            .app_data_storage
-            .set_last_processed_block_eth(block_height)
-            .await
-        {
-            tracing::error!(%err, "failed to set last processed eth block");
-        }
-    }
-
-    /// Check whether the indexer is on track with the latest block height from the chain.
-    pub async fn is_running(&self) -> bool {
-        self.last_updated_timestamp.read().await.elapsed() <= self.running_threshold
-    }
-
-    /// Check whether the indexer is behind with the latest block height from the chain.
-    pub async fn is_behind(&self) -> bool {
-        if let Some(latest_block_timestamp) = *self.latest_block_timestamp.read().await {
-            crate::util::is_elapsed_longer_than_timeout(
-                latest_block_timestamp,
-                self.behind_threshold.as_millis() as u64,
-            )
-        } else {
-            true
-        }
-    }
-
-    pub async fn is_stable(&self) -> bool {
-        !self.is_behind().await && self.is_running().await
-    }
-
-    async fn update_block_height_and_timestamp(&self, block_height: u64, block_timestamp: u64) {
-        tracing::debug!(block_height, "update_block_height_and_timestamp eth");
-        self.set_last_processed_block(block_height).await;
-        *self.last_updated_timestamp.write().await = Instant::now();
-        *self.latest_block_timestamp.write().await = Some(block_timestamp);
-    }
-}
-
-#[derive(Clone)]
-struct Context {
-    contract_address: H160,
-    node_account_id: AccountId,
-    web3: Web3<web3::transports::Http>,
-    sign_tx: mpsc::Sender<SignRequest>,
-    indexer: EthIndexer,
-}
-
-async fn handle_block(block_number: u64, ctx: &Context) -> anyhow::Result<()> {
-    let signature_requested_topic = H256::from_slice(&web3::signing::keccak256(
-        b"SignatureRequested(bytes32,address,uint256,uint256,string)",
-    ));
-
-    let filter = FilterBuilder::default()
-        .from_block(BlockNumber::Number(block_number.into()))
-        .to_block(BlockNumber::Number(block_number.into()))
-        .address(vec![ctx.contract_address])
-        .topics(Some(vec![signature_requested_topic]), None, None, None)
-        .build();
-
-    let block = ctx
-        .web3
-        .eth()
-        .block(web3::types::BlockId::Number(block_number.into()))
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("eth block {block_number} not found"))?;
-
-    let block_timestamp = block.timestamp.as_u64();
-
-    let logs = ctx.web3.eth().logs(filter).await?;
-    let logs_cnt = logs.len();
-    if logs_cnt > 0 {
-        tracing::debug!("found {logs_cnt} filtered logs");
-    }
-
-    let mut pending_requests = Vec::new();
-    // Get logs using filter
-    for log in logs {
-        let event = parse_event(&log)?;
-        tracing::debug!("found eth event: {:?}", event);
-        // Create sign request from event
-        let Some(payload) = Scalar::from_bytes(event.payload_hash) else {
-            tracing::warn!(
-                "eth `sign` did not produce payload hash correctly: {:?}",
-                event.payload_hash,
-            );
-            continue;
-        };
-        let request = ContractSignRequest {
-            payload,
-            path: event.path,
-            key_version: 0,
-            chain: Ethereum,
-        };
-
-        let epsilon = derive_epsilon_eth(
-            format!("0x{}", event.requester.encode_hex::<String>()),
-            &request.path,
+fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignRequest> {
+    let event = parse_event(&log)?;
+    tracing::debug!("found eth event: {:?}", event);
+    // Create sign request from event
+    let Some(payload) = Scalar::from_bytes(event.payload_hash) else {
+        tracing::warn!(
+            "eth `sign` did not produce payload hash correctly: {:?}",
+            event.payload_hash,
         );
-        let mut event_epsilon_bytes: [u8; 32] = [0; 32];
-        event.epsilon.to_big_endian(&mut event_epsilon_bytes);
-        let event_epsilon_scalar = Scalar::from_bytes(event_epsilon_bytes)
-            .ok_or(anyhow::anyhow!("failed to convert event epsilon to scalar"))?;
-        if epsilon != event_epsilon_scalar {
-            tracing::warn!(
-                "epsilon mismatch: derived={:?}, event={:?}",
-                epsilon,
-                event.epsilon
-            );
-            continue;
-        }
-        tracing::debug!(
-            "from epsilon: {:?} event epsilon: {:?}",
+        return Err(anyhow::anyhow!(
+            "failed to convert event payload hash to scalar"
+        ));
+    };
+    let request = ContractSignRequest {
+        payload,
+        path: event.path,
+        key_version: 0,
+        chain: Ethereum,
+    };
+    let epsilon = derive_epsilon_eth(
+        format!("0x{}", event.requester.encode_hex::<String>()),
+        &request.path,
+    );
+    let mut event_epsilon_bytes: [u8; 32] = [0; 32];
+    event.epsilon.to_big_endian(&mut event_epsilon_bytes);
+    let event_epsilon_scalar = Scalar::from_bytes(event_epsilon_bytes)
+        .ok_or(anyhow::anyhow!("failed to convert event epsilon to scalar"))?;
+    if epsilon != event_epsilon_scalar {
+        tracing::warn!(
+            "epsilon mismatch: derived={:?}, event={:?}",
             epsilon,
             event.epsilon
         );
-        // Use transaction hash as entropy
-        let entropy = log
-            .transaction_hash
-            .map(|h| *h.as_fixed_bytes())
-            .unwrap_or([0u8; 32]);
-
-        let sign_request = SignRequest {
-            request_id: event.request_id,
-            request,
-            epsilon,
-            entropy,
-            // TODO: use indexer timestamp instead.
-            time_added: Instant::now(),
-        };
-
-        pending_requests.push(sign_request);
+        return Err(anyhow::anyhow!("epsilon mismatch"));
     }
+    tracing::debug!(
+        "from epsilon: {:?} event epsilon: {:?}",
+        epsilon,
+        event.epsilon
+    );
+    // Use transaction hash as entropy
+    let entropy = log
+        .transaction_hash
+        .map(|h| *h.as_fixed_bytes())
+        .unwrap_or([0u8; 32]);
 
-    crate::metrics::NUM_SIGN_REQUESTS_ETH
-        .with_label_values(&[ctx.node_account_id.as_str()])
-        .inc_by(pending_requests.len() as f64);
-
-    for request in pending_requests {
-        if let Err(err) = ctx.sign_tx.send(request).await {
-            tracing::error!(?err, "failed to send the eth sign request into sign queue");
-        }
-    }
-
-    ctx.indexer
-        .update_block_height_and_timestamp(block_number, block_timestamp)
-        .await;
-
-    crate::metrics::LATEST_BLOCK_HEIGHT_ETH
-        .with_label_values(&[ctx.node_account_id.as_str()])
-        .set(block_number as i64);
-
-    Ok(())
+    Ok(SignRequest {
+        request_id: event.request_id,
+        request,
+        epsilon,
+        entropy,
+        // TODO: use indexer timestamp instead.
+        time_added: Instant::now(),
+    })
 }
 
 // Helper function to parse event logs
@@ -291,77 +147,68 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
     })
 }
 
-pub fn run(
-    options: &Options,
-    node_account_id: &AccountId,
+pub async fn run(
+    options: Options,
     sign_tx: mpsc::Sender<SignRequest>,
-    app_data_storage: AppDataStorage,
-) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, EthIndexer)> {
-    let transport = web3::transports::Http::new(&options.eth_rpc_url)?;
-    let web3 = Web3::new(transport);
-
+    node_near_account_id: AccountId,
+) -> anyhow::Result<()> {
     let contract_address = H160::from_str(&options.eth_contract_address)?;
 
-    let indexer = EthIndexer::new(app_data_storage, options);
-    let context = Context {
-        contract_address,
-        node_account_id: node_account_id.clone(),
-        web3,
-        sign_tx,
-        indexer: indexer.clone(),
-    };
+    let signature_requested_topic = H256::from_slice(&web3::signing::keccak256(
+        b"SignatureRequested(bytes32,address,uint256,uint256,string)",
+    ));
 
-    let join_handle = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
+    let filter = FilterBuilder::default()
+        .address(vec![contract_address])
+        .topics(Some(vec![signature_requested_topic]), None, None, None)
+        .build();
 
-        rt.block_on(async {
-            loop {
-                let latest_block = match context.web3.eth().block_number().await {
-                    Ok(block) => block.as_u64(),
-                    Err(err) => {
-                        tracing::warn!(%err, "failed to get latest eth block number");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        continue;
+    loop {
+        match web3::transports::WebSocket::new(&options.eth_rpc_ws_url).await {
+            Ok(ws) => {
+                let web3_ws = web3::Web3::new(ws);
+                match web3_ws.eth_subscribe().subscribe_logs(filter.clone()).await {
+                    Ok(mut filtered_logs_sub) => {
+                        tracing::info!("Ethereum indexer connected and listening for logs");
+
+                        let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(60));
+
+                        loop {
+                            tokio::select! {
+                                Some(log) = filtered_logs_sub.next() => {
+                                    let Ok(log) = log.inspect_err(|err| {
+                                        tracing::warn!("Ethereum log subscription error: {:?}", err);
+                                    }) else {
+                                        break;
+                                    };
+                                    tracing::info!("Received new Ethereum sign request: {:?}", log);
+                                    crate::metrics::NUM_SIGN_REQUESTS_ETH
+                                        .with_label_values(&[node_near_account_id.as_str()])
+                                        .inc();
+                                    if let Ok(sign_request) = sign_request_from_filtered_log(log) {
+                                        let sign_tx = sign_tx.clone();
+                                        tokio::spawn(async move {
+                                            if let Err(err) = sign_tx.send(sign_request).await {
+                                                tracing::error!(?err, "Failed to send ETH sign request into queue");
+                                            }
+                                        });
+                                    }
+                                }
+                                _ = heartbeat_interval.tick() => {
+                                    tracing::info!("Ethereum indexer is still running...");
+                                }
+                            }
+                        }
                     }
-                };
-
-                let latest_handled_block =
-                    context.indexer.last_processed_block().await.unwrap_or(0);
-
-                const MAX_DELAYED_BLOCKS: u64 = 100;
-                let next_block_to_handle: u64 = {
-                    if latest_block - latest_handled_block < MAX_DELAYED_BLOCKS {
-                        latest_handled_block + 1
-                    } else {
-                        latest_block.saturating_sub(MAX_DELAYED_BLOCKS) + 1
-                    }
-                };
-
-                if latest_block % 100 == 0 {
-                    tracing::debug!(
-                        next_block_to_handle,
-                        latest_block,
-                        latest_handled_block,
-                        "Eth indexer running"
-                    )
-                }
-
-                if next_block_to_handle <= latest_block {
-                    if let Err(err) = handle_block(next_block_to_handle, &context).await {
-                        tracing::warn!(%err, "failed to handle eth block");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        continue;
-                    }
-                } else {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    Err(err) => tracing::warn!("Failed to subscribe to logs: {:?}", err),
                 }
             }
-        })
-    });
+            Err(err) => tracing::error!("Failed to connect to Ethereum WebSocket: {:?}", err),
+        }
 
-    Ok((join_handle, indexer))
+        tracing::warn!("Ethereum WebSocket disconnected, reconnecting in 2 seconds...");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 #[derive(Debug)]

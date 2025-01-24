@@ -1,4 +1,5 @@
 require("@nomicfoundation/hardhat-toolbox");
+require('@openzeppelin/hardhat-upgrades');
 
 // Ensure your configuration variables are set before executing the script
 const { vars } = require("hardhat/config");
@@ -19,6 +20,15 @@ const SEPOLIA_PRIVATE_KEY = vars.get("SEPOLIA_PRIVATE_KEY", 'ac0974bec39a17e36ba
 module.exports = {
   solidity: "0.8.27",
   networks: {
+    hardhat: {
+      chainId: 31337,
+      loggingEnabled: true,
+      // make local eth node auto-mine blocks every 3 seconds
+      mining: {
+        auto: true,
+        interval: 3000,
+      },
+    },
     sepolia: {
       url: `https://sepolia.infura.io/v3/${INFURA_API_KEY}`,
       accounts: [SEPOLIA_PRIVATE_KEY],

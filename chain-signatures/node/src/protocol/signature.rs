@@ -235,7 +235,6 @@ pub struct SignatureManager {
     epoch: u64,
 }
 
-#[derive(Clone)]
 pub struct ToPublish {
     pub request_id: [u8; 32],
     pub request: SignatureRequest,

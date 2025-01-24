@@ -268,7 +268,7 @@ pub struct EthClient {
 
 impl EthClient {
     pub fn new(options: &crate::indexer_eth::Options, account_sk: &str) -> Self {
-        let transport = web3::transports::Http::new(&options.eth_rpc_url).unwrap();
+        let transport = web3::transports::Http::new(&options.eth_rpc_http_url).unwrap();
         let client = web3::Web3::new(transport);
         let address = web3::types::H160::from_str(&options.eth_contract_address).unwrap();
 

@@ -128,12 +128,6 @@ impl MpcSignProtocol {
         presignature_storage: PresignatureStorage,
     ) -> Self {
         let my_address = my_address.into_url().unwrap();
-        tracing::info!(
-            ?my_address,
-            ?mpc_contract_id,
-            ?account_id,
-            "initializing protocol with parameters"
-        );
         let ctx = Ctx {
             my_address,
             account_id,
