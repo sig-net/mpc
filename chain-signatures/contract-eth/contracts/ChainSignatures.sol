@@ -103,7 +103,7 @@ contract ChainSignatures is Initializable {
         uint32 keyVersion = _request.keyVersion;
 
         if (keyVersion > latestKeyVersion()) {
-            revert("This key version is unsupported. Call latest_key_version() to get the latest supported version.");
+            revert("This key version is unsupported. Call latestKeyVersion() to get the latest supported version");
         }
 
         uint256 requiredDeposit = getSignatureDeposit();
