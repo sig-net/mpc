@@ -46,6 +46,7 @@ impl Node {
     const CONTAINER_PORT: u16 = 3000;
 
     pub async fn run(
+        node_id: usize,
         ctx: &super::Context,
         cfg: &NodeConfig,
         account: &Account,
@@ -71,6 +72,7 @@ impl Node {
             .unwrap();
 
         Self::spawn(
+            node_id,
             ctx,
             NodeEnvConfig {
                 web_port: Self::CONTAINER_PORT,
@@ -98,7 +100,11 @@ impl Node {
         }
     }
 
-    pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
+    pub async fn spawn(
+        node_id: usize,
+        ctx: &super::Context,
+        config: NodeEnvConfig,
+    ) -> anyhow::Result<Self> {
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
             s3_region: ctx.localstack.s3_region.clone(),
@@ -107,10 +113,9 @@ impl Node {
             behind_threshold: 120,
         };
         let indexer_eth_options = mpc_node::indexer_eth::Options {
-            eth_rpc_url: config.cfg.eth_rpc_url.clone(),
+            eth_rpc_ws_url: config.cfg.eth_rpc_ws_url.clone(),
+            eth_rpc_http_url: config.cfg.eth_rpc_http_url.clone(),
             eth_contract_address: config.cfg.eth_contract_address.clone(),
-            eth_behind_threshold: 120,
-            eth_running_threshold: 120,
         };
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
@@ -124,6 +129,7 @@ impl Node {
             indexer_options: indexer_options.clone(),
             indexer_eth_options,
             my_address: None,
+            debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
             sign_sk: Some(config.sign_sk.clone()),
             override_config: Some(OverrideConfig::new(serde_json::to_value(

@@ -110,6 +110,7 @@ impl Cluster {
             .running_on_epoch(state.epoch + 1)
             .participant_missing(&kick)
             .await?;
+
         tracing::info!(
             "Getting new state, old {} {:?}, new {} {:?}",
             state.participants.len(),

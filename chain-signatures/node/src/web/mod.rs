@@ -2,9 +2,7 @@ mod error;
 
 use self::error::Error;
 use crate::indexer::Indexer;
-use crate::indexer_eth::EthIndexer;
-use crate::protocol::message::SignedMessage;
-use crate::protocol::{Message, NodeState};
+use crate::protocol::NodeState;
 use crate::web::error::Result;
 use anyhow::Context;
 use axum::http::StatusCode;
@@ -12,7 +10,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
 use cait_sith::protocol::Participant;
-use mpc_keys::hpke::{self, Ciphered};
+use mpc_keys::hpke::Ciphered;
 use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
@@ -20,28 +18,22 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc::Sender, RwLock};
 
 struct AxumState {
-    sender: Sender<Message>,
+    sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
-    cipher_sk: hpke::SecretKey,
     indexer: Indexer,
-    eth_indexer: EthIndexer,
 }
 
 pub async fn run(
     port: u16,
-    sender: Sender<Message>,
-    cipher_sk: hpke::SecretKey,
+    sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
     indexer: Indexer,
-    eth_indexer: EthIndexer,
 ) -> anyhow::Result<()> {
     tracing::info!("running a node");
     let axum_state = AxumState {
         sender,
         protocol_state,
-        cipher_sk,
         indexer,
-        eth_indexer,
     };
 
     let app = Router::new()
@@ -80,23 +72,11 @@ async fn msg(
     WithRejection(Json(encrypted), _): WithRejection<Json<Vec<Ciphered>>, Error>,
 ) -> Result<()> {
     for encrypted in encrypted.into_iter() {
-        let message = match SignedMessage::decrypt(
-            &state.cipher_sk,
-            &state.protocol_state,
-            encrypted,
-        )
-        .await
-        {
-            Ok(msg) => msg,
-            Err(err) => {
-                tracing::error!(?err, "failed to decrypt or verify an encrypted message");
-                return Err(err.into());
-            }
-        };
-
-        if let Err(err) = state.sender.send(message).await {
+        if let Err(err) = state.sender.send(encrypted).await {
             tracing::error!(?err, "failed to forward an encrypted protocol message");
-            return Err(err.into());
+            return Err(Error::Internal(
+                "failed to forward an encrypted protocol message",
+            ));
         }
     }
     Ok(())
@@ -116,7 +96,6 @@ pub enum StateView {
         presignature_mine_count: usize,
         presignature_potential_count: usize,
         latest_block_height: BlockHeight,
-        latest_eth_block_height: BlockHeight,
         is_stable: bool,
     },
     Resharing {
@@ -137,7 +116,6 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<State
     tracing::debug!("fetching state");
     // TODO: rename to last_processed_block when making other breaking changes
     let latest_block_height = state.indexer.last_processed_block().await.unwrap_or(0);
-    let latest_eth_block_height = state.eth_indexer.last_processed_block().await.unwrap_or(0);
     let is_stable = state.indexer.is_stable().await;
     let protocol_state = state.protocol_state.read().await;
 
@@ -161,7 +139,6 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<State
                 presignature_mine_count,
                 presignature_potential_count,
                 latest_block_height,
-                latest_eth_block_height,
                 is_stable,
             }))
         }

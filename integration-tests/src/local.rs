@@ -51,6 +51,7 @@ impl fmt::Debug for NodeEnvConfig {
 
 impl Node {
     pub async fn dry_run(
+        node_id: usize,
         ctx: &super::Context,
         account: &Account,
         cfg: &NodeConfig,
@@ -70,10 +71,9 @@ impl Node {
             behind_threshold: 120,
         };
         let indexer_eth_options = mpc_node::indexer_eth::Options {
-            eth_rpc_url: cfg.eth_rpc_url.clone(),
+            eth_rpc_ws_url: cfg.eth_rpc_ws_url.clone(),
+            eth_rpc_http_url: cfg.eth_rpc_http_url.clone(),
             eth_contract_address: cfg.eth_contract_address.clone(),
-            eth_behind_threshold: 120,
-            eth_running_threshold: 120,
         };
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
@@ -90,6 +90,7 @@ impl Node {
             indexer_options,
             indexer_eth_options,
             my_address: None,
+            debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 cfg.protocol.clone(),
@@ -125,6 +126,7 @@ impl Node {
     }
 
     pub async fn run(
+        node_id: usize,
         ctx: &super::Context,
         cfg: &NodeConfig,
         account: &Account,
@@ -148,6 +150,7 @@ impl Node {
         LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc).await?;
 
         Self::spawn(
+            node_id,
             ctx,
             NodeEnvConfig {
                 web_port,
@@ -162,7 +165,11 @@ impl Node {
         .await
     }
 
-    pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
+    pub async fn spawn(
+        node_id: usize,
+        ctx: &super::Context,
+        config: NodeEnvConfig,
+    ) -> anyhow::Result<Self> {
         let web_port = config.web_port;
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
@@ -172,10 +179,9 @@ impl Node {
             behind_threshold: 120,
         };
         let indexer_eth_options = mpc_node::indexer_eth::Options {
-            eth_rpc_url: config.cfg.eth_rpc_url.clone(),
+            eth_rpc_ws_url: config.cfg.eth_rpc_ws_url.clone(),
+            eth_rpc_http_url: config.cfg.eth_rpc_http_url.clone(),
             eth_contract_address: config.cfg.eth_contract_address.clone(),
-            eth_behind_threshold: 120,
-            eth_running_threshold: 120,
         };
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
@@ -190,6 +196,7 @@ impl Node {
             indexer_options,
             indexer_eth_options,
             my_address: None,
+            debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),

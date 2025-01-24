@@ -5,17 +5,14 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::{MpcSignProtocol, SignQueue};
 use crate::storage::app_data_storage;
-use crate::{indexer, indexer_eth, mesh, storage, web};
+use crate::{indexer, indexer_eth, logs, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
 use local_ip_address::local_ip;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing_stackdriver::layer as stackdriver_layer;
-use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 use url::Url;
 
 use mpc_keys::hpke;
@@ -64,6 +61,9 @@ pub enum Cli {
         /// Local address that other peers can use to message this node.
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
+        /// Debuggable id for each MPC node for logging purposes
+        #[arg(long, env("MPC_DEBUG_NODE_ID"))]
+        debug_id: Option<usize>,
         /// Storage options
         #[clap(flatten)]
         storage_options: storage::Options,
@@ -96,6 +96,7 @@ impl Cli {
                 indexer_options,
                 indexer_eth_options,
                 my_address,
+                debug_id,
                 storage_options,
                 override_config,
                 client_header_referer,
@@ -129,6 +130,9 @@ impl Cli {
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
                 }
+                if let Some(debug_id) = debug_id {
+                    args.extend(["--debug-id".to_string(), debug_id.to_string()]);
+                }
                 if let Some(override_config) = override_config {
                     args.extend([
                         "--override-config".to_string(),
@@ -151,41 +155,7 @@ impl Cli {
     }
 }
 
-/// This will whether this code is being ran on top of GCP or not.
-fn is_running_on_gcp() -> bool {
-    // Check if running in Google Cloud Run: https://cloud.google.com/run/docs/container-contract#services-env-vars
-    if std::env::var("K_SERVICE").is_ok() {
-        return true;
-    }
-
-    let resp = reqwest::blocking::Client::new()
-        .get("http://metadata.google.internal/computeMetadata/v1/instance/id")
-        .header("Metadata-Flavor", "Google")
-        .timeout(Duration::from_millis(200))
-        .send();
-
-    match resp {
-        Ok(resp) => resp.status().is_success(),
-        _ => false,
-    }
-}
-
 pub fn run(cmd: Cli) -> anyhow::Result<()> {
-    // Install global collector configured based on RUST_LOG env var.
-    let base_subscriber = Registry::default().with(EnvFilter::from_default_env());
-
-    let subscriber = if is_running_on_gcp() {
-        let stackdriver = stackdriver_layer().with_writer(std::io::stderr);
-        base_subscriber.with(None).with(Some(stackdriver))
-    } else {
-        let fmt_layer = tracing_subscriber::fmt::layer().with_thread_ids(true);
-        base_subscriber.with(Some(fmt_layer)).with(None)
-    };
-
-    tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
-
-    let _span = tracing::trace_span!("cli").entered();
-
     match cmd {
         Cli::Start {
             near_rpc,
@@ -200,12 +170,16 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             indexer_options,
             indexer_eth_options,
             my_address,
+            debug_id,
             storage_options,
             override_config,
             client_header_referer,
             mesh_options,
             message_options,
         } => {
+            logs::install_global(debug_id);
+            let _span = tracing::trace_span!("cli").entered();
+
             let (sign_tx, sign_rx) = SignQueue::channel();
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -241,9 +215,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 rpc_client.clone(),
             )?;
 
-            let (eth_indexer_handle, eth_indexer) =
-                indexer_eth::run(&indexer_eth_options, &account_id, sign_tx, app_data_storage)?;
-
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
                 .map(|mut addr| {
@@ -262,6 +233,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let config = Arc::new(RwLock::new(Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network: NetworkConfig {
+                    cipher_sk: hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?,
                     cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
                     sign_sk,
                 },
@@ -272,12 +244,14 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 crate::contract_updater::ContractUpdater::init(&rpc_client, &mpc_contract_id);
 
             rt.block_on(async {
+                let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
                 let (sender, channel) =
-                    MessageChannel::spawn(client, &account_id, &config, &mesh_state).await;
-                let (protocol, protocol_state) = MpcSignProtocol::init(
+                    MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
+                let protocol = MpcSignProtocol::init(
                     my_address,
                     mpc_contract_id,
-                    account_id,
+                    account_id.clone(),
+                    state.clone(),
                     rpc_client,
                     signer,
                     channel,
@@ -285,46 +259,31 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     key_storage,
                     triple_storage,
                     presignature_storage,
-                    indexer_eth_options.eth_rpc_url.clone(),
+                    indexer_eth_options.eth_rpc_http_url.clone(),
                     indexer_eth_options.eth_contract_address.clone(),
                     eth_account_sk,
                 );
 
                 tracing::info!("protocol initialized");
-                let contract_handle = tokio::spawn({
-                    let contract_state = Arc::clone(&contract_state);
-                    let config = Arc::clone(&config);
-                    async move { contract_updater.run(contract_state, config).await }
-                });
-                let mesh_handle = tokio::spawn({
-                    let contract_state = Arc::clone(&contract_state);
-                    async move { mesh.run(contract_state).await }
-                });
+                let contract_handle =
+                    tokio::spawn(contract_updater.run(contract_state.clone(), config.clone()));
+                let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
-                let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
-                let web_handle = tokio::spawn(async move {
-                    web::run(
-                        web_port,
-                        sender,
-                        cipher_sk,
-                        protocol_state,
-                        indexer,
-                        eth_indexer,
-                    )
-                    .await
-                });
+                let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
+                let eth_indexer_handle =
+                    tokio::spawn(indexer_eth::run(indexer_eth_options, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");
 
                 contract_handle.await??;
                 mesh_handle.await??;
                 protocol_handle.await??;
                 web_handle.await??;
+                eth_indexer_handle.await??;
                 tracing::info!("spinning down");
 
                 indexer_handle.join().unwrap()?;
-                eth_indexer_handle.join().unwrap()?;
 
                 anyhow::Ok(())
             })?;

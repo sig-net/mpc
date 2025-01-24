@@ -457,15 +457,6 @@ pub(crate) static PROTOCOL_ITER_CNT: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static LATEST_BLOCK_HEIGHT_ETH: Lazy<IntGaugeVec> = Lazy::new(|| {
-    try_create_int_gauge_vec(
-        "multichain_latest_block_height_eth",
-        "Latest block height handled by the node on ethereum chain",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
-
 pub(crate) static NUM_SIGN_REQUESTS_ETH: Lazy<CounterVec> = Lazy::new(|| {
     try_create_counter_vec(
         "multichain_sign_requests_count_eth",

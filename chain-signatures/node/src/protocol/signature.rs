@@ -710,6 +710,10 @@ impl SignatureManager {
                     continue;
                 }
 
+                if my_requests.is_empty() {
+                    continue;
+                }
+
                 if let Some(another_presignature) = presignature_manager.take_mine().await {
                     presignature = another_presignature;
                 } else {

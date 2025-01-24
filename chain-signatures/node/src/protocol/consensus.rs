@@ -63,13 +63,7 @@ pub enum ConsensusError {
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
     #[error("secret storage error: {0}")]
-    SecretStorageError(SecretStorageError),
-}
-
-impl From<SecretStorageError> for ConsensusError {
-    fn from(err: SecretStorageError) -> Self {
-        ConsensusError::SecretStorageError(err)
-    }
+    SecretStorageError(#[from] SecretStorageError),
 }
 
 #[async_trait]
@@ -487,10 +481,10 @@ impl ConsensusProtocol for RunningState {
             ProtocolState::Running(contract_state) => match contract_state.epoch.cmp(&self.epoch) {
                 Ordering::Greater => {
                     tracing::warn!(
-                            "running(running): our current epoch is {} while contract state's is {}, trying to rejoin as a new participant",
-                            self.epoch,
-                            contract_state.epoch
-                        );
+                        "running(running): our current epoch is {} while contract state's is {}, trying to rejoin as a new participant",
+                        self.epoch,
+                        contract_state.epoch
+                    );
 
                     Ok(NodeState::Joining(JoiningState {
                         participants: contract_state.participants,
