@@ -475,6 +475,86 @@ pub(crate) static NUM_SIGN_REQUESTS_ETH: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub(crate) static PRESIGNATURE_BEFORE_POKE_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_presignature_before_poke_delay_sec",
+        "per presignature protocol, delay between generator cration and first poke that returns SendMany/SendPrivate",
+        &["node_account_id"],
+        Some(exponential_buckets(1.0, 1.5, 20).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static PRESIGNATURE_ACCRUED_WAIT_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_presignature_accrued_wait_delay_sec",
+        "per presignature protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
+        &["node_account_id"],
+        Some(exponential_buckets(1.0, 1.5, 20).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static TRIPLE_BEFORE_POKE_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_triple_before_poke_delay_sec",
+        "per triple protocol, delay between generator cration and first poke that returns SendMany/SendPrivate",
+        &["node_account_id"],
+        Some(exponential_buckets(1.0, 1.5, 20).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static TRIPLE_ACCRUED_WAIT_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_triple_accrued_wait_delay_sec",
+        "per triple protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
+        &["node_account_id"],
+        Some(exponential_buckets(1.0, 1.5, 20).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static SIGNATURE_BEFORE_POKE_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_signature_before_poke_delay_sec",
+        "per signature protocol, delay between generator cration and first poke that returns SendMany/SendPrivate",
+        &["node_account_id"],
+        Some(exponential_buckets(1.0, 1.5, 20).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static SIGNATURE_ACCRUED_WAIT_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_triple_accrued_wait_delay_sec",
+        "per signature protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
+        &["node_account_id"],
+        Some(exponential_buckets(1.0, 1.5, 20).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static TRIPLE_LATENCY_TOTAL: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_triple_latency_total_sec",
+        "Latency of multichain triple generation, start from generator creation, end when triple generation complete.",
+        &["node_account_id"],
+        Some(exponential_buckets(5.0, 1.5, 20).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static MSG_CLIENT_SEND_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_client_send_delay_ms",
+        "Delay between message creation and sending to the client",
+        &["node_account_id"],
+        Some(exponential_buckets(0.5, 1.5, 20).unwrap()),
+    )
+    .unwrap()
+});
+
 pub fn try_create_int_gauge_vec(name: &str, help: &str, labels: &[&str]) -> Result<IntGaugeVec> {
     check_metric_multichain_prefix(name)?;
     let opts = Opts::new(name, help);

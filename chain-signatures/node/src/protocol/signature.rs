@@ -234,6 +234,8 @@ pub struct SignatureManager {
     failed: VecDeque<(SignRequestIdentifier, GenerationRequest)>,
     /// Set of completed signatures
     completed: HashMap<SignRequestIdentifier, Instant>,
+    /// latest poked time and total acrued wait time per signature protocol
+    poked_latest: HashMap<SignRequestIdentifier, (Instant, Duration)>,
     /// Generated signatures assigned to the current node that are yet to be published.
     /// Vec<(receipt_id, msg_hash, timestamp, output)>
     signatures: Vec<ToPublish>,
@@ -289,6 +291,7 @@ impl SignatureManager {
             generators: HashMap::new(),
             failed: VecDeque::new(),
             completed: HashMap::new(),
+            poked_latest: HashMap::new(),
             signatures: Vec::new(),
             me,
             my_account_id: my_account_id.clone(),
@@ -508,6 +511,16 @@ impl SignatureManager {
     /// Pokes all of the ongoing generation protocols to completion
     pub async fn poke(&mut self, channel: MessageChannel) {
         let mut remove = Vec::new();
+
+        let signature_before_poke_delay_metric = crate::metrics::SIGNATURE_BEFORE_POKE_DELAY
+            .with_label_values(&[self.my_account_id.as_str()]);
+        let signature_accrued_wait_delay_metric = crate::metrics::SIGNATURE_ACCRUED_WAIT_DELAY
+            .with_label_values(&[self.my_account_id.as_str()]);
+        let signature_generator_failures_metric = crate::metrics::SIGNATURE_GENERATOR_FAILURES
+            .with_label_values(&[self.my_account_id.as_str()]);
+        let signature_failures_metric =
+            crate::metrics::SIGNATURE_FAILURES.with_label_values(&[self.my_account_id.as_str()]);
+
         for (sign_request_id, generator) in self.generators.iter_mut() {
             loop {
                 let action = match generator.poke() {
@@ -517,9 +530,7 @@ impl SignatureManager {
                             if generator.sign_request_timestamp.elapsed() < generator.timeout_total
                             {
                                 tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
-                                crate::metrics::SIGNATURE_GENERATOR_FAILURES
-                                    .with_label_values(&[self.my_account_id.as_str()])
-                                    .inc();
+                                signature_generator_failures_metric.inc();
                                 // only retry the signature generation if it was initially proposed by us. We do not
                                 // want any nodes to be proposing the same signature multiple times.
                                 self.failed.push_back((
@@ -536,12 +547,8 @@ impl SignatureManager {
                             } else {
                                 self.completed
                                     .insert(sign_request_id.clone(), Instant::now());
-                                crate::metrics::SIGNATURE_GENERATOR_FAILURES
-                                    .with_label_values(&[self.my_account_id.as_str()])
-                                    .inc();
-                                crate::metrics::SIGNATURE_FAILURES
-                                    .with_label_values(&[self.my_account_id.as_str()])
-                                    .inc();
+                                signature_generator_failures_metric.inc();
+                                signature_failures_metric.inc();
                                 tracing::warn!(
                                     ?err,
                                     "signature failed to be produced; trashing request"
@@ -559,6 +566,21 @@ impl SignatureManager {
                         break;
                     }
                     Action::SendMany(data) => {
+                        if !self.poked_latest.contains_key(sign_request_id) {
+                            signature_before_poke_delay_metric
+                                .observe(generator.generator_timestamp.elapsed().as_secs_f64());
+                            self.poked_latest.insert(
+                                sign_request_id.clone(),
+                                (Instant::now(), Duration::from_micros(0)),
+                            );
+                        } else {
+                            let wait_since_last_poke =
+                                self.poked_latest[sign_request_id].0.elapsed();
+                            let total_wait =
+                                self.poked_latest[sign_request_id].1 + wait_since_last_poke;
+                            self.poked_latest
+                                .insert(sign_request_id.clone(), (Instant::now(), total_wait));
+                        }
                         for to in generator.participants.iter() {
                             if *to == self.me {
                                 continue;
@@ -584,6 +606,21 @@ impl SignatureManager {
                         }
                     }
                     Action::SendPrivate(to, data) => {
+                        if !self.poked_latest.contains_key(sign_request_id) {
+                            signature_before_poke_delay_metric
+                                .observe(generator.generator_timestamp.elapsed().as_secs_f64());
+                            self.poked_latest.insert(
+                                sign_request_id.clone(),
+                                (Instant::now(), Duration::from_micros(0)),
+                            );
+                        } else {
+                            let wait_since_last_poke =
+                                self.poked_latest[sign_request_id].0.elapsed();
+                            let total_wait =
+                                self.poked_latest[sign_request_id].1 + wait_since_last_poke;
+                            self.poked_latest
+                                .insert(sign_request_id.clone(), (Instant::now(), total_wait));
+                        }
                         channel
                             .send(
                                 self.me,
@@ -604,6 +641,14 @@ impl SignatureManager {
                             .await
                     }
                     Action::Return(output) => {
+                        if self.poked_latest.contains_key(sign_request_id) {
+                            let wait_since_last_poke =
+                                self.poked_latest[sign_request_id].0.elapsed();
+                            let total_wait =
+                                self.poked_latest[sign_request_id].1 + wait_since_last_poke;
+                            signature_accrued_wait_delay_metric.observe(total_wait.as_secs_f64());
+                            self.poked_latest.remove(sign_request_id);
+                        }
                         tracing::info!(
                             ?sign_request_id,
                             me = ?self.me,
