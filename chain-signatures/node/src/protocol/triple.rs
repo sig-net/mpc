@@ -124,13 +124,6 @@ impl TripleGenerator {
         epoch: u64,
         channel: MessageChannel,
     ) -> GeneratorOutcome {
-        let triple_before_poke_delay_metric =
-            crate::metrics::TRIPLE_BEFORE_POKE_DELAY.with_label_values(&[my_account_id.as_str()]);
-        let triple_accrued_wait_delay_metric =
-            crate::metrics::TRIPLE_ACCRUED_WAIT_DELAY.with_label_values(&[my_account_id.as_str()]);
-        let triple_pokes_cnt_metric =
-            crate::metrics::TRIPLE_POKES_CNT.with_label_values(&[my_account_id.as_str()]);
-
         loop {
             let action = match self.poke().await {
                 Ok(action) => action,
@@ -165,7 +158,9 @@ impl TripleGenerator {
                     if self.poked_latest.is_none() {
                         let now = Instant::now();
                         let start_time = self.generator_created;
-                        triple_before_poke_delay_metric.observe((now - start_time).as_secs_f64());
+                        crate::metrics::TRIPLE_BEFORE_POKE_DELAY
+                            .with_label_values(&[my_account_id.as_str()])
+                            .observe((now - start_time).as_secs_f64());
                         self.poked_latest = Some((now, Duration::from_millis(0), 1));
                     } else {
                         let (last_poked, total_wait, total_pokes) = self.poked_latest.unwrap();
@@ -197,7 +192,9 @@ impl TripleGenerator {
                     if self.poked_latest.is_none() {
                         let now = Instant::now();
                         let start_time = self.generator_created;
-                        triple_before_poke_delay_metric.observe((now - start_time).as_secs_f64());
+                        crate::metrics::TRIPLE_BEFORE_POKE_DELAY
+                            .with_label_values(&[my_account_id.as_str()])
+                            .observe((now - start_time).as_secs_f64());
                         self.poked_latest = Some((now, Duration::from_millis(0), 1));
                     } else {
                         let (last_poked, total_wait, total_pokes) = self.poked_latest.unwrap();
@@ -226,8 +223,12 @@ impl TripleGenerator {
                         let total_wait = total_wait + elapsed;
                         let total_pokes = total_pokes + 1;
                         self.poked_latest = Some((now, total_wait, total_pokes));
-                        triple_accrued_wait_delay_metric.observe(total_wait.as_secs_f64());
-                        triple_pokes_cnt_metric.observe(total_pokes as f64);
+                        crate::metrics::TRIPLE_ACCRUED_WAIT_DELAY
+                            .with_label_values(&[my_account_id.as_str()])
+                            .observe(total_wait.as_secs_f64());
+                        crate::metrics::TRIPLE_POKES_CNT
+                            .with_label_values(&[my_account_id.as_str()])
+                            .observe(total_pokes as f64);
                     }
                     let elapsed = {
                         let timestamp = self.timestamp.read().await;

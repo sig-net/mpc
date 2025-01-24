@@ -527,7 +527,7 @@ pub(crate) static SIGNATURE_BEFORE_POKE_DELAY: Lazy<HistogramVec> = Lazy::new(||
 
 pub(crate) static SIGNATURE_ACCRUED_WAIT_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
     try_create_histogram_vec(
-        "multichain_triple_accrued_wait_delay_sec",
+        "multichain_signature_accrued_wait_delay_sec",
         "per signature protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
         &["node_account_id"],
         Some(exponential_buckets(1.0, 1.5, 20).unwrap()),
