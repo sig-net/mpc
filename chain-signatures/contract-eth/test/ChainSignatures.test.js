@@ -1,6 +1,8 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { upgrades } = require("hardhat");
+const fs = require('fs');
+const path = require('path');
 
 describe("ChainSignatures", function () {
   let ChainSignatures;
@@ -152,6 +154,88 @@ describe("ChainSignatures", function () {
       }
 
       expect(await chainSignatures.getSignatureDeposit()).to.equal(ethers.parseEther("0.004"));
+    });
+  });
+
+  
+
+  describe("Contract upgrade", function() {
+    let ChainSignaturesV2ForTest;
+    this.beforeAll(async function() {
+      // Create modified contract source code
+      const sourcePath = path.join(__dirname, '../contracts/ChainSignatures.sol');
+      let sourceCode = fs.readFileSync(sourcePath, 'utf8');
+      
+      // Write the modified source to a new file.
+      // This is for testing, for production we can simply update ChainSignatures.sol in place
+      // After contract initialization, the contract version is set to 1, done by inherit the openzeppelin Initializable
+      // the `reinitializer(2)` decorator makes sure it can only be called once when version is 1 and after the call version is set to 2
+      // And for next upgrade we'll need to add a function upgradeToV3(...) public reinitializer(3) {...}, and so on
+      const v2Path = path.join(__dirname, '../contracts/ChainSignaturesV2ForTest.sol');
+      sourceCode = sourceCode.replace(
+        /contract ChainSignatures is/,
+        'contract ChainSignaturesV2ForTest is'
+      );
+      sourceCode = sourceCode.replace(
+        /}[\s]*$/,
+        `function upgradeToV2(PublicKey memory _publicKey) public reinitializer(2) { publicKey = _publicKey; }
+}`
+      );
+      fs.writeFileSync(v2Path, sourceCode);
+      // Compile the contract to generate artifacts
+      await hre.run("compile");
+
+      // Compile using the contract factory directly
+      ChainSignaturesV2ForTest = await ethers.getContractFactory("ChainSignaturesV2ForTest");
+    });
+
+    this.afterAll(async function() {
+      // Delete the temporary V2 contract file
+      const v2Path = path.join(__dirname, '../contracts/ChainSignaturesV2ForTest.sol');
+      if (fs.existsSync(v2Path)) {
+        fs.unlinkSync(v2Path);
+      }
+
+      // Delete the artifacts
+      const artifactsPath = path.join(__dirname, '../artifacts/contracts/ChainSignaturesV2ForTest.sol');
+      if (fs.existsSync(artifactsPath)) {
+        fs.rmSync(artifactsPath, { recursive: true, force: true });
+      }
+    });
+
+    it("Should only allow owner to upgrade", async function() {
+      const ChainSignatures = await ethers.getContractFactory("ChainSignatures");
+      const [owner, addr1] = await ethers.getSigners();
+
+      let pkNew = {
+        "x": "0x4a65bed3374ea3250d1721315c287af4501b9cb872cac20f52c9c1399dc6625c", 
+        "y": "0x599926b9b88c30ba42fc122db1fba37c35d97d70c32858e9fdd3950cfcba9729"
+      }
+
+      const proxy = await upgrades.deployProxy(ChainSignatures, [publicKey], { initializer: 'initialize' });
+      ChainSignaturesV2ForTest = ChainSignaturesV2ForTest.connect(addr1);
+      await expect(
+        upgrades.upgradeProxy(
+          await proxy.getAddress(),
+          ChainSignaturesV2ForTest,
+          {call: {fn: 'upgradeToV2', args: [pkNew]}}
+        )
+      ).to.be.reverted;
+    });
+  
+    it("Should upgrade contract correctly", async function() {
+      const ChainSignatures = await ethers.getContractFactory("ChainSignatures");
+
+      let pkNew = {
+        "x": "0x4a65bed3374ea3250d1721315c287af4501b9cb872cac20f52c9c1399dc6625c",
+        "y": "0x599926b9b88c30ba42fc122db1fba37c35d97d70c32858e9fdd3950cfcba9729"
+      }
+      const proxy = await upgrades.deployProxy(ChainSignatures, [publicKey], { initializer: 'initialize' });
+      ChainSignaturesV2ForTest = ChainSignaturesV2ForTest.connect(owner);
+      await upgrades.upgradeProxy(await proxy.getAddress(), ChainSignaturesV2ForTest, {call: {fn: 'upgradeToV2', args: [pkNew]}});
+      let getPk = await proxy.getPublicKey();
+      expect(getPk.x).to.equal(pkNew.x);
+      expect(getPk.y).to.equal(pkNew.y);
     });
   });
 });

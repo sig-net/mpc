@@ -34,6 +34,7 @@ async function main() {
   // Get old implementation address before upgrade
   const oldImplementationAddress = await upgrades.erc1967.getImplementationAddress(proxyAddress);
   await upgrades.upgradeProxy(proxyAddress, ChainSignatures);
+//   await upgrades.upgradeProxy(proxyAddress, ChainSignatures, {call: {fn: 'upgradeToV2', args: [args]}});
 
   // Compare old and new implementation addresses
   const newImplementationAddress = await upgrades.erc1967.getImplementationAddress(proxyAddress);
