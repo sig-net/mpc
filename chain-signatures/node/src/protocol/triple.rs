@@ -47,6 +47,8 @@ pub struct TripleGenerator {
     pub protocol: Arc<TripleProtocol>,
     pub timestamp: Arc<RwLock<Option<Instant>>>,
     pub timeout: Duration,
+    poked_latest: Option<(Instant, Duration, u64)>,
+    generator_created: Instant,
 }
 
 impl TripleGenerator {
@@ -71,6 +73,8 @@ impl TripleGenerator {
             protocol,
             timestamp: Arc::new(RwLock::new(None)),
             timeout: Duration::from_millis(timeout),
+            poked_latest: None,
+            generator_created: Instant::now(),
         })
     }
 
@@ -155,6 +159,19 @@ impl TripleGenerator {
                     break (self.id, Ok(None));
                 }
                 Action::SendMany(data) => {
+                    if self.poked_latest.is_none() {
+                        let now = Instant::now();
+                        let start_time = self.generator_created;
+                        crate::metrics::TRIPLE_BEFORE_POKE_DELAY
+                            .with_label_values(&[my_account_id.as_str()])
+                            .observe((now - start_time).as_secs_f64());
+                        self.poked_latest = Some((now, Duration::from_millis(0), 1));
+                    } else {
+                        let (last_poked, total_wait, total_pokes) = self.poked_latest.unwrap();
+                        let now = Instant::now();
+                        let elapsed = now - last_poked;
+                        self.poked_latest = Some((now, total_wait + elapsed, total_pokes + 1));
+                    }
                     for to in &self.participants {
                         if *to == me {
                             continue;
@@ -176,6 +193,19 @@ impl TripleGenerator {
                     }
                 }
                 Action::SendPrivate(to, data) => {
+                    if self.poked_latest.is_none() {
+                        let now = Instant::now();
+                        let start_time = self.generator_created;
+                        crate::metrics::TRIPLE_BEFORE_POKE_DELAY
+                            .with_label_values(&[my_account_id.as_str()])
+                            .observe((now - start_time).as_secs_f64());
+                        self.poked_latest = Some((now, Duration::from_millis(0), 1));
+                    } else {
+                        let (last_poked, total_wait, total_pokes) = self.poked_latest.unwrap();
+                        let now = Instant::now();
+                        let elapsed = now - last_poked;
+                        self.poked_latest = Some((now, total_wait + elapsed, total_pokes + 1));
+                    }
                     channel
                         .send(
                             me,
@@ -191,14 +221,46 @@ impl TripleGenerator {
                         .await
                 }
                 Action::Return(output) => {
+                    let now = Instant::now();
+                    if let Some((last_poked, total_wait, total_pokes)) = self.poked_latest {
+                        let elapsed = now - last_poked;
+                        let total_wait = total_wait + elapsed;
+                        let total_pokes = total_pokes + 1;
+                        self.poked_latest = Some((now, total_wait, total_pokes));
+                        crate::metrics::TRIPLE_ACCRUED_WAIT_DELAY
+                            .with_label_values(&[my_account_id.as_str()])
+                            .observe(total_wait.as_secs_f64());
+                        crate::metrics::TRIPLE_POKES_CNT
+                            .with_label_values(&[my_account_id.as_str()])
+                            .observe(total_pokes as f64);
+                    }
                     let elapsed = {
                         let timestamp = self.timestamp.read().await;
-                        let elapsed = timestamp.map(|t| t.elapsed()).unwrap_or_default();
-                        crate::metrics::TRIPLE_LATENCY
-                            .with_label_values(&[my_account_id.as_str()])
-                            .observe(elapsed.as_secs_f64());
-                        elapsed
+                        timestamp.map(|t| now - t).unwrap_or_default()
                     };
+                    tracing::info!(
+                        id = self.id,
+                        ?me,
+                        big_a = ?output.1.big_a.to_base58(),
+                        big_b = ?output.1.big_b.to_base58(),
+                        big_c = ?output.1.big_c.to_base58(),
+                        ?elapsed,
+                        "completed triple generation"
+                    );
+
+                    {
+                        let timestamp = self.timestamp.read().await;
+                        if let Some(start_time) = &*timestamp {
+                            crate::metrics::TRIPLE_LATENCY
+                                .with_label_values(&[my_account_id.as_str()])
+                                .observe((now - *start_time).as_secs_f64());
+                        }
+                    }
+
+                    // this measures from generator creation to finishing. TRIPLE_LATENCY instead starts from the first poke() on the generator
+                    crate::metrics::TRIPLE_LATENCY_TOTAL
+                        .with_label_values(&[my_account_id.as_str()])
+                        .observe((now - self.generator_created).as_secs_f64());
 
                     crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS
                         .with_label_values(&[my_account_id.as_str()])

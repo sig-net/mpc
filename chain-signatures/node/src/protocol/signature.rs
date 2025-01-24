@@ -196,6 +196,8 @@ pub struct SignatureGenerator {
     pub timestamp: Instant,
     pub timeout: Duration,
     pub timeout_total: Duration,
+    /// latest poked time, total acrued wait time and total pokes per signature protocol
+    pub poked_latest: Option<(Instant, Duration, u64)>,
 }
 
 impl SignatureGenerator {
@@ -212,6 +214,7 @@ impl SignatureGenerator {
             timestamp: Instant::now(),
             timeout: Duration::from_millis(cfg.signature.generation_timeout),
             timeout_total: Duration::from_millis(cfg.signature.generation_timeout_total),
+            poked_latest: None,
         }
     }
 
@@ -427,6 +430,16 @@ impl SignatureManager {
 
     /// Pokes all of the ongoing generation protocols to completion
     pub async fn poke(&mut self, message: MessageChannel, rpc: RpcChannel) {
+        let signature_before_poke_delay_metric = crate::metrics::SIGNATURE_BEFORE_POKE_DELAY
+            .with_label_values(&[self.my_account_id.as_str()]);
+        let signature_accrued_wait_delay_metric = crate::metrics::SIGNATURE_ACCRUED_WAIT_DELAY
+            .with_label_values(&[self.my_account_id.as_str()]);
+        let signature_pokes_cnt_metric =
+            crate::metrics::SIGNATURE_POKES_CNT.with_label_values(&[self.my_account_id.as_str()]);
+        let signature_generator_failures_metric = crate::metrics::SIGNATURE_GENERATOR_FAILURES
+            .with_label_values(&[self.my_account_id.as_str()]);
+        let signature_failures_metric =
+            crate::metrics::SIGNATURE_FAILURES.with_label_values(&[self.my_account_id.as_str()]);
         let mut remove = Vec::new();
         let mut failed = Vec::new();
         for (sign_id, generator) in self.generators.iter_mut() {
@@ -442,9 +455,7 @@ impl SignatureManager {
                             failed.push(sign_id.clone());
                             tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
                             if generator.request.proposer == self.me {
-                                crate::metrics::SIGNATURE_GENERATOR_FAILURES
-                                    .with_label_values(&[self.my_account_id.as_str()])
-                                    .inc();
+                                signature_generator_failures_metric.inc();
                             }
                         } else {
                             tracing::warn!(
@@ -452,12 +463,8 @@ impl SignatureManager {
                                 "signature failed to be produced; trashing request"
                             );
                             if generator.request.proposer == self.me {
-                                crate::metrics::SIGNATURE_GENERATOR_FAILURES
-                                    .with_label_values(&[self.my_account_id.as_str()])
-                                    .inc();
-                                crate::metrics::SIGNATURE_FAILURES
-                                    .with_label_values(&[self.my_account_id.as_str()])
-                                    .inc();
+                                signature_generator_failures_metric.inc();
+                                signature_failures_metric.inc();
                             }
                         }
                         break;
@@ -470,7 +477,21 @@ impl SignatureManager {
                         break;
                     }
                     Action::SendMany(data) => {
-                        for to in generator.request.participants.iter() {
+                        if generator.poked_latest.is_none() {
+                            let now = Instant::now();
+                            let start_time = generator.generator_timestamp;
+                            signature_before_poke_delay_metric
+                                .observe((now - start_time).as_secs_f64());
+                            generator.poked_latest = Some((now, Duration::from_millis(0), 1));
+                        } else {
+                            let (last_poked, total_wait, total_pokes) =
+                                generator.poked_latest.unwrap();
+                            let now = Instant::now();
+                            let elapsed = now - last_poked;
+                            generator.poked_latest =
+                                Some((now, total_wait + elapsed, total_pokes + 1));
+                        }
+                        for to in generator.participants.iter() {
                             if *to == self.me {
                                 continue;
                             }
@@ -492,6 +513,20 @@ impl SignatureManager {
                         }
                     }
                     Action::SendPrivate(to, data) => {
+                        if generator.poked_latest.is_none() {
+                            let now = Instant::now();
+                            let start_time = generator.generator_timestamp;
+                            signature_before_poke_delay_metric
+                                .observe((now - start_time).as_secs_f64());
+                            generator.poked_latest = Some((now, Duration::from_millis(0), 1));
+                        } else {
+                            let (last_poked, total_wait, total_pokes) =
+                                generator.poked_latest.unwrap();
+                            let now = Instant::now();
+                            let elapsed = now - last_poked;
+                            generator.poked_latest =
+                                Some((now, total_wait + elapsed, total_pokes + 1));
+                        }
                         message
                             .send(
                                 self.me,
@@ -509,6 +544,16 @@ impl SignatureManager {
                             .await
                     }
                     Action::Return(output) => {
+                        let now = Instant::now();
+                        if let Some((last_poked, total_wait, total_pokes)) = generator.poked_latest
+                        {
+                            let elapsed = now - last_poked;
+                            let total_wait = total_wait + elapsed;
+                            let total_pokes = total_pokes + 1;
+                            generator.poked_latest = Some((now, total_wait, total_pokes));
+                            signature_accrued_wait_delay_metric.observe(total_wait.as_secs_f64());
+                            signature_pokes_cnt_metric.observe(total_pokes as f64);
+                        }
                         tracing::info!(
                             ?sign_id,
                             me = ?self.me,
