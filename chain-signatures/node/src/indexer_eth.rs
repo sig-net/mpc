@@ -148,9 +148,9 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
 }
 
 pub async fn run(
-    options: &Options,
+    options: Options,
     sign_tx: mpsc::Sender<SignRequest>,
-    node_near_account_id: &AccountId,
+    node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     let contract_address = H160::from_str(&options.eth_contract_address)?;
 
@@ -171,30 +171,27 @@ pub async fn run(
                     Ok(mut filtered_logs_sub) => {
                         tracing::info!("Ethereum indexer connected and listening for logs");
 
-                        let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
+                        let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(60));
 
                         loop {
                             tokio::select! {
                                 Some(log) = filtered_logs_sub.next() => {
-                                    match log {
-                                        Ok(log) => {
-                                            tracing::info!("Received new Ethereum sign request: {:?}", log);
-                                            crate::metrics::NUM_SIGN_REQUESTS_ETH
-                                                .with_label_values(&[node_near_account_id.as_str()])
-                                                .inc();
-                                            let sign_tx = sign_tx.clone();
-                                            if let Ok(sign_request) = sign_request_from_filtered_log(log) {
-                                                tokio::spawn(async move {
-                                                    if let Err(err) = sign_tx.send(sign_request).await {
-                                                        tracing::error!(?err, "Failed to send ETH sign request into queue");
-                                                    }
-                                                });
+                                    let Ok(log) = log.inspect_err(|err| {
+                                        tracing::warn!("Ethereum log subscription error: {:?}", err);
+                                    }) else {
+                                        break;
+                                    };
+                                    tracing::info!("Received new Ethereum sign request: {:?}", log);
+                                    crate::metrics::NUM_SIGN_REQUESTS_ETH
+                                        .with_label_values(&[node_near_account_id.as_str()])
+                                        .inc();
+                                    if let Ok(sign_request) = sign_request_from_filtered_log(log) {
+                                        let sign_tx = sign_tx.clone();
+                                        tokio::spawn(async move {
+                                            if let Err(err) = sign_tx.send(sign_request).await {
+                                                tracing::error!(?err, "Failed to send ETH sign request into queue");
                                             }
-                                        }
-                                        Err(err) => {
-                                            tracing::warn!("Ethereum log subscription error: {:?}", err);
-                                            break;
-                                        }
+                                        });
                                     }
                                 }
                                 _ = heartbeat_interval.tick() => {

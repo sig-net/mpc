@@ -272,9 +272,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
                 let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
-                let eth_indexer_handle = tokio::spawn(async move {
-                    indexer_eth::run(&indexer_eth_options, sign_tx, &account_id).await
-                });
+                let eth_indexer_handle =
+                    tokio::spawn(indexer_eth::run(indexer_eth_options, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");
 
                 contract_handle.await??;
