@@ -37,28 +37,33 @@ To do a local end-to-end test, following these steps.
 npx hardhat node
 ```
 
-2. Make sure you have docker daemon running. Open another terminal window, go to `integration-tests/chain-signatures` and run the following command to start the MPC cluster:
+2. Figure out the contract address. Run and copy the "Future contract address" from the output:
 ```bash
-cargo run -- setup-env
+npx hardhat --network localhost run scripts/findAddress.js
 ```
 
-3. In MPC cluster log, search for log `voting for public key public_key=secp256k1:` and copy the public key after `secp256k1:`
+3. Make sure you have docker daemon running. Open another terminal window, go to `integration-tests` and run the following command to start the MPC cluster:
+```bash
+cargo run -- setup-env --eth-contract-address <future-contract-address>
+```
 
-4. Open another terminal window, Then run the following command to config the mpc public key for deploying ethereum contract:
+4. In MPC cluster log, search for log `voting for public key public_key=secp256k1:` and copy the public key after `secp256k1:`
+
+5. Open another terminal window, Then run the following command to config the mpc public key for deploying ethereum contract:
 ```bash
 node scripts/convertPk.js <public_key>
 ```
 For example:
 ```bash
-node scripts/convertPk.js 46sdkzwo46ga8B3K2J9i57akBsfgtFYbj4JzdnTuyhWiNaorz96qkExE3ei7djX25bzV6rmLJ435FJMpAYUs9JRg
+node scripts/convertPk.js 37xNKgg4LvhuaMBPThHEZNp6VJHu8KsATkPrCKrsfbwQEas1erep8otiB37F99tvY5aM3s78uzix49t5BjxuBYzD
 ```
 
-5. Then run the following command to deploy the contract:
+6. Then run the following command to deploy the contract:
 ```bash
 npx hardhat ignition deploy ignition/modules/chainSignatures.js --parameters ignition/params.json --network localhost
 ```
 
-6. Then run the following command to request a signature from MPC:
+7. Then run the following command to request a signature from MPC:
 ```bash
 npx hardhat run scripts/requestSign.js --network localhost
 ```
@@ -81,7 +86,7 @@ npx hardhat --network sepolia run scripts/findAddress.js
 
 5. Make sure you have docker daemon running. Go to `integration-tests` and run the following command to start the MPC cluster connected to Ethereum Sepolia Testnet:
 ```bash
-cargo run -- setup-env --eth-rpc-url https://sepolia.infura.io/v3/<infura-api-key> --eth-account-sk <eth-account-secret-key-without-0x-prefix> --eth-contract-address <future-contract-address> --eth-start-block-height <latest-block-number>
+cargo run -- setup-env --eth-rpc-http-url https://sepolia.infura.io/v3/<infura-api-key> --eth-rpc-ws-url wss://sepolia.infura.io/ws/v3/<infura-api-key> --eth-account-sk <eth-account-secret-key-without-0x-prefix> --eth-contract-address <future-contract-address>
 ```
 
 6. In MPC cluster log, search for log `voting for public key public_key=secp256k1:` and copy the public key after `secp256k1:`
@@ -92,7 +97,7 @@ node scripts/convertPk.js <public_key>
 ```
 For example:
 ```bash
-node scripts/convertPk.js 46sdkzwo46ga8B3K2J9i57akBsfgtFYbj4JzdnTuyhWiNaorz96qkExE3ei7djX25bzV6rmLJ435FJMpAYUs9JRg
+node scripts/convertPk.js pkqFQkRgYsZx4pNwuitXSDYAKsGML1P6JboVKP5qSG4HVatFHUqA8Fzcan49uxBZFyNwCHvr1tJo5KNJMcuWCQ6
 ```
 
 8. Then run the following command to deploy the contract to Ethereum Sepolia Testnet:

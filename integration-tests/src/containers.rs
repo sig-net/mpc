@@ -113,10 +113,9 @@ impl Node {
             behind_threshold: 120,
         };
         let indexer_eth_options = mpc_node::indexer_eth::Options {
-            eth_rpc_url: config.cfg.eth_rpc_url.clone(),
+            eth_rpc_ws_url: config.cfg.eth_rpc_ws_url.clone(),
+            eth_rpc_http_url: config.cfg.eth_rpc_http_url.clone(),
             eth_contract_address: config.cfg.eth_contract_address.clone(),
-            eth_behind_threshold: 120,
-            eth_running_threshold: 120,
         };
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),

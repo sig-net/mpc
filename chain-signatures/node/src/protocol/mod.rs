@@ -150,7 +150,7 @@ impl MpcSignProtocol {
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
-        eth_rpc_url: String,
+        eth_rpc_http_url: String,
         eth_contract_address: String,
         eth_account_sk: String,
     ) -> Self {
@@ -164,8 +164,8 @@ impl MpcSignProtocol {
             signer_id = ?signer.account_id,
             "initializing protocol with parameters"
         );
-        let transport =
-            web3::transports::Http::new(&eth_rpc_url).expect("failed to initialize eth client");
+        let transport = web3::transports::Http::new(&eth_rpc_http_url)
+            .expect("failed to initialize eth client");
         let web3 = Web3::new(transport);
         let ctx = Ctx {
             my_address,

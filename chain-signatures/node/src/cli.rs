@@ -215,9 +215,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 rpc_client.clone(),
             )?;
 
-            let (eth_indexer_handle, eth_indexer) =
-                indexer_eth::run(&indexer_eth_options, &account_id, sign_tx, app_data_storage)?;
-
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
                 .map(|mut addr| {
@@ -253,7 +250,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 let protocol = MpcSignProtocol::init(
                     my_address,
                     mpc_contract_id,
-                    account_id,
+                    account_id.clone(),
                     state.clone(),
                     rpc_client,
                     signer,
@@ -262,7 +259,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     key_storage,
                     triple_storage,
                     presignature_storage,
-                    indexer_eth_options.eth_rpc_url.clone(),
+                    indexer_eth_options.eth_rpc_http_url.clone(),
                     indexer_eth_options.eth_contract_address.clone(),
                     eth_account_sk,
                 );
@@ -273,19 +270,20 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
-                tracing::info!("protocol task spawned");
-                let web_handle =
-                    tokio::spawn(web::run(web_port, sender, state, indexer, eth_indexer));
+                tracing::info!("protocol thread spawned");
+                let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
+                let eth_indexer_handle =
+                    tokio::spawn(indexer_eth::run(indexer_eth_options, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");
 
                 contract_handle.await??;
                 mesh_handle.await??;
                 protocol_handle.await??;
                 web_handle.await??;
+                eth_indexer_handle.await??;
                 tracing::info!("spinning down");
 
                 indexer_handle.join().unwrap()?;
-                eth_indexer_handle.join().unwrap()?;
 
                 anyhow::Ok(())
             })?;
