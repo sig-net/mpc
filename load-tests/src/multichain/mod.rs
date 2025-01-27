@@ -1,11 +1,12 @@
 use std::time::Duration;
 
+use borsh::BorshSerialize;
 use goose::goose::{GooseMethod, GooseRequest, GooseUser, TransactionResult};
 use goose_eggs::{validate_and_load_static_assets, Validate};
-use near_crypto::InMemorySigner;
+use near_crypto::{InMemorySigner, Signer};
 use near_jsonrpc_client::JsonRpcClient;
 use near_primitives::{
-    transaction::{Action, FunctionCallAction, Transaction},
+    transaction::{Action, FunctionCallAction, Transaction, TransactionV0},
     types::AccountId,
 };
 use rand::Rng;
@@ -49,7 +50,7 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
         .await
         .unwrap();
 
-    let payload_hashed: [u8; 32] = rand::thread_rng().gen();
+    let payload_hashed: [u8; 32] = rand::rng().random();
     tracing::info!("requesting signature for: {:?}", payload_hashed);
 
     let request = SignRequest {
@@ -58,13 +59,13 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
         key_version: 0,
     };
 
-    let transaction = Transaction {
+    let transaction = Transaction::V0(TransactionV0 {
         signer_id: session.near_account_id.clone(),
         public_key: session.fa_sk.public_key(),
         nonce,
         receiver_id: multichain_contract_id,
         block_hash,
-        actions: vec![Action::FunctionCall(FunctionCallAction {
+        actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
             method_name: "sign".to_string(),
             args: serde_json::to_vec(&serde_json::json!({
                 "request": request,
@@ -72,14 +73,16 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
             .unwrap(),
             gas: 300_000_000_000_000,
             deposit,
-        })],
-    };
+        }))],
+    });
 
-    let signed_transaction = transaction.sign(&signer);
+    let signed_transaction = transaction.sign(&Signer::InMemory(signer));
 
-    let encoded_transaction = near_primitives::serialize::to_base64(
-        &borsh::BorshSerialize::try_to_vec(&signed_transaction).unwrap(),
-    );
+    let encoded_transaction = near_primitives::serialize::to_base64(&{
+        let mut vec = Vec::new();
+        BorshSerialize::serialize(&signed_transaction, &mut vec).unwrap();
+        vec
+    });
 
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
@@ -93,7 +96,7 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
     let request_builder = user
         .get_request_builder(&GooseMethod::Post, "")?
         .json(&payload)
-        .header(CONTENT_TYPE, "application/json")
+        .header(CONTENT_TYPE.as_str(), "application/json")
         .timeout(Duration::from_secs(50));
 
     let goose_request = GooseRequest::builder()
