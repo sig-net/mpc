@@ -49,6 +49,9 @@ const RETURN_SIGNATURE_ON_FINISH_CALL_GAS: Gas = Gas::from_tgas(10);
 // Prepaid gas for a `update_config` call
 const UPDATE_CONFIG_GAS: Gas = Gas::from_tgas(5);
 
+// Maximum number of concurrent requests
+const MAX_CONCURRENT_REQUESTS: u32 = 2048;
+
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub enum VersionedMpcContract {
@@ -160,7 +163,7 @@ impl VersionedMpcContract {
 
         match self {
             Self::V0(mpc_contract) => {
-                if mpc_contract.request_counter > 16 {
+                if mpc_contract.request_counter > MAX_CONCURRENT_REQUESTS {
                     return Err(SignError::RequestLimitExceeded.into());
                 }
             }
@@ -224,19 +227,19 @@ impl VersionedMpcContract {
 
     /// This experimental function calculates the fee for a signature request.
     /// The fee is volatile and depends on the number of pending requests.
-    /// If used on a client side, it can give outdate results.
+    /// If used on a client side, it can give outdated results.
     pub fn experimental_signature_deposit(&self) -> U128 {
-        const CHEAP_REQUESTS: u32 = 3;
         let pending_requests = match self {
             Self::V0(mpc_contract) => mpc_contract.request_counter,
         };
-        match pending_requests {
-            0..=CHEAP_REQUESTS => U128::from(1),
-            _ => {
-                let expensive_requests = (pending_requests - CHEAP_REQUESTS) as u128;
-                let price = expensive_requests * NearToken::from_millinear(50).as_yoctonear();
-                U128::from(price)
-            }
+        let load = pending_requests as f64 / MAX_CONCURRENT_REQUESTS as f64;
+
+        match load {
+            0.0..=0.25 => U128(1),
+            0.25..=0.5 => U128(NearToken::from_millinear(50).as_yoctonear()),
+            0.5..=0.75 => U128(NearToken::from_millinear(500).as_yoctonear()),
+            0.75..=1.0 => U128(NearToken::from_near(1).as_yoctonear()),
+            _ => U128(NearToken::from_near(1000).as_yoctonear()),
         }
     }
 }
