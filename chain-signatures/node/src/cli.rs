@@ -24,7 +24,7 @@ pub enum Cli {
         #[arg(
             long,
             env("MPC_NEAR_RPC"),
-            default_value("https://rpc.testnet.near.org")
+            default_value("https://free.rpc.fastnear.com")
         )]
         near_rpc: String,
         /// MPC contract id

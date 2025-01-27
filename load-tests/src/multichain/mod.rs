@@ -26,7 +26,7 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
 
     // Config
     let multichain_contract_id = AccountId::try_from("v1.signer-dev.testnet".to_string()).unwrap();
-    let testnet_rpc_url = "https://rpc.testnet.near.org".to_string();
+    let testnet_rpc_url = "https://free.rpc.fastnear.com".to_string();
     let deposit = 1; // attach more if you are ok with going above "CHEAP_REQUESTS" limit
     let expected_log = "Signature is ready."; // This is a log that we are expecting to see in the successful response
 
