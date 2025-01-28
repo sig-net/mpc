@@ -5,7 +5,7 @@ This directory contains load tests for SigNetwork services. It is build using [G
 To run the tests, you need to have Rust installed. You can install Rust using [rustup](https://rustup.rs/).
 To start the tests, run the following command:
 ```bash
-RUST_LOG=info cargo run --release -- --host https://free.rpc.fastnear.com --report-file=load_test_results.html --test-plan "$(cat ./src/multichain/test_plans/short.txt)" --scenarios multichainSign
+RUST_LOG=info cargo run --release -- --host https://rpc.testnet.near.org --report-file=load_test_results.html --test-plan "$(cat ./src/multichain/test_plans/short.txt)" --scenarios multichainSign
 ```
 You can run Load Tests against your local development environment (check `/integration-tests` for more info) or against the staging environment by setting the `--host` parameter.
 

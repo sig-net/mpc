@@ -27,8 +27,10 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
     tracing::info!("multichain_sign");
 
     // Config
-    let multichain_contract_id = env::var("MULTICHAIN_CONTRACT_ID").unwrap_or_else(|_| "v1.signer-dev.testnet".to_string());
-    let multichain_contract_id = AccountId::try_from(multichain_contract_id).expect("Failed to parse MULTICHAIN_CONTRACT_ID");
+    let multichain_contract_id =
+        env::var("MULTICHAIN_CONTRACT_ID").unwrap_or_else(|_| "v1.signer-dev.testnet".to_string());
+    let multichain_contract_id = AccountId::try_from(multichain_contract_id)
+        .expect("Failed to parse MULTICHAIN_CONTRACT_ID");
     let testnet_rpc_url = user.config.host.clone();
     let deposit = NearToken::from_millinear(50).as_yoctonear();
     let expected_log = "Signature is ready."; // This is a log that we are expecting to see in the successful response
@@ -98,7 +100,7 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
     let request_builder = user
         .get_request_builder(&GooseMethod::Post, "")?
         .json(&payload)
-        .header(CONTENT_TYPE.as_str(), "application/json")
+        .header(CONTENT_TYPE, "application/json")
         .timeout(Duration::from_secs(50));
 
     let goose_request = GooseRequest::builder()
