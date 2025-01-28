@@ -447,6 +447,9 @@ async fn try_publish_near(
     crate::metrics::SIGN_LATENCY
         .with_label_values(&[near.my_account_id.as_str()])
         .observe(time_added.elapsed().as_secs_f64());
+    crate::metrics::SIGN_RESPOND_LATENCY
+        .with_label_values(&[near.my_account_id.as_str()])
+        .observe(timestamp.elapsed().as_secs_f64());
     if time_added.elapsed().as_secs() <= 30 {
         crate::metrics::NUM_SIGN_SUCCESS_30S
             .with_label_values(&[near.my_account_id.as_str()])

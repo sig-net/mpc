@@ -51,6 +51,26 @@ pub(crate) static SIGN_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub(crate) static SIGN_GENERATION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_sign_gen_latency_sec",
+        "Latency of multichain signing, from received sign request to signature generation complete.",
+        &["node_account_id"],
+        Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static SIGN_RESPOND_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_sign_respond_latency_sec",
+        "Latency of multichain signing, from received publish request to publish complete",
+        &["node_account_id"],
+        Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
+    )
+    .unwrap()
+});
+
 pub(crate) static LATEST_BLOCK_HEIGHT: Lazy<IntGaugeVec> = Lazy::new(|| {
     try_create_int_gauge_vec(
         "multichain_latest_block_height",
