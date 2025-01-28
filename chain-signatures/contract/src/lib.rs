@@ -229,17 +229,14 @@ impl VersionedMpcContract {
     /// The fee is volatile and depends on the number of pending requests.
     /// If used on a client side, it can give outdated results.
     pub fn experimental_signature_deposit(&self) -> U128 {
-        let pending_requests = match self {
-            Self::V0(mpc_contract) => mpc_contract.request_counter,
-        };
-        let load = pending_requests as f64 / MAX_CONCURRENT_REQUESTS as f64;
+        let load = self.system_load();
 
         match load {
-            0.0..=0.25 => U128(1),
-            0.25..=0.5 => U128(NearToken::from_millinear(50).as_yoctonear()),
-            0.5..=0.75 => U128(NearToken::from_millinear(500).as_yoctonear()),
-            0.75..=1.0 => U128(NearToken::from_near(1).as_yoctonear()),
-            _ => U128(NearToken::from_near(1000).as_yoctonear()),
+            0..=25 => U128(1),
+            26..=50 => U128(NearToken::from_millinear(50).as_yoctonear()),
+            51..=75 => U128(NearToken::from_millinear(500).as_yoctonear()),
+            76..=100 => U128(NearToken::from_near(1).as_yoctonear()),
+            _ => U128(NearToken::from_near(1).as_yoctonear()),
         }
     }
 }
@@ -677,6 +674,19 @@ impl VersionedMpcContract {
     pub fn config(&self) -> &Config {
         match self {
             Self::V0(mpc_contract) => &mpc_contract.config,
+        }
+    }
+
+    pub fn system_load(&self) -> u32 {
+        let pending_requests = self.pending_requests();
+        ((pending_requests as f64 / MAX_CONCURRENT_REQUESTS as f64) * 100.0)
+            .min(100.0)
+            .round() as u32
+    }
+
+    pub fn pending_requests(&self) -> u32 {
+        match self {
+            Self::V0(mpc_contract) => mpc_contract.request_counter,
         }
     }
 
