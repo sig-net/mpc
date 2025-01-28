@@ -4,6 +4,7 @@ use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::{MpcSignProtocol, SignQueue};
+use crate::rpc::{EthClient, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, logs, mesh, storage, web};
 use clap::Parser;
@@ -230,19 +231,30 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let client = NodeClient::new(&message_options);
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let (mesh, mesh_state) = Mesh::init(&client, mesh_options);
-            let config = Arc::new(RwLock::new(Config::new(LocalConfig {
-                over: override_config.unwrap_or_else(Default::default),
-                network: NetworkConfig {
-                    cipher_sk: hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?,
-                    cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
-                    sign_sk,
-                },
-            })));
             let contract_state = Arc::new(RwLock::new(None));
 
-            let contract_updater =
-                crate::contract_updater::ContractUpdater::init(&rpc_client, &mpc_contract_id);
+            let network = NetworkConfig {
+                cipher_sk: hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?,
+                cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
+                sign_sk,
+            };
+            let eth_client = EthClient::new(&indexer_eth_options, &eth_account_sk);
+            let near_client =
+                NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
+            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth_client);
+            let config = Arc::new(RwLock::new(Config::new(LocalConfig {
+                over: override_config.unwrap_or_else(Default::default),
+                network,
+            })));
 
+            tracing::info!(
+                ?mpc_contract_id,
+                ?account_id,
+                ?my_address,
+                near_rpc_url = ?near_client.rpc_addr(),
+                eth_rpc_url = ?indexer_eth_options.eth_rpc_http_url,
+                "starting node",
+            );
             rt.block_on(async {
                 let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
                 let (sender, channel) =
@@ -252,21 +264,17 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     mpc_contract_id,
                     account_id.clone(),
                     state.clone(),
-                    rpc_client,
-                    signer,
+                    near_client,
+                    rpc_channel,
                     channel,
                     sign_rx,
                     key_storage,
                     triple_storage,
                     presignature_storage,
-                    indexer_eth_options.eth_rpc_http_url.clone(),
-                    indexer_eth_options.eth_contract_address.clone(),
-                    eth_account_sk,
                 );
 
                 tracing::info!("protocol initialized");
-                let contract_handle =
-                    tokio::spawn(contract_updater.run(contract_state.clone(), config.clone()));
+                let rpc_handle = tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
                 let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
@@ -276,7 +284,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     tokio::spawn(indexer_eth::run(indexer_eth_options, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");
 
-                contract_handle.await??;
+                rpc_handle.await?;
                 mesh_handle.await??;
                 protocol_handle.await??;
                 web_handle.await??;

@@ -7,25 +7,20 @@ use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
+use crate::rpc::RpcChannel;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 
 use async_trait::async_trait;
 use cait_sith::protocol::{Action, InitializationError, ProtocolError};
 use k256::elliptic_curve::group::GroupEncoding;
 use near_account_id::AccountId;
-use near_crypto::InMemorySigner;
-use web3::Web3;
 
 pub trait CryptographicCtx {
-    fn rpc_client(&self) -> &near_fetch::Client;
-    fn eth_client(&self) -> &Web3<web3::transports::Http>;
-    fn eth_contract_address(&self) -> String;
-    fn eth_account_sk(&self) -> String;
-    fn signer(&self) -> &InMemorySigner;
     fn mpc_contract_id(&self) -> &AccountId;
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox;
     fn my_account_id(&self) -> &AccountId;
     fn channel(&self) -> &MessageChannel;
+    fn rpc_channel(&self) -> &RpcChannel;
 }
 
 #[derive(thiserror::Error, Debug)]
