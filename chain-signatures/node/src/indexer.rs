@@ -203,6 +203,10 @@ async fn handle_block(
             continue;
         };
         let ExecutionStatus::SuccessReceiptId(receipt_id) = receipt.status() else {
+            tracing::warn!(
+                receipt_id = ?action.receipt_id(),
+                "`sign` call not successful",
+            );
             continue;
         };
         tracing::debug!(?receipt_id, "found `sign` function call");
