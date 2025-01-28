@@ -20,7 +20,11 @@ async fn main() -> Result<(), GooseError> {
         .register_scenario(
             scenario!("multichainSign")
                 .register_transaction(transaction!(prepare_user_credentials).set_sequence(1))
-                .register_transaction(transaction!(multichain_sign).set_sequence(2).set_weight(sign_calls_per_account)?)
+                .register_transaction(
+                    transaction!(multichain_sign)
+                        .set_sequence(2)
+                        .set_weight(sign_calls_per_account)?,
+                )
                 .register_transaction(transaction!(delete_user_account).set_sequence(3)),
         )
         .execute()
