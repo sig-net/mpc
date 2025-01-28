@@ -10,8 +10,6 @@ use tracing_subscriber::{filter, prelude::*};
 async fn main() -> Result<(), GooseError> {
     let stdout_log = tracing_subscriber::fmt::layer().pretty();
 
-    let sign_calls_per_account = 10;
-
     tracing_subscriber::registry()
         .with(stdout_log.with_filter(filter::LevelFilter::INFO))
         .init();
@@ -23,7 +21,7 @@ async fn main() -> Result<(), GooseError> {
                 .register_transaction(
                     transaction!(multichain_sign)
                         .set_sequence(2)
-                        .set_weight(sign_calls_per_account)?,
+                        .set_weight(100)?,
                 )
                 .register_transaction(transaction!(delete_user_account).set_sequence(3)),
         )

@@ -10,4 +10,4 @@ RUST_LOG=info cargo run --release -- --host https://free.rpc.fastnear.com --repo
 You can run Load Tests against your local development environment (check `/integration-tests` for more info) or against the staging environment by setting the `--host` parameter.
 
 The tests are written in Rust and can be found in the `/src` directory.
-You can create your own test plan or execute one of the existing test plans from `<service>/test_plans` directory. 
+You can create your own test plan or execute one of the existing test plans from `<service>/test_plans` directory.

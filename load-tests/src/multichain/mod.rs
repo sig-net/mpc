@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{env, time::Duration};
 
 use borsh::BorshSerialize;
 use goose::goose::{GooseMethod, GooseRequest, GooseUser, TransactionResult};
@@ -9,6 +9,7 @@ use near_primitives::{
     transaction::{Action, FunctionCallAction, Transaction, TransactionV0},
     types::AccountId,
 };
+use near_workspaces::types::NearToken;
 use rand::Rng;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
@@ -26,9 +27,10 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
     tracing::info!("multichain_sign");
 
     // Config
-    let multichain_contract_id = AccountId::try_from("v1.signer-dev.testnet".to_string()).unwrap();
-    let testnet_rpc_url = "https://free.rpc.fastnear.com".to_string();
-    let deposit = 1; // attach more if you are ok with going above "CHEAP_REQUESTS" limit
+    let multichain_contract_id = env::var("MULTICHAIN_CONTRACT_ID").unwrap_or_else(|_| "v1.signer-dev.testnet".to_string());
+    let multichain_contract_id = AccountId::try_from(multichain_contract_id).expect("Failed to parse MULTICHAIN_CONTRACT_ID");
+    let testnet_rpc_url = user.config.host.clone();
+    let deposit = NearToken::from_millinear(50).as_yoctonear();
     let expected_log = "Signature is ready."; // This is a log that we are expecting to see in the successful response
 
     let session = user
