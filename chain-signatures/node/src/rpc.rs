@@ -16,7 +16,7 @@ use near_primitives::hash::CryptoHash;
 use serde_json::json;
 use std::str::FromStr as _;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use url::Url;
 use web3::contract::tokens::Tokenizable as _;
@@ -30,8 +30,14 @@ const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract state and config
 const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
 
+struct PublishAction {
+    public_key: crypto_shared::PublicKey,
+    to_publish: ToPublish,
+    timestamp: Instant,
+}
+
 enum RpcAction {
-    Publish(crypto_shared::PublicKey, ToPublish),
+    Publish(PublishAction),
 }
 
 #[derive(Clone)]
@@ -43,7 +49,11 @@ impl RpcChannel {
     pub async fn publish(self, public_key: crypto_shared::PublicKey, to_publish: ToPublish) {
         if let Err(err) = self
             .tx
-            .send(RpcAction::Publish(public_key, to_publish))
+            .send(RpcAction::Publish(PublishAction {
+                public_key,
+                to_publish,
+                timestamp: Instant::now(),
+            }))
             .await
         {
             tracing::error!(%err, "failed to send publish action");
@@ -93,8 +103,8 @@ impl RpcExecutor {
                 return;
             };
             let task = match action {
-                RpcAction::Publish(public_key, to_publish) => {
-                    execute_publish(self.client(&to_publish.chain), public_key, to_publish)
+                RpcAction::Publish(action) => {
+                    execute_publish(self.client(&action.to_publish.chain), action)
                 }
             };
             tokio::spawn(task);
@@ -316,25 +326,22 @@ async fn update_config(near: NearClient, config: Arc<RwLock<Config>>) {
 }
 
 /// Publish the signature and retry if it fails
-async fn execute_publish(
-    client: ChainClient,
-    public_key: crypto_shared::PublicKey,
-    mut to_publish: ToPublish,
-) {
+async fn execute_publish(client: ChainClient, mut action: PublishAction) {
     let ToPublish {
         request_id,
         request,
         signature,
         chain,
         ..
-    } = &to_publish;
+    } = &action.to_publish;
 
     tracing::info!(
         ?chain,
         request_id = ?CryptoHash(*request_id),
+        started_at = ?action.timestamp.elapsed(),
         "trying to publish signature",
     );
-    let expected_public_key = crypto_shared::derive_key(public_key, request.epsilon.scalar);
+    let expected_public_key = crypto_shared::derive_key(action.public_key, request.epsilon.scalar);
     // We do this here, rather than on the client side, so we can use the ecrecover system function on NEAR to validate our signature
     let Ok(signature) = crate::kdf::into_eth_sig(
         &expected_public_key,
@@ -351,27 +358,33 @@ async fn execute_publish(
 
     loop {
         let publish = match &client {
-            ChainClient::Near(near) => try_publish_near(near, &to_publish, &signature)
-                .await
-                .map_err(|_| ()),
-            ChainClient::Ethereum(eth) => try_publish_eth(eth, &to_publish, &signature).await,
+            ChainClient::Near(near) => {
+                try_publish_near(near, &action.to_publish, &action.timestamp, &signature)
+                    .await
+                    .map_err(|_| ())
+            }
+            ChainClient::Ethereum(eth) => {
+                try_publish_eth(eth, &action.to_publish, &action.timestamp, &signature).await
+            }
         };
         if publish.is_ok() {
             break;
         }
 
-        to_publish.retry_count += 1;
+        action.to_publish.retry_count += 1;
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if to_publish.retry_count >= MAX_PUBLISH_RETRY {
+        if action.to_publish.retry_count >= MAX_PUBLISH_RETRY {
             tracing::info!(
-                request_id = ?CryptoHash(to_publish.request_id),
+                request_id = ?CryptoHash(action.to_publish.request_id),
+                elapsed = ?action.timestamp.elapsed(),
                 "exceeded max retries, trashing publish request",
             );
             break;
         } else {
             tracing::info!(
-                request_id = ?CryptoHash(to_publish.request_id),
-                retry_count = to_publish.retry_count,
+                request_id = ?CryptoHash(action.to_publish.request_id),
+                retry_count = action.to_publish.retry_count,
+                elapsed = ?action.timestamp.elapsed(),
                 "failed to publish, retrying"
             );
         }
@@ -381,6 +394,7 @@ async fn execute_publish(
 async fn try_publish_near(
     near: &NearClient,
     to_publish: &ToPublish,
+    timestamp: &Instant,
     signature: &SignatureResponse,
 ) -> Result<(), near_fetch::Error> {
     let ToPublish {
@@ -423,6 +437,7 @@ async fn try_publish_near(
         ?request,
         big_r = signature.big_r.affine_point.to_base58(),
         s = ?signature.s,
+        elapsed = ?timestamp.elapsed(),
         "published signature sucessfully",
     );
 
@@ -444,6 +459,7 @@ async fn try_publish_near(
 async fn try_publish_eth(
     eth: &EthClient,
     to_publish: &ToPublish,
+    timestamp: &Instant,
     signature: &SignatureResponse,
 ) -> Result<(), ()> {
     let ToPublish { request_id, .. } = to_publish;
@@ -499,6 +515,7 @@ async fn try_publish_eth(
             tracing::info!(
                 request_id = ?CryptoHash(*request_id),
                 tx_hash = ?tx_hash,
+                elapsed = ?timestamp.elapsed(),
                 "published ethereum signature successfully"
             );
             Ok(())

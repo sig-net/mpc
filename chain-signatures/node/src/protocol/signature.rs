@@ -596,6 +596,7 @@ impl SignatureManager {
                             presignature_id = generator.presignature_id,
                             big_r = ?output.big_r.to_base58(),
                             s = ?output.s,
+                            elapsed = ?generator.generator_timestamp.elapsed(),
                             "completed signature generation"
                         );
                         self.completed
