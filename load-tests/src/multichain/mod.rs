@@ -1,6 +1,5 @@
 use std::{env, time::Duration};
 
-use borsh::BorshSerialize;
 use goose::goose::{GooseMethod, GooseRequest, GooseUser, TransactionResult};
 use goose_eggs::{validate_and_load_static_assets, Validate};
 use near_crypto::{InMemorySigner, Signer};
@@ -11,7 +10,7 @@ use near_primitives::{
 };
 use near_workspaces::types::NearToken;
 use rand::Rng;
-use reqwest::header::CONTENT_TYPE;
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
 use crate::common::primitives::UserSession;
@@ -82,11 +81,8 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
 
     let signed_transaction = transaction.sign(&Signer::InMemory(signer));
 
-    let encoded_transaction = near_primitives::serialize::to_base64(&{
-        let mut vec = Vec::new();
-        BorshSerialize::serialize(&signed_transaction, &mut vec).unwrap();
-        vec
-    });
+    let encoded_transaction =
+        near_primitives::serialize::to_base64(&borsh::to_vec(&signed_transaction).unwrap());
 
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
@@ -97,10 +93,13 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
         ]
     });
 
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
     let request_builder = user
         .get_request_builder(&GooseMethod::Post, "")?
         .json(&payload)
-        .header(CONTENT_TYPE, "application/json")
+        .headers(headers)
         .timeout(Duration::from_secs(50));
 
     let goose_request = GooseRequest::builder()
