@@ -67,7 +67,7 @@ async fn test_experimental_signature_deposit() -> anyhow::Result<()> {
     let alice = worker.dev_create_account().await?;
     let path = "test";
 
-    for i in 1..5 {
+    for i in 1..700 {
         let msg = format!("hello world {}", i);
         println!("submitting: {msg}");
         let (payload_hash, _, _) = create_response(alice.id(), &msg, path, &sk).await;

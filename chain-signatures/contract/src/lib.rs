@@ -235,7 +235,7 @@ impl VersionedMpcContract {
         let load = pending_requests as f64 / MAX_CONCURRENT_REQUESTS as f64;
 
         match load {
-            0.0..=0.25 => U128(1),
+            0.0..=0.25 => U128(2),
             0.25..=0.5 => U128(NearToken::from_millinear(50).as_yoctonear()),
             0.5..=0.75 => U128(NearToken::from_millinear(500).as_yoctonear()),
             0.75..=1.0 => U128(NearToken::from_near(1).as_yoctonear()),
