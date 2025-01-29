@@ -44,6 +44,8 @@ impl Default for NodeConfig {
             nodes: 3,
             threshold: 2,
             protocol: ProtocolConfig {
+                max_concurrent_generation: 16,
+                max_concurrent_introduction: 2,
                 triple: TripleConfig {
                     min_triples: 8,
                     max_triples: 80,

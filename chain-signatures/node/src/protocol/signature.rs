@@ -596,8 +596,13 @@ impl SignatureManager {
                             presignature_id = generator.presignature_id,
                             big_r = ?output.big_r.to_base58(),
                             s = ?output.s,
+                            elapsed = ?generator.generator_timestamp.elapsed(),
                             "completed signature generation"
                         );
+                        crate::metrics::SIGN_GENERATION_LATENCY
+                            .with_label_values(&[self.my_account_id.as_str()])
+                            .observe(generator.generator_timestamp.elapsed().as_secs_f64());
+
                         self.completed
                             .insert(sign_request_id.clone(), Instant::now());
                         let request = SignatureRequest {

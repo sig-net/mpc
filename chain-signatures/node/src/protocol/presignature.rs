@@ -425,6 +425,7 @@ impl PresignatureManager {
                 // We will always try to generate a new triple if we have less than the minimum
                 self.len_mine().await < cfg.presignature.min_presignatures as usize
                     && self.introduced.len() < cfg.max_concurrent_introduction as usize
+                    && self.generators.len() < cfg.max_concurrent_generation as usize
             }
         };
 
