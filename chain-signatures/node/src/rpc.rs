@@ -444,7 +444,7 @@ async fn try_publish_near(
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[near.my_account_id.as_str()])
         .inc();
-    crate::metrics::SIGN_LATENCY
+    crate::metrics::SIGN_TOTAL_LATENCY
         .with_label_values(&[near.my_account_id.as_str()])
         .observe(time_added.elapsed().as_secs_f64());
     crate::metrics::SIGN_RESPOND_LATENCY
