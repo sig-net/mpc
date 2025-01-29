@@ -16,32 +16,44 @@ use web3::types::{FilterBuilder, Log, H160, H256, U256};
 /// Configures Ethereum indexer.
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_eth_options")]
-pub struct Options {
+pub struct EthArgs {
+    /// The ethereum account secret key used to sign eth respond txn.
+    #[arg(long, env("MPC_ETH_ACCOUNT_SK"))]
+    pub eth_account_sk: Option<String>,
     /// Ethereum WebSocket RPC URL
-    #[clap(long, env("MPC_INDEXER_ETH_RPC_WS_URL"))]
-    pub eth_rpc_ws_url: String,
-
+    #[clap(long, env("MPC_ETH_RPC_WS_URL"), requires = "eth_account_sk")]
+    pub eth_rpc_ws_url: Option<String>,
     /// Ethereum HTTP RPC URL
-    #[clap(long, env("MPC_INDEXER_ETH_RPC_HTTP_URL"))]
-    pub eth_rpc_http_url: String,
-
+    #[clap(long, env("MPC_ETH_RPC_HTTP_URL"), requires = "eth_account_sk")]
+    pub eth_rpc_http_url: Option<String>,
     /// The contract address to watch without the `0x` prefix
-    #[clap(long, env("MPC_INDEXER_ETH_CONTRACT_ADDRESS"))]
-    pub eth_contract_address: String,
+    #[clap(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
+    pub eth_contract_address: Option<String>,
 }
 
-impl Options {
+impl EthArgs {
     pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::new();
-        args.extend([
-            "--eth-rpc-ws-url".to_string(),
-            self.eth_rpc_ws_url,
-            "--eth-rpc-http-url".to_string(),
-            self.eth_rpc_http_url,
-            "--eth-contract-address".to_string(),
-            self.eth_contract_address,
-        ]);
+        let mut args = Vec::with_capacity(10);
+        if let Some(eth_account_sk) = self.eth_account_sk {
+            args.extend(["--eth-account-sk".to_string(), eth_account_sk]);
+        }
+        if let Some(eth_rpc_ws_url) = self.eth_rpc_ws_url {
+            args.extend(["--eth-rpc-ws-url".to_string(), eth_rpc_ws_url]);
+        }
+        if let Some(eth_rpc_http_url) = self.eth_rpc_http_url {
+            args.extend(["--eth-rpc-http-url".to_string(), eth_rpc_http_url]);
+        }
+        if let Some(eth_contract_address) = self.eth_contract_address {
+            args.extend(["--eth-contract-address".to_string(), eth_contract_address]);
+        }
         args
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.eth_account_sk.is_none()
+            || self.eth_rpc_ws_url.is_none()
+            || self.eth_rpc_http_url.is_none()
+            || self.eth_contract_address.is_none()
     }
 }
 
@@ -148,12 +160,17 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
 }
 
 pub async fn run(
-    options: Options,
+    args: EthArgs,
     sign_tx: mpsc::Sender<SignRequest>,
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
-    let contract_address = H160::from_str(&options.eth_contract_address)?;
+    if args.is_none() {
+        tracing::warn!("ethereum indexer is disabled");
+        return Ok(());
+    }
 
+    tracing::info!("running ethereum indexer");
+    let contract_address = H160::from_str(&args.eth_contract_address.unwrap())?;
     let signature_requested_topic = H256::from_slice(&web3::signing::keccak256(
         b"SignatureRequested(bytes32,address,uint256,uint256,string)",
     ));
@@ -163,8 +180,9 @@ pub async fn run(
         .topics(Some(vec![signature_requested_topic]), None, None, None)
         .build();
 
+    let rpc_ws = args.eth_rpc_ws_url.unwrap();
     loop {
-        match web3::transports::WebSocket::new(&options.eth_rpc_ws_url).await {
+        match web3::transports::WebSocket::new(&rpc_ws).await {
             Ok(ws) => {
                 let web3_ws = web3::Web3::new(ws);
                 match web3_ws.eth_subscribe().subscribe_logs(filter.clone()).await {

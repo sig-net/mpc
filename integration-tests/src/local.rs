@@ -70,10 +70,11 @@ impl Node {
             running_threshold: 120,
             behind_threshold: 120,
         };
-        let indexer_eth_options = mpc_node::indexer_eth::Options {
-            eth_rpc_ws_url: cfg.eth_rpc_ws_url.clone(),
-            eth_rpc_http_url: cfg.eth_rpc_http_url.clone(),
-            eth_contract_address: cfg.eth_contract_address.clone(),
+        let eth = mpc_node::indexer_eth::EthArgs {
+            eth_account_sk: Some(cfg.eth_account_sk.clone()),
+            eth_rpc_ws_url: Some(cfg.eth_rpc_ws_url.clone()),
+            eth_rpc_http_url: Some(cfg.eth_rpc_http_url.clone()),
+            eth_contract_address: Some(cfg.eth_contract_address.clone()),
         };
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
@@ -82,13 +83,12 @@ impl Node {
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
             account_sk: account_sk.to_string().parse()?,
-            eth_account_sk: cfg.eth_account_sk.clone(),
             web_port,
             cipher_pk: hex::encode(cipher_pk.to_bytes()),
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
             sign_sk: Some(sign_sk.clone()),
+            eth,
             indexer_options,
-            indexer_eth_options,
             my_address: None,
             debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
@@ -178,23 +178,24 @@ impl Node {
             running_threshold: 120,
             behind_threshold: 120,
         };
-        let indexer_eth_options = mpc_node::indexer_eth::Options {
-            eth_rpc_ws_url: config.cfg.eth_rpc_ws_url.clone(),
-            eth_rpc_http_url: config.cfg.eth_rpc_http_url.clone(),
-            eth_contract_address: config.cfg.eth_contract_address.clone(),
+
+        let eth = mpc_node::indexer_eth::EthArgs {
+            eth_account_sk: Some(config.cfg.eth_account_sk.clone()),
+            eth_rpc_ws_url: Some(config.cfg.eth_rpc_ws_url.clone()),
+            eth_rpc_http_url: Some(config.cfg.eth_rpc_http_url.clone()),
+            eth_contract_address: Some(config.cfg.eth_contract_address.clone()),
         };
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
-            eth_account_sk: config.cfg.eth_account_sk.clone(),
             web_port,
             cipher_pk: hex::encode(config.cipher_pk.to_bytes()),
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             sign_sk: Some(config.sign_sk.clone()),
+            eth,
             indexer_options,
-            indexer_eth_options,
             my_address: None,
             debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),

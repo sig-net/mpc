@@ -112,22 +112,22 @@ impl Node {
             running_threshold: 120,
             behind_threshold: 120,
         };
-        let indexer_eth_options = mpc_node::indexer_eth::Options {
-            eth_rpc_ws_url: config.cfg.eth_rpc_ws_url.clone(),
-            eth_rpc_http_url: config.cfg.eth_rpc_http_url.clone(),
-            eth_contract_address: config.cfg.eth_contract_address.clone(),
+        let eth_args = mpc_node::indexer_eth::EthArgs {
+            eth_account_sk: Some(config.cfg.eth_account_sk.clone()),
+            eth_rpc_ws_url: Some(config.cfg.eth_rpc_ws_url.clone()),
+            eth_rpc_http_url: Some(config.cfg.eth_rpc_http_url.clone()),
+            eth_contract_address: Some(config.cfg.eth_contract_address.clone()),
         };
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
-            eth_account_sk: config.cfg.eth_account_sk.clone(),
             web_port: Self::CONTAINER_PORT,
             cipher_pk: hex::encode(config.cipher_pk.to_bytes()),
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             indexer_options: indexer_options.clone(),
-            indexer_eth_options,
+            eth: eth_args,
             my_address: None,
             debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),

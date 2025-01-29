@@ -1,4 +1,5 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
+use crate::indexer_eth::EthArgs;
 use crate::protocol::signature::ToPublish;
 use crate::protocol::{Chain, ProtocolState};
 use crate::util::AffinePointExt as _;
@@ -63,12 +64,13 @@ impl RpcChannel {
 
 pub struct RpcExecutor {
     near: NearClient,
-    eth: EthClient,
+    eth: Option<EthClient>,
     action_rx: mpsc::Receiver<RpcAction>,
 }
 
 impl RpcExecutor {
-    pub fn new(near: &NearClient, eth: &EthClient) -> (RpcChannel, Self) {
+    pub fn new(near: &NearClient, eth: &EthArgs) -> (RpcChannel, Self) {
+        let eth = EthClient::new(eth);
         let (tx, rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         (
             RpcChannel { tx },
@@ -115,7 +117,13 @@ impl RpcExecutor {
     fn client(&self, chain: &Chain) -> ChainClient {
         match chain {
             Chain::NEAR => ChainClient::Near(self.near.clone()),
-            Chain::Ethereum => ChainClient::Ethereum(self.eth.clone()),
+            Chain::Ethereum => {
+                if let Some(eth) = &self.eth {
+                    ChainClient::Ethereum(eth.clone())
+                } else {
+                    ChainClient::Err("no eth client available for node")
+                }
+            }
         }
     }
 }
@@ -277,10 +285,10 @@ pub struct EthClient {
 }
 
 impl EthClient {
-    pub fn new(options: &crate::indexer_eth::Options, account_sk: &str) -> Self {
-        let transport = web3::transports::Http::new(&options.eth_rpc_http_url).unwrap();
+    pub fn new(args: &crate::indexer_eth::EthArgs) -> Option<Self> {
+        let transport = web3::transports::Http::new(args.eth_rpc_http_url.as_ref()?).unwrap();
         let client = web3::Web3::new(transport);
-        let address = web3::types::H160::from_str(&options.eth_contract_address).unwrap();
+        let address = web3::types::H160::from_str(args.eth_contract_address.as_ref()?).unwrap();
 
         let contract_json: serde_json::Value = serde_json::from_slice(include_bytes!(
             "../../contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
@@ -292,17 +300,18 @@ impl EthClient {
             contract_json["abi"].to_string().as_bytes(),
         )
         .unwrap();
-        Self {
+        Some(Self {
             client,
             contract,
-            account_sk: web3::signing::SecretKey::from_str(account_sk)
+            account_sk: web3::signing::SecretKey::from_str(args.eth_account_sk.as_ref()?)
                 .expect("failed to parse eth account sk, should not begin with 0x"),
-        }
+        })
     }
 }
 
 /// Client related to a specific chain
 pub enum ChainClient {
+    Err(&'static str),
     Near(NearClient),
     Ethereum(EthClient),
 }
@@ -365,6 +374,10 @@ async fn execute_publish(client: ChainClient, mut action: PublishAction) {
             }
             ChainClient::Ethereum(eth) => {
                 try_publish_eth(eth, &action.to_publish, &action.timestamp, &signature).await
+            }
+            ChainClient::Err(msg) => {
+                tracing::warn!(msg, "no client for chain");
+                Ok(())
             }
         };
         if publish.is_ok() {
