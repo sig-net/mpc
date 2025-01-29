@@ -4,7 +4,7 @@ use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::{MpcSignProtocol, SignQueue};
-use crate::rpc::{EthClient, NearClient, RpcExecutor};
+use crate::rpc::{NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, logs, mesh, storage, web};
 use clap::Parser;
@@ -37,9 +37,6 @@ pub enum Cli {
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"))]
         account_sk: SecretKey,
-        /// The ethereum account secret key used to sign eth respond txn.
-        #[arg(long, env("MPC_ETH_ACCOUNT_SK"))]
-        eth_account_sk: String,
         /// The web port for this server
         #[arg(long, env("MPC_WEB_PORT"))]
         web_port: u16,
@@ -53,12 +50,12 @@ pub enum Cli {
         /// The secret key used to sign messages to be sent between nodes.
         #[arg(long, env("MPC_SIGN_SK"))]
         sign_sk: Option<SecretKey>,
+        /// Ethereum Indexer options
+        #[clap(flatten)]
+        eth: indexer_eth::EthArgs,
         /// NEAR Lake Indexer options
         #[clap(flatten)]
         indexer_options: indexer::Options,
-        /// Ethereum Indexer options
-        #[clap(flatten)]
-        indexer_eth_options: indexer_eth::Options,
         /// Local address that other peers can use to message this node.
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
@@ -89,13 +86,12 @@ impl Cli {
                 account_id,
                 mpc_contract_id,
                 account_sk,
-                eth_account_sk,
                 web_port,
                 cipher_pk,
                 cipher_sk,
                 sign_sk,
+                eth,
                 indexer_options,
-                indexer_eth_options,
                 my_address,
                 debug_id,
                 storage_options,
@@ -114,8 +110,6 @@ impl Cli {
                     account_id.to_string(),
                     "--account-sk".to_string(),
                     account_sk.to_string(),
-                    "--eth-account-sk".to_string(),
-                    eth_account_sk.to_string(),
                     "--web-port".to_string(),
                     web_port.to_string(),
                     "--cipher-pk".to_string(),
@@ -145,8 +139,8 @@ impl Cli {
                     args.extend(["--client-header-referer".to_string(), client_header_referer]);
                 }
 
+                args.extend(eth.into_str_args());
                 args.extend(indexer_options.into_str_args());
-                args.extend(indexer_eth_options.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(mesh_options.into_str_args());
                 args.extend(message_options.into_str_args());
@@ -164,12 +158,11 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             mpc_contract_id,
             account_id,
             account_sk,
-            eth_account_sk,
             cipher_pk,
             cipher_sk,
             sign_sk,
+            eth,
             indexer_options,
-            indexer_eth_options,
             my_address,
             debug_id,
             storage_options,
@@ -238,10 +231,9 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
                 sign_sk,
             };
-            let eth_client = EthClient::new(&indexer_eth_options, &eth_account_sk);
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
-            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth_client);
+            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth);
             let config = Arc::new(RwLock::new(Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network,
@@ -252,7 +244,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 ?account_id,
                 ?my_address,
                 near_rpc_url = ?near_client.rpc_addr(),
-                eth_rpc_url = ?indexer_eth_options.eth_rpc_http_url,
+                eth_rpc_url = ?eth.eth_rpc_http_url,
                 "starting node",
             );
             rt.block_on(async {
@@ -280,8 +272,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
                 let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
-                let eth_indexer_handle =
-                    tokio::spawn(indexer_eth::run(indexer_eth_options, sign_tx, account_id));
+                let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");
 
                 rpc_handle.await?;
