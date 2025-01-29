@@ -1,3 +1,5 @@
+use std::sync::{LazyLock, RwLock};
+
 use once_cell::sync::Lazy;
 pub use prometheus::{
     self, core::MetricVec, core::MetricVecBuilder, exponential_buckets, linear_buckets, Counter,
@@ -5,13 +7,18 @@ pub use prometheus::{
     IntCounterVec, IntGauge, IntGaugeVec, Opts, Result, TextEncoder,
 };
 
+pub(crate) static MY_ACCOUNT_ID: LazyLock<RwLock<String>> =
+    LazyLock::new(|| RwLock::new("unknown.near".into()));
+
 pub(crate) static NODE_RUNNING: Lazy<IntGaugeVec> = Lazy::new(|| {
+    let account_id = MY_ACCOUNT_ID.read().unwrap();
     try_create_int_gauge_vec(
         "multichain_node_is_up",
         "whether the multichain signer node is up and running",
         &["node_account_id"],
     )
     .unwrap()
+    .with_label_values(&[&account_id.as_str()])
 });
 
 pub(crate) static NUM_SIGN_REQUESTS: Lazy<CounterVec> = Lazy::new(|| {
