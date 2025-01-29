@@ -58,6 +58,7 @@ mpc-keys = { path = "../chain-signatures/keys" }
 mpc-node = { path = "../chain-signatures/node" }
 
 [dev-dependencies]
+criterion = { version = "0.5.1", features = ["async_tokio"] }
 test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [build-dependencies]
