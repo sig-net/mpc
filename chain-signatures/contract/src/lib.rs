@@ -50,7 +50,7 @@ const RETURN_SIGNATURE_ON_FINISH_CALL_GAS: Gas = Gas::from_tgas(10);
 const UPDATE_CONFIG_GAS: Gas = Gas::from_tgas(5);
 
 // Maximum number of concurrent requests
-const MAX_CONCURRENT_REQUESTS: u32 = 2048;
+const MAX_CONCURRENT_REQUESTS: u32 = 128;
 
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
