@@ -1,6 +1,6 @@
 use test_log::test;
 
-use crate::cluster;
+use integration_tests::cluster;
 
 #[test(tokio::test)]
 #[ignore = "This is triggered by the nightly Github Actions pipeline"]

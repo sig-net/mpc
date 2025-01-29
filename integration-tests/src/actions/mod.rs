@@ -3,6 +3,7 @@ pub mod wait;
 pub mod wait_for;
 
 use crate::cluster::Cluster;
+use crate::containers::LakeIndexer;
 
 use anyhow::Context as _;
 use cait_sith::FullSignature;
@@ -32,7 +33,6 @@ use std::time::Duration;
 
 const CHAIN_ID_ETH: u64 = 31337;
 
-use integration_tests::containers::LakeIndexer;
 use k256::{
     ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
     PublicKey as K256PublicKey,
@@ -212,10 +212,86 @@ pub async fn batch_duplicate_signature_production(nodes: &Cluster) -> anyhow::Re
     Ok(())
 }
 
+/// Get the x coordinate of a point, as a scalar
+pub(crate) fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar {
+    <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
+}
+
+pub fn recover<M>(
+    signature: ethers_core::types::Signature,
+    message: M,
+) -> Result<ethers_core::types::Address, ethers_core::types::SignatureError>
+where
+    M: Into<ethers_core::types::RecoveryMessage>,
+{
+    let message_hash = match message.into() {
+        ethers_core::types::RecoveryMessage::Data(ref message) => {
+            println!("identified as data");
+            ethers_core::utils::hash_message(message)
+        }
+        ethers_core::types::RecoveryMessage::Hash(hash) => hash,
+    };
+    println!("message_hash {message_hash:#?}");
+
+    let (recoverable_sig, recovery_id) = as_signature(signature)?;
+    let verifying_key =
+        VerifyingKey::recover_from_prehash(message_hash.as_ref(), &recoverable_sig, recovery_id)?;
+    println!("verifying_key {verifying_key:#?}");
+
+    let public_key = K256PublicKey::from(&verifying_key);
+    //println!("ethercore public key from verifying key {public_key:#?}");
+
+    let public_key = public_key.to_encoded_point(/* compress = */ false);
+    println!("ethercore recover encoded point pk {public_key:#?}");
+    let public_key = public_key.as_bytes();
+    debug_assert_eq!(public_key[0], 0x04);
+    let hash = ethers_core::utils::keccak256(&public_key[1..]);
+    let result = ethers_core::types::Address::from_slice(&hash[12..]);
+    println!("ethercore recover result {result:#?}");
+    Ok(ethers_core::types::Address::from_slice(&hash[12..]))
+}
+
+/// Retrieves the recovery signature.
+fn as_signature(
+    signature: ethers_core::types::Signature,
+) -> Result<(RecoverableSignature, k256::ecdsa::RecoveryId), ethers_core::types::SignatureError> {
+    let mut recovery_id = signature.recovery_id()?;
+    let mut signature = {
+        let mut r_bytes = [0u8; 32];
+        let mut s_bytes = [0u8; 32];
+        signature.r.to_big_endian(&mut r_bytes);
+        signature.s.to_big_endian(&mut s_bytes);
+        let gar: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
+            generic_array::GenericArray::from_slice(&r_bytes);
+        let gas: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
+            generic_array::GenericArray::from_slice(&s_bytes);
+        K256Signature::from_scalars(*gar, *gas)?
+    };
+
+    // Normalize into "low S" form. See:
+    // - https://github.com/RustCrypto/elliptic-curves/issues/988
+    // - https://github.com/bluealloy/revm/pull/870
+    if let Some(normalized) = signature.normalize_s() {
+        signature = normalized;
+        recovery_id = k256::ecdsa::RecoveryId::from_byte(recovery_id.to_byte() ^ 1).unwrap();
+    }
+
+    Ok((signature, recovery_id))
+}
+
+pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> web3::types::Address {
+    let public_key = public_key.serialize_uncompressed();
+
+    debug_assert_eq!(public_key[0], 0x04);
+    let hash: [u8; 32] = web3::signing::keccak256(&public_key[1..]);
+
+    web3::types::Address::from_slice(&hash[12..])
+}
+
 // This test hardcodes the output of the signing process and checks that everything verifies as expected
 // If you find yourself changing the constants in this test you are likely breaking backwards compatibility
-#[tokio::test]
-async fn signatures_havent_changed() {
+#[test]
+fn signatures_havent_changed() {
     let big_r = "03f13a99141ce0a4043a7c02afdec6d52f25c6b3de01967acc5cf4a3fa43801589";
     let s = "39e5631fcc06ffccf8469a3cdcdce0651ebafd998a4280ebbf5dc24a749c98fb";
     let mpc_key = "04b5695a882aeaf36bf3933e21911b5cbcceae7fd7cb424f3ea221c7e8d390aad4ad2c1a427faec960f22a5442739c0a04fd64ab7ce4c93980417bd3d1d8bc04ea";
@@ -349,82 +425,6 @@ async fn signatures_havent_changed() {
     );
 
     assert_eq!(user_address_from_pk, user_address_ethers);
-}
-
-/// Get the x coordinate of a point, as a scalar
-pub(crate) fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar {
-    <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
-}
-
-pub fn recover<M>(
-    signature: ethers_core::types::Signature,
-    message: M,
-) -> Result<ethers_core::types::Address, ethers_core::types::SignatureError>
-where
-    M: Into<ethers_core::types::RecoveryMessage>,
-{
-    let message_hash = match message.into() {
-        ethers_core::types::RecoveryMessage::Data(ref message) => {
-            println!("identified as data");
-            ethers_core::utils::hash_message(message)
-        }
-        ethers_core::types::RecoveryMessage::Hash(hash) => hash,
-    };
-    println!("message_hash {message_hash:#?}");
-
-    let (recoverable_sig, recovery_id) = as_signature(signature)?;
-    let verifying_key =
-        VerifyingKey::recover_from_prehash(message_hash.as_ref(), &recoverable_sig, recovery_id)?;
-    println!("verifying_key {verifying_key:#?}");
-
-    let public_key = K256PublicKey::from(&verifying_key);
-    //println!("ethercore public key from verifying key {public_key:#?}");
-
-    let public_key = public_key.to_encoded_point(/* compress = */ false);
-    println!("ethercore recover encoded point pk {public_key:#?}");
-    let public_key = public_key.as_bytes();
-    debug_assert_eq!(public_key[0], 0x04);
-    let hash = ethers_core::utils::keccak256(&public_key[1..]);
-    let result = ethers_core::types::Address::from_slice(&hash[12..]);
-    println!("ethercore recover result {result:#?}");
-    Ok(ethers_core::types::Address::from_slice(&hash[12..]))
-}
-
-/// Retrieves the recovery signature.
-fn as_signature(
-    signature: ethers_core::types::Signature,
-) -> Result<(RecoverableSignature, k256::ecdsa::RecoveryId), ethers_core::types::SignatureError> {
-    let mut recovery_id = signature.recovery_id()?;
-    let mut signature = {
-        let mut r_bytes = [0u8; 32];
-        let mut s_bytes = [0u8; 32];
-        signature.r.to_big_endian(&mut r_bytes);
-        signature.s.to_big_endian(&mut s_bytes);
-        let gar: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
-            generic_array::GenericArray::from_slice(&r_bytes);
-        let gas: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
-            generic_array::GenericArray::from_slice(&s_bytes);
-        K256Signature::from_scalars(*gar, *gas)?
-    };
-
-    // Normalize into "low S" form. See:
-    // - https://github.com/RustCrypto/elliptic-curves/issues/988
-    // - https://github.com/bluealloy/revm/pull/870
-    if let Some(normalized) = signature.normalize_s() {
-        signature = normalized;
-        recovery_id = k256::ecdsa::RecoveryId::from_byte(recovery_id.to_byte() ^ 1).unwrap();
-    }
-
-    Ok((signature, recovery_id))
-}
-
-pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> web3::types::Address {
-    let public_key = public_key.serialize_uncompressed();
-
-    debug_assert_eq!(public_key[0], 0x04);
-    let hash: [u8; 32] = web3::signing::keccak256(&public_key[1..]);
-
-    web3::types::Address::from_slice(&hash[12..])
 }
 
 fn verify(

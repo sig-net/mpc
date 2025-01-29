@@ -1,7 +1,9 @@
+pub mod cluster;
 pub mod containers;
 pub mod execute;
 pub mod local;
 pub mod utils;
+pub mod actions;
 
 use containers::Container;
 use deadpool_redis::Pool;
