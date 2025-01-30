@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use integration_tests::actions::{self, add_latency};
 use integration_tests::cluster;
 
@@ -7,7 +5,6 @@ use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
 use crypto_shared::{self, derive_epsilon, derive_key, x_coordinate, ScalarExt};
-use deadpool_redis::Runtime;
 use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
@@ -18,11 +15,8 @@ use mpc_contract::update::ProposeUpdateArgs;
 use mpc_node::kdf::into_eth_sig;
 use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
 use mpc_node::protocol::triple::{Triple, TripleManager};
-use mpc_node::storage;
 use mpc_node::util::NearPublicKeyExt as _;
-use near_account_id::AccountId;
 use test_log::test;
-use url::Url;
 
 pub mod nightly;
 
@@ -155,20 +149,11 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
         .init_network()
         .await?;
 
+    let node_id = "test.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
-    let redis_url = Url::parse(redis.internal_address.as_str())?;
-    let redis_cfg = deadpool_redis::Config::from_url(redis_url);
-    let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-    let triple_storage =
-        storage::triple_storage::init(&redis_pool, &AccountId::from_str("test.near").unwrap());
-
-    let triple_manager = TripleManager::new(
-        Participant::from(0),
-        5,
-        123,
-        &AccountId::from_str("test.near").unwrap(),
-        &triple_storage,
-    );
+    let triple_storage = redis.triple_storage(&node_id);
+    let triple_manager =
+        TripleManager::new(Participant::from(0), 5, 123, &node_id, &triple_storage);
 
     let triple_id_1: u64 = 1;
     let triple_1 = dummy_triple(triple_id_1);
@@ -265,19 +250,14 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         .init_network()
         .await?;
 
+    let node_id = "test.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
-    let redis_url = Url::parse(redis.internal_address.as_str())?;
-    let redis_cfg = deadpool_redis::Config::from_url(redis_url);
-    let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-    let presignature_storage = storage::presignature_storage::init(
-        &redis_pool,
-        &AccountId::from_str("test.near").unwrap(),
-    );
+    let presignature_storage = redis.presignature_storage(&node_id);
     let mut presignature_manager = PresignatureManager::new(
         Participant::from(0),
         5,
         123,
-        &AccountId::from_str("test.near").unwrap(),
+        &node_id,
         &presignature_storage,
     );
 

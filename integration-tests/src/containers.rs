@@ -13,6 +13,7 @@ use bollard::Docker;
 use futures::{lock::Mutex, StreamExt};
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
+use near_account_id::AccountId;
 use near_workspaces::Account;
 use once_cell::sync::Lazy;
 use serde_json::json;
@@ -653,5 +654,21 @@ impl Redis {
             internal_address,
             external_address,
         }
+    }
+
+    pub fn pool(&self) -> deadpool_redis::Pool {
+        let redis_url = url::Url::parse(self.internal_address.as_str()).unwrap();
+        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
+        redis_cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap()
+    }
+
+    pub fn triple_storage(&self, id: &AccountId) -> mpc_node::storage::TripleStorage {
+        mpc_node::storage::triple_storage::init(&self.pool(), id)
+    }
+
+    pub fn presignature_storage(&self, id: &AccountId) -> mpc_node::storage::PresignatureStorage {
+        mpc_node::storage::presignature_storage::init(&self.pool(), id)
     }
 }
