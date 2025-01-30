@@ -98,7 +98,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_CONTRACT_ID"
-      value = "sig-net.near"
+      value = "v1.sig-net.near"
     },
     {
       name  = "MPC_INDEXER_S3_BUCKET"
