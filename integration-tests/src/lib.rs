@@ -242,12 +242,13 @@ pub struct Context {
     pub message_options: node_client::Options,
 }
 
-pub async fn setup(spawner: &ClusterSpawner) -> anyhow::Result<Context> {
+pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let LakeIndexerCtx {
         localstack,
         lake_indexer,
         worker,
     } = initialize_lake_indexer(spawner).await?;
+    spawner.create_accounts(&worker).await;
 
     let mpc_contract = worker
         .dev_deploy(&std::fs::read(
@@ -259,15 +260,13 @@ pub async fn setup(spawner: &ClusterSpawner) -> anyhow::Result<Context> {
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
 
     let redis = crate::containers::Redis::run(spawner).await;
-    let redis_url = redis.internal_address.clone();
-
     let sk_share_local_path = "multichain-integration-secret-manager".to_string();
     let storage_options = mpc_node::storage::Options {
         env: "local-test".to_string(),
         gcp_project_id: "multichain-integration".to_string(),
         sk_share_secret_id: None,
         sk_share_local_path: Some(sk_share_local_path),
-        redis_url,
+        redis_url: redis.internal_address.clone(),
     };
 
     let mesh_options = mpc_node::mesh::Options {
@@ -294,27 +293,22 @@ pub async fn setup(spawner: &ClusterSpawner) -> anyhow::Result<Context> {
     })
 }
 
-pub async fn docker(spawner: &ClusterSpawner) -> anyhow::Result<Nodes> {
+pub async fn docker(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let ctx = setup(spawner).await?;
     let cfg = &spawner.cfg;
 
-    let accounts =
-        futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-    let mut node_futures = Vec::new();
-    for (node_id, account) in accounts.iter().enumerate() {
-        let node = containers::Node::run(node_id, &ctx, cfg, account);
-        node_futures.push(node);
-    }
+    let node_futures = spawner
+        .accounts
+        .iter()
+        .enumerate()
+        .map(|(node_id, account)| containers::Node::run(node_id, &ctx, cfg, account));
     let nodes = futures::future::join_all(node_futures)
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    let candidates: HashMap<AccountId, CandidateInfo> = accounts
+    let candidates: HashMap<AccountId, CandidateInfo> = spawner
+        .accounts
         .iter()
-        .cloned()
         .zip(&nodes)
         .map(|(account, node)| {
             (
@@ -345,23 +339,18 @@ pub async fn docker(spawner: &ClusterSpawner) -> anyhow::Result<Nodes> {
     })
 }
 
-pub async fn dry_host(spawner: &ClusterSpawner) -> anyhow::Result<Context> {
+pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let ctx = setup(spawner).await?;
     let cfg = &spawner.cfg;
 
-    let accounts =
-        futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
     let mut node_cfgs = Vec::new();
-    for (node_id, account) in accounts.iter().enumerate() {
+    for (node_id, account) in spawner.accounts.iter().enumerate() {
         node_cfgs.push(local::Node::dry_run(node_id, &ctx, account, cfg).await?);
     }
 
-    let candidates: HashMap<AccountId, CandidateInfo> = accounts
+    let candidates: HashMap<AccountId, CandidateInfo> = spawner
+        .accounts
         .iter()
-        .cloned()
         .zip(&node_cfgs)
         .map(|(account, node_cfg)| {
             (
@@ -399,26 +388,22 @@ pub async fn dry_host(spawner: &ClusterSpawner) -> anyhow::Result<Context> {
     Ok(ctx)
 }
 
-pub async fn host(spawner: &ClusterSpawner) -> anyhow::Result<Nodes> {
+pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let ctx = setup(spawner).await?;
     let cfg = &spawner.cfg;
 
-    let accounts =
-        futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-    let mut node_futures = Vec::with_capacity(cfg.nodes);
-    for (node_id, account) in accounts.iter().enumerate() {
-        node_futures.push(local::Node::run(node_id, &ctx, cfg, account));
-    }
+    let node_futures = spawner
+        .accounts
+        .iter()
+        .enumerate()
+        .map(|(node_id, account)| local::Node::run(node_id, &ctx, cfg, account));
     let nodes = futures::future::join_all(node_futures)
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    let candidates: HashMap<AccountId, CandidateInfo> = accounts
+    let candidates: HashMap<AccountId, CandidateInfo> = spawner
+        .accounts
         .iter()
-        .cloned()
         .zip(&nodes)
         .map(|(account, node)| {
             (
@@ -449,7 +434,7 @@ pub async fn host(spawner: &ClusterSpawner) -> anyhow::Result<Nodes> {
     })
 }
 
-pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Nodes> {
+pub async fn run(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     #[cfg(feature = "docker-test")]
     return docker(spawner).await;
 
@@ -457,7 +442,7 @@ pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Nodes> {
     return host(spawner).await;
 }
 
-pub async fn dry_run(spawner: &ClusterSpawner) -> anyhow::Result<Context> {
+pub async fn dry_run(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     #[cfg(feature = "docker-test")]
     unimplemented!("dry_run only works with native node");
 

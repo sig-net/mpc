@@ -1,4 +1,6 @@
 use mpc_contract::config::ProtocolConfig;
+use near_workspaces::network::Sandbox;
+use near_workspaces::{Account, Worker};
 
 use std::future::{Future, IntoFuture};
 
@@ -13,6 +15,7 @@ pub struct ClusterSpawner {
     pub docker: DockerClient,
     pub release: bool,
     pub network: String,
+    pub accounts: Vec<Account>,
 
     pub cfg: NodeConfig,
     pub wait_for_running: bool,
@@ -22,17 +25,18 @@ pub struct ClusterSpawner {
 
 impl Default for ClusterSpawner {
     fn default() -> Self {
+        let cfg = NodeConfig {
+            nodes: 3,
+            threshold: 2,
+            ..Default::default()
+        };
         Self {
             docker: DockerClient::default(),
             release: true,
             network: DOCKER_NETWORK.to_string(),
+            accounts: Vec::with_capacity(cfg.nodes),
 
-            cfg: NodeConfig {
-                nodes: 3,
-                threshold: 2,
-                protocol: Default::default(),
-                ..Default::default()
-            },
+            cfg,
             wait_for_running: false,
             pregenerate_triples: true,
             pregenerate_presigs: true,
@@ -96,11 +100,22 @@ impl ClusterSpawner {
         self
     }
 
-    pub async fn run(&self) -> anyhow::Result<Nodes> {
+    /// Create accounts for the nodes:
+    pub async fn create_accounts(&mut self, worker: &Worker<Sandbox>) {
+        let accounts =
+            futures::future::join_all((0..self.cfg.nodes).map(|_| worker.dev_create_account()))
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+        self.accounts.extend(accounts);
+    }
+
+    pub async fn run(&mut self) -> anyhow::Result<Nodes> {
         crate::run(self).await
     }
 
-    pub async fn dry_run(&self) -> anyhow::Result<crate::Context> {
+    pub async fn dry_run(&mut self) -> anyhow::Result<crate::Context> {
         crate::dry_run(self).await
     }
 }

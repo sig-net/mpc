@@ -70,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             };
             println!("Full config: {:?}", config);
-            let spawner = ClusterSpawner::default()
+            let mut spawner = ClusterSpawner::default()
                 .config(config)
                 .init_network()
                 .await?;
@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cli::DepServices => {
             println!("Setting up dependency services");
-            let spawner = ClusterSpawner::default().init_network().await?;
+            let mut spawner = ClusterSpawner::default().init_network().await?;
             let _ctx = spawner.dry_run().await?;
 
             println!("Press Ctrl-C to stop dependency services");
