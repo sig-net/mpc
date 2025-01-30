@@ -98,7 +98,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_CONTRACT_ID"
-      value = "v1.signer"
+      value = "sig-net.near"
     },
     {
       name  = "MPC_INDEXER_S3_BUCKET"
@@ -126,7 +126,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_CLIENT_HEADER_REFERER"
-      value = "https://multichain-partner-mainnet-pagoda.api.pagoda.co"
+      value = "https://sig.network"
     }
   ]
 }

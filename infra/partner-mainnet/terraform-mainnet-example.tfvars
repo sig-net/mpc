@@ -4,7 +4,7 @@ network    = "default"
 subnetwork = "default"
 image      = "europe-west1-docker.pkg.dev/near-cs-mainnet/multichain-public/multichain-mainnet:latest"
 region     = "europe-west1"
-zone       = "europe-west1-b"
+zone       = "europe-west1-b" # Feel free to choose other zones in the region for HA purposes between nodes
 # These will be specific to your node
 node_configs = [
   {

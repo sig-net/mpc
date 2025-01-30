@@ -135,9 +135,8 @@ module "ig_template" {
     scopes = ["cloud-platform"]
   }
   name_prefix  = "multichain-partner-mainnet-${count.index}"
-  machine_type = "n2d-standard-2"
+  machine_type = "n2d-standard-4"
 
-  startup_script = "docker rm watchtower ; docker run -d --name watchtower -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower --debug --interval 30"
 
   source_image = var.source_image
   metadata     = merge(var.additional_metadata, { "gce-container-declaration" = module.gce-container["${count.index}"].metadata_value })
