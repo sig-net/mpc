@@ -45,13 +45,13 @@ Key versions refer new versions of the root key that we may choose to generate o
 pub const fn latest_key_version(&self) -> u32
 ```
 
-## `experimantal_signature_deposit()`
-This experimantal function calculates the fee for a signature request. The fee is volatile and depends on the number of pending requests. If used on a client side, it can give outdate results.
+## `experimental_signature_deposit()`
+This experimental function calculates the fee for a signature request. The fee is volatile and depends on the number of pending requests. If used on a client side, it can give outdate results.
 ```rust
-pub fn experimantal_signature_deposit(&self) -> u128
+pub fn experimental_signature_deposit(&self) -> u128
 ```
 
-For more details check `User contract API` impl block in the [chain-signatures/contracts/src/lib.rs](./chain-signatures/contracts/src/lib.rs) file.
+For more details check `User contract API` impl block in the [chain-signatures/contract/src/lib.rs](./chain-signatures/contract/src/lib.rs) file.
 
 # Environments
 1. Mainnet: `v1.signer`
