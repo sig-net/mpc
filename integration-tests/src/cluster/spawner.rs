@@ -2,8 +2,8 @@ use mpc_contract::config::ProtocolConfig;
 
 use std::future::{Future, IntoFuture};
 
-use integration_tests::containers::DockerClient;
-use integration_tests::{run, NodeConfig};
+use crate::containers::DockerClient;
+use crate::{run, NodeConfig};
 
 use crate::cluster::Cluster;
 

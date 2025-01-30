@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
-use crate::actions::{self, add_latency};
-use crate::cluster;
+use integration_tests::actions::{self, add_latency};
+use integration_tests::cluster;
 
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
