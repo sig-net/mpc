@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::cluster::spawner::ClusterSpawner;
+
 use super::{local::NodeEnvConfig, utils, NodeConfig};
 use anyhow::{anyhow, Context};
 use async_process::Child;
@@ -200,26 +202,23 @@ pub struct LocalStack {
 impl LocalStack {
     const S3_CONTAINER_PORT: u16 = 4566;
 
-    pub async fn run(
-        docker_client: &DockerClient,
-        network: &str,
-        s3_bucket: &str,
-        s3_region: &str,
-    ) -> Self {
+    pub async fn run(spawner: &ClusterSpawner, s3_bucket: &str, s3_region: &str) -> Self {
         tracing::info!("running LocalStack container...");
         let container = GenericImage::new("localstack/localstack", "3.5.0")
             .with_wait_for(WaitFor::message_on_stdout("Ready."))
-            .with_network(network)
+            .with_network(&spawner.network)
             .start()
             .await
             .unwrap();
-        let address = docker_client
-            .get_network_ip_address(&container, network)
+        let address = spawner
+            .docker
+            .get_network_ip_address(&container, &spawner.network)
             .await
             .unwrap();
 
         // Create the bucket
-        let create_result = docker_client
+        let create_result = spawner
+            .docker
             .docker
             .create_exec(
                 container.id(),
@@ -240,7 +239,8 @@ impl LocalStack {
             )
             .await
             .unwrap();
-        let result = docker_client
+        let result = spawner
+            .docker
             .docker
             .start_exec(&create_result.id, None)
             .await
@@ -386,17 +386,19 @@ impl LakeIndexer {
     }
 
     pub async fn run(
-        docker_client: &DockerClient,
-        network: &str,
+        spawner: &ClusterSpawner,
         s3_address: &str,
         bucket_name: &str,
         region: &str,
     ) -> LakeIndexer {
         tracing::info!("initializing toxi proxy servers");
         let toxi_server_process = Self::spin_up_toxi_server_process().await.unwrap();
-        let toxi_server_container = Self::spin_up_toxi_server_container(network).await.unwrap();
-        let toxi_server_container_address = docker_client
-            .get_network_ip_address(&toxi_server_container, network)
+        let toxi_server_container = Self::spin_up_toxi_server_container(&spawner.network)
+            .await
+            .unwrap();
+        let toxi_server_container_address = spawner
+            .docker
+            .get_network_ip_address(&toxi_server_container, &spawner.network)
             .await
             .unwrap();
         let s3_address_proxied = format!(
@@ -414,7 +416,7 @@ impl LakeIndexer {
             .unwrap();
 
         tracing::info!(
-            network,
+            network = %spawner.network,
             s3_address_proxied,
             bucket_name,
             region,
@@ -426,7 +428,7 @@ impl LakeIndexer {
             .with_exposed_port(Self::CONTAINER_RPC_PORT.tcp())
             .with_env_var("AWS_ACCESS_KEY_ID", "FAKE_LOCALSTACK_KEY_ID")
             .with_env_var("AWS_SECRET_ACCESS_KEY", "FAKE_LOCALSTACK_ACCESS_KEY")
-            .with_network(network)
+            .with_network(&spawner.network)
             .with_cmd(vec![
                 "--endpoint".to_string(),
                 format!("http://{}", s3_address_proxied),
@@ -441,8 +443,9 @@ impl LakeIndexer {
             .await
             .unwrap();
 
-        let address = docker_client
-            .get_network_ip_address(&container, network)
+        let address = spawner
+            .docker
+            .get_network_ip_address(&container, &spawner.network)
             .await
             .unwrap();
         let rpc_address = format!("http://{}:{}", address, Self::CONTAINER_RPC_PORT);
@@ -616,17 +619,18 @@ pub struct Redis {
 impl Redis {
     const DEFAULT_REDIS_PORT: u16 = 6379;
 
-    pub async fn run(docker_client: &DockerClient, network: &str) -> Self {
+    pub async fn run(spawner: &ClusterSpawner) -> Self {
         tracing::info!("Running Redis container...");
         let container = GenericImage::new("redis", "7.4.2")
             .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .with_network(network)
+            .with_network(&spawner.network)
             .start()
             .await
             .unwrap();
-        let network_ip = docker_client
-            .get_network_ip_address(&container, network)
+        let network_ip = spawner
+            .docker
+            .get_network_ip_address(&container, &spawner.network)
             .await
             .unwrap();
 

@@ -4,8 +4,8 @@ use std::str::FromStr;
 use std::vec;
 
 use clap::Parser;
-use integration_tests::containers::DockerClient;
-use integration_tests::{dry_run, run, utils, NodeConfig};
+use integration_tests::cluster::spawner::ClusterSpawner;
+use integration_tests::{utils, NodeConfig};
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -46,7 +46,6 @@ async fn main() -> anyhow::Result<()> {
         .with_thread_ids(true)
         .with_env_filter(EnvFilter::from_default_env());
     subscriber.init();
-    let docker_client = DockerClient::default();
 
     match Cli::parse() {
         Cli::SetupEnv {
@@ -71,9 +70,14 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             };
             println!("Full config: {:?}", config);
-            let nodes = run(config.clone(), &docker_client).await?;
+            let spawner = ClusterSpawner::default()
+                .config(config)
+                .init_network()
+                .await?;
+
+            let nodes = spawner.run().await?;
             let ctx = nodes.ctx();
-            let urls: Vec<_> = (0..config.nodes).map(|i| nodes.url(i)).collect();
+            let urls: Vec<_> = (0..spawner.cfg.nodes).map(|i| nodes.url(i)).collect();
             let near_accounts = nodes.near_accounts();
             let sk_local_path = nodes.ctx().storage_options.sk_share_local_path.clone();
 
@@ -104,8 +108,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Cli::DepServices => {
             println!("Setting up dependency services");
-            let config = NodeConfig::default();
-            let _ctx = dry_run(config.clone(), &docker_client).await?;
+            let spawner = ClusterSpawner::default().init_network().await?;
+            let _ctx = spawner.dry_run().await?;
 
             println!("Press Ctrl-C to stop dependency services");
             signal::ctrl_c().await.expect("Failed to listen for event");

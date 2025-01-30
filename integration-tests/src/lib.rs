@@ -1,10 +1,11 @@
+pub mod actions;
 pub mod cluster;
 pub mod containers;
 pub mod execute;
 pub mod local;
 pub mod utils;
-pub mod actions;
 
+use cluster::spawner::ClusterSpawner;
 use containers::Container;
 use deadpool_redis::Pool;
 use std::collections::HashMap;
@@ -26,8 +27,6 @@ use near_workspaces::network::{Sandbox, ValidatorKey};
 use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
-
-const NETWORK: &str = "mpc_it_network";
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
@@ -243,16 +242,12 @@ pub struct Context {
     pub message_options: node_client::Options,
 }
 
-pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context> {
-    let release = true;
-    let docker_network = NETWORK;
-    docker_client.create_network(docker_network).await?;
-
+pub async fn setup(spawner: &ClusterSpawner) -> anyhow::Result<Context> {
     let LakeIndexerCtx {
         localstack,
         lake_indexer,
         worker,
-    } = initialize_lake_indexer(docker_client, docker_network).await?;
+    } = initialize_lake_indexer(spawner).await?;
 
     let mpc_contract = worker
         .dev_deploy(&std::fs::read(
@@ -263,7 +258,7 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context> {
         .await?;
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
 
-    let redis = crate::containers::Redis::run(docker_client, docker_network).await;
+    let redis = crate::containers::Redis::run(spawner).await;
     let redis_url = redis.internal_address.clone();
 
     let sk_share_local_path = "multichain-integration-secret-manager".to_string();
@@ -285,9 +280,9 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context> {
     };
 
     Ok(Context {
-        docker_client: docker_client.clone(),
-        docker_network: docker_network.to_string(),
-        release,
+        docker_client: spawner.docker.clone(),
+        docker_network: spawner.network.clone(),
+        release: spawner.release,
         localstack,
         lake_indexer,
         worker,
@@ -299,8 +294,9 @@ pub async fn setup(docker_client: &DockerClient) -> anyhow::Result<Context> {
     })
 }
 
-pub async fn docker(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
-    let ctx = setup(docker_client).await?;
+pub async fn docker(spawner: &ClusterSpawner) -> anyhow::Result<Nodes> {
+    let ctx = setup(spawner).await?;
+    let cfg = &spawner.cfg;
 
     let accounts =
         futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
@@ -309,7 +305,7 @@ pub async fn docker(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Re
             .collect::<Result<Vec<_>, _>>()?;
     let mut node_futures = Vec::new();
     for (node_id, account) in accounts.iter().enumerate() {
-        let node = containers::Node::run(node_id, &ctx, &cfg, account);
+        let node = containers::Node::run(node_id, &ctx, cfg, account);
         node_futures.push(node);
     }
     let nodes = futures::future::join_all(node_futures)
@@ -349,8 +345,9 @@ pub async fn docker(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Re
     })
 }
 
-pub async fn dry_host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Context> {
-    let ctx = setup(docker_client).await?;
+pub async fn dry_host(spawner: &ClusterSpawner) -> anyhow::Result<Context> {
+    let ctx = setup(spawner).await?;
+    let cfg = &spawner.cfg;
 
     let accounts =
         futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
@@ -359,7 +356,7 @@ pub async fn dry_host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::
             .collect::<Result<Vec<_>, _>>()?;
     let mut node_cfgs = Vec::new();
     for (node_id, account) in accounts.iter().enumerate() {
-        node_cfgs.push(local::Node::dry_run(node_id, &ctx, account, &cfg).await?);
+        node_cfgs.push(local::Node::dry_run(node_id, &ctx, account, cfg).await?);
     }
 
     let candidates: HashMap<AccountId, CandidateInfo> = accounts
@@ -402,8 +399,9 @@ pub async fn dry_host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::
     Ok(ctx)
 }
 
-pub async fn host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
-    let ctx = setup(docker_client).await?;
+pub async fn host(spawner: &ClusterSpawner) -> anyhow::Result<Nodes> {
+    let ctx = setup(spawner).await?;
+    let cfg = &spawner.cfg;
 
     let accounts =
         futures::future::join_all((0..cfg.nodes).map(|_| ctx.worker.dev_create_account()))
@@ -412,7 +410,7 @@ pub async fn host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Resu
             .collect::<Result<Vec<_>, _>>()?;
     let mut node_futures = Vec::with_capacity(cfg.nodes);
     for (node_id, account) in accounts.iter().enumerate() {
-        node_futures.push(local::Node::run(node_id, &ctx, &cfg, account));
+        node_futures.push(local::Node::run(node_id, &ctx, cfg, account));
     }
     let nodes = futures::future::join_all(node_futures)
         .await
@@ -451,20 +449,20 @@ pub async fn host(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Resu
     })
 }
 
-pub async fn run(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Nodes> {
+pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Nodes> {
     #[cfg(feature = "docker-test")]
-    return docker(cfg, docker_client).await;
+    return docker(spawner).await;
 
     #[cfg(not(feature = "docker-test"))]
-    return host(cfg, docker_client).await;
+    return host(spawner).await;
 }
 
-pub async fn dry_run(cfg: NodeConfig, docker_client: &DockerClient) -> anyhow::Result<Context> {
+pub async fn dry_run(spawner: &ClusterSpawner) -> anyhow::Result<Context> {
     #[cfg(feature = "docker-test")]
     unimplemented!("dry_run only works with native node");
 
     #[cfg(not(feature = "docker-test"))]
-    return dry_host(cfg, docker_client).await;
+    return dry_host(spawner).await;
 }
 
 async fn fetch_from_validator(
@@ -521,24 +519,15 @@ pub struct LakeIndexerCtx {
     pub worker: Worker<Sandbox>,
 }
 
-pub async fn initialize_lake_indexer(
-    docker_client: &DockerClient,
-    network: &str,
-) -> anyhow::Result<LakeIndexerCtx> {
+pub async fn initialize_lake_indexer(spawner: &ClusterSpawner) -> anyhow::Result<LakeIndexerCtx> {
     let s3_bucket = "near-lake-custom";
     let s3_region = "us-east-1";
-    let localstack = LocalStack::run(docker_client, network, s3_bucket, s3_region).await;
+    let localstack = LocalStack::run(spawner, s3_bucket, s3_region).await;
 
-    let lake_indexer = containers::LakeIndexer::run(
-        docker_client,
-        network,
-        &localstack.s3_address,
-        s3_bucket,
-        s3_region,
-    )
-    .await;
+    let lake_indexer =
+        containers::LakeIndexer::run(spawner, &localstack.s3_address, s3_bucket, s3_region).await;
 
-    let validator_key = fetch_validator_keys(docker_client, &lake_indexer.container).await?;
+    let validator_key = fetch_validator_keys(&spawner.docker, &lake_indexer.container).await?;
 
     tracing::info!("initializing sandbox worker");
     let worker = near_workspaces::sandbox()

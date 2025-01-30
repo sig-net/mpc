@@ -26,15 +26,7 @@ const CURRENT_CONTRACT_FILE_PATH: &str =
     "../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
 
 pub fn spawn() -> ClusterSpawner {
-    ClusterSpawner {
-        wait_for_running: false,
-        cfg: NodeConfig {
-            nodes: 3,
-            threshold: 2,
-            protocol: Default::default(),
-            ..Default::default()
-        },
-    }
+    ClusterSpawner::default()
 }
 
 pub struct Cluster {
