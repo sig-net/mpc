@@ -737,7 +737,7 @@ fn shares_to_triples(
     shares: &[TripleShare<Secp256k1>],
 ) -> Vec<Triple> {
     shares
-        .into_iter()
+        .iter()
         .map(|share| Triple {
             id,
             public: public.clone(),

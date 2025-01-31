@@ -45,7 +45,7 @@ impl Default for ClusterSpawner {
             participants: Vec::with_capacity(cfg.nodes),
 
             cfg,
-            wait_for_running: false,
+            wait_for_running: true,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
         }
     }
@@ -82,8 +82,9 @@ impl ClusterSpawner {
         self
     }
 
-    pub fn wait_for_running(mut self) -> Self {
-        self.wait_for_running = true;
+    /// Do not wait for the nodes to be running.
+    pub fn disable_wait_running(mut self) -> Self {
+        self.wait_for_running = false;
         self
     }
 

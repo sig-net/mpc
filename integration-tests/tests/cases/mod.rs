@@ -22,10 +22,7 @@ pub mod nightly;
 
 #[test(tokio::test)]
 async fn test_multichain_reshare() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn()
-        .disable_prestockpile()
-        .wait_for_running()
-        .await?;
+    let mut nodes = cluster::spawn().disable_prestockpile().await?;
 
     nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
@@ -61,7 +58,7 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_signature_basic() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().wait_for_running().await?;
+    let nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     nodes.sign().await?;
 
@@ -70,7 +67,7 @@ async fn test_signature_basic() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_signature_rogue() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().wait_for_running().await?;
+    let nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     nodes.sign().rogue_responder().await?;
 
@@ -79,7 +76,7 @@ async fn test_signature_rogue() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_signature_offline_node() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn().wait_for_running().await?;
+    let mut nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
 
@@ -97,7 +94,7 @@ async fn test_signature_offline_node() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_key_derivation() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().wait_for_running().await?;
+    let nodes = cluster::spawn().await?;
 
     let hd_path = "test";
     let mpc_pk: k256::AffinePoint = nodes.root_public_key().await?.into_affine_point();
@@ -374,7 +371,7 @@ fn dummy_triple(id: u64) -> Triple {
 
 #[test(tokio::test)]
 async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn().wait_for_running().await?;
+    let mut nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
 
@@ -414,7 +411,7 @@ async fn test_lake_congestion() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn().wait_for_running().await?;
+    let mut nodes = cluster::spawn().await?;
 
     // add latency to node1->rpc, but not node0->rpc
     add_latency(&nodes.nodes.proxy_name_for_node(1), true, 1.0, 1_000, 100).await?;
@@ -449,7 +446,7 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_multichain_update_contract() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().wait_for_running().await?;
+    let nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     nodes.sign().await.unwrap();
 
@@ -476,14 +473,14 @@ async fn test_multichain_update_contract() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_batch_random_signature() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().wait_for_running().await?;
+    let nodes = cluster::spawn().await?;
     actions::batch_random_signature_production(&nodes).await?;
     Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_batch_duplicate_signature() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().wait_for_running().await?;
+    let nodes = cluster::spawn().await?;
     actions::batch_duplicate_signature_production(&nodes).await?;
     Ok(())
 }

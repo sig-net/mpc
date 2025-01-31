@@ -18,7 +18,6 @@ async fn test_nightly_signature_production() -> anyhow::Result<()> {
             config.protocol.triple.min_triples = MIN_TRIPLES;
             config.protocol.triple.max_triples = MAX_TRIPLES;
         })
-        .wait_for_running()
         .await?;
 
     for i in 0..SIGNATURE_AMOUNT {
