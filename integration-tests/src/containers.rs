@@ -679,7 +679,7 @@ impl Redis {
         mpc_node::storage::presignature_storage::init(&self.pool(), id)
     }
 
-    pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants) {
+    pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants, mul: u32) {
         let pool = self.pool();
         let storage = participants
             .participants
@@ -709,7 +709,7 @@ impl Redis {
         // - third loop: for each triple, store the shares individually per node
         let mut num_triples = 0;
         for mine_idx in &participant_ids {
-            for _ in 0..(cfg.protocol.triple.min_triples * 3) {
+            for _ in 0..(cfg.protocol.triple.min_triples * mul) {
                 num_triples += 1;
                 let triple_id = rand::random();
                 for (participant, triple) in participant_ids

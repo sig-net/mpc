@@ -12,6 +12,12 @@ use crate::cluster::Cluster;
 
 const DOCKER_NETWORK: &str = "mpc_it_network";
 
+struct Prestockpile {
+    /// Multiplier to increase the stockpile such that stockpiling presignatures does not trigger
+    /// the number of triples to be lower than the stockpile limit.
+    multiplier: u32,
+}
+
 pub struct ClusterSpawner {
     pub docker: DockerClient,
     pub release: bool,
@@ -21,8 +27,7 @@ pub struct ClusterSpawner {
 
     pub cfg: NodeConfig,
     pub wait_for_running: bool,
-    pub prestockpile_triples: bool,
-    pub prestockpile_presigs: bool,
+    prestockpile: Option<Prestockpile>,
 }
 
 impl Default for ClusterSpawner {
@@ -41,8 +46,7 @@ impl Default for ClusterSpawner {
 
             cfg,
             wait_for_running: false,
-            prestockpile_triples: true,
-            prestockpile_presigs: true,
+            prestockpile: Some(Prestockpile { multiplier: 4 }),
         }
     }
 }
@@ -83,13 +87,13 @@ impl ClusterSpawner {
         self
     }
 
-    pub fn disable_prestockpile_triples(mut self) -> Self {
-        self.prestockpile_triples = false;
+    pub fn disable_prestockpile(mut self) -> Self {
+        self.prestockpile = None;
         self
     }
 
-    pub fn disable_prestockpile_presigs(mut self) -> Self {
-        self.prestockpile_presigs = false;
+    pub fn prestockpile(mut self, multiplier: u32) -> Self {
+        self.prestockpile = Some(Prestockpile { multiplier });
         self
     }
 
@@ -105,12 +109,10 @@ impl ClusterSpawner {
 
     /// Create accounts for the nodes
     pub async fn create_accounts(&mut self, worker: &Worker<Sandbox>) {
-        let accounts =
-            futures::future::join_all((0..self.cfg.nodes).map(|_| worker.dev_create_account()))
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
+        let mut accounts = Vec::with_capacity(self.cfg.nodes);
+        for _ in 0..self.cfg.nodes {
+            accounts.push(worker.dev_create_account().await.unwrap());
+        }
         self.participants
             .extend((0..accounts.len() as u32).map(Participant::from));
         self.accounts.extend(accounts);
@@ -151,14 +153,20 @@ impl IntoFuture for ClusterSpawner {
                 cluster.wait().running().nodes_running().await?;
             }
 
-            if self.prestockpile_triples {
+            if let Some(prestockpile) = self.prestockpile {
                 let participants = cluster.participants().await.unwrap();
                 cluster
                     .nodes
                     .ctx()
                     .redis
-                    .stockpile_triples(&cfg, &participants)
+                    .stockpile_triples(&cfg, &participants, prestockpile.multiplier)
                     .await;
+
+                cluster
+                    .wait()
+                    .min_mine_presignatures(cfg.protocol.presignature.min_presignatures as usize)
+                    .await
+                    .unwrap();
             }
 
             Ok(cluster)
