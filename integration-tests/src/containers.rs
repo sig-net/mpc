@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::cluster::spawner::ClusterSpawner;
@@ -10,9 +11,15 @@ use bollard::exec::CreateExecOptions;
 use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
 use bollard::Docker;
+use cait_sith::protocol::Participant;
+use cait_sith::triples::{TriplePub, TripleShare};
+use elliptic_curve::rand_core::OsRng;
 use futures::{lock::Mutex, StreamExt};
+use k256::Secp256k1;
+use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
+use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
 use once_cell::sync::Lazy;
@@ -671,4 +678,70 @@ impl Redis {
     pub fn presignature_storage(&self, id: &AccountId) -> mpc_node::storage::PresignatureStorage {
         mpc_node::storage::presignature_storage::init(&self.pool(), id)
     }
+
+    pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants) {
+        let pool = self.pool();
+        let storage = participants
+            .participants
+            .keys()
+            .map(|account_id| {
+                (
+                    Participant::from(
+                        *participants
+                            .account_to_participant_id
+                            .get(account_id)
+                            .unwrap(),
+                    ),
+                    mpc_node::storage::triple_storage::init(&pool, account_id),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        let participant_ids = participants
+            .account_to_participant_id
+            .values()
+            .map(|id| Participant::from(*id))
+            .collect::<Vec<_>>();
+        let (public, shares) =
+            cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
+
+        // - first/second loop add at least min_triples per node
+        // - third loop: for each triple, store the shares individually per node
+        let mut num_triples = 0;
+        for mine_idx in &participant_ids {
+            for _ in 0..(cfg.protocol.triple.min_triples * 3) {
+                num_triples += 1;
+                let triple_id = rand::random();
+                for (participant, triple) in participant_ids
+                    .iter()
+                    .zip(shares_to_triples(triple_id, &public, &shares))
+                {
+                    let mine = participant == mine_idx;
+                    storage
+                        .get(participant)
+                        .unwrap()
+                        .insert(triple, mine, false)
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+
+        tracing::info!("stockpiled {num_triples} triples");
+    }
+}
+
+fn shares_to_triples(
+    id: u64,
+    public: &TriplePub<Secp256k1>,
+    shares: &[TripleShare<Secp256k1>],
+) -> Vec<Triple> {
+    shares
+        .into_iter()
+        .map(|share| Triple {
+            id,
+            public: public.clone(),
+            share: share.clone(),
+        })
+        .collect()
 }
