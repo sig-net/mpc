@@ -22,7 +22,11 @@ pub mod nightly;
 
 #[test(tokio::test)]
 async fn test_multichain_reshare() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn().wait_for_running().await?;
+    let mut nodes = cluster::spawn()
+        .disable_prestockpile()
+        .wait_for_running()
+        .await?;
+
     nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
 
