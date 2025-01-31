@@ -8,12 +8,26 @@ There are several components that make up chain-signatures. This includes but is
 
 Note that this list only includes components vital to creating signatures and not the components required to do foreign chain interactions like sending the signature over to ethereum or any other chain. Each of these will be explained further in the following sections.
 
+But first, here is a visual high-level overview.
+
+![diagram](./doc/System%20Architecture%20Overview%20-%20High%20Level.svg)
+
 ### NEAR Smart Contract
 
 The contract is simple in terms of functionality. It provides two main functions for users or developers to call into.
 
 - The most common of which is `sign`, which when called will yield back a signature for the user to consume however they wish to. For example, this signature can be used to sign into arbitrary chains given the derivation path of the account of that chain. For more info on how the MPC node picks these `sign` request, refer to the NEAR Lake Indexer section.
 - The second method (and should realistically only be used by the MPC nodes themselves), are the `vote_*` methods. These allow the MPC nodes to each individually act as voters into the MPC network, and facilitates the way new nodes join or current nodes get kicked out.
+
+Besides the two methods for users, there are also methods only used by the MPC nodes.
+
+- `respond` is the sibling of `sign`. It takes the completed signature from the MPC network, wakes up a waiting `sign` call and return it back to the calling user.
+- `state` and `config` are view calls used by the MPC nodes to read the shared network state.
+- `system_load` and `version` are for debugging
+
+The diagram below shows everything the Near smart contract does, combining the network management with the singing functionality, all in one contract.
+
+![diagram](./doc/System%20Architecture%20Overview%20-%20Smart%20Contract.svg)
 
 #### MPC State
 
