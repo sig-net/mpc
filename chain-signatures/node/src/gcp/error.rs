@@ -19,25 +19,3 @@ pub enum SecretStorageError {
     #[error("(de)serialization error: {0}")]
     SerdeError(#[from] serde_json::Error),
 }
-
-#[derive(thiserror::Error, Debug)]
-pub enum DatastoreStorageError {
-    #[error("GCP error: {0}")]
-    GcpError(#[from] google_datastore1::Error),
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
-    #[error("(de)serialization error: {0}")]
-    SerdeError(#[from] serde_json::Error),
-    #[error("datastore value conversion error: {0}")]
-    ConvertError(ConvertError),
-    #[error("fetch_entities error: `{0}`")]
-    FetchEntitiesError(String),
-    #[error("could not find entity: {0}")]
-    EntityNotFound(String),
-}
-
-impl From<ConvertError> for DatastoreStorageError {
-    fn from(err: ConvertError) -> Self {
-        DatastoreStorageError::ConvertError(err)
-    }
-}

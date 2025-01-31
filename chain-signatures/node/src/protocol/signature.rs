@@ -1,11 +1,13 @@
 use super::contract::primitives::Participants;
-use super::message::SignatureMessage;
 use super::presignature::{GenerationError, Presignature, PresignatureId, PresignatureManager};
+use super::state::RunningState;
 use crate::indexer::ContractSignRequest;
-use crate::kdf::{derive_delta, into_eth_sig};
+use crate::kdf::derive_delta;
+use crate::protocol::message::{MessageChannel, SignatureMessage};
+use crate::protocol::Chain;
+use crate::rpc::RpcChannel;
 use crate::types::SignatureProtocol;
 use crate::util::AffinePointExt;
-use near_primitives::hash::CryptoHash;
 
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{FullSignature, PresignOutput};
@@ -20,114 +22,84 @@ use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::{mpsc, RwLock};
 
 use near_account_id::AccountId;
-use near_fetch::signer::SignerExt;
+use near_primitives::hash::CryptoHash;
 
 pub type ReceiptId = near_primitives::hash::CryptoHash;
 
+/// This is the maximum amount of sign requests that we can accept in the network.
+const MAX_SIGN_REQUESTS: usize = 1024;
+
 pub struct SignRequest {
-    pub receipt_id: ReceiptId,
+    pub request_id: [u8; 32],
     pub request: ContractSignRequest,
     pub epsilon: Scalar,
     pub entropy: [u8; 32],
     pub time_added: Instant,
 }
 
-/// Type that preserves the insertion order of requests.
-#[derive(Default)]
-pub struct ParticipantRequests {
-    requests: HashMap<ReceiptId, SignRequest>,
-    order: VecDeque<ReceiptId>,
-}
-
-impl ParticipantRequests {
-    fn insert(&mut self, receipt_id: ReceiptId, request: SignRequest) {
-        self.requests.insert(receipt_id, request);
-        self.order.push_back(receipt_id);
-    }
-
-    fn contains_key(&self, receipt_id: &ReceiptId) -> bool {
-        self.requests.contains_key(receipt_id)
-    }
-
-    pub fn len(&self) -> usize {
-        self.requests.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn pop_front(&mut self) -> Option<(ReceiptId, SignRequest)> {
-        let receipt_id = self.order.pop_front()?;
-        self.requests
-            .remove(&receipt_id)
-            .map(|req| (receipt_id, req))
-    }
-}
-
-#[derive(Default)]
 pub struct SignQueue {
-    unorganized_requests: Vec<SignRequest>,
-    requests: HashMap<Participant, ParticipantRequests>,
+    me: Participant,
+    sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
+    requests: HashMap<Participant, VecDeque<SignRequest>>,
 }
 
 impl SignQueue {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn channel() -> (mpsc::Sender<SignRequest>, mpsc::Receiver<SignRequest>) {
+        mpsc::channel(MAX_SIGN_REQUESTS)
+    }
+
+    pub fn new(me: Participant, sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>) -> Self {
+        Self {
+            me,
+            sign_rx,
+            requests: HashMap::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.unorganized_requests.len()
+        self.requests.values().map(|v| v.len()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    pub fn add(&mut self, request: SignRequest) {
-        tracing::info!(
-            receipt_id = %request.receipt_id,
-            payload = hex::encode(request.request.payload.to_bytes()),
-            entropy = hex::encode(request.entropy),
-            "new sign request"
-        );
-        self.unorganized_requests.push(request);
-    }
-
-    pub fn organize(
+    pub async fn organize(
         &mut self,
         threshold: usize,
         stable: &Participants,
-        me: Participant,
         my_account_id: &AccountId,
     ) {
-        if stable.len() < threshold {
-            tracing::warn!(
-                "Require at least {} stable participants to organize, got {}: {:?}",
-                threshold,
-                stable.len(),
-                stable.keys_vec()
-            );
-            return;
-        }
-        for request in self.unorganized_requests.drain(..) {
+        let mut sign_rx = self.sign_rx.write().await;
+        while let Ok(request) = {
+            match sign_rx.try_recv() {
+                err @ Err(TryRecvError::Disconnected) => {
+                    tracing::error!("sign queue channel disconnected");
+                    err
+                }
+                other => other,
+            }
+        } {
             let mut rng = StdRng::from_seed(request.entropy);
             let subset = stable.keys().choose_multiple(&mut rng, threshold);
             let proposer = **subset.choose(&mut rng).unwrap();
-            if subset.contains(&&me) {
-                let is_mine = proposer == me;
+            if subset.contains(&&self.me) {
+                let is_mine = proposer == self.me;
                 tracing::info!(
-                    receipt_id = %request.receipt_id,
+                    request_id = ?CryptoHash(request.request_id),
                     ?is_mine,
                     ?subset,
                     ?proposer,
                     "saving sign request: node is in the signer subset"
                 );
                 let proposer_requests = self.requests.entry(proposer).or_default();
-                proposer_requests.insert(request.receipt_id, request);
+                proposer_requests.push_back(request);
                 if is_mine {
                     crate::metrics::NUM_SIGN_REQUESTS_MINE
                         .with_label_values(&[my_account_id.as_str()])
@@ -135,8 +107,8 @@ impl SignQueue {
                 }
             } else {
                 tracing::info!(
-                    receipt_id = %request.receipt_id,
-                    ?me,
+                    rrequest_id = ?CryptoHash(request.request_id),
+                    me = ?self.me,
                     ?subset,
                     ?proposer,
                     "skipping sign request: node is NOT in the signer subset"
@@ -145,15 +117,12 @@ impl SignQueue {
         }
     }
 
-    pub fn contains(&self, participant: Participant, receipt_id: ReceiptId) -> bool {
-        let Some(participant_requests) = self.requests.get(&participant) else {
-            return false;
-        };
-        participant_requests.contains_key(&receipt_id)
+    pub fn take_my_requests(&mut self) -> VecDeque<SignRequest> {
+        self.requests.remove(&self.me).unwrap_or_default()
     }
 
-    pub fn my_requests(&mut self, me: Participant) -> &mut ParticipantRequests {
-        self.requests.entry(me).or_default()
+    pub fn insert_mine(&mut self, requests: VecDeque<SignRequest>) {
+        self.requests.insert(self.me, requests);
     }
 }
 
@@ -165,7 +134,7 @@ pub struct SignatureGenerator {
     pub presignature_id: PresignatureId,
     pub request: ContractSignRequest,
     pub epsilon: Scalar,
-    pub receipt_id: CryptoHash,
+    pub request_id: [u8; 32],
     pub entropy: [u8; 32],
     pub sign_request_timestamp: Instant,
     pub generator_timestamp: Instant,
@@ -182,7 +151,7 @@ impl SignatureGenerator {
         presignature_id: PresignatureId,
         request: ContractSignRequest,
         epsilon: Scalar,
-        receipt_id: CryptoHash,
+        request_id: [u8; 32],
         entropy: [u8; 32],
         sign_request_timestamp: Instant,
         cfg: &ProtocolConfig,
@@ -194,7 +163,7 @@ impl SignatureGenerator {
             presignature_id,
             request,
             epsilon,
-            receipt_id,
+            request_id,
             entropy,
             sign_request_timestamp,
             generator_timestamp: Instant::now(),
@@ -227,49 +196,69 @@ pub struct GenerationRequest {
     pub proposer: Participant,
     pub request: ContractSignRequest,
     pub epsilon: Scalar,
-    pub receipt_id: CryptoHash,
+    pub request_id: [u8; 32],
     pub entropy: [u8; 32],
     pub sign_request_timestamp: Instant,
 }
 
-pub struct SignatureManager {
-    /// Ongoing signature generation protocols.
-    generators: HashMap<ReceiptId, SignatureGenerator>,
-    /// Failed signatures awaiting to be retried.
-    failed: VecDeque<(ReceiptId, GenerationRequest)>,
-    /// Set of completed signatures
-    completed: HashMap<ReceiptId, Instant>,
-    /// Generated signatures assigned to the current node that are yet to be published.
-    /// Vec<(receipt_id, msg_hash, timestamp, output)>
-    signatures: Vec<ToPublish>,
-    me: Participant,
-    public_key: PublicKey,
-    epoch: u64,
-    my_account_id: AccountId,
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+pub struct SignRequestIdentifier {
+    pub request_id: [u8; 32],
+    pub epsilon: Vec<u8>,
+    pub payload: Vec<u8>,
 }
 
-pub const MAX_RETRY: u8 = 10;
+impl SignRequestIdentifier {
+    pub fn new(request_id: [u8; 32], epsilon: Scalar, payload: Scalar) -> Self {
+        Self {
+            request_id,
+            epsilon: borsh::to_vec(&SerializableScalar { scalar: epsilon }).unwrap(),
+            payload: borsh::to_vec(&SerializableScalar { scalar: payload }).unwrap(),
+        }
+    }
+}
+
+pub struct SignatureManager {
+    /// Ongoing signature generation protocols.
+    generators: HashMap<SignRequestIdentifier, SignatureGenerator>,
+    /// Failed signatures awaiting to be retried.
+    failed: VecDeque<(SignRequestIdentifier, GenerationRequest)>,
+    /// Set of completed signatures
+    completed: HashMap<SignRequestIdentifier, Instant>,
+    /// Sign queue that maintains all requests coming in from indexer.
+    sign_queue: SignQueue,
+
+    me: Participant,
+    my_account_id: AccountId,
+    threshold: usize,
+    public_key: PublicKey,
+    epoch: u64,
+}
+
 pub struct ToPublish {
-    receipt_id: ReceiptId,
-    request: SignatureRequest,
-    time_added: Instant,
-    signature: FullSignature<Secp256k1>,
-    retry_count: u8,
+    pub request_id: [u8; 32],
+    pub request: SignatureRequest,
+    pub time_added: Instant,
+    pub signature: FullSignature<Secp256k1>,
+    pub retry_count: u8,
+    pub chain: Chain,
 }
 
 impl ToPublish {
     pub fn new(
-        receipt_id: ReceiptId,
+        request_id: [u8; 32],
         request: SignatureRequest,
         time_added: Instant,
         signature: FullSignature<Secp256k1>,
+        chain: Chain,
     ) -> ToPublish {
         ToPublish {
-            receipt_id,
+            request_id,
             request,
             time_added,
             signature,
             retry_count: 0,
+            chain,
         }
     }
 }
@@ -277,19 +266,22 @@ impl ToPublish {
 impl SignatureManager {
     pub fn new(
         me: Participant,
+        my_account_id: &AccountId,
+        threshold: usize,
         public_key: PublicKey,
         epoch: u64,
-        my_account_id: &AccountId,
+        sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
     ) -> Self {
         Self {
             generators: HashMap::new(),
             failed: VecDeque::new(),
             completed: HashMap::new(),
-            signatures: Vec::new(),
+            sign_queue: SignQueue::new(me, sign_rx),
             me,
+            my_account_id: my_account_id.clone(),
+            threshold,
             public_key,
             epoch,
-            my_account_id: my_account_id.clone(),
         }
     }
 
@@ -316,12 +308,12 @@ impl SignatureManager {
             proposer,
             request,
             epsilon,
-            receipt_id,
+            request_id,
             entropy,
             sign_request_timestamp,
         } = req;
         let PresignOutput { big_r, k, sigma } = presignature.output;
-        let delta = derive_delta(receipt_id, entropy, big_r);
+        let delta = derive_delta(request_id, entropy, big_r);
         // TODO: Check whether it is okay to use invert_vartime instead
         let output: PresignOutput<Secp256k1> = PresignOutput {
             big_r: (big_r * delta).to_affine(),
@@ -346,7 +338,7 @@ impl SignatureManager {
             presignature_id,
             request,
             epsilon,
-            receipt_id,
+            request_id,
             entropy,
             sign_request_timestamp,
             cfg,
@@ -356,13 +348,13 @@ impl SignatureManager {
     #[allow(clippy::result_large_err)]
     fn retry_failed_generation(
         &mut self,
-        receipt_id: ReceiptId,
+        sign_request_identifier: SignRequestIdentifier,
         req: GenerationRequest,
         presignature: Presignature,
         participants: &Participants,
         cfg: &ProtocolConfig,
     ) -> Result<(), (Presignature, InitializationError)> {
-        tracing::info!(receipt_id = %receipt_id, participants = ?participants.keys_vec(), "restarting failed protocol to generate signature");
+        tracing::info!(sign_request_identifier = ?sign_request_identifier, participants = ?participants.keys_vec(), "restarting failed protocol to generate signature");
         let generator = Self::generate_internal(
             participants,
             self.me,
@@ -374,7 +366,7 @@ impl SignatureManager {
         crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
             .with_label_values(&[self.my_account_id.as_str()])
             .inc();
-        self.generators.insert(receipt_id, generator);
+        self.generators.insert(sign_request_identifier, generator);
         Ok(())
     }
 
@@ -384,7 +376,7 @@ impl SignatureManager {
     pub fn generate(
         &mut self,
         participants: &Participants,
-        receipt_id: ReceiptId,
+        request_id: [u8; 32],
         presignature: Presignature,
         request: ContractSignRequest,
         epsilon: Scalar,
@@ -392,8 +384,10 @@ impl SignatureManager {
         sign_request_timestamp: Instant,
         cfg: &ProtocolConfig,
     ) -> Result<(), (Presignature, InitializationError)> {
+        let sign_request_identifier =
+            SignRequestIdentifier::new(request_id, epsilon, request.payload);
         tracing::info!(
-            %receipt_id,
+            ?sign_request_identifier,
             me = ?self.me,
             presignature_id = presignature.id,
             participants = ?participants.keys_vec(),
@@ -408,7 +402,7 @@ impl SignatureManager {
                 proposer: self.me,
                 request,
                 epsilon,
-                receipt_id,
+                request_id,
                 entropy,
                 sign_request_timestamp,
             },
@@ -417,7 +411,7 @@ impl SignatureManager {
         crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
             .with_label_values(&[self.my_account_id.as_str()])
             .inc();
-        self.generators.insert(receipt_id, generator);
+        self.generators.insert(sign_request_identifier, generator);
         Ok(())
     }
 
@@ -428,10 +422,10 @@ impl SignatureManager {
     /// 4) Depends on triples (`triple0`/`triple1`) that are unknown to the node
     // TODO: What if the presignature completed generation and is already spent?
     #[allow(clippy::too_many_arguments)]
-    pub fn get_or_generate(
+    pub async fn get_or_start_protocol(
         &mut self,
         participants: &Participants,
-        receipt_id: ReceiptId,
+        request_id: [u8; 32],
         proposer: Participant,
         presignature_id: PresignatureId,
         request: &ContractSignRequest,
@@ -440,14 +434,16 @@ impl SignatureManager {
         presignature_manager: &mut PresignatureManager,
         cfg: &ProtocolConfig,
     ) -> Result<&mut SignatureProtocol, GenerationError> {
-        if self.completed.contains_key(&receipt_id) {
-            tracing::warn!(%receipt_id, presignature_id, "presignature has already been used to generate a signature");
+        let sign_request_identifier =
+            SignRequestIdentifier::new(request_id, epsilon, request.payload);
+        if self.completed.contains_key(&sign_request_identifier) {
+            tracing::warn!(sign_request_identifier = ?sign_request_identifier.clone(), presignature_id, "presignature has already been used to generate a signature");
             return Err(GenerationError::AlreadyGenerated);
         }
-        match self.generators.entry(receipt_id) {
+        match self.generators.entry(sign_request_identifier.clone()) {
             Entry::Vacant(entry) => {
-                tracing::info!(%receipt_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
-                let presignature = match presignature_manager.take(presignature_id) {
+                tracing::info!(sign_request_identifier = ?sign_request_identifier.clone(), me = ?self.me, presignature_id, "joining protocol to generate a new signature");
+                let presignature = match presignature_manager.take(presignature_id).await {
                     Ok(presignature) => presignature,
                     Err(err @ GenerationError::PresignatureIsGenerating(_)) => {
                         tracing::warn!(me = ?self.me, presignature_id, "presignature is generating, can't join signature generation protocol");
@@ -474,15 +470,14 @@ impl SignatureManager {
                         request: request.clone(),
                         epsilon,
                         entropy,
-                        receipt_id,
+                        request_id,
                         sign_request_timestamp: Instant::now(),
                     },
                     cfg,
                 ) {
                     Ok(generator) => generator,
                     Err((presignature, err @ InitializationError::BadParameters(_))) => {
-                        presignature_manager.insert_mine(presignature);
-                        tracing::warn!(%receipt_id, presignature_id, ?err, "failed to start signature generation");
+                        tracing::warn!(sign_request = ?sign_request_identifier, presignature.id, ?err, "failed to start signature generation");
                         return Err(GenerationError::CaitSithInitializationError(err));
                     }
                 };
@@ -496,19 +491,17 @@ impl SignatureManager {
         }
     }
 
-    /// Pokes all of the ongoing generation protocols and returns a vector of
-    /// messages to be sent to the respective participant.
-    ///
-    /// An empty vector means we cannot progress until we receive a new message.
-    pub fn poke(&mut self) -> Vec<(Participant, SignatureMessage)> {
-        let mut messages = Vec::new();
-        self.generators.retain(|receipt_id, generator| {
+    /// Pokes all of the ongoing generation protocols to completion
+    pub async fn poke(&mut self, message: MessageChannel, rpc: RpcChannel) {
+        let mut remove = Vec::new();
+        for (sign_request_id, generator) in self.generators.iter_mut() {
             loop {
                 let action = match generator.poke() {
                     Ok(action) => action,
                     Err(err) => {
                         if generator.proposer == self.me {
-                            if generator.sign_request_timestamp.elapsed() < generator.timeout_total {
+                            if generator.sign_request_timestamp.elapsed() < generator.timeout_total
+                            {
                                 tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
                                 crate::metrics::SIGNATURE_GENERATOR_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])
@@ -516,39 +509,73 @@ impl SignatureManager {
                                 // only retry the signature generation if it was initially proposed by us. We do not
                                 // want any nodes to be proposing the same signature multiple times.
                                 self.failed.push_back((
-                                    *receipt_id,
+                                    sign_request_id.clone(),
                                     GenerationRequest {
                                         proposer: generator.proposer,
                                         request: generator.request.clone(),
                                         epsilon: generator.epsilon,
-                                        receipt_id: generator.receipt_id,
+                                        request_id: generator.request_id,
                                         entropy: generator.entropy,
-                                        sign_request_timestamp: generator.sign_request_timestamp
+                                        sign_request_timestamp: generator.sign_request_timestamp,
                                     },
                                 ));
                             } else {
-                                self.completed.insert(*receipt_id, Instant::now());
+                                self.completed
+                                    .insert(sign_request_id.clone(), Instant::now());
+                                crate::metrics::SIGNATURE_GENERATOR_FAILURES
+                                    .with_label_values(&[self.my_account_id.as_str()])
+                                    .inc();
                                 crate::metrics::SIGNATURE_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])
                                     .inc();
-                                tracing::warn!(?err, "signature failed to be produced; trashing request");
+                                tracing::warn!(
+                                    ?err,
+                                    "signature failed to be produced; trashing request"
+                                );
                             }
                         }
-                        break false;
+                        remove.push(sign_request_id.clone());
+                        break;
                     }
                 };
                 match action {
                     Action::Wait => {
                         tracing::debug!("signature: waiting");
                         // Retain protocol until we are finished
-                        return true;
+                        break;
                     }
                     Action::SendMany(data) => {
-                        for p in generator.participants.iter() {
-                            messages.push((
-                                *p,
+                        for to in generator.participants.iter() {
+                            if *to == self.me {
+                                continue;
+                            }
+                            message
+                                .send(
+                                    self.me,
+                                    *to,
+                                    SignatureMessage {
+                                        request_id: sign_request_id.request_id,
+                                        proposer: generator.proposer,
+                                        presignature_id: generator.presignature_id,
+                                        request: generator.request.clone(),
+                                        epsilon: generator.epsilon,
+                                        entropy: generator.entropy,
+                                        epoch: self.epoch,
+                                        from: self.me,
+                                        data: data.clone(),
+                                        timestamp: Utc::now().timestamp() as u64,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                    Action::SendPrivate(to, data) => {
+                        message
+                            .send(
+                                self.me,
+                                to,
                                 SignatureMessage {
-                                    receipt_id: *receipt_id,
+                                    request_id: sign_request_id.request_id,
                                     proposer: generator.proposer,
                                     presignature_id: generator.presignature_id,
                                     request: generator.request.clone(),
@@ -556,123 +583,144 @@ impl SignatureManager {
                                     entropy: generator.entropy,
                                     epoch: self.epoch,
                                     from: self.me,
-                                    data: data.clone(),
-                                    timestamp: Utc::now().timestamp() as u64
+                                    data,
+                                    timestamp: Utc::now().timestamp() as u64,
                                 },
-                            ))
-                        }
+                            )
+                            .await
                     }
-                    Action::SendPrivate(p, data) => messages.push((
-                        p,
-                        SignatureMessage {
-                            receipt_id: *receipt_id,
-                            proposer: generator.proposer,
-                            presignature_id: generator.presignature_id,
-                            request: generator.request.clone(),
-                            epsilon: generator.epsilon,
-                            entropy: generator.entropy,
-                            epoch: self.epoch,
-                            from: self.me,
-                            data,
-                            timestamp: Utc::now().timestamp() as u64
-                        },
-                    )),
                     Action::Return(output) => {
                         tracing::info!(
-                            ?receipt_id,
+                            ?sign_request_id,
                             me = ?self.me,
                             presignature_id = generator.presignature_id,
                             big_r = ?output.big_r.to_base58(),
                             s = ?output.s,
+                            elapsed = ?generator.generator_timestamp.elapsed(),
                             "completed signature generation"
                         );
-                        self.completed.insert(*receipt_id, Instant::now());
+                        crate::metrics::SIGN_GENERATION_LATENCY
+                            .with_label_values(&[self.my_account_id.as_str()])
+                            .observe(generator.generator_timestamp.elapsed().as_secs_f64());
+
+                        self.completed
+                            .insert(sign_request_id.clone(), Instant::now());
                         let request = SignatureRequest {
-                            epsilon: SerializableScalar {scalar: generator.epsilon},
+                            epsilon: SerializableScalar {
+                                scalar: generator.epsilon,
+                            },
                             payload_hash: generator.request.payload.into(),
                         };
                         if generator.proposer == self.me {
-                            self.signatures
-                                .push(ToPublish::new(*receipt_id, request, generator.sign_request_timestamp, output));
+                            let to_publish = ToPublish::new(
+                                sign_request_id.request_id,
+                                request,
+                                generator.sign_request_timestamp,
+                                output,
+                                generator.request.chain,
+                            );
+                            tokio::spawn(rpc.clone().publish(self.public_key, to_publish));
                         }
                         // Do not retain the protocol
-                        return false;
+                        remove.push(sign_request_id.clone());
                     }
                 }
             }
-        });
-        messages
+        }
+
+        for sign_request_id in remove {
+            self.generators.remove(&sign_request_id);
+        }
     }
 
-    pub fn handle_requests(
+    pub async fn handle_requests(
         &mut self,
-        threshold: usize,
         stable: &Participants,
-        my_requests: &mut ParticipantRequests,
         presignature_manager: &mut PresignatureManager,
         cfg: &ProtocolConfig,
     ) {
-        if stable.len() < threshold {
+        if stable.len() < self.threshold {
             tracing::warn!(
                 "Require at least {} stable participants to handle_requests, got {}: {:?}",
-                threshold,
+                self.threshold,
                 stable.len(),
                 stable.keys_vec()
             );
             return;
         }
-        let mut failed_presigs = Vec::new();
+
+        self.sign_queue
+            .organize(self.threshold, stable, &self.my_account_id)
+            .await;
+        crate::metrics::SIGN_QUEUE_SIZE
+            .with_label_values(&[self.my_account_id.as_str()])
+            .set(self.sign_queue.len() as i64);
+        let mut my_requests = self.sign_queue.take_my_requests();
+        crate::metrics::SIGN_QUEUE_MINE_SIZE
+            .with_label_values(&[self.my_account_id.as_str()])
+            .set(my_requests.len() as i64);
+
         while let Some(mut presignature) = {
             if self.failed.is_empty() && my_requests.is_empty() {
                 None
             } else {
-                presignature_manager.take_mine()
+                presignature_manager.take_mine().await
             }
         } {
             let sig_participants = stable.intersection(&[&presignature.participants]);
-            if sig_participants.len() < threshold {
+            if sig_participants.len() < self.threshold {
                 tracing::warn!(
                     participants = ?sig_participants.keys_vec(),
-                    "intersection of stable participants and presignature participants is less than threshold"
+                    "intersection of stable participants and presignature participants is less than threshold, trashing presignature"
                 );
-                failed_presigs.push(presignature);
+                // TODO: do not insert back presignature when we have a clear model for data consistency
+                // between nodes and utilizing only presignatures that meet threshold requirements.
+                presignature_manager.insert(presignature, true, true).await;
                 continue;
             }
-            let presig_id = presignature.id;
 
             // NOTE: this prioritizes old requests first then tries to do new ones if there's enough presignatures.
             // TODO: we need to decide how to prioritize certain requests over others such as with gas or time of
             // when the request made it into the NEAR network.
             // issue: https://github.com/near/mpc-recovery/issues/596
-            if let Some((receipt_id, failed_req)) = self.failed.pop_front() {
+            if let Some((sign_request_identifier, failed_req)) = self.failed.pop_front() {
                 if let Err((presignature, InitializationError::BadParameters(err))) = self
                     .retry_failed_generation(
-                        receipt_id,
+                        sign_request_identifier.clone(),
                         failed_req,
                         presignature,
                         &sig_participants,
                         cfg,
                     )
                 {
-                    tracing::warn!(%receipt_id, presig_id, ?err, "failed to retry signature generation: trashing presignature");
-                    failed_presigs.push(presignature);
+                    tracing::warn!(
+                        ?sign_request_identifier,
+                        presignature.id,
+                        ?err,
+                        "failed to retry signature generation: trashing presignature"
+                    );
                     continue;
                 }
 
-                if let Some(another_presignature) = presignature_manager.take_mine() {
+                if my_requests.is_empty() {
+                    continue;
+                }
+
+                if let Some(another_presignature) = presignature_manager.take_mine().await {
                     presignature = another_presignature;
                 } else {
                     break;
                 }
             }
 
-            let Some((receipt_id, my_request)) = my_requests.pop_front() else {
-                failed_presigs.push(presignature);
+            let Some(my_request) = my_requests.pop_front() else {
+                tracing::warn!("unexpected state, no more requests to handle");
                 continue;
             };
+
             if let Err((presignature, InitializationError::BadParameters(err))) = self.generate(
                 &sig_participants,
-                receipt_id,
+                my_request.request_id,
                 presignature,
                 my_request.request,
                 my_request.epsilon,
@@ -680,99 +728,16 @@ impl SignatureManager {
                 my_request.time_added,
                 cfg,
             ) {
-                failed_presigs.push(presignature);
-                tracing::warn!(%receipt_id, presig_id, ?err, "failed to start signature generation: trashing presignature");
+                tracing::warn!(request_id = ?CryptoHash(my_request.request_id), presignature.id, ?err, "failed to start signature generation: trashing presignature");
                 continue;
             }
         }
 
-        // add back the failed presignatures that were incompatible to be made into
-        // signatures due to failures or lack of participants.
-        for presignature in failed_presigs {
-            presignature_manager.insert_mine(presignature);
+        // We do not have enough presignature stockpile and the taken requests need to be fulfilled,
+        // so insert it back into the sign queue to be fulfilled in the next iteration.
+        if !my_requests.is_empty() {
+            self.sign_queue.insert_mine(my_requests);
         }
-    }
-
-    pub async fn publish<T: SignerExt>(
-        &mut self,
-        rpc_client: &near_fetch::Client,
-        signer: &T,
-        mpc_contract_id: &AccountId,
-    ) {
-        let mut to_retry: Vec<ToPublish> = Vec::new();
-
-        for mut to_publish in self.signatures.drain(..) {
-            let ToPublish {
-                receipt_id,
-                request,
-                time_added,
-                signature,
-                ..
-            } = &to_publish;
-            let expected_public_key = derive_key(self.public_key, request.epsilon.scalar);
-            // We do this here, rather than on the client side, so we can use the ecrecover system function on NEAR to validate our signature
-            let Ok(signature) = into_eth_sig(
-                &expected_public_key,
-                &signature.big_r,
-                &signature.s,
-                request.payload_hash.scalar,
-            ) else {
-                tracing::error!(%receipt_id, "Failed to generate a recovery ID");
-                continue;
-            };
-            let response = match rpc_client
-                .call(signer, mpc_contract_id, "respond")
-                .args_json(serde_json::json!({
-                    "request": request,
-                    "response": signature,
-                }))
-                .max_gas()
-                .retry_exponential(10, 5)
-                .transact()
-                .await
-            {
-                Ok(response) => response,
-                Err(err) => {
-                    tracing::error!(%receipt_id, error = ?err, "Failed to publish the signature");
-                    crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                        .with_label_values(&[self.my_account_id.as_str()])
-                        .inc();
-                    // Push the response to the back of the queue if it hasn't been retried the max number of times
-                    if to_publish.retry_count < MAX_RETRY {
-                        to_publish.retry_count += 1;
-                        to_retry.push(to_publish);
-                    }
-                    continue;
-                }
-            };
-
-            match response.json() {
-                Ok(()) => {
-                    tracing::info!(%receipt_id, bi_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, "published signature sucessfully")
-                }
-                Err(err) => {
-                    tracing::error!(%receipt_id, bi_r = signature.big_r.affine_point.to_base58(), s = ?signature.s, error = ?err, "smart contract threw error");
-                    crate::metrics::SIGNATURE_PUBLISH_RESPONSE_ERRORS
-                        .with_label_values(&[self.my_account_id.as_str()])
-                        .inc();
-                    continue;
-                }
-            };
-
-            crate::metrics::NUM_SIGN_SUCCESS
-                .with_label_values(&[self.my_account_id.as_str()])
-                .inc();
-            crate::metrics::SIGN_LATENCY
-                .with_label_values(&[self.my_account_id.as_str()])
-                .observe(time_added.elapsed().as_secs_f64());
-            if time_added.elapsed().as_secs() <= 30 {
-                crate::metrics::NUM_SIGN_SUCCESS_30S
-                    .with_label_values(&[self.my_account_id.as_str()])
-                    .inc();
-            }
-        }
-        // Put the failed requests at the back of the queue
-        self.signatures.extend(to_retry);
     }
 
     /// Garbage collect all the completed signatures.
@@ -790,11 +755,40 @@ impl SignatureManager {
         }
     }
 
-    pub fn refresh_gc(&mut self, id: &ReceiptId) -> bool {
+    pub fn refresh_gc(&mut self, id: &SignRequestIdentifier) -> bool {
         let entry = self
             .completed
-            .entry(*id)
+            .entry(id.clone())
             .and_modify(|e| *e = Instant::now());
         matches!(entry, Entry::Occupied(_))
+    }
+
+    pub fn execute(
+        state: &RunningState,
+        stable: &Participants,
+        protocol_cfg: &ProtocolConfig,
+        ctx: &impl super::cryptography::CryptographicCtx,
+    ) -> tokio::task::JoinHandle<()> {
+        let presignature_manager = state.presignature_manager.clone();
+        let signature_manager = state.signature_manager.clone();
+        let stable = stable.clone();
+        let protocol_cfg = protocol_cfg.clone();
+        let rpc_channel = ctx.rpc_channel().clone();
+        let channel = ctx.channel().clone();
+
+        // NOTE: signatures should only use stable and not active participants. The difference here is that
+        // stable participants utilizes more than the online status of a node, such as whether or not their
+        // block height is up to date, such that they too can process signature requests. If they cannot
+        // then they are considered unstable and should not be a part of signature generation this round.
+
+        tokio::task::spawn(tokio::task::unconstrained(async move {
+            let mut signature_manager = signature_manager.write().await;
+            let mut presignature_manager = presignature_manager.write().await;
+            signature_manager
+                .handle_requests(&stable, &mut presignature_manager, &protocol_cfg)
+                .await;
+            drop(presignature_manager);
+            signature_manager.poke(channel, rpc_channel).await;
+        }))
     }
 }

@@ -41,10 +41,30 @@ pub(crate) static NUM_SIGN_SUCCESS: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static SIGN_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static SIGN_TOTAL_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     try_create_histogram_vec(
         "multichain_sign_latency_sec",
         "Latency of multichain signing, start from indexing sign request, end when publish() called.",
+        &["node_account_id"],
+        Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static SIGN_GENERATION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_sign_gen_latency_sec",
+        "Latency of multichain signing, from start signature generation to completion.",
+        &["node_account_id"],
+        Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static SIGN_RESPOND_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_sign_respond_latency_sec",
+        "Latency of multichain signing, from received publish request to publish complete.",
         &["node_account_id"],
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
@@ -257,16 +277,6 @@ pub(crate) static NUM_SIGN_SUCCESS_30S: Lazy<CounterVec> = Lazy::new(|| {
         .unwrap()
 });
 
-pub(crate) static SEND_ENCRYPTED_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
-    try_create_histogram_vec(
-        "multichain_send_encrypted_ms",
-        "Latency of send encrypted.",
-        &["node_account_id"],
-        Some(exponential_buckets(0.5, 1.5, 20).unwrap()),
-    )
-    .unwrap()
-});
-
 pub(crate) static PROTOCOL_LATENCY_ITER_TOTAL: Lazy<HistogramVec> = Lazy::new(|| {
     try_create_histogram_vec(
         "multichain_protocol_iter_total",
@@ -321,6 +331,16 @@ pub(crate) static NUM_SEND_ENCRYPTED_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
         "multichain_send_encrypted_total",
         "number total send encrypted",
         &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static SEND_ENCRYPTED_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    try_create_histogram_vec(
+        "multichain_send_encrypted_ms",
+        "Latency of send encrypted.",
+        &["node_account_id"],
+        Some(exponential_buckets(0.5, 1.5, 20).unwrap()),
     )
     .unwrap()
 });
@@ -452,6 +472,15 @@ pub(crate) static PROTOCOL_ITER_CNT: Lazy<CounterVec> = Lazy::new(|| {
     try_create_counter_vec(
         "multichain_protocol_iter_count",
         "Count of multichain protocol iter",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static NUM_SIGN_REQUESTS_ETH: Lazy<CounterVec> = Lazy::new(|| {
+    try_create_counter_vec(
+        "multichain_sign_requests_count_eth",
+        "number of multichain sign requests from ethereum chain, marked by sign requests indexed",
         &["node_account_id"],
     )
     .unwrap()

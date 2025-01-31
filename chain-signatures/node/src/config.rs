@@ -3,9 +3,10 @@ use std::str::FromStr;
 
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke;
-use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::rpc::NearClient;
 
 /// The contract's config is a dynamic representation of all configurations possible.
 pub type ContractConfig = HashMap<String, Value>;
@@ -51,12 +52,8 @@ impl Config {
 
     /// Fetches the latest config from the contract and set the config inplace. The old config
     /// is returned when swap is completed.
-    pub async fn fetch_inplace(
-        &mut self,
-        rpc_client: &near_fetch::Client,
-        contract_id: &AccountId,
-    ) -> anyhow::Result<Self> {
-        let new_config = crate::rpc_client::fetch_mpc_config(rpc_client, contract_id, self).await?;
+    pub async fn fetch_inplace(&mut self, rpc_client: &NearClient) -> anyhow::Result<Self> {
+        let new_config = rpc_client.fetch_config(self).await?;
         Ok(std::mem::replace(self, new_config))
     }
 }
@@ -72,6 +69,7 @@ pub struct LocalConfig {
 #[derive(Clone, Debug)]
 pub struct NetworkConfig {
     pub sign_sk: near_crypto::SecretKey,
+    pub cipher_sk: hpke::SecretKey,
     pub cipher_pk: hpke::PublicKey,
 }
 
@@ -82,6 +80,7 @@ impl Default for NetworkConfig {
                 near_crypto::KeyType::ED25519,
                 "test-entropy",
             ),
+            cipher_sk: hpke::SecretKey::from_bytes(&[0; 32]),
             cipher_pk: hpke::PublicKey::from_bytes(&[0; 32]),
         }
     }

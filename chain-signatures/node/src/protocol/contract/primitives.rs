@@ -138,17 +138,18 @@ impl Participants {
         self.participants.iter()
     }
 
-    pub fn find_participant(&self, account_id: &AccountId) -> Option<Participant> {
+    pub fn find(&self, account_id: &AccountId) -> Option<(&Participant, &ParticipantInfo)> {
         self.participants
             .iter()
             .find(|(_, participant_info)| participant_info.account_id == *account_id)
-            .map(|(participant, _)| *participant)
+    }
+
+    pub fn find_participant(&self, account_id: &AccountId) -> Option<&Participant> {
+        self.find(account_id).map(|(participant, _)| participant)
     }
 
     pub fn find_participant_info(&self, account_id: &AccountId) -> Option<&ParticipantInfo> {
-        self.participants
-            .values()
-            .find(|participant_info| participant_info.account_id == *account_id)
+        self.find(account_id).map(|(_, info)| info)
     }
 
     pub fn contains_account_id(&self, account_id: &AccountId) -> bool {
@@ -189,6 +190,26 @@ impl Participants {
         }
         Participants {
             participants: intersect,
+        }
+    }
+}
+
+/// ParticipantMap used to find a participant by specific amount of participants.
+#[derive(Clone, Debug)]
+pub enum ParticipantMap {
+    Zero,
+    One(Participants),
+    Two(Participants, Participants),
+}
+
+impl ParticipantMap {
+    pub fn get(&self, p: &Participant) -> Option<&ParticipantInfo> {
+        match self {
+            ParticipantMap::Zero => None,
+            ParticipantMap::One(participants) => participants.get(p),
+            ParticipantMap::Two(participants1, participants2) => {
+                participants1.get(p).or_else(|| participants2.get(p))
+            }
         }
     }
 }
@@ -291,7 +312,7 @@ impl From<mpc_contract::primitives::PkVotes> for PkVotes {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Votes {
     pub votes: BTreeMap<AccountId, HashSet<AccountId>>,
 }

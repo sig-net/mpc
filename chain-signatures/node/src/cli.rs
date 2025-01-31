@@ -1,17 +1,19 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
+use crate::mesh::Mesh;
+use crate::node_client::{self, NodeClient};
+use crate::protocol::message::MessageChannel;
 use crate::protocol::{MpcSignProtocol, SignQueue};
-use crate::storage::triple_storage::LockTripleNodeStorageBox;
-use crate::{indexer, storage, web};
+use crate::rpc::{NearClient, RpcExecutor};
+use crate::storage::app_data_storage;
+use crate::{indexer, indexer_eth, logs, mesh, storage, web};
 use clap::Parser;
+use deadpool_redis::Runtime;
 use local_ip_address::local_ip;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
-use tracing_stackdriver::layer as stackdriver_layer;
-use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+use tokio::sync::RwLock;
 use url::Url;
 
 use mpc_keys::hpke;
@@ -48,12 +50,18 @@ pub enum Cli {
         /// The secret key used to sign messages to be sent between nodes.
         #[arg(long, env("MPC_SIGN_SK"))]
         sign_sk: Option<SecretKey>,
+        /// Ethereum Indexer options
+        #[clap(flatten)]
+        eth: indexer_eth::EthArgs,
         /// NEAR Lake Indexer options
         #[clap(flatten)]
         indexer_options: indexer::Options,
         /// Local address that other peers can use to message this node.
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
+        /// Debuggable id for each MPC node for logging purposes
+        #[arg(long, env("MPC_DEBUG_NODE_ID"))]
+        debug_id: Option<usize>,
         /// Storage options
         #[clap(flatten)]
         storage_options: storage::Options,
@@ -63,6 +71,10 @@ pub enum Cli {
         /// referer header for mainnet whitelist
         #[arg(long, env("MPC_CLIENT_HEADER_REFERER"), default_value(None))]
         client_header_referer: Option<String>,
+        #[clap(flatten)]
+        mesh_options: mesh::Options,
+        #[clap(flatten)]
+        message_options: node_client::Options,
     },
 }
 
@@ -78,11 +90,15 @@ impl Cli {
                 cipher_pk,
                 cipher_sk,
                 sign_sk,
+                eth,
                 indexer_options,
                 my_address,
+                debug_id,
                 storage_options,
                 override_config,
                 client_header_referer,
+                mesh_options,
+                message_options,
             } => {
                 let mut args = vec![
                     "start".to_string(),
@@ -100,12 +116,17 @@ impl Cli {
                     cipher_pk,
                     "--cipher-sk".to_string(),
                     cipher_sk,
+                    "--redis-url".to_string(),
+                    storage_options.redis_url.to_string(),
                 ];
                 if let Some(sign_sk) = sign_sk {
                     args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
                 }
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
+                }
+                if let Some(debug_id) = debug_id {
+                    args.extend(["--debug-id".to_string(), debug_id.to_string()]);
                 }
                 if let Some(override_config) = override_config {
                     args.extend([
@@ -118,49 +139,18 @@ impl Cli {
                     args.extend(["--client-header-referer".to_string(), client_header_referer]);
                 }
 
+                args.extend(eth.into_str_args());
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
+                args.extend(mesh_options.into_str_args());
+                args.extend(message_options.into_str_args());
                 args
             }
         }
     }
 }
 
-/// This will whether this code is being ran on top of GCP or not.
-fn is_running_on_gcp() -> bool {
-    // Check if running in Google Cloud Run: https://cloud.google.com/run/docs/container-contract#services-env-vars
-    if std::env::var("K_SERVICE").is_ok() {
-        return true;
-    }
-
-    let resp = reqwest::blocking::Client::new()
-        .get("http://metadata.google.internal/computeMetadata/v1/instance/id")
-        .header("Metadata-Flavor", "Google")
-        .timeout(Duration::from_millis(200))
-        .send();
-
-    match resp {
-        Ok(resp) => resp.status().is_success(),
-        _ => false,
-    }
-}
-
 pub fn run(cmd: Cli) -> anyhow::Result<()> {
-    // Install global collector configured based on RUST_LOG env var.
-    let base_subscriber = Registry::default().with(EnvFilter::from_default_env());
-
-    let subscriber = if is_running_on_gcp() {
-        let stackdriver = stackdriver_layer().with_writer(std::io::stderr);
-        base_subscriber.with(None).with(Some(stackdriver))
-    } else {
-        let fmt_layer = tracing_subscriber::fmt::layer().with_thread_ids(true);
-        base_subscriber.with(Some(fmt_layer)).with(None)
-    };
-
-    tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
-
-    let _span = tracing::trace_span!("cli").entered();
-
     match cmd {
         Cli::Start {
             near_rpc,
@@ -171,32 +161,53 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             cipher_pk,
             cipher_sk,
             sign_sk,
+            eth,
             indexer_options,
             my_address,
+            debug_id,
             storage_options,
             override_config,
             client_header_referer,
+            mesh_options,
+            message_options,
         } => {
-            let sign_queue = Arc::new(RwLock::new(SignQueue::new()));
+            logs::install_global(debug_id);
+            let _span = tracing::trace_span!("cli").entered();
+
+            let (sign_tx, sign_rx) = SignQueue::channel();
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
             let gcp_service =
                 rt.block_on(async { GcpService::init(&account_id, &storage_options).await })?;
+
+            let key_storage =
+                storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
+
+            let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
+
+            let redis_cfg = deadpool_redis::Config::from_url(redis_url);
+            let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+            let triple_storage = storage::triple_storage::init(&redis_pool, &account_id);
+            let presignature_storage =
+                storage::presignature_storage::init(&redis_pool, &account_id);
+            let app_data_storage = app_data_storage::init(&redis_pool, &account_id);
+
+            let mut rpc_client = near_fetch::Client::new(&near_rpc);
+            if let Some(referer_param) = client_header_referer {
+                let client_headers = rpc_client.inner_mut().headers_mut();
+                client_headers.insert(http::header::REFERER, referer_param.parse().unwrap());
+            }
+            tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
+
             let (indexer_handle, indexer) = indexer::run(
                 &indexer_options,
                 &mpc_contract_id,
                 &account_id,
-                &sign_queue,
-                &gcp_service,
-                &rt,
+                sign_tx.clone(),
+                app_data_storage.clone(),
+                rpc_client.clone(),
             )?;
-
-            let key_storage =
-                storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
-            let triple_storage: LockTripleNodeStorageBox = Arc::new(RwLock::new(
-                storage::triple_storage::init(Some(&gcp_service), &account_id),
-            ));
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
@@ -209,51 +220,70 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
                 });
 
-            let (sender, receiver) = mpsc::channel(16384);
-
             tracing::info!(%my_address, "address detected");
-            let mut rpc_client = near_fetch::Client::new(&near_rpc);
-            if let Some(referer_param) = client_header_referer {
-                let client_headers = rpc_client.inner_mut().headers_mut();
-                client_headers.insert(http::header::REFERER, referer_param.parse().unwrap());
-            }
-
-            tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
+            let client = NodeClient::new(&message_options);
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
-            let (protocol, protocol_state) = MpcSignProtocol::init(
-                my_address,
-                mpc_contract_id,
-                account_id,
-                rpc_client,
-                signer,
-                receiver,
-                sign_queue,
-                key_storage,
-                triple_storage,
-                Config::new(LocalConfig {
-                    over: override_config.unwrap_or_else(Default::default),
-                    network: NetworkConfig {
-                        cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
-                        sign_sk,
-                    },
-                }),
-            );
+            let (mesh, mesh_state) = Mesh::init(&client, mesh_options);
+            let contract_state = Arc::new(RwLock::new(None));
 
+            let network = NetworkConfig {
+                cipher_sk: hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?,
+                cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
+                sign_sk,
+            };
+            let near_client =
+                NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
+            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth);
+            let config = Arc::new(RwLock::new(Config::new(LocalConfig {
+                over: override_config.unwrap_or_else(Default::default),
+                network,
+            })));
+
+            tracing::info!(
+                ?mpc_contract_id,
+                ?account_id,
+                ?my_address,
+                near_rpc_url = ?near_client.rpc_addr(),
+                eth_rpc_url = ?eth.eth_rpc_http_url,
+                "starting node",
+            );
             rt.block_on(async {
+                let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
+                let (sender, channel) =
+                    MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
+                let protocol = MpcSignProtocol::init(
+                    my_address,
+                    mpc_contract_id,
+                    account_id.clone(),
+                    state.clone(),
+                    near_client,
+                    rpc_channel,
+                    channel,
+                    sign_rx,
+                    key_storage,
+                    triple_storage,
+                    presignature_storage,
+                );
+
                 tracing::info!("protocol initialized");
-                let protocol_handle = tokio::spawn(async move { protocol.run().await });
+                let rpc_handle = tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
+                let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
+                let protocol_handle =
+                    tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
-                let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
-                let web_handle = tokio::spawn(async move {
-                    web::run(web_port, sender, cipher_sk, protocol_state, indexer).await
-                });
+                let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
+                let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");
 
+                rpc_handle.await?;
+                mesh_handle.await??;
                 protocol_handle.await??;
                 web_handle.await??;
+                eth_indexer_handle.await??;
                 tracing::info!("spinning down");
 
                 indexer_handle.join().unwrap()?;
+
                 anyhow::Ok(())
             })?;
         }

@@ -41,13 +41,16 @@ const GAS_FOR_SIGN_CALL: Gas = Gas::from_tgas(50);
 const DATA_ID_REGISTER: u64 = 0;
 
 // Prepaid gas for a `clear_state_on_finish` call
-const CLEAR_STATE_ON_FINISH_CALL_GAS: Gas = Gas::from_tgas(10);
+const CLEAR_STATE_ON_FINISH_CALL_GAS: Gas = Gas::from_tgas(20);
 
 // Prepaid gas for a `return_signature_on_finish` call
-const RETURN_SIGNATURE_ON_FINISH_CALL_GAS: Gas = Gas::from_tgas(5);
+const RETURN_SIGNATURE_ON_FINISH_CALL_GAS: Gas = Gas::from_tgas(10);
 
 // Prepaid gas for a `update_config` call
 const UPDATE_CONFIG_GAS: Gas = Gas::from_tgas(5);
+
+// Maximum number of concurrent requests
+const MAX_CONCURRENT_REQUESTS: u32 = 128;
 
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
@@ -64,17 +67,23 @@ impl Default for VersionedMpcContract {
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct MpcContract {
     protocol_state: ProtocolContractState,
-    pending_requests: LookupMap<SignatureRequest, YieldIndex>,
+    pending_requests: LookupMap<SignatureRequest, Option<YieldIndex>>,
     request_counter: u32,
     proposed_updates: ProposedUpdates,
     config: Config,
 }
 
 impl MpcContract {
+    fn mark_request_received(&mut self, request: &SignatureRequest) {
+        if self.pending_requests.insert(request, &None).is_none() {
+            self.request_counter += 1;
+        }
+    }
+
     fn add_request(&mut self, request: &SignatureRequest, data_id: CryptoHash) {
         if self
             .pending_requests
-            .insert(request, &YieldIndex { data_id })
+            .insert(request, &Some(YieldIndex { data_id }))
             .is_none()
         {
             self.request_counter += 1;
@@ -154,7 +163,7 @@ impl VersionedMpcContract {
 
         match self {
             Self::V0(mpc_contract) => {
-                if mpc_contract.request_counter > 16 {
+                if mpc_contract.request_counter > MAX_CONCURRENT_REQUESTS {
                     return Err(SignError::RequestLimitExceeded.into());
                 }
             }
@@ -166,6 +175,7 @@ impl VersionedMpcContract {
                 "sign: predecessor={predecessor}, payload={payload:?}, path={path:?}, key_version={key_version}",
             );
             env::log_str(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
+            self.mark_request_received(&request);
             let contract_signature_request = ContractSignatureRequest {
                 request,
                 requester: predecessor,
@@ -174,7 +184,7 @@ impl VersionedMpcContract {
             };
             Ok(Self::ext(env::current_account_id()).sign_helper(contract_signature_request))
         } else {
-            Err(SignError::PayloadCollision.into())
+            Err(SignError::RequestCollision.into())
         }
     }
 
@@ -217,19 +227,16 @@ impl VersionedMpcContract {
 
     /// This experimental function calculates the fee for a signature request.
     /// The fee is volatile and depends on the number of pending requests.
-    /// If used on a client side, it can give outdate results.
+    /// If used on a client side, it can give outdated results.
     pub fn experimental_signature_deposit(&self) -> U128 {
-        const CHEAP_REQUESTS: u32 = 3;
-        let pending_requests = match self {
-            Self::V0(mpc_contract) => mpc_contract.request_counter,
-        };
-        match pending_requests {
-            0..=CHEAP_REQUESTS => U128::from(1),
-            _ => {
-                let expensive_requests = (pending_requests - CHEAP_REQUESTS) as u128;
-                let price = expensive_requests * NearToken::from_millinear(50).as_yoctonear();
-                U128::from(price)
-            }
+        let load = self.system_load();
+
+        match load {
+            0..=25 => U128(1),
+            26..=50 => U128(NearToken::from_millinear(50).as_yoctonear()),
+            51..=75 => U128(NearToken::from_millinear(500).as_yoctonear()),
+            76..=100 => U128(NearToken::from_near(1).as_yoctonear()),
+            _ => U128(NearToken::from_near(1).as_yoctonear()),
         }
     }
 }
@@ -275,7 +282,7 @@ impl VersionedMpcContract {
 
             match self {
                 Self::V0(mpc_contract) => {
-                    if let Some(YieldIndex { data_id }) =
+                    if let Some(Some(YieldIndex { data_id })) =
                         mpc_contract.pending_requests.get(&request)
                     {
                         env::promise_yield_resume(
@@ -670,6 +677,19 @@ impl VersionedMpcContract {
         }
     }
 
+    pub fn system_load(&self) -> u32 {
+        let pending_requests = self.pending_requests();
+        ((pending_requests as f64 / MAX_CONCURRENT_REQUESTS as f64) * 100.0)
+            .min(100.0)
+            .round() as u32
+    }
+
+    pub fn pending_requests(&self) -> u32 {
+        match self {
+            Self::V0(mpc_contract) => mpc_contract.request_counter,
+        }
+    }
+
     // contract version
     pub fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()
@@ -800,6 +820,12 @@ impl VersionedMpcContract {
     fn request_already_exists(&self, request: &SignatureRequest) -> bool {
         match self {
             Self::V0(mpc_contract) => mpc_contract.pending_requests.contains_key(request),
+        }
+    }
+
+    fn mark_request_received(&mut self, request: &SignatureRequest) {
+        match self {
+            Self::V0(ref mut mpc_contract) => mpc_contract.mark_request_received(request),
         }
     }
 

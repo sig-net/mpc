@@ -6,7 +6,7 @@ use k256::{
     Scalar, Secp256k1, SecretKey,
 };
 use near_account_id::AccountId;
-use sha3::{Digest, Sha3_256};
+use sha3::{Digest, Keccak256, Sha3_256};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // near-mpc-recovery with key derivation protocol vX.Y.Z.
@@ -23,6 +23,15 @@ pub fn derive_epsilon(predecessor_id: &AccountId, path: &str) -> Scalar {
     // ID or it'll be vunerable to Hash Melleability/extention attacks.
     let derivation_path = format!("{EPSILON_DERIVATION_PREFIX}{},{}", predecessor_id, path);
     let mut hasher = Sha3_256::new();
+    hasher.update(derivation_path);
+    let hash: [u8; 32] = hasher.finalize().into();
+    Scalar::from_non_biased(hash)
+}
+
+const EPSILON_DERIVATION_PREFIX_ETH: &str = "near-mpc-recovery v0.2.0 epsilon derivation:";
+pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
+    let derivation_path = format!("{EPSILON_DERIVATION_PREFIX_ETH}{},{}", requester, path);
+    let mut hasher = Keccak256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
     Scalar::from_non_biased(hash)

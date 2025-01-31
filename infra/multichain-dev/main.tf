@@ -1,18 +1,33 @@
 provider "google" {
   project = var.project_id
 }
+
 provider "google-beta" {
   project = var.project_id
 }
+
+resource "google_compute_project_metadata_item" "project_logging" {
+  key   = "google-logging-enabled"
+  value = "true"
+}
+
 module "gce-container" {
   count   = length(var.node_configs)
   source  = "terraform-google-modules/container-vm/google"
   version = "~> 3.0"
 
   container = {
-    image = "us-east1-docker.pkg.dev/pagoda-discovery-platform-dev/multichain-public/multichain-dev:latest"
-    args  = ["start"]
-    port  = "3000"
+    image = "europe-west1-docker.pkg.dev/near-cs-dev/multichain-public/multichain-dev:latest"
+
+    port = "3000"
+
+    volumeMounts = [
+      {
+        mountPath = "/data"
+        name      = "host-path"
+        readOnly  = false
+      }
+    ]
 
     env = concat(var.static_env, [
       {
@@ -58,9 +73,42 @@ module "gce-container" {
       {
         name  = "MPC_ENV",
         value = var.env
+      },
+      {
+        name  = "MPC_REDIS_URL",
+        value = var.redis_url
       }
     ])
   }
+
+  volumes = [
+    {
+      name = "host-path"
+      hostPath = {
+        path = "/var/redis"
+      }
+    }
+  ]
+}
+
+resource "google_service_account" "service_account" {
+  account_id   = "multichain-${var.env}"
+  display_name = "Multichain ${var.env} Account"
+}
+
+resource "google_project_iam_member" "sa-roles" {
+  for_each = toset([
+    "roles/secretmanager.admin",
+    "roles/storage.objectAdmin",
+    "roles/iam.serviceAccountAdmin",
+    "roles/artifactregistry.reader",
+    "roles/logging.logWriter",
+  ])
+
+  role    = each.key
+  member  = "serviceAccount:${google_service_account.service_account.email}"
+  project = var.project_id
+
 }
 
 resource "google_compute_address" "internal_ips" {
@@ -69,33 +117,35 @@ resource "google_compute_address" "internal_ips" {
   address_type = "INTERNAL"
   address      = var.node_configs["${count.index}"].ip_address
   region       = var.region
-  subnetwork   = "projects/pagoda-shared-infrastructure/regions/us-central1/subnetworks/dev-us-central1"
+  subnetwork   = "projects/sig-shared-network/regions/europe-west1/subnetworks/dev-europe-west1"
 }
 
 module "mig_template" {
   count      = length(var.node_configs)
   source     = "../modules/mig_template"
-  network    = "projects/pagoda-shared-infrastructure/global/networks/dev"
-  subnetwork = "projects/pagoda-shared-infrastructure/regions/us-central1/subnetworks/dev-us-central1"
+  network    = "projects/sig-shared-network/global/networks/dev"
+  subnetwork = "projects/sig-shared-network/regions/europe-west1/subnetworks/dev-europe-west1"
   region     = var.region
   service_account = {
-    email  = "mpc-recovery@pagoda-discovery-platform-dev.iam.gserviceaccount.com",
+    email  = google_service_account.service_account.email,
     scopes = ["cloud-platform"]
   }
-  name_prefix          = "multichain-${count.index}"
-  source_image_family  = "cos-113-lts"
-  source_image_project = "cos-cloud"
-  machine_type         = "n2-standard-2"
+  name_prefix  = "multichain-${count.index}"
+  machine_type = "e2-medium"
 
   startup_script = "docker rm watchtower ; docker run -d --name watchtower -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower --debug --interval 30"
 
-  source_image = reverse(split("/", module.gce-container[count.index].source_image))[0]
+  source_image = var.source_image
   metadata     = merge(var.additional_metadata, { "gce-container-declaration" = module.gce-container["${count.index}"].metadata_value })
   tags = [
     "multichain"
   ]
   labels = {
-    "container-vm" = module.gce-container[count.index].vm_container_label
+    "container-vm" = module.gce-container[count.index].vm_container_label,
+    environment    = "dev",
+    chain          = "near",
+    owner          = "sig",
+    network        = "testnet"
   }
 
   depends_on = [google_compute_address.internal_ips]
@@ -108,8 +158,8 @@ module "instances" {
   region     = var.region
   project_id = var.project_id
   hostname   = "multichain-dev-${count.index}"
-  network    = "projects/pagoda-shared-infrastructure/global/networks/dev"
-  subnetwork = "projects/pagoda-shared-infrastructure/regions/us-central1/subnetworks/dev-us-central1"
+  network    = "projects/sig-shared-network/global/networks/dev"
+  subnetwork = "projects/sig-shared-network/regions/europe-west1/subnetworks/dev-europe-west1"
 
   instance_template = module.mig_template[count.index].self_link_unique
   static_ips        = [google_compute_address.internal_ips[count.index].address]
@@ -141,7 +191,7 @@ resource "google_compute_instance_group" "multichain_group" {
   name      = "multichain-instance-group"
   instances = module.instances[*].self_links[0]
 
-  zone = "us-central1-a"
+  zone = "europe-west1-b"
   named_port {
     name = "http"
     port = 3000

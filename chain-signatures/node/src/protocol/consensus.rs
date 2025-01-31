@@ -3,19 +3,18 @@ use super::state::{
     JoiningState, NodeState, PersistentNodeData, RunningState, StartedState,
     WaitingForConsensusState,
 };
-use super::{Config, SignQueue};
-use crate::gcp::error::DatastoreStorageError;
+use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
 use crate::protocol::contract::primitives::Participants;
-use crate::protocol::monitor::StuckMonitor;
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
-use crate::rpc_client;
+use crate::protocol::SignRequest;
+use crate::rpc::NearClient;
+use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
-use crate::storage::triple_storage::LockTripleNodeStorageBox;
-use crate::storage::triple_storage::TripleData;
+use crate::storage::triple_storage::TripleStorage;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 
@@ -24,24 +23,20 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cait_sith::protocol::InitializationError;
-use serde_json::json;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use url::Url;
 
 use near_account_id::AccountId;
-use near_crypto::InMemorySigner;
 
 pub trait ConsensusCtx {
     fn my_account_id(&self) -> &AccountId;
-    fn http_client(&self) -> &reqwest::Client;
-    fn rpc_client(&self) -> &near_fetch::Client;
-    fn signer(&self) -> &InMemorySigner;
+    fn near_client(&self) -> &NearClient;
     fn mpc_contract_id(&self) -> &AccountId;
     fn my_address(&self) -> &Url;
-    fn sign_queue(&self) -> Arc<RwLock<SignQueue>>;
+    fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<SignRequest>>>;
     fn secret_storage(&self) -> &SecretNodeStorageBox;
-    fn triple_storage(&self) -> LockTripleNodeStorageBox;
-    fn cfg(&self) -> &Config;
+    fn triple_storage(&self) -> &TripleStorage;
+    fn presignature_storage(&self) -> &PresignatureStorage;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -65,21 +60,7 @@ pub enum ConsensusError {
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
     #[error("secret storage error: {0}")]
-    SecretStorageError(SecretStorageError),
-    #[error("datastore storage error: {0}")]
-    DatastoreStorageError(DatastoreStorageError),
-}
-
-impl From<SecretStorageError> for ConsensusError {
-    fn from(err: SecretStorageError) -> Self {
-        ConsensusError::SecretStorageError(err)
-    }
-}
-
-impl From<DatastoreStorageError> for ConsensusError {
-    fn from(err: DatastoreStorageError) -> Self {
-        ConsensusError::DatastoreStorageError(err)
-    }
+    SecretStorageError(#[from] SecretStorageError),
 }
 
 #[async_trait]
@@ -88,6 +69,7 @@ pub trait ConsensusProtocol {
         self,
         ctx: C,
         contract_state: ProtocolState,
+        cfg: Config,
     ) -> Result<NodeState, ConsensusError>;
 }
 
@@ -97,6 +79,7 @@ impl ConsensusProtocol for StartedState {
         self,
         ctx: C,
         contract_state: ProtocolState,
+        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match self.persistent_node_data {
             Some(PersistentNodeData {
@@ -123,7 +106,6 @@ impl ConsensusProtocol for StartedState {
                         }
                         Ordering::Less => Err(ConsensusError::EpochRollback),
                         Ordering::Equal => {
-                            let sign_queue = ctx.sign_queue();
                             match contract_state
                                 .participants
                                 .find_participant(ctx.my_account_id())
@@ -132,23 +114,32 @@ impl ConsensusProtocol for StartedState {
                                     tracing::info!(
                                         "started: contract state is running and we are already a participant"
                                     );
-                                    let presignature_manager = PresignatureManager::new(
-                                        me,
+                                    let triple_manager = TripleManager::new(
+                                        *me,
                                         contract_state.threshold,
                                         epoch,
                                         ctx.my_account_id(),
-                                    );
-                                    let triple_manager = Arc::new(RwLock::new(TripleManager::new(
-                                        me,
-                                        contract_state.threshold,
-                                        epoch,
-                                        self.triple_data,
                                         ctx.triple_storage(),
-                                        ctx.my_account_id(),
-                                    )));
-                                    let stuck_monitor = Arc::new(RwLock::new(
-                                        StuckMonitor::new(&triple_manager).await,
-                                    ));
+                                    );
+
+                                    let presignature_manager =
+                                        Arc::new(RwLock::new(PresignatureManager::new(
+                                            *me,
+                                            contract_state.threshold,
+                                            epoch,
+                                            ctx.my_account_id(),
+                                            ctx.presignature_storage(),
+                                        )));
+
+                                    let signature_manager =
+                                        Arc::new(RwLock::new(SignatureManager::new(
+                                            *me,
+                                            ctx.my_account_id(),
+                                            contract_state.threshold,
+                                            public_key,
+                                            epoch,
+                                            ctx.sign_rx(),
+                                        )));
 
                                     Ok(NodeState::Running(RunningState {
                                         epoch,
@@ -156,21 +147,9 @@ impl ConsensusProtocol for StartedState {
                                         threshold: contract_state.threshold,
                                         private_share,
                                         public_key,
-                                        sign_queue,
-                                        stuck_monitor,
                                         triple_manager,
-                                        presignature_manager: Arc::new(RwLock::new(
-                                            presignature_manager,
-                                        )),
-                                        signature_manager: Arc::new(RwLock::new(
-                                            SignatureManager::new(
-                                                me,
-                                                contract_state.public_key,
-                                                epoch,
-                                                ctx.my_account_id(),
-                                            ),
-                                        )),
-                                        messages: Default::default(),
+                                        presignature_manager,
+                                        signature_manager,
                                     }))
                                 }
                                 None => Ok(NodeState::Joining(JoiningState {
@@ -216,15 +195,15 @@ impl ConsensusProtocol for StartedState {
                                 "started(initializing): starting key generation as a part of the participant set"
                             );
                             let protocol = KeygenProtocol::new(
-                                &participants.keys().cloned().collect::<Vec<_>>(),
-                                me,
+                                &participants.keys_vec(),
+                                *me,
                                 contract_state.threshold,
                             )?;
                             Ok(NodeState::Generating(GeneratingState {
+                                me: *me,
                                 participants,
                                 threshold: contract_state.threshold,
                                 protocol,
-                                messages: Default::default(),
                             }))
                         }
                         None => {
@@ -252,6 +231,7 @@ impl ConsensusProtocol for GeneratingState {
         self,
         _ctx: C,
         contract_state: ProtocolState,
+        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => {
@@ -302,6 +282,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
         self,
         ctx: C,
         contract_state: ProtocolState,
+        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(contract_state) => {
@@ -314,14 +295,10 @@ impl ConsensusProtocol for WaitingForConsensusState {
                     .unwrap_or_default();
                 if !has_voted {
                     tracing::info!("waiting(initializing): we haven't voted yet, voting for the generated public key");
-                    rpc_client::vote_for_public_key(
-                        ctx.rpc_client(),
-                        ctx.signer(),
-                        ctx.mpc_contract_id(),
-                        &public_key,
-                    )
-                    .await
-                    .map_err(|err| ConsensusError::CannotVote(format!("{err:?}")))?;
+                    ctx.near_client()
+                        .vote_public_key(&public_key)
+                        .await
+                        .map_err(|err| ConsensusError::CannotVote(format!("{err:?}")))?;
                 }
                 Ok(NodeState::WaitingForConsensus(self))
             }
@@ -351,27 +328,54 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         return Err(ConsensusError::MismatchedPublicKey);
                     }
 
-                    let me = contract_state
+                    let Some(me) = contract_state
                         .participants
                         .find_participant(ctx.my_account_id())
-                        .unwrap();
+                    else {
+                        tracing::error!("waiting(running, unexpected): we do not belong to the participant set -- cannot progress!");
+                        return Ok(NodeState::WaitingForConsensus(self));
+                    };
 
                     // Clear triples from storage before starting the new epoch. This is necessary if the node has accumulated
                     // triples from previous epochs. If it was not able to clear the previous triples, we'll leave them as-is
-                    if let Err(err) = ctx.triple_storage().write().await.clear().await {
-                        tracing::warn!(?err, "failed to clear triples from storage");
+                    if let Err(err) = ctx.triple_storage().clear().await {
+                        tracing::error!(
+                            ?err,
+                            "failed to clear triples from storage on new epoch start"
+                        );
                     }
 
-                    let triple_manager = Arc::new(RwLock::new(TripleManager::new(
-                        me,
+                    if let Err(err) = ctx.presignature_storage().clear().await {
+                        tracing::error!(
+                            ?err,
+                            "failed to clear presignatures from storage on new epoch start"
+                        );
+                    }
+
+                    let triple_manager = TripleManager::new(
+                        *me,
                         self.threshold,
                         self.epoch,
-                        vec![],
-                        ctx.triple_storage(),
                         ctx.my_account_id(),
+                        ctx.triple_storage(),
+                    );
+
+                    let presignature_manager = Arc::new(RwLock::new(PresignatureManager::new(
+                        *me,
+                        self.threshold,
+                        self.epoch,
+                        ctx.my_account_id(),
+                        ctx.presignature_storage(),
                     )));
-                    let stuck_monitor =
-                        Arc::new(RwLock::new(StuckMonitor::new(&triple_manager).await));
+
+                    let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
+                        *me,
+                        ctx.my_account_id(),
+                        self.threshold,
+                        self.public_key,
+                        self.epoch,
+                        ctx.sign_rx(),
+                    )));
 
                     Ok(NodeState::Running(RunningState {
                         epoch: self.epoch,
@@ -379,22 +383,9 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         threshold: self.threshold,
                         private_share: self.private_share,
                         public_key: self.public_key,
-                        sign_queue: ctx.sign_queue(),
-                        stuck_monitor,
                         triple_manager,
-                        presignature_manager: Arc::new(RwLock::new(PresignatureManager::new(
-                            me,
-                            self.threshold,
-                            self.epoch,
-                            ctx.my_account_id(),
-                        ))),
-                        signature_manager: Arc::new(RwLock::new(SignatureManager::new(
-                            me,
-                            self.public_key,
-                            self.epoch,
-                            ctx.my_account_id(),
-                        ))),
-                        messages: self.messages,
+                        presignature_manager,
+                        signature_manager,
                     }))
                 }
             },
@@ -441,16 +432,10 @@ impl ConsensusProtocol for WaitingForConsensusState {
                                         epoch = self.epoch,
                                         "waiting(resharing): we haven't voted yet, voting for resharing to complete"
                                     );
-                                    rpc_client::vote_reshared(
-                                        ctx.rpc_client(),
-                                        ctx.signer(),
-                                        ctx.mpc_contract_id(),
-                                        self.epoch,
-                                    )
-                                    .await
-                                    .map_err(|err| {
-                                        ConsensusError::CannotVote(format!("{err:?}"))
-                                    })?;
+
+                                    ctx.near_client().vote_reshared(self.epoch).await.map_err(
+                                        |err| ConsensusError::CannotVote(format!("{err:?}")),
+                                    )?;
                                 } else {
                                     tracing::info!(
                                         epoch = self.epoch,
@@ -476,16 +461,17 @@ impl ConsensusProtocol for RunningState {
         self,
         ctx: C,
         contract_state: ProtocolState,
+        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
             ProtocolState::Running(contract_state) => match contract_state.epoch.cmp(&self.epoch) {
                 Ordering::Greater => {
                     tracing::warn!(
-                            "running(running): our current epoch is {} while contract state's is {}, trying to rejoin as a new participant",
-                            self.epoch,
-                            contract_state.epoch
-                        );
+                        "running(running): our current epoch is {} while contract state's is {}, trying to rejoin as a new participant",
+                        self.epoch,
+                        contract_state.epoch
+                    );
 
                     Ok(NodeState::Joining(JoiningState {
                         participants: contract_state.participants,
@@ -550,6 +536,7 @@ impl ConsensusProtocol for ResharingState {
         self,
         _ctx: C,
         contract_state: ProtocolState,
+        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
@@ -626,6 +613,7 @@ impl ConsensusProtocol for JoiningState {
         self,
         ctx: C,
         contract_state: ProtocolState,
+        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
@@ -658,21 +646,10 @@ impl ConsensusProtocol for JoiningState {
                         tracing::info!(
                             "joining(running): sending a transaction to join the participant set"
                         );
-                        ctx.rpc_client()
-                            .call(ctx.signer(), ctx.mpc_contract_id(), "join")
-                            .args_json(json!({
-                                "url": ctx.my_address(),
-                                "cipher_pk": ctx.cfg().local.network.cipher_pk.to_bytes(),
-                                "sign_pk": ctx.cfg().local.network.sign_sk.public_key(),
-                            }))
-                            .max_gas()
-                            .retry_exponential(10, 3)
-                            .transact()
-                            .await
-                            .map_err(|err| {
-                                tracing::error!(?err, "failed to join the participant set");
-                                ConsensusError::CannotJoin(format!("{err:?}"))
-                            })?;
+                        ctx.near_client().propose_join().await.map_err(|err| {
+                            tracing::error!(?err, "failed to join the participant set");
+                            ConsensusError::CannotJoin(format!("{err:?}"))
+                        })?;
                         Ok(NodeState::Joining(self))
                     }
                 }
@@ -699,48 +676,23 @@ impl ConsensusProtocol for NodeState {
         self,
         ctx: C,
         contract_state: ProtocolState,
+        cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match self {
             NodeState::Starting => {
                 let persistent_node_data = ctx.secret_storage().load().await?;
-                let triple_data = load_triples(ctx).await?;
                 Ok(NodeState::Started(StartedState {
                     persistent_node_data,
-                    triple_data,
                 }))
             }
-            NodeState::Started(state) => state.advance(ctx, contract_state).await,
-            NodeState::Generating(state) => state.advance(ctx, contract_state).await,
-            NodeState::WaitingForConsensus(state) => state.advance(ctx, contract_state).await,
-            NodeState::Running(state) => state.advance(ctx, contract_state).await,
-            NodeState::Resharing(state) => state.advance(ctx, contract_state).await,
-            NodeState::Joining(state) => state.advance(ctx, contract_state).await,
+            NodeState::Started(state) => state.advance(ctx, contract_state, cfg).await,
+            NodeState::Generating(state) => state.advance(ctx, contract_state, cfg).await,
+            NodeState::WaitingForConsensus(state) => state.advance(ctx, contract_state, cfg).await,
+            NodeState::Running(state) => state.advance(ctx, contract_state, cfg).await,
+            NodeState::Resharing(state) => state.advance(ctx, contract_state, cfg).await,
+            NodeState::Joining(state) => state.advance(ctx, contract_state, cfg).await,
         }
     }
-}
-
-async fn load_triples<C: ConsensusCtx + Send + Sync>(
-    ctx: C,
-) -> Result<Vec<TripleData>, ConsensusError> {
-    let triple_storage = ctx.triple_storage();
-    let mut retries = 3;
-    let mut error = None;
-    while retries > 0 {
-        match triple_storage.read().await.load().await {
-            Err(DatastoreStorageError::FetchEntitiesError(_)) => {
-                tracing::info!("There are no triples persisted.");
-                return Ok(vec![]);
-            }
-            Err(e) => {
-                retries -= 1;
-                tracing::warn!(?e, "triple load failed.");
-                error = Some(e);
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-            Ok(loaded_triples) => return Ok(loaded_triples),
-        }
-    }
-    Err(ConsensusError::DatastoreStorageError(error.unwrap()))
 }
 
 async fn start_resharing<C: ConsensusCtx>(
@@ -751,15 +703,20 @@ async fn start_resharing<C: ConsensusCtx>(
     let me = contract_state
         .new_participants
         .find_participant(ctx.my_account_id())
-        .unwrap();
-    let protocol = ReshareProtocol::new(private_share, me, &contract_state)?;
+        .or_else(|| {
+            contract_state
+                .old_participants
+                .find_participant(ctx.my_account_id())
+        })
+        .expect("unexpected: cannot find us in the participant set while starting resharing");
+    let protocol = ReshareProtocol::new(private_share, *me, &contract_state)?;
     Ok(NodeState::Resharing(ResharingState {
+        me: *me,
         old_epoch: contract_state.old_epoch,
         old_participants: contract_state.old_participants,
         new_participants: contract_state.new_participants,
         threshold: contract_state.threshold,
         public_key: contract_state.public_key,
         protocol,
-        messages: Default::default(),
     }))
 }

@@ -58,10 +58,6 @@ resource "google_cloud_run_v2_service" "node" {
         }
       }
       env {
-        name  = "MPC_INDEXER_START_BLOCK_HEIGHT"
-        value = var.indexer_options.start_block_height
-      }
-      env {
         name = "MPC_ACCOUNT_SK"
         value_source {
           secret_key_ref {

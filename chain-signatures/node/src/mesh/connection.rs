@@ -3,20 +3,19 @@ use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
 use tokio::sync::RwLock;
-use url::Url;
 
+use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ProtocolState;
 use crate::web::StateView;
-
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
+use std::sync::Arc;
+use tokio::task::JoinSet;
 
 // TODO: this is a basic connection pool and does not do most of the work yet. This is
 //       mostly here just to facilitate offline node handling for now.
 // TODO/NOTE: we can use libp2p to facilitate most the of low level TCP connection work.
-#[derive(Default)]
 pub struct Pool {
-    http: reqwest::Client,
+    client: NodeClient,
     connections: RwLock<Participants>,
     potential_connections: RwLock<Participants>,
     status: RwLock<HashMap<Participant, StateView>>,
@@ -25,89 +24,159 @@ pub struct Pool {
     current_active: RwLock<Option<(Participants, Instant)>>,
     // Potentially active participants that we can use to establish a connection in the next epoch.
     potential_active: RwLock<Option<(Participants, Instant)>>,
+    refresh_active_timeout: Duration,
 }
 
 impl Pool {
-    pub async fn ping(&self) -> Participants {
+    pub fn new(client: &NodeClient, refresh_active_timeout: Duration) -> Self {
+        tracing::info!(?refresh_active_timeout, "creating a new pool");
+        Self {
+            client: client.clone(),
+            connections: RwLock::new(Participants::default()),
+            potential_connections: RwLock::new(Participants::default()),
+            status: RwLock::new(HashMap::default()),
+            current_active: RwLock::new(Option::default()),
+            potential_active: RwLock::new(Option::default()),
+            refresh_active_timeout,
+        }
+    }
+
+    // self typed Arc<Self> so it can be passed between tokio tasks
+    pub async fn ping(self: Arc<Self>) -> Participants {
+        // Check if the current active participants are still valid
         if let Some((ref active, timestamp)) = *self.current_active.read().await {
-            if timestamp.elapsed() < DEFAULT_TIMEOUT {
+            if timestamp.elapsed() < self.refresh_active_timeout {
                 return active.clone();
             }
         }
 
-        let connections = self.connections.read().await;
+        let connections = {
+            let conn = self.connections.read().await;
+            conn.clone()
+        };
+
+        // Spawn tasks for each participant
+        let mut join_set = JoinSet::new();
+        for (participant, info) in connections.into_iter() {
+            let pool = Arc::clone(&self);
+
+            join_set.spawn(async move {
+                match pool.client.state(&info.url).await {
+                    Ok(state) => match pool.client.msg_empty(&info.url).await {
+                        Ok(()) => Ok((participant, state, info)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Send empty msg for participant {participant:?} with url {} has failed with error {e}.",
+                                info.url
+                            );
+                            Err(())
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            "Fetch state for participant {participant:?} with url {} has failed with error {e}.",
+                            info.url
+                        );
+                        Err(())
+                    }
+                }
+            });
+        }
 
         let mut status = self.status.write().await;
         let mut participants = Participants::default();
-        for (participant, info) in connections.iter() {
-            let Ok(Ok(url)) = Url::parse(&info.url).map(|url| url.join("/state")) else {
-                tracing::error!(
-                    "Pool.ping url is invalid participant {:?} url {} /state",
-                    participant,
-                    info.url
-                );
-                continue;
-            };
 
-            let Ok(resp) = self.http.get(url.clone()).send().await else {
-                tracing::warn!(
-                    "Pool.ping resp err participant {:?} url {}",
-                    participant,
-                    url
-                );
-                continue;
-            };
-
-            let Ok(state): Result<StateView, _> = resp.json().await else {
-                tracing::warn!(
-                    "Pool.ping state view err participant {:?} url {}",
-                    participant,
-                    url
-                );
-                continue;
-            };
-
-            status.insert(*participant, state);
-            participants.insert(participant, info.clone());
+        // Process completed tasks
+        while let Some(result) = join_set.join_next().await {
+            match result {
+                Ok(Ok((participant, state, info))) => {
+                    status.insert(participant, state);
+                    participants.insert(&participant, info);
+                }
+                Ok(Err(())) => {
+                    // Already logged in task
+                }
+                Err(e) => {
+                    tracing::warn!("fetch participant state task panicked: {e}");
+                }
+            }
         }
+
         drop(status);
 
+        // Update the active participants
         let mut active = self.current_active.write().await;
         *active = Some((participants.clone(), Instant::now()));
+
         participants
     }
 
-    pub async fn ping_potential(&self) -> Participants {
+    // self typed Arc<Self> so it can be passed between tokio tasks
+    pub async fn ping_potential(self: Arc<Self>) -> Participants {
         if let Some((ref active, timestamp)) = *self.potential_active.read().await {
-            if timestamp.elapsed() < DEFAULT_TIMEOUT {
+            if timestamp.elapsed() < self.refresh_active_timeout {
                 return active.clone();
             }
         }
 
-        let connections = self.potential_connections.read().await;
+        let connections = {
+            let conn = self.potential_connections.read().await;
+            conn.clone()
+        };
+
+        // Spawn tasks for each participant
+        let mut join_set = JoinSet::new();
+        for (participant, info) in connections.into_iter() {
+            let pool = Arc::clone(&self); // Clone Arc for use inside tasks
+
+            join_set.spawn(async move {
+                match pool.client.state(&info.url).await {
+                    Ok(state) => match pool.client.msg_empty(&info.url).await {
+                        Ok(()) => Ok((participant, state, info)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Send empty msg for participant {participant:?} with url {} has failed with error {e}.",
+                                info.url
+                            );
+                            Err(())
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            "Fetch state for participant {participant:?} with url {} has failed with error {e}.",
+                            info.url
+                        );
+                        Err(())
+                    }
+                }
+            });
+        }
 
         let mut status = self.status.write().await;
         let mut participants = Participants::default();
-        for (participant, info) in connections.iter() {
-            let Ok(Ok(url)) = Url::parse(&info.url).map(|url| url.join("/state")) else {
-                continue;
-            };
 
-            let Ok(resp) = self.http.get(url).send().await else {
-                continue;
-            };
-
-            let Ok(state): Result<StateView, _> = resp.json().await else {
-                continue;
-            };
-
-            status.insert(*participant, state);
-            participants.insert(participant, info.clone());
+        // Process completed tasks
+        while let Some(result) = join_set.join_next().await {
+            match result {
+                Ok(Ok((participant, state, info))) => {
+                    status.insert(participant, state);
+                    participants.insert(&participant, info);
+                }
+                Ok(Err(())) => {
+                    // Already logged in task
+                }
+                Err(e) => {
+                    tracing::warn!("fetch participant state task panicked: {e}");
+                }
+            }
         }
+
         drop(status);
 
+        // Update the active participants
         let mut potential_active = self.potential_active.write().await;
         *potential_active = Some((participants.clone(), Instant::now()));
+
         participants
     }
 
@@ -149,7 +218,7 @@ impl Pool {
         self.potential_connections.read().await.clone()
     }
 
-    pub async fn is_participant_stable(&self, participant: &Participant) -> bool {
+    async fn is_participant_stable(&self, participant: &Participant) -> bool {
         self.status
             .read()
             .await
@@ -158,5 +227,19 @@ impl Pool {
                 StateView::Running { is_stable, .. } => *is_stable,
                 _ => false,
             })
+    }
+
+    /// Get active participants that have a stable connection. This is useful for arbitrary metrics to
+    /// say whether or not a node is stable, such as a node being on track with the latest block height.
+    pub async fn stable_participants(&self) -> Participants {
+        let mut stable = Participants::default();
+        if let Some((active_participants, _)) = self.current_active.read().await.clone() {
+            for (participant, info) in active_participants.iter() {
+                if self.is_participant_stable(participant).await {
+                    stable.insert(participant, info.clone());
+                }
+            }
+        }
+        stable
     }
 }

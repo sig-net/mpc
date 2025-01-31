@@ -1,18 +1,19 @@
-use std::time::Duration;
+use std::{env, time::Duration};
 
 use goose::goose::{GooseMethod, GooseRequest, GooseUser, TransactionResult};
 use goose_eggs::{validate_and_load_static_assets, Validate};
-use near_crypto::InMemorySigner;
+use near_crypto::{InMemorySigner, Signer};
 use near_jsonrpc_client::JsonRpcClient;
 use near_primitives::{
-    transaction::{Action, FunctionCallAction, Transaction},
+    transaction::{Action, FunctionCallAction, Transaction, TransactionV0},
     types::AccountId,
 };
+use near_workspaces::types::NearToken;
 use rand::Rng;
-use reqwest::header::CONTENT_TYPE;
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
-use crate::fastauth::primitives::UserSession;
+use crate::common::primitives::UserSession;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SignRequest {
@@ -25,9 +26,12 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
     tracing::info!("multichain_sign");
 
     // Config
-    let multichain_contract_id = AccountId::try_from("v1.signer-dev.testnet".to_string()).unwrap();
-    let testnet_rpc_url = "https://rpc.testnet.near.org".to_string();
-    let deposit = 1; // attach more if you are ok with going above "CHEAP_REQUESTS" limit
+    let multichain_contract_id =
+        env::var("MULTICHAIN_CONTRACT_ID").unwrap_or_else(|_| "v1.signer-dev.testnet".to_string());
+    let multichain_contract_id = AccountId::try_from(multichain_contract_id)
+        .expect("Failed to parse MULTICHAIN_CONTRACT_ID");
+    let testnet_rpc_url = user.config.host.clone();
+    let deposit = NearToken::from_millinear(50).as_yoctonear();
     let expected_log = "Signature is ready."; // This is a log that we are expecting to see in the successful response
 
     let session = user
@@ -49,7 +53,7 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
         .await
         .unwrap();
 
-    let payload_hashed: [u8; 32] = rand::thread_rng().gen();
+    let payload_hashed: [u8; 32] = rand::rng().random();
     tracing::info!("requesting signature for: {:?}", payload_hashed);
 
     let request = SignRequest {
@@ -58,13 +62,13 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
         key_version: 0,
     };
 
-    let transaction = Transaction {
+    let transaction = Transaction::V0(TransactionV0 {
         signer_id: session.near_account_id.clone(),
         public_key: session.fa_sk.public_key(),
         nonce,
         receiver_id: multichain_contract_id,
         block_hash,
-        actions: vec![Action::FunctionCall(FunctionCallAction {
+        actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
             method_name: "sign".to_string(),
             args: serde_json::to_vec(&serde_json::json!({
                 "request": request,
@@ -72,14 +76,13 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
             .unwrap(),
             gas: 300_000_000_000_000,
             deposit,
-        })],
-    };
+        }))],
+    });
 
-    let signed_transaction = transaction.sign(&signer);
+    let signed_transaction = transaction.sign(&Signer::InMemory(signer));
 
-    let encoded_transaction = near_primitives::serialize::to_base64(
-        &borsh::BorshSerialize::try_to_vec(&signed_transaction).unwrap(),
-    );
+    let encoded_transaction =
+        near_primitives::serialize::to_base64(&borsh::to_vec(&signed_transaction).unwrap());
 
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
@@ -90,10 +93,13 @@ pub async fn multichain_sign(user: &mut GooseUser) -> TransactionResult {
         ]
     });
 
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
     let request_builder = user
         .get_request_builder(&GooseMethod::Post, "")?
         .json(&payload)
-        .header(CONTENT_TYPE, "application/json")
+        .headers(headers)
         .timeout(Duration::from_secs(50));
 
     let goose_request = GooseRequest::builder()

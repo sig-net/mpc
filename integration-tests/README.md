@@ -2,26 +2,13 @@
 
 ## Basic guide
 
-Running integration tests requires you to have relayer and sandbox docker images present on your machine:
+Running integration tests requires you to have redis and sandbox docker images present on your machine:
 
 ```BASH
-docker pull ghcr.io/near/os-relayer
-docker pull ghcr.io/near/sandbox
-```
-
-For M1 you may want to pull the following image instead:
-
-```BASH
-docker pull ghcr.io/near/sandbox:latest-aarch64
+docker pull redis:7.4.2
 ```
 
 In case of authorization issues make sure you have logged into docker using your [access token](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
-
-Build OIDC Provider test image
-
-```bash
-docker build -t near/test-oidc-provider ./test-oidc-provider
-```
 
 Set dummy AWS credentials and the correct region
 
@@ -34,42 +21,11 @@ aws --profile default configure set aws_secret_access_key "456"
 Then run the integration tests:
 
 ```BASH
-cd integration-tests/fastauth   # or integration-tests/chain-signatures
-cargo test
-```
-
-### Alternative: Docker Builds/Tests
-
-If instead, we need to run docker build/tests:
-
-```BASH
-docker build ./ -t near/mpc-recovery
-```
-
-**Note**. You will need to re-build the Docker image each time you make a code change and want to run the integration tests.
-
-Finally, run the integration tests with the built docker image:
-
-```BASH
-cd integration-tests/fastauth   # or integration-tests/chain-signatures
+cd integration-tests
+cargo test --jobs 1 -- --test-threads 1
+# or if you want to run tests in docker
 cargo test --features docker-test
 ```
-
-## Profiling: Flamegraphs
-
-To profile code and get a flamegraph, run the following:
-
-```sh
-cargo flamegraph --root --profile flamegraph --test lib
-```
-
-Or for a singular test like `test_basic_action`:
-
-```sh
-cargo flamegraph --root --profile flamegraph --test lib -- test_basic_action
-```
-
-This will generate a `flamegraph.svg`. Open this on a browser and inspect each of the callstacks.
 
 ## FAQ
 
@@ -78,8 +34,8 @@ This will generate a `flamegraph.svg`. Open this on a browser and inspect each o
 You can pass environment variable `TESTCONTAINERS=keep` to keep all of the docker containers. For example:
 
 ```bash
-$ cd integration-tests/fastauth
-$ TESTCONTAINERS=keep cargo test
+$ cd integration-tests
+$ TESTCONTAINERS=keep cargo test --jobs 1 -- --test-threads 1
 ```
 
 ### There are no logs anymore, how do I debug?
@@ -87,7 +43,7 @@ $ TESTCONTAINERS=keep cargo test
 The easiest way is to run one isolated test of your choosing while keeping the containers (see above):
 
 ```bash
-$ cd integration-tests/fastauth
+$ cd integration-tests
 $ TESTCONTAINERS=keep cargo test test_basic_action
 ```
 
@@ -107,22 +63,18 @@ c505ead6eb18   redis:latest                                     "docker-entrypoi
 
 Now, you can inspect each container's logs according to your needs using `docker logs <container-id>`. You might also want to reproduce some components of the test manually by making `curl` requests to the leader node (its web port is exposed on your host machine, use `docker ps` output above as the reference).
 
+### How to see all the logs in terminal
+```bash
+RUST_BACKTRACE=full RUST_LOG=debug cargo test test_name -- --nocapture
+```
+
 ### Re-building Docker image is way too slow, is there a way I can do a faster development feedback loop?
 
 We have a CLI tool that can instantiate a short-lived development environment that has everything except for the leader node set up. You can then seamlessly plug in your own leader node instance that you have set up manually (the tool gives you a CLI command to use as a starting point, but you can attach debugger, enable extra logs etc). Try it out now (sets up 3 signer nodes):
 
-For fastauth:
-
 ```bash
 $ export RUST_LOG=info
-$ cd integration-tests/fastauth
-$ cargo run -- setup-env 3
-```
-
-For chain signatures:
-```bash
-$ export RUST_LOG=info
-$ cd integration-tests/chain-signatures
+$ cd integration-tests
 $ cargo run -- setup-env --nodes 3 --threshold 2
 ```
 

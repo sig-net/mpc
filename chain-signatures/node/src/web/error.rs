@@ -1,8 +1,8 @@
 use axum::extract::rejection::JsonRejection;
 use reqwest::StatusCode;
-use tokio::sync::mpsc::error::SendError;
 
-use crate::protocol::{ConsensusError, CryptographicError, MpcMessage};
+use crate::protocol::message::MessageError;
+use crate::protocol::{ConsensusError, CryptographicError};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -17,9 +17,11 @@ pub enum Error {
     #[error(transparent)]
     Cryptography(#[from] CryptographicError),
     #[error(transparent)]
-    Message(#[from] SendError<MpcMessage>),
+    Message(#[from] MessageError),
     #[error(transparent)]
     Rpc(#[from] near_fetch::Error),
+    #[error("internal error: {0}")]
+    Internal(&'static str),
 }
 
 impl Error {
@@ -30,6 +32,7 @@ impl Error {
             Error::Cryptography(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Message(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Rpc(_) => StatusCode::BAD_REQUEST,
+            Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

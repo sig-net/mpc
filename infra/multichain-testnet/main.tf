@@ -4,6 +4,10 @@ provider "google" {
 provider "google-beta" {
   project = var.project_id
 }
+resource "google_compute_project_metadata_item" "project_logging" {
+  key   = "google-logging-enabled"
+  value = "true"
+}
 module "gce-container" {
   count   = length(var.node_configs)
   source  = "terraform-google-modules/container-vm/google"
@@ -11,8 +15,15 @@ module "gce-container" {
 
   container = {
     image = var.image
-    args  = ["start"]
-    port  = "3000"
+
+    port = "3000"
+    volumeMounts = [
+      {
+        mountPath = "/data"
+        name      = "host-path"
+        readOnly  = false
+      }
+    ]
 
     env = concat(var.static_env, [
       {
@@ -63,8 +74,20 @@ module "gce-container" {
         name  = "MPC_GCP_PROJECT_ID"
         value = var.project_id
       },
+      {
+        name  = "MPC_REDIS_URL",
+        value = var.redis_url
+      }
     ])
   }
+  volumes = [
+    {
+      name = "host-path"
+      hostPath = {
+        path = "/var/redis"
+      }
+    }
+  ]
 }
 
 resource "google_service_account" "service_account" {
@@ -74,10 +97,10 @@ resource "google_service_account" "service_account" {
 
 resource "google_project_iam_member" "sa-roles" {
   for_each = toset([
-    "roles/datastore.user",
     "roles/secretmanager.admin",
     "roles/storage.objectAdmin",
     "roles/iam.serviceAccountAdmin",
+    "roles/logging.logWriter"
   ])
 
   role    = each.key
@@ -87,7 +110,7 @@ resource "google_project_iam_member" "sa-roles" {
 
 resource "google_compute_global_address" "external_ips" {
   count        = length(var.node_configs)
-  name         = "multichain-testnet-partner-${count.index}"
+  name         = "multichain-testnet-${count.index}"
   address_type = "EXTERNAL"
 }
 
@@ -101,21 +124,22 @@ module "ig_template" {
     email  = google_service_account.service_account.email,
     scopes = ["cloud-platform"]
   }
-  name_prefix          = "multichain-partner-${count.index}"
-  source_image_family  = "cos-stable"
-  source_image_project = "cos-cloud"
-  machine_type         = "n2d-standard-2"
+  name_prefix  = "multichain-testnet-${count.index}"
+  machine_type = "n2d-standard-2"
 
   startup_script = "docker rm watchtower ; docker run -d --name watchtower -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower --debug --interval 30"
 
-  source_image = reverse(split("/", module.gce-container[count.index].source_image))[0]
+  source_image = var.source_image
   metadata     = merge(var.additional_metadata, { "gce-container-declaration" = module.gce-container["${count.index}"].metadata_value })
   tags = [
-    "multichain",
-    "allow-ssh"
+    "multichain"
   ]
   labels = {
-    "container-vm" = module.gce-container[count.index].vm_container_label
+    "container-vm" = module.gce-container[count.index].vm_container_label,
+    environment    = "prod",
+    chain          = "near",
+    owner          = "sig",
+    network        = "testnet"
   }
 
   depends_on = [google_compute_global_address.external_ips]
@@ -127,7 +151,7 @@ module "instances" {
   source     = "../modules/instance-from-tpl"
   region     = var.region
   project_id = var.project_id
-  hostname   = "multichain-testnet-partner-${count.index}"
+  hostname   = "multichain-testnet-${count.index}"
   network    = var.network
   subnetwork = var.subnetwork
 
@@ -136,7 +160,7 @@ module "instances" {
 }
 
 resource "google_compute_health_check" "multichain_healthcheck" {
-  name = "multichain-testnet-partner-healthcheck"
+  name = "multichain-testnet-healthcheck"
 
   http_health_check {
     port         = 3000
@@ -147,7 +171,7 @@ resource "google_compute_health_check" "multichain_healthcheck" {
 
 resource "google_compute_global_forwarding_rule" "default" {
   count                 = length(var.node_configs)
-  name                  = "multichain-partner-rule-${count.index}"
+  name                  = "multichain-testnet-rule-${count.index}"
   target                = google_compute_target_http_proxy.default[count.index].id
   port_range            = "80"
   load_balancing_scheme = "EXTERNAL"
@@ -156,19 +180,19 @@ resource "google_compute_global_forwarding_rule" "default" {
 
 resource "google_compute_target_http_proxy" "default" {
   count       = length(var.node_configs)
-  name        = "multichain-partner-target-proxy-${count.index}"
+  name        = "multichain-testnet-target-proxy-${count.index}"
   description = "a description"
   url_map     = google_compute_url_map.default[count.index].id
 }
 
 resource "google_compute_url_map" "default" {
   count           = length(var.node_configs)
-  name            = "multichain-partner-url-map-${count.index}"
+  name            = "multichain-testnet-url-map-${count.index}"
   default_service = google_compute_backend_service.multichain_backend.id
 }
 
 resource "google_compute_backend_service" "multichain_backend" {
-  name                  = "multichain-partner-backend-service"
+  name                  = "multichain-testnet-backend-service"
   load_balancing_scheme = "EXTERNAL"
 
   backend {
@@ -179,7 +203,7 @@ resource "google_compute_backend_service" "multichain_backend" {
 }
 
 resource "google_compute_instance_group" "multichain_group" {
-  name      = "multichain-partner-instance-group"
+  name      = "multichain-testnet-instance-group"
   instances = module.instances[*].self_links[0]
 
   zone = var.zone

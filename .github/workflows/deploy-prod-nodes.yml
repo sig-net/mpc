@@ -1,0 +1,42 @@
+name: Deploy Multichain Prod.
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        type: choice
+        options:
+          - mainnet
+          - testnet
+        description: mainnet or testnet network
+        default: testnet
+        required: true
+
+
+jobs:
+  build-mpc-recovery:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v3
+        name: "Checkout mpc-recovery"
+
+      - name: Login to GCP Artifact Registry Mainnet
+        if: github.event.inputs.network == 'mainnet'
+        run: echo "$GOOGLE_CREDENTIALS" | docker login -u _json_key --password-stdin https://europe-west1-docker.pkg.dev
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.SIG_CREDENTIALS_MAINNET }}
+
+      - name: Login to GCP Artifact Registry Testnet
+        if: github.event.inputs.network == 'testnet'
+        run: echo "$GOOGLE_CREDENTIALS" | docker login -u _json_key --password-stdin https://europe-west1-docker.pkg.dev
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.SIG_CREDENTIALS_TESTNET }}
+      
+        # Since the Mainnet and Testnet nodes are polling this image repository, only the image needs to be updated in order to trigger a deployment
+      - name: Build Docker image and deploy partner nodes
+        id: docker-push-tagged-partner
+        uses: docker/build-push-action@v4
+        with:
+          push: true
+          file: ./Dockerfile.multichain
+          tags: "europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:latest"
