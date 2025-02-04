@@ -95,8 +95,8 @@ pub fn setup() {
         .tracing()
         .with_exporter(
             opentelemetry_otlp::new_exporter()
-                .tonic()
-                .with_endpoint("localhost:4318"),
+                .http()
+                .with_endpoint("http://localhost:4317"),
         )
         // .with_trace_config(trace_config)
         .install_batch(opentelemetry::runtime::Tokio)
