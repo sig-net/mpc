@@ -1,15 +1,13 @@
-use std::str::FromStr;
-
-use crate::actions::{self, add_latency};
-use crate::cluster;
+use integration_tests::actions::{self, add_latency};
+use integration_tests::cluster;
 
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
 use crypto_shared::{self, derive_epsilon, derive_key, x_coordinate, ScalarExt};
-use deadpool_redis::Runtime;
 use elliptic_curve::CurveArithmetic;
-use integration_tests::containers::{self, DockerClient};
+use integration_tests::cluster::spawner::ClusterSpawner;
+use integration_tests::containers;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::Secp256k1;
 use mpc_contract::config::Config;
@@ -17,17 +15,15 @@ use mpc_contract::update::ProposeUpdateArgs;
 use mpc_node::kdf::into_eth_sig;
 use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
 use mpc_node::protocol::triple::{Triple, TripleManager};
-use mpc_node::storage;
 use mpc_node::util::NearPublicKeyExt as _;
-use near_account_id::AccountId;
 use test_log::test;
-use url::Url;
 
 pub mod nightly;
 
 #[test(tokio::test)]
 async fn test_multichain_reshare() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn().wait_for_running().await?;
+    let mut nodes = cluster::spawn().disable_prestockpile().await?;
+
     nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
 
@@ -62,7 +58,7 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_signature_basic() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().wait_for_running().await?;
+    let nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     nodes.sign().await?;
 
@@ -71,7 +67,7 @@ async fn test_signature_basic() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_signature_rogue() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().wait_for_running().await?;
+    let nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     nodes.sign().rogue_responder().await?;
 
@@ -80,7 +76,7 @@ async fn test_signature_rogue() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_signature_offline_node() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn().wait_for_running().await?;
+    let mut nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
 
@@ -98,7 +94,7 @@ async fn test_signature_offline_node() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_key_derivation() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().wait_for_running().await?;
+    let nodes = cluster::spawn().await?;
 
     let hd_path = "test";
     let mpc_pk: k256::AffinePoint = nodes.root_public_key().await?.into_affine_point();
@@ -149,23 +145,16 @@ async fn test_key_derivation() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {
-    let docker_client = DockerClient::default();
-    let docker_network = "test-triple-persistence";
-    docker_client.create_network(docker_network).await?;
-    let redis = containers::Redis::run(&docker_client, docker_network).await;
-    let redis_url = Url::parse(redis.internal_address.as_str())?;
-    let redis_cfg = deadpool_redis::Config::from_url(redis_url);
-    let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-    let triple_storage =
-        storage::triple_storage::init(&redis_pool, &AccountId::from_str("test.near").unwrap());
+    let spawner = ClusterSpawner::default()
+        .network("test-triple-persistence")
+        .init_network()
+        .await?;
 
-    let triple_manager = TripleManager::new(
-        Participant::from(0),
-        5,
-        123,
-        &AccountId::from_str("test.near").unwrap(),
-        &triple_storage,
-    );
+    let node_id = "test.near".parse().unwrap();
+    let redis = containers::Redis::run(&spawner).await;
+    let triple_storage = redis.triple_storage(&node_id);
+    let triple_manager =
+        TripleManager::new(Participant::from(0), 5, 123, &node_id, &triple_storage);
 
     let triple_id_1: u64 = 1;
     let triple_1 = dummy_triple(triple_id_1);
@@ -257,22 +246,19 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_presignature_persistence() -> anyhow::Result<()> {
-    let docker_client = DockerClient::default();
-    let docker_network = "test-presignature-persistence";
-    docker_client.create_network(docker_network).await?;
-    let redis = containers::Redis::run(&docker_client, docker_network).await;
-    let redis_url = Url::parse(redis.internal_address.as_str())?;
-    let redis_cfg = deadpool_redis::Config::from_url(redis_url);
-    let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-    let presignature_storage = storage::presignature_storage::init(
-        &redis_pool,
-        &AccountId::from_str("test.near").unwrap(),
-    );
+    let spawner = ClusterSpawner::default()
+        .network("test-presignature-persistence")
+        .init_network()
+        .await?;
+
+    let node_id = "test.near".parse().unwrap();
+    let redis = containers::Redis::run(&spawner).await;
+    let presignature_storage = redis.presignature_storage(&node_id);
     let mut presignature_manager = PresignatureManager::new(
         Participant::from(0),
         5,
         123,
-        &AccountId::from_str("test.near").unwrap(),
+        &node_id,
         &presignature_storage,
     );
 
@@ -385,7 +371,7 @@ fn dummy_triple(id: u64) -> Triple {
 
 #[test(tokio::test)]
 async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn().wait_for_running().await?;
+    let mut nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
 
@@ -425,7 +411,7 @@ async fn test_lake_congestion() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn().wait_for_running().await?;
+    let mut nodes = cluster::spawn().await?;
 
     // add latency to node1->rpc, but not node0->rpc
     add_latency(&nodes.nodes.proxy_name_for_node(1), true, 1.0, 1_000, 100).await?;
@@ -460,7 +446,7 @@ async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_multichain_update_contract() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().wait_for_running().await?;
+    let nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     nodes.sign().await.unwrap();
 
@@ -487,14 +473,14 @@ async fn test_multichain_update_contract() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_batch_random_signature() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().wait_for_running().await?;
+    let nodes = cluster::spawn().await?;
     actions::batch_random_signature_production(&nodes).await?;
     Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_batch_duplicate_signature() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().wait_for_running().await?;
+    let nodes = cluster::spawn().await?;
     actions::batch_duplicate_signature_production(&nodes).await?;
     Ok(())
 }

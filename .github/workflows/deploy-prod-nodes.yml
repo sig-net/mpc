@@ -31,12 +31,12 @@ jobs:
         run: echo "$GOOGLE_CREDENTIALS" | docker login -u _json_key --password-stdin https://europe-west1-docker.pkg.dev
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.SIG_CREDENTIALS_TESTNET }}
-      
+
         # Since the Mainnet and Testnet nodes are polling this image repository, only the image needs to be updated in order to trigger a deployment
       - name: Build Docker image and deploy partner nodes
         id: docker-push-tagged-partner
         uses: docker/build-push-action@v4
         with:
           push: true
-          file: ./Dockerfile.multichain
+          file: ./Dockerfile
           tags: "europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:latest"

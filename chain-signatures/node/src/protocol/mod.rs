@@ -97,6 +97,14 @@ impl CryptographicCtx for &mut MpcSignProtocol {
         &mut self.ctx.secret_storage
     }
 
+    fn triple_storage(&self) -> &TripleStorage {
+        &self.ctx.triple_storage
+    }
+
+    fn presignature_storage(&self) -> &PresignatureStorage {
+        &self.ctx.presignature_storage
+    }
+
     fn channel(&self) -> &MessageChannel {
         &self.channel
     }
