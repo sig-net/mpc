@@ -171,7 +171,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             mesh_options,
             message_options,
         } => {
-            logs::install_global(debug_id);
+            logs::setup();
             let _span = tracing::trace_span!("cli").entered();
 
             let (sign_tx, sign_rx) = SignQueue::channel();

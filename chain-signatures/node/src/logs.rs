@@ -1,5 +1,6 @@
 use std::fmt;
 
+use opentelemetry_otlp::WithExportConfig;
 use tracing::{Event, Subscriber};
 use tracing_stackdriver::layer as stackdriver_layer;
 use tracing_subscriber::fmt::format::{Format, FormatEvent, Full};
@@ -79,4 +80,44 @@ pub fn install_global(node_id: Option<usize>) {
         let subscriber = base_subscriber.with(fmt_layer);
         tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
     }
+}
+
+pub fn setup() {
+    // TODO: add Phuongs debug node id layer
+    // TODO: add parameters (telemetry host, anything else?)
+
+    // Install global collector configured based on RUST_LOG env var.
+    let subscriber = Registry::default().with(EnvFilter::from_default_env());
+
+    // note that here, localhost:4318 is the default HTTP address
+    // for a local OpenTelemetry collector
+    let tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_endpoint("localhost:4318"),
+        )
+        // .with_trace_config(trace_config)
+        .install_batch(opentelemetry::runtime::Tokio)
+        .expect("Failed to build OpenTelemetry tracer");
+
+    // log level filtering here
+    let filter_layer = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("info"))
+        .unwrap();
+
+    // fmt layer - printing out logs
+    let fmt_layer = tracing_subscriber::fmt::layer().compact();
+
+    // turn our OTLP pipeline into a tracing layer
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    // initialise our subscriber
+    let subscriber = subscriber
+        .with(filter_layer)
+        .with(fmt_layer)
+        .with(otel_layer);
+
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 }
