@@ -9,6 +9,7 @@ use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::rpc::RpcChannel;
 use crate::storage::secret_storage::SecretNodeStorageBox;
+use crate::storage::{PresignatureStorage, TripleStorage};
 
 use async_trait::async_trait;
 use cait_sith::protocol::{Action, InitializationError, ProtocolError};
@@ -18,6 +19,8 @@ use near_account_id::AccountId;
 pub trait CryptographicCtx {
     fn mpc_contract_id(&self) -> &AccountId;
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox;
+    fn triple_storage(&self) -> &TripleStorage;
+    fn presignature_storage(&self) -> &PresignatureStorage;
     fn my_account_id(&self) -> &AccountId;
     fn channel(&self) -> &MessageChannel;
     fn rpc_channel(&self) -> &RpcChannel;
@@ -221,6 +224,22 @@ impl CryptographicProtocol for ResharingState {
                             public_key: self.public_key,
                         })
                         .await?;
+
+                    // Clear triples from storage before starting the new epoch. This is necessary if the node has accumulated
+                    // triples from previous epochs. If it was not able to clear the previous triples, we'll leave them as-is
+                    if let Err(err) = ctx.triple_storage().clear().await {
+                        tracing::error!(
+                            ?err,
+                            "failed to clear triples from storage on new epoch start"
+                        );
+                    }
+
+                    if let Err(err) = ctx.presignature_storage().clear().await {
+                        tracing::error!(
+                            ?err,
+                            "failed to clear presignatures from storage on new epoch start"
+                        );
+                    }
 
                     return Ok(NodeState::WaitingForConsensus(WaitingForConsensusState {
                         epoch: self.old_epoch + 1,

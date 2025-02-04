@@ -626,6 +626,7 @@ impl PresignatureManager {
                             id,
                             me = ?self.me,
                             big_r = ?output.big_r.to_base58(),
+                            elapsed = ?generator.timestamp.elapsed(),
                             "completed presignature generation"
                         );
                         let presignature = Presignature {

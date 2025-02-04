@@ -26,10 +26,8 @@ enum NodeState {
 
 enum WaitActions {
     Running(Epoch),
-    MinTriples(usize),
-    MinMineTriples(usize),
-    MinPresignatures(usize),
-    MinMinePresignatures(usize),
+    MinTriples(usize, bool),
+    MinPresignatures(usize, bool),
     Signable(usize),
     NodeState(NodeState, usize),
     ContractState(ContractState),
@@ -65,26 +63,23 @@ impl<'a, R> WaitAction<'a, R> {
         }
     }
 
-    pub fn min_triples(mut self, min_triples: usize) -> Self {
-        self.actions.push(WaitActions::MinTriples(min_triples));
+    pub fn min_triples(mut self, min: usize) -> Self {
+        self.actions.push(WaitActions::MinTriples(min, false));
         self
     }
 
-    pub fn min_mine_triples(mut self, min_mine_triples: usize) -> Self {
-        self.actions
-            .push(WaitActions::MinMineTriples(min_mine_triples));
+    pub fn min_mine_triples(mut self, min: usize) -> Self {
+        self.actions.push(WaitActions::MinTriples(min, true));
         self
     }
 
-    pub fn min_presignatures(mut self, min_presignatures: usize) -> Self {
-        self.actions
-            .push(WaitActions::MinPresignatures(min_presignatures));
+    pub fn min_presignatures(mut self, min: usize) -> Self {
+        self.actions.push(WaitActions::MinPresignatures(min, false));
         self
     }
 
-    pub fn min_mine_presignatures(mut self, min_mine_presignatures: usize) -> Self {
-        self.actions
-            .push(WaitActions::MinMinePresignatures(min_mine_presignatures));
+    pub fn min_mine_presignatures(mut self, min: usize) -> Self {
+        self.actions.push(WaitActions::MinPresignatures(min, true));
         self
     }
 
@@ -174,17 +169,11 @@ impl<'a, R> WaitAction<'a, R> {
                 WaitActions::Running(epoch) => {
                     running_mpc(self.nodes, if epoch > 0 { Some(epoch) } else { None }).await?;
                 }
-                WaitActions::MinTriples(expected) => {
-                    require_triples(self.nodes, expected, false).await?;
+                WaitActions::MinTriples(expected, mine) => {
+                    require_triples(self.nodes, expected, mine).await?;
                 }
-                WaitActions::MinMineTriples(expected) => {
-                    require_triples(self.nodes, expected, true).await?;
-                }
-                WaitActions::MinPresignatures(expected) => {
-                    require_presignatures(self.nodes, expected, false).await?;
-                }
-                WaitActions::MinMinePresignatures(expected) => {
-                    require_presignatures(self.nodes, expected, true).await?;
+                WaitActions::MinPresignatures(expected, mine) => {
+                    require_presignatures(self.nodes, expected, mine).await?;
                 }
                 WaitActions::Signable(count) => {
                     require_presignatures(self.nodes, count, true).await?;
