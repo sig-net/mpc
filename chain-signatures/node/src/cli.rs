@@ -59,12 +59,12 @@ pub enum Cli {
         /// Local address that other peers can use to message this node.
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
-        /// Debuggable id for each MPC node for logging purposes
-        #[arg(long, env("MPC_DEBUG_NODE_ID"))]
-        debug_id: Option<usize>,
         /// Storage options
         #[clap(flatten)]
         storage_options: storage::Options,
+        /// Logging options
+        #[clap(flatten)]
+        logging_options: logs::Options,
         /// The set of configurations that we will use to override contract configurations.
         #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
         override_config: Option<OverrideConfig>,
@@ -93,8 +93,8 @@ impl Cli {
                 eth,
                 indexer_options,
                 my_address,
-                debug_id,
                 storage_options,
+                logging_options,
                 override_config,
                 client_header_referer,
                 mesh_options,
@@ -125,9 +125,6 @@ impl Cli {
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
                 }
-                if let Some(debug_id) = debug_id {
-                    args.extend(["--debug-id".to_string(), debug_id.to_string()]);
-                }
                 if let Some(override_config) = override_config {
                     args.extend([
                         "--override-config".to_string(),
@@ -142,6 +139,7 @@ impl Cli {
                 args.extend(eth.into_str_args());
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
+                args.extend(logging_options.into_str_args());
                 args.extend(mesh_options.into_str_args());
                 args.extend(message_options.into_str_args());
                 args
@@ -164,14 +162,15 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             eth,
             indexer_options,
             my_address,
-            debug_id,
             storage_options,
+            logging_options,
             override_config,
             client_header_referer,
             mesh_options,
             message_options,
         } => {
-            logs::setup();
+            logs::setup(&storage_options.env, account_id.as_str(), &logging_options);
+
             let _span = tracing::trace_span!("cli").entered();
 
             let (sign_tx, sign_rx) = SignQueue::channel();

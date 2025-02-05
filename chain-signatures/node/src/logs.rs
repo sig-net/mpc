@@ -1,6 +1,10 @@
-use std::fmt;
+use std::fmt::{self, Display};
 
+use opentelemetry::sdk::Resource;
+use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::trace::{self, RandomIdGenerator, Sampler};
+use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
 use tracing::{Event, Subscriber};
 use tracing_stackdriver::layer as stackdriver_layer;
 use tracing_subscriber::fmt::format::{Format, FormatEvent, Full};
@@ -8,7 +12,74 @@ use tracing_subscriber::fmt::time::SystemTime;
 use tracing_subscriber::fmt::{format, FmtContext, FormatFields};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::{EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Layer, Registry};
+
+#[derive(Debug, Clone, clap::Parser)]
+pub struct Options {
+    #[clap(
+        long,
+        env("MPC_OPENTELEMETRY_LEVEL"),
+        value_enum,
+        default_value = "off"
+    )]
+    pub opentelemetry_level: OpenTelemetryLevel,
+
+    #[clap(
+        long,
+        env("MPC_OTLP_ENDPOINT"),
+        default_value = "http://localhost:4317"
+    )]
+    pub otlp_endpoint: String,
+    /// Debuggable id for each MPC node for logging purposes
+    #[arg(long, env("MPC_DEBUG_NODE_ID"))]
+    debug_id: Option<usize>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            opentelemetry_level: OpenTelemetryLevel::OFF,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            debug_id: None,
+        }
+    }
+}
+
+impl Options {
+    pub fn into_str_args(self) -> Vec<String> {
+        let mut opts = vec![
+            "--opentelemetry-level".to_string(),
+            self.opentelemetry_level.to_string(),
+            "--otlp-endpoint".to_string(),
+            self.otlp_endpoint,
+        ];
+        if let Some(debug_id) = self.debug_id {
+            opts.extend(vec!["--node-debug-id".to_string(), debug_id.to_string()]);
+        }
+        opts
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+pub enum OpenTelemetryLevel {
+    #[default]
+    OFF,
+    INFO,
+    DEBUG,
+    TRACE,
+}
+
+impl Display for OpenTelemetryLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let str = match self {
+            OpenTelemetryLevel::OFF => "off",
+            OpenTelemetryLevel::INFO => "info",
+            OpenTelemetryLevel::DEBUG => "debug",
+            OpenTelemetryLevel::TRACE => "trace",
+        };
+        write!(f, "{}", str)
+    }
+}
 
 /// This will whether this code is being ran on top of GCP or not.
 fn is_running_on_gcp() -> bool {
@@ -82,42 +153,41 @@ pub fn install_global(node_id: Option<usize>) {
     }
 }
 
-pub fn setup() {
-    // TODO: add Phuongs debug node id layer
-    // TODO: add parameters (telemetry host, anything else?)
-
-    // Install global collector configured based on RUST_LOG env var.
+// TODO: add Phuongs debug node id layer
+// TODO: what to do with GCP logs?
+pub fn setup(env: &str, node_id: &str, options: &Options) {
     let subscriber = Registry::default().with(EnvFilter::from_default_env());
 
-    // note that here, localhost:4318 is the default HTTP address
-    // for a local OpenTelemetry collector
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(atty::is(atty::Stream::Stderr))
+        .with_line_number(true)
+        .with_thread_names(true);
+
+    let trace_config = trace::config()
+        .with_sampler(Sampler::AlwaysOn)
+        .with_id_generator(RandomIdGenerator::default())
+        .with_resource(Resource::new(vec![
+            KeyValue::new(SERVICE_NAME, format!("mpc:{}:{}", env, node_id)),
+            KeyValue::new("env", env.to_string()),
+            KeyValue::new("node_id", node_id.to_string()),
+        ]));
+
     let tracer = opentelemetry_otlp::new_pipeline()
         .tracing()
         .with_exporter(
             opentelemetry_otlp::new_exporter()
                 .http()
-                .with_endpoint("http://localhost:4317"),
+                .with_endpoint(options.otlp_endpoint.clone()),
         )
-        // .with_trace_config(trace_config)
+        .with_trace_config(trace_config)
         .install_batch(opentelemetry::runtime::Tokio)
         .expect("Failed to build OpenTelemetry tracer");
 
-    // log level filtering here
-    let filter_layer = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("info"))
-        .unwrap();
+    let otel_layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_filter(EnvFilter::new(options.opentelemetry_level.to_string()));
 
-    // fmt layer - printing out logs
-    let fmt_layer = tracing_subscriber::fmt::layer().compact();
-
-    // turn our OTLP pipeline into a tracing layer
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-
-    // initialise our subscriber
-    let subscriber = subscriber
-        .with(filter_layer)
-        .with(fmt_layer)
-        .with(otel_layer);
+    let subscriber = subscriber.with(fmt_layer).with(otel_layer);
 
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 }

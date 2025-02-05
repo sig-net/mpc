@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 async-trait = "0.1"
+atty = "0.2"
 aws-config = "1.4"
 aws-sdk-s3 = "1.29"
 axum = { version = "0.6.19" }
@@ -39,6 +40,7 @@ thiserror = "1"
 tokio = { version = "1.28", features = ["full"] }
 tokio-retry = "0.3"
 tracing = "0.1"
+tracing-appender = "0.2.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-stackdriver = "0.10.0"
 tracing-opentelemetry = "0.21.0"
@@ -47,6 +49,8 @@ opentelemetry-otlp = { version = "0.13.0", features = [
     "http-proto",
     "reqwest-client",
 ] }
+opentelemetry_sdk = { version = "0.20.0", features = ["rt-tokio"] }
+opentelemetry-semantic-conventions = "0.14.0"
 web3 = "0.19.0"
 url = { version = "2.4.0", features = ["serde"] }
 

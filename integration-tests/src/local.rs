@@ -90,8 +90,8 @@ impl Node {
             eth,
             indexer_options,
             my_address: None,
-            debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
+            logging_options: ctx.logging_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 cfg.protocol.clone(),
             )?)),
@@ -197,8 +197,8 @@ impl Node {
             eth,
             indexer_options,
             my_address: None,
-            debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
+            logging_options: ctx.logging_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),
             )?)),

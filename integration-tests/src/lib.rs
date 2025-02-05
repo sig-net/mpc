@@ -21,7 +21,7 @@ use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
 use mpc_node::storage::triple_storage::TripleStorage;
-use mpc_node::{mesh, node_client, storage};
+use mpc_node::{logs, mesh, node_client, storage};
 use near_crypto::KeyFile;
 use near_workspaces::network::{Sandbox, ValidatorKey};
 use near_workspaces::types::{KeyType, SecretKey};
@@ -238,6 +238,7 @@ pub struct Context {
     pub mpc_contract: Contract,
     pub redis: crate::containers::Redis,
     pub storage_options: storage::Options,
+    pub logging_options: logs::Options,
     pub mesh_options: mesh::Options,
     pub message_options: node_client::Options,
 }
@@ -269,6 +270,8 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         redis_url: redis.internal_address.clone(),
     };
 
+    let logging_options = logs::Options::default();
+
     let mesh_options = mpc_node::mesh::Options {
         refresh_active_timeout: 1000,
     };
@@ -288,6 +291,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         mpc_contract,
         redis,
         storage_options,
+        logging_options,
         mesh_options,
         message_options,
     })

@@ -139,8 +139,8 @@ impl Node {
             indexer_options: indexer_options.clone(),
             eth: eth_args,
             my_address: None,
-            debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
+            logging_options: ctx.logging_options.clone(),
             sign_sk: Some(config.sign_sk.clone()),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),
