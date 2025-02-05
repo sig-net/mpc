@@ -50,7 +50,7 @@ pub async fn run(
         .route("/metrics", get(metrics));
 
     if cfg!(feature = "bench") {
-        router = router.route("/bench/metrics/sig", get(bench_metrics));
+        router = router.route("/bench/metrics", get(bench_metrics));
     }
 
     let app = router.layer(Extension(Arc::new(axum_state)));
@@ -198,7 +198,18 @@ async fn metrics() -> (StatusCode, String) {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchMetrics {
+    pub sig_gen: Vec<f64>,
+    pub sig_respond: Vec<f64>,
+    pub presig_gen: Vec<f64>,
+}
+
 #[tracing::instrument(level = "debug", skip_all)]
-async fn bench_metrics() -> Json<Vec<f64>> {
-    Json(crate::metrics::SIGN_GENERATION_LATENCY.exact())
+async fn bench_metrics() -> Json<BenchMetrics> {
+    Json(BenchMetrics {
+        sig_gen: crate::metrics::SIGN_GENERATION_LATENCY.exact(),
+        sig_respond: crate::metrics::SIGN_RESPOND_LATENCY.exact(),
+        presig_gen: crate::metrics::PRESIGNATURE_LATENCY.exact(),
+    })
 }

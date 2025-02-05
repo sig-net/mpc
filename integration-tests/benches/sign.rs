@@ -1,18 +1,17 @@
 use criterion::measurement::ValueFormatter;
 use criterion::Criterion;
+use criterion::{measurement::Measurement, Throughput};
 use integration_tests::cluster::{self, Cluster};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 use std::time::Instant;
 
-pub const SIGNATURE_AMOUNT: usize = 10;
-
-use criterion::{measurement::Measurement, Throughput};
-use std::time::Duration;
+pub const SIGNATURE_AMOUNT: usize = 30;
 
 struct NodeTimeMeasurement {
     name: &'static str,
-    datapoints: Vec<f64>,
+    data: Vec<f64>,
     at: Mutex<usize>,
 }
 
@@ -22,9 +21,9 @@ impl Measurement for NodeTimeMeasurement {
 
     fn start(&self) -> Self::Intermediate {
         let mut at = self.at.lock().unwrap();
-        let value = self.datapoints[*at];
+        let value = self.data[*at];
         *at += 1;
-        if *at >= self.datapoints.len() {
+        if *at >= self.data.len() {
             *at = 0;
         }
         value
@@ -56,7 +55,7 @@ impl Measurement for NodeTimeMeasurement {
 fn bench_on_metrics(measurement: NodeTimeMeasurement) {
     let name = measurement.name.to_string();
     let mut c = Criterion::default()
-        .sample_size(measurement.datapoints.len())
+        .sample_size(measurement.data.len())
         .warm_up_time(Duration::from_nanos(1))
         .measurement_time(Duration::from_millis(1))
         .with_measurement(measurement);
@@ -108,14 +107,23 @@ fn main() {
     });
 
     // cleanup and drop everything within the runtime so that async-drops work:
-    let metrics = rt.block_on(async move { nodes.fetch_bench_sig(0).await.unwrap() });
+    let metrics = rt.block_on(async move { nodes.fetch_bench_metrics(0).await.unwrap() });
 
-    let measurement = NodeTimeMeasurement {
+    bench_on_metrics(NodeTimeMeasurement {
         name: "sig(metrics) generation latency",
-        datapoints: metrics,
+        data: metrics.sig_gen,
         at: Mutex::new(0),
-    };
-    bench_on_metrics(measurement);
+    });
+    bench_on_metrics(NodeTimeMeasurement {
+        name: "sig(metrics) respond latency",
+        data: metrics.sig_respond,
+        at: Mutex::new(0),
+    });
+    bench_on_metrics(NodeTimeMeasurement {
+        name: "presig(metrics) generation latency",
+        data: metrics.presig_gen,
+        at: Mutex::new(0),
+    });
     println!("bench total time: {:?}", started.elapsed());
 }
 

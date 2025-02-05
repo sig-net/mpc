@@ -60,14 +60,13 @@ pub(crate) static SIGN_GENERATION_LATENCY: Lazy<Histogram> = Lazy::new(|| {
     )
 });
 
-pub(crate) static SIGN_RESPOND_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
-    try_create_histogram_vec(
+pub(crate) static SIGN_RESPOND_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::new(
         "multichain_sign_respond_latency_sec",
         "Latency of multichain signing, from received publish request to publish complete.",
         &["node_account_id"],
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
-    .unwrap()
 });
 
 pub(crate) static LATEST_BLOCK_HEIGHT: Lazy<IntGaugeVec> = Lazy::new(|| {
@@ -89,14 +88,13 @@ pub(crate) static TRIPLE_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static PRESIGNATURE_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
-    try_create_histogram_vec(
+pub(crate) static PRESIGNATURE_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::new(
         "multichain_presignature_latency_sec",
         "Latency of multichain presignature generation, start from starting generation, end when presignature generation complete.",
         &["node_account_id"],
         Some(exponential_buckets(1.0, 1.5, 20).unwrap()),
     )
-    .unwrap()
 });
 
 pub(crate) static SIGN_QUEUE_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
@@ -533,7 +531,6 @@ fn check_metric_multichain_prefix(name: &str) -> Result<()> {
 pub struct Histogram {
     pub histogram: HistogramVec,
     pub label_values: Mutex<Vec<String>>,
-    #[cfg(feature = "bench")]
     pub exact: Mutex<Vec<f64>>,
 }
 
@@ -543,23 +540,25 @@ impl Histogram {
         Self {
             histogram,
             label_values: Mutex::new(Vec::new()),
-            #[cfg(feature = "bench")]
             exact: Mutex::new(Vec::new()),
         }
     }
 
+    #[cfg(feature = "bench")]
     pub fn with_label_values(&self, values: &[&str]) -> &Self {
         let mut label_values = self.label_values.lock().unwrap();
         *label_values = values.iter().map(|s| s.to_string()).collect();
         self
     }
 
+    #[cfg(not(feature = "bench"))]
+    pub fn with_label_values(&self, values: &[&str]) -> prometheus::Histogram {
+        self.histogram.with_label_values(values)
+    }
+
     pub fn observe(&self, value: f64) {
-        #[cfg(feature = "bench")]
-        {
-            let mut exact = self.exact.lock().unwrap();
-            exact.push(value);
-        }
+        let mut exact = self.exact.lock().unwrap();
+        exact.push(value);
 
         let label_values = self.label_values.lock().unwrap();
         let label_values = label_values.iter().map(String::as_str).collect::<Vec<_>>();
@@ -569,11 +568,6 @@ impl Histogram {
     }
 
     pub fn exact(&self) -> Vec<f64> {
-        #[cfg(feature = "bench")]
-        let value = self.exact.lock().unwrap().clone();
-        #[cfg(not(feature = "bench"))]
-        let value = Vec::new();
-
-        value
+        self.exact.lock().unwrap().clone()
     }
 }
