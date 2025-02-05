@@ -55,12 +55,18 @@ mpc-keys = { path = "../chain-signatures/keys" }
 mpc-node = { path = "../chain-signatures/node" }
 
 [dev-dependencies]
+criterion = "0.5.1"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [build-dependencies]
 anyhow = "1"
 async-process = "1"
 tokio = { version = "1", features = ["full"] }
+
+[[bench]]
+name = "sign"
+path = "benches/sign.rs"
+harness = false
 
 [workspace] # used to ignore higher level workspace
 
