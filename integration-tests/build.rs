@@ -97,6 +97,13 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
     rerun_directory("../chain-signatures/");
 
+    let build_disabled = env::var("MPC_TEST_BUILD_DISABLED")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if build_disabled {
+        return Ok(());
+    }
+
     let release = true;
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {

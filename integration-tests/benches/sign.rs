@@ -127,6 +127,7 @@ fn main() {
     println!("bench total time: {:?}", started.elapsed());
 }
 
+// Code pulled from criterion crate due to it not exposing `DurationFormatter`
 pub(crate) struct DurationFormatter;
 impl DurationFormatter {
     fn bytes_per_second(&self, bytes: f64, typical: f64, values: &mut [f64]) -> &'static str {

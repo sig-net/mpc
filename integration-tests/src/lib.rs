@@ -181,9 +181,6 @@ impl Nodes {
         }
     }
 
-    pub fn kill_containers(&mut self) {
-    }
-
     pub async fn restart_node(&mut self, config: NodeEnvConfig) -> anyhow::Result<()> {
         tracing::info!(node_account_id = %config.account.id(), "restarting node");
         match self {
