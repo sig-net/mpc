@@ -1,74 +1,17 @@
 use criterion::measurement::ValueFormatter;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::Criterion;
 use integration_tests::cluster::{self, Cluster};
-use near_workspaces::Account;
 use std::sync::Arc;
-use std::{future::Future, sync::Mutex};
+use std::sync::Mutex;
+use std::time::Instant;
 
 pub const SIGNATURE_AMOUNT: usize = 10;
 
-// fn bench_single_sign_latency(c: &mut Criterion) {
-//     bench(c, "sign latency", |nodes, account| async move {
-//         nodes.sign().account(account).await
-//     });
-// }
-
-// fn bench<O, R: Future<Output = O>>(
-//     c: &mut Criterion,
-//     name: &str,
-//     f: fn(Arc<Cluster>, Account) -> R,
-// ) {
-//     let rt = tokio::runtime::Builder::new_multi_thread()
-//         .enable_all()
-//         .build()
-//         .unwrap();
-//     let (nodes, accounts) = rt.block_on(async {
-//         let nodes = cluster::spawn()
-//             .with_config(|cfg| {
-//                 cfg.protocol.triple.min_triples = SIGNATURE_AMOUNT as u32 * 4;
-//                 cfg.protocol.triple.max_triples = SIGNATURE_AMOUNT as u32 * 16;
-//                 cfg.protocol.presignature.min_presignatures = SIGNATURE_AMOUNT as u32;
-//                 cfg.protocol.presignature.max_presignatures = SIGNATURE_AMOUNT as u32 * 4;
-//             })
-//             .await
-//             .unwrap();
-
-//         let worker = nodes.worker();
-//         let mut accounts = Vec::with_capacity(SIGNATURE_AMOUNT * 2);
-//         for _ in 0..SIGNATURE_AMOUNT * 2 {
-//             accounts.push(worker.dev_create_account().await.unwrap());
-//         }
-
-//         (Arc::new(nodes), accounts)
-//     });
-
-//     println!("starting benchmark: {}", name);
-//     let mut accounts = accounts.into_iter();
-//     c.bench_function(name, |b| {
-//         // b.to_async(&rt)
-//         //     .iter(|| f(nodes.clone(), accounts.next().unwrap()))
-//         b.iter(|| rt.block_on(f(nodes.clone(), accounts.next().unwrap())))
-//     });
-//     println!("stopping benchmark: {}", name);
-
-//     // cleanup and drop everything within the runtime so that async-drops work:
-//     rt.block_on(async move {
-//         drop(nodes);
-//     });
-// }
-
-// criterion_group!(
-//     name = sign;
-//     config = Criterion::default().sample_size(SIGNATURE_AMOUNT);
-//     targets = bench_single_sign_latency
-// );
-// criterion_main!(sign);
-
-use criterion::{measurement::Measurement, BenchmarkId, Throughput};
+use criterion::{measurement::Measurement, Throughput};
 use std::time::Duration;
 
 struct NodeTimeMeasurement {
-    name: String,
+    name: &'static str,
     datapoints: Vec<f64>,
     at: Mutex<usize>,
 }
@@ -110,46 +53,30 @@ impl Measurement for NodeTimeMeasurement {
     }
 }
 
-fn my_function() {
-    std::thread::sleep(Duration::from_millis(1)); // Simulating work
-}
+fn bench_on_metrics(measurement: NodeTimeMeasurement) {
+    let name = measurement.name.to_string();
+    let mut c = Criterion::default()
+        .sample_size(measurement.datapoints.len())
+        .warm_up_time(Duration::from_nanos(1))
+        .measurement_time(Duration::from_millis(1))
+        .with_measurement(measurement);
 
-fn benchmark(c: &mut Criterion<NodeTimeMeasurement>) {
-    let mut group = c.benchmark_group("external_benchmark");
-    // group.throughput(Throughput::Elements(1));
-    group.bench_with_input(BenchmarkId::new("my_function", 1), &1, |b, _| {
+    let mut group = c.benchmark_group("bench_on_metrics");
+    group.bench_function(name, |b| {
         b.iter(|| {
-            my_function();
+            std::thread::sleep(Duration::from_millis(1)); // Simulating work
         })
     });
     group.finish();
 }
 
 fn main() {
-    // let datapoints = vec![
-    //     0.1, 0.2, 0.3, 0.4, 0.5, 0.3, 0.2, 0.43, 0.15, 0.25, 0.111, 0.222,
-    // ];
-    // let datapoints: Vec<f64> = vec![
-    //     0.12, 0.85, 0.73, 0.91, 0.44, 0.56, 0.77, 0.32, 0.68, 0.27, 0.93, 0.88, 0.15, 0.41, 0.79,
-    //     0.36, 0.52, 0.69, 0.81, 0.25, 0.64, 0.48, 0.96, 0.19, 0.72, 0.53, 0.67, 0.39, 0.84, 0.21,
-    //     0.74, 0.47, 0.59, 0.29, 0.92, 0.33, 0.55, 0.61, 0.87, 0.14, 0.49, 0.76, 0.26, 0.97, 0.43,
-    //     0.62, 0.34, 0.89, 0.57, 0.31, 0.66, 0.22, 0.95, 0.45, 0.71, 0.38, 0.54, 0.82, 0.24, 0.78,
-    //     0.63, 0.17, 0.99, 0.42, 0.51, 0.86, 0.28, 0.75, 0.58, 0.37, 0.46, 0.16, 0.83, 0.65, 0.23,
-    //     0.91, 0.35, 0.44, 0.98, 0.12, 0.68, 0.19, 0.53, 0.72, 0.31, 0.79, 0.56, 0.48, 0.94, 0.21,
-    //     0.61, 0.87, 0.33, 0.47, 0.55, 0.41, 0.92, 0.29, 0.73, 0.14, 0.39, 0.84, 0.26, 0.58, 0.97,
-    //     0.42, 0.36, 0.64, 0.81, 0.49, 0.76, 0.53, 0.22, 0.95, 0.62, 0.37, 0.57, 0.45, 0.88, 0.28,
-    //     0.69, 0.25, 0.74, 0.43, 0.32, 0.96, 0.59, 0.51, 0.86, 0.38, 0.67, 0.19, 0.93, 0.24, 0.71,
-    //     0.48, 0.34, 0.89, 0.54, 0.27, 0.82, 0.16, 0.98, 0.63, 0.39, 0.55, 0.47, 0.91, 0.35, 0.44,
-    //     0.79, 0.26, 0.68, 0.31, 0.53, 0.72, 0.41, 0.88, 0.21, 0.66, 0.95, 0.29, 0.76, 0.51, 0.36,
-    //     0.83, 0.42, 0.58, 0.97, 0.22, 0.69, 0.24, 0.74, 0.46, 0.32, 0.94, 0.59, 0.45, 0.85, 0.37,
-    //     0.67, 0.19, 0.92, 0.27, 0.71, 0.48, 0.33, 0.89, 0.54, 0.28,
-    // ];
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap();
-    let datapoints = rt.block_on(async {
+    let started = Instant::now();
+    let (nodes, accounts) = rt.block_on(async {
         let nodes = cluster::spawn()
             .with_config(|cfg| {
                 cfg.protocol.triple.min_triples = SIGNATURE_AMOUNT as u32 * 4;
@@ -166,27 +93,30 @@ fn main() {
             accounts.push(worker.dev_create_account().await.unwrap());
         }
 
-        for account in accounts.into_iter() {
-            if let Err(err) = nodes.sign().account(account).await {
-                println!("failed to sign: {:?}", err);
-            }
-        }
-
-        nodes.fetch_bench_sig(0).await.unwrap()
+        (Arc::new(nodes), accounts)
     });
 
-    let amount = datapoints.len();
+    let mut accounts = accounts.into_iter();
+    let mut c = Criterion::default()
+        .sample_size(SIGNATURE_AMOUNT)
+        .warm_up_time(Duration::from_nanos(1))
+        .measurement_time(Duration::from_millis(1));
+    c.bench_function("sig(e2e) latency", |b| {
+        let sign =
+            |nodes: Arc<Cluster>, account| async move { nodes.sign().account(account).await };
+        b.iter(|| rt.block_on(sign(nodes.clone(), accounts.next().unwrap())))
+    });
+
+    // cleanup and drop everything within the runtime so that async-drops work:
+    let metrics = rt.block_on(async move { nodes.fetch_bench_sig(0).await.unwrap() });
+
     let measurement = NodeTimeMeasurement {
-        name: "node_time".to_string(),
-        datapoints,
+        name: "sig(metrics) generation latency",
+        datapoints: metrics,
         at: Mutex::new(0),
     };
-    let mut criterion = Criterion::default()
-        .sample_size(amount)
-        .warm_up_time(Duration::from_nanos(1))
-        .measurement_time(Duration::from_millis(1))
-        .with_measurement(measurement);
-    benchmark(&mut criterion);
+    bench_on_metrics(measurement);
+    println!("bench total time: {:?}", started.elapsed());
 }
 
 pub(crate) struct DurationFormatter;
