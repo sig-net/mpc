@@ -69,6 +69,12 @@ impl Cluster {
         futures::future::try_join_all(tasks).await
     }
 
+    pub async fn fetch_bench_sig(&self, id: usize) -> anyhow::Result<Vec<f64>> {
+        let url = self.url(id).join("/bench/metrics/sig").unwrap();
+        let metrics: Vec<f64> = self.http_client.get(url).send().await?.json().await?;
+        Ok(metrics)
+    }
+
     pub fn wait(&self) -> WaitAction<'_, ()> {
         WaitAction::new(self)
     }
