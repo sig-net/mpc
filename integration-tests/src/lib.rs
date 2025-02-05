@@ -166,6 +166,24 @@ impl Nodes {
         killed_node_config
     }
 
+    pub fn kill_all(&mut self) {
+        match self {
+            Nodes::Local { nodes, .. } => {
+                for node in nodes.drain(..) {
+                    node.kill();
+                }
+            }
+            Nodes::Docker { nodes, .. } => {
+                for node in nodes.drain(..) {
+                    tokio::spawn(node.kill());
+                }
+            }
+        }
+    }
+
+    pub fn kill_containers(&mut self) {
+    }
+
     pub async fn restart_node(&mut self, config: NodeEnvConfig) -> anyhow::Result<()> {
         tracing::info!(node_account_id = %config.account.id(), "restarting node");
         match self {
@@ -224,6 +242,12 @@ impl Nodes {
 
     pub fn contract(&self) -> &Contract {
         &self.ctx().mpc_contract
+    }
+}
+
+impl Drop for Nodes {
+    fn drop(&mut self) {
+        self.kill_all();
     }
 }
 
