@@ -27,6 +27,23 @@ cargo test --jobs 1 -- --test-threads 1
 cargo test --features docker-test
 ```
 
+## Benchmarking
+
+Benchmarks collect metrics from node and represent them in a readable format for CI to pick up.
+
+First manually build the nodes with bench feature so we can collect metrics for benchmarking:
+```sh
+cd chain-signatures/
+cargo build -p mpc-node --release --features bench
+cargo build -p mpc-contract --release --target wasm32-unknown-unknown --features bench
+```
+
+Then run the integration test benchmarks:
+```sh
+cd integration-tests/
+MPC_TEST_BUILD_DISABLED=1 cargo bench
+```
+
 ## FAQ
 
 ### I want to run a test, but keep the docker containers from being destroyed
