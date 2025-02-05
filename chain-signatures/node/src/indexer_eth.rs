@@ -7,11 +7,35 @@ use hex::ToHex;
 use k256::Scalar;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use web3::futures::StreamExt;
 use web3::types::{FilterBuilder, Log, H160, H256, U256};
+
+#[derive(Clone)]
+pub struct EthConfig {
+    /// The ethereum account secret key used to sign eth respond txn.
+    pub account_sk: String,
+    /// Ethereum WebSocket RPC URL
+    pub rpc_ws_url: String,
+    /// Ethereum HTTP RPC URL
+    pub rpc_http_url: String,
+    /// The contract address to watch without the `0x` prefix
+    pub contract_address: String,
+}
+
+impl fmt::Debug for EthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EthConfig")
+            .field("account_sk", &"<hidden>")
+            .field("rpc_ws_url", &self.rpc_ws_url)
+            .field("rpc_http_url", &self.rpc_http_url)
+            .field("contract_address", &self.contract_address)
+            .finish()
+    }
+}
 
 /// Configures Ethereum indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -49,11 +73,13 @@ impl EthArgs {
         args
     }
 
-    pub fn is_none(&self) -> bool {
-        self.eth_account_sk.is_none()
-            || self.eth_rpc_ws_url.is_none()
-            || self.eth_rpc_http_url.is_none()
-            || self.eth_contract_address.is_none()
+    pub fn into_config(self) -> Option<EthConfig> {
+        Some(EthConfig {
+            account_sk: self.eth_account_sk?,
+            rpc_ws_url: self.eth_rpc_ws_url?,
+            rpc_http_url: self.eth_rpc_http_url?,
+            contract_address: self.eth_contract_address?,
+        })
     }
 }
 
@@ -160,17 +186,17 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
 }
 
 pub async fn run(
-    args: EthArgs,
+    eth: Option<EthConfig>,
     sign_tx: mpsc::Sender<SignRequest>,
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
-    if args.is_none() {
+    let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
         return Ok(());
-    }
+    };
 
     tracing::info!("running ethereum indexer");
-    let contract_address = H160::from_str(&args.eth_contract_address.unwrap())?;
+    let contract_address = H160::from_str(&eth.contract_address)?;
     let signature_requested_topic = H256::from_slice(&web3::signing::keccak256(
         b"SignatureRequested(bytes32,address,uint256,uint256,string)",
     ));
@@ -180,9 +206,8 @@ pub async fn run(
         .topics(Some(vec![signature_requested_topic]), None, None, None)
         .build();
 
-    let rpc_ws = args.eth_rpc_ws_url.unwrap();
     loop {
-        match web3::transports::WebSocket::new(&rpc_ws).await {
+        match web3::transports::WebSocket::new(&eth.rpc_ws_url).await {
             Ok(ws) => {
                 let web3_ws = web3::Web3::new(ws);
                 match web3_ws.eth_subscribe().subscribe_logs(filter.clone()).await {
