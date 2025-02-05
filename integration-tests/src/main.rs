@@ -6,6 +6,7 @@ use std::vec;
 use clap::Parser;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::{utils, NodeConfig};
+use mpc_node::indexer_eth::EthConfig;
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -63,10 +64,12 @@ async fn main() -> anyhow::Result<()> {
             let config = NodeConfig {
                 nodes,
                 threshold,
-                eth_rpc_ws_url,
-                eth_rpc_http_url,
-                eth_contract_address,
-                eth_account_sk,
+                eth: EthConfig {
+                    account_sk: eth_account_sk,
+                    rpc_ws_url: eth_rpc_ws_url,
+                    rpc_http_url: eth_rpc_http_url,
+                    contract_address: eth_contract_address,
+                },
                 ..Default::default()
             };
             println!("Full config: {:?}", config);

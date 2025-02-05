@@ -336,7 +336,7 @@ fn update_system_metrics(node_account_id: &str) {
         .set(total_disk_space);
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy, Hash)]
 pub enum Chain {
     NEAR,
     Ethereum,
