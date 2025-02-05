@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 anyhow = { version = "1.0", features = ["backtrace"] }
 async-process = "1"
+backon = "0.4"
 bollard = "0.17.0"
 clap = { version = "4.5.4", features = ["derive"] }
 futures = "0.3"
@@ -15,7 +16,6 @@ generic-array = { version = "0.14.7", default-features = false }
 glob = "0.3.0"
 hex = "0.4.3"
 hyper = { version = "0.14", features = ["full"] }
-lazy_static = "1.4.0"
 once_cell = "1"
 rand = "0.7"
 reqwest = "0.11.16"
@@ -32,9 +32,12 @@ web3 = "0.19.0"
 deadpool-redis = "0.18.0"
 
 # crypto dependencies
+ecdsa = "0.16.9"
+ethers-core = "2.0.13"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 elliptic-curve = { version = "0.13.5", default-features = false }
 k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
+secp256k1 = "0.28.2"
 
 # near dependencies
 near-account-id = "1"
@@ -43,8 +46,6 @@ near-fetch = "0.6.0"
 near-sdk = "5.2.1"
 near-jsonrpc-client = "0.13.0"
 near-primitives = "0.26.0"
-near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/2.3.0" }
-near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/2.3.0" }
 near-workspaces = { git = "https://github.com/near/near-workspaces-rs", branch = "phuong/tmp-node-2.3.0" }
 
 # local chain-signatures dependencies
@@ -54,13 +55,7 @@ mpc-keys = { path = "../chain-signatures/keys" }
 mpc-node = { path = "../chain-signatures/node" }
 
 [dev-dependencies]
-backon = "0.4"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
-
-# crypto dependencies
-ecdsa = "0.16.9"
-ethers-core = "2.0.13"
-secp256k1 = "0.28.2"
 
 [build-dependencies]
 anyhow = "1"

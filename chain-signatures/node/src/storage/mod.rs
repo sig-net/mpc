@@ -4,6 +4,9 @@ pub mod presignature_storage;
 pub mod secret_storage;
 pub mod triple_storage;
 
+pub use presignature_storage::PresignatureStorage;
+pub use triple_storage::TripleStorage;
+
 /// Configures storage.
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "storage_options")]

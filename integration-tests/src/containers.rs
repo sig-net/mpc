@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::path::Path;
+
+use crate::cluster::spawner::ClusterSpawner;
 
 use super::{local::NodeEnvConfig, utils, NodeConfig};
 use anyhow::{anyhow, Context};
@@ -8,9 +11,16 @@ use bollard::exec::CreateExecOptions;
 use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
 use bollard::Docker;
+use cait_sith::protocol::Participant;
+use cait_sith::triples::{TriplePub, TripleShare};
+use elliptic_curve::rand_core::OsRng;
 use futures::{lock::Mutex, StreamExt};
+use k256::Secp256k1;
+use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
+use mpc_node::protocol::triple::Triple;
+use near_account_id::AccountId;
 use near_workspaces::Account;
 use once_cell::sync::Lazy;
 use serde_json::json;
@@ -113,10 +123,10 @@ impl Node {
             behind_threshold: 120,
         };
         let eth_args = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: Some(config.cfg.eth_account_sk.clone()),
-            eth_rpc_ws_url: Some(config.cfg.eth_rpc_ws_url.clone()),
-            eth_rpc_http_url: Some(config.cfg.eth_rpc_http_url.clone()),
-            eth_contract_address: Some(config.cfg.eth_contract_address.clone()),
+            eth_account_sk: Some(config.cfg.eth.account_sk.clone()),
+            eth_rpc_ws_url: Some(config.cfg.eth.rpc_ws_url.clone()),
+            eth_rpc_http_url: Some(config.cfg.eth.rpc_http_url.clone()),
+            eth_contract_address: Some(config.cfg.eth.contract_address.clone()),
         };
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
@@ -200,26 +210,23 @@ pub struct LocalStack {
 impl LocalStack {
     const S3_CONTAINER_PORT: u16 = 4566;
 
-    pub async fn run(
-        docker_client: &DockerClient,
-        network: &str,
-        s3_bucket: &str,
-        s3_region: &str,
-    ) -> Self {
+    pub async fn run(spawner: &ClusterSpawner, s3_bucket: &str, s3_region: &str) -> Self {
         tracing::info!("running LocalStack container...");
         let container = GenericImage::new("localstack/localstack", "3.5.0")
             .with_wait_for(WaitFor::message_on_stdout("Ready."))
-            .with_network(network)
+            .with_network(&spawner.network)
             .start()
             .await
             .unwrap();
-        let address = docker_client
-            .get_network_ip_address(&container, network)
+        let address = spawner
+            .docker
+            .get_network_ip_address(&container, &spawner.network)
             .await
             .unwrap();
 
         // Create the bucket
-        let create_result = docker_client
+        let create_result = spawner
+            .docker
             .docker
             .create_exec(
                 container.id(),
@@ -240,7 +247,8 @@ impl LocalStack {
             )
             .await
             .unwrap();
-        let result = docker_client
+        let result = spawner
+            .docker
             .docker
             .start_exec(&create_result.id, None)
             .await
@@ -386,17 +394,19 @@ impl LakeIndexer {
     }
 
     pub async fn run(
-        docker_client: &DockerClient,
-        network: &str,
+        spawner: &ClusterSpawner,
         s3_address: &str,
         bucket_name: &str,
         region: &str,
     ) -> LakeIndexer {
         tracing::info!("initializing toxi proxy servers");
         let toxi_server_process = Self::spin_up_toxi_server_process().await.unwrap();
-        let toxi_server_container = Self::spin_up_toxi_server_container(network).await.unwrap();
-        let toxi_server_container_address = docker_client
-            .get_network_ip_address(&toxi_server_container, network)
+        let toxi_server_container = Self::spin_up_toxi_server_container(&spawner.network)
+            .await
+            .unwrap();
+        let toxi_server_container_address = spawner
+            .docker
+            .get_network_ip_address(&toxi_server_container, &spawner.network)
             .await
             .unwrap();
         let s3_address_proxied = format!(
@@ -414,7 +424,7 @@ impl LakeIndexer {
             .unwrap();
 
         tracing::info!(
-            network,
+            network = %spawner.network,
             s3_address_proxied,
             bucket_name,
             region,
@@ -426,7 +436,7 @@ impl LakeIndexer {
             .with_exposed_port(Self::CONTAINER_RPC_PORT.tcp())
             .with_env_var("AWS_ACCESS_KEY_ID", "FAKE_LOCALSTACK_KEY_ID")
             .with_env_var("AWS_SECRET_ACCESS_KEY", "FAKE_LOCALSTACK_ACCESS_KEY")
-            .with_network(network)
+            .with_network(&spawner.network)
             .with_cmd(vec![
                 "--endpoint".to_string(),
                 format!("http://{}", s3_address_proxied),
@@ -441,8 +451,9 @@ impl LakeIndexer {
             .await
             .unwrap();
 
-        let address = docker_client
-            .get_network_ip_address(&container, network)
+        let address = spawner
+            .docker
+            .get_network_ip_address(&container, &spawner.network)
             .await
             .unwrap();
         let rpc_address = format!("http://{}:{}", address, Self::CONTAINER_RPC_PORT);
@@ -616,17 +627,18 @@ pub struct Redis {
 impl Redis {
     const DEFAULT_REDIS_PORT: u16 = 6379;
 
-    pub async fn run(docker_client: &DockerClient, network: &str) -> Self {
+    pub async fn run(spawner: &ClusterSpawner) -> Self {
         tracing::info!("Running Redis container...");
         let container = GenericImage::new("redis", "7.4.2")
             .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .with_network(network)
+            .with_network(&spawner.network)
             .start()
             .await
             .unwrap();
-        let network_ip = docker_client
-            .get_network_ip_address(&container, network)
+        let network_ip = spawner
+            .docker
+            .get_network_ip_address(&container, &spawner.network)
             .await
             .unwrap();
 
@@ -650,4 +662,86 @@ impl Redis {
             external_address,
         }
     }
+
+    pub fn pool(&self) -> deadpool_redis::Pool {
+        let redis_url = url::Url::parse(self.internal_address.as_str()).unwrap();
+        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
+        redis_cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap()
+    }
+
+    pub fn triple_storage(&self, id: &AccountId) -> mpc_node::storage::TripleStorage {
+        mpc_node::storage::triple_storage::init(&self.pool(), id)
+    }
+
+    pub fn presignature_storage(&self, id: &AccountId) -> mpc_node::storage::PresignatureStorage {
+        mpc_node::storage::presignature_storage::init(&self.pool(), id)
+    }
+
+    pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants, mul: u32) {
+        let pool = self.pool();
+        let storage = participants
+            .participants
+            .keys()
+            .map(|account_id| {
+                (
+                    Participant::from(
+                        *participants
+                            .account_to_participant_id
+                            .get(account_id)
+                            .unwrap(),
+                    ),
+                    mpc_node::storage::triple_storage::init(&pool, account_id),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        let participant_ids = participants
+            .account_to_participant_id
+            .values()
+            .map(|id| Participant::from(*id))
+            .collect::<Vec<_>>();
+        let (public, shares) =
+            cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
+
+        // - first/second loop add at least min_triples per node
+        // - third loop: for each triple, store the shares individually per node
+        let mut num_triples = 0;
+        for mine_idx in &participant_ids {
+            for _ in 0..(cfg.protocol.triple.min_triples * mul) {
+                num_triples += 1;
+                let triple_id = rand::random();
+                for (participant, triple) in participant_ids
+                    .iter()
+                    .zip(shares_to_triples(triple_id, &public, &shares))
+                {
+                    let mine = participant == mine_idx;
+                    storage
+                        .get(participant)
+                        .unwrap()
+                        .insert(triple, mine, false)
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+
+        tracing::info!("stockpiled {num_triples} triples");
+    }
+}
+
+fn shares_to_triples(
+    id: u64,
+    public: &TriplePub<Secp256k1>,
+    shares: &[TripleShare<Secp256k1>],
+) -> Vec<Triple> {
+    shares
+        .iter()
+        .map(|share| Triple {
+            id,
+            public: public.clone(),
+            share: share.clone(),
+        })
+        .collect()
 }
