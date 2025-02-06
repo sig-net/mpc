@@ -25,7 +25,7 @@ describe("ChainSignatures", function () {
     publicKey = { x: xHex, y: yHex };
     
     // Deploy as upgradeable proxy
-    chainSignatures = await upgrades.deployProxy(ChainSignatures, [publicKey], { initializer: 'initialize' });
+    chainSignatures = await upgrades.deployProxy(ChainSignatures, [publicKey, 0], { initializer: 'initialize' });
     await chainSignatures.waitForDeployment();
   });
 
@@ -178,7 +178,7 @@ describe("ChainSignatures", function () {
       );
       sourceCode = sourceCode.replace(
         /}[\s]*$/,
-        `function upgradeToV3(PublicKey memory _publicKey, uint32 _keyVersion) public reinitializer(3) { publicKey = _publicKey; keyVersion = _keyVersion; }
+        `function upgradeToV3(PublicKey calldata _publicKey, uint32 _keyVersion) public reinitializer(3) { publicKey = _publicKey; keyVersion = _keyVersion; }
 }`
       );
       fs.writeFileSync(v2Path, sourceCode);
@@ -212,7 +212,7 @@ describe("ChainSignatures", function () {
         "y": "0x599926b9b88c30ba42fc122db1fba37c35d97d70c32858e9fdd3950cfcba9729"
       }
 
-      const proxy = await upgrades.deployProxy(ChainSignatures, [publicKey], { initializer: 'initialize' });
+      const proxy = await upgrades.deployProxy(ChainSignatures, [publicKey, 0], { initializer: 'initialize' });
       ChainSignaturesV2ForTest = ChainSignaturesV2ForTest.connect(addr1);
       await expect(
         upgrades.upgradeProxy(
@@ -230,7 +230,7 @@ describe("ChainSignatures", function () {
         "x": "0x4a65bed3374ea3250d1721315c287af4501b9cb872cac20f52c9c1399dc6625c",
         "y": "0x599926b9b88c30ba42fc122db1fba37c35d97d70c32858e9fdd3950cfcba9729"
       }
-      const proxy = await upgrades.deployProxy(ChainSignatures, [publicKey], { initializer: 'initialize' });
+      const proxy = await upgrades.deployProxy(ChainSignatures, [publicKey, 0], { initializer: 'initialize' });
       ChainSignaturesV2ForTest = ChainSignaturesV2ForTest.connect(owner);
       await upgrades.upgradeProxy(await proxy.getAddress(), ChainSignaturesV2ForTest, {call: {fn: 'upgradeToV3', args: [pkNew, 0]}});
       let getPk = await proxy.getPublicKey();
