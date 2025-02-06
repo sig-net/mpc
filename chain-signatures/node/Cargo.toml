@@ -14,8 +14,8 @@ aws-config = "1.4"
 aws-sdk-s3 = "1.29"
 axum = { version = "0.6.19" }
 axum-extra = "0.7"
-borsh = "1.5.3"
-cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
+borsh.workspace = true
+cait-sith.workspace = true
 ciborium = "0.2.2"
 clap = { version = "4.2", features = ["derive", "env"] }
 chrono = "0.4.24"
@@ -32,7 +32,7 @@ rand = "0.8"
 reqwest = { version = "0.11.16", features = ["blocking", "json"] }
 semver = "1.0.23"
 sha3 = "0.10.8"
-serde = { version = "1", features = ["derive"] }
+serde.workspace = true
 serde_bytes = "0.11.15"
 serde_json = "1"
 thiserror = "1"
@@ -50,7 +50,7 @@ near-fetch = "0.6.0"
 near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/2.3.0" }
 near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/2.3.0" }
 near-primitives = "0.26.0"
-near-sdk = { version = "5.2.1", features = ["legacy", "unit-testing"] }
+near-sdk.workspace = true
 
 mpc-contract = { path = "../contract" }
 mpc-keys = { path = "../keys" }

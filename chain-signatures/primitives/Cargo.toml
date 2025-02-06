@@ -1,0 +1,13 @@
+[package]
+name = "mpc-primitives"
+version.workspace = true
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+borsh.workspace = true
+cait-sith.workspace = true
+near-account-id.workspace = true
+serde.workspace = true

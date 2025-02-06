@@ -8,6 +8,8 @@ use crypto_shared::{
     derive_epsilon, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     types::SignatureResponse, ScalarExt as _,
 };
+use mpc_primitives::{CandidateInfo, Candidates, Participants};
+
 use errors::{
     ConversionError, InitError, InvalidParameters, InvalidState, JoinError, PublicKeyError,
     RespondError, SignError, VoteError,
@@ -22,8 +24,8 @@ use near_sdk::{
     PromiseError, PublicKey,
 };
 use primitives::{
-    CandidateInfo, Candidates, ContractSignatureRequest, Participants, PkVotes, SignRequest,
-    SignaturePromiseError, SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex,
+    ContractSignatureRequest, PkVotes, SignRequest, SignaturePromiseError, SignatureRequest,
+    SignatureResult, StorageKey, Votes, YieldIndex,
 };
 use std::collections::{BTreeMap, HashSet};
 

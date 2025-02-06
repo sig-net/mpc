@@ -3111,6 +3111,7 @@ dependencies = [
  "digest 0.10.7",
  "ecdsa 0.16.9",
  "k256",
+ "mpc-primitives",
  "near-crypto 0.27.0",
  "near-sdk",
  "near-workspaces",
@@ -3188,6 +3189,16 @@ dependencies = [
  "tracing-subscriber",
  "url 2.5.2",
  "web3",
+]
+
+[[package]]
+name = "mpc-primitives"
+version = "1.0.0"
+dependencies = [
+ "borsh",
+ "cait-sith",
+ "near-account-id",
+ "serde",
 ]
 
 [[package]]

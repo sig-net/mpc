@@ -3777,6 +3777,7 @@ dependencies = [
  "borsh",
  "crypto-shared",
  "k256",
+ "mpc-primitives",
  "near-sdk",
  "serde",
  "serde_json",
@@ -3849,6 +3850,14 @@ dependencies = [
  "tracing-subscriber",
  "url 2.5.1",
  "web3",
+]
+
+[[package]]
+name = "mpc-primitives"
+version = "1.0.0"
+dependencies = [
+ "borsh",
+ "cait-sith",
 ]
 
 [[package]]
