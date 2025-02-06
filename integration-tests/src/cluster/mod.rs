@@ -13,7 +13,7 @@ use crate::cluster::spawner::ClusterSpawner;
 use crate::containers::DockerClient;
 use crate::local::NodeEnvConfig;
 use crate::utils::{vote_join, vote_leave};
-use crate::{utils, NodeConfig, Nodes};
+use crate::{NodeConfig, Nodes};
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 use mpc_contract::{ProtocolContractState, RunningContractState};
 use mpc_node::web::StateView;
@@ -134,16 +134,7 @@ impl Cluster {
     pub async fn restart_node(&mut self, config: NodeEnvConfig) -> anyhow::Result<()> {
         self.nodes.restart_node(config).await
     }
-}
 
-impl Drop for Cluster {
-    fn drop(&mut self) {
-        let sk_local_path = self.nodes.ctx().storage_options.sk_share_local_path.clone();
-        let _task = tokio::task::spawn(utils::clear_local_sk_shares(sk_local_path));
-    }
-}
-
-impl Cluster {
     /// Starts a node and waits for the cluster to be in running. This does not have the node join the network,
     /// but it does appear as a candidate in the contract.
     pub async fn start(&mut self, node: Option<NodeEnvConfig>) -> anyhow::Result<Account> {

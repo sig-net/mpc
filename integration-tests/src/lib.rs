@@ -232,11 +232,11 @@ pub struct Context {
     pub docker_network: String,
     pub release: bool,
 
-    pub localstack: crate::containers::LocalStack,
-    pub lake_indexer: crate::containers::LakeIndexer,
+    pub localstack: containers::LocalStack,
+    pub lake_indexer: containers::LakeIndexer,
     pub worker: Worker<Sandbox>,
     pub mpc_contract: Contract,
-    pub redis: crate::containers::Redis,
+    pub redis: containers::Redis,
     pub storage_options: storage::Options,
     pub mesh_options: mesh::Options,
     pub message_options: node_client::Options,
@@ -259,11 +259,16 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         .await?;
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
 
-    let redis = crate::containers::Redis::run(spawner).await;
-    let sk_share_local_path = "multichain-integration-secret-manager".to_string();
+    let redis = containers::Redis::run(spawner).await;
+    let sk_share_local_path = spawner.tmp_dir.join("secrets");
+    std::fs::create_dir_all(&sk_share_local_path).expect("could not create secrets dir");
+    let sk_share_local_path = sk_share_local_path
+        .to_string_lossy()
+        .to_string();
+
     let storage_options = mpc_node::storage::Options {
-        env: "local-test".to_string(),
-        gcp_project_id: "multichain-integration".to_string(),
+        env: spawner.env.clone(),
+        gcp_project_id: spawner.gcp_project_id.clone(),
         sk_share_secret_id: None,
         sk_share_local_path: Some(sk_share_local_path),
         redis_url: redis.internal_address.clone(),
