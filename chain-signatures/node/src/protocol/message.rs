@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, RwLock};
+use tokio::time::timeout;
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
@@ -308,11 +309,10 @@ impl MessageExecutor {
                 let mesh_state = self.mesh_state.read().await;
                 mesh_state.active_with_potential()
             };
-            self.outbox.expire(&protocol);
             self.outbox.extend(&mut self.outgoing);
             let compacted = self.outbox.compact();
             let encrypted = self.outbox.encrypt(&sign_sk, &active, compacted);
-            self.outbox.send(&active, encrypted).await;
+            self.outbox.send(&active, &protocol, encrypted).await;
         }
     }
 }
@@ -840,32 +840,6 @@ impl MessageOutbox {
             .set(message_count);
     }
 
-    /// Expire messages that have been in the outbox for too long.
-    pub fn expire(&mut self, cfg: &ProtocolConfig) {
-        // timeout errors are very common for a message expiring, so map them to counts here:
-        let mut timeouts = HashMap::<String, usize>::new();
-        for ((_from, to), messages) in self.messages.iter_mut() {
-            messages.retain(|(msg, timestamp)| {
-                if timestamp.elapsed() > timeout(msg, cfg) {
-                    let counter = timeouts
-                        .entry(format!(
-                            "timeout message={} for node={to:?}",
-                            msg.typename(),
-                        ))
-                        .or_insert(0);
-                    *counter += 1;
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-
-        if !timeouts.is_empty() {
-            tracing::warn!(?timeouts, "messages expired");
-        }
-    }
-
     /// Compact the messages in the outbox into partitions of at most 256kb.
     pub fn compact(&mut self) -> HashMap<MessageRoute, Vec<Partition>> {
         let mut compacted = HashMap::new();
@@ -948,11 +922,10 @@ impl MessageOutbox {
     pub async fn send(
         &mut self,
         active: &Participants,
+        cfg: &ProtocolConfig,
         encrypted: HashMap<MessageRoute, Vec<(Ciphered, Partition)>>,
     ) {
-        let start = Instant::now();
-        let mut send_tasks = Vec::new();
-        for ((from, to), encrypted) in encrypted {
+        for ((_from, to), encrypted) in encrypted {
             for (encrypted_partition, partition) in encrypted {
                 // guaranteed to unwrap due to our previous loop check:
                 let info = active.get(&to).unwrap();
@@ -964,69 +937,32 @@ impl MessageOutbox {
                     .inc_by(partition.messages.len() as f64);
 
                 let client = self.client.clone();
-                send_tasks.push(tokio::spawn(async move {
-                    let start = Instant::now();
-                    if let Err(err) = client.msg(url, &[&encrypted_partition]).await {
-                        crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
-                            .with_label_values(&[account_id.as_str()])
-                            .inc_by(partition.messages.len() as f64);
-                        crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
-                            .with_label_values(&[account_id.as_str()])
-                            .observe(start.elapsed().as_millis() as f64);
-                        Err(((from, to), partition, err))
-                    } else {
-                        crate::metrics::SEND_ENCRYPTED_LATENCY
-                            .with_label_values(&[account_id.as_str()])
-                            .observe(start.elapsed().as_millis() as f64);
-                        Ok(partition.messages.len())
-                    }
-                }));
+                tokio::spawn(timeout(
+                    Duration::from_millis(cfg.message_timeout),
+                    async move {
+                        loop {
+                            let start = Instant::now();
+                            let Err(err) = client.msg(&url, &[&encrypted_partition]).await else {
+                                crate::metrics::SEND_ENCRYPTED_LATENCY
+                                    .with_label_values(&[account_id.as_str()])
+                                    .observe(start.elapsed().as_millis() as f64);
+                                tracing::debug!(elapsed = ?start.elapsed(), "outbox: sent encrypted messages");
+                                break;
+                            };
+
+                            crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
+                                .with_label_values(&[account_id.as_str()])
+                                .inc_by(partition.messages.len() as f64);
+                            crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
+                                .with_label_values(&[account_id.as_str()])
+                                .observe(start.elapsed().as_millis() as f64);
+                            tracing::warn!(?err, "outbox: failed sending encrypted messages");
+
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    },
+                ));
             }
-        }
-
-        let mut errors = Vec::new();
-        let mut retry = VecDeque::new();
-        let mut uncompacted = 0;
-        let mut compacted = 0;
-        for task in send_tasks {
-            match task.await {
-                Ok(Ok(msgs_len)) => {
-                    uncompacted += msgs_len;
-                    compacted += 1;
-                }
-                Ok(Err((route, partition, err))) => {
-                    // since we failed, put back all the messages related to this
-                    retry.push_back((route, partition));
-                    errors.push(err);
-                }
-                Err(err) => {
-                    tracing::warn!(?err, "outbox: task failed to send message");
-                }
-            }
-        }
-
-        if uncompacted > 0 {
-            tracing::debug!(
-                uncompacted,
-                compacted,
-                "sent messages in {:?}",
-                start.elapsed()
-            );
-        }
-
-        if !errors.is_empty() {
-            tracing::warn!(?errors, "outbox: failed sending encrypted messages");
-        }
-
-        // Add back the failed attempts for next time.
-        for (route, partition) in retry {
-            let entry = self.messages.entry(route).or_default();
-            entry.extend(
-                partition
-                    .messages
-                    .into_iter()
-                    .zip(partition.timestamps.into_iter()),
-            );
         }
     }
 }
@@ -1072,19 +1008,6 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
     }
 
     partitions
-}
-
-fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {
-    match msg {
-        Message::Generating(_) => Duration::from_millis(cfg.message_timeout),
-        Message::Resharing(_) => Duration::from_millis(cfg.message_timeout),
-        Message::Triple(_) => Duration::from_millis(cfg.triple.generation_timeout),
-        Message::Presignature(_) => Duration::from_millis(cfg.presignature.generation_timeout),
-        Message::Signature(_) => Duration::from_millis(cfg.signature.generation_timeout),
-
-        // unknown message cannot be handled at all, so we just expire them immediately.
-        Message::Unknown(_) => Duration::from_millis(1),
-    }
 }
 
 /// Scalar module for any scalars to be sent through messaging other nodes.
