@@ -54,12 +54,12 @@ contract ChainSignatures is Initializable {
         _disableInitializers();
     }
 
-    function initialize(PublicKey memory _publicKey, uint32 _keyVersion) public initializer {
+    function initialize(PublicKey calldata _publicKey, uint32 _keyVersion) public initializer {
         publicKey = _publicKey;
         keyVersion = _keyVersion;
     }
 
-    function upgradeToV2(PublicKey memory _publicKey, uint32 _keyVersion) public reinitializer(2) {
+    function upgradeToV2(PublicKey calldata _publicKey, uint32 _keyVersion) public reinitializer(2) {
         publicKey = _publicKey;
         keyVersion = _keyVersion;
     }
