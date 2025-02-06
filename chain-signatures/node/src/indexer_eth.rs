@@ -1,6 +1,7 @@
 use crate::indexer::ContractSignRequest;
 use crate::protocol::Chain::Ethereum;
 use crate::protocol::SignRequest;
+use crate::storage::request_queue::push_sign_request;
 use crypto_shared::kdf::derive_epsilon_eth;
 use crypto_shared::ScalarExt;
 use hex::ToHex;
@@ -9,8 +10,7 @@ use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use std::time::{Duration, SystemTime};
 use web3::futures::StreamExt;
 use web3::types::{FilterBuilder, Log, H160, H256, U256};
 
@@ -142,7 +142,7 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignR
         epsilon,
         entropy,
         // TODO: use indexer timestamp instead.
-        time_added: Instant::now(),
+        time_added: SystemTime::now(),
     })
 }
 
@@ -187,7 +187,7 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
 
 pub async fn run(
     eth: Option<EthConfig>,
-    sign_tx: mpsc::Sender<SignRequest>,
+    redis_pool: deadpool_redis::Pool,
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     let Some(eth) = eth else {
@@ -229,9 +229,9 @@ pub async fn run(
                                         .with_label_values(&[node_near_account_id.as_str()])
                                         .inc();
                                     if let Ok(sign_request) = sign_request_from_filtered_log(log) {
-                                        let sign_tx = sign_tx.clone();
+                                        let redis_pool = redis_pool.clone();
                                         tokio::spawn(async move {
-                                            if let Err(err) = sign_tx.send(sign_request).await {
+                                            if let Err(err) = push_sign_request(&redis_pool, sign_request).await {
                                                 tracing::error!(?err, "Failed to send ETH sign request into queue");
                                             }
                                         });

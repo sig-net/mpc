@@ -1,6 +1,7 @@
 use crate::protocol::Chain::NEAR;
 use crate::protocol::{Chain, SignRequest};
 use crate::storage::app_data_storage::AppDataStorage;
+use crate::storage::request_queue::push_sign_request;
 use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
 use near_account_id::AccountId;
@@ -13,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::ops::Mul;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::RwLock;
 
 /// Configures indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -172,7 +173,7 @@ impl Indexer {
 struct Context {
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
-    sign_tx: mpsc::Sender<SignRequest>,
+    redis_pool: deadpool_redis::Pool,
     indexer: Indexer,
 }
 
@@ -255,7 +256,7 @@ async fn handle_block(
                     epsilon,
                     entropy,
                     // TODO: use indexer timestamp instead.
-                    time_added: Instant::now(),
+                    time_added: SystemTime::now(),
                 });
             }
         }
@@ -278,7 +279,7 @@ async fn handle_block(
             entropy = hex::encode(request.entropy),
             "new sign request"
         );
-        if let Err(err) = ctx.sign_tx.send(request).await {
+        if let Err(err) = push_sign_request(&ctx.redis_pool, request).await {
             tracing::error!(?err, "failed to send the sign request into sign queue");
         }
         crate::metrics::NUM_SIGN_REQUESTS
@@ -302,7 +303,7 @@ pub fn run(
     options: &Options,
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
-    sign_tx: mpsc::Sender<SignRequest>,
+    redis_pool: deadpool_redis::Pool,
     app_data_storage: AppDataStorage,
     rpc_client: near_fetch::Client,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, Indexer)> {
@@ -318,7 +319,7 @@ pub fn run(
     let context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
         node_account_id: node_account_id.clone(),
-        sign_tx,
+        redis_pool,
         indexer: indexer.clone(),
     };
 

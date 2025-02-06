@@ -10,7 +10,6 @@ use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
-use crate::protocol::SignRequest;
 use crate::rpc::NearClient;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
@@ -23,7 +22,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cait_sith::protocol::InitializationError;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use url::Url;
 
 use near_account_id::AccountId;
@@ -33,7 +32,7 @@ pub trait ConsensusCtx {
     fn near_client(&self) -> &NearClient;
     fn mpc_contract_id(&self) -> &AccountId;
     fn my_address(&self) -> &Url;
-    fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<SignRequest>>>;
+    fn redis_pool(&self) -> &deadpool_redis::Pool;
     fn secret_storage(&self) -> &SecretNodeStorageBox;
     fn triple_storage(&self) -> &TripleStorage;
     fn presignature_storage(&self) -> &PresignatureStorage;
@@ -138,7 +137,7 @@ impl ConsensusProtocol for StartedState {
                                             contract_state.threshold,
                                             public_key,
                                             epoch,
-                                            ctx.sign_rx(),
+                                            ctx.redis_pool().clone(),
                                         )));
 
                                     Ok(NodeState::Running(RunningState {
@@ -358,7 +357,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.threshold,
                         self.public_key,
                         self.epoch,
-                        ctx.sign_rx(),
+                        ctx.redis_pool().clone(),
                     )));
 
                     Ok(NodeState::Running(RunningState {

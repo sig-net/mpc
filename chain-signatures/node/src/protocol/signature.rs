@@ -6,6 +6,7 @@ use crate::kdf::derive_delta;
 use crate::protocol::message::{MessageChannel, SignatureMessage};
 use crate::protocol::Chain;
 use crate::rpc::RpcChannel;
+use crate::storage::request_queue::pop_sign_request;
 use crate::types::SignatureProtocol;
 use crate::util::AffinePointExt;
 
@@ -22,10 +23,8 @@ use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::{mpsc, RwLock};
+use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::mpsc;
 
 use near_account_id::AccountId;
 use near_primitives::hash::CryptoHash;
@@ -35,17 +34,19 @@ pub type ReceiptId = near_primitives::hash::CryptoHash;
 /// This is the maximum amount of sign requests that we can accept in the network.
 const MAX_SIGN_REQUESTS: usize = 1024;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SignRequest {
     pub request_id: [u8; 32],
     pub request: ContractSignRequest,
     pub epsilon: Scalar,
     pub entropy: [u8; 32],
-    pub time_added: Instant,
+    // SystemTime is less accurate than Instant but can be serialized
+    pub time_added: SystemTime,
 }
 
 pub struct SignQueue {
     me: Participant,
-    sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
+    redis_pool: deadpool_redis::Pool,
     requests: HashMap<Participant, VecDeque<SignRequest>>,
 }
 
@@ -54,10 +55,10 @@ impl SignQueue {
         mpsc::channel(MAX_SIGN_REQUESTS)
     }
 
-    pub fn new(me: Participant, sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>) -> Self {
+    pub fn new(me: Participant, redis_pool: deadpool_redis::Pool) -> Self {
         Self {
             me,
-            sign_rx,
+            redis_pool,
             requests: HashMap::new(),
         }
     }
@@ -76,16 +77,14 @@ impl SignQueue {
         stable: &Participants,
         my_account_id: &AccountId,
     ) {
-        let mut sign_rx = self.sign_rx.write().await;
-        while let Ok(request) = {
-            match sign_rx.try_recv() {
-                err @ Err(TryRecvError::Disconnected) => {
-                    tracing::error!("sign queue channel disconnected");
-                    err
-                }
-                other => other,
-            }
-        } {
+        loop {
+            let Ok(request) = pop_sign_request(&self.redis_pool).await.inspect_err(|err| {
+                tracing::error!("Failed to read sign request from queue: {err}")
+            }) else {
+                // We cannot handle this request but we can hope the next request works.
+                continue;
+            };
+
             let mut rng = StdRng::from_seed(request.entropy);
             let subset = stable.keys().choose_multiple(&mut rng, threshold);
             let proposer = **subset.choose(&mut rng).unwrap();
@@ -136,7 +135,8 @@ pub struct SignatureGenerator {
     pub epsilon: Scalar,
     pub request_id: [u8; 32],
     pub entropy: [u8; 32],
-    pub sign_request_timestamp: Instant,
+    // SystemTime is less accurate than Instant but can be serialized
+    pub sign_request_timestamp: SystemTime,
     pub generator_timestamp: Instant,
     pub timeout: Duration,
     pub timeout_total: Duration,
@@ -153,7 +153,7 @@ impl SignatureGenerator {
         epsilon: Scalar,
         request_id: [u8; 32],
         entropy: [u8; 32],
-        sign_request_timestamp: Instant,
+        sign_request_timestamp: SystemTime,
         cfg: &ProtocolConfig,
     ) -> Self {
         Self {
@@ -173,7 +173,7 @@ impl SignatureGenerator {
     }
 
     pub fn poke(&mut self) -> Result<Action<FullSignature<Secp256k1>>, ProtocolError> {
-        if self.sign_request_timestamp.elapsed() > self.timeout_total {
+        if self.sign_request_timestamp.elapsed().unwrap_or_default() > self.timeout_total {
             let msg = "signature protocol timed out completely";
             tracing::warn!(msg);
             return Err(ProtocolError::Other(anyhow::anyhow!(msg).into()));
@@ -198,7 +198,7 @@ pub struct GenerationRequest {
     pub epsilon: Scalar,
     pub request_id: [u8; 32],
     pub entropy: [u8; 32],
-    pub sign_request_timestamp: Instant,
+    pub sign_request_timestamp: SystemTime,
 }
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
@@ -238,7 +238,8 @@ pub struct SignatureManager {
 pub struct ToPublish {
     pub request_id: [u8; 32],
     pub request: SignatureRequest,
-    pub time_added: Instant,
+    // SystemTime is less accurate than Instant but can be serialized
+    pub time_added: SystemTime,
     pub signature: FullSignature<Secp256k1>,
     pub retry_count: u8,
     pub chain: Chain,
@@ -248,7 +249,7 @@ impl ToPublish {
     pub fn new(
         request_id: [u8; 32],
         request: SignatureRequest,
-        time_added: Instant,
+        time_added: SystemTime,
         signature: FullSignature<Secp256k1>,
         chain: Chain,
     ) -> ToPublish {
@@ -270,13 +271,13 @@ impl SignatureManager {
         threshold: usize,
         public_key: PublicKey,
         epoch: u64,
-        sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
+        redis_pool: deadpool_redis::Pool,
     ) -> Self {
         Self {
             generators: HashMap::new(),
             failed: VecDeque::new(),
             completed: HashMap::new(),
-            sign_queue: SignQueue::new(me, sign_rx),
+            sign_queue: SignQueue::new(me, redis_pool),
             me,
             my_account_id: my_account_id.clone(),
             threshold,
@@ -381,7 +382,7 @@ impl SignatureManager {
         request: ContractSignRequest,
         epsilon: Scalar,
         entropy: [u8; 32],
-        sign_request_timestamp: Instant,
+        sign_request_timestamp: SystemTime,
         cfg: &ProtocolConfig,
     ) -> Result<(), (Presignature, InitializationError)> {
         let sign_request_identifier =
@@ -471,7 +472,7 @@ impl SignatureManager {
                         epsilon,
                         entropy,
                         request_id,
-                        sign_request_timestamp: Instant::now(),
+                        sign_request_timestamp: SystemTime::now(),
                     },
                     cfg,
                 ) {
@@ -500,7 +501,11 @@ impl SignatureManager {
                     Ok(action) => action,
                     Err(err) => {
                         if generator.proposer == self.me {
-                            if generator.sign_request_timestamp.elapsed() < generator.timeout_total
+                            if generator
+                                .sign_request_timestamp
+                                .elapsed()
+                                .unwrap_or_default()
+                                < generator.timeout_total
                             {
                                 tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
                                 crate::metrics::SIGNATURE_GENERATOR_FAILURES
