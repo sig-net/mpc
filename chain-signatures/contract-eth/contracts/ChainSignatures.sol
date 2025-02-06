@@ -44,14 +44,24 @@ contract ChainSignatures is Initializable {
 
     mapping(bytes32 => uint256) public depositToRefund;
 
+    uint32 public keyVersion;
+
     event SignatureRequested(bytes32 indexed requestId, address requester, uint256 epsilon, uint256 payloadHash, string path);
     event SignatureResponded(bytes32 indexed requestId, SignatureResponse response);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() initializer {}
+    constructor() {
+        _disableInitializers();
+    }
 
-    function initialize(PublicKey memory _publicKey) public initializer {
+    function initialize(PublicKey memory _publicKey, uint32 _keyVersion) public initializer {
         publicKey = _publicKey;
+        keyVersion = _keyVersion;
+    }
+
+    function upgradeToV2(PublicKey memory _publicKey, uint32 _keyVersion) public reinitializer(2) {
+        publicKey = _publicKey;
+        keyVersion = _keyVersion;
     }
 
     function getPublicKey() public view returns (PublicKey memory) {
@@ -93,17 +103,17 @@ contract ChainSignatures is Initializable {
         return epsilon;
     }
 
-    function latestKeyVersion() public pure returns (uint32) {
-        return 0;
+    function getLatestKeyVersion() public view returns (uint32) {
+        return keyVersion;
     }
 
     function sign(SignRequest memory _request) external payable returns (bytes32) {
         bytes32 payload = _request.payload;
         string memory path = _request.path;
-        uint32 keyVersion = _request.keyVersion;
+        uint32 requestKeyVersion = _request.keyVersion;
 
-        if (keyVersion > latestKeyVersion()) {
-            revert("This key version is unsupported. Call latestKeyVersion() to get the latest supported version");
+        if (requestKeyVersion > getLatestKeyVersion()) {
+            revert("this key version is unsupported. Call getLatestKeyVersion() to get the latest supported version");
         }
 
         uint256 requiredDeposit = getSignatureDeposit();

@@ -6,6 +6,8 @@ async function main() {
   const network = await ethers.provider.getNetwork();
   const networkName = network.name;
   const deploymentPath = `deployments/${networkName}.json`;
+  const params = require('./params.json');
+  const pkey = params.ChainSignaturesModule.publicKey;
 
   // Check if deployment file exists
   if (!fs.existsSync(deploymentPath)) {
@@ -33,8 +35,8 @@ async function main() {
   const ChainSignatures = await ethers.getContractFactory('ChainSignatures');
   // Get old implementation address before upgrade
   const oldImplementationAddress = await upgrades.erc1967.getImplementationAddress(proxyAddress);
-  await upgrades.upgradeProxy(proxyAddress, ChainSignatures);
-//   await upgrades.upgradeProxy(proxyAddress, ChainSignatures, {call: {fn: 'upgradeToV2', args: [args]}});
+  // await upgrades.upgradeProxy(proxyAddress, ChainSignatures);
+  await upgrades.upgradeProxy(proxyAddress, ChainSignatures, {call: {fn: 'upgradeToV2', args: [pkey, 0]}});
 
   // Compare old and new implementation addresses
   const newImplementationAddress = await upgrades.erc1967.getImplementationAddress(proxyAddress);
