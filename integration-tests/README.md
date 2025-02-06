@@ -31,17 +31,9 @@ cargo test --features docker-test
 
 Benchmarks collect metrics from node and represent them in a readable format for CI to pick up.
 
-First manually build the nodes with bench feature so we can collect metrics for benchmarking:
+To run benchmarks, simply run the `bench.sh` script in the root:
 ```sh
-cd chain-signatures/
-cargo build -p mpc-node --release --features bench
-cargo build -p mpc-contract --release --target wasm32-unknown-unknown --features bench
-```
-
-Then run the integration test benchmarks:
-```sh
-cd integration-tests/
-MPC_TEST_BUILD_DISABLED=1 cargo bench
+./bench.sh
 ```
 
 ## FAQ
