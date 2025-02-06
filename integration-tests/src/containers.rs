@@ -123,10 +123,10 @@ impl Node {
             behind_threshold: 120,
         };
         let eth_args = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: Some(config.cfg.eth_account_sk.clone()),
-            eth_rpc_ws_url: Some(config.cfg.eth_rpc_ws_url.clone()),
-            eth_rpc_http_url: Some(config.cfg.eth_rpc_http_url.clone()),
-            eth_contract_address: Some(config.cfg.eth_contract_address.clone()),
+            eth_account_sk: Some(config.cfg.eth.account_sk.clone()),
+            eth_rpc_ws_url: Some(config.cfg.eth.rpc_ws_url.clone()),
+            eth_rpc_http_url: Some(config.cfg.eth.rpc_http_url.clone()),
+            eth_contract_address: Some(config.cfg.eth.contract_address.clone()),
         };
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),

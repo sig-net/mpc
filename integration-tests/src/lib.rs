@@ -8,6 +8,7 @@ pub mod utils;
 use cluster::spawner::ClusterSpawner;
 use containers::Container;
 use deadpool_redis::Pool;
+use mpc_node::indexer_eth::EthConfig;
 use std::collections::HashMap;
 
 use self::local::NodeEnvConfig;
@@ -33,10 +34,7 @@ pub struct NodeConfig {
     pub nodes: usize,
     pub threshold: usize,
     pub protocol: ProtocolConfig,
-    pub eth_rpc_ws_url: String,
-    pub eth_rpc_http_url: String,
-    pub eth_contract_address: String,
-    pub eth_account_sk: String,
+    pub eth: EthConfig,
 }
 
 impl Default for NodeConfig {
@@ -59,11 +57,13 @@ impl Default for NodeConfig {
                 },
                 ..Default::default()
             },
-            eth_rpc_http_url: "http://localhost:8545".to_string(),
-            eth_rpc_ws_url: "ws://localhost:8545".to_string(),
-            eth_contract_address: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512".to_string(),
-            eth_account_sk: "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
-                .to_string(),
+            eth: EthConfig {
+                rpc_http_url: "http://localhost:8545".to_string(),
+                rpc_ws_url: "ws://localhost:8545".to_string(),
+                contract_address: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512".to_string(),
+                account_sk: "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+                    .to_string(),
+            },
         }
     }
 }
@@ -262,9 +262,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let redis = containers::Redis::run(spawner).await;
     let sk_share_local_path = spawner.tmp_dir.join("secrets");
     std::fs::create_dir_all(&sk_share_local_path).expect("could not create secrets dir");
-    let sk_share_local_path = sk_share_local_path
-        .to_string_lossy()
-        .to_string();
+    let sk_share_local_path = sk_share_local_path.to_string_lossy().to_string();
 
     let storage_options = mpc_node::storage::Options {
         env: spawner.env.clone(),

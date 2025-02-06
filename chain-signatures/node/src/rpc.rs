@@ -1,5 +1,5 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
-use crate::indexer_eth::EthArgs;
+use crate::indexer_eth::EthConfig;
 use crate::protocol::signature::ToPublish;
 use crate::protocol::{Chain, ProtocolState};
 use crate::util::AffinePointExt as _;
@@ -69,14 +69,14 @@ pub struct RpcExecutor {
 }
 
 impl RpcExecutor {
-    pub fn new(near: &NearClient, eth: &EthArgs) -> (RpcChannel, Self) {
-        let eth = EthClient::new(eth);
+    pub fn new(near: &NearClient, eth: &Option<EthConfig>) -> (RpcChannel, Self) {
+        let eth = eth.as_ref().map(EthClient::new);
         let (tx, rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         (
             RpcChannel { tx },
             Self {
                 near: near.clone(),
-                eth: eth.clone(),
+                eth,
                 action_rx: rx,
             },
         )
@@ -285,10 +285,10 @@ pub struct EthClient {
 }
 
 impl EthClient {
-    pub fn new(args: &crate::indexer_eth::EthArgs) -> Option<Self> {
-        let transport = web3::transports::Http::new(args.eth_rpc_http_url.as_ref()?).unwrap();
+    pub fn new(eth: &EthConfig) -> Self {
+        let transport = web3::transports::Http::new(&eth.rpc_http_url).unwrap();
         let client = web3::Web3::new(transport);
-        let address = web3::types::H160::from_str(args.eth_contract_address.as_ref()?).unwrap();
+        let address = web3::types::H160::from_str(&eth.contract_address).unwrap();
 
         let contract_json: serde_json::Value = serde_json::from_slice(include_bytes!(
             "../../contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
@@ -300,12 +300,12 @@ impl EthClient {
             contract_json["abi"].to_string().as_bytes(),
         )
         .unwrap();
-        Some(Self {
+        Self {
             client,
             contract,
-            account_sk: web3::signing::SecretKey::from_str(args.eth_account_sk.as_ref()?)
+            account_sk: web3::signing::SecretKey::from_str(&eth.account_sk)
                 .expect("failed to parse eth account sk, should not begin with 0x"),
-        })
+        }
     }
 }
 
