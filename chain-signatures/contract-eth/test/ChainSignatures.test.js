@@ -178,7 +178,7 @@ describe("ChainSignatures", function () {
       );
       sourceCode = sourceCode.replace(
         /}[\s]*$/,
-        `function upgradeToV2(PublicKey memory _publicKey) public reinitializer(2) { publicKey = _publicKey; }
+        `function upgradeToV3(PublicKey memory _publicKey, uint32 _keyVersion) public reinitializer(3) { publicKey = _publicKey; keyVersion = _keyVersion; }
 }`
       );
       fs.writeFileSync(v2Path, sourceCode);
@@ -218,7 +218,7 @@ describe("ChainSignatures", function () {
         upgrades.upgradeProxy(
           await proxy.getAddress(),
           ChainSignaturesV2ForTest,
-          {call: {fn: 'upgradeToV2', args: [pkNew]}}
+          {call: {fn: 'upgradeToV3', args: [pkNew, 0]}}
         )
       ).to.be.reverted;
     });
@@ -232,7 +232,7 @@ describe("ChainSignatures", function () {
       }
       const proxy = await upgrades.deployProxy(ChainSignatures, [publicKey], { initializer: 'initialize' });
       ChainSignaturesV2ForTest = ChainSignaturesV2ForTest.connect(owner);
-      await upgrades.upgradeProxy(await proxy.getAddress(), ChainSignaturesV2ForTest, {call: {fn: 'upgradeToV2', args: [pkNew]}});
+      await upgrades.upgradeProxy(await proxy.getAddress(), ChainSignaturesV2ForTest, {call: {fn: 'upgradeToV3', args: [pkNew, 0]}});
       let getPk = await proxy.getPublicKey();
       expect(getPk.x).to.equal(pkNew.x);
       expect(getPk.y).to.equal(pkNew.y);
