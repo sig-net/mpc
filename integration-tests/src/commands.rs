@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crypto_shared::{ScalarExt, SerializableAffinePoint, SerializableScalar, SignatureResponse};
+use mpc_crypto::{ScalarExt, SerializableAffinePoint, SerializableScalar, SignatureResponse};
 use k256::Scalar;
 use mpc_contract::{
     config::Config,

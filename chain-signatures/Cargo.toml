@@ -9,6 +9,31 @@ resolver = "2"
 [workspace.package]
 version = "1.0.0"
 
+[workspace.dependencies]
+anyhow = { version = "1.0.95", features = ["backtrace"] }
+borsh = "1.5.3"
+cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
+hex = "0.4.3"
+k256 = { version = "0.13.1", features = [
+    "sha256",
+    "ecdsa",
+    "serde",
+    "arithmetic",
+    "expose-field",
+] }
+rand = "0.8.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha3 = "0.10.8"
+thiserror = "1"
+
+near-account-id = "1.0.0"
+near-sdk = { version = "5.6.0", features = ["legacy", "unit-testing", "unstable"] }
+
+mpc-contract = { path = "./contract" }
+mpc-crypto = { path = "./crypto" }
+mpc-keys = { path = "./keys" }
+
 [patch.crates-io]
 # TODO: trigger Cargo.lock update for x25519-dalek once they release.
 # This fixes https://rustsec.org/advisories/RUSTSEC-2024-0344 by pointing to a commit that includes the fix.

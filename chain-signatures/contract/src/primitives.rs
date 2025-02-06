@@ -1,5 +1,5 @@
-use crypto_shared::{derive_epsilon, SerializableScalar};
 use k256::Scalar;
+use mpc_crypto::{derive_epsilon, SerializableScalar};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};

@@ -4,7 +4,7 @@ use integration_tests::cluster;
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
-use crypto_shared::{self, derive_epsilon, derive_key, x_coordinate, ScalarExt};
+use mpc_crypto::{self, derive_epsilon, derive_key, x_coordinate, ScalarExt};
 use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;

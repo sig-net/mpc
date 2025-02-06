@@ -5,7 +5,7 @@ use anyhow::Context;
 use backon::ConstantBuilder;
 use backon::Retryable;
 use cait_sith::FullSignature;
-use crypto_shared::SignatureResponse;
+use mpc_crypto::SignatureResponse;
 use k256::Secp256k1;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_primitives::errors::ActionErrorKind;

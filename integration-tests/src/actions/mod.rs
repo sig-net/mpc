@@ -7,8 +7,8 @@ use crate::containers::LakeIndexer;
 
 use anyhow::Context as _;
 use cait_sith::FullSignature;
-use crypto_shared::ScalarExt;
-use crypto_shared::{derive_epsilon, derive_key};
+use mpc_crypto::ScalarExt;
+use mpc_crypto::{derive_epsilon, derive_key};
 use elliptic_curve::sec1::ToEncodedPoint;
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::point::AffineCoordinates;
@@ -284,7 +284,7 @@ pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> web3::types::
 
 #[cfg(test)]
 mod tests {
-    use crypto_shared::{derive_epsilon, derive_key, ScalarExt as _};
+    use mpc_crypto::{derive_epsilon, derive_key, ScalarExt as _};
     use elliptic_curve::sec1::FromEncodedPoint as _;
     use k256::ecdsa::VerifyingKey;
     use k256::elliptic_curve::ops::{Invert, Reduce};

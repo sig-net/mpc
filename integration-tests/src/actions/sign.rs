@@ -2,7 +2,7 @@ use std::fmt;
 use std::future::IntoFuture;
 
 use cait_sith::FullSignature;
-use crypto_shared::{
+use mpc_crypto::{
     derive_epsilon, ScalarExt as _, SerializableAffinePoint, SerializableScalar, SignatureResponse,
 };
 use k256::{Scalar, Secp256k1};

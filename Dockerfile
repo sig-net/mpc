@@ -19,7 +19,7 @@ COPY chain-signatures/node/Cargo.toml Cargo.toml
 RUN sed -i 's#src/main.rs#dummy.rs#' Cargo.toml
 RUN sed -i 's#mpc-keys = { path = "../keys" }##' Cargo.toml
 RUN sed -i 's#mpc-contract = { path = "../contract" }##' Cargo.toml
-RUN sed -i 's#crypto-shared = { path = "../crypto-shared" }##' Cargo.toml
+RUN sed -i 's#mpc-crypto = { path = "../mpc-crypto" }##' Cargo.toml
 RUN sed -i 's#version.workspace = true##' Cargo.toml
 RUN cargo build --release
 # Now build the actual node
