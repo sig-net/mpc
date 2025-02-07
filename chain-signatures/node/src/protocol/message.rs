@@ -444,7 +444,7 @@ impl MessageReceiver for RunningState {
         mesh_state: MeshState,
     ) -> Result<(), MessageError> {
         let protocol_cfg = &cfg.protocol;
-        let participants = &mesh_state.active;
+        let active = &mesh_state.active;
         let mut inbox = channel.inbox().write().await;
 
         // remove the triple_id that has already failed or taken from the triple_bins
@@ -470,7 +470,7 @@ impl MessageReceiver for RunningState {
 
             let protocol = match self
                 .triple_manager
-                .get_or_start_generation(id, participants, protocol_cfg)
+                .get_or_start_generation(id, active, protocol_cfg)
                 .await
             {
                 Ok(protocol) => protocol,
@@ -526,7 +526,7 @@ impl MessageReceiver for RunningState {
 
             let protocol = match presignature_manager
                 .get_or_start_generation(
-                    participants,
+                    active,
                     *id,
                     *triple0,
                     *triple1,
@@ -582,7 +582,7 @@ impl MessageReceiver for RunningState {
 
         let mut signature_manager = self.signature_manager.write().await;
         let signature_messages = inbox.signature.entry(self.epoch).or_default();
-        signature_messages.retain(|sign_request_identifier, queue| {
+        signature_messages.retain(|sign_id, queue| {
             // Skip message if it already timed out
             if queue.is_empty()
                 || queue.iter().any(|msg| {
@@ -595,15 +595,14 @@ impl MessageReceiver for RunningState {
                 return false;
             }
 
-            !signature_manager.refresh_gc(sign_request_identifier)
+            !signature_manager.refresh_gc(sign_id)
         });
-        for (sign_request_identifier, queue) in signature_messages {
+        for (sign_id, queue) in signature_messages {
             // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
             let SignatureMessage {
                 proposer,
                 presignature_id,
                 request,
-                epsilon,
                 entropy,
                 ..
             } = queue.front().unwrap();
@@ -618,24 +617,17 @@ impl MessageReceiver for RunningState {
                 continue;
             }
 
-            // if !self
-            //     .sign_queue
-            //     .read()
-            //     .await
-            //     .contains(message.proposer, receipt_id.clone())
-            // {
-            //     leftover_messages.push(message);
-            //     continue;
-            // };
-            // TODO: Validate that the message matches our sign_queue
+            // wait till we index the request on our node:
+            if !signature_manager.request_processable(*proposer, &sign_id) {
+                continue;
+            }
+
             let protocol = match signature_manager
                 .get_or_start_protocol(
-                    participants,
-                    sign_request_identifier.request_id,
+                    sign_id,
                     *proposer,
                     *presignature_id,
                     request,
-                    *epsilon,
                     *entropy,
                     &mut presignature_manager,
                     protocol_cfg,
@@ -656,11 +648,7 @@ impl MessageReceiver for RunningState {
                     // and have the other nodes timeout in the following cases:
                     // - If a presignature is in GC, then it was used already or failed to be produced.
                     // - If a presignature is missing, that means our system cannot process this signature.
-                    tracing::warn!(
-                        ?sign_request_identifier,
-                        ?err,
-                        "signature cannot be generated"
-                    );
+                    tracing::warn!(?sign_id, ?err, "signature cannot be generated");
                     queue.clear();
                     continue;
                 }
@@ -668,7 +656,7 @@ impl MessageReceiver for RunningState {
                     // ignore the whole of the messages since the generation had bad parameters. Also have the other node who
                     // initiated the protocol resend the message or have it timeout on their side.
                     tracing::warn!(
-                        ?sign_request_identifier,
+                        ?sign_id,
                         presignature_id,
                         ?error,
                         "unable to initialize incoming signature protocol"
@@ -678,7 +666,7 @@ impl MessageReceiver for RunningState {
                 }
                 Err(err) => {
                     tracing::warn!(
-                        ?sign_request_identifier,
+                        ?sign_id,
                         ?err,
                         "Unexpected error encounted while generating signature"
                     );
