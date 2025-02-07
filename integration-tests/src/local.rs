@@ -71,10 +71,10 @@ impl Node {
             behind_threshold: 120,
         };
         let eth = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: Some(cfg.eth_account_sk.clone()),
-            eth_rpc_ws_url: Some(cfg.eth_rpc_ws_url.clone()),
-            eth_rpc_http_url: Some(cfg.eth_rpc_http_url.clone()),
-            eth_contract_address: Some(cfg.eth_contract_address.clone()),
+            eth_account_sk: Some(cfg.eth.account_sk.clone()),
+            eth_rpc_ws_url: Some(cfg.eth.rpc_ws_url.clone()),
+            eth_rpc_http_url: Some(cfg.eth.rpc_http_url.clone()),
+            eth_contract_address: Some(cfg.eth.contract_address.clone()),
         };
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
@@ -180,10 +180,10 @@ impl Node {
         };
 
         let eth = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: Some(config.cfg.eth_account_sk.clone()),
-            eth_rpc_ws_url: Some(config.cfg.eth_rpc_ws_url.clone()),
-            eth_rpc_http_url: Some(config.cfg.eth_rpc_http_url.clone()),
-            eth_contract_address: Some(config.cfg.eth_contract_address.clone()),
+            eth_account_sk: Some(config.cfg.eth.account_sk.clone()),
+            eth_rpc_ws_url: Some(config.cfg.eth.rpc_ws_url.clone()),
+            eth_rpc_http_url: Some(config.cfg.eth.rpc_http_url.clone()),
+            eth_contract_address: Some(config.cfg.eth.contract_address.clone()),
         };
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),

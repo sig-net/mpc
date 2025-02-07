@@ -5,7 +5,8 @@ use std::vec;
 
 use clap::Parser;
 use integration_tests::cluster::spawner::ClusterSpawner;
-use integration_tests::{utils, NodeConfig};
+use integration_tests::NodeConfig;
+use mpc_node::indexer_eth::EthConfig;
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -63,10 +64,12 @@ async fn main() -> anyhow::Result<()> {
             let config = NodeConfig {
                 nodes,
                 threshold,
-                eth_rpc_ws_url,
-                eth_rpc_http_url,
-                eth_contract_address,
-                eth_account_sk,
+                eth: EthConfig {
+                    account_sk: eth_account_sk,
+                    rpc_ws_url: eth_rpc_ws_url,
+                    rpc_http_url: eth_rpc_http_url,
+                    contract_address: eth_contract_address,
+                },
                 ..Default::default()
             };
             println!("Full config: {:?}", config);
@@ -79,7 +82,6 @@ async fn main() -> anyhow::Result<()> {
             let ctx = nodes.ctx();
             let urls: Vec<_> = (0..spawner.cfg.nodes).map(|i| nodes.url(i)).collect();
             let near_accounts = nodes.near_accounts();
-            let sk_local_path = nodes.ctx().storage_options.sk_share_local_path.clone();
 
             println!("\nEnvironment is ready:");
             println!("  docker-network: {}", ctx.docker_network);
@@ -103,7 +105,6 @@ async fn main() -> anyhow::Result<()> {
 
             signal::ctrl_c().await.expect("Failed to listen for event");
             println!("Received Ctrl-C");
-            utils::clear_local_sk_shares(sk_local_path).await?;
             println!("Clean up finished");
         }
         Cli::DepServices => {

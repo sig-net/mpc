@@ -231,6 +231,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let (mesh, mesh_state) = Mesh::init(&client, mesh_options);
             let contract_state = Arc::new(RwLock::new(None));
 
+            let eth = eth.into_config();
             let network = NetworkConfig {
                 cipher_sk: hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?,
                 cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
@@ -249,7 +250,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 ?account_id,
                 ?my_address,
                 near_rpc_url = ?near_client.rpc_addr(),
-                eth_rpc_url = ?eth.eth_rpc_http_url,
+                ?eth,
                 "starting node",
             );
             rt.block_on(async {

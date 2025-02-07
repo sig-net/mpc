@@ -4,13 +4,16 @@ use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
 
 use std::future::{Future, IntoFuture};
+use std::path::PathBuf;
 
 use crate::containers::DockerClient;
-use crate::{NodeConfig, Nodes};
+use crate::{execute, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
 
 const DOCKER_NETWORK: &str = "mpc_it_network";
+const GCP_PROJECT_ID: &str = "multichain-integration";
+const ENV: &str = "integration-tests";
 
 struct Prestockpile {
     /// Multiplier to increase the stockpile such that stockpiling presignatures does not trigger
@@ -21,9 +24,12 @@ struct Prestockpile {
 pub struct ClusterSpawner {
     pub docker: DockerClient,
     pub release: bool,
+    pub env: String,
+    pub gcp_project_id: String,
     pub network: String,
     pub accounts: Vec<Account>,
     pub participants: Vec<Participant>,
+    pub tmp_dir: PathBuf,
 
     pub cfg: NodeConfig,
     pub wait_for_running: bool,
@@ -32,6 +38,9 @@ pub struct ClusterSpawner {
 
 impl Default for ClusterSpawner {
     fn default() -> Self {
+        let mut tmp_dir = execute::target_dir().expect("unable to locate target dir");
+        tmp_dir.push("tmp");
+
         let cfg = NodeConfig {
             nodes: 3,
             threshold: 2,
@@ -40,9 +49,12 @@ impl Default for ClusterSpawner {
         Self {
             docker: DockerClient::default(),
             release: true,
+            env: ENV.to_string(),
+            gcp_project_id: GCP_PROJECT_ID.to_string(),
             network: DOCKER_NETWORK.to_string(),
             accounts: Vec::with_capacity(cfg.nodes),
             participants: Vec::with_capacity(cfg.nodes),
+            tmp_dir,
 
             cfg,
             wait_for_running: true,
@@ -95,6 +107,16 @@ impl ClusterSpawner {
 
     pub fn prestockpile(mut self, multiplier: u32) -> Self {
         self.prestockpile = Some(Prestockpile { multiplier });
+        self
+    }
+
+    pub fn env(mut self, env: &str) -> Self {
+        self.env = env.to_string();
+        self
+    }
+
+    pub fn gcp_project_id(mut self, gcp_project_id: &str) -> Self {
+        self.gcp_project_id = gcp_project_id.to_string();
         self
     }
 
