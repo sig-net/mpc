@@ -155,7 +155,7 @@ pub fn install_global(node_id: Option<usize>) {
 
 // TODO: add Phuongs debug node id layer
 // TODO: what to do with GCP logs?
-pub fn setup(env: &str, node_id: &str, options: &Options) {
+pub fn setup(env: &str, node_id: &str, options: &Options, rt: &tokio::runtime::Runtime) {
     let subscriber = Registry::default().with(EnvFilter::from_default_env());
 
     let fmt_layer = tracing_subscriber::fmt::layer()
@@ -172,16 +172,18 @@ pub fn setup(env: &str, node_id: &str, options: &Options) {
             KeyValue::new("node_id", node_id.to_string()),
         ]));
 
-    let tracer = opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(
-            opentelemetry_otlp::new_exporter()
-                .http()
-                .with_endpoint(options.otlp_endpoint.clone()),
-        )
-        .with_trace_config(trace_config)
-        .install_batch(opentelemetry::runtime::Tokio)
-        .expect("Failed to build OpenTelemetry tracer");
+    let tracer = rt.block_on(async {
+        opentelemetry_otlp::new_pipeline()
+            .tracing()
+            .with_exporter(
+                opentelemetry_otlp::new_exporter()
+                    .http()
+                    .with_endpoint(options.otlp_endpoint.clone()),
+            )
+            .with_trace_config(trace_config)
+            .install_batch(opentelemetry::runtime::Tokio)
+            .expect("Failed to build OpenTelemetry tracer")
+    });
 
     let otel_layer = tracing_opentelemetry::layer()
         .with_tracer(tracer)
