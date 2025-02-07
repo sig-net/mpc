@@ -155,9 +155,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.90"
+version = "1.0.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37bf3594c4c988a53154954629820791dde498571819ae4ca50ca811e060cc95"
+checksum = "34ac096ce696dc2fcabef30516bb13c0a68a11d30131d3df6f04711467681b04"
 dependencies = [
  "backtrace",
 ]
@@ -1393,22 +1393,6 @@ dependencies = [
  "generic-array",
  "rand_core",
  "typenum",
-]
-
-[[package]]
-name = "crypto-shared"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "borsh",
- "getrandom",
- "k256",
- "near-account-id",
- "near-sdk",
- "serde",
- "serde_json",
- "sha3",
- "subtle",
 ]
 
 [[package]]
@@ -3107,10 +3091,10 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "borsh",
- "crypto-shared",
  "digest 0.10.7",
  "ecdsa 0.16.9",
  "k256",
+ "mpc-crypto",
  "near-crypto 0.27.0",
  "near-sdk",
  "near-workspaces",
@@ -3120,6 +3104,21 @@ dependencies = [
  "signature 2.2.0",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "mpc-crypto"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "borsh",
+ "getrandom",
+ "k256",
+ "near-account-id",
+ "near-sdk",
+ "serde",
+ "serde_json",
+ "sha3",
 ]
 
 [[package]]
@@ -3148,7 +3147,6 @@ dependencies = [
  "chrono",
  "ciborium",
  "clap",
- "crypto-shared",
  "deadpool-redis",
  "google-datastore1",
  "google-secretmanager1",
@@ -3161,6 +3159,7 @@ dependencies = [
  "k256",
  "local-ip-address",
  "mpc-contract",
+ "mpc-crypto",
  "mpc-keys",
  "near-account-id",
  "near-crypto 0.26.0",
@@ -5204,9 +5203,9 @@ checksum = "61697e0a1c7e512e84a621326239844a24d8207b4669b41bc18b32ea5cbf988b"
 
 [[package]]
 name = "serde"
-version = "1.0.210"
+version = "1.0.217"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8e3592472072e6e22e0a54d5904d9febf8508f65fb8552499a1abc7d1078c3a"
+checksum = "02fc4265df13d6fa1d00ecff087228cc0a2b5f3c0e87e258d8b94a156e984c70"
 dependencies = [
  "serde_derive",
 ]
@@ -5222,9 +5221,9 @@ dependencies = [
 
 [[package]]
 name = "serde_derive"
-version = "1.0.210"
+version = "1.0.217"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "243902eda00fad750862fc144cea25caca5e20d615af0a81bee94ca738f1df1f"
+checksum = "5a9bf7cf98d04a2b28aead066b7496853d4779c9cc183c440dbac457641e19a0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5244,9 +5243,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.132"
+version = "1.0.138"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d726bfaff4b320266d395898905d0eba0345aae23b54aee3a737e260fd46db03"
+checksum = "d434192e7da787e94a6ea7e9670b26a036d0ca41e0b7efb2676dd32bae872949"
 dependencies = [
  "itoa",
  "memchr",

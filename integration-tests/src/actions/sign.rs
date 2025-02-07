@@ -2,12 +2,12 @@ use std::fmt;
 use std::future::IntoFuture;
 
 use cait_sith::FullSignature;
-use crypto_shared::{
-    derive_epsilon, ScalarExt as _, SerializableAffinePoint, SerializableScalar, SignatureResponse,
-};
 use k256::{Scalar, Secp256k1};
 use mpc_contract::errors;
 use mpc_contract::primitives::{SignRequest, SignatureRequest};
+use mpc_crypto::{
+    derive_epsilon, ScalarExt as _, SerializableAffinePoint, SerializableScalar, SignatureResponse,
+};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};

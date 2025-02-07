@@ -49,7 +49,7 @@ near-primitives = "0.26.0"
 near-workspaces = { git = "https://github.com/near/near-workspaces-rs", branch = "phuong/tmp-node-2.3.0" }
 
 # local chain-signatures dependencies
-crypto-shared = { path = "../chain-signatures/crypto-shared" }
+mpc-crypto = { path = "../chain-signatures/crypto" }
 mpc-contract = { path = "../chain-signatures/contract" }
 mpc-keys = { path = "../chain-signatures/keys" }
 mpc-node = { path = "../chain-signatures/node" }

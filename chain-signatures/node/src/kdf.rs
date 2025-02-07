@@ -1,7 +1,7 @@
 use anyhow::Context;
-use crypto_shared::{kdf::recover, x_coordinate, ScalarExt, SignatureResponse};
 use hkdf::Hkdf;
 use k256::{ecdsa::RecoveryId, elliptic_curve::sec1::ToEncodedPoint, AffinePoint, Scalar};
+use mpc_crypto::{kdf::recover, x_coordinate, ScalarExt, SignatureResponse};
 use near_primitives::hash::CryptoHash;
 use sha3::Sha3_256;
 

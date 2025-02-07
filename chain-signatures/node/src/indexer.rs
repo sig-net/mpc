@@ -1,8 +1,8 @@
 use crate::protocol::Chain::NEAR;
 use crate::protocol::{Chain, SignRequest};
 use crate::storage::app_data_storage::AppDataStorage;
-use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
+use mpc_crypto::{derive_epsilon, ScalarExt};
 use near_account_id::AccountId;
 use near_lake_framework::{Lake, LakeBuilder, LakeContext};
 use near_lake_primitives::actions::ActionMetaDataExt;
