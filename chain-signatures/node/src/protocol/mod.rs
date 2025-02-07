@@ -34,7 +34,6 @@ use reqwest::IntoUrl;
 use std::path::Path;
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use url::Url;
 
@@ -44,7 +43,7 @@ struct Ctx {
     mpc_contract_id: AccountId,
     near: NearClient,
     rpc_channel: RpcChannel,
-    sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
+    redis_pool: deadpool_redis::Pool,
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
@@ -67,8 +66,8 @@ impl ConsensusCtx for &mut MpcSignProtocol {
         &self.ctx.my_address
     }
 
-    fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<SignRequest>>> {
-        self.ctx.sign_rx.clone()
+    fn redis_pool(&self) -> &deadpool_redis::Pool {
+        &self.ctx.redis_pool
     }
 
     fn secret_storage(&self) -> &SecretNodeStorageBox {
@@ -130,7 +129,7 @@ impl MpcSignProtocol {
         near: NearClient,
         rpc_channel: RpcChannel,
         channel: MessageChannel,
-        sign_rx: mpsc::Receiver<SignRequest>,
+        redis_pool: deadpool_redis::Pool,
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
@@ -142,7 +141,7 @@ impl MpcSignProtocol {
             mpc_contract_id,
             near,
             rpc_channel,
-            sign_rx: Arc::new(RwLock::new(sign_rx)),
+            redis_pool,
             secret_storage,
             triple_storage,
             presignature_storage,

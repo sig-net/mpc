@@ -3,7 +3,7 @@ use crate::gcp::GcpService;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
-use crate::protocol::{MpcSignProtocol, SignQueue};
+use crate::protocol::MpcSignProtocol;
 use crate::rpc::{NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, logs, mesh, storage, web};
@@ -174,7 +174,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             logs::install_global(debug_id);
             let _span = tracing::trace_span!("cli").entered();
 
-            let (sign_tx, sign_rx) = SignQueue::channel();
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
@@ -204,7 +203,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 &indexer_options,
                 &mpc_contract_id,
                 &account_id,
-                sign_tx.clone(),
+                redis_pool.clone(),
                 app_data_storage.clone(),
                 rpc_client.clone(),
             )?;
@@ -260,7 +259,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     near_client,
                     rpc_channel,
                     channel,
-                    sign_rx,
+                    redis_pool.clone(),
                     key_storage,
                     triple_storage,
                     presignature_storage,
@@ -273,7 +272,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
                 let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
-                let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
+                let eth_indexer_handle =
+                    tokio::spawn(indexer_eth::run(eth, redis_pool, account_id));
                 tracing::info!("protocol http server spawned");
 
                 rpc_handle.await?;
