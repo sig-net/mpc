@@ -36,7 +36,7 @@ pub async fn run(
         indexer,
     };
 
-    let app = Router::new()
+    let mut router = Router::new()
         // healthcheck endpoint
         .route(
             "/",
@@ -47,8 +47,13 @@ pub async fn run(
         )
         .route("/msg", post(msg))
         .route("/state", get(state))
-        .route("/metrics", get(metrics))
-        .layer(Extension(Arc::new(axum_state)));
+        .route("/metrics", get(metrics));
+
+    if cfg!(feature = "bench") {
+        router = router.route("/bench/metrics", get(bench_metrics));
+    }
+
+    let app = router.layer(Extension(Arc::new(axum_state)));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!(?addr, "starting http server");
@@ -191,4 +196,20 @@ async fn metrics() -> (StatusCode, String) {
             )
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchMetrics {
+    pub sig_gen: Vec<f64>,
+    pub sig_respond: Vec<f64>,
+    pub presig_gen: Vec<f64>,
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn bench_metrics() -> Json<BenchMetrics> {
+    Json(BenchMetrics {
+        sig_gen: crate::metrics::SIGN_GENERATION_LATENCY.exact(),
+        sig_respond: crate::metrics::SIGN_RESPOND_LATENCY.exact(),
+        presig_gen: crate::metrics::PRESIGNATURE_LATENCY.exact(),
+    })
 }
