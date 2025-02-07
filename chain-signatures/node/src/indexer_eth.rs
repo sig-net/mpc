@@ -93,6 +93,11 @@ pub struct EthSignRequest {
 fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignRequest> {
     let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
+    if event.deposit < 1 {
+        tracing::warn!("insufficient deposit: {}", event.deposit);
+        return Err(anyhow::anyhow!("insufficient deposit"));
+    }
+
     // Create sign request from event
     let Some(payload) = Scalar::from_bytes(event.payload_hash) else {
         tracing::warn!(
@@ -103,6 +108,11 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignR
             "failed to convert event payload hash to scalar"
         ));
     };
+
+    // if payload > Scalar::from_bytes(hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141").unwrap().try_into().unwrap()).unwrap() {
+    //     tracing::warn!("Payload exceeds secp256k1 curve order: {:?}", payload);
+    //     return Err(anyhow::anyhow!("Payload exceeds secp256k1 curve order"));
+    // }
     let request = ContractSignRequest {
         payload,
         path: event.path,
@@ -113,23 +123,23 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignR
         format!("0x{}", event.requester.encode_hex::<String>()),
         &request.path,
     );
-    let mut event_epsilon_bytes: [u8; 32] = [0; 32];
-    event.epsilon.to_big_endian(&mut event_epsilon_bytes);
-    let event_epsilon_scalar = Scalar::from_bytes(event_epsilon_bytes)
-        .ok_or(anyhow::anyhow!("failed to convert event epsilon to scalar"))?;
-    if epsilon != event_epsilon_scalar {
-        tracing::warn!(
-            "epsilon mismatch: derived={:?}, event={:?}",
-            epsilon,
-            event.epsilon
-        );
-        return Err(anyhow::anyhow!("epsilon mismatch"));
-    }
-    tracing::debug!(
-        "from epsilon: {:?} event epsilon: {:?}",
-        epsilon,
-        event.epsilon
-    );
+    // let mut event_epsilon_bytes: [u8; 32] = [0; 32];
+    // event.epsilon.to_big_endian(&mut event_epsilon_bytes);
+    // let event_epsilon_scalar = Scalar::from_bytes(event_epsilon_bytes)
+    //     .ok_or(anyhow::anyhow!("failed to convert event epsilon to scalar"))?;
+    // if epsilon != event_epsilon_scalar {
+    //     tracing::warn!(
+    //         "epsilon mismatch: derived={:?}, event={:?}",
+    //         epsilon,
+    //         event.epsilon
+    //     );
+    //     return Err(anyhow::anyhow!("epsilon mismatch"));
+    // }
+    // tracing::debug!(
+    //     "from epsilon: {:?} event epsilon: {:?}",
+    //     epsilon,
+    //     event.epsilon
+    // );
     // Use transaction hash as entropy
     let entropy = log
         .transaction_hash
@@ -163,12 +173,11 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
     // Parse requester address (20 bytes)
     let requester = H160::from_slice(&data[12..32]);
 
-    // Parse epsilon (32 bytes)
-    let epsilon = U256::from_big_endian(&data[32..64]);
-
     // Parse payload hash (32 bytes)
     let mut payload_hash = [0u8; 32];
-    payload_hash.copy_from_slice(&data[64..96]);
+    payload_hash.copy_from_slice(&data[32..64]);
+
+    let deposit = U256::from_big_endian(&data[64..96]).as_usize();
 
     // Parse path string
     let path_offset = U256::from_big_endian(&data[96..128]).as_usize();
@@ -176,12 +185,21 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
     let path_bytes = &data[path_offset + 32..path_offset + 32 + path_length];
     let path = String::from_utf8(path_bytes.to_vec())?;
 
+    tracing::info!(
+        "Parsed event: request_id={}, requester={}, payload_hash={}, path={}, deposit={}",
+        hex::encode(request_id),
+        requester,
+        hex::encode(payload_hash),
+        path,
+        deposit,
+    );
+    
     Ok(SignatureRequestedEvent {
         request_id,
         requester,
-        epsilon,
         payload_hash,
         path,
+        deposit,
     })
 }
 
@@ -198,7 +216,7 @@ pub async fn run(
     tracing::info!("running ethereum indexer");
     let contract_address = H160::from_str(&eth.contract_address)?;
     let signature_requested_topic = H256::from_slice(&web3::signing::keccak256(
-        b"SignatureRequested(bytes32,address,uint256,uint256,string)",
+        b"SignatureRequested(bytes32,address,bytes32,uint256,string)",
     ));
 
     let filter = FilterBuilder::default()
@@ -258,7 +276,7 @@ pub async fn run(
 struct SignatureRequestedEvent {
     request_id: [u8; 32],
     requester: H160,
-    epsilon: U256,
     payload_hash: [u8; 32],
     path: String,
+    deposit: usize,
 }
