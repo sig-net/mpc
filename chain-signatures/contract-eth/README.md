@@ -55,7 +55,7 @@ node scripts/convertPk.js <public_key>
 ```
 For example:
 ```bash
-node scripts/convertPk.js 37xNKgg4LvhuaMBPThHEZNp6VJHu8KsATkPrCKrsfbwQEas1erep8otiB37F99tvY5aM3s78uzix49t5BjxuBYzD
+node scripts/convertPk.js kbPYfG2qMn3yYqwe5U4PDGzZSQsfRw2kxRkojw5f38nLZY5NEokyDg8HWSuQfafmncuvuaNf3LZrYZAZLFhZqe9
 ```
 
 6. Then run the following command to deploy the contract:

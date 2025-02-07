@@ -4,11 +4,12 @@ async function main() {
   let contractAddress;
   let network = hre.network.name;
   if (network === 'localhost') {
-    const deployments = require('../deployments/localhost.json');
-    contractAddress = deployments.proxy;
+    const deployments = require('../ignition/deployments/chain-31337/deployed_addresses.json');
+    contractAddress = deployments[Object.keys(deployments).pop()];
+    console.log(contractAddress)
   } else if (network === 'sepolia') {
-    const deployments = require('../deployments/sepolia.json');
-    contractAddress = deployments.proxy;
+    const deployments = require('../ignition/deployments/chain-11155111/deployed_addresses.json'); 
+    contractAddress = deployments[Object.keys(deployments).pop()];
   } else {
     throw new Error('Unsupported network specified. Use "localhost" or "sepolia"');
   }
@@ -41,7 +42,6 @@ async function main() {
     const testPath = "test2";
     const signatureDeposit = await chainSignatures.getSignatureDeposit();
     const signer = (await hre.ethers.getSigners())[0];
-    const derivedPublicKey = await chainSignatures.derivedPublicKey(testPath, signer.address);
     
     console.log("Requesting signature for message:", testMessage);
     console.log("Using path:", testPath);
@@ -49,7 +49,7 @@ async function main() {
 
     const chainSignaturesWithSigner = chainSignatures.connect(signer);
     
-    const tx = await chainSignaturesWithSigner.sign({payload: testMessage, path: testPath, keyVersion: 0, derivedPublicKey: {x: derivedPublicKey.x, y: derivedPublicKey.y}}, {
+    const tx = await chainSignaturesWithSigner.sign({payload: testMessage, path: testPath, keyVersion: 0}, {
       value: signatureDeposit
     });
     const receipt = await tx.wait();
@@ -62,8 +62,7 @@ async function main() {
       const parsedEvent = chainSignatures.interface.parseLog(requestEvent);
       console.log("Signature requested successfully!");
       console.log("Request ID:", parsedEvent.args.requestId);
-      console.log("Epsilon:", parsedEvent.args.epsilon.toString());
-      console.log("Payload Hash:", parsedEvent.args.payloadHash.toString());
+      console.log("Payload Hash:", parsedEvent.args.payload.toString());
 
       // Add event listener for SignatureResponded
       console.log("Waiting for signature response...");
