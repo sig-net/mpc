@@ -21,10 +21,9 @@ aws --profile default configure set aws_secret_access_key "456"
 Then run the integration tests:
 
 ```BASH
-cd integration-tests
-cargo test --jobs 1 -- --test-threads 1
+cargo test -p integration-tests --jobs 1 -- --test-threads 1
 # or if you want to run tests in docker
-cargo test --features docker-test
+cargo test -p integration-tests --features docker-test
 ```
 
 ## FAQ
@@ -34,8 +33,7 @@ cargo test --features docker-test
 You can pass environment variable `TESTCONTAINERS=keep` to keep all of the docker containers. For example:
 
 ```bash
-$ cd integration-tests
-$ TESTCONTAINERS=keep cargo test --jobs 1 -- --test-threads 1
+$ TESTCONTAINERS=keep cargo test -p integration-tests --jobs 1 -- --test-threads 1
 ```
 
 ### There are no logs anymore, how do I debug?
@@ -43,8 +41,7 @@ $ TESTCONTAINERS=keep cargo test --jobs 1 -- --test-threads 1
 The easiest way is to run one isolated test of your choosing while keeping the containers (see above):
 
 ```bash
-$ cd integration-tests
-$ TESTCONTAINERS=keep cargo test test_basic_action
+$ TESTCONTAINERS=keep cargo test -p integration-tests test_basic_action
 ```
 
 Now, you can do `docker ps` and it should list all of containers related to your test (the most recent ones are always at the top, so lookout for those). For example:
