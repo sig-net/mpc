@@ -13,19 +13,11 @@ RUN apt-get update \
     apt-get install --no-install-recommends --assume-yes \
     protobuf-compiler libprotobuf-dev
 
-# Create a dummy file to cache dependencies
-RUN echo "fn main() {}" > dummy.rs
-COPY chain-signatures/node/Cargo.toml Cargo.toml
-RUN sed -i 's#src/main.rs#dummy.rs#' Cargo.toml
-RUN sed -i 's#mpc-keys = { path = "../keys" }##' Cargo.toml
-RUN sed -i 's#mpc-contract = { path = "../contract" }##' Cargo.toml
-RUN sed -i 's#mpc-crypto = { path = "../mpc-crypto" }##' Cargo.toml
-RUN sed -i 's#version.workspace = true##' Cargo.toml
-RUN cargo build --release
-# Now build the actual node
-COPY chain-signatures/. .
+COPY chain-signatures/ ./chain-signatures/
+COPY Cargo.toml .
+COPY Cargo.lock .
 COPY --from=eth-builder /usr/src/app/contract-eth/artifacts contract-eth/artifacts
-RUN sed -i 's#target-dir = "../target"#target-dir = "target"#' .cargo/config.toml
+RUN sed -i 's#"integration-tests",##' Cargo.toml
 RUN cargo build --release --package mpc-node
 
 FROM debian:stable-slim as runtime
