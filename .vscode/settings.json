@@ -2,7 +2,6 @@
   "rust-analyzer.linkedProjects": [
     "chain-signatures/Cargo.toml",
     "integration-tests/Cargo.toml",
-    "load-tests/Cargo.toml",
   ],
   "rust-analyzer.cargo.extraEnv": {
     "CARGO_PROFILE_RUST_ANALYZER_INHERITS": "dev"
