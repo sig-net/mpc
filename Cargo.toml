@@ -1,8 +1,11 @@
 [workspace]
 members = [
-    "contract",
-    "keys",
-    "node",
+    "chain-signatures/crypto",
+    "chain-signatures/contract",
+    "chain-signatures/keys",
+    "chain-signatures/node",
+
+    "integration-tests",
 ]
 resolver = "2"
 
@@ -30,9 +33,9 @@ thiserror = "1"
 near-account-id = "1.0.0"
 near-sdk = { version = "5.6.0", features = ["legacy", "unit-testing", "unstable"] }
 
-mpc-contract = { path = "./contract" }
-mpc-crypto = { path = "./crypto" }
-mpc-keys = { path = "./keys" }
+mpc-contract = { path = "./chain-signatures/contract" }
+mpc-crypto = { path = "./chain-signatures/crypto" }
+mpc-keys = { path = "./chain-signatures/keys" }
 
 [patch.crates-io]
 # TODO: trigger Cargo.lock update for x25519-dalek once they release.
