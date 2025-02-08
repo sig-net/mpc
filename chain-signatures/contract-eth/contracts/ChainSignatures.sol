@@ -2,10 +2,11 @@
 pragma solidity ^0.8.17;
 
 import "./Secp256k1.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
 import "hardhat/console.sol";
 
-contract ChainSignatures {
+contract ChainSignatures is AccessControl {
     struct SignRequest {
         bytes32 payload;
         string path;
@@ -33,15 +34,20 @@ contract ChainSignatures {
     event SignatureRequested(bytes32 indexed requestId, address requester, bytes32 payload, uint256 deposit, string path);
     event SignatureResponded(bytes32 indexed requestId, SignatureResponse response);
 
-    constructor(PublicKey memory _publicKey) {
+    bytes32 public constant RECEIVER_ROLE = keccak256("RECEIVER_ROLE");
+
+    constructor(address admin, address receiver, PublicKey memory _publicKey) {
         publicKey = _publicKey;
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _setRoleAdmin(RECEIVER_ROLE, DEFAULT_ADMIN_ROLE);
+        _grantRole(RECEIVER_ROLE, receiver);
     }
 
-    function getPublicKey() public view returns (PublicKey memory) {
+    function getPublicKey() external view returns (PublicKey memory) {
         return publicKey;
     }
 
-    function derivedPublicKey(string memory path, address _predecessor) public view returns (PublicKey memory) {
+    function derivedPublicKey(string memory path, address _predecessor) external view returns (PublicKey memory) {
         address predecessor = _predecessor == address(0) ? msg.sender : _predecessor;
         uint256 epsilon = deriveEpsilon(path, predecessor);
         PublicKey memory _derivedPublicKey = deriveKey(publicKey, epsilon);
@@ -79,8 +85,15 @@ contract ChainSignatures {
         emit SignatureResponded(_requestId, _response);
     }
 
-    function getSignatureDeposit() public pure returns (uint256) {
+    function getSignatureDeposit() external pure returns (uint256) {
         // Simplified deposit calculation
         return 1 wei;
+    }
+
+    function withdraw(uint256 amount) external onlyRole(RECEIVER_ROLE) {
+        uint256 totalBalanceInContract = address(this).balance;
+        require(amount <= totalBalanceInContract, "withdraw amount must be smaller than total balance in contract");
+        address payable to = payable(msg.sender);
+        to.transfer(amount);
     }
 }

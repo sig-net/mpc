@@ -37,7 +37,7 @@ To do a local end-to-end test, following these steps.
 npx hardhat node
 ```
 
-2. Figure out the contract address. Run and copy the "Future contract address" from the output:
+2. Figure out the contract address, admin address and receiver address(receiver of contract balance). Run and copy the "Future contract address" from the output:
 ```bash
 npx hardhat --network localhost run scripts/findAddress.js
 ```
@@ -60,7 +60,7 @@ node scripts/convertPk.js kbPYfG2qMn3yYqwe5U4PDGzZSQsfRw2kxRkojw5f38nLZY5NEokyDg
 
 6. Then run the following command to deploy the contract:
 ```bash
-npx hardhat run scripts/initialDeploy.js --network localhost
+npx hardhat ignition deploy ignition/modules/chainSignatures.js --parameters ignition/params.json --network localhost
 ```
 
 7. Then run the following command to request a signature from MPC:
@@ -79,12 +79,12 @@ npx hardhat vars set SEPOLIA_PRIVATE_KEY
 ```
 3. Deploy the contract with right public key configured in `params.json`.
 ```bash
-npx hardhat run scripts/initialDeploy.js --network sepolia
+npx hardhat ignition deploy ignition/modules/chainSignatures.js --parameters ignition/params.json --network sepolia
 ```
 
 4. Make sure you have docker daemon running. Go to `integration-tests` and run the following command to start the MPC cluster connected to Ethereum Sepolia Testnet:
 ```bash
-cargo run -- setup-env --eth-rpc-url https://sepolia.infura.io/v3/<infura-api-key> --eth-account-sk <eth-account-secret-key-without-0x-prefix> --eth-contract-address <eth-proxy-contract-address>
+cargo run -- setup-env --eth-rpc-url https://sepolia.infura.io/v3/<infura-api-key> --eth-account-sk <eth-account-secret-key-without-0x-prefix> --eth-contract-address <eth-contract-address>
 ```
 
 5. Then run the following command to request a signature from MPC:

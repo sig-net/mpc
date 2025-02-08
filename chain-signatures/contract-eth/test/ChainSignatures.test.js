@@ -20,7 +20,7 @@ describe("ChainSignatures", function () {
     console.log("===", xHex, yHex);
     ChainSignatures = await ethers.getContractFactory("ChainSignatures");
     publicKey = { x: xHex, y: yHex };
-    chainSignatures = await ChainSignatures.deploy(publicKey);
+    chainSignatures = await ChainSignatures.deploy(owner, addr2, publicKey);
   });
 
   describe("deriveEpsilon", function () {
@@ -71,28 +71,16 @@ describe("ChainSignatures", function () {
       const payload = ethers.keccak256(ethers.toUtf8Bytes("Test payload"));
       const path = "test/path";
       const requiredDeposit = await chainSignatures.getSignatureDeposit();
-      const epsilon = await chainSignatures.deriveEpsilon(path, addr1.address);
       const requestId = 
         ethers.solidityPackedKeccak256(
           ["bytes32", "address", "string"],
           [payload, addr1.address, path]
         );
-      const derivedPublicKey = await chainSignatures.derivedPublicKey(path, addr1.address);
 
       await expect(chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0}, { value: requiredDeposit }))
         .to.emit(chainSignatures, "SignatureRequested")
         .withArgs(requestId, addr1.address, payload, requiredDeposit, path);
     });
-
-    // it("Should not allow creating a request with insufficient deposit", async function () {
-    //   const payload = ethers.keccak256(ethers.toUtf8Bytes("Test payload"));
-    //   const path = "test/path";
-    //   const requiredDeposit = await chainSignatures.getSignatureDeposit();
-    //   const derivedPublicKey = await chainSignatures.derivedPublicKey(path, addr1.address);
-
-    //   await expect(chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0, derivedPublicKey: {x: derivedPublicKey.x, y: derivedPublicKey.y}}, { value: requiredDeposit - 1n }))
-    //     .to.be.revertedWith("Insufficient deposit");
-    // });
 
     it("Respond to a signature request", async function () {
       const payload = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9"
@@ -133,103 +121,27 @@ describe("ChainSignatures", function () {
       expect(parsedEvent.args[1][1]).to.equal(s);
       expect(parsedEvent.args[1][2]).to.equal(0);
     });
-  });
 
-  // describe("Signature deposit", function () {
-  //   it("Should return correct deposit amount", async function () {
-  //     expect(await chainSignatures.getSignatureDeposit()).to.equal(1);
+    it("Should be able to withdraw", async function () {
+      const payload = ethers.keccak256(ethers.toUtf8Bytes("Test payload"));
+      const path = "test/path";
+      const requiredDeposit = await chainSignatures.getSignatureDeposit();
+      const requestId = 
+        ethers.solidityPackedKeccak256(
+          ["bytes32", "address", "string"],
+          [payload, addr1.address, path]
+        );
 
-  //     for (let i = 0; i < 4; i++) {
-  //       const payload = ethers.keccak256(ethers.toUtf8Bytes(`Test payload ${i}`));
-  //       const path = `test/path/${i}`;
-  //       const requiredDeposit = await chainSignatures.getSignatureDeposit();
-  //       const derivedPublicKey = await chainSignatures.derivedPublicKey(path, addr1.address);
-  //       await chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0, derivedPublicKey: {x: derivedPublicKey.x, y: derivedPublicKey.y}}, { value: requiredDeposit });
-  //     }
-
-  //     expect(await chainSignatures.getSignatureDeposit()).to.equal(ethers.parseEther("0.004"));
-  //   });
-  // });
-
-  
-
-//   describe("Contract upgrade", function() {
-//     let ChainSignaturesV2ForTest;
-//     this.beforeAll(async function() {
-//       // Create modified contract source code
-//       const sourcePath = path.join(__dirname, '../contracts/ChainSignatures.sol');
-//       let sourceCode = fs.readFileSync(sourcePath, 'utf8');
+      await chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0}, { value: requiredDeposit });
       
-//       // Write the modified source to a new file.
-//       // This is for testing, for production we can simply update ChainSignatures.sol in place
-//       // After contract initialization, the contract version is set to 1, done by inherit the openzeppelin Initializable
-//       // the `reinitializer(2)` decorator makes sure it can only be called once when version is 1 and after the call version is set to 2
-//       // And for next upgrade we'll need to add a function upgradeToV3(...) public reinitializer(3) {...}, and so on
-//       const v2Path = path.join(__dirname, '../contracts/ChainSignaturesV2ForTest.sol');
-//       sourceCode = sourceCode.replace(
-//         /contract ChainSignatures is/,
-//         'contract ChainSignaturesV2ForTest is'
-//       );
-//       sourceCode = sourceCode.replace(
-//         /}[\s]*$/,
-//         `function upgradeToV3(PublicKey calldata _publicKey, uint32 _keyVersion) public reinitializer(3) { publicKey = _publicKey; keyVersion = _keyVersion; }
-// }`
-//       );
-//       fs.writeFileSync(v2Path, sourceCode);
-//       // Compile the contract to generate artifacts
-//       await hre.run("compile");
-
-//       // Compile using the contract factory directly
-//       ChainSignaturesV2ForTest = await ethers.getContractFactory("ChainSignaturesV2ForTest");
-//     });
-
-//     this.afterAll(async function() {
-//       // Delete the temporary V2 contract file
-//       const v2Path = path.join(__dirname, '../contracts/ChainSignaturesV2ForTest.sol');
-//       if (fs.existsSync(v2Path)) {
-//         fs.unlinkSync(v2Path);
-//       }
-
-//       // Delete the artifacts
-//       const artifactsPath = path.join(__dirname, '../artifacts/contracts/ChainSignaturesV2ForTest.sol');
-//       if (fs.existsSync(artifactsPath)) {
-//         fs.rmSync(artifactsPath, { recursive: true, force: true });
-//       }
-//     });
-
-//     it("Should only allow owner to upgrade", async function() {
-//       const ChainSignatures = await ethers.getContractFactory("ChainSignatures");
-//       const [owner, addr1] = await ethers.getSigners();
-
-//       let pkNew = {
-//         "x": "0x4a65bed3374ea3250d1721315c287af4501b9cb872cac20f52c9c1399dc6625c", 
-//         "y": "0x599926b9b88c30ba42fc122db1fba37c35d97d70c32858e9fdd3950cfcba9729"
-//       }
-
-//       const proxy = await upgrades.deployProxy(ChainSignatures, [publicKey, 0], { initializer: 'initialize' });
-//       ChainSignaturesV2ForTest = ChainSignaturesV2ForTest.connect(addr1);
-//       await expect(
-//         upgrades.upgradeProxy(
-//           await proxy.getAddress(),
-//           ChainSignaturesV2ForTest,
-//           {call: {fn: 'upgradeToV3', args: [pkNew, 0]}}
-//         )
-//       ).to.be.reverted;
-//     });
-  
-//     it("Should upgrade contract correctly", async function() {
-//       const ChainSignatures = await ethers.getContractFactory("ChainSignatures");
-
-//       let pkNew = {
-//         "x": "0x4a65bed3374ea3250d1721315c287af4501b9cb872cac20f52c9c1399dc6625c",
-//         "y": "0x599926b9b88c30ba42fc122db1fba37c35d97d70c32858e9fdd3950cfcba9729"
-//       }
-//       const proxy = await upgrades.deployProxy(ChainSignatures, [publicKey, 0], { initializer: 'initialize' });
-//       ChainSignaturesV2ForTest = ChainSignaturesV2ForTest.connect(owner);
-//       await upgrades.upgradeProxy(await proxy.getAddress(), ChainSignaturesV2ForTest, {call: {fn: 'upgradeToV3', args: [pkNew, 0]}});
-//       let getPk = await proxy.getPublicKey();
-//       expect(getPk.x).to.equal(pkNew.x);
-//       expect(getPk.y).to.equal(pkNew.y);
-//     });
-//   });
+      const path2 = "test/path2";
+      await chainSignatures.connect(addr1).sign({payload, path: path2, keyVersion: 0}, { value: requiredDeposit });
+      
+      const balanceEth = await ethers.provider.getBalance(chainSignatures.getAddress());
+      expect(balanceEth).to.equal(2);
+      await chainSignatures.connect(addr2).withdraw(1);
+      const balanceEthAfterWithdraw = await ethers.provider.getBalance(chainSignatures.getAddress());
+      expect(balanceEthAfterWithdraw).to.equal(1);
+    });
+  });
 });
