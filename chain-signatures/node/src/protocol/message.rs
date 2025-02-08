@@ -617,20 +617,14 @@ impl MessageReceiver for RunningState {
                 continue;
             }
 
-            // wait till we index the request on our node:
-            if !signature_manager.request_processable(*proposer, &sign_id) {
-                continue;
-            }
 
             let protocol = match signature_manager
                 .get_or_start_protocol(
                     sign_id,
                     *proposer,
                     *presignature_id,
-                    request,
-                    *entropy,
-                    &mut presignature_manager,
                     protocol_cfg,
+                    &mut presignature_manager,
                 )
                 .await
             {

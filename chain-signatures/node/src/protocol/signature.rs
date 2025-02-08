@@ -46,8 +46,8 @@ pub struct SignRequest {
 pub struct SignQueue {
     me: Participant,
     sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
-    requests: HashMap<Participant, VecDeque<SignRequest>>,
-    subsets: HashMap<SignRequestIdentifier, Vec<Participant>>,
+    my_requests: VecDeque<(SignRequest, Participant, Vec<Participant>)>,
+    other_requests: HashMap<SignRequestIdentifier, (SignRequest, Participant, Vec<Participant>)>,
 }
 
 impl SignQueue {
@@ -59,13 +59,13 @@ impl SignQueue {
         Self {
             me,
             sign_rx,
-            requests: HashMap::new(),
-            subsets: HashMap::new(),
+            my_requests: VecDeque::new(),
+            other_requests: HashMap::new(),
         }
     }
 
     pub fn len(&self) -> usize {
-        self.requests.values().map(|v| v.len()).sum()
+        self.my_requests.len() + self.other_requests.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -89,9 +89,13 @@ impl SignQueue {
             }
         } {
             let mut rng = StdRng::from_seed(request.entropy);
-            let subset = stable.keys().choose_multiple(&mut rng, threshold);
+            let subset = stable
+                .keys()
+                .into_iter()
+                .cloned()
+                .choose_multiple(&mut rng, threshold);
             let in_subset = subset.contains(&&self.me);
-            let proposer = **subset.choose(&mut rng).unwrap();
+            let proposer = *subset.choose(&mut rng).unwrap();
             let is_mine = proposer == self.me;
             let request_id = CryptoHash(request.request_id);
 
@@ -104,28 +108,27 @@ impl SignQueue {
                 "sign queue: organizing request"
             );
 
-            self.subsets.insert(
-                SignRequestIdentifier::new(
-                    request.request_id,
-                    request.epsilon,
-                    request.request.payload,
-                ),
-                subset.into_iter().cloned().collect(),
+            let sign_id = SignRequestIdentifier::new(
+                request.request_id,
+                request.epsilon,
+                request.request.payload,
             );
-            let proposer_requests = self.requests.entry(proposer).or_default();
-            proposer_requests.push_back(request);
-
-            if is_mine {
-                crate::metrics::NUM_SIGN_REQUESTS_MINE
-                    .with_label_values(&[my_account_id.as_str()])
-                    .inc();
-            }
 
             if in_subset {
                 tracing::info!(
                     ?request_id,
                     "saving sign request: node is in the signer subset"
                 );
+
+                if is_mine {
+                    crate::metrics::NUM_SIGN_REQUESTS_MINE
+                        .with_label_values(&[my_account_id.as_str()])
+                        .inc();
+                    self.my_requests.push_back((request, proposer, subset));
+                } else {
+                    self.other_requests
+                        .insert(sign_id, (request, proposer, subset));
+                }
             } else {
                 tracing::info!(
                     ?request_id,
@@ -135,30 +138,24 @@ impl SignQueue {
         }
     }
 
-    pub fn take_my_requests(&mut self) -> VecDeque<SignRequest> {
-        self.requests.remove(&self.me).unwrap_or_default()
+    pub fn take_my_requests(&mut self) -> VecDeque<(SignRequest, Participant, Vec<Participant>)> {
+        std::mem::take(&mut self.my_requests)
     }
 
-    pub fn insert_mine(&mut self, requests: VecDeque<SignRequest>) {
-        self.requests.insert(self.me, requests);
+    pub fn insert_mine(
+        &mut self,
+        requests: VecDeque<(SignRequest, Participant, Vec<Participant>)>,
+    ) {
+        self.my_requests = requests;
     }
 
-    pub fn contains_request(&self, proposer: Participant, id: &SignRequestIdentifier) -> bool {
-        self.requests.get(&proposer).map_or(false, |requests| {
-            requests.iter().any(|req| {
-                req.request_id == id.request_id
-                    && req.epsilon == id.epsilon
-                    && req.request.payload == id.payload
-            })
-        })
-    }
-
-    pub fn subset(&self, id: &SignRequestIdentifier) -> Option<&Vec<Participant>> {
-        self.subsets.get(id)
-    }
-
-    pub fn remove_subset(&mut self, id: &SignRequestIdentifier) {
-        self.subsets.remove(id);
+    pub fn take(
+        &mut self,
+        proposer: Participant,
+        id: &SignRequestIdentifier,
+    ) -> Option<(SignRequest, Participant, Vec<Participant>)> {
+        let (request, p, subset) = self.other_requests.remove(id)?;
+        (p == proposer).then(|| (request, p, subset))
     }
 }
 
@@ -230,6 +227,7 @@ impl SignatureGenerator {
 /// for starting up this failed signature once again.
 pub struct GenerationRequest {
     pub proposer: Participant,
+    pub participants: Vec<Participant>,
     pub request: ContractSignRequest,
     pub epsilon: Scalar,
     pub request_id: [u8; 32],
@@ -340,7 +338,6 @@ impl SignatureManager {
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::result_large_err)]
     fn generate_internal(
-        participants: &[Participant],
         me: Participant,
         public_key: PublicKey,
         presignature: Presignature,
@@ -349,6 +346,7 @@ impl SignatureManager {
     ) -> Result<SignatureGenerator, (Presignature, InitializationError)> {
         let GenerationRequest {
             proposer,
+            participants,
             request,
             epsilon,
             request_id,
@@ -394,23 +392,14 @@ impl SignatureManager {
         sign_id: SignRequestIdentifier,
         req: GenerationRequest,
         presignature: Presignature,
-        participants: &Participants,
         cfg: &ProtocolConfig,
     ) -> Result<(), (Presignature, InitializationError)> {
-        let participants = participants.keys_vec();
         tracing::info!(
             ?sign_id,
-            ?participants,
+            participants = ?req.participants,
             "restarting failed protocol to generate signature"
         );
-        let generator = Self::generate_internal(
-            &participants,
-            self.me,
-            self.public_key,
-            presignature,
-            req,
-            cfg,
-        )?;
+        let generator = Self::generate_internal(self.me, self.public_key, presignature, req, cfg)?;
         crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
             .with_label_values(&[self.my_account_id.as_str()])
             .inc();
@@ -443,12 +432,12 @@ impl SignatureManager {
             "starting protocol to generate a new signature",
         );
         let generator = Self::generate_internal(
-            &participants,
             self.me,
             self.public_key,
             presignature,
             GenerationRequest {
                 proposer: self.me,
+                participants,
                 request,
                 epsilon,
                 request_id,
@@ -476,10 +465,8 @@ impl SignatureManager {
         sign_id: &SignRequestIdentifier,
         proposer: Participant,
         presignature_id: PresignatureId,
-        request: &ContractSignRequest,
-        entropy: [u8; 32],
-        presignature_manager: &mut PresignatureManager,
         cfg: &ProtocolConfig,
+        presignature_manager: &mut PresignatureManager,
     ) -> Result<&mut SignatureProtocol, GenerationError> {
         if self.completed.contains_key(sign_id) {
             tracing::warn!(
@@ -490,65 +477,65 @@ impl SignatureManager {
             return Err(GenerationError::AlreadyGenerated);
         }
 
-        let Some(stable) = self.sign_queue.subset(sign_id) else {
-            tracing::warn!(?sign_id, "cannot find subset");
-            return Err(GenerationError::ParticipantsNotFound(sign_id.clone()));
+        let entry = match self.generators.entry(sign_id.clone()) {
+            Entry::Vacant(entry) => entry,
+            Entry::Occupied(entry) => return Ok(&mut entry.into_mut().protocol),
         };
 
-        match self.generators.entry(sign_id.clone()) {
-            Entry::Vacant(entry) => {
-                tracing::info!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
-                let presignature = match presignature_manager.take(presignature_id).await {
-                    Ok(presignature) => presignature,
-                    Err(err @ GenerationError::PresignatureIsGenerating(_)) => {
-                        tracing::warn!(me = ?self.me, presignature_id, "presignature is generating, can't join signature generation protocol");
-                        return Err(err);
-                    }
-                    Err(err @ GenerationError::PresignatureIsMissing(_)) => {
-                        tracing::warn!(me = ?self.me, presignature_id, "presignature is missing, can't join signature generation protocol");
-                        return Err(err);
-                    }
-                    Err(err @ GenerationError::PresignatureIsGarbageCollected(_)) => {
-                        tracing::warn!(me = ?self.me, presignature_id, "presignature is garbage collected, can't join signature generation protocol");
-                        return Err(err);
-                    }
-                    Err(err) => return Err(err),
-                };
-                tracing::info!(me = ?self.me, presignature_id, "found presignature: ready to start signature generation");
-                let generator = match Self::generate_internal(
-                    stable,
-                    self.me,
-                    self.public_key,
-                    presignature,
-                    GenerationRequest {
-                        proposer,
-                        request: request.clone(),
-                        epsilon: sign_id.epsilon,
-                        entropy,
-                        request_id: sign_id.request_id,
-                        sign_request_timestamp: Instant::now(),
-                    },
-                    cfg,
-                ) {
-                    Ok(generator) => generator,
-                    Err((presignature, err @ InitializationError::BadParameters(_))) => {
-                        tracing::warn!(
-                            ?sign_id,
-                            presignature.id,
-                            ?err,
-                            "failed to start signature generation"
-                        );
-                        return Err(GenerationError::CaitSithInitializationError(err));
-                    }
-                };
-                let generator = entry.insert(generator);
-                crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
-                    .with_label_values(&[self.my_account_id.as_str()])
-                    .inc();
-                Ok(&mut generator.protocol)
+        let Some((request, proposer, subset)) = self.sign_queue.take(proposer, sign_id) else {
+            tracing::warn!(?sign_id, ?proposer, "cannot find request");
+            return Err(GenerationError::WaitingForIndexer(sign_id.clone()));
+        };
+
+        tracing::info!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
+        let presignature = match presignature_manager.take(presignature_id).await {
+            Ok(presignature) => presignature,
+            Err(err @ GenerationError::PresignatureIsGenerating(_)) => {
+                tracing::warn!(me = ?self.me, presignature_id, "presignature is generating, can't join signature generation protocol");
+                return Err(err);
             }
-            Entry::Occupied(entry) => Ok(&mut entry.into_mut().protocol),
-        }
+            Err(err @ GenerationError::PresignatureIsMissing(_)) => {
+                tracing::warn!(me = ?self.me, presignature_id, "presignature is missing, can't join signature generation protocol");
+                return Err(err);
+            }
+            Err(err @ GenerationError::PresignatureIsGarbageCollected(_)) => {
+                tracing::warn!(me = ?self.me, presignature_id, "presignature is garbage collected, can't join signature generation protocol");
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
+        tracing::info!(me = ?self.me, presignature_id, "found presignature: ready to start signature generation");
+        let generator = match Self::generate_internal(
+            self.me,
+            self.public_key,
+            presignature,
+            GenerationRequest {
+                proposer,
+                participants: subset,
+                request: request.request,
+                epsilon: request.epsilon,
+                entropy: request.entropy,
+                request_id: sign_id.request_id,
+                sign_request_timestamp: Instant::now(),
+            },
+            cfg,
+        ) {
+            Ok(generator) => generator,
+            Err((presignature, err @ InitializationError::BadParameters(_))) => {
+                tracing::warn!(
+                    ?sign_id,
+                    presignature.id,
+                    ?err,
+                    "failed to start signature generation"
+                );
+                return Err(GenerationError::CaitSithInitializationError(err));
+            }
+        };
+        let generator = entry.insert(generator);
+        crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
+            .with_label_values(&[self.my_account_id.as_str()])
+            .inc();
+        Ok(&mut generator.protocol)
     }
 
     /// Pokes all of the ongoing generation protocols to completion
@@ -572,6 +559,7 @@ impl SignatureManager {
                                     sign_request_id.clone(),
                                     GenerationRequest {
                                         proposer: generator.proposer,
+                                        participants: generator.participants.clone(),
                                         request: generator.request.clone(),
                                         epsilon: generator.epsilon,
                                         request_id: generator.request_id,
@@ -665,7 +653,6 @@ impl SignatureManager {
 
                         self.completed
                             .insert(sign_request_id.clone(), Instant::now());
-                        self.sign_queue.remove_subset(&sign_request_id);
                         let request = SignatureRequest {
                             epsilon: SerializableScalar {
                                 scalar: generator.epsilon,
@@ -733,11 +720,8 @@ impl SignatureManager {
             // when the request made it into the NEAR network.
             // issue: https://github.com/near/mpc-recovery/issues/596
             if let Some((sign_id, failed_req)) = self.failed.pop_front() {
-                let Some(subset) = self.sign_queue.subset(&sign_id) else {
-                    tracing::warn!(?sign_id, "cannot find subset for failed request");
-                    continue;
-                };
-                let participants = stable.intersection(&[&presignature.participants, subset]);
+                let participants =
+                    stable.intersection(&[&presignature.participants, &failed_req.participants]);
                 if participants.len() < self.threshold {
                     tracing::warn!(
                         participants = ?participants.keys_vec(),
@@ -749,14 +733,8 @@ impl SignatureManager {
                     continue;
                 }
 
-                if let Err((presignature, InitializationError::BadParameters(err))) = self
-                    .retry_failed_generation(
-                        sign_id.clone(),
-                        failed_req,
-                        presignature,
-                        &participants,
-                        cfg,
-                    )
+                if let Err((presignature, InitializationError::BadParameters(err))) =
+                    self.retry_failed_generation(sign_id.clone(), failed_req, presignature, cfg)
                 {
                     tracing::warn!(
                         ?sign_id,
@@ -778,7 +756,7 @@ impl SignatureManager {
                 }
             }
 
-            let Some(my_request) = my_requests.pop_front() else {
+            let Some((my_request, proposer, subset)) = my_requests.pop_front() else {
                 tracing::warn!("unexpected state, no more requests to handle");
                 continue;
             };
@@ -788,12 +766,7 @@ impl SignatureManager {
                 my_request.epsilon,
                 my_request.request.payload,
             );
-
-            let Some(subset) = self.sign_queue.subset(&sign_id) else {
-                tracing::warn!(?sign_id, "cannot find subset for failed request");
-                continue;
-            };
-            let participants = stable.intersection(&[&presignature.participants, subset]);
+            let participants = stable.intersection(&[&presignature.participants, &subset]);
             if participants.len() < self.threshold {
                 tracing::warn!(
                     participants = ?participants.keys_vec(),
@@ -825,10 +798,6 @@ impl SignatureManager {
         if !my_requests.is_empty() {
             self.sign_queue.insert_mine(my_requests);
         }
-    }
-
-    pub fn request_processable(&self, proposer: Participant, id: &SignRequestIdentifier) -> bool {
-        self.generators.contains_key(id) || self.sign_queue.contains_request(proposer, id)
     }
 
     /// Garbage collect all the completed signatures.
