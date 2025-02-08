@@ -89,12 +89,8 @@ impl SignQueue {
             }
         } {
             let mut rng = StdRng::from_seed(request.entropy);
-            let subset = stable
-                .keys()
-                .into_iter()
-                .cloned()
-                .choose_multiple(&mut rng, threshold);
-            let in_subset = subset.contains(&&self.me);
+            let subset = stable.keys().cloned().choose_multiple(&mut rng, threshold);
+            let in_subset = subset.contains(&self.me);
             let proposer = *subset.choose(&mut rng).unwrap();
             let is_mine = proposer == self.me;
             let request_id = CryptoHash(request.request_id);
@@ -151,11 +147,9 @@ impl SignQueue {
 
     pub fn take(
         &mut self,
-        proposer: Participant,
         id: &SignRequestIdentifier,
     ) -> Option<(SignRequest, Participant, Vec<Participant>)> {
-        let (request, p, subset) = self.other_requests.remove(id)?;
-        (p == proposer).then(|| (request, p, subset))
+        self.other_requests.remove(id)
     }
 }
 
@@ -335,7 +329,6 @@ impl SignatureManager {
         self.me
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::result_large_err)]
     fn generate_internal(
         me: Participant,
@@ -459,7 +452,6 @@ impl SignatureManager {
     /// 3) Has never been seen by the manager in which case start a new protocol and returns `Some(protocol)`, or
     /// 4) Depends on triples (`triple0`/`triple1`) that are unknown to the node
     // TODO: What if the presignature completed generation and is already spent?
-    #[allow(clippy::too_many_arguments)]
     pub async fn get_or_start_protocol(
         &mut self,
         sign_id: &SignRequestIdentifier,
@@ -482,10 +474,12 @@ impl SignatureManager {
             Entry::Occupied(entry) => return Ok(&mut entry.into_mut().protocol),
         };
 
-        let Some((request, proposer, subset)) = self.sign_queue.take(proposer, sign_id) else {
-            tracing::warn!(?sign_id, ?proposer, "cannot find request");
+        let Some((request, our_proposer, subset)) = self.sign_queue.take(sign_id) else {
             return Err(GenerationError::WaitingForIndexer(sign_id.clone()));
         };
+        if proposer != our_proposer {
+            return Err(GenerationError::InvalidProposer(proposer, our_proposer));
+        }
 
         tracing::info!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
         let presignature = match presignature_manager.take(presignature_id).await {
@@ -756,16 +750,11 @@ impl SignatureManager {
                 }
             }
 
-            let Some((my_request, proposer, subset)) = my_requests.pop_front() else {
+            let Some((my_request, _proposer, subset)) = my_requests.pop_front() else {
                 tracing::warn!("unexpected state, no more requests to handle");
                 continue;
             };
 
-            let sign_id = SignRequestIdentifier::new(
-                my_request.request_id,
-                my_request.epsilon,
-                my_request.request.payload,
-            );
             let participants = stable.intersection(&[&presignature.participants, &subset]);
             if participants.len() < self.threshold {
                 tracing::warn!(

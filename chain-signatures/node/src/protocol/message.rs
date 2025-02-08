@@ -602,8 +602,6 @@ impl MessageReceiver for RunningState {
             let SignatureMessage {
                 proposer,
                 presignature_id,
-                request,
-                entropy,
                 ..
             } = queue.front().unwrap();
 
@@ -616,7 +614,6 @@ impl MessageReceiver for RunningState {
                 queue.clear();
                 continue;
             }
-
 
             let protocol = match signature_manager
                 .get_or_start_protocol(
@@ -631,6 +628,17 @@ impl MessageReceiver for RunningState {
                 Ok(protocol) => protocol,
                 Err(GenerationError::PresignatureIsGenerating(_)) => {
                     // We will revisit this this signature request later when the presignature has been generated.
+                    continue;
+                }
+                Err(err @ GenerationError::WaitingForIndexer(_)) => {
+                    // We will revisit this this signature request later when we have the request indexed.
+                    tracing::warn!(?sign_id, ?proposer, ?err, "waiting for indexer");
+                    continue;
+                }
+                Err(err @ GenerationError::InvalidProposer(_, _)) => {
+                    // We will revisit this this signature request later when we have the request indexed.
+                    tracing::warn!(?sign_id, ?err, "signature generation cannot be started");
+                    queue.clear();
                     continue;
                 }
                 Err(
