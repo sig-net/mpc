@@ -1,8 +1,8 @@
 const { ethers } = require("hardhat");
 
-async function getContractAddress() {
+async function main() {
     // Get the deployer's signer
-    const [deployer] = await ethers.getSigners();
+    [deployer, addr1, addr2] = await ethers.getSigners();
 
     // Get the nonce
     const nonce = await deployer.getNonce();
@@ -13,14 +13,27 @@ async function getContractAddress() {
         nonce: nonce
     });
 
-    console.log("Deployer address:", deployer.address);
+    const admin_addr = deployer.address;
+    const receiver_addr = addr1.address;
+    console.log("Admin address:", admin_addr);
+    console.log("Receiver address:", receiver_addr);
     console.log("Current nonce:", nonce);
     console.log("Future contract address:", futureAddress);
+
+    // Save to params.json
+    const fs = require('fs');
+    const path = require('path');
+        
+    const params = {
+        ChainSignaturesModule: {
+            admin: admin_addr,
+            receiver: receiver_addr
+        }
+    };
+
+    const paramsPath = path.join(__dirname, '../ignition/params.json');
+    fs.writeFileSync(paramsPath, JSON.stringify(params, null, 4));
+    console.log('Saved admin address and receiver address to', paramsPath);
 }
 
-getContractAddress()
-    .then(() => process.exit(0))
-    .catch((error) => {
-        console.error(error);
-        process.exit(1);
-    });
+main().catch(console.error);

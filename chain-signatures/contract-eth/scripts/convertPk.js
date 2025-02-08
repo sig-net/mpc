@@ -1,5 +1,6 @@
 const base58 = require('bs58');
 const secp256k1 = require('secp256k1');
+const { ethers } = require("hardhat");
 
 function convertPublicKey(base58PublicKey) {
     // Remove the "secp256k1:" prefix
@@ -30,12 +31,23 @@ console.log(coordinates);
 const fs = require('fs');
 const path = require('path');
 
-const params = {
-    ChainSignaturesModule: {
-        publicKey: coordinates
-    }
-};
-
 const paramsPath = path.join(__dirname, '../ignition/params.json');
-fs.writeFileSync(paramsPath, JSON.stringify(params, null, 4));
-console.log('Saved coordinates to', paramsPath);
+fs.readFile(paramsPath, 'utf8', (err, data) => {
+    if (err) {
+        console.error('Error reading file:', err);
+        return;
+    }
+
+    try {
+        // Parse JSON string to object
+        let jsonData = JSON.parse(data);
+
+        jsonData.ChainSignaturesModule.publicKey = coordinates;
+
+        // Write updated JSON back to file
+        fs.writeFileSync(paramsPath, JSON.stringify(jsonData, null, 4));
+        console.log('Saved public key to', paramsPath);
+    } catch (parseErr) {
+        console.error('Error parsing JSON:', parseErr);
+    }
+});
