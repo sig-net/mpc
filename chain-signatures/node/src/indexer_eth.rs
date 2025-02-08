@@ -1,4 +1,5 @@
 use crate::indexer::ContractSignRequest;
+use crate::protocol::signature::SignRequestIdentifier;
 use crate::protocol::Chain::Ethereum;
 use crate::protocol::SignRequest;
 use crypto_shared::kdf::derive_epsilon_eth;
@@ -137,12 +138,11 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignR
         .unwrap_or([0u8; 32]);
 
     Ok(SignRequest {
-        request_id: event.request_id,
+        id: SignRequestIdentifier::new(event.request_id, epsilon, payload),
         request,
-        epsilon,
         entropy,
         // TODO: use indexer timestamp instead.
-        time_added: Instant::now(),
+        indexed_timestamp: Instant::now(),
     })
 }
 

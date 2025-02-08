@@ -1,3 +1,4 @@
+use crate::protocol::signature::SignRequestIdentifier;
 use crate::protocol::Chain::NEAR;
 use crate::protocol::{Chain, SignRequest};
 use crate::storage::app_data_storage::AppDataStorage;
@@ -250,12 +251,11 @@ async fn handle_block(
                     chain: NEAR,
                 };
                 pending_requests.push(SignRequest {
-                    request_id: receipt_id.0,
+                    id: SignRequestIdentifier::new(receipt_id.0, epsilon, payload),
                     request,
-                    epsilon,
                     entropy,
                     // TODO: use indexer timestamp instead.
-                    time_added: Instant::now(),
+                    indexed_timestamp: Instant::now(),
                 });
             }
         }
@@ -273,7 +273,7 @@ async fn handle_block(
     // This way we can revisit the same block if we failed while not having added the requests partially.
     for request in pending_requests {
         tracing::info!(
-            request_id = ?near_primitives::hash::CryptoHash(request.request_id),
+            sign_id = ?request.id,
             payload = hex::encode(request.request.payload.to_bytes()),
             entropy = hex::encode(request.entropy),
             "new sign request"
