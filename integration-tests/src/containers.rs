@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::cluster::spawner::ClusterSpawner;
+use crate::local::NodeEnvConfig;
+use crate::{utils, NodeConfig};
 
-use super::{local::NodeEnvConfig, utils, NodeConfig};
 use anyhow::{anyhow, Context};
 use async_process::Child;
 use bollard::container::LogsOptions;
@@ -14,7 +15,7 @@ use bollard::Docker;
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use elliptic_curve::rand_core::OsRng;
-use futures::{lock::Mutex, StreamExt};
+use futures::StreamExt as _;
 use k256::Secp256k1;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
@@ -22,7 +23,6 @@ use mpc_node::config::OverrideConfig;
 use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
-use once_cell::sync::Lazy;
 use serde_json::json;
 use testcontainers::core::ExecCommand;
 use testcontainers::ContainerAsync;
@@ -35,8 +35,6 @@ use tokio::io::AsyncWriteExt;
 use tracing;
 
 pub type Container = ContainerAsync<GenericImage>;
-
-static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
 
 pub struct Node {
     pub container: Container,
@@ -529,7 +527,6 @@ impl DockerClient {
     }
 
     pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
-        let _lock = &NETWORK_MUTEX.lock().await;
         let list = self.docker.list_networks::<&str>(None).await?;
         if list.iter().any(|n| n.name == Some(network.to_string())) {
             return Ok(());
