@@ -14,7 +14,6 @@ aws-sdk-s3 = "1.29"
 axum = { version = "0.6.19" }
 axum-extra = "0.7"
 ciborium = "0.2.2"
-clap = { version = "4.2", features = ["derive", "env"] }
 chrono = "0.4.24"
 google-datastore1 = "=5.0.4"
 google-secretmanager1 = "5"
@@ -23,13 +22,9 @@ highway = "1.1.0"
 hyper = { version = "0.14", features = ["full"] }
 hyper-rustls = { version = "=0.24", features = ["http2"] }
 local-ip-address = "0.5.4"
-reqwest = { version = "0.11.16", features = ["blocking", "json"] }
 semver = "1.0.23"
 serde_bytes = "0.11.15"
-tokio = { version = "1.28", features = ["full"] }
 tokio-retry = "0.3"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-stackdriver = "0.10.0"
 web3 = "0.19.0"
 url = { version = "2.4.0", features = ["serde"] }
@@ -38,13 +33,18 @@ url = { version = "2.4.0", features = ["serde"] }
 anyhow.workspace = true
 borsh.workspace = true
 cait-sith.workspace = true
+clap.workspace = true
 hex.workspace = true
 k256.workspace = true
 rand.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 near-account-id.workspace = true
 near-crypto = "0.26.0"

@@ -16,6 +16,7 @@ version = "1.0.0"
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 borsh = "1.5.3"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
+clap = { version = "4.5.4", features = ["derive", "env"] }
 hex = "0.4.3"
 k256 = { version = "0.13.1", features = [
     "sha256",
@@ -25,10 +26,14 @@ k256 = { version = "0.13.1", features = [
     "expose-field",
 ] }
 rand = "0.8.5"
+reqwest = { version = "0.11.16", features = ["blocking", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha3 = "0.10.8"
 thiserror = "1"
+tokio = { version = "1.28", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
 near-account-id = "1.0.0"
 near-sdk = { version = "5.6.0", features = ["legacy", "unit-testing", "unstable"] }
@@ -36,6 +41,7 @@ near-sdk = { version = "5.6.0", features = ["legacy", "unit-testing", "unstable"
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
 mpc-keys = { path = "./chain-signatures/keys" }
+mpc-node = { path = "./chain-signatures/node" }
 
 [patch.crates-io]
 # TODO: trigger Cargo.lock update for x25519-dalek once they release.

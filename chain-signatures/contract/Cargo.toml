@@ -18,7 +18,7 @@ thiserror.workspace = true
 [dev-dependencies]
 anyhow.workspace = true
 rand.workspace = true
-tokio = { version = "1", features = ["full"] }
+tokio.workspace = true
 
 # crypto dependencies
 ecdsa = { version = "0.16.9", features = ["digest", "hazmat"] }
