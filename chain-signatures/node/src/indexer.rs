@@ -1,6 +1,6 @@
 use crate::protocol::signature::SignId;
 use crate::protocol::Chain::NEAR;
-use crate::protocol::{Chain, SignRequest};
+use crate::protocol::{Chain, IndexedSignRequest};
 use crate::storage::app_data_storage::AppDataStorage;
 use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
@@ -173,7 +173,7 @@ impl Indexer {
 struct Context {
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
-    sign_tx: mpsc::Sender<SignRequest>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
     indexer: Indexer,
 }
 
@@ -250,7 +250,7 @@ async fn handle_block(
                     key_version: arguments.request.key_version,
                     chain: NEAR,
                 };
-                pending_requests.push(SignRequest {
+                pending_requests.push(IndexedSignRequest {
                     id: SignId::new(receipt_id.0, epsilon, payload),
                     request,
                     entropy,
@@ -302,7 +302,7 @@ pub fn run(
     options: &Options,
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
-    sign_tx: mpsc::Sender<SignRequest>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     rpc_client: near_fetch::Client,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, Indexer)> {

@@ -1,7 +1,7 @@
 use crate::indexer::ContractSignRequest;
 use crate::protocol::signature::SignId;
 use crate::protocol::Chain::Ethereum;
-use crate::protocol::SignRequest;
+use crate::protocol::IndexedSignRequest;
 use crypto_shared::kdf::derive_epsilon_eth;
 use crypto_shared::ScalarExt;
 use hex::ToHex;
@@ -91,7 +91,7 @@ pub struct EthSignRequest {
     pub key_version: u32,
 }
 
-fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignRequest> {
+fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<IndexedSignRequest> {
     let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
     // Create sign request from event
@@ -137,7 +137,7 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignR
         .map(|h| *h.as_fixed_bytes())
         .unwrap_or([0u8; 32]);
 
-    Ok(SignRequest {
+    Ok(IndexedSignRequest {
         id: SignId::new(event.request_id, epsilon, payload),
         request,
         entropy,
@@ -187,7 +187,7 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
 
 pub async fn run(
     eth: Option<EthConfig>,
-    sign_tx: mpsc::Sender<SignRequest>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     let Some(eth) = eth else {

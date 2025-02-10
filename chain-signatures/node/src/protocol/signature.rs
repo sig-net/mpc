@@ -59,7 +59,7 @@ impl SignId {
     }
 }
 
-pub struct SignRequest {
+pub struct IndexedSignRequest {
     pub id: SignId,
     pub request: ContractSignRequest,
     pub entropy: [u8; 32],
@@ -68,17 +68,20 @@ pub struct SignRequest {
 
 pub struct SignQueue {
     me: Participant,
-    sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
-    my_requests: VecDeque<(SignRequest, Participant, Vec<Participant>)>,
-    other_requests: HashMap<SignId, (SignRequest, Participant, Vec<Participant>)>,
+    sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+    my_requests: VecDeque<(IndexedSignRequest, Participant, Vec<Participant>)>,
+    other_requests: HashMap<SignId, (IndexedSignRequest, Participant, Vec<Participant>)>,
 }
 
 impl SignQueue {
-    pub fn channel() -> (mpsc::Sender<SignRequest>, mpsc::Receiver<SignRequest>) {
+    pub fn channel() -> (
+        mpsc::Sender<IndexedSignRequest>,
+        mpsc::Receiver<IndexedSignRequest>,
+    ) {
         mpsc::channel(MAX_SIGN_REQUESTS)
     }
 
-    pub fn new(me: Participant, sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>) -> Self {
+    pub fn new(me: Participant, sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>) -> Self {
         Self {
             me,
             sign_rx,
@@ -150,19 +153,34 @@ impl SignQueue {
         }
     }
 
-    pub fn take_my_requests(&mut self) -> VecDeque<(SignRequest, Participant, Vec<Participant>)> {
+    pub fn take_my_requests(
+        &mut self,
+    ) -> VecDeque<(IndexedSignRequest, Participant, Vec<Participant>)> {
         std::mem::take(&mut self.my_requests)
     }
 
     pub fn insert_mine(
         &mut self,
-        requests: VecDeque<(SignRequest, Participant, Vec<Participant>)>,
+        requests: VecDeque<(IndexedSignRequest, Participant, Vec<Participant>)>,
     ) {
         self.my_requests = requests;
     }
 
-    pub fn take(&mut self, id: &SignId) -> Option<(SignRequest, Participant, Vec<Participant>)> {
+    pub fn take(
+        &mut self,
+        id: &SignId,
+    ) -> Option<(IndexedSignRequest, Participant, Vec<Participant>)> {
         self.other_requests.remove(id)
+    }
+
+    pub fn insert(
+        &mut self,
+        id: SignId,
+        request: IndexedSignRequest,
+        proposer: Participant,
+        subset: Vec<Participant>,
+    ) {
+        self.other_requests.insert(id, (request, proposer, subset));
     }
 }
 
@@ -172,7 +190,7 @@ pub struct SignatureGenerator {
     pub participants: Vec<Participant>,
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
-    pub request: SignRequest,
+    pub request: IndexedSignRequest,
     pub generator_timestamp: Instant,
     pub timeout: Duration,
     pub timeout_total: Duration,
@@ -184,7 +202,7 @@ impl SignatureGenerator {
         participants: Vec<Participant>,
         proposer: Participant,
         presignature_id: PresignatureId,
-        request: SignRequest,
+        request: IndexedSignRequest,
         cfg: &ProtocolConfig,
     ) -> Self {
         Self {
@@ -222,7 +240,7 @@ impl SignatureGenerator {
 pub struct GenerationRequest {
     pub proposer: Participant,
     pub participants: Vec<Participant>,
-    pub request: SignRequest,
+    pub request: IndexedSignRequest,
 }
 
 pub struct SignatureManager {
@@ -277,7 +295,7 @@ impl SignatureManager {
         threshold: usize,
         public_key: PublicKey,
         epoch: u64,
-        sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
+        sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     ) -> Self {
         Self {
             generators: HashMap::new(),
@@ -313,7 +331,7 @@ impl SignatureManager {
             participants,
             request,
         } = req;
-        let SignRequest {
+        let IndexedSignRequest {
             id:
                 SignId {
                     epsilon,
@@ -380,7 +398,7 @@ impl SignatureManager {
         &mut self,
         participants: &Participants,
         presignature: Presignature,
-        request: SignRequest,
+        request: IndexedSignRequest,
         cfg: &ProtocolConfig,
     ) -> Result<(), (Presignature, InitializationError)> {
         let participants = participants.keys_vec();
