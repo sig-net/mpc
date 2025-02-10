@@ -1,4 +1,4 @@
-use crate::protocol::signature::SignRequestIdentifier;
+use crate::protocol::signature::SignId;
 use crate::protocol::Chain::NEAR;
 use crate::protocol::{Chain, SignRequest};
 use crate::storage::app_data_storage::AppDataStorage;
@@ -251,7 +251,7 @@ async fn handle_block(
                     chain: NEAR,
                 };
                 pending_requests.push(SignRequest {
-                    id: SignRequestIdentifier::new(receipt_id.0, epsilon, payload),
+                    id: SignId::new(receipt_id.0, epsilon, payload),
                     request,
                     entropy,
                     // TODO: use indexer timestamp instead.

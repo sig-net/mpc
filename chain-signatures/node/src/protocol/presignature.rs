@@ -1,5 +1,5 @@
 use super::message::{MessageChannel, PresignatureMessage};
-use super::signature::SignRequestIdentifier;
+use super::signature::SignId;
 use super::state::RunningState;
 use super::triple::{Triple, TripleId, TripleManager};
 use crate::protocol::contract::primitives::Participants;
@@ -152,7 +152,7 @@ pub enum GenerationError {
     #[error("presignature bad parameters")]
     PresignatureBadParameters,
     #[error("waiting for missing sign request id={0:?}")]
-    WaitingForIndexer(SignRequestIdentifier),
+    WaitingForIndexer(SignId),
     #[error("invalid proposer expected={0:?}, actual={1:?}")]
     InvalidProposer(Participant, Participant),
 }

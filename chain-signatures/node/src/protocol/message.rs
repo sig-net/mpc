@@ -1,6 +1,6 @@
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::{GenerationError, PresignatureId};
-use super::signature::SignRequestIdentifier;
+use super::signature::SignId;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
 use crate::indexer::ContractSignRequest;
@@ -168,7 +168,7 @@ pub struct MessageInbox {
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
     presignature: HashMap<Epoch, HashMap<PresignatureId, VecDeque<PresignatureMessage>>>,
-    signature: HashMap<Epoch, HashMap<SignRequestIdentifier, VecDeque<SignatureMessage>>>,
+    signature: HashMap<Epoch, HashMap<SignId, VecDeque<SignatureMessage>>>,
 }
 
 impl MessageInbox {
@@ -198,7 +198,7 @@ impl MessageInbox {
                 .signature
                 .entry(message.epoch)
                 .or_default()
-                .entry(SignRequestIdentifier::new(
+                .entry(SignId::new(
                     message.request_id,
                     message.epsilon,
                     message.request.payload,

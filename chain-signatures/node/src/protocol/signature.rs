@@ -35,13 +35,13 @@ pub type ReceiptId = near_primitives::hash::CryptoHash;
 const MAX_SIGN_REQUESTS: usize = 1024;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct SignRequestIdentifier {
+pub struct SignId {
     pub request_id: [u8; 32],
     pub epsilon: Scalar,
     pub payload: Scalar,
 }
 
-impl std::hash::Hash for SignRequestIdentifier {
+impl std::hash::Hash for SignId {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.request_id.hash(state);
         self.epsilon.to_bytes().hash(state);
@@ -49,7 +49,7 @@ impl std::hash::Hash for SignRequestIdentifier {
     }
 }
 
-impl SignRequestIdentifier {
+impl SignId {
     pub fn new(request_id: [u8; 32], epsilon: Scalar, payload: Scalar) -> Self {
         Self {
             request_id,
@@ -60,7 +60,7 @@ impl SignRequestIdentifier {
 }
 
 pub struct SignRequest {
-    pub id: SignRequestIdentifier,
+    pub id: SignId,
     pub request: ContractSignRequest,
     pub entropy: [u8; 32],
     pub indexed_timestamp: Instant,
@@ -70,7 +70,7 @@ pub struct SignQueue {
     me: Participant,
     sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
     my_requests: VecDeque<(SignRequest, Participant, Vec<Participant>)>,
-    other_requests: HashMap<SignRequestIdentifier, (SignRequest, Participant, Vec<Participant>)>,
+    other_requests: HashMap<SignId, (SignRequest, Participant, Vec<Participant>)>,
 }
 
 impl SignQueue {
@@ -161,10 +161,7 @@ impl SignQueue {
         self.my_requests = requests;
     }
 
-    pub fn take(
-        &mut self,
-        id: &SignRequestIdentifier,
-    ) -> Option<(SignRequest, Participant, Vec<Participant>)> {
+    pub fn take(&mut self, id: &SignId) -> Option<(SignRequest, Participant, Vec<Participant>)> {
         self.other_requests.remove(id)
     }
 }
@@ -230,11 +227,11 @@ pub struct GenerationRequest {
 
 pub struct SignatureManager {
     /// Ongoing signature generation protocols.
-    generators: HashMap<SignRequestIdentifier, SignatureGenerator>,
+    generators: HashMap<SignId, SignatureGenerator>,
     /// Failed signatures awaiting to be retried.
-    failed: VecDeque<(SignRequestIdentifier, GenerationRequest)>,
+    failed: VecDeque<(SignId, GenerationRequest)>,
     /// Set of completed signatures
-    completed: HashMap<SignRequestIdentifier, Instant>,
+    completed: HashMap<SignId, Instant>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
 
@@ -318,7 +315,7 @@ impl SignatureManager {
         } = req;
         let SignRequest {
             id:
-                SignRequestIdentifier {
+                SignId {
                     epsilon,
                     payload,
                     request_id,
@@ -359,7 +356,7 @@ impl SignatureManager {
     #[allow(clippy::result_large_err)]
     fn retry_failed_generation(
         &mut self,
-        sign_id: SignRequestIdentifier,
+        sign_id: SignId,
         req: GenerationRequest,
         presignature: Presignature,
         cfg: &ProtocolConfig,
@@ -421,7 +418,7 @@ impl SignatureManager {
     // TODO: What if the presignature completed generation and is already spent?
     pub async fn get_or_start_protocol(
         &mut self,
-        sign_id: &SignRequestIdentifier,
+        sign_id: &SignId,
         proposer: Participant,
         presignature_id: PresignatureId,
         cfg: &ProtocolConfig,
@@ -770,7 +767,7 @@ impl SignatureManager {
         }
     }
 
-    pub fn refresh_gc(&mut self, id: &SignRequestIdentifier) -> bool {
+    pub fn refresh_gc(&mut self, id: &SignId) -> bool {
         let entry = self
             .completed
             .entry(id.clone())
