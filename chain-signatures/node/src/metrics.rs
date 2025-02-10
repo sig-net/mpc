@@ -199,14 +199,15 @@ pub(crate) static NODE_VERSION: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
-        "multichain_num_total_historical_triple_generators",
-        "number of all triple generators historically on the node",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
+pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS: LazyLock<CounterVec> =
+    LazyLock::new(|| {
+        try_create_counter_vec(
+            "multichain_num_total_historical_triple_generators",
+            "number of all triple generators historically on the node",
+            &["node_account_id"],
+        )
+        .unwrap()
+    });
 
 pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS: LazyLock<CounterVec> =
     LazyLock::new(|| {
@@ -355,14 +356,15 @@ pub(crate) static FAILED_SEND_ENCRYPTED_LATENCY: LazyLock<HistogramVec> = LazyLo
     .unwrap()
 });
 
-pub(crate) static NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
-        "multichain_num_total_historical_signature_generators",
-        "number of all signature generators historically on the node",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
+pub(crate) static NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS: LazyLock<CounterVec> =
+    LazyLock::new(|| {
+        try_create_counter_vec(
+            "multichain_num_total_historical_signature_generators",
+            "number of all signature generators historically on the node",
+            &["node_account_id"],
+        )
+        .unwrap()
+    });
 
 pub(crate) static TRIPLE_GENERATOR_FAILURES: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
