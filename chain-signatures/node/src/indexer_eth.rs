@@ -142,7 +142,7 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<Index
         request,
         entropy,
         // TODO: use indexer timestamp instead.
-        indexed_timestamp: Instant::now(),
+        timestamp: Instant::now(),
     })
 }
 

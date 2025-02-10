@@ -255,7 +255,7 @@ async fn handle_block(
                     request,
                     entropy,
                     // TODO: use indexer timestamp instead.
-                    indexed_timestamp: Instant::now(),
+                    timestamp: Instant::now(),
                 });
             }
         }

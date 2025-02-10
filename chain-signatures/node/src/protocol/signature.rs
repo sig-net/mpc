@@ -63,7 +63,7 @@ pub struct IndexedSignRequest {
     pub id: SignId,
     pub request: ContractSignRequest,
     pub entropy: [u8; 32],
-    pub indexed_timestamp: Instant,
+    pub timestamp: Instant,
 }
 
 pub struct SignRequest {
@@ -222,7 +222,7 @@ impl SignatureGenerator {
     }
 
     pub fn poke(&mut self) -> Result<Action<FullSignature<Secp256k1>>, ProtocolError> {
-        if self.request.indexed.indexed_timestamp.elapsed() > self.timeout_total {
+        if self.request.indexed.timestamp.elapsed() > self.timeout_total {
             let msg = "signature protocol timed out completely";
             tracing::warn!(msg);
             return Err(ProtocolError::Other(anyhow::anyhow!(msg).into()));
@@ -468,7 +468,7 @@ impl SignatureManager {
                         remove.push(sign_id.clone());
 
                         if generator.request.proposer == self.me {
-                            if generator.request.indexed.indexed_timestamp.elapsed()
+                            if generator.request.indexed.timestamp.elapsed()
                                 < generator.timeout_total
                             {
                                 failed.push(sign_id.clone());
@@ -571,7 +571,7 @@ impl SignatureManager {
                             let to_publish = ToPublish::new(
                                 sign_id.request_id,
                                 request,
-                                generator.request.indexed.indexed_timestamp,
+                                generator.request.indexed.timestamp,
                                 output,
                                 generator.request.indexed.request.chain,
                             );
