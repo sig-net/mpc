@@ -96,6 +96,14 @@ impl SignQueue {
         }
     }
 
+    pub fn len_mine(&self) -> usize {
+        self.my_requests.len()
+    }
+
+    pub fn is_empty_mine(&self) -> bool {
+        self.len_mine() == 0
+    }
+
     pub fn len(&self) -> usize {
         self.my_requests.len() + self.other_requests.len()
     }
@@ -164,20 +172,25 @@ impl SignQueue {
         }
     }
 
-    pub fn take_my_requests(&mut self) -> VecDeque<SignRequest> {
-        std::mem::take(&mut self.my_requests)
+    pub fn push_failed(&mut self, request: SignRequest) {
+        // NOTE: this prioritizes old requests first then tries to do new ones if there's enough presignatures.
+        // TODO: we need to decide how to prioritize certain requests over others such as with gas or time of
+        // when the request made it into the NEAR network.
+        // issue: https://github.com/near/mpc-recovery/issues/596
+        if request.proposer == self.me {
+            self.my_requests.push_front(request);
+        } else {
+            self.other_requests
+                .insert(request.indexed.id.clone(), request);
+        }
     }
 
-    pub fn insert_mine(&mut self, requests: VecDeque<SignRequest>) {
-        self.my_requests = requests;
+    pub fn take_mine(&mut self) -> Option<SignRequest> {
+        self.my_requests.pop_front()
     }
 
     pub fn take(&mut self, id: &SignId) -> Option<SignRequest> {
         self.other_requests.remove(id)
-    }
-
-    pub fn insert(&mut self, id: SignId, request: SignRequest) {
-        self.other_requests.insert(id, request);
     }
 }
 
@@ -229,8 +242,6 @@ impl SignatureGenerator {
 pub struct SignatureManager {
     /// Ongoing signature generation protocols.
     generators: HashMap<SignId, SignatureGenerator>,
-    /// Failed signatures awaiting to be retried.
-    failed: VecDeque<(SignId, SignRequest)>,
     /// Set of completed signatures
     completed: HashMap<SignId, Instant>,
     /// Sign queue that maintains all requests coming in from indexer.
@@ -282,7 +293,6 @@ impl SignatureManager {
     ) -> Self {
         Self {
             generators: HashMap::new(),
-            failed: VecDeque::new(),
             completed: HashMap::new(),
             sign_queue: SignQueue::new(me, sign_rx),
             me,
@@ -291,10 +301,6 @@ impl SignatureManager {
             public_key,
             epoch,
         }
-    }
-
-    pub fn failed_len(&self) -> usize {
-        self.failed.len()
     }
 
     pub fn me(&self) -> Participant {
@@ -310,9 +316,9 @@ impl SignatureManager {
         cfg: &ProtocolConfig,
     ) -> Result<SignatureGenerator, (Presignature, InitializationError)> {
         let SignRequest {
-            proposer,
             participants,
             indexed,
+            ..
         } = &request;
         let IndexedSignRequest {
             id:
@@ -350,28 +356,6 @@ impl SignatureManager {
             request,
             cfg,
         ))
-    }
-
-    #[allow(clippy::result_large_err)]
-    fn retry_failed_generation(
-        &mut self,
-        sign_id: SignId,
-        request: SignRequest,
-        presignature: Presignature,
-        cfg: &ProtocolConfig,
-    ) -> Result<(), (Presignature, InitializationError)> {
-        tracing::info!(
-            ?sign_id,
-            participants = ?request.participants,
-            "restarting failed protocol to generate signature"
-        );
-        let generator =
-            Self::generate_internal(self.me, self.public_key, presignature, request, cfg)?;
-        crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
-            .with_label_values(&[self.my_account_id.as_str()])
-            .inc();
-        self.generators.insert(sign_id, generator);
-        Ok(())
     }
 
     /// Starts a new presignature generation protocol.
@@ -482,17 +466,16 @@ impl SignatureManager {
                     Ok(action) => action,
                     Err(err) => {
                         remove.push(sign_id.clone());
+
                         if generator.request.proposer == self.me {
                             if generator.request.indexed.indexed_timestamp.elapsed()
                                 < generator.timeout_total
                             {
+                                failed.push(sign_id.clone());
                                 tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
                                 crate::metrics::SIGNATURE_GENERATOR_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])
                                     .inc();
-                                // only retry the signature generation if it was initially proposed by us. We do not
-                                // want any nodes to be proposing the same signature multiple times.
-                                failed.push(sign_id.clone());
                             } else {
                                 self.completed.insert(sign_id.clone(), Instant::now());
                                 crate::metrics::SIGNATURE_GENERATOR_FAILURES
@@ -603,7 +586,7 @@ impl SignatureManager {
 
         for id in failed {
             if let Some(generator) = self.generators.remove(&id) {
-                self.failed.push_back((id, generator.request));
+                self.sign_queue.push_failed(generator.request);
             }
         }
 
@@ -634,60 +617,18 @@ impl SignatureManager {
         crate::metrics::SIGN_QUEUE_SIZE
             .with_label_values(&[self.my_account_id.as_str()])
             .set(self.sign_queue.len() as i64);
-        let mut my_requests = self.sign_queue.take_my_requests();
         crate::metrics::SIGN_QUEUE_MINE_SIZE
             .with_label_values(&[self.my_account_id.as_str()])
-            .set(my_requests.len() as i64);
+            .set(self.sign_queue.len_mine() as i64);
 
-        while let Some(mut presignature) = {
-            if self.failed.is_empty() && my_requests.is_empty() {
+        while let Some(presignature) = {
+            if self.sign_queue.is_empty_mine() {
                 None
             } else {
                 presignature_manager.take_mine().await
             }
         } {
-            // NOTE: this prioritizes old requests first then tries to do new ones if there's enough presignatures.
-            // TODO: we need to decide how to prioritize certain requests over others such as with gas or time of
-            // when the request made it into the NEAR network.
-            // issue: https://github.com/near/mpc-recovery/issues/596
-            if let Some((sign_id, failed_req)) = self.failed.pop_front() {
-                let participants =
-                    stable.intersection(&[&presignature.participants, &failed_req.participants]);
-                if participants.len() < self.threshold {
-                    tracing::warn!(
-                        participants = ?participants.keys_vec(),
-                        "intersection of stable participants and presignature participants is less than threshold, trashing presignature"
-                    );
-                    // TODO: do not insert back presignature when we have a clear model for data consistency
-                    // between nodes and utilizing only presignatures that meet threshold requirements.
-                    presignature_manager.insert(presignature, true, true).await;
-                    continue;
-                }
-
-                if let Err((presignature, InitializationError::BadParameters(err))) =
-                    self.retry_failed_generation(sign_id.clone(), failed_req, presignature, cfg)
-                {
-                    tracing::warn!(
-                        ?sign_id,
-                        presignature.id,
-                        ?err,
-                        "failed to retry signature generation: trashing presignature"
-                    );
-                    continue;
-                }
-
-                if my_requests.is_empty() {
-                    continue;
-                }
-
-                if let Some(another_presignature) = presignature_manager.take_mine().await {
-                    presignature = another_presignature;
-                } else {
-                    break;
-                }
-            }
-
-            let Some(my_request) = my_requests.pop_front() else {
+            let Some(my_request) = self.sign_queue.take_mine() else {
                 tracing::warn!("unexpected state, no more requests to handle");
                 continue;
             };
@@ -717,12 +658,6 @@ impl SignatureManager {
                 );
                 continue;
             }
-        }
-
-        // We do not have enough presignature stockpile and the taken requests need to be fulfilled,
-        // so insert it back into the sign queue to be fulfilled in the next iteration.
-        if !my_requests.is_empty() {
-            self.sign_queue.insert_mine(my_requests);
         }
     }
 
