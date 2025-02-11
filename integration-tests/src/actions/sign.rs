@@ -6,7 +6,8 @@ use k256::{Scalar, Secp256k1};
 use mpc_contract::errors;
 use mpc_contract::primitives::{SignRequest, SignatureRequest};
 use mpc_crypto::{
-    derive_epsilon, ScalarExt as _, SerializableAffinePoint, SerializableScalar, SignatureResponse,
+    derive_epsilon_near, ScalarExt as _, SerializableAffinePoint, SerializableScalar,
+    SignatureResponse,
 };
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
@@ -238,7 +239,7 @@ impl SignAction<'_> {
             public_key: rogue.secret_key().public_key().clone().into(),
             secret_key: rogue.secret_key().to_string().parse()?,
         };
-        let epsilon = derive_epsilon(predecessor, &self.path);
+        let epsilon = derive_epsilon_near(predecessor, &self.path);
 
         let request = SignatureRequest {
             payload_hash: Scalar::from_bytes(payload_hash).unwrap().into(),

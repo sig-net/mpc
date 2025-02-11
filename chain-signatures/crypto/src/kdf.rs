@@ -22,7 +22,10 @@ pub fn derive_epsilon_near(predecessor_id: &AccountId, path: &str) -> Scalar {
     // indicate the end of the account id in derivation path.
     // Do not reuse this hash function on anything that isn't an account
     // ID or it'll be vunerable to Hash Melleability/extention attacks.
-    let derivation_path = format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_NEAR},{},{}", predecessor_id, path);
+    let derivation_path = format!(
+        "{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_NEAR},{},{}",
+        predecessor_id, path
+    );
     let mut hasher = Sha3_256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
@@ -31,7 +34,10 @@ pub fn derive_epsilon_near(predecessor_id: &AccountId, path: &str) -> Scalar {
 
 const CHAIN_ID_ETHEREUM: &str = "0x1";
 pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
-    let derivation_path = format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{},{}", requester, path);
+    let derivation_path = format!(
+        "{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{},{}",
+        requester, path
+    );
     let mut hasher = Keccak256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();

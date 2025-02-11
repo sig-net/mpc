@@ -15,7 +15,7 @@ use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
 use mpc_contract::errors::SignError;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt;
-use mpc_crypto::{derive_epsilon, derive_key};
+use mpc_crypto::{derive_epsilon_near, derive_key};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_fetch::ops::Function;
@@ -110,7 +110,7 @@ pub async fn validate_signature(
 ) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
-    let epsilon = derive_epsilon(account_id, "test");
+    let epsilon = derive_epsilon_near(account_id, "test");
     let user_pk = derive_key(mpc_pk, epsilon);
     signature
         .verify(
