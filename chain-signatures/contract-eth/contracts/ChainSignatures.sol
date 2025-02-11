@@ -32,7 +32,6 @@ contract ChainSignatures is AccessControl {
     uint256 signatureDeposit;
 
     event SignatureRequested(
-        bytes32 indexed requestId,
         address sender,
         bytes32 payload,
         string path,
@@ -60,35 +59,10 @@ contract ChainSignatures is AccessControl {
 
     function sign(
         SignRequest memory _request
-    ) external payable returns (bytes32) {
+    ) external payable {
         require(msg.value >= signatureDeposit, "Insufficient deposit");
 
-        bytes32 requestId = keccak256(
-            abi.encodePacked(
-                msg.sender,
-                ":",
-                _request.payload,
-                ":",
-                _request.path,
-                ":",
-                _request.keyVersion,
-                ":",
-                _request.algo,
-                ":",
-                _request.dest,
-                ":",
-                _request.params,
-                ":",
-                msg.value,
-                ":",
-                block.chainid,
-                ":",
-                block.timestamp
-            )
-        );
-
         emit SignatureRequested(
-            requestId,
             msg.sender,
             _request.payload,
             _request.path,
@@ -100,8 +74,6 @@ contract ChainSignatures is AccessControl {
             block.chainid,
             block.timestamp
         );
-
-        return requestId;
     }
 
     function respond(Response[] calldata _responses) external {
