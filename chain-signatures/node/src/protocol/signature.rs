@@ -303,14 +303,13 @@ impl SignatureManager {
         self.me
     }
 
-    #[allow(clippy::result_large_err)]
     fn generate_internal(
         me: Participant,
         public_key: PublicKey,
         presignature: Presignature,
         request: SignRequest,
         cfg: &ProtocolConfig,
-    ) -> Result<SignatureGenerator, (Presignature, InitializationError)> {
+    ) -> Result<SignatureGenerator, InitializationError> {
         let SignRequest {
             participants,
             indexed,
@@ -335,33 +334,28 @@ impl SignatureManager {
             k: k * delta.invert().unwrap(),
             sigma: (sigma + *epsilon * k) * delta.invert().unwrap(),
         };
-        let presignature_id = presignature.id;
-        let protocol = Box::new(
-            cait_sith::sign(
-                participants,
-                me,
-                derive_key(public_key, *epsilon),
-                output,
-                *payload,
-            )
-            .map_err(|err| (presignature, err))?,
-        );
+        let protocol = Box::new(cait_sith::sign(
+            participants,
+            me,
+            derive_key(public_key, *epsilon),
+            output,
+            *payload,
+        )?);
         Ok(SignatureGenerator::new(
             protocol,
-            presignature_id,
+            presignature.id,
             request,
             cfg,
         ))
     }
 
     /// Starts a new presignature generation protocol.
-    #[allow(clippy::result_large_err)]
     pub fn generate(
         &mut self,
         presignature: Presignature,
         request: SignRequest,
         cfg: &ProtocolConfig,
-    ) -> Result<(), (Presignature, InitializationError)> {
+    ) -> Result<(), InitializationError> {
         let sign_id = request.indexed.id.clone();
         tracing::info!(
             ?sign_id,
@@ -435,10 +429,10 @@ impl SignatureManager {
         let generator =
             match Self::generate_internal(self.me, self.public_key, presignature, request, cfg) {
                 Ok(generator) => generator,
-                Err((presignature, err @ InitializationError::BadParameters(_))) => {
+                Err(err @ InitializationError::BadParameters(_)) => {
                     tracing::warn!(
                         ?sign_id,
-                        presignature.id,
+                        presignature_id,
                         ?err,
                         "failed to start signature generation"
                     );
@@ -622,12 +616,13 @@ impl SignatureManager {
             }
 
             let sign_id = my_request.indexed.id.clone();
-            if let Err((presignature, InitializationError::BadParameters(err))) =
+            let presignature_id = presignature.id;
+            if let Err(InitializationError::BadParameters(err)) =
                 self.generate(presignature, my_request, cfg)
             {
                 tracing::warn!(
                     ?sign_id,
-                    presignature.id,
+                    presignature_id,
                     ?err,
                     "failed to start signature generation: trashing presignature"
                 );
