@@ -11,11 +11,9 @@ use crate::util::AffinePointExt;
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{FullSignature, PresignOutput};
 use chrono::Utc;
-use crypto_shared::SerializableScalar;
 use crypto_shared::{derive_key, PublicKey};
 use k256::{Scalar, Secp256k1};
 use mpc_contract::config::ProtocolConfig;
-use mpc_contract::primitives::SignatureRequest;
 use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
@@ -28,8 +26,6 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, RwLock};
 
 use near_account_id::AccountId;
-
-pub type ReceiptId = near_primitives::hash::CryptoHash;
 
 /// This is the maximum amount of sign requests that we can accept in the network.
 const MAX_SIGN_REQUESTS: usize = 1024;
@@ -70,12 +66,14 @@ pub struct IndexedSignArgs {
     pub chain: Chain,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct IndexedSignRequest {
     pub id: SignId,
     pub args: IndexedSignArgs,
     pub timestamp: Instant,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct SignRequest {
     pub indexed: IndexedSignRequest,
     pub proposer: Participant,
@@ -262,34 +260,6 @@ pub struct SignatureManager {
     threshold: usize,
     public_key: PublicKey,
     epoch: u64,
-}
-
-pub struct ToPublish {
-    pub request_id: [u8; 32],
-    pub request: SignatureRequest,
-    pub time_added: Instant,
-    pub signature: FullSignature<Secp256k1>,
-    pub retry_count: u8,
-    pub chain: Chain,
-}
-
-impl ToPublish {
-    pub fn new(
-        request_id: [u8; 32],
-        request: SignatureRequest,
-        time_added: Instant,
-        signature: FullSignature<Secp256k1>,
-        chain: Chain,
-    ) -> ToPublish {
-        ToPublish {
-            request_id,
-            request,
-            time_added,
-            signature,
-            retry_count: 0,
-            chain,
-        }
-    }
 }
 
 impl SignatureManager {
@@ -564,25 +534,10 @@ impl SignatureManager {
                             .with_label_values(&[self.my_account_id.as_str()])
                             .observe(generator.timestamp.elapsed().as_secs_f64());
 
-                        self.completed.insert(sign_id.clone(), Instant::now());
-
                         if generator.request.proposer == self.me {
-                            let request = SignatureRequest {
-                                epsilon: SerializableScalar {
-                                    scalar: generator.request.indexed.id.epsilon,
-                                },
-                                payload_hash: generator.request.indexed.id.payload.into(),
-                            };
-
-                            let to_publish = ToPublish::new(
-                                sign_id.request_id,
-                                request,
-                                generator.request.indexed.timestamp,
-                                output,
-                                generator.request.indexed.args.chain,
-                            );
-                            tokio::spawn(rpc.clone().publish(self.public_key, to_publish));
+                            rpc.publish(self.public_key, generator.request.clone(), output);
                         }
+                        self.completed.insert(sign_id.clone(), Instant::now());
                         // Do not retain the protocol
                         remove.push(sign_id.clone());
                     }
