@@ -1,10 +1,10 @@
 use crate::indexer::ContractSignRequest;
 use crate::protocol::Chain::Ethereum;
 use crate::protocol::SignRequest;
-use crypto_shared::kdf::derive_epsilon_eth;
-use crypto_shared::ScalarExt;
 use hex::ToHex;
 use k256::Scalar;
+use mpc_crypto::kdf::derive_epsilon_eth;
+use mpc_crypto::ScalarExt;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::fmt;

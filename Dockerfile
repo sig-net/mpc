@@ -1,11 +1,11 @@
-FROM node:20 as eth-builder
+FROM node:20 AS eth-builder
 WORKDIR /usr/src/app/contract-eth
 COPY chain-signatures/contract-eth/package.json chain-signatures/contract-eth/package-lock.json ./
 RUN npm install
 COPY chain-signatures/contract-eth ./
 RUN npx hardhat compile
 
-FROM rust:latest as node-builder
+FROM rust:latest AS node-builder
 RUN rustc --version --verbose
 WORKDIR /usr/src/app
 RUN apt-get update \
@@ -13,22 +13,14 @@ RUN apt-get update \
     apt-get install --no-install-recommends --assume-yes \
     protobuf-compiler libprotobuf-dev
 
-# Create a dummy file to cache dependencies
-RUN echo "fn main() {}" > dummy.rs
-COPY chain-signatures/node/Cargo.toml Cargo.toml
-RUN sed -i 's#src/main.rs#dummy.rs#' Cargo.toml
-RUN sed -i 's#mpc-keys = { path = "../keys" }##' Cargo.toml
-RUN sed -i 's#mpc-contract = { path = "../contract" }##' Cargo.toml
-RUN sed -i 's#crypto-shared = { path = "../crypto-shared" }##' Cargo.toml
-RUN sed -i 's#version.workspace = true##' Cargo.toml
-RUN cargo build --release
-# Now build the actual node
-COPY chain-signatures/. .
+COPY chain-signatures/ ./chain-signatures
+COPY integration-tests/ ./integration-tests
+COPY Cargo.toml .
+COPY Cargo.lock .
 COPY --from=eth-builder /usr/src/app/contract-eth/artifacts contract-eth/artifacts
-RUN sed -i 's#target-dir = "../target"#target-dir = "target"#' .cargo/config.toml
 RUN cargo build --release --package mpc-node
 
-FROM debian:stable-slim as runtime
+FROM debian:stable-slim AS runtime
 RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates curl redis-server
 
 RUN update-ca-certificates

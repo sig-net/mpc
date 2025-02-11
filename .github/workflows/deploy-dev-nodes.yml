@@ -13,12 +13,12 @@ env:
   TAG: ${{ github.sha }}
 
 jobs:
-  build-mpc-recovery:
+  build:
     if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-        name: "Checkout mpc-recovery"
+        name: "Checkout mpc"
 
       - name: Login to GCP Artifact Registry
         run: echo "$GOOGLE_CREDENTIALS" | docker login -u _json_key --password-stdin https://europe-west1-docker.pkg.dev
@@ -37,7 +37,7 @@ jobs:
   deploy:
     if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    needs: build-mpc-recovery
+    needs: build
     steps:
       - id: 'auth'
         uses: 'google-github-actions/auth@v2'

@@ -4,8 +4,8 @@ use crate::protocol::signature::ToPublish;
 use crate::protocol::{Chain, ProtocolState};
 use crate::util::AffinePointExt as _;
 
-use crypto_shared::SignatureResponse;
 use mpc_contract::primitives::SignatureRequest;
+use mpc_crypto::SignatureResponse;
 use mpc_keys::hpke;
 
 use k256::elliptic_curve::point::AffineCoordinates;
@@ -32,7 +32,7 @@ const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
 
 struct PublishAction {
-    public_key: crypto_shared::PublicKey,
+    public_key: mpc_crypto::PublicKey,
     to_publish: ToPublish,
     timestamp: Instant,
 }
@@ -47,7 +47,7 @@ pub struct RpcChannel {
 }
 
 impl RpcChannel {
-    pub async fn publish(self, public_key: crypto_shared::PublicKey, to_publish: ToPublish) {
+    pub async fn publish(self, public_key: mpc_crypto::PublicKey, to_publish: ToPublish) {
         if let Err(err) = self
             .tx
             .send(RpcAction::Publish(PublishAction {
@@ -350,7 +350,7 @@ async fn execute_publish(client: ChainClient, mut action: PublishAction) {
         started_at = ?action.timestamp.elapsed(),
         "trying to publish signature",
     );
-    let expected_public_key = crypto_shared::derive_key(action.public_key, request.epsilon.scalar);
+    let expected_public_key = mpc_crypto::derive_key(action.public_key, request.epsilon.scalar);
     // We do this here, rather than on the client side, so we can use the ecrecover system function on NEAR to validate our signature
     let Ok(signature) = crate::kdf::into_eth_sig(
         &expected_public_key,
