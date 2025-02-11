@@ -13,8 +13,7 @@ use mpc_contract::primitives::{
 use mpc_contract::update::UpdateId;
 use mpc_crypto::kdf::{check_ec_signature, derive_secret_key};
 use mpc_crypto::{
-    derive_epsilon, derive_key, ScalarExt as _, SerializableAffinePoint, SerializableScalar,
-    SignatureResponse,
+    derive_epsilon, derive_key, ScalarExt as _, SerializableAffinePoint, SignatureResponse,
 };
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccountId, NearToken};
@@ -192,7 +191,7 @@ pub async fn create_response(
         big_r: SerializableAffinePoint {
             affine_point: big_r,
         },
-        s: SerializableScalar { scalar: s },
+        s,
         recovery_id,
     };
 

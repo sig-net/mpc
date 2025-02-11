@@ -7,7 +7,7 @@ use crate::util::AffinePointExt as _;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_contract::primitives::SignatureRequest;
-use mpc_crypto::{SerializableScalar, SignatureResponse};
+use mpc_crypto::SignatureResponse;
 use mpc_keys::hpke;
 
 use k256::elliptic_curve::point::AffineCoordinates;
@@ -418,10 +418,8 @@ async fn try_publish_near(
     signature: &SignatureResponse,
 ) -> Result<(), near_fetch::Error> {
     let request = SignatureRequest {
-        epsilon: SerializableScalar {
-            scalar: action.request.indexed.id.epsilon,
-        },
-        payload_hash: action.request.indexed.id.payload.into(),
+        epsilon: action.request.indexed.id.epsilon,
+        payload: action.request.indexed.id.payload,
     };
 
     let outcome = near
@@ -499,7 +497,7 @@ async fn try_publish_eth(
                         .unwrap(),
                 )),
             ]),
-            Token::Uint(U256::from_big_endian(&signature.s.scalar.to_bytes())),
+            Token::Uint(U256::from_big_endian(&signature.s.to_bytes())),
             signature.recovery_id.into_token(),
         ]),
     ];

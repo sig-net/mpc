@@ -265,14 +265,14 @@ impl VersionedMpcContract {
             // generate the expected public key
             let pk = self.public_key()?;
             let expected_public_key =
-                derive_key(near_public_key_to_affine_point(pk), request.epsilon.scalar);
+                derive_key(near_public_key_to_affine_point(pk), request.epsilon);
 
             // Check the signature is correct
             if check_ec_signature(
                 &expected_public_key,
                 &response.big_r.affine_point,
-                &response.s.scalar,
-                request.payload_hash.scalar,
+                &response.s,
+                request.payload,
                 response.recovery_id,
             )
             .is_err()

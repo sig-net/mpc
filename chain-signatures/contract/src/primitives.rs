@@ -1,5 +1,6 @@
 use k256::Scalar;
-use mpc_crypto::{derive_epsilon, SerializableScalar};
+use mpc_crypto::derive_epsilon;
+use mpc_crypto::types::borsh_scalar;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
@@ -25,10 +26,17 @@ pub struct YieldIndex {
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
-#[borsh(crate = "near_sdk::borsh")]
 pub struct SignatureRequest {
-    pub epsilon: SerializableScalar,
-    pub payload_hash: SerializableScalar,
+    #[borsh(
+        serialize_with = "borsh_scalar::serialize",
+        deserialize_with = "borsh_scalar::deserialize_reader"
+    )]
+    pub epsilon: Scalar,
+    #[borsh(
+        serialize_with = "borsh_scalar::serialize",
+        deserialize_with = "borsh_scalar::deserialize_reader"
+    )]
+    pub payload: Scalar,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
@@ -41,16 +49,9 @@ pub struct ContractSignatureRequest {
 }
 
 impl SignatureRequest {
-    pub fn new(payload_hash: Scalar, predecessor_id: &AccountId, path: &str) -> Self {
+    pub fn new(payload: Scalar, predecessor_id: &AccountId, path: &str) -> Self {
         let epsilon = derive_epsilon(predecessor_id, path);
-        let epsilon = SerializableScalar { scalar: epsilon };
-        let payload_hash = SerializableScalar {
-            scalar: payload_hash,
-        };
-        SignatureRequest {
-            epsilon,
-            payload_hash,
-        }
+        SignatureRequest { epsilon, payload }
     }
 }
 
