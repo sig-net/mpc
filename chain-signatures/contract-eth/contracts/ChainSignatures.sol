@@ -40,8 +40,7 @@ contract ChainSignatures is AccessControl {
         string dest,
         string params,
         uint256 deposit,
-        uint256 chainId,
-        uint256 timestamp
+        uint256 chainId
     );
 
     event SignatureResponded(
@@ -71,8 +70,7 @@ contract ChainSignatures is AccessControl {
             _request.dest,
             _request.params,
             msg.value,
-            block.chainid,
-            block.timestamp
+            block.chainid
         );
     }
 
