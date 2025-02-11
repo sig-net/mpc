@@ -209,7 +209,7 @@ pub struct SignatureGenerator {
     pub protocol: SignatureProtocol,
     pub presignature_id: PresignatureId,
     pub request: SignRequest,
-    pub generator_timestamp: Instant,
+    pub timestamp: Instant,
     pub timeout: Duration,
     pub timeout_total: Duration,
 }
@@ -225,7 +225,7 @@ impl SignatureGenerator {
             protocol,
             presignature_id,
             request,
-            generator_timestamp: Instant::now(),
+            timestamp: Instant::now(),
             timeout: Duration::from_millis(cfg.signature.generation_timeout),
             timeout_total: Duration::from_millis(cfg.signature.generation_timeout_total),
         }
@@ -238,7 +238,7 @@ impl SignatureGenerator {
             return Err(ProtocolError::Other(anyhow::anyhow!(msg).into()));
         }
 
-        if self.generator_timestamp.elapsed() > self.timeout {
+        if self.timestamp.elapsed() > self.timeout {
             tracing::warn!(self.presignature_id, "signature protocol timed out");
             return Err(ProtocolError::Other(
                 anyhow::anyhow!("signature protocol timeout").into(),
@@ -557,12 +557,12 @@ impl SignatureManager {
                             presignature_id = generator.presignature_id,
                             big_r = ?output.big_r.to_base58(),
                             s = ?output.s,
-                            elapsed = ?generator.generator_timestamp.elapsed(),
+                            elapsed = ?generator.timestamp.elapsed(),
                             "completed signature generation"
                         );
                         crate::metrics::SIGN_GENERATION_LATENCY
                             .with_label_values(&[self.my_account_id.as_str()])
-                            .observe(generator.generator_timestamp.elapsed().as_secs_f64());
+                            .observe(generator.timestamp.elapsed().as_secs_f64());
 
                         self.completed.insert(sign_id.clone(), Instant::now());
 
