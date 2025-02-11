@@ -216,6 +216,13 @@ impl SignQueue {
     pub fn take(&mut self, id: &SignId) -> Option<SignRequest> {
         self.other_requests.remove(id)
     }
+
+    pub fn expire(&mut self, cfg: &ProtocolConfig) {
+        self.other_requests.retain(|_, request| {
+            request.indexed.timestamp.elapsed()
+                < Duration::from_millis(cfg.signature.generation_timeout_total)
+        });
+    }
 }
 
 /// An ongoing signature generator.
@@ -580,6 +587,7 @@ impl SignatureManager {
             return;
         }
 
+        self.sign_queue.expire(cfg);
         self.sign_queue
             .organize(self.threshold, stable, &self.my_account_id)
             .await;
