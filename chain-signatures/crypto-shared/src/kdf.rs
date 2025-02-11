@@ -37,6 +37,13 @@ pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
     Scalar::from_non_biased(hash)
 }
 
+pub fn derive_epsilon_admin_addr_eth(path: &str) -> Scalar {
+    let mut hasher = Keccak256::new();
+    hasher.update(path);
+    let hash: [u8; 32] = hasher.finalize().into();
+    Scalar::from_non_biased(hash)
+}
+
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
     (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key).to_affine()
 }
