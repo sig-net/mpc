@@ -74,7 +74,6 @@ pub struct SignArgs {
     pub entropy: [u8; 32],
     pub path: String,
     pub key_version: u32,
-    pub chain: Chain,
 }
 
 /// All relevant info pertaining to an Indexed sign request from an indexer.
@@ -82,6 +81,7 @@ pub struct SignArgs {
 pub struct IndexedSignRequest {
     pub id: SignId,
     pub args: SignArgs,
+    pub chain: Chain,
     pub timestamp: Instant,
 }
 

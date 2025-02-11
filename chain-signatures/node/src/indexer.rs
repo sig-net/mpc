@@ -234,15 +234,14 @@ async fn handle_block(
                     entropy = hex::encode(entropy),
                     "indexed new `sign` function call"
                 );
-                let request = SignArgs {
-                    entropy,
-                    path: arguments.request.path,
-                    key_version: arguments.request.key_version,
-                    chain: Chain::NEAR,
-                };
                 pending_requests.push(IndexedSignRequest {
                     id: SignId::new(receipt_id.0, epsilon, payload),
-                    args: request,
+                    args: SignArgs {
+                        entropy,
+                        path: arguments.request.path,
+                        key_version: arguments.request.key_version,
+                    },
+                    chain: Chain::NEAR,
                     // TODO: use indexer timestamp instead.
                     timestamp: Instant::now(),
                 });

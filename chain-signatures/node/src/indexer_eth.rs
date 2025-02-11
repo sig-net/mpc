@@ -1,5 +1,5 @@
 use crate::protocol::signature::{SignArgs, SignId};
-use crate::protocol::Chain::Ethereum;
+use crate::protocol::Chain;
 use crate::protocol::IndexedSignRequest;
 use crypto_shared::kdf::derive_epsilon_eth;
 use crypto_shared::ScalarExt;
@@ -136,8 +136,8 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<Index
             entropy,
             path: event.path,
             key_version: 0,
-            chain: Ethereum,
         },
+        chain: Chain::Ethereum,
         // TODO: use indexer timestamp instead.
         timestamp: Instant::now(),
     })

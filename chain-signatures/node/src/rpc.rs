@@ -119,7 +119,7 @@ impl RpcExecutor {
             };
             let task = match action {
                 RpcAction::Publish(action) => {
-                    execute_publish(self.client(&action.request.indexed.args.chain), action)
+                    execute_publish(self.client(&action.request.indexed.chain), action)
                 }
             };
             tokio::spawn(task);
@@ -351,7 +351,7 @@ async fn update_config(near: NearClient, config: Arc<RwLock<Config>>) {
 async fn execute_publish(client: ChainClient, mut action: PublishAction) {
     tracing::info!(
         sign_id = ?action.request.indexed.id,
-        chain = ?action.request.indexed.args.chain,
+        chain = ?action.request.indexed.chain,
         started_at = ?action.timestamp.elapsed(),
         "trying to publish signature",
     );
