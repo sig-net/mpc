@@ -30,21 +30,31 @@ use near_account_id::AccountId;
 /// This is the maximum amount of sign requests that we can accept in the network.
 const MAX_SIGN_REQUESTS: usize = 1024;
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SignId {
     #[serde(with = "serde_bytes")]
     pub request_id: [u8; 32],
     #[serde(with = "cbor_scalar")]
-    pub epsilon: Scalar,
-    #[serde(with = "cbor_scalar")]
     pub payload: Scalar,
+    #[serde(with = "cbor_scalar")]
+    pub epsilon: Scalar,
 }
 
 impl std::hash::Hash for SignId {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.request_id.hash(state);
-        self.epsilon.to_bytes().hash(state);
         self.payload.to_bytes().hash(state);
+        self.epsilon.to_bytes().hash(state);
+    }
+}
+
+impl std::fmt::Debug for SignId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SignId")
+            .field(&near_primitives::hash::CryptoHash(self.request_id))
+            .field(&hex::encode(self.payload.to_bytes()))
+            .field(&hex::encode(self.epsilon.to_bytes()))
+            .finish()
     }
 }
 
@@ -60,6 +70,7 @@ impl SignId {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexedSignArgs {
+    #[serde(with = "serde_bytes")]
     pub entropy: [u8; 32],
     pub path: String,
     pub key_version: u32,
@@ -73,6 +84,9 @@ pub struct IndexedSignRequest {
     pub timestamp: Instant,
 }
 
+/// The sign request for the node to process. This contains relevant info for the node
+/// to generate a signature such as what has been indexed and what the node needs to maintain
+/// metadata-wise to generate the signature.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignRequest {
     pub indexed: IndexedSignRequest,
@@ -322,7 +336,7 @@ impl SignatureManager {
         let presignature_id = presignature.id;
         let protocol = Box::new(
             cait_sith::sign(
-                &participants,
+                participants,
                 me,
                 derive_key(public_key, *epsilon),
                 output,
