@@ -3674,9 +3674,11 @@ dependencies = [
  "k256",
  "near-account-id",
  "near-sdk",
+ "secp256k1 0.28.2",
  "serde",
  "serde_json",
  "sha3",
+ "web3",
 ]
 
 [[package]]

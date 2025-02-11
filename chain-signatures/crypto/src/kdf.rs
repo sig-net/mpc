@@ -112,3 +112,48 @@ pub fn recover(
     ))
     .context("Failed to parse returned key")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::near_public_key_to_affine_point;
+    use std::str::FromStr;
+
+    // This logic is used to determine MPC PK (address) that is set as admin in Ethereum contract
+    #[test]
+    fn derive_ethereum_admin_key() {
+        // Define epsilon
+        let requester = "%admin#".to_string();
+        let path = "signing_contract_control".to_string();
+        let derivation_path = format!(
+            "{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{},{}",
+            requester, path
+        );
+
+        let mut hasher = Keccak256::new();
+        hasher.update(derivation_path);
+        let hash: [u8; 32] = hasher.finalize().into();
+        let epsilon = Scalar::from_non_biased(hash);
+
+        // Define root PK
+        let root_pk = "secp256k1:54hU5wcCmVUPFWLDALXMh1fFToZsVXrx9BbTbHzSfQq1Kd1rJZi52iPa4QQxo6s5TgjWqgpY8HamYuUDzG6fAaUq";
+        let root_pk = near_sdk::PublicKey::from_str(root_pk).unwrap();
+        let root_pk = near_public_key_to_affine_point(root_pk);
+
+        // Derive admin PK
+        let admin_ap = derive_key(root_pk, epsilon);
+        let admin_pk = k256::PublicKey::from_affine(admin_ap).unwrap();
+        let admin_pk = admin_pk.to_encoded_point(false);
+
+        // Calculate admin Ethereum address
+        let hash: [u8; 32] = web3::signing::keccak256(&admin_pk.as_bytes()[1..]);
+        let address = web3::types::Address::from_slice(&hash[12..]);
+
+        println!("Admin Ethereum address: {}", address);
+
+        let expected_address =
+            web3::types::Address::from_str("0x64b4bc39ff1393ebb8605975bd68db67aa0a31c4").unwrap();
+
+        assert_eq!(address, expected_address);
+    }
+}
