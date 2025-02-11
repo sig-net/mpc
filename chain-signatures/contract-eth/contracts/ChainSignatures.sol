@@ -71,8 +71,7 @@ contract ChainSignatures is AccessControl {
     }
 
     function withdraw(uint256 _amount, address _receiver) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        uint256 totalBalanceInContract = address(this).balance;
-        require(_amount <= totalBalanceInContract, "withdraw amount must be smaller than total balance in contract");
+        require(_amount <= address(this).balance, "withdraw amount must be smaller than total balance in contract");
         address payable to = payable(_receiver);
         to.transfer(_amount);
     }
