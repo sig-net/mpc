@@ -2,7 +2,6 @@
 pragma solidity ^0.8.17;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/utils/Strings.sol";
 
 contract ChainSignatures is AccessControl {
     struct SignRequest {
@@ -19,15 +18,15 @@ contract ChainSignatures is AccessControl {
         uint256 y;
     }
 
-    struct SignatureResponse {
+    struct Signature {
         AffinePoint bigR;
         uint256 s;
         uint8 recoveryId;
     }
 
-    struct ResponseWithId {
+    struct Response {
         bytes32 requestId;
-        SignatureResponse response;
+        Signature response;
     }
 
     uint256 signatureDeposit;
@@ -49,7 +48,7 @@ contract ChainSignatures is AccessControl {
     event SignatureResponded(
         bytes32 indexed requestId,
         address responder,
-        SignatureResponse response
+        Signature response
     );
 
     event Withdraw(address indexed owner, uint amount);
@@ -105,7 +104,7 @@ contract ChainSignatures is AccessControl {
         return requestId;
     }
 
-    function respond(ResponseWithId[] calldata _responses) external {
+    function respond(Response[] calldata _responses) external {
         for (uint256 i = 0; i < _responses.length; i++) {
             emit SignatureResponded(
                 _responses[i].requestId,
