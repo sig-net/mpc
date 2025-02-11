@@ -54,9 +54,9 @@ contract ChainSignatures is AccessControl {
 
     event Withdraw(address indexed owner, uint amount);
 
-    constructor(address _admin) {
+    constructor(address _admin, uint256 _signatureDeposit) {
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
-        signatureDeposit = 50000 gwei;
+        signatureDeposit = _signatureDeposit;
     }
 
     function sign(
