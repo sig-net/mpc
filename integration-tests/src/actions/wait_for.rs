@@ -61,8 +61,8 @@ pub async fn signature_responded(
             .json()
             .map_err(|err| WaitForError::SerdeJson(format!("{err:?}")))?;
         Ok(Outcome::Signature(cait_sith::FullSignature::<Secp256k1> {
-            big_r: result.big_r.affine_point,
-            s: result.s.scalar,
+            big_r: result.big_r,
+            s: result.s,
         }))
     };
 
@@ -190,8 +190,8 @@ pub async fn batch_signature_responded(
                             let result: SignatureResponse = serde_json::from_slice(&value)
                                 .map_err(|err| WaitForError::SerdeJson(format!("{err:?}")))?;
                             let signature = cait_sith::FullSignature::<Secp256k1> {
-                                big_r: result.big_r.affine_point,
-                                s: result.s.scalar,
+                                big_r: result.big_r,
+                                s: result.s,
                             };
                             signatures.push(signature);
                         }

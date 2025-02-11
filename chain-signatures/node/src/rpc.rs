@@ -441,7 +441,7 @@ async fn try_publish_near(
         tracing::error!(
             sign_id = ?action.request.indexed.id,
             ?request,
-            big_r = signature.big_r.affine_point.to_base58(),
+            big_r = signature.big_r.to_base58(),
             s = ?signature.s,
             ?err,
             "smart contract threw error",
@@ -453,7 +453,7 @@ async fn try_publish_near(
     tracing::info!(
         sign_id = ?action.request.indexed.id,
         ?request,
-        big_r = signature.big_r.affine_point.to_base58(),
+        big_r = signature.big_r.to_base58(),
         s = ?signature.s,
         elapsed = ?timestamp.elapsed(),
         "published signature sucessfully",
@@ -487,14 +487,9 @@ async fn try_publish_eth(
         Token::FixedBytes(action.request.indexed.id.request_id.to_vec()),
         Token::Tuple(vec![
             Token::Tuple(vec![
-                Token::Uint(U256::from_big_endian(&signature.big_r.affine_point.x())),
+                Token::Uint(U256::from_big_endian(&signature.big_r.x())),
                 Token::Uint(U256::from_big_endian(
-                    signature
-                        .big_r
-                        .affine_point
-                        .to_encoded_point(false)
-                        .y()
-                        .unwrap(),
+                    signature.big_r.to_encoded_point(false).y().unwrap(),
                 )),
             ]),
             Token::Uint(U256::from_big_endian(&signature.s.to_bytes())),

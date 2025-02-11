@@ -270,7 +270,7 @@ impl VersionedMpcContract {
             // Check the signature is correct
             if check_ec_signature(
                 &expected_public_key,
-                &response.big_r.affine_point,
+                &response.big_r,
                 &response.s,
                 request.payload,
                 response.recovery_id,

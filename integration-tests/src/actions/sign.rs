@@ -5,9 +5,7 @@ use cait_sith::FullSignature;
 use k256::{Scalar, Secp256k1};
 use mpc_contract::errors;
 use mpc_contract::primitives::{SignRequest, SignatureRequest};
-use mpc_crypto::{
-    derive_epsilon, ScalarExt as _, SerializableAffinePoint, SerializableScalar, SignatureResponse,
-};
+use mpc_crypto::{derive_epsilon, ScalarExt as _, SignatureResponse};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
@@ -241,8 +239,8 @@ impl SignAction<'_> {
         let epsilon = derive_epsilon(predecessor, &self.path);
 
         let request = SignatureRequest {
-            payload_hash: Scalar::from_bytes(payload_hash).unwrap().into(),
-            epsilon: SerializableScalar { scalar: epsilon },
+            payload: Scalar::from_bytes(payload_hash).unwrap(),
+            epsilon,
         };
 
         let big_r = serde_json::from_value(
@@ -253,10 +251,8 @@ impl SignAction<'_> {
         )?; // Fake S
 
         let response = SignatureResponse {
-            big_r: SerializableAffinePoint {
-                affine_point: big_r,
-            },
-            s: SerializableScalar { scalar: s },
+            big_r,
+            s,
             recovery_id: 0,
         };
 

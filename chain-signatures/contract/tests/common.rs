@@ -12,9 +12,7 @@ use mpc_contract::primitives::{
 };
 use mpc_contract::update::UpdateId;
 use mpc_crypto::kdf::{check_ec_signature, derive_secret_key};
-use mpc_crypto::{
-    derive_epsilon, derive_key, ScalarExt as _, SerializableAffinePoint, SignatureResponse,
-};
+use mpc_crypto::{derive_epsilon, derive_key, ScalarExt as _, SignatureResponse};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccountId, NearToken};
 use near_workspaces::{Account, Contract, Worker};
@@ -187,10 +185,8 @@ pub async fn create_response(
         panic!("unable to use recovery id of 0 or 1");
     };
 
-    let respond_resp = SignatureResponse {
-        big_r: SerializableAffinePoint {
-            affine_point: big_r,
-        },
+    let respond_resp: SignatureResponse = SignatureResponse {
+        big_r,
         s,
         recovery_id,
     };

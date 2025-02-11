@@ -14,7 +14,7 @@ pub struct SignRequest {
 }
 
 pub struct SignatureResponse {
-    pub big_r: SerializableAffinePoint,
+    pub big_r: AffinePoint,
     pub s: Scalar,
     pub recovery_id: u8,
 }

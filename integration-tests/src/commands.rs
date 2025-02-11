@@ -6,7 +6,7 @@ use mpc_contract::{
     primitives::{CandidateInfo, Candidates, Participants, SignRequest, SignatureRequest},
     update::ProposeUpdateArgs,
 };
-use mpc_crypto::{ScalarExt, SerializableAffinePoint, SerializableScalar, SignatureResponse};
+use mpc_crypto::{ScalarExt, SignatureResponse};
 use mpc_keys::hpke;
 use near_account_id::AccountId;
 use near_primitives::borsh;
@@ -56,10 +56,8 @@ pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow
     )?; // Fake S
 
     let response = SignatureResponse {
-        big_r: SerializableAffinePoint {
-            affine_point: big_r,
-        },
-        s: SerializableScalar { scalar: s },
+        big_r,
+        s,
         recovery_id: 0,
     };
 
