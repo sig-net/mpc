@@ -34,6 +34,7 @@ contract ChainSignatures is AccessControl {
 
     event SignatureRequested(bytes32 indexed requestId, address requester, bytes32 payload, uint32 keyVersion, uint256 deposit, string path, string algo, string dest, string params);
     event SignatureResponded(bytes32 indexed requestId, SignatureResponse response);
+    event Withdraw(address indexed owner, uint amount);
 
     constructor(address _admin) {
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
@@ -75,5 +76,6 @@ contract ChainSignatures is AccessControl {
         require(_amount <= totalBalanceInContract, "withdraw amount must be smaller than total balance in contract");
         address payable to = payable(_receiver);
         to.transfer(_amount);
+        emit Withdraw(_receiver, _amount);
     }
 }
