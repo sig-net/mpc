@@ -16,6 +16,6 @@ const params = {
     }
 };
 
-const paramsPath = path.join(__dirname, './params.json');
+const paramsPath = path.join(__dirname, '../ignition/params.json');
 fs.writeFileSync(paramsPath, JSON.stringify(params, null, 4));
 console.log('Saved admin address to', paramsPath);

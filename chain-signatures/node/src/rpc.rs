@@ -509,7 +509,7 @@ async fn try_publish_eth(
     let txn = web3::types::TransactionParameters {
         to: Some(eth.contract.address()),
         data: web3::types::Bytes(data),
-        gas: web3::types::U256::from(100_000),
+        gas: web3::types::U256::from(40_000), // actually only using 28,000
         ..Default::default()
     };
 
