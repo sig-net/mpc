@@ -225,8 +225,9 @@ async fn handle_block(
                     continue;
                 };
                 let epsilon = derive_epsilon(&action.predecessor_id(), &arguments.request.path);
+                let sign_id = SignId::new(receipt_id.0, epsilon, payload);
                 tracing::info!(
-                    receipt_id = %receipt_id,
+                    ?sign_id,
                     caller_id = receipt.predecessor_id().to_string(),
                     our_account = ctx.node_account_id.to_string(),
                     payload = hex::encode(arguments.request.payload),
@@ -235,7 +236,7 @@ async fn handle_block(
                     "indexed new `sign` function call"
                 );
                 pending_requests.push(IndexedSignRequest {
-                    id: SignId::new(receipt_id.0, epsilon, payload),
+                    id: sign_id,
                     args: SignArgs {
                         entropy,
                         path: arguments.request.path,
