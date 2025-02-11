@@ -44,26 +44,20 @@ npx hardhat --network localhost run scripts/findAddress.js
 
 3. Make sure you have docker daemon running. Open another terminal window, go to `integration-tests` and run the following command to start the MPC cluster:
 ```bash
-cargo run -- setup-env --eth-contract-address <future-contract-address>
+cargo run -- setup-env --eth-contract-address <eth-contract-address-without-0x-prefix>
 ```
 
-4. In MPC cluster log, search for log `voting for public key public_key=secp256k1:` and copy the public key after `secp256k1:`
-
-5. Open another terminal window, Then run the following command to config the mpc public key for deploying ethereum contract:
+4. Populate the ignition/params.json with admin address:
 ```bash
-node scripts/convertPk.js <public_key>
-```
-For example:
-```bash
-node scripts/convertPk.js kbPYfG2qMn3yYqwe5U4PDGzZSQsfRw2kxRkojw5f38nLZY5NEokyDg8HWSuQfafmncuvuaNf3LZrYZAZLFhZqe9
+node scripts/populateParams.js <adminAddress>
 ```
 
-6. Then run the following command to deploy the contract:
+5. Then run the following command to deploy the contract:
 ```bash
 npx hardhat ignition deploy ignition/modules/chainSignatures.js --parameters ignition/params.json --network localhost
 ```
 
-7. Then run the following command to request a signature from MPC:
+6. Then run the following command to request a signature from MPC:
 ```bash
 npx hardhat run scripts/requestSign.js --network localhost
 ```
@@ -77,17 +71,22 @@ In a few seconds,you should see the signature response from MPC printed by reque
 npx hardhat vars set INFURA_API_KEY
 npx hardhat vars set SEPOLIA_PRIVATE_KEY
 ```
-3. Deploy the contract with right public key configured in `params.json`.
+3. Populate the ignition/params.json with admin address:
+```bash
+node scripts/populateParams.js <adminAddress>
+```
+
+4. Deploy the contract with right public key configured in `params.json`.
 ```bash
 npx hardhat ignition deploy ignition/modules/chainSignatures.js --parameters ignition/params.json --network sepolia
 ```
 
-4. Make sure you have docker daemon running. Go to `integration-tests` and run the following command to start the MPC cluster connected to Ethereum Sepolia Testnet:
+5. Make sure you have docker daemon running. Go to `integration-tests` and run the following command to start the MPC cluster connected to Ethereum Sepolia Testnet:
 ```bash
-cargo run -- setup-env --eth-rpc-url https://sepolia.infura.io/v3/<infura-api-key> --eth-account-sk <eth-account-secret-key-without-0x-prefix> --eth-contract-address <eth-contract-address>
+cargo run -- setup-env --eth-rpc-url https://sepolia.infura.io/v3/<infura-api-key> --eth-account-sk <eth-account-secret-key-without-0x-prefix> --eth-contract-address <eth-contract-address-without-0x-prefix>
 ```
 
-5. Then run the following command to request a signature from MPC:
+6. Then run the following command to request a signature from MPC:
 ```bash
 npx hardhat run scripts/requestSign.js --network sepolia
 ```

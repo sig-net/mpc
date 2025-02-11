@@ -49,7 +49,7 @@ async function main() {
 
     const chainSignaturesWithSigner = chainSignatures.connect(signer);
     
-    const tx = await chainSignaturesWithSigner.sign({payload: testMessage, path: testPath, keyVersion: 0}, {
+    const tx = await chainSignaturesWithSigner.sign({payload: testMessage, path: testPath, keyVersion: 0, algo: "", dest:"", params: ""}, {
       value: signatureDeposit
     });
     const receipt = await tx.wait();
