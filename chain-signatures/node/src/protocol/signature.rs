@@ -69,7 +69,7 @@ impl SignId {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct IndexedSignArgs {
+pub struct SignArgs {
     #[serde(with = "serde_bytes")]
     pub entropy: [u8; 32],
     pub path: String,
@@ -77,10 +77,11 @@ pub struct IndexedSignArgs {
     pub chain: Chain,
 }
 
+/// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexedSignRequest {
     pub id: SignId,
-    pub args: IndexedSignArgs,
+    pub args: SignArgs,
     pub timestamp: Instant,
 }
 
@@ -506,7 +507,6 @@ impl SignatureManager {
                                         id: sign_id.clone(),
                                         proposer: generator.request.proposer,
                                         presignature_id: generator.presignature_id,
-                                        args: generator.request.indexed.args.clone(),
                                         epoch: self.epoch,
                                         from: self.me,
                                         data: data.clone(),
@@ -525,7 +525,6 @@ impl SignatureManager {
                                     id: sign_id.clone(),
                                     proposer: generator.request.proposer,
                                     presignature_id: generator.presignature_id,
-                                    args: generator.request.indexed.args.clone(),
                                     epoch: self.epoch,
                                     from: self.me,
                                     data,

@@ -1,6 +1,6 @@
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::{GenerationError, PresignatureId};
-use super::signature::{IndexedSignArgs, SignId};
+use super::signature::SignId;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
 use crate::node_client::NodeClient;
@@ -94,7 +94,6 @@ pub struct SignatureMessage {
     pub id: SignId,
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
-    pub args: IndexedSignArgs,
     pub epoch: u64,
     pub from: Participant,
     #[serde(with = "serde_bytes")]
@@ -1136,7 +1135,7 @@ mod tests {
     use crate::protocol::{
         contract::primitives::{ParticipantMap, Participants},
         message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
-        signature::{IndexedSignArgs, SignId},
+        signature::SignId,
         ParticipantInfo,
     };
 
@@ -1317,12 +1316,6 @@ mod tests {
                 proposer: from,
                 presignature_id: 1234,
                 epoch: 0,
-                args: IndexedSignArgs {
-                    entropy: [9; 32],
-                    path: "test-something".to_string(),
-                    key_version: 1,
-                    chain: crate::protocol::Chain::NEAR,
-                },
                 from,
                 data: vec![78; 1222],
                 timestamp: 1234567,

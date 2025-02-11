@@ -1,4 +1,4 @@
-use crate::protocol::signature::{IndexedSignArgs, SignId};
+use crate::protocol::signature::{SignArgs, SignId};
 use crate::protocol::Chain::Ethereum;
 use crate::protocol::IndexedSignRequest;
 use crypto_shared::kdf::derive_epsilon_eth;
@@ -132,7 +132,7 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<Index
 
     Ok(IndexedSignRequest {
         id: SignId::new(event.request_id, epsilon, payload),
-        args: IndexedSignArgs {
+        args: SignArgs {
             entropy,
             path: event.path,
             key_version: 0,

@@ -1,4 +1,4 @@
-use crate::protocol::signature::{IndexedSignArgs, SignId};
+use crate::protocol::signature::{SignArgs, SignId};
 use crate::protocol::Chain;
 use crate::protocol::IndexedSignRequest;
 use crate::storage::app_data_storage::AppDataStorage;
@@ -234,7 +234,7 @@ async fn handle_block(
                     entropy = hex::encode(entropy),
                     "indexed new `sign` function call"
                 );
-                let request = IndexedSignArgs {
+                let request = SignArgs {
                     entropy,
                     path: arguments.request.path,
                     key_version: arguments.request.key_version,
