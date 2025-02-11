@@ -40,7 +40,7 @@ jobs:
           key: "${{ runner.os }}-cargo-${{ hashFiles('mpc-recovery/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
       - name: Compile Contract
-        run: cd chain-signatures && cargo build -p mpc-contract --target wasm32-unknown-unknown --release
+        run: cargo build -p mpc-contract --target wasm32-unknown-unknown --release
       - name: Compile eth contract
         run: cd chain-signatures/contract-eth && npm i && npx hardhat compile
       - name: Eth contract unit tests
@@ -50,16 +50,11 @@ jobs:
           ( cd chain-signatures ; cargo check )
           ( cd integration-tests ; cargo check )
       - name: Test format
-        run: |
-          ( cd chain-signatures ; cargo fmt -- --check )
-          ( cd integration-tests ; cargo fmt -- --check )
+        run: cargo fmt -- --check
       - name: Test clippy
-        run: |
-          ( cd chain-signatures ; cargo clippy --tests -- -Dclippy::all )
-          ( cd integration-tests ; cargo clippy --tests -- -Dclippy::all )
+        run: cargo clippy --tests -- -Dclippy::all
       - name: Unit tests
-        working-directory: chain-signatures
-        run: cargo test
+        run: cargo test --workspace --exclude integration-tests
 
   audit:
     name: Audit
@@ -76,7 +71,6 @@ jobs:
       - name: Run Audit
         # even if previous audit step fails, run this audit step to ensure all crates are audited
         if: always()
-        working-directory: chain-signatures
         # ALL audit exceptions must be justified here
         # RUSTSEC-2024-0344 and RUSTSEC-2022-0093 are both to do with ed25519 signatures in near-sdk, we don't sign things with this library so it's safe
         # RUSTSEC-2022-0054 wee-alloc is unmaintained, it's fine for now because we barely use an allocator and the contracts are short lived, but we should find a replacement/use the default allocator
