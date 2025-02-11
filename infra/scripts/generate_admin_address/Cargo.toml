@@ -1,0 +1,16 @@
+[package]
+name = "generate_keys"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+hex = "0.4.3"
+near-crypto = "0.23"
+mpc-keys = { path = "../../../chain-signatures/keys" }
+secp256k1 = "0.28.2"
+crypto-shared = { path = "../../../chain-signatures/crypto-shared" }
+integration-tests = { path = "../../../integration-tests" }
+
+[workspace]
