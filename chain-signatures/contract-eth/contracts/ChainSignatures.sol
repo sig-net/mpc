@@ -32,8 +32,21 @@ contract ChainSignatures is AccessControl {
 
     uint256 signatureDeposit;
 
-    event SignatureRequested(bytes32 indexed requestId, address requester, bytes32 payload, uint32 keyVersion, uint256 deposit, string path, string algo, string dest, string params);
-    event SignatureResponded(bytes32 indexed requestId, SignatureResponse response);
+    event SignatureRequested(
+        bytes32 indexed requestId,
+        address requester,
+        bytes32 payload,
+        uint32 keyVersion,
+        uint256 deposit,
+        string path,
+        string algo,
+        string dest,
+        string params
+    );
+    event SignatureResponded(
+        bytes32 indexed requestId,
+        SignatureResponse response
+    );
     event Withdraw(address indexed owner, uint amount);
 
     constructor(address _admin) {
@@ -41,7 +54,9 @@ contract ChainSignatures is AccessControl {
         signatureDeposit = 50000 gwei;
     }
 
-    function sign(SignRequest memory _request) external payable returns (bytes32) {
+    function sign(
+        SignRequest memory _request
+    ) external payable returns (bytes32) {
         bytes32 payload = _request.payload;
         string memory chainIdStr = Strings.toString(block.chainid);
         string memory path = string.concat(_request.path, "/", chainIdStr);
@@ -50,16 +65,39 @@ contract ChainSignatures is AccessControl {
         string memory dest = _request.dest;
         string memory params = _request.params;
 
-        bytes32 requestId = keccak256(abi.encodePacked(payload, msg.sender, path, keyVersion, algo, dest, params));
+        bytes32 requestId = keccak256(
+            abi.encodePacked(
+                payload,
+                msg.sender,
+                path,
+                keyVersion,
+                algo,
+                dest,
+                params
+            )
+        );
 
-        emit SignatureRequested(requestId, msg.sender, payload, keyVersion, msg.value, path, algo, dest, params);
+        emit SignatureRequested(
+            requestId,
+            msg.sender,
+            payload,
+            keyVersion,
+            msg.value,
+            path,
+            algo,
+            dest,
+            params
+        );
 
         return requestId;
     }
-    
+
     function respond(ResponseWithId[] calldata _responses) external {
         for (uint256 i = 0; i < _responses.length; i++) {
-            emit SignatureResponded(_responses[i].requestId, _responses[i].response);
+            emit SignatureResponded(
+                _responses[i].requestId,
+                _responses[i].response
+            );
         }
     }
 
@@ -67,12 +105,20 @@ contract ChainSignatures is AccessControl {
         return signatureDeposit;
     }
 
-    function setSignatureDeposit(uint256 _amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setSignatureDeposit(
+        uint256 _amount
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         signatureDeposit = _amount;
     }
 
-    function withdraw(uint256 _amount, address _receiver) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(_amount <= address(this).balance, "withdraw amount must be smaller than total balance in contract");
+    function withdraw(
+        uint256 _amount,
+        address _receiver
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(
+            _amount <= address(this).balance,
+            "withdraw amount must be smaller than total balance in contract"
+        );
         address payable to = payable(_receiver);
         to.transfer(_amount);
         emit Withdraw(_receiver, _amount);
