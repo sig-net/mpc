@@ -479,7 +479,7 @@ async fn try_publish_eth(
     signature: &SignatureResponse,
 ) -> Result<(), ()> {
     let ToPublish { request_id, .. } = to_publish;
-    let params = [
+    let params = [Token::Array(vec![Token::Tuple(vec![
         Token::FixedBytes(request_id.to_vec()),
         Token::Tuple(vec![
             Token::Tuple(vec![
@@ -496,7 +496,7 @@ async fn try_publish_eth(
             Token::Uint(U256::from_big_endian(&signature.s.scalar.to_bytes())),
             signature.recovery_id.into_token(),
         ]),
-    ];
+    ])])];
 
     let data = eth
         .contract

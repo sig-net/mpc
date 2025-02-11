@@ -13,6 +13,6 @@ integration-tests/.project
 node_modules/
 chain-signatures/contract-eth/artifacts
 chain-signatures/contract-eth/cache
-chain-signatures/contract-eth/ignition/
+chain-signatures/contract-eth/ignition/deployments/chain-31337
 chain-signatures/contract-eth/deployments/localhost.json
 chain-signatures/contract-eth/scripts/params.json

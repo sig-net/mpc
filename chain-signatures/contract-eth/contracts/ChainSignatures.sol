@@ -1,16 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
-import "./Secp256k1.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
-import "hardhat/console.sol";
 
 contract ChainSignatures is AccessControl {
     struct SignRequest {
         bytes32 payload;
         string path;
         uint32 keyVersion;
+        string algo;
+        string dest;
+        string params;
+    }
+
+    struct AffinePoint {
+        uint256 x;
+        uint256 y;
     }
 
     struct SignatureResponse {
@@ -19,81 +25,55 @@ contract ChainSignatures is AccessControl {
         uint8 recoveryId;
     }
 
-    struct PublicKey {
-        uint256 x;
-        uint256 y;
+    struct ResponseWithId {
+        bytes32 requestId;
+        SignatureResponse response;
     }
 
-    struct AffinePoint {
-        uint256 x;
-        uint256 y;
-    }
+    uint256 signatureDeposit;
 
-    PublicKey public publicKey;
-
-    event SignatureRequested(bytes32 indexed requestId, address requester, bytes32 payload, uint256 deposit, string path);
+    event SignatureRequested(bytes32 indexed requestId, address requester, bytes32 payload, uint32 keyVersion, uint256 deposit, string path, string algo, string dest, string params);
     event SignatureResponded(bytes32 indexed requestId, SignatureResponse response);
 
-    bytes32 public constant RECEIVER_ROLE = keccak256("RECEIVER_ROLE");
-
-    constructor(address admin, address receiver, PublicKey memory _publicKey) {
-        publicKey = _publicKey;
-        _grantRole(DEFAULT_ADMIN_ROLE, admin);
-        _setRoleAdmin(RECEIVER_ROLE, DEFAULT_ADMIN_ROLE);
-        _grantRole(RECEIVER_ROLE, receiver);
-    }
-
-    function getPublicKey() external view returns (PublicKey memory) {
-        return publicKey;
-    }
-
-    function derivedPublicKey(string memory path, address _predecessor) external view returns (PublicKey memory) {
-        address predecessor = _predecessor == address(0) ? msg.sender : _predecessor;
-        uint256 epsilon = deriveEpsilon(path, predecessor);
-        PublicKey memory _derivedPublicKey = deriveKey(publicKey, epsilon);
-        return _derivedPublicKey;
-    }
-
-    function deriveKey(PublicKey memory _publicKey, uint256 epsilon) public pure returns (PublicKey memory) {
-        // G * epsilon + publicKey
-        (uint256 epsilonGx, uint256 epsilonGy) = Secp256k1.ecMul(epsilon, Secp256k1.GX, Secp256k1.GY);
-        (uint256 resultX, uint256 resultY) = Secp256k1.ecAdd(epsilonGx, epsilonGy, _publicKey.x, _publicKey.y);
-        return PublicKey(resultX, resultY);
-    }
-
-    function deriveEpsilon(string memory path, address requester) public pure returns (uint256) {
-        string memory requesterStr = Strings.toHexString(uint256(uint160(requester)), 20);
-        string memory epsilonString = string.concat("near-mpc-recovery v0.2.0 epsilon derivation:", requesterStr, ",", path);
-        console.log("Epsilon String:", epsilonString);
-        bytes32 epsilonBytes = keccak256(bytes(epsilonString));
-        uint256 epsilon = uint256(epsilonBytes);
-        return epsilon;
+    constructor(address _admin) {
+        _grantRole(DEFAULT_ADMIN_ROLE, _admin);
+        signatureDeposit = 50000 gwei;
     }
 
     function sign(SignRequest memory _request) external payable returns (bytes32) {
         bytes32 payload = _request.payload;
-        string memory path = _request.path;
+        string memory chainIdStr = Strings.toString(block.chainid);
+        string memory path = string.concat(_request.path, "/", chainIdStr);
+        uint32 keyVersion = _request.keyVersion;
+        string memory algo = _request.algo;
+        string memory dest = _request.dest;
+        string memory params = _request.params;
 
-        bytes32 requestId = keccak256(abi.encodePacked(payload, msg.sender, path));
+        bytes32 requestId = keccak256(abi.encodePacked(payload, msg.sender, path, keyVersion, algo, dest, params));
 
-        emit SignatureRequested(requestId, msg.sender, payload, msg.value, path);
+        emit SignatureRequested(requestId, msg.sender, payload, keyVersion, msg.value, path, algo, dest, params);
 
         return requestId;
     }
     
-    function respond(bytes32 _requestId, SignatureResponse memory _response) external {        
-        emit SignatureResponded(_requestId, _response);
+    function respond(ResponseWithId[] calldata _responses) external {
+        for (uint256 i = 0; i < _responses.length; i++) {
+            emit SignatureResponded(_responses[i].requestId, _responses[i].response);
+        }
     }
 
-    function getSignatureDeposit() external pure returns (uint256) {
-        // Simplified deposit calculation
-        return 1 wei;
+    function getSignatureDeposit() external view returns (uint256) {
+        return signatureDeposit;
     }
 
-    function withdraw(uint256 amount) external onlyRole(RECEIVER_ROLE) {
+    function setSignatureDeposit(uint256 _amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        signatureDeposit = _amount;
+    }
+
+    function withdraw(uint256 _amount, address _receiver) external onlyRole(DEFAULT_ADMIN_ROLE) {
         uint256 totalBalanceInContract = address(this).balance;
-        require(amount <= totalBalanceInContract, "withdraw amount must be smaller than total balance in contract");
-        address payable to = payable(msg.sender);
-        to.transfer(amount);
+        require(_amount <= totalBalanceInContract, "withdraw amount must be smaller than total balance in contract");
+        address payable to = payable(_receiver);
+        to.transfer(_amount);
     }
 }
