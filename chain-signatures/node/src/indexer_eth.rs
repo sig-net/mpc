@@ -1,5 +1,4 @@
-use crate::indexer::ContractSignRequest;
-use crate::protocol::signature::SignId;
+use crate::protocol::signature::{IndexedSignArgs, SignId};
 use crate::protocol::Chain::Ethereum;
 use crate::protocol::IndexedSignRequest;
 use crypto_shared::kdf::derive_epsilon_eth;
@@ -104,15 +103,9 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<Index
             "failed to convert event payload hash to scalar"
         ));
     };
-    let request = ContractSignRequest {
-        payload,
-        path: event.path,
-        key_version: 0,
-        chain: Ethereum,
-    };
     let epsilon = derive_epsilon_eth(
         format!("0x{}", event.requester.encode_hex::<String>()),
-        &request.path,
+        &event.path,
     );
     let mut event_epsilon_bytes: [u8; 32] = [0; 32];
     event.epsilon.to_big_endian(&mut event_epsilon_bytes);
@@ -139,8 +132,12 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<Index
 
     Ok(IndexedSignRequest {
         id: SignId::new(event.request_id, epsilon, payload),
-        request,
-        entropy,
+        args: IndexedSignArgs {
+            entropy,
+            path: event.path,
+            key_version: 0,
+            chain: Ethereum,
+        },
         // TODO: use indexer timestamp instead.
         timestamp: Instant::now(),
     })

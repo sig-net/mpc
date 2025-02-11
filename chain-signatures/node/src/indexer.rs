@@ -1,6 +1,6 @@
-use crate::protocol::signature::SignId;
-use crate::protocol::Chain::NEAR;
-use crate::protocol::{Chain, IndexedSignRequest};
+use crate::protocol::signature::{IndexedSignArgs, SignId};
+use crate::protocol::Chain;
+use crate::protocol::IndexedSignRequest;
 use crate::storage::app_data_storage::AppDataStorage;
 use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
@@ -78,16 +78,6 @@ struct UnvalidatedContractSignRequest {
     pub payload: [u8; 32],
     pub path: String,
     pub key_version: u32,
-}
-
-/// A validated version of the sign request
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct ContractSignRequest {
-    #[serde(with = "crate::protocol::message::cbor_scalar")]
-    pub payload: Scalar,
-    pub path: String,
-    pub key_version: u32,
-    pub chain: Chain,
 }
 
 #[derive(Clone)]
@@ -244,16 +234,15 @@ async fn handle_block(
                     entropy = hex::encode(entropy),
                     "indexed new `sign` function call"
                 );
-                let request = ContractSignRequest {
-                    payload,
+                let request = IndexedSignArgs {
+                    entropy,
                     path: arguments.request.path,
                     key_version: arguments.request.key_version,
-                    chain: NEAR,
+                    chain: Chain::NEAR,
                 };
                 pending_requests.push(IndexedSignRequest {
                     id: SignId::new(receipt_id.0, epsilon, payload),
-                    request,
-                    entropy,
+                    args: request,
                     // TODO: use indexer timestamp instead.
                     timestamp: Instant::now(),
                 });
@@ -274,8 +263,8 @@ async fn handle_block(
     for request in pending_requests {
         tracing::info!(
             sign_id = ?request.id,
-            payload = hex::encode(request.request.payload.to_bytes()),
-            entropy = hex::encode(request.entropy),
+            payload = hex::encode(request.id.payload.to_bytes()),
+            entropy = hex::encode(request.args.entropy),
             "new sign request"
         );
         if let Err(err) = ctx.sign_tx.send(request).await {

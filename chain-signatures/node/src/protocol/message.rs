@@ -1,9 +1,8 @@
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::{GenerationError, PresignatureId};
-use super::signature::SignId;
+use super::signature::{IndexedSignArgs, SignId};
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
-use crate::indexer::ContractSignRequest;
 use crate::node_client::NodeClient;
 use crate::protocol::Config;
 use crate::protocol::MeshState;
@@ -95,9 +94,7 @@ pub struct SignatureMessage {
     pub id: SignId,
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
-    pub request: ContractSignRequest,
-    #[serde(with = "serde_bytes")]
-    pub entropy: [u8; 32],
+    pub args: IndexedSignArgs,
     pub epoch: u64,
     pub from: Participant,
     #[serde(with = "serde_bytes")]
@@ -1136,14 +1133,11 @@ mod tests {
     use mpc_keys::hpke::{self, Ciphered};
     use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-    use crate::{
-        indexer::ContractSignRequest,
-        protocol::{
-            contract::primitives::{ParticipantMap, Participants},
-            message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
-            signature::SignId,
-            ParticipantInfo,
-        },
+    use crate::protocol::{
+        contract::primitives::{ParticipantMap, Participants},
+        message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
+        signature::{IndexedSignArgs, SignId},
+        ParticipantInfo,
     };
 
     #[test]
@@ -1323,13 +1317,12 @@ mod tests {
                 proposer: from,
                 presignature_id: 1234,
                 epoch: 0,
-                request: ContractSignRequest {
-                    payload: Scalar::ZERO,
+                args: IndexedSignArgs {
+                    entropy: [9; 32],
                     path: "test-something".to_string(),
                     key_version: 1,
                     chain: crate::protocol::Chain::NEAR,
                 },
-                entropy: [9; 32],
                 from,
                 data: vec![78; 1222],
                 timestamp: 1234567,

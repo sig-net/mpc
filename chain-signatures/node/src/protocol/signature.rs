@@ -1,7 +1,6 @@
 use super::contract::primitives::Participants;
 use super::presignature::{GenerationError, Presignature, PresignatureId, PresignatureManager};
 use super::state::RunningState;
-use crate::indexer::ContractSignRequest;
 use crate::kdf::derive_delta;
 use crate::protocol::message::{cbor_scalar, MessageChannel, SignatureMessage};
 use crate::protocol::Chain;
@@ -63,10 +62,17 @@ impl SignId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexedSignArgs {
+    pub entropy: [u8; 32],
+    pub path: String,
+    pub key_version: u32,
+    pub chain: Chain,
+}
+
 pub struct IndexedSignRequest {
     pub id: SignId,
-    pub request: ContractSignRequest,
-    pub entropy: [u8; 32],
+    pub args: IndexedSignArgs,
     pub timestamp: Instant,
 }
 
@@ -132,7 +138,7 @@ impl SignQueue {
                 other => other,
             }
         } {
-            let mut rng = StdRng::from_seed(indexed.entropy);
+            let mut rng = StdRng::from_seed(indexed.args.entropy);
             let subset = stable.keys().cloned().choose_multiple(&mut rng, threshold);
             let in_subset = subset.contains(&self.me);
             let proposer = *subset.choose(&mut rng).unwrap();
@@ -331,12 +337,12 @@ impl SignatureManager {
                     payload,
                     request_id,
                 },
-            entropy,
+            args,
             ..
         } = indexed;
 
         let PresignOutput { big_r, k, sigma } = presignature.output;
-        let delta = derive_delta(*request_id, *entropy, big_r);
+        let delta = derive_delta(*request_id, args.entropy, big_r);
         // TODO: Check whether it is okay to use invert_vartime instead
         let output: PresignOutput<Secp256k1> = PresignOutput {
             big_r: (big_r * delta).to_affine(),
@@ -516,8 +522,7 @@ impl SignatureManager {
                                         id: sign_id.clone(),
                                         proposer: generator.request.proposer,
                                         presignature_id: generator.presignature_id,
-                                        request: generator.request.indexed.request.clone(),
-                                        entropy: generator.request.indexed.entropy,
+                                        args: generator.request.indexed.args.clone(),
                                         epoch: self.epoch,
                                         from: self.me,
                                         data: data.clone(),
@@ -536,8 +541,7 @@ impl SignatureManager {
                                     id: sign_id.clone(),
                                     proposer: generator.request.proposer,
                                     presignature_id: generator.presignature_id,
-                                    request: generator.request.indexed.request.clone(),
-                                    entropy: generator.request.indexed.entropy,
+                                    args: generator.request.indexed.args.clone(),
                                     epoch: self.epoch,
                                     from: self.me,
                                     data,
@@ -567,7 +571,7 @@ impl SignatureManager {
                                 epsilon: SerializableScalar {
                                     scalar: generator.request.indexed.id.epsilon,
                                 },
-                                payload_hash: generator.request.indexed.request.payload.into(),
+                                payload_hash: generator.request.indexed.id.payload.into(),
                             };
 
                             let to_publish = ToPublish::new(
@@ -575,7 +579,7 @@ impl SignatureManager {
                                 request,
                                 generator.request.indexed.timestamp,
                                 output,
-                                generator.request.indexed.request.chain,
+                                generator.request.indexed.args.chain,
                             );
                             tokio::spawn(rpc.clone().publish(self.public_key, to_publish));
                         }
