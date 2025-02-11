@@ -12,7 +12,6 @@ use crate::util;
 
 use async_trait::async_trait;
 use cait_sith::protocol::{MessageData, Participant};
-use k256::Scalar;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
 use near_account_id::AccountId;
@@ -93,13 +92,10 @@ impl From<PresignatureMessage> for Message {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct SignatureMessage {
-    #[serde(with = "serde_bytes")]
-    pub request_id: [u8; 32],
+    pub id: SignId,
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
     pub request: ContractSignRequest,
-    #[serde(with = "cbor_scalar")]
-    pub epsilon: Scalar,
     #[serde(with = "serde_bytes")]
     pub entropy: [u8; 32],
     pub epoch: u64,
@@ -198,11 +194,7 @@ impl MessageInbox {
                 .signature
                 .entry(message.epoch)
                 .or_default()
-                .entry(SignId::new(
-                    message.request_id,
-                    message.epsilon,
-                    message.request.payload,
-                ))
+                .entry(message.id.clone())
                 .or_default()
                 .push_back(message),
             Message::Unknown(entries) => {
@@ -1149,6 +1141,7 @@ mod tests {
         protocol::{
             contract::primitives::{ParticipantMap, Participants},
             message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
+            signature::SignId,
             ParticipantInfo,
         },
     };
@@ -1326,9 +1319,9 @@ mod tests {
                 data: vec![8; 512],
             }),
             Message::Signature(SignatureMessage {
+                id: SignId::new([7; 32], Scalar::ONE, Scalar::ZERO),
                 proposer: from,
                 presignature_id: 1234,
-                request_id: [7; 32],
                 epoch: 0,
                 request: ContractSignRequest {
                     payload: Scalar::ZERO,
@@ -1336,7 +1329,6 @@ mod tests {
                     key_version: 1,
                     chain: crate::protocol::Chain::NEAR,
                 },
-                epsilon: Scalar::ONE,
                 entropy: [9; 32],
                 from,
                 data: vec![78; 1222],

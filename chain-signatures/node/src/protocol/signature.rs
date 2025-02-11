@@ -3,7 +3,7 @@ use super::presignature::{GenerationError, Presignature, PresignatureId, Presign
 use super::state::RunningState;
 use crate::indexer::ContractSignRequest;
 use crate::kdf::derive_delta;
-use crate::protocol::message::{MessageChannel, SignatureMessage};
+use crate::protocol::message::{cbor_scalar, MessageChannel, SignatureMessage};
 use crate::protocol::Chain;
 use crate::rpc::RpcChannel;
 use crate::types::SignatureProtocol;
@@ -20,6 +20,7 @@ use mpc_contract::primitives::SignatureRequest;
 use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
+use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -34,10 +35,13 @@ pub type ReceiptId = near_primitives::hash::CryptoHash;
 /// This is the maximum amount of sign requests that we can accept in the network.
 const MAX_SIGN_REQUESTS: usize = 1024;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SignId {
+    #[serde(with = "serde_bytes")]
     pub request_id: [u8; 32],
+    #[serde(with = "cbor_scalar")]
     pub epsilon: Scalar,
+    #[serde(with = "cbor_scalar")]
     pub payload: Scalar,
 }
 
@@ -509,11 +513,10 @@ impl SignatureManager {
                                     self.me,
                                     *to,
                                     SignatureMessage {
-                                        request_id: sign_id.request_id,
+                                        id: sign_id.clone(),
                                         proposer: generator.request.proposer,
                                         presignature_id: generator.presignature_id,
                                         request: generator.request.indexed.request.clone(),
-                                        epsilon: generator.request.indexed.id.epsilon,
                                         entropy: generator.request.indexed.entropy,
                                         epoch: self.epoch,
                                         from: self.me,
@@ -530,11 +533,10 @@ impl SignatureManager {
                                 self.me,
                                 to,
                                 SignatureMessage {
-                                    request_id: sign_id.request_id,
+                                    id: sign_id.clone(),
                                     proposer: generator.request.proposer,
                                     presignature_id: generator.presignature_id,
                                     request: generator.request.indexed.request.clone(),
-                                    epsilon: generator.request.indexed.id.epsilon,
                                     entropy: generator.request.indexed.entropy,
                                     epoch: self.epoch,
                                     from: self.me,
