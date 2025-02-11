@@ -1,11 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
-use crypto_shared::kdf::{check_ec_signature, derive_secret_key};
-use crypto_shared::{
-    derive_epsilon, derive_key, ScalarExt as _, SerializableAffinePoint, SerializableScalar,
-    SignatureResponse,
-};
 use digest::{Digest, FixedOutput};
 use ecdsa::signature::Verifier;
 use k256::elliptic_curve::ops::Reduce;
@@ -16,6 +11,11 @@ use mpc_contract::primitives::{
     CandidateInfo, ParticipantInfo, Participants, SignRequest, SignatureRequest,
 };
 use mpc_contract::update::UpdateId;
+use mpc_crypto::kdf::{check_ec_signature, derive_secret_key};
+use mpc_crypto::{
+    derive_epsilon, derive_key, ScalarExt as _, SerializableAffinePoint, SerializableScalar,
+    SignatureResponse,
+};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccountId, NearToken};
 use near_workspaces::{Account, Contract, Worker};

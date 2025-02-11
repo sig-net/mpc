@@ -62,7 +62,7 @@ jobs:
           profile: minimal
           toolchain: stable
           target: wasm32-unknown-unknown
-      
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -92,7 +92,6 @@ jobs:
           aws --profile default configure set aws_secret_access_key "456"
 
       - name: Build Chain-Signatures Contract
-        working-directory: ./chain-signatures
         run: cargo build -p mpc-contract --target wasm32-unknown-unknown --release
 
       - name: Build eth contract
@@ -100,16 +99,13 @@ jobs:
         run: npm i && npx hardhat compile
 
       - name: Build Chain-Signatures Node
-        working-directory: ./chain-signatures
         run: cargo build -p mpc-node --release
 
-      - name: Build Integration Tests
-        working-directory: ./integration-tests
-        run: cargo build --tests
+      - name: Build nightly
+        run: cargo build -p integration-tests --tests
 
-      - name: Run Nightly
-        working-directory: ./integration-tests
-        run: cargo test --package integration-tests --test lib -- cases::nightly --show-output --ignored
+      - name: Run nightly
+        run: cargo test -p integration-tests --test lib -- cases::nightly --show-output --ignored
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1

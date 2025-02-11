@@ -624,7 +624,7 @@ impl MessageReceiver for RunningState {
                     continue;
                 }
                 Err(err @ GenerationError::InvalidProposer(_, _)) => {
-                    // We will revisit this this signature request later when we have the request indexed.
+                    // trash the whole of these messages since we got an invalid set of participants.
                     tracing::warn!(?sign_id, ?err, "signature generation cannot be started");
                     queue.clear();
                     continue;

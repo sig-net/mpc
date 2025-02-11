@@ -4,16 +4,16 @@ pub mod primitives;
 pub mod state;
 pub mod update;
 
-use crypto_shared::{
-    derive_epsilon, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
-    types::SignatureResponse, ScalarExt as _,
-};
 use errors::{
     ConversionError, InitError, InvalidParameters, InvalidState, JoinError, PublicKeyError,
     RespondError, SignError, VoteError,
 };
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
+use mpc_crypto::{
+    derive_epsilon, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
+    types::SignatureResponse, ScalarExt as _,
+};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
 use near_sdk::json_types::U128;

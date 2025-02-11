@@ -7,8 +7,6 @@ use crate::containers::LakeIndexer;
 
 use anyhow::Context as _;
 use cait_sith::FullSignature;
-use crypto_shared::ScalarExt;
-use crypto_shared::{derive_epsilon, derive_key};
 use elliptic_curve::sec1::ToEncodedPoint;
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::point::AffineCoordinates;
@@ -16,6 +14,8 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
 use mpc_contract::errors::SignError;
 use mpc_contract::primitives::SignRequest;
+use mpc_crypto::ScalarExt;
+use mpc_crypto::{derive_epsilon, derive_key};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_fetch::ops::Function;
@@ -284,13 +284,13 @@ pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> web3::types::
 
 #[cfg(test)]
 mod tests {
-    use crypto_shared::{derive_epsilon, derive_key, ScalarExt as _};
     use elliptic_curve::sec1::FromEncodedPoint as _;
     use k256::ecdsa::VerifyingKey;
     use k256::elliptic_curve::ops::{Invert, Reduce};
     use k256::elliptic_curve::point::AffineCoordinates;
     use k256::elliptic_curve::ProjectivePoint;
     use k256::{AffinePoint, EncodedPoint, Scalar};
+    use mpc_crypto::{derive_epsilon, derive_key, ScalarExt as _};
 
     use super::{public_key_to_address, recover, x_coordinate};
 

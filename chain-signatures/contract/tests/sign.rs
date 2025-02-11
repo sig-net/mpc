@@ -5,7 +5,7 @@ use mpc_contract::errors;
 use mpc_contract::primitives::{CandidateInfo, SignRequest};
 use near_workspaces::types::{AccountId, NearToken};
 
-use crypto_shared::SignatureResponse;
+use mpc_crypto::SignatureResponse;
 use std::collections::HashMap;
 
 #[tokio::test]

@@ -4,7 +4,7 @@ use anyhow::Context;
 use backon::{ConstantBuilder, Retryable};
 use mpc_contract::{ProtocolContractState, RunningContractState};
 use mpc_node::web::StateView;
-use near_sdk::AccountId;
+use near_account_id::AccountId;
 
 use crate::cluster::Cluster;
 

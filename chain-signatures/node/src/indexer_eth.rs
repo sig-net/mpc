@@ -1,10 +1,9 @@
 use crate::protocol::signature::{SignArgs, SignId};
-use crate::protocol::Chain;
-use crate::protocol::IndexedSignRequest;
-use crypto_shared::kdf::derive_epsilon_eth;
-use crypto_shared::ScalarExt;
+use crate::protocol::{Chain, IndexedSignRequest};
 use hex::ToHex;
 use k256::Scalar;
+use mpc_crypto::kdf::derive_epsilon_eth;
+use mpc_crypto::ScalarExt as _;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
