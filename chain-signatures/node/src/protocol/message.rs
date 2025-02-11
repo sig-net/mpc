@@ -1,5 +1,6 @@
 use super::contract::primitives::{ParticipantMap, Participants};
-use super::presignature::{GenerationError, PresignatureId};
+use super::error::GenerationError;
+use super::presignature::PresignatureId;
 use super::signature::SignId;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;

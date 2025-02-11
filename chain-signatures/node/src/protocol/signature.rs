@@ -1,8 +1,9 @@
 use super::contract::primitives::Participants;
-use super::presignature::{GenerationError, Presignature, PresignatureId, PresignatureManager};
 use super::state::RunningState;
 use crate::kdf::derive_delta;
+use crate::protocol::error::GenerationError;
 use crate::protocol::message::{cbor_scalar, MessageChannel, SignatureMessage};
+use crate::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
 use crate::protocol::Chain;
 use crate::rpc::RpcChannel;
 use crate::types::SignatureProtocol;
@@ -252,7 +253,7 @@ impl SignatureGenerator {
         }
 
         if self.timestamp.elapsed() > self.timeout {
-            tracing::warn!(self.presignature_id, "signature protocol timed out");
+            tracing::warn!(sign_id = ?self.request.indexed.id, "signature protocol timed out");
             return Err(ProtocolError::Other(
                 anyhow::anyhow!("signature protocol timeout").into(),
             ));
