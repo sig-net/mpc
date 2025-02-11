@@ -9,9 +9,10 @@ use near_account_id::AccountId;
 use sha3::{Digest, Keccak256, Sha3_256};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
-// near-mpc-recovery with key derivation protocol vX.Y.Z.
-const NEAR_EPSILON_DERIVATION_PREFIX: &str = "sig.network v0.1.0 epsilon derivation: NEAR";
+// Sig.Network with key derivation protocol vX.Y.Z.
+const EPSILON_DERIVATION_PREFIX: &str = "sig.network v1.0.0 epsilon derivation";
 
+const CHAIN_ID_NEAR: &str = "0x18d";
 pub fn derive_epsilon_near(predecessor_id: &AccountId, path: &str) -> Scalar {
     // TODO: Use a key derivation library instead of doing this manually.
     // https://crates.io/crates/hkdf might be a good option?
@@ -21,16 +22,16 @@ pub fn derive_epsilon_near(predecessor_id: &AccountId, path: &str) -> Scalar {
     // indicate the end of the account id in derivation path.
     // Do not reuse this hash function on anything that isn't an account
     // ID or it'll be vunerable to Hash Melleability/extention attacks.
-    let derivation_path = format!("{NEAR_EPSILON_DERIVATION_PREFIX}{},{}", predecessor_id, path);
+    let derivation_path = format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_NEAR},{},{}", predecessor_id, path);
     let mut hasher = Sha3_256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
     Scalar::from_non_biased(hash)
 }
 
-const EPSILON_DERIVATION_PREFIX_ETH: &str = "sig.network v0.1.0 epsilon derivation: Ethereum";
+const CHAIN_ID_ETHEREUM: &str = "0x1";
 pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
-    let derivation_path = format!("{EPSILON_DERIVATION_PREFIX_ETH}{},{}", requester, path);
+    let derivation_path = format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{},{}", requester, path);
     let mut hasher = Keccak256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();

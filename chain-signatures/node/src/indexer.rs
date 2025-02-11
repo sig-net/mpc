@@ -233,7 +233,7 @@ async fn handle_block(
                     );
                     continue;
                 };
-                let epsilon = derive_epsilon(&action.predecessor_id(), &arguments.request.path);
+                let epsilon = derive_epsilon_near(&action.predecessor_id(), &arguments.request.path);
                 tracing::info!(
                     receipt_id = %receipt_id,
                     caller_id = receipt.predecessor_id().to_string(),
