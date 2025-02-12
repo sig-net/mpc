@@ -408,8 +408,16 @@ impl MessageReceiver for GeneratingState {
     ) -> Result<(), MessageError> {
         let mut inbox = channel.inbox().write().await;
         let mut protocol = self.protocol.write().await;
+        let message_counts: HashMap<Participant, usize> =
+            inbox
+                .generating
+                .iter()
+                .fold(HashMap::new(), |mut acc, msg| {
+                    *acc.entry(msg.from).or_default() += 1;
+                    acc
+                });
+        tracing::info!(?message_counts, "generating: handling new messages");
         while let Some(msg) = inbox.generating.pop_front() {
-            tracing::debug!("handling new generating message");
             protocol.message(msg.from, msg.data);
         }
         Ok(())
@@ -425,7 +433,17 @@ impl MessageReceiver for ResharingState {
         _mesh_state: MeshState,
     ) -> Result<(), MessageError> {
         let mut inbox = channel.inbox().write().await;
-        tracing::debug!("handling {} resharing messages", inbox.resharing.len());
+        let message_counts: HashMap<(Participant, Epoch), usize> =
+            inbox
+                .resharing
+                .iter()
+                .fold(HashMap::new(), |mut acc, (epoch, messages)| {
+                    for msg in messages {
+                        *acc.entry((msg.from, *epoch)).or_default() += 1;
+                    }
+                    acc
+                });
+        tracing::info!(?message_counts, "resharing: handling new messages");
         let q = inbox.resharing.entry(self.old_epoch).or_default();
         let mut protocol = self.protocol.write().await;
         while let Some(msg) = q.pop_front() {

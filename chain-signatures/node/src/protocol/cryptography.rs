@@ -54,7 +54,12 @@ impl CryptographicProtocol for GeneratingState {
         _cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
-        tracing::info!(active = ?mesh_state.active.keys_vec(), "generating: progressing key generation");
+        let participants = self.participants.keys_vec();
+        tracing::info!(
+            ?participants,
+            active = ?mesh_state.active.keys_vec(),
+            "generating: progressing key generation",
+        );
         let mut protocol = self.protocol.write().await;
         loop {
             let action = match protocol.poke() {
@@ -75,7 +80,7 @@ impl CryptographicProtocol for GeneratingState {
                 }
                 Action::SendMany(data) => {
                     tracing::debug!("generating: sending a message to many participants");
-                    for p in mesh_state.active.keys() {
+                    for p in &participants {
                         if p == &self.me {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;
