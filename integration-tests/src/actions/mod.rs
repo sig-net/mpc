@@ -282,17 +282,17 @@ pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> web3::types::
     web3::types::Address::from_slice(&hash[12..])
 }
 
-#[cfg(test)]
-mod tests {
-    use elliptic_curve::sec1::FromEncodedPoint as _;
-    use k256::ecdsa::VerifyingKey;
-    use k256::elliptic_curve::ops::{Invert, Reduce};
-    use k256::elliptic_curve::point::AffineCoordinates;
-    use k256::elliptic_curve::ProjectivePoint;
-    use k256::{AffinePoint, EncodedPoint, Scalar};
-    use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
+// #[cfg(test)]
+// mod tests {
+//     use elliptic_curve::sec1::FromEncodedPoint as _;
+//     use k256::ecdsa::VerifyingKey;
+//     use k256::elliptic_curve::ops::{Invert, Reduce};
+//     use k256::elliptic_curve::point::AffineCoordinates;
+//     use k256::elliptic_curve::ProjectivePoint;
+//     use k256::{AffinePoint, EncodedPoint, Scalar};
+//     use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
 
-    use super::{public_key_to_address, recover, x_coordinate};
+//     use super::{public_key_to_address, recover, x_coordinate};
 
     // This test hardcodes the output of the signing process and checks that everything verifies as expected
     // If you find yourself changing the constants in this test you are likely breaking backwards compatibility
@@ -436,69 +436,69 @@ mod tests {
     //     assert_eq!(user_address_from_pk, user_address_ethers);
     // }
 
-    fn verify(
-        key: &VerifyingKey,
-        msg: &[u8],
-        sig: &k256::ecdsa::Signature,
-    ) -> Result<(), &'static str> {
-        let q = ProjectivePoint::<k256::Secp256k1>::from(key.as_affine());
-        let z = ecdsa::hazmat::bits2field::<k256::Secp256k1>(msg).unwrap();
+    // fn verify(
+    //     key: &VerifyingKey,
+    //     msg: &[u8],
+    //     sig: &k256::ecdsa::Signature,
+    // ) -> Result<(), &'static str> {
+    //     let q = ProjectivePoint::<k256::Secp256k1>::from(key.as_affine());
+    //     let z = ecdsa::hazmat::bits2field::<k256::Secp256k1>(msg).unwrap();
 
-        // &k256::FieldBytes::from_slice(&k256::Scalar::from_bytes(msg).to_bytes()),
-        verify_prehashed(&q, &z, sig)
-    }
+    //     // &k256::FieldBytes::from_slice(&k256::Scalar::from_bytes(msg).to_bytes()),
+    //     verify_prehashed(&q, &z, sig)
+    // }
 
-    fn verify_prehashed(
-        q: &ProjectivePoint<k256::Secp256k1>,
-        z: &k256::FieldBytes,
-        sig: &k256::ecdsa::Signature,
-    ) -> Result<(), &'static str> {
-        // let z: Scalar = Scalar::reduce_bytes(z);
-        let z =
-        <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(z);
-        let (r, s) = sig.split_scalars();
-        let s_inv = *s.invert_vartime();
-        let u1 = z * s_inv;
-        let u2 = *r * s_inv;
-        let reproduced =
-            lincomb(&ProjectivePoint::<k256::Secp256k1>::GENERATOR, &u1, q, &u2).to_affine();
-        let x = reproduced.x();
+    // fn verify_prehashed(
+    //     q: &ProjectivePoint<k256::Secp256k1>,
+    //     z: &k256::FieldBytes,
+    //     sig: &k256::ecdsa::Signature,
+    // ) -> Result<(), &'static str> {
+    //     // let z: Scalar = Scalar::reduce_bytes(z);
+    //     let z =
+    //     <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(z);
+    //     let (r, s) = sig.split_scalars();
+    //     let s_inv = *s.invert_vartime();
+    //     let u1 = z * s_inv;
+    //     let u2 = *r * s_inv;
+    //     let reproduced =
+    //         lincomb(&ProjectivePoint::<k256::Secp256k1>::GENERATOR, &u1, q, &u2).to_affine();
+    //     let x = reproduced.x();
 
-        // println!("------------- verify_prehashed[beg] -------------");
-        // println!("z: {z:#?}");
-        // // println!("r: {r:#?}");
-        // // println!("s: {s:#?}");
-        // println!("s_inv {s_inv:#?}");
-        // println!("u1 {u1:#?}");
-        // println!("u2 {u2:#?}");
-        // println!("reproduced {reproduced:#?}");
-        // println!("reproduced_x {x:?}");
-        // println!("------------- verify_prehashed[end] -------------");
+    //     // println!("------------- verify_prehashed[beg] -------------");
+    //     // println!("z: {z:#?}");
+    //     // // println!("r: {r:#?}");
+    //     // // println!("s: {s:#?}");
+    //     // println!("s_inv {s_inv:#?}");
+    //     // println!("u1 {u1:#?}");
+    //     // println!("u2 {u2:#?}");
+    //     // println!("reproduced {reproduced:#?}");
+    //     // println!("reproduced_x {x:?}");
+    //     // println!("------------- verify_prehashed[end] -------------");
 
-        let reduced =
-        <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
-            &x,
-        );
+    //     let reduced =
+    //     <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
+    //         &x,
+    //     );
 
-        //println!("reduced {reduced:#?}");
+    //     //println!("reduced {reduced:#?}");
 
-        if *r == reduced {
-            Ok(())
-        } else {
-            Err("error")
-        }
-    }
+    //     if *r == reduced {
+    //         Ok(())
+    //     } else {
+    //         Err("error")
+    //     }
+    // }
 
-    fn lincomb(
-        x: &ProjectivePoint<k256::Secp256k1>,
-        k: &Scalar,
-        y: &ProjectivePoint<k256::Secp256k1>,
-        l: &Scalar,
-    ) -> ProjectivePoint<k256::Secp256k1> {
-        (*x * k) + (*y * l)
-    }
+    // fn lincomb(
+    //     x: &ProjectivePoint<k256::Secp256k1>,
+    //     k: &Scalar,
+    //     y: &ProjectivePoint<k256::Secp256k1>,
+    //     l: &Scalar,
+    // ) -> ProjectivePoint<k256::Secp256k1> {
+    //     (*x * k) + (*y * l)
+    // }
 
-    pub fn to_eip155_v(recovery_id: u8, chain_id: u64) -> u64 {
-        (recovery_id as u64) + 35 + chain_id * 2
-    }
-}
+    // pub fn to_eip155_v(recovery_id: u8, chain_id: u64) -> u64 {
+    //     (recovery_id as u64) + 35 + chain_id * 2
+    // }
+// }
