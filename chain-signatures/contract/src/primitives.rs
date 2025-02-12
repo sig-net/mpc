@@ -40,20 +40,20 @@ pub struct SignRequestPending {
     pub payload: Scalar,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
-#[borsh(crate = "near_sdk::borsh")]
-pub struct ContractSignatureRequest {
-    pub request: SignRequestPending,
-    pub requester: AccountId,
-    pub deposit: NearToken,
-    pub required_deposit: NearToken,
-}
-
 impl SignRequestPending {
     pub fn new(payload: Scalar, predecessor_id: &AccountId, path: &str) -> Self {
         let epsilon = derive_epsilon(predecessor_id, path);
         SignRequestPending { epsilon, payload }
     }
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct ContractSignRequest {
+    pub request: SignRequestPending,
+    pub requester: AccountId,
+    pub deposit: NearToken,
+    pub required_deposit: NearToken,
 }
 
 #[derive(
