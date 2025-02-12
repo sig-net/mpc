@@ -1,6 +1,7 @@
 use cait_sith::protocol::{InitializationError, Participant};
+use mpc_primitives::SignId;
 
-use super::{presignature::PresignatureId, signature::SignId, triple::TripleId};
+use super::{presignature::PresignatureId, triple::TripleId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GenerationError {

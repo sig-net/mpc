@@ -2,7 +2,7 @@ use super::contract::primitives::Participants;
 use super::state::RunningState;
 use crate::kdf::derive_delta;
 use crate::protocol::error::GenerationError;
-use crate::protocol::message::{cbor_scalar, MessageChannel, SignatureMessage};
+use crate::protocol::message::{MessageChannel, SignatureMessage};
 use crate::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
 use crate::protocol::Chain;
 use crate::rpc::RpcChannel;
@@ -12,13 +12,13 @@ use crate::util::AffinePointExt;
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::{FullSignature, PresignOutput};
 use chrono::Utc;
-use k256::{Scalar, Secp256k1};
+use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::{derive_key, PublicKey};
+use mpc_primitives::{SignArgs, SignId};
 use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
-use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -30,50 +30,6 @@ use near_account_id::AccountId;
 
 /// This is the maximum amount of sign requests that we can accept in the network.
 const MAX_SIGN_REQUESTS: usize = 1024;
-
-#[derive(Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct SignId {
-    #[serde(with = "serde_bytes")]
-    pub request_id: [u8; 32],
-}
-
-impl std::fmt::Debug for SignId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("SignId")
-            .field(&near_primitives::hash::CryptoHash(self.request_id))
-            .finish()
-    }
-}
-
-impl SignId {
-    pub fn new(request_id: [u8; 32]) -> Self {
-        Self { request_id }
-    }
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub struct SignArgs {
-    #[serde(with = "serde_bytes")]
-    pub entropy: [u8; 32],
-    #[serde(with = "cbor_scalar")]
-    pub epsilon: Scalar,
-    #[serde(with = "cbor_scalar")]
-    pub payload: Scalar,
-    pub path: String,
-    pub key_version: u32,
-}
-
-impl std::fmt::Debug for SignArgs {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SignArgs")
-            .field("entropy", &near_primitives::hash::CryptoHash(self.entropy))
-            .field("epsilon", &self.epsilon)
-            .field("payload", &self.payload)
-            .field("path", &self.path)
-            .field("key_version", &self.key_version)
-            .finish()
-    }
-}
 
 /// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]

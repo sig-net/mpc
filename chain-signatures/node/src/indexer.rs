@@ -1,9 +1,9 @@
-use crate::protocol::signature::{SignArgs, SignId};
 use crate::protocol::Chain;
 use crate::protocol::IndexedSignRequest;
 use crate::storage::app_data_storage::AppDataStorage;
 use k256::Scalar;
 use mpc_crypto::{derive_epsilon, ScalarExt};
+use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use near_lake_framework::{Lake, LakeBuilder, LakeContext};
 use near_lake_primitives::actions::ActionMetaDataExt;

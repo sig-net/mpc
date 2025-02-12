@@ -3754,13 +3754,15 @@ name = "mpc-primitives"
 version = "1.0.0"
 dependencies = [
  "anyhow",
- "borsh",
+ "ciborium",
  "getrandom",
+ "hex",
  "k256",
  "mpc-crypto",
  "near-account-id",
  "near-sdk",
  "serde",
+ "serde_bytes",
 ]
 
 [[package]]

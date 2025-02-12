@@ -5,11 +5,13 @@ edition = "2021"
 
 [dependencies]
 anyhow.workspace = true
-borsh.workspace = true
+ciborium.workspace = true
+hex.workspace = true
 k256.workspace = true
 near-account-id.workspace = true
 near-sdk.workspace = true
 serde.workspace = true
+serde_bytes.workspace = true
 
 mpc-crypto.workspace = true
 
