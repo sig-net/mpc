@@ -2,7 +2,7 @@ use std::fmt;
 use std::future::IntoFuture;
 
 use cait_sith::FullSignature;
-use k256::{elliptic_curve::sec1::ToEncodedPoint, Scalar, Secp256k1};
+use k256::{Scalar, Secp256k1};
 use mpc_contract::errors;
 use mpc_contract::primitives::{SignRequest, SignatureRequest};
 use mpc_crypto::{
