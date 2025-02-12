@@ -163,14 +163,14 @@ impl SignAction<'_> {
         mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
 
         // Useful for populating the "signatures_havent_changed" test's hardcoded values
-        tracing::warn!(
-            "ref_string: big_r={}, s={}, mpc_pk_bytes={}, payload_hash={}, account_id={}",
-            hex::encode(signature.big_r.to_encoded_point(true).to_bytes()),
-            hex::encode(signature.s.to_bytes()),
-            hex::encode(&mpc_pk_bytes),
-            hex::encode(payload_hash),
-            account.id(),
-        );
+        // tracing::warn!(
+        //     "ref_string: big_r={}, s={}, mpc_pk_bytes={}, payload_hash={}, account_id={}",
+        //     hex::encode(signature.big_r.to_encoded_point(true).to_bytes()),
+        //     hex::encode(signature.s.to_bytes()),
+        //     hex::encode(&mpc_pk_bytes),
+        //     hex::encode(payload_hash),
+        //     account.id(),
+        // );
         actions::validate_signature(account.id(), &mpc_pk_bytes, payload_hash, &signature).await?;
 
         Ok(SignOutcome {
