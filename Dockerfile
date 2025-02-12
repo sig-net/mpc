@@ -17,7 +17,7 @@ COPY chain-signatures/ ./chain-signatures
 COPY integration-tests/ ./integration-tests
 COPY Cargo.toml .
 COPY Cargo.lock .
-COPY --from=eth-builder /usr/src/app/contract-eth/artifacts contract-eth/artifacts
+COPY --from=eth-builder /usr/src/app/contract-eth/artifacts chain-signatures/contract-eth/artifacts
 RUN cargo build --release --package mpc-node
 
 FROM debian:stable-slim AS runtime
