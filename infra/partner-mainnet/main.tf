@@ -266,4 +266,5 @@ resource "google_compute_firewall" "app_port" {
     ports    = ["80", "3000"]
   }
 
+  depends_on = [ module.vpc ]
 }

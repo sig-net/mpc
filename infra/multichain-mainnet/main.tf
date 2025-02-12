@@ -111,9 +111,6 @@ resource "google_compute_global_address" "external_ips" {
   name         = "multichain-mainnet-${count.index}"
   address_type = "EXTERNAL"
 
-  lifecycle {
-    prevent_destroy = true
-  }
 }
 
 resource "google_compute_managed_ssl_certificate" "mainnet_ssl" {

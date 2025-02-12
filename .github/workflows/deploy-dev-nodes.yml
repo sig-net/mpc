@@ -1,6 +1,5 @@
 name: Build Image & Deploy Nodes to Dev
 on:
-  workflow_dispatch:
   pull_request:
     types: [closed]
     branches:
@@ -14,7 +13,7 @@ env:
 
 jobs:
   build:
-    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -26,7 +25,7 @@ jobs:
           GOOGLE_CREDENTIALS: ${{ secrets.SIG_CREDENTIALS_DEV }}
 
       - name: Build Docker image and push to Google Artifact Registry
-        if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
+        if: github.event.pull_request.merged == true
         id: docker-push-tagged
         uses: docker/build-push-action@v4
         with:
@@ -44,16 +43,3 @@ jobs:
         with:
           credentials_json: '${{ secrets.SIG_CREDENTIALS_DEV }}'
 
-      - name: 'Set up Cloud SDK'
-        uses: 'google-github-actions/setup-gcloud@v2'
-        with:
-          install_components: 'kubectl,gke-gcloud-auth-plugin'
-
-      - name: 'Set project'
-        run: 'gcloud config set project near-cs-dev'
-
-      - name: 'Get container credentials'
-        run: 'gcloud container clusters get-credentials dev --location europe-west1'
-
-      - name: 'Rollout k8s node'
-        run: 'kubectl rollout restart deployment multichain-dev-11'
