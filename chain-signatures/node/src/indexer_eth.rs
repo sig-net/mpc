@@ -9,10 +9,21 @@ use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use web3::futures::StreamExt;
 use web3::types::{FilterBuilder, Log, H160, H256, U256};
+
+pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
+    Scalar::from_bytes(
+        hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140")
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    )
+    .unwrap()
+});
 
 #[derive(Clone)]
 pub struct EthConfig {
@@ -114,10 +125,10 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignR
         ));
     };
 
-    // if payload > Scalar::from_bytes(hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141").unwrap().try_into().unwrap()).unwrap() {
-    //     tracing::warn!("Payload exceeds secp256k1 curve order: {:?}", payload);
-    //     return Err(anyhow::anyhow!("Payload exceeds secp256k1 curve order"));
-    // }
+    if payload > *MAX_SECP256K1_SCALAR {
+        tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
+        anyhow::bail!("payload exceeds secp256k1 curve order");
+    }
 
     let request = ContractSignRequest {
         payload,
