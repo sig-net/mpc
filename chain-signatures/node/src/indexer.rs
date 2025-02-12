@@ -7,8 +7,9 @@ use near_account_id::AccountId;
 use near_lake_framework::{Lake, LakeBuilder, LakeContext};
 use near_lake_primitives::actions::ActionMetaDataExt;
 use near_lake_primitives::receipts::ExecutionStatus;
-
+use near_lake_primitives::Block;
 use near_primitives::types::BlockHeight;
+
 use serde::{Deserialize, Serialize};
 use std::ops::Mul;
 use std::sync::Arc;
@@ -156,15 +157,11 @@ impl Indexer {
         !self.is_behind().await && self.is_running().await
     }
 
-    async fn update_block_height_and_timestamp(
-        &self,
-        block_height: BlockHeight,
-        block_timestamp_nanosec: u64,
-    ) {
-        tracing::debug!(block_height, "update_block_height_and_timestamp");
-        self.set_last_processed_block(block_height).await;
+    async fn update_block(&self, block: &Block) {
+        self.set_last_processed_block(block.block_height()).await;
         *self.last_updated_timestamp.write().await = Instant::now();
-        *self.latest_block_timestamp_nanosec.write().await = Some(block_timestamp_nanosec);
+        *self.latest_block_timestamp_nanosec.write().await =
+            Some(block.header().timestamp_nanosec());
     }
 }
 
@@ -176,11 +173,7 @@ struct Context {
     indexer: Indexer,
 }
 
-async fn handle_block(
-    mut block: near_lake_primitives::block::Block,
-    ctx: &Context,
-) -> anyhow::Result<()> {
-    tracing::debug!(block_height = block.block_height(), "handle_block");
+async fn handle_block(mut block: Block, ctx: &Context) -> anyhow::Result<()> {
     let mut pending_requests = Vec::new();
     for action in block.actions().cloned().collect::<Vec<_>>() {
         if action.receiver_id() == ctx.mpc_contract_id {
@@ -261,9 +254,7 @@ async fn handle_block(
         }
     }
 
-    ctx.indexer
-        .update_block_height_and_timestamp(block.block_height(), block.header().timestamp_nanosec())
-        .await;
+    ctx.indexer.update_block(&block).await;
 
     crate::metrics::LATEST_BLOCK_HEIGHT
         .with_label_values(&[ctx.node_account_id.as_str()])
