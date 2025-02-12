@@ -8,7 +8,7 @@ use k256::elliptic_curve::point::DecompressPoint as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{AffinePoint, FieldBytes, Scalar, Secp256k1};
 use mpc_contract::primitives::{
-    CandidateInfo, ParticipantInfo, Participants, SignRequest, SignatureRequest,
+    CandidateInfo, ParticipantInfo, Participants, SignRequest, SignRequestPending,
 };
 use mpc_contract::update::UpdateId;
 use mpc_crypto::kdf::{check_ec_signature, derive_secret_key};
@@ -154,7 +154,7 @@ pub async fn create_response(
     msg: &str,
     path: &str,
     sk: &k256::SecretKey,
-) -> ([u8; 32], SignatureRequest, SignatureResponse) {
+) -> ([u8; 32], SignRequestPending, SignatureResponse) {
     let (digest, scalar_hash, payload_hash) = process_message(msg).await;
     let pk = sk.public_key();
 
@@ -172,7 +172,7 @@ pub async fn create_response(
     let s = signature.s();
     let (r_bytes, _s_bytes) = signature.split_bytes();
     let payload_hash_s = Scalar::from_bytes(payload_hash).unwrap();
-    let respond_req = SignatureRequest::new(payload_hash_s, predecessor_id, path);
+    let respond_req = SignRequestPending::new(payload_hash_s, predecessor_id, path);
     let big_r =
         AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0)).unwrap();
     let s: k256::Scalar = *s.as_ref();
@@ -196,7 +196,7 @@ pub async fn create_response(
 
 pub async fn sign_and_validate(
     request: &SignRequest,
-    respond: Option<(&SignatureRequest, &SignatureResponse)>,
+    respond: Option<(&SignRequestPending, &SignatureResponse)>,
     contract: &Contract,
 ) -> anyhow::Result<()> {
     let status = contract

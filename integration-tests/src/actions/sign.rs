@@ -4,7 +4,7 @@ use std::future::IntoFuture;
 use cait_sith::FullSignature;
 use k256::{Scalar, Secp256k1};
 use mpc_contract::errors;
-use mpc_contract::primitives::{SignRequest, SignatureRequest};
+use mpc_contract::primitives::{SignRequest, SignRequestPending};
 use mpc_crypto::{derive_epsilon, ScalarExt as _, SignatureResponse};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
@@ -238,7 +238,7 @@ impl SignAction<'_> {
         };
         let epsilon = derive_epsilon(predecessor, &self.path);
 
-        let request = SignatureRequest {
+        let request = SignRequestPending {
             payload: Scalar::from_bytes(payload_hash).unwrap(),
             epsilon,
         };

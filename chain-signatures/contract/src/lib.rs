@@ -23,7 +23,7 @@ use near_sdk::{
 };
 use primitives::{
     CandidateInfo, Candidates, ContractSignatureRequest, Participants, PkVotes, SignRequest,
-    SignaturePromiseError, SignatureRequest, SignatureResult, StorageKey, Votes, YieldIndex,
+    SignRequestPending, SignaturePromiseError, SignatureResult, StorageKey, Votes, YieldIndex,
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -67,20 +67,20 @@ impl Default for VersionedMpcContract {
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct MpcContract {
     protocol_state: ProtocolContractState,
-    pending_requests: LookupMap<SignatureRequest, Option<YieldIndex>>,
+    pending_requests: LookupMap<SignRequestPending, Option<YieldIndex>>,
     request_counter: u32,
     proposed_updates: ProposedUpdates,
     config: Config,
 }
 
 impl MpcContract {
-    fn mark_request_received(&mut self, request: &SignatureRequest) {
+    fn mark_request_received(&mut self, request: &SignRequestPending) {
         if self.pending_requests.insert(request, &None).is_none() {
             self.request_counter += 1;
         }
     }
 
-    fn add_request(&mut self, request: &SignatureRequest, data_id: CryptoHash) {
+    fn add_request(&mut self, request: &SignRequestPending, data_id: CryptoHash) {
         if self
             .pending_requests
             .insert(request, &Some(YieldIndex { data_id }))
@@ -90,7 +90,7 @@ impl MpcContract {
         }
     }
 
-    fn remove_request(&mut self, request: SignatureRequest) -> Result<(), Error> {
+    fn remove_request(&mut self, request: SignRequestPending) -> Result<(), Error> {
         if self.pending_requests.remove(&request).is_some() {
             self.request_counter -= 1;
             Ok(())
@@ -169,7 +169,7 @@ impl VersionedMpcContract {
             }
         }
         let predecessor = env::predecessor_account_id();
-        let request = SignatureRequest::new(payload, &predecessor, &path);
+        let request = SignRequestPending::new(payload, &predecessor, &path);
         if !self.request_already_exists(&request) {
             log!(
                 "sign: predecessor={predecessor}, payload={payload:?}, path={path:?}, key_version={key_version}",
@@ -247,7 +247,7 @@ impl VersionedMpcContract {
     #[handle_result]
     pub fn respond(
         &mut self,
-        request: SignatureRequest,
+        request: SignRequestPending,
         response: SignatureResponse,
     ) -> Result<(), Error> {
         let protocol_state = self.mutable_state();
@@ -817,13 +817,13 @@ impl VersionedMpcContract {
         }
     }
 
-    fn request_already_exists(&self, request: &SignatureRequest) -> bool {
+    fn request_already_exists(&self, request: &SignRequestPending) -> bool {
         match self {
             Self::V0(mpc_contract) => mpc_contract.pending_requests.contains_key(request),
         }
     }
 
-    fn mark_request_received(&mut self, request: &SignatureRequest) {
+    fn mark_request_received(&mut self, request: &SignRequestPending) {
         match self {
             Self::V0(ref mut mpc_contract) => mpc_contract.mark_request_received(request),
         }

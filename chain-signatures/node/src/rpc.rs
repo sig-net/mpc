@@ -6,7 +6,7 @@ use crate::util::AffinePointExt as _;
 
 use cait_sith::FullSignature;
 use k256::Secp256k1;
-use mpc_contract::primitives::SignatureRequest;
+use mpc_contract::primitives::SignRequestPending;
 use mpc_crypto::SignatureResponse;
 use mpc_keys::hpke;
 
@@ -275,7 +275,7 @@ impl NearClient {
 
     pub async fn call_respond(
         &self,
-        request: &SignatureRequest,
+        request: &SignRequestPending,
         response: &SignatureResponse,
     ) -> Result<ExecutionFinalResult, near_fetch::Error> {
         self.client
@@ -417,7 +417,7 @@ async fn try_publish_near(
     timestamp: &Instant,
     signature: &SignatureResponse,
 ) -> Result<(), near_fetch::Error> {
-    let request = SignatureRequest {
+    let request = SignRequestPending {
         epsilon: action.request.indexed.id.epsilon,
         payload: action.request.indexed.id.payload,
     };

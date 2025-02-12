@@ -3,7 +3,7 @@ use std::str::FromStr;
 use k256::Scalar;
 use mpc_contract::{
     config::Config,
-    primitives::{CandidateInfo, Candidates, Participants, SignRequest, SignatureRequest},
+    primitives::{CandidateInfo, Candidates, Participants, SignRequest, SignRequestPending},
     update::ProposeUpdateArgs,
 };
 use mpc_crypto::{ScalarExt, SignatureResponse};
@@ -41,7 +41,7 @@ pub fn sing_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
 pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::Result<String> {
     let payload_hashed = web3::signing::keccak256(&PAYLOAD);
 
-    let request = SignatureRequest::new(
+    let request = SignRequestPending::new(
         Scalar::from_bytes(payload_hashed)
             .ok_or_else(|| anyhow::anyhow!("Failed to convert bytes to Scalar"))?,
         caller_id,

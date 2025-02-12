@@ -26,7 +26,8 @@ pub struct YieldIndex {
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
-pub struct SignatureRequest {
+#[borsh(crate = "near_sdk::borsh")]
+pub struct SignRequestPending {
     #[borsh(
         serialize_with = "borsh_scalar::serialize",
         deserialize_with = "borsh_scalar::deserialize_reader"
@@ -42,16 +43,16 @@ pub struct SignatureRequest {
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct ContractSignatureRequest {
-    pub request: SignatureRequest,
+    pub request: SignRequestPending,
     pub requester: AccountId,
     pub deposit: NearToken,
     pub required_deposit: NearToken,
 }
 
-impl SignatureRequest {
+impl SignRequestPending {
     pub fn new(payload: Scalar, predecessor_id: &AccountId, path: &str) -> Self {
         let epsilon = derive_epsilon(predecessor_id, path);
-        SignatureRequest { epsilon, payload }
+        SignRequestPending { epsilon, payload }
     }
 }
 
