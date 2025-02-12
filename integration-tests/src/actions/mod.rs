@@ -300,12 +300,12 @@ mod tests {
     fn signatures_havent_changed() {
         const CHAIN_ID_ETH: u64 = 31337;
 
-        let big_r = "03f13a99141ce0a4043a7c02afdec6d52f25c6b3de01967acc5cf4a3fa43801589";
-        let s = "39e5631fcc06ffccf8469a3cdcdce0651ebafd998a4280ebbf5dc24a749c98fb";
-        let mpc_key = "04b5695a882aeaf36bf3933e21911b5cbcceae7fd7cb424f3ea221c7e8d390aad4ad2c1a427faec960f22a5442739c0a04fd64ab7ce4c93980417bd3d1d8bc04ea";
-        let account_id = "dev-20240719125040-80075249096169.test.near";
+        let big_r = "029b1b94bf4511b1a25986ba858cfa0fbdd5e4077c02e1d1102a194389b1f72df7";
+        let s = "25f3494bb7e7b3349a4b4d939d3e5ae1787a0863e4f698fb8ed2d3e11c195035";
+        let mpc_key = "045b4fa179e005361fd858f8a6f896d7afc23a53d3f95d6566a88cde954e7b2f1cb77c554705c35d4ffced67aeafbcda46d9d89d6f200c3a3d109f92872863b3dc";
+        let account_id = "dev-20250212213501-93636560094065.test.near";
         let payload_hash: [u8; 32] =
-            hex::decode("49f32740939bfdcbd8d1786075df7aca384381ec203975c3a6c1fd80acddcd4c")
+            hex::decode("835b9f469b36126284df2e06ecab9482cf495413ab9275faaafb2d40d79cf7bb")
                 .unwrap()
                 .try_into()
                 .unwrap();
@@ -455,7 +455,7 @@ mod tests {
     ) -> Result<(), &'static str> {
         // let z: Scalar = Scalar::reduce_bytes(z);
         let z =
-        <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(z);
+    <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(z);
         let (r, s) = sig.split_scalars();
         let s_inv = *s.invert_vartime();
         let u1 = z * s_inv;
@@ -476,9 +476,9 @@ mod tests {
         // println!("------------- verify_prehashed[end] -------------");
 
         let reduced =
-        <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
-            &x,
-        );
+    <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
+        &x,
+    );
 
         //println!("reduced {reduced:#?}");
 
