@@ -225,7 +225,7 @@ async fn handle_block(
                     continue;
                 };
                 let epsilon = derive_epsilon(&action.predecessor_id(), &arguments.request.path);
-                let sign_id = SignId::new(receipt_id.0, epsilon, payload);
+                let sign_id = SignId::new(receipt_id.0);
                 tracing::info!(
                     ?sign_id,
                     caller_id = receipt.predecessor_id().to_string(),
@@ -239,6 +239,8 @@ async fn handle_block(
                     id: sign_id,
                     args: SignArgs {
                         entropy,
+                        epsilon,
+                        payload,
                         path: arguments.request.path,
                         key_version: arguments.request.key_version,
                     },
@@ -263,8 +265,10 @@ async fn handle_block(
     for request in pending_requests {
         tracing::info!(
             sign_id = ?request.id,
-            payload = hex::encode(request.id.payload.to_bytes()),
+            payload = hex::encode(request.args.payload.to_bytes()),
             entropy = hex::encode(request.args.entropy),
+            epsilon = hex::encode(request.args.epsilon.to_bytes()),
+
             "new sign request"
         );
         if let Err(err) = ctx.sign_tx.send(request).await {

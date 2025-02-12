@@ -130,9 +130,11 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<Index
         .unwrap_or([0u8; 32]);
 
     Ok(IndexedSignRequest {
-        id: SignId::new(event.request_id, epsilon, payload),
+        id: SignId::new(event.request_id),
         args: SignArgs {
             entropy,
+            epsilon,
+            payload,
             path: event.path,
             key_version: 0,
         },

@@ -356,14 +356,14 @@ async fn execute_publish(client: ChainClient, mut action: PublishAction) {
         "trying to publish signature",
     );
     let expected_public_key =
-        mpc_crypto::derive_key(action.public_key, action.request.indexed.id.epsilon);
+        mpc_crypto::derive_key(action.public_key, action.request.indexed.args.epsilon);
 
     // We do this here, rather than on the client side, so we can use the ecrecover system function on NEAR to validate our signature
     let Ok(signature) = crate::kdf::into_eth_sig(
         &expected_public_key,
         &action.output.big_r,
         &action.output.s,
-        action.request.indexed.id.payload,
+        action.request.indexed.args.payload,
     ) else {
         tracing::error!(
             sign_id = ?action.request.indexed.id,
@@ -418,8 +418,8 @@ async fn try_publish_near(
     signature: &SignatureResponse,
 ) -> Result<(), near_fetch::Error> {
     let request = SignRequestPending {
-        epsilon: action.request.indexed.id.epsilon,
-        payload: action.request.indexed.id.payload,
+        epsilon: action.request.indexed.args.epsilon,
+        payload: action.request.indexed.args.payload,
     };
 
     let outcome = near

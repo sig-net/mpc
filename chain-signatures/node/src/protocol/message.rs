@@ -1313,7 +1313,7 @@ mod tests {
                 data: vec![8; 512],
             }),
             Message::Signature(SignatureMessage {
-                id: SignId::new([7; 32], Scalar::ONE, Scalar::ZERO),
+                id: SignId::new([7; 32]),
                 proposer: from,
                 presignature_id: 1234,
                 epoch: 0,

@@ -31,50 +31,48 @@ use near_account_id::AccountId;
 /// This is the maximum amount of sign requests that we can accept in the network.
 const MAX_SIGN_REQUESTS: usize = 1024;
 
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct SignId {
     #[serde(with = "serde_bytes")]
     pub request_id: [u8; 32],
-    #[serde(with = "cbor_scalar")]
-    pub payload: Scalar,
-    #[serde(with = "cbor_scalar")]
-    pub epsilon: Scalar,
-}
-
-impl std::hash::Hash for SignId {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.request_id.hash(state);
-        self.payload.to_bytes().hash(state);
-        self.epsilon.to_bytes().hash(state);
-    }
 }
 
 impl std::fmt::Debug for SignId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("SignId")
             .field(&near_primitives::hash::CryptoHash(self.request_id))
-            .field(&hex::encode(self.payload.to_bytes()))
-            .field(&hex::encode(self.epsilon.to_bytes()))
             .finish()
     }
 }
 
 impl SignId {
-    pub fn new(request_id: [u8; 32], epsilon: Scalar, payload: Scalar) -> Self {
-        Self {
-            request_id,
-            epsilon,
-            payload,
-        }
+    pub fn new(request_id: [u8; 32]) -> Self {
+        Self { request_id }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignArgs {
     #[serde(with = "serde_bytes")]
     pub entropy: [u8; 32],
+    #[serde(with = "cbor_scalar")]
+    pub epsilon: Scalar,
+    #[serde(with = "cbor_scalar")]
+    pub payload: Scalar,
     pub path: String,
     pub key_version: u32,
+}
+
+impl std::fmt::Debug for SignArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignArgs")
+            .field("entropy", &near_primitives::hash::CryptoHash(self.entropy))
+            .field("epsilon", &self.epsilon)
+            .field("payload", &self.payload)
+            .field("path", &self.path)
+            .field("key_version", &self.key_version)
+            .finish()
+    }
 }
 
 /// All relevant info pertaining to an Indexed sign request from an indexer.
@@ -323,12 +321,7 @@ impl SignatureManager {
             ..
         } = &request;
         let IndexedSignRequest {
-            id:
-                SignId {
-                    epsilon,
-                    payload,
-                    request_id,
-                },
+            id: SignId { request_id },
             args,
             ..
         } = indexed;
@@ -339,14 +332,14 @@ impl SignatureManager {
         let output: PresignOutput<Secp256k1> = PresignOutput {
             big_r: (big_r * delta).to_affine(),
             k: k * delta.invert().unwrap(),
-            sigma: (sigma + *epsilon * k) * delta.invert().unwrap(),
+            sigma: (sigma + args.epsilon * k) * delta.invert().unwrap(),
         };
         let protocol = Box::new(cait_sith::sign(
             participants,
             me,
-            derive_key(public_key, *epsilon),
+            derive_key(public_key, args.epsilon),
             output,
-            *payload,
+            args.payload,
         )?);
         Ok(SignatureGenerator::new(
             protocol,
