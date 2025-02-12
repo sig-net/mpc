@@ -34,13 +34,13 @@ contract ChainSignatures is AccessControl {
     event SignatureRequested(
         address sender,
         bytes32 payload,
-        string path,
         uint32 keyVersion,
+        uint256 deposit,
+        uint256 chainId,
+        string path,
         string algo,
         string dest,
-        string params,
-        uint256 deposit,
-        uint256 chainId
+        string params
     );
 
     event SignatureResponded(
@@ -56,21 +56,19 @@ contract ChainSignatures is AccessControl {
         signatureDeposit = _signatureDeposit;
     }
 
-    function sign(
-        SignRequest memory _request
-    ) external payable {
+    function sign(SignRequest memory _request) external payable {
         require(msg.value >= signatureDeposit, "Insufficient deposit");
 
         emit SignatureRequested(
             msg.sender,
             _request.payload,
-            _request.path,
             _request.keyVersion,
+            msg.value,
+            block.chainid,
+            _request.path,
             _request.algo,
             _request.dest,
-            _request.params,
-            msg.value,
-            block.chainid
+            _request.params
         );
     }
 

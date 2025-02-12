@@ -23,14 +23,6 @@ async function main() {
     // Verify contract exists
     const code = await hre.ethers.provider.getCode(contractAddress);
     if (code === "0x") throw new Error("No contract deployed at this address");
-
-    // Get public key data
-    const publicKey = await chainSignatures.getPublicKey();
-    console.log("Public key:", {
-      x: publicKey.x?.toString() || 'undefined',
-      y: publicKey.y?.toString() || 'undefined'
-    });
-
   } catch (error) {
     console.error("Error:", error.message);
   }
@@ -39,7 +31,7 @@ async function main() {
   // Request to ign a test message
   try {
     const testMessage = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9";
-    const testPath = "test2";
+    const testPath = "test5";
     const signatureDeposit = await chainSignatures.getSignatureDeposit();
     const signer = (await hre.ethers.getSigners())[0];
     
@@ -61,16 +53,22 @@ async function main() {
     if (requestEvent) {
       const parsedEvent = chainSignatures.interface.parseLog(requestEvent);
       console.log("Signature requested successfully!");
-      console.log("Request ID:", parsedEvent.args.requestId);
       console.log("Payload Hash:", parsedEvent.args.payload.toString());
+      const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["address", "bytes", "string", "uint32", "uint256", "string", "string", "string"],
+        [parsedEvent.args.sender, parsedEvent.args.payload, parsedEvent.args.path, parsedEvent.args.keyVersion, parsedEvent.args.chainId, parsedEvent.args.algo, parsedEvent.args.dest, parsedEvent.args.params]
+      );
+      const requestId = ethers.keccak256(encoded);
+
+      console.log("Request ID:", requestId);
 
       // Add event listener for SignatureResponded
       console.log("Waiting for signature response...");
-      const filter = chainSignatures.filters.SignatureResponded(parsedEvent.args.requestId);
+      const filter = chainSignatures.filters.SignatureResponded(requestId);
       
       chainSignatures.once(filter, (event) => {
         console.log("\nSignature response received!");
-        console.log("Request ID:", event.args.requestId);
+        console.log("Request ID:", requestId);
         console.log("Response:")
         console.log("  bigR:", event.args.response.bigR);
         console.log("  s:", event.args.response.s);

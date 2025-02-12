@@ -7,11 +7,13 @@ use mpc_crypto::kdf::derive_epsilon_eth;
 use mpc_crypto::ScalarExt;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Keccak256};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use web3::ethabi::{encode, Token};
 use web3::futures::StreamExt;
 use web3::types::{FilterBuilder, Log, H160, H256, U256};
 
@@ -104,9 +106,9 @@ pub struct EthSignRequest {
 fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignRequest> {
     let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
-    if event.deposit < 1 {
-        tracing::warn!("insufficient deposit: {}", event.deposit);
-        return Err(anyhow::anyhow!("insufficient deposit"));
+    if event.deposit == U256::from_dec_str("0").unwrap() {
+        tracing::warn!("deposit is 0, skipping sign request");
+        return Err(anyhow::anyhow!("deposit is 0"));
     }
 
     if event.key_version != 0 {
@@ -132,7 +134,7 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignR
 
     let request = ContractSignRequest {
         payload,
-        path: event.path,
+        path: event.path.clone(),
         key_version: event.key_version,
         chain: Ethereum,
     };
@@ -148,8 +150,12 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignR
         .map(|h| *h.as_fixed_bytes())
         .unwrap_or([0u8; 32]);
 
+    let request_id = calculate_request_id(&event);
+
+    tracing::info!("etheresum signature request_id: {:?}", request_id);
+
     Ok(SignRequest {
-        request_id: event.request_id,
+        request_id,
         request,
         epsilon,
         entropy,
@@ -158,17 +164,29 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignR
     })
 }
 
+fn encode_abi(event: &SignatureRequestedEvent) -> Vec<u8> {
+    encode(&[
+        Token::Address(event.requester),         // Solidity `address`
+        Token::Bytes(event.payload_hash.into()), // Solidity `bytes`
+        Token::String(event.path.clone()),       // Solidity `string`
+        Token::Uint(event.key_version.into()),   // Solidity `uint32`
+        Token::Uint(event.chain_id),             // Solidity `uint256`
+        Token::String(event.algo.clone()),       // Solidity `string`
+        Token::String(event.dest.clone()),       // Solidity `string`
+        Token::String(event.params.clone()),     // Solidity `string`
+    ])
+}
+
+fn calculate_request_id(event: &SignatureRequestedEvent) -> [u8; 32] {
+    let abi_encoded = encode_abi(event);
+    let mut hasher = Keccak256::new();
+    hasher.update(abi_encoded);
+    let output: [u8; 32] = hasher.finalize().into();
+    output
+}
+
 // Helper function to parse event logs
 fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
-    // Ensure we have enough topics
-    if log.topics.len() < 2 {
-        anyhow::bail!("Invalid number of topics");
-    }
-
-    // Parse request_id from topics[1]
-    let mut request_id = [0u8; 32];
-    request_id.copy_from_slice(log.topics[1].as_bytes());
-
     // Parse data fields
     let data = log.data.0.as_slice();
 
@@ -181,49 +199,51 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
 
     let key_version = U256::from_big_endian(&data[64..96]).as_u32();
 
-    let deposit = U256::from_big_endian(&data[96..128]).as_usize();
+    let deposit = U256::from_big_endian(&data[96..128]);
 
-    // Parse path string
-    let path_offset = U256::from_big_endian(&data[128..160]).as_usize();
-    let path_length = U256::from_big_endian(&data[path_offset..path_offset + 32]).as_usize();
-    let path_bytes = &data[path_offset + 32..path_offset + 32 + path_length];
-    let path = String::from_utf8(path_bytes.to_vec())?;
+    let chain_id = U256::from_big_endian(&data[128..160]);
 
-    // // Parse algo string
-    // let algo_offset = U256::from_big_endian(&data[160..192]).as_usize();
-    // let algo_length = U256::from_big_endian(&data[algo_offset..algo_offset + 32]).as_usize();
-    // let algo_bytes = &data[algo_offset + 32..algo_offset + 32 + algo_length];
-    // let algo = String::from_utf8(algo_bytes.to_vec())?;
+    let path = parse_string_args(data, 160);
 
-    // // Parse dest string
-    // let dest_offset = U256::from_big_endian(&data[192..224]).as_usize();
-    // let dest_length = U256::from_big_endian(&data[dest_offset..dest_offset + 32]).as_usize();
-    // let dest_bytes = &data[dest_offset + 32..dest_offset + 32 + dest_length];
-    // let dest = String::from_utf8(dest_bytes.to_vec())?;
+    let algo = parse_string_args(data, 192);
 
-    // // Parse params string
-    // let params_offset = U256::from_big_endian(&data[224..256]).as_usize();
-    // let dest_length = U256::from_big_endian(&data[dest_offset..dest_offset + 32]).as_usize();
-    // let dest_bytes = &data[dest_offset + 32..dest_offset + 32 + dest_length];
-    // let dest = String::from_utf8(dest_bytes.to_vec())?;
+    let dest = parse_string_args(data, 224);
+
+    let params = parse_string_args(data, 256);
 
     tracing::info!(
-        "Parsed event: request_id={}, requester={}, payload_hash={}, path={}, deposit={}",
-        hex::encode(request_id),
+        "Parsed event: requester={}, payload_hash={}, path={}, deposit={}, chain_id={}, algo={}, dest={}, params={}",
         requester,
         hex::encode(payload_hash),
         path,
         deposit,
+        chain_id,
+        algo,
+        dest,
+        params
     );
 
     Ok(SignatureRequestedEvent {
-        request_id,
         requester,
         payload_hash,
         path,
         key_version,
         deposit,
+        chain_id,
+        algo,
+        dest,
+        params,
     })
+}
+
+fn parse_string_args(data: &[u8], offset_start: usize) -> String {
+    let offset = U256::from_big_endian(&data[offset_start..offset_start + 32]).as_usize();
+    let length = U256::from_big_endian(&data[offset..offset + 32]).as_usize();
+    if length == 0 {
+        return String::new();
+    }
+    let bytes = &data[offset + 32..offset + 32 + length];
+    String::from_utf8(bytes.to_vec()).unwrap_or_default()
 }
 
 pub async fn run(
@@ -239,7 +259,7 @@ pub async fn run(
     tracing::info!("running ethereum indexer");
     let contract_address = H160::from_str(&eth.contract_address)?;
     let signature_requested_topic = H256::from_slice(&web3::signing::keccak256(
-        b"SignatureRequested(bytes32,address,bytes32,uint32,uint256,string,string,string,string)",
+        b"SignatureRequested(address,bytes32,uint32,uint256,uint256,string,string,string,string)",
     ));
 
     let filter = FilterBuilder::default()
@@ -297,10 +317,13 @@ pub async fn run(
 
 #[derive(Debug)]
 struct SignatureRequestedEvent {
-    request_id: [u8; 32],
     requester: H160,
     payload_hash: [u8; 32],
     path: String,
     key_version: u32,
-    deposit: usize,
+    deposit: U256,
+    chain_id: U256,
+    algo: String,
+    dest: String,
+    params: String,
 }

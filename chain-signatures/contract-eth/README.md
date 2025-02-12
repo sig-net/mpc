@@ -49,7 +49,7 @@ cargo run -- setup-env --eth-contract-address <eth-contract-address-without-0x-p
 
 4. Populate the ignition/params.json with admin address:
 ```bash
-node scripts/populateParams.js <adminAddress>
+node scripts/populateParams.js <adminAddress> <deposit required in wei>
 ```
 
 5. Then run the following command to deploy the contract:
@@ -73,7 +73,7 @@ npx hardhat vars set SEPOLIA_PRIVATE_KEY
 ```
 3. Populate the ignition/params.json with admin address:
 ```bash
-node scripts/populateParams.js 0x53370DF3f1F8A9d95133Bc01D272E3c57e20D010
+node scripts/populateParams.js <adminAddress> <deposit required in wei>
 ```
 
 4. Deploy the contract with right public key configured in `params.json`.
@@ -83,7 +83,7 @@ npx hardhat ignition deploy ignition/modules/chainSignatures.js --parameters ign
 
 5. Make sure you have docker daemon running. Go to `integration-tests` and run the following command to start the MPC cluster connected to Ethereum Sepolia Testnet:
 ```bash
-cargo run -- setup-env --eth-rpc-ws-url wss://sepolia.infura.io/ws/v3/a7081ff0d8484018bd5d32e7a280856d --eth-rpc-http-url https://sepolia.infura.io/v3/a7081ff0d8484018bd5d32e7a280856d --eth-account-sk 16ad7c7357b389b40b781ed8844a57bacae14815a41282b10365ff9f1e11875b --eth-contract-address 902f4Ea2BfDA22CCb5E0cEf81362d48E1dF04a21
+cargo run -- setup-env --eth-rpc-ws-url wss://sepolia.infura.io/ws/v3/<api-key> --eth-rpc-http-url https://sepolia.infura.io/v3/<api-key> --eth-account-sk <eth-account-sk> --eth-contract-address <eth-contract-address-without-0x-prefix>
 ```
 
 6. Then run the following command to request a signature from MPC:
@@ -108,16 +108,3 @@ After [this commit](https://github.com/sig-net/mpc/pull/58/commits/f2308fe3c7352
 After 1, the respond gas cost is reduced to 1.2M. After 2, the respond gas cost is reduced to 260K. Then we can further reduce the respond gas cost by moving the verify ECMUL operation to sign, so sign gas cost increased from 140k to 350k, and respond gas cost reduced to 53k. The sign gas cost, paid by user, is similar to a uniswap swap and the respond gas, which is paid by the mpc node runner to a very cheap level.
 
 There are certain small gas optimizations possible to reduce a little more gas, but at this stage I think it is not a priority.
-
-## Upgrade contract
-
-To upgrade the contract, after change to ChainSignatures.sol, you can use the following command:
-```bash
-npx hardhat run scripts/upgradeContract.js --network <network>
-```
-
-It will upgrade the implementation contract to the new version and keep the proxy contract address the same. Make sure you always extends the storage and never override it. For more details, please refer to [Writing Upgradeable Contracts](https://docs.openzeppelin.com/upgrades-plugins/writing-upgradeable).
-
-## Update the public key
-
-To update the public key, you also need to update the contract. Add a `reinitialize` function to the contract that set the public key to new one, and upgrade the contract as above.
