@@ -17,3 +17,4 @@ sha3.workspace = true
 getrandom = { version = "0.2.12", features = ["custom"] }
 
 [dev-dependencies]
+web3.workspace = true
