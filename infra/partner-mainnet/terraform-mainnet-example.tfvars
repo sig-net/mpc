@@ -20,6 +20,6 @@ node_configs = [
     eth_account_sk_secret_id = "multichain-eth-account-sk-mainnet-0"
     eth_rpc_ws_url_secret_id = "multichain-eth-rpc-ws-url-0"
     eth_rpc_http_url_secret_id = "multichain-eth-rpc-http-url-0"
-    eth_contract_address = "<eth-contract-address>"
+    eth_contract_address = "D39b0aBc0acab7d48aC6DFC9612543f035233b68"
   },
 ]
