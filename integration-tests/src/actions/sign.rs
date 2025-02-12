@@ -2,7 +2,7 @@ use std::fmt;
 use std::future::IntoFuture;
 
 use cait_sith::FullSignature;
-use k256::{Scalar, Secp256k1};
+use k256::{elliptic_curve::sec1::ToEncodedPoint, Scalar, Secp256k1};
 use mpc_contract::errors;
 use mpc_contract::primitives::{SignRequest, SignatureRequest};
 use mpc_crypto::{
@@ -163,13 +163,14 @@ impl SignAction<'_> {
         mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
 
         // Useful for populating the "signatures_havent_changed" test's hardcoded values
-        // dbg!(
-        //     hex::encode(signature.big_r.to_encoded_point(true).to_bytes()),
-        //     hex::encode(signature.s.to_bytes()),
-        //     hex::encode(&mpc_pk_bytes),
-        //     hex::encode(&payload_hash),
-        //     account.id(),
-        // );
+        dbg!(
+            "ref_string",
+            hex::encode(signature.big_r.to_encoded_point(true).to_bytes()),
+            hex::encode(signature.s.to_bytes()),
+            hex::encode(&mpc_pk_bytes),
+            hex::encode(&payload_hash),
+            account.id(),
+        );
         actions::validate_signature(account.id(), &mpc_pk_bytes, payload_hash, &signature).await?;
 
         Ok(SignOutcome {
