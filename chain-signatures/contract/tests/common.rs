@@ -7,12 +7,11 @@ use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::point::DecompressPoint as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{AffinePoint, FieldBytes, Scalar, Secp256k1};
-use mpc_contract::primitives::{
-    CandidateInfo, ParticipantInfo, Participants, SignRequest, SignRequestPending,
-};
+use mpc_contract::primitives::{CandidateInfo, ParticipantInfo, Participants, SignRequest};
 use mpc_contract::update::UpdateId;
 use mpc_crypto::kdf::{check_ec_signature, derive_secret_key};
 use mpc_crypto::{derive_epsilon, derive_key, ScalarExt as _, SignatureResponse};
+use mpc_primitives::SignRequestPending;
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccountId, NearToken};
 use near_workspaces::{Account, Contract, Worker};

@@ -3278,6 +3278,7 @@ dependencies = [
  "mpc-crypto",
  "mpc-keys",
  "mpc-node",
+ "mpc-primitives",
  "near-account-id",
  "near-crypto 0.26.0",
  "near-fetch",
@@ -3653,6 +3654,7 @@ dependencies = [
  "ecdsa 0.16.9",
  "k256",
  "mpc-crypto",
+ "mpc-primitives",
  "near-crypto 0.27.0",
  "near-sdk",
  "near-workspaces 0.15.0",
@@ -3719,6 +3721,7 @@ dependencies = [
  "mpc-contract",
  "mpc-crypto",
  "mpc-keys",
+ "mpc-primitives",
  "near-account-id",
  "near-crypto 0.26.0",
  "near-fetch",
@@ -3744,6 +3747,20 @@ dependencies = [
  "tracing-subscriber",
  "url 2.5.2",
  "web3",
+]
+
+[[package]]
+name = "mpc-primitives"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "borsh",
+ "getrandom",
+ "k256",
+ "mpc-crypto",
+ "near-account-id",
+ "near-sdk",
+ "serde",
 ]
 
 [[package]]

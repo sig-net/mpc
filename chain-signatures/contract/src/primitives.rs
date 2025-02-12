@@ -1,6 +1,4 @@
-use k256::Scalar;
-use mpc_crypto::derive_epsilon;
-use mpc_crypto::types::borsh_scalar;
+use mpc_primitives::SignRequestPending;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
@@ -23,37 +21,6 @@ pub enum StorageKey {
 #[borsh(crate = "near_sdk::borsh")]
 pub struct YieldIndex {
     pub data_id: CryptoHash,
-}
-
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
-#[borsh(crate = "near_sdk::borsh")]
-pub struct SignRequestPending {
-    #[borsh(
-        serialize_with = "borsh_scalar::serialize",
-        deserialize_with = "borsh_scalar::deserialize_reader"
-    )]
-    pub epsilon: Scalar,
-    #[borsh(
-        serialize_with = "borsh_scalar::serialize",
-        deserialize_with = "borsh_scalar::deserialize_reader"
-    )]
-    pub payload: Scalar,
-}
-
-impl SignRequestPending {
-    pub fn new(payload: Scalar, predecessor_id: &AccountId, path: &str) -> Self {
-        let epsilon = derive_epsilon(predecessor_id, path);
-        SignRequestPending { epsilon, payload }
-    }
-}
-
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
-#[borsh(crate = "near_sdk::borsh")]
-pub struct ContractSignRequest {
-    pub request: SignRequestPending,
-    pub requester: AccountId,
-    pub deposit: NearToken,
-    pub required_deposit: NearToken,
 }
 
 #[derive(
@@ -326,6 +293,15 @@ impl PkVotes {
     pub fn entry(&mut self, public_key: PublicKey) -> &mut HashSet<AccountId> {
         self.votes.entry(public_key).or_default()
     }
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct InternalSignRequest {
+    pub request: SignRequestPending,
+    pub requester: AccountId,
+    pub deposit: NearToken,
+    pub required_deposit: NearToken,
 }
 
 #[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Debug)]

@@ -14,6 +14,7 @@ use mpc_crypto::{
     derive_epsilon, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     types::SignatureResponse, ScalarExt as _,
 };
+use mpc_primitives::SignRequestPending;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LookupMap;
 use near_sdk::json_types::U128;
@@ -22,8 +23,8 @@ use near_sdk::{
     PromiseError, PublicKey,
 };
 use primitives::{
-    CandidateInfo, Candidates, ContractSignRequest, Participants, PkVotes, SignRequest,
-    SignRequestPending, SignaturePromiseError, SignatureResult, StorageKey, Votes, YieldIndex,
+    CandidateInfo, Candidates, InternalSignRequest, Participants, PkVotes, SignRequest,
+    SignaturePromiseError, SignatureResult, StorageKey, Votes, YieldIndex,
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -176,7 +177,7 @@ impl VersionedMpcContract {
             );
             env::log_str(&serde_json::to_string(&near_sdk::env::random_seed_array()).unwrap());
             self.mark_request_received(&request);
-            let contract_signature_request = ContractSignRequest {
+            let contract_signature_request = InternalSignRequest {
                 request,
                 requester: predecessor,
                 deposit,
@@ -696,7 +697,7 @@ impl VersionedMpcContract {
     }
 
     #[private]
-    pub fn sign_helper(&mut self, contract_signature_request: ContractSignRequest) {
+    pub fn sign_helper(&mut self, contract_signature_request: InternalSignRequest) {
         match self {
             Self::V0(mpc_contract) => {
                 let yield_promise = env::promise_yield_create(
@@ -749,14 +750,14 @@ impl VersionedMpcContract {
         }
     }
 
-    fn refund_on_fail(request: &ContractSignRequest) {
+    fn refund_on_fail(request: &InternalSignRequest) {
         let amount = request.deposit;
         let to = request.requester.clone();
         log!("refund {amount} to {to} due to fail");
         Promise::new(to).transfer(amount);
     }
 
-    fn refund_on_success(request: &ContractSignRequest) {
+    fn refund_on_success(request: &InternalSignRequest) {
         let deposit = request.deposit;
         let required = request.required_deposit;
         if let Some(diff) = deposit.checked_sub(required) {
@@ -772,7 +773,7 @@ impl VersionedMpcContract {
     #[handle_result]
     pub fn clear_state_on_finish(
         &mut self,
-        contract_signature_request: ContractSignRequest,
+        contract_signature_request: InternalSignRequest,
         #[callback_result] signature: Result<SignatureResponse, PromiseError>,
     ) -> Result<SignatureResult<SignatureResponse, SignaturePromiseError>, Error> {
         match self {

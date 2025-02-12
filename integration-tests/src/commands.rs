@@ -3,11 +3,12 @@ use std::str::FromStr;
 use k256::Scalar;
 use mpc_contract::{
     config::Config,
-    primitives::{CandidateInfo, Candidates, Participants, SignRequest, SignRequestPending},
+    primitives::{CandidateInfo, Candidates, Participants, SignRequest},
     update::ProposeUpdateArgs,
 };
 use mpc_crypto::{ScalarExt, SignatureResponse};
 use mpc_keys::hpke;
+use mpc_primitives::SignRequestPending;
 use near_account_id::AccountId;
 use near_primitives::borsh;
 use near_sdk::PublicKey;

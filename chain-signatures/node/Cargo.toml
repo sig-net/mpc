@@ -60,5 +60,6 @@ near-primitives = "0.26.0"
 near-sdk.workspace = true
 
 mpc-contract.workspace = true
-mpc-keys.workspace = true
 mpc-crypto.workspace = true
+mpc-keys.workspace = true
+mpc-primitives.workspace = true

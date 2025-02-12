@@ -6,9 +6,9 @@ use crate::util::AffinePointExt as _;
 
 use cait_sith::FullSignature;
 use k256::Secp256k1;
-use mpc_contract::primitives::SignRequestPending;
 use mpc_crypto::SignatureResponse;
 use mpc_keys::hpke;
+use mpc_primitives::SignRequestPending;
 
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
