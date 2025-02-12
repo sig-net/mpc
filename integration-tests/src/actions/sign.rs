@@ -6,7 +6,8 @@ use k256::{Scalar, Secp256k1};
 use mpc_contract::errors;
 use mpc_contract::primitives::{SignRequest, SignatureRequest};
 use mpc_crypto::{
-    derive_epsilon, ScalarExt as _, SerializableAffinePoint, SerializableScalar, SignatureResponse,
+    derive_epsilon_near, ScalarExt as _, SerializableAffinePoint, SerializableScalar,
+    SignatureResponse,
 };
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
@@ -162,11 +163,12 @@ impl SignAction<'_> {
         mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
 
         // Useful for populating the "signatures_havent_changed" test's hardcoded values
-        // dbg!(
+        // tracing::warn!(
+        //     "ref_string: big_r={}, s={}, mpc_pk_bytes={}, payload_hash={}, account_id={}",
         //     hex::encode(signature.big_r.to_encoded_point(true).to_bytes()),
         //     hex::encode(signature.s.to_bytes()),
         //     hex::encode(&mpc_pk_bytes),
-        //     hex::encode(&payload_hash),
+        //     hex::encode(payload_hash),
         //     account.id(),
         // );
         actions::validate_signature(account.id(), &mpc_pk_bytes, payload_hash, &signature).await?;
@@ -238,7 +240,7 @@ impl SignAction<'_> {
             public_key: rogue.secret_key().public_key().clone().into(),
             secret_key: rogue.secret_key().to_string().parse()?,
         };
-        let epsilon = derive_epsilon(predecessor, &self.path);
+        let epsilon = derive_epsilon_near(predecessor, &self.path);
 
         let request = SignatureRequest {
             payload_hash: Scalar::from_bytes(payload_hash).unwrap().into(),

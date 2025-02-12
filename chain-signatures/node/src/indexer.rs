@@ -2,7 +2,7 @@ use crate::protocol::Chain::NEAR;
 use crate::protocol::{Chain, SignRequest};
 use crate::storage::app_data_storage::AppDataStorage;
 use k256::Scalar;
-use mpc_crypto::{derive_epsilon, ScalarExt};
+use mpc_crypto::{derive_epsilon_near, ScalarExt};
 use near_account_id::AccountId;
 use near_lake_framework::{Lake, LakeBuilder, LakeContext};
 use near_lake_primitives::actions::ActionMetaDataExt;
@@ -233,7 +233,8 @@ async fn handle_block(
                     );
                     continue;
                 };
-                let epsilon = derive_epsilon(&action.predecessor_id(), &arguments.request.path);
+                let epsilon =
+                    derive_epsilon_near(&action.predecessor_id(), &arguments.request.path);
                 tracing::info!(
                     receipt_id = %receipt_id,
                     caller_id = receipt.predecessor_id().to_string(),

@@ -1,5 +1,5 @@
 use k256::Scalar;
-use mpc_crypto::{derive_epsilon, SerializableScalar};
+use mpc_crypto::{derive_epsilon_near, SerializableScalar};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
@@ -42,7 +42,7 @@ pub struct ContractSignatureRequest {
 
 impl SignatureRequest {
     pub fn new(payload_hash: Scalar, predecessor_id: &AccountId, path: &str) -> Self {
-        let epsilon = derive_epsilon(predecessor_id, path);
+        let epsilon = derive_epsilon_near(predecessor_id, path);
         let epsilon = SerializableScalar { scalar: epsilon };
         let payload_hash = SerializableScalar {
             scalar: payload_hash,
