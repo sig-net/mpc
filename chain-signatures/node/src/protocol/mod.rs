@@ -2,6 +2,7 @@ mod cryptography;
 
 pub mod consensus;
 pub mod contract;
+pub mod error;
 pub mod message;
 pub mod presignature;
 pub mod signature;
@@ -13,7 +14,7 @@ pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
-pub use signature::{SignQueue, SignRequest};
+pub use signature::{IndexedSignRequest, SignQueue};
 pub use state::NodeState;
 pub use sysinfo::{Components, CpuRefreshKind, Disks, RefreshKind, System};
 
@@ -44,7 +45,7 @@ struct Ctx {
     mpc_contract_id: AccountId,
     near: NearClient,
     rpc_channel: RpcChannel,
-    sign_rx: Arc<RwLock<mpsc::Receiver<SignRequest>>>,
+    sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
@@ -67,7 +68,7 @@ impl ConsensusCtx for &mut MpcSignProtocol {
         &self.ctx.my_address
     }
 
-    fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<SignRequest>>> {
+    fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>> {
         self.ctx.sign_rx.clone()
     }
 
@@ -97,6 +98,14 @@ impl CryptographicCtx for &mut MpcSignProtocol {
         &mut self.ctx.secret_storage
     }
 
+    fn triple_storage(&self) -> &TripleStorage {
+        &self.ctx.triple_storage
+    }
+
+    fn presignature_storage(&self) -> &PresignatureStorage {
+        &self.ctx.presignature_storage
+    }
+
     fn channel(&self) -> &MessageChannel {
         &self.channel
     }
@@ -122,7 +131,7 @@ impl MpcSignProtocol {
         near: NearClient,
         rpc_channel: RpcChannel,
         channel: MessageChannel,
-        sign_rx: mpsc::Receiver<SignRequest>,
+        sign_rx: mpsc::Receiver<IndexedSignRequest>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
@@ -328,7 +337,7 @@ fn update_system_metrics(node_account_id: &str) {
         .set(total_disk_space);
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy, Hash)]
 pub enum Chain {
     NEAR,
     Ethereum,

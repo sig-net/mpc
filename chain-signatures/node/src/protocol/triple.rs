@@ -1,7 +1,7 @@
 use super::contract::primitives::Participants;
 use super::cryptography::CryptographicError;
 use super::message::{MessageChannel, TripleMessage};
-use super::presignature::GenerationError;
+use crate::protocol::error::GenerationError;
 use crate::storage::triple_storage::TripleStorage;
 use crate::types::TripleProtocol;
 use crate::util::AffinePointExt;

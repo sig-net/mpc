@@ -1,3 +1,6 @@
+use ethers::signers::LocalWallet;
+use ethers::signers::Signer;
+use hex;
 use mpc_keys::hpke;
 
 fn main() {
@@ -14,4 +17,15 @@ fn main() {
     let near_account_pk = near_account_sk.public_key();
     println!("near account public key: {}", near_account_pk);
     println!("near account secret key: {}", near_account_sk);
+
+    // generate ethereum account secret and public key
+    let wallet = LocalWallet::new(&mut rand::thread_rng());
+    let private_key = wallet.signer().to_bytes();
+    let public_key = wallet.signer().verifying_key().to_encoded_point(false);
+    println!("ethereum account private key: {}", hex::encode(private_key));
+    println!(
+        "ethereum account public key: {}",
+        hex::encode(public_key.as_bytes())
+    );
+    println!("Ethereum Address: {:?}", wallet.address());
 }

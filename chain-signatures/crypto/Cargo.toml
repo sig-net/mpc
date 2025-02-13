@@ -1,0 +1,17 @@
+[package]
+name = "mpc-crypto"
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+k256.workspace = true
+anyhow.workspace = true
+near-account-id.workspace = true
+near-sdk.workspace = true
+sha3.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2.12", features = ["custom"] }
+
+[dev-dependencies]
+web3.workspace = true

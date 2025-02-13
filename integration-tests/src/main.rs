@@ -4,8 +4,9 @@ use std::str::FromStr;
 use std::vec;
 
 use clap::Parser;
-use integration_tests::containers::DockerClient;
-use integration_tests::{dry_run, run, utils, NodeConfig};
+use integration_tests::cluster::spawner::ClusterSpawner;
+use integration_tests::NodeConfig;
+use mpc_node::indexer_eth::EthConfig;
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -46,7 +47,6 @@ async fn main() -> anyhow::Result<()> {
         .with_thread_ids(true)
         .with_env_filter(EnvFilter::from_default_env());
     subscriber.init();
-    let docker_client = DockerClient::default();
 
     match Cli::parse() {
         Cli::SetupEnv {
@@ -64,18 +64,24 @@ async fn main() -> anyhow::Result<()> {
             let config = NodeConfig {
                 nodes,
                 threshold,
-                eth_rpc_ws_url,
-                eth_rpc_http_url,
-                eth_contract_address,
-                eth_account_sk,
+                eth: EthConfig {
+                    account_sk: eth_account_sk,
+                    rpc_ws_url: eth_rpc_ws_url,
+                    rpc_http_url: eth_rpc_http_url,
+                    contract_address: eth_contract_address,
+                },
                 ..Default::default()
             };
             println!("Full config: {:?}", config);
-            let nodes = run(config.clone(), &docker_client).await?;
+            let mut spawner = ClusterSpawner::default()
+                .config(config)
+                .init_network()
+                .await?;
+
+            let nodes = spawner.run().await?;
             let ctx = nodes.ctx();
-            let urls: Vec<_> = (0..config.nodes).map(|i| nodes.url(i)).collect();
+            let urls: Vec<_> = (0..spawner.cfg.nodes).map(|i| nodes.url(i)).collect();
             let near_accounts = nodes.near_accounts();
-            let sk_local_path = nodes.ctx().storage_options.sk_share_local_path.clone();
 
             println!("\nEnvironment is ready:");
             println!("  docker-network: {}", ctx.docker_network);
@@ -99,13 +105,12 @@ async fn main() -> anyhow::Result<()> {
 
             signal::ctrl_c().await.expect("Failed to listen for event");
             println!("Received Ctrl-C");
-            utils::clear_local_sk_shares(sk_local_path).await?;
             println!("Clean up finished");
         }
         Cli::DepServices => {
             println!("Setting up dependency services");
-            let config = NodeConfig::default();
-            let _ctx = dry_run(config.clone(), &docker_client).await?;
+            let mut spawner = ClusterSpawner::default().init_network().await?;
+            let _ctx = spawner.dry_run().await?;
 
             println!("Press Ctrl-C to stop dependency services");
             signal::ctrl_c().await.expect("Failed to listen for event");
@@ -117,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
             let path = "../chain-signatures/contract/EXAMPLE.md";
             let mut file = File::create(path)?;
             let mut doc: Vec<String> = vec![];
-            let contract_account_id = AccountId::from_str("v1.signer-dev.testnet")?;
+            let contract_account_id = AccountId::from_str("dev.sig-net.testnet")?;
             let caller_account_id = AccountId::from_str("caller.testnet")?;
             let public_key: PublicKey =
                 "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae".parse()?;
@@ -127,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
                 .to_string()
             );
 
-            doc.push(commands::sing_command(
+            doc.push(commands::sign_command(
                 &contract_account_id,
                 &caller_account_id,
             )?);

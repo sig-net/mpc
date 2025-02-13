@@ -1,14 +1,16 @@
 const hre = require("hardhat");
+const { generateRequestId } = require("../utils/utils");
 
 async function main() {
   let contractAddress;
   let network = hre.network.name;
   if (network === 'localhost') {
-    const deployments = require('../deployments/localhost.json');
-    contractAddress = deployments.proxy;
+    const deployments = require('../ignition/deployments/chain-31337/deployed_addresses.json');
+    contractAddress = deployments[Object.keys(deployments).pop()];
+    console.log(contractAddress)
   } else if (network === 'sepolia') {
-    const deployments = require('../deployments/sepolia.json');
-    contractAddress = deployments.proxy;
+    const deployments = require('../ignition/deployments/chain-11155111/deployed_addresses.json'); 
+    contractAddress = deployments[Object.keys(deployments).pop()];
   } else {
     throw new Error('Unsupported network specified. Use "localhost" or "sepolia"');
   }
@@ -22,14 +24,6 @@ async function main() {
     // Verify contract exists
     const code = await hre.ethers.provider.getCode(contractAddress);
     if (code === "0x") throw new Error("No contract deployed at this address");
-
-    // Get public key data
-    const publicKey = await chainSignatures.getPublicKey();
-    console.log("Public key:", {
-      x: publicKey.x?.toString() || 'undefined',
-      y: publicKey.y?.toString() || 'undefined'
-    });
-
   } catch (error) {
     console.error("Error:", error.message);
   }
@@ -38,10 +32,9 @@ async function main() {
   // Request to ign a test message
   try {
     const testMessage = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9";
-    const testPath = "test2";
+    const testPath = "test5";
     const signatureDeposit = await chainSignatures.getSignatureDeposit();
     const signer = (await hre.ethers.getSigners())[0];
-    const derivedPublicKey = await chainSignatures.derivedPublicKey(testPath, signer.address);
     
     console.log("Requesting signature for message:", testMessage);
     console.log("Using path:", testPath);
@@ -49,7 +42,7 @@ async function main() {
 
     const chainSignaturesWithSigner = chainSignatures.connect(signer);
     
-    const tx = await chainSignaturesWithSigner.sign({payload: testMessage, path: testPath, keyVersion: 0, derivedPublicKey: {x: derivedPublicKey.x, y: derivedPublicKey.y}}, {
+    const tx = await chainSignaturesWithSigner.sign({payload: testMessage, path: testPath, keyVersion: 0, algo: "", dest:"", params: ""}, {
       value: signatureDeposit
     });
     const receipt = await tx.wait();
@@ -61,21 +54,22 @@ async function main() {
     if (requestEvent) {
       const parsedEvent = chainSignatures.interface.parseLog(requestEvent);
       console.log("Signature requested successfully!");
-      console.log("Request ID:", parsedEvent.args.requestId);
-      console.log("Epsilon:", parsedEvent.args.epsilon.toString());
-      console.log("Payload Hash:", parsedEvent.args.payloadHash.toString());
+      console.log("Payload Hash:", parsedEvent.args.payload.toString());
+      
+      const requestId = generateRequestId(parsedEvent.args.sender, parsedEvent.args.payload, parsedEvent.args.path, parsedEvent.args.keyVersion, parsedEvent.args.chainId, parsedEvent.args.algo, parsedEvent.args.dest, parsedEvent.args.params);
+      console.log("Request ID:", requestId);
 
       // Add event listener for SignatureResponded
       console.log("Waiting for signature response...");
-      const filter = chainSignatures.filters.SignatureResponded(parsedEvent.args.requestId);
+      const filter = chainSignatures.filters.SignatureResponded(requestId);
       
       chainSignatures.once(filter, (event) => {
         console.log("\nSignature response received!");
-        console.log("Request ID:", event.args.requestId);
+        console.log("Request ID:", requestId);
         console.log("Response:")
-        console.log("  bigR:", event.args.response.bigR);
-        console.log("  s:", event.args.response.s);
-        console.log("  recoveryId:", event.args.response.recoveryId);
+        console.log("  bigR:", event.args.signature.bigR);
+        console.log("  s:", event.args.signature.s);
+        console.log("  recoveryId:", event.args.signature.recoveryId);
       });
     }
 

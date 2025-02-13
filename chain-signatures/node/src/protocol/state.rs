@@ -5,7 +5,7 @@ use super::triple::TripleManager;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 
 use cait_sith::protocol::Participant;
-use crypto_shared::PublicKey;
+use mpc_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
