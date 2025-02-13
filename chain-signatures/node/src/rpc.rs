@@ -6,9 +6,9 @@ use crate::util::AffinePointExt as _;
 
 use cait_sith::FullSignature;
 use k256::Secp256k1;
-use mpc_crypto::SignatureResponse;
 use mpc_keys::hpke;
-use mpc_primitives::SignRequestPending;
+use mpc_primitives::SignId;
+use mpc_primitives::Signature;
 
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
@@ -275,14 +275,14 @@ impl NearClient {
 
     pub async fn call_respond(
         &self,
-        request: &SignRequestPending,
-        response: &SignatureResponse,
+        id: &SignId,
+        response: &Signature,
     ) -> Result<ExecutionFinalResult, near_fetch::Error> {
         self.client
             .call(&self.signer, &self.contract_id, "respond")
             .args_json(json!({
-                "request": request,
-                "response": response,
+                "sign_id": id,
+                "signature": response,
             }))
             .max_gas()
             .transact()
@@ -415,20 +415,14 @@ async fn try_publish_near(
     near: &NearClient,
     action: &PublishAction,
     timestamp: &Instant,
-    signature: &SignatureResponse,
+    signature: &Signature,
 ) -> Result<(), near_fetch::Error> {
-    let request = SignRequestPending {
-        epsilon: action.request.indexed.args.epsilon,
-        payload: action.request.indexed.args.payload,
-    };
-
     let outcome = near
-        .call_respond(&request, signature)
+        .call_respond(&action.request.indexed.id, signature)
         .await
         .inspect_err(|err| {
             tracing::error!(
                 sign_id = ?action.request.indexed.id,
-                ?request,
                 ?err,
                 "failed to publish signature",
             );
@@ -440,7 +434,6 @@ async fn try_publish_near(
     let _: () = outcome.json().inspect_err(|err| {
         tracing::error!(
             sign_id = ?action.request.indexed.id,
-            ?request,
             big_r = signature.big_r.to_base58(),
             s = ?signature.s,
             ?err,
@@ -452,7 +445,6 @@ async fn try_publish_near(
     })?;
     tracing::info!(
         sign_id = ?action.request.indexed.id,
-        ?request,
         big_r = signature.big_r.to_base58(),
         s = ?signature.s,
         elapsed = ?timestamp.elapsed(),
@@ -481,7 +473,7 @@ async fn try_publish_eth(
     eth: &EthClient,
     action: &PublishAction,
     timestamp: &Instant,
-    signature: &SignatureResponse,
+    signature: &Signature,
 ) -> Result<(), ()> {
     let params = [
         Token::FixedBytes(action.request.indexed.id.request_id.to_vec()),

@@ -2,11 +2,10 @@ use std::fmt;
 use std::future::IntoFuture;
 
 use cait_sith::FullSignature;
-use k256::{Scalar, Secp256k1};
+use k256::Secp256k1;
 use mpc_contract::errors;
 use mpc_contract::primitives::SignRequest;
-use mpc_crypto::{derive_epsilon, ScalarExt as _, SignatureResponse};
-use mpc_primitives::SignRequestPending;
+use mpc_primitives::{SignId, Signature};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
@@ -237,12 +236,6 @@ impl SignAction<'_> {
             public_key: rogue.secret_key().public_key().clone().into(),
             secret_key: rogue.secret_key().to_string().parse()?,
         };
-        let epsilon = derive_epsilon(predecessor, &self.path);
-
-        let request = SignRequestPending {
-            payload: Scalar::from_bytes(payload_hash).unwrap(),
-            epsilon,
-        };
 
         let big_r = serde_json::from_value(
             "02EC7FA686BB430A4B700BDA07F2E07D6333D9E33AEEF270334EB2D00D0A6FEC6C".into(),
@@ -251,19 +244,20 @@ impl SignAction<'_> {
             "20F90C540EE00133C911EA2A9ADE2ABBCC7AD820687F75E011DFEEC94DB10CD6".into(),
         )?; // Fake S
 
-        let response = SignatureResponse {
+        let signature = Signature {
             big_r,
             s,
             recovery_id: 0,
         };
 
+        let sign_id = SignId::from_parts(predecessor, &payload_hash, &self.path, self.key_version);
         let status = self
             .nodes
             .rpc_client
             .call(&signer, self.nodes.contract().id(), "respond")
             .args_json(serde_json::json!({
-                "request": request,
-                "response": response,
+                "sign_id": sign_id,
+                "signature": signature,
             }))
             .max_gas()
             .transact_async()

@@ -184,7 +184,7 @@ async fn handle_block(
                 tracing::warn!("{err}");
                 anyhow::bail!(err);
             };
-            let ExecutionStatus::SuccessReceiptId(receipt_id) = receipt.status() else {
+            let ExecutionStatus::SuccessReceiptId(_receipt_id) = receipt.status() else {
                 continue;
             };
             let Some(function_call) = action.as_function_call() else {
@@ -224,12 +224,18 @@ async fn handle_block(
                     );
                     continue;
                 };
-                let epsilon = derive_epsilon(&action.predecessor_id(), &arguments.request.path);
-                let sign_id = SignId::new(receipt_id.0);
+                let predecessor_id = action.predecessor_id();
+                let epsilon = derive_epsilon(&predecessor_id, &arguments.request.path);
+                let sign_id = SignId::from_parts(
+                    &predecessor_id,
+                    &arguments.request.payload,
+                    &arguments.request.path,
+                    arguments.request.key_version,
+                );
                 tracing::info!(
                     ?sign_id,
-                    caller_id = receipt.predecessor_id().to_string(),
-                    our_account = ctx.node_account_id.to_string(),
+                    caller_id = ?predecessor_id,
+                    our_account = ?ctx.node_account_id,
                     payload = hex::encode(arguments.request.payload),
                     key_version = arguments.request.key_version,
                     entropy = hex::encode(entropy),

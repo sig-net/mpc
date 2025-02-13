@@ -1,4 +1,4 @@
-use mpc_primitives::SignRequestPending;
+use mpc_primitives::{bytes::borsh_scalar, SignId};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
@@ -21,6 +21,22 @@ pub enum StorageKey {
 #[borsh(crate = "near_sdk::borsh")]
 pub struct YieldIndex {
     pub data_id: CryptoHash,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct PendingRequest {
+    pub index: Option<YieldIndex>,
+    #[borsh(
+        serialize_with = "borsh_scalar::serialize",
+        deserialize_with = "borsh_scalar::deserialize_reader"
+    )]
+    pub payload: k256::Scalar,
+    #[borsh(
+        serialize_with = "borsh_scalar::serialize",
+        deserialize_with = "borsh_scalar::deserialize_reader"
+    )]
+    pub epsilon: k256::Scalar,
 }
 
 #[derive(
@@ -298,7 +314,7 @@ impl PkVotes {
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct InternalSignRequest {
-    pub request: SignRequestPending,
+    pub id: SignId,
     pub requester: AccountId,
     pub deposit: NearToken,
     pub required_deposit: NearToken,

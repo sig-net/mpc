@@ -1,34 +1,12 @@
 pub mod bytes;
 
-use k256::Scalar;
-use mpc_crypto::types::borsh_scalar;
+use k256::{AffinePoint, Scalar};
 use near_account_id::AccountId;
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
+use sha3::Digest;
 
 use crate::bytes::cbor_scalar;
-
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
-#[borsh(crate = "near_sdk::borsh")]
-pub struct SignRequestPending {
-    #[borsh(
-        serialize_with = "borsh_scalar::serialize",
-        deserialize_with = "borsh_scalar::deserialize_reader"
-    )]
-    pub epsilon: Scalar,
-    #[borsh(
-        serialize_with = "borsh_scalar::serialize",
-        deserialize_with = "borsh_scalar::deserialize_reader"
-    )]
-    pub payload: Scalar,
-}
-
-impl SignRequestPending {
-    pub fn new(payload: Scalar, predecessor_id: &AccountId, path: &str) -> Self {
-        let epsilon = mpc_crypto::derive_epsilon(predecessor_id, path);
-        SignRequestPending { epsilon, payload }
-    }
-}
 
 #[derive(Clone, Eq, PartialEq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -40,13 +18,23 @@ pub struct SignId {
 impl std::fmt::Debug for SignId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("SignId")
-            .field(&hex::encode(&self.request_id))
+            .field(&hex::encode(self.request_id))
             .finish()
     }
 }
 
 impl SignId {
     pub fn new(request_id: [u8; 32]) -> Self {
+        Self { request_id }
+    }
+
+    pub fn from_parts(id: &AccountId, payload: &[u8; 32], path: &str, key_version: u32) -> Self {
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(id.as_bytes());
+        hasher.update(payload);
+        hasher.update(path.as_bytes());
+        hasher.update(key_version.to_le_bytes());
+        let request_id: [u8; 32] = hasher.finalize().into();
         Self { request_id }
     }
 }
@@ -66,11 +54,37 @@ pub struct SignArgs {
 impl std::fmt::Debug for SignArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SignArgs")
-            .field("entropy", &hex::encode(&self.entropy))
+            .field("entropy", &hex::encode(self.entropy))
             .field("epsilon", &self.epsilon)
             .field("payload", &self.payload)
             .field("path", &self.path)
             .field("key_version", &self.key_version)
             .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct Signature {
+    #[borsh(
+        serialize_with = "bytes::borsh_affine_point::serialize",
+        deserialize_with = "bytes::borsh_affine_point::deserialize_reader"
+    )]
+    pub big_r: AffinePoint,
+    #[borsh(
+        serialize_with = "bytes::borsh_scalar::serialize",
+        deserialize_with = "bytes::borsh_scalar::deserialize_reader"
+    )]
+    pub s: Scalar,
+    pub recovery_id: u8,
+}
+
+impl Signature {
+    pub fn new(big_r: AffinePoint, s: Scalar, recovery_id: u8) -> Self {
+        Signature {
+            big_r,
+            s,
+            recovery_id,
+        }
     }
 }

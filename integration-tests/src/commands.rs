@@ -1,14 +1,12 @@
 use std::str::FromStr;
 
-use k256::Scalar;
 use mpc_contract::{
     config::Config,
     primitives::{CandidateInfo, Candidates, Participants, SignRequest},
     update::ProposeUpdateArgs,
 };
-use mpc_crypto::{ScalarExt, SignatureResponse};
 use mpc_keys::hpke;
-use mpc_primitives::SignRequestPending;
+use mpc_primitives::{SignId, Signature};
 use near_account_id::AccountId;
 use near_primitives::borsh;
 use near_sdk::PublicKey;
@@ -21,7 +19,7 @@ const PAYLOAD: [u8; 32] = [
 
 const SIGN_PK: &str = "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae";
 
-pub fn sing_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::Result<String> {
+pub fn sign_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::Result<String> {
     let sign_request = SignRequest {
         payload: PAYLOAD,
         path: "test".into(),
@@ -41,14 +39,10 @@ pub fn sing_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
 
 pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::Result<String> {
     let payload_hashed = web3::signing::keccak256(&PAYLOAD);
+    let path = "test";
+    let key_version = 0;
 
-    let request = SignRequestPending::new(
-        Scalar::from_bytes(payload_hashed)
-            .ok_or_else(|| anyhow::anyhow!("Failed to convert bytes to Scalar"))?,
-        caller_id,
-        "test",
-    );
-
+    let sign_id = SignId::from_parts(caller_id, &payload_hashed, path, key_version);
     let big_r = serde_json::from_value(
         "02EC7FA686BB430A4B700BDA07F2E07D6333D9E33AEEF270334EB2D00D0A6FEC6C".into(),
     )?; // Fake BigR
@@ -56,7 +50,7 @@ pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow
         "20F90C540EE00133C911EA2A9ADE2ABBCC7AD820687F75E011DFEEC94DB10CD6".into(),
     )?; // Fake S
 
-    let response = SignatureResponse {
+    let signature = Signature {
         big_r,
         s,
         recovery_id: 0,
@@ -64,7 +58,7 @@ pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow
 
     let request_json = format!(
         "'{}'",
-        serde_json::to_string(&json!({"request": request, "response": response})).unwrap()
+        serde_json::to_string(&json!({"sign_id": sign_id, "signature": signature})).unwrap()
     );
 
     Ok(format!(

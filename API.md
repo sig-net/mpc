@@ -13,7 +13,7 @@ pub struct SignRequest {
     pub key_version: u32,
 }
 
-pub struct SignatureResponse {
+pub struct Signature {
     pub big_r: AffinePoint,
     pub s: Scalar,
     pub recovery_id: u8,
