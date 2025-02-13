@@ -44,7 +44,7 @@ web3 = "0.19.0"
 
 near-account-id = "1.0.0"
 near-primitives = "0.26.0"
-near-sdk = { version = "5.6.0", features = ["legacy", "unit-testing", "unstable"] }
+near-sdk = { version = "5.6.0", features = ["unit-testing", "unstable"] }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }

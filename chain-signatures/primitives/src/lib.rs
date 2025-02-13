@@ -8,7 +8,18 @@ use sha3::Digest;
 
 use crate::bytes::cbor_scalar;
 
-#[derive(Clone, Eq, PartialEq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone,
+    Eq,
+    PartialEq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct SignId {
     #[serde(with = "serde_bytes")]
