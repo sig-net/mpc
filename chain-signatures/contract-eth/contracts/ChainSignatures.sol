@@ -33,6 +33,11 @@ contract ChainSignatures is AccessControl {
         Signature signature;
     }
 
+    struct ErrorResponse {
+        bytes32 requestId;
+        string error;
+    }
+
     uint256 signatureDeposit;
 
     /**
@@ -135,12 +140,17 @@ contract ChainSignatures is AccessControl {
     }
 
     /**
-     * @dev Function to emit a signature generation error.
-     * @param _requestId The ID of the request.
-     * @param _error The error message.
+     * @dev Function to emit signature generation errors.
+     * @param _errors The array of signature errors.
      */
-    function emitSignatureError(bytes32 _requestId, string calldata _error) external {
-        emit SignatureError(_requestId, msg.sender, _error);
+    function emitSignatureError(ErrorResponse[] calldata _errors) external {
+        for (uint256 i = 0; i < _errors.length; i++) {
+            emit SignatureError(
+                _errors[i].requestId,
+                msg.sender,
+                _errors[i].error
+            );
+        }
     }
 
     /**
