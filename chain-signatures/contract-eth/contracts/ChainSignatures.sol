@@ -35,7 +35,7 @@ contract ChainSignatures is AccessControl {
 
     struct ErrorResponse {
         bytes32 requestId;
-        string error;
+        string errorMessage;
     }
 
     uint256 signatureDeposit;
@@ -148,7 +148,7 @@ contract ChainSignatures is AccessControl {
             emit SignatureError(
                 _errors[i].requestId,
                 msg.sender,
-                _errors[i].error
+                _errors[i].errorMessage
             );
         }
     }
