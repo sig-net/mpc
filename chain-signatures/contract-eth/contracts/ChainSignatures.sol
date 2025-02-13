@@ -72,6 +72,18 @@ contract ChainSignatures is AccessControl {
     );
 
     /**
+     * @dev Emitted when a signature error is received.
+     * @param requestId The ID of the request. Must be calculated off-chain.
+     * @param responder The address of the responder.
+     * @param error The error message.
+     */
+    event SignatureError(
+        bytes32 indexed requestId,
+        address responder,
+        string error
+    );
+
+    /**
      * @dev Emitted when a withdrawal is made.
      * @param owner The address of the owner.
      * @param amount The amount withdrawn.
