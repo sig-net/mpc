@@ -30,7 +30,12 @@ contract ChainSignatures is AccessControl {
 
     struct Response {
         bytes32 requestId;
-        Signature response;
+        Signature signature;
+    }
+
+    struct ErrorResponse {
+        bytes32 requestId;
+        string error;
     }
 
     uint256 signatureDeposit;
@@ -63,12 +68,24 @@ contract ChainSignatures is AccessControl {
      * @dev Emitted when a signature response is received.
      * @param requestId The ID of the request. Must be calculated off-chain.
      * @param responder The address of the responder.
-     * @param response The signature response.
+     * @param signature The signature response.
      */
     event SignatureResponded(
         bytes32 indexed requestId,
         address responder,
-        Signature response
+        Signature signature
+    );
+
+    /**
+     * @dev Emitted when a signature error is received.
+     * @param requestId The ID of the request. Must be calculated off-chain.
+     * @param responder The address of the responder.
+     * @param error The error message.
+     */
+    event SignatureError(
+        bytes32 indexed requestId,
+        address responder,
+        string error
     );
 
     /**
@@ -117,7 +134,21 @@ contract ChainSignatures is AccessControl {
             emit SignatureResponded(
                 _responses[i].requestId,
                 msg.sender,
-                _responses[i].response
+                _responses[i].signature
+            );
+        }
+    }
+
+    /**
+     * @dev Function to emit signature generation errors.
+     * @param _errors The array of signature generation errors.
+     */
+    function respondError(ErrorResponse[] calldata _errors) external {
+        for (uint256 i = 0; i < _errors.length; i++) {
+            emit SignatureError(
+                _errors[i].requestId,
+                msg.sender,
+                _errors[i].error
             );
         }
     }

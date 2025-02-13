@@ -10,6 +10,8 @@ on:
       - "chain-signatures/**/*.rs"
       - "chain-signatures/Cargo.*"
       - "integration-tests/**/*.rs"
+      - "chain-signatures/contract-eth/**/*.sol"
+      - "chain-signatures/contract-eth/**/*.js"
 
 env:
   RUSTFLAGS: -D warnings
@@ -28,7 +30,7 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: "18"
       - uses: WarpBuilds/cache@v1
         with:
           path: |
