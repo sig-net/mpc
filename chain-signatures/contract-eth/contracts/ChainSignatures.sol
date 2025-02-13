@@ -135,6 +135,15 @@ contract ChainSignatures is AccessControl {
     }
 
     /**
+     * @dev Function to emit a signature generation error.
+     * @param _requestId The ID of the request.
+     * @param _error The error message.
+     */
+    function emitSignatureError(bytes32 _requestId, string calldata _error) external {
+        emit SignatureError(_requestId, msg.sender, _error);
+    }
+
+    /**
      * @dev Function to get the current signature deposit amount.
      * @return The current signature deposit amount.
      */
