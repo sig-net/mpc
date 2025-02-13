@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
                 .to_string()
             );
 
-            doc.push(commands::sing_command(
+            doc.push(commands::sign_command(
                 &contract_account_id,
                 &caller_account_id,
             )?);

@@ -1,10 +1,9 @@
-use crate::indexer::ContractSignRequest;
-use crate::protocol::Chain::Ethereum;
-use crate::protocol::SignRequest;
+use crate::protocol::{Chain, IndexedSignRequest};
 use hex::ToHex;
 use k256::Scalar;
 use mpc_crypto::kdf::derive_epsilon_eth;
-use mpc_crypto::ScalarExt;
+use mpc_crypto::ScalarExt as _;
+use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
@@ -103,7 +102,7 @@ pub struct EthSignRequest {
     pub key_version: u32,
 }
 
-fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignRequest> {
+fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<IndexedSignRequest> {
     let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
     if event.deposit == U256::from_dec_str("0").unwrap() {
@@ -132,16 +131,9 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignR
         anyhow::bail!("payload exceeds secp256k1 curve order");
     }
 
-    let request = ContractSignRequest {
-        payload,
-        path: event.path.clone(),
-        key_version: event.key_version,
-        chain: Ethereum,
-    };
-
     let epsilon = derive_epsilon_eth(
         format!("0x{}", event.requester.encode_hex::<String>()),
-        &request.path,
+        &event.path,
     );
 
     // Use transaction hash as entropy
@@ -150,17 +142,21 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<SignR
         .map(|h| *h.as_fixed_bytes())
         .unwrap_or([0u8; 32]);
 
-    let request_id = calculate_request_id(&event);
+    let sign_id = SignId::new(calculate_request_id(&event));
+    tracing::info!(?sign_id, "eth signature requested");
 
-    tracing::info!("etheresum signature request_id: {:?}", request_id);
-
-    Ok(SignRequest {
-        request_id,
-        request,
-        epsilon,
-        entropy,
+    Ok(IndexedSignRequest {
+        id: sign_id,
+        args: SignArgs {
+            entropy,
+            epsilon,
+            payload,
+            path: event.path,
+            key_version: 0,
+        },
+        chain: Chain::Ethereum,
         // TODO: use indexer timestamp instead.
-        time_added: Instant::now(),
+        timestamp: Instant::now(),
     })
 }
 
@@ -248,7 +244,7 @@ fn parse_string_args(data: &[u8], offset_start: usize) -> String {
 
 pub async fn run(
     eth: Option<EthConfig>,
-    sign_tx: mpsc::Sender<SignRequest>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     let Some(eth) = eth else {

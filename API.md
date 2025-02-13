@@ -13,9 +13,9 @@ pub struct SignRequest {
     pub key_version: u32,
 }
 
-pub struct SignatureResponse {
-    pub big_r: SerializableAffinePoint,
-    pub s: SerializableScalar,
+pub struct Signature {
+    pub big_r: AffinePoint,
+    pub s: Scalar,
     pub recovery_id: u8,
 }
 ```
@@ -57,7 +57,7 @@ For more details check `User contract API` impl block in the [chain-signatures/c
 1. Mainnet: `v1.signer`
 2. Testnet: `v1.sigenr-prod.testnet`
 
-# Interact using NEAR CLI 
+# Interact using NEAR CLI
 
 There is an `Example Commands` in the [chain-signatures/contract/example.md](./chain-signature/contract/EXAMPLE.md) file.
 

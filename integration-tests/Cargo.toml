@@ -50,6 +50,7 @@ mpc-crypto.workspace = true
 mpc-contract.workspace = true
 mpc-keys.workspace = true
 mpc-node.workspace = true
+mpc-primitives.workspace = true
 
 [dev-dependencies]
 test-log = { version = "0.2.12", features = ["log", "trace"] }
