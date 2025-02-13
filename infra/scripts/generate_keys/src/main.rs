@@ -27,5 +27,5 @@ fn main() {
         "ethereum account public key: {}",
         hex::encode(public_key.as_bytes())
     );
-    println!("Ethereum Address: {}", wallet.address());
+    println!("Ethereum Address: {:?}", wallet.address());
 }
