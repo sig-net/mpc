@@ -46,9 +46,7 @@ jobs:
       - name: Eth contract unit tests
         run: cd chain-signatures/contract-eth && npx hardhat test
       - name: Compile
-        run: |
-          ( cd chain-signatures ; cargo check )
-          ( cd integration-tests ; cargo check )
+        run: cargo check
       - name: Test format
         run: cargo fmt -- --check
       - name: Test clippy

@@ -2,7 +2,7 @@ use crate::protocol::Chain;
 use crate::protocol::IndexedSignRequest;
 use crate::storage::app_data_storage::AppDataStorage;
 use k256::Scalar;
-use mpc_crypto::{derive_epsilon, ScalarExt};
+use mpc_crypto::{derive_epsilon_near, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use near_lake_framework::{Lake, LakeBuilder, LakeContext};
@@ -225,7 +225,7 @@ async fn handle_block(
                     continue;
                 };
                 let predecessor_id = action.predecessor_id();
-                let epsilon = derive_epsilon(&predecessor_id, &arguments.request.path);
+                let epsilon = derive_epsilon_near(&predecessor_id, &arguments.request.path);
                 let sign_id = SignId::from_parts(
                     &predecessor_id,
                     &arguments.request.payload,

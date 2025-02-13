@@ -11,7 +11,7 @@ use errors::{
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
 use mpc_crypto::{
-    derive_epsilon, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
+    derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     ScalarExt as _,
 };
 use mpc_primitives::{SignId, Signature};
@@ -185,7 +185,7 @@ impl VersionedMpcContract {
             );
             let entropy = near_sdk::env::random_seed_array();
             env::log_str(&serde_json::to_string(&entropy).unwrap());
-            let epsilon = derive_epsilon(&predecessor, &path);
+            let epsilon = derive_epsilon_near(&predecessor, &path);
 
             self.lock_request(&sign_id, payload, epsilon);
             let request = InternalSignRequest {
@@ -219,7 +219,7 @@ impl VersionedMpcContract {
         predecessor: Option<AccountId>,
     ) -> Result<PublicKey, Error> {
         let predecessor = predecessor.unwrap_or_else(env::predecessor_account_id);
-        let epsilon = derive_epsilon(&predecessor, &path);
+        let epsilon = derive_epsilon_near(&predecessor, &path);
         let derived_public_key =
             derive_key(near_public_key_to_affine_point(self.public_key()?), epsilon);
         let encoded_point = derived_public_key.to_encoded_point(false);

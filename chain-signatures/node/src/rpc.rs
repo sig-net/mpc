@@ -475,7 +475,7 @@ async fn try_publish_eth(
     timestamp: &Instant,
     signature: &Signature,
 ) -> Result<(), ()> {
-    let params = [
+    let params = [Token::Array(vec![Token::Tuple(vec![
         Token::FixedBytes(action.request.indexed.id.request_id.to_vec()),
         Token::Tuple(vec![
             Token::Tuple(vec![
@@ -487,7 +487,7 @@ async fn try_publish_eth(
             Token::Uint(U256::from_big_endian(&signature.s.to_bytes())),
             signature.recovery_id.into_token(),
         ]),
-    ];
+    ])])];
 
     let data = eth
         .contract
@@ -500,7 +500,7 @@ async fn try_publish_eth(
     let txn = web3::types::TransactionParameters {
         to: Some(eth.contract.address()),
         data: web3::types::Bytes(data),
-        gas: web3::types::U256::from(100_000),
+        gas: web3::types::U256::from(40_000), // actually only using 28,000
         ..Default::default()
     };
 

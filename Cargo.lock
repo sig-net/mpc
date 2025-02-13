@@ -3676,6 +3676,7 @@ dependencies = [
  "near-account-id",
  "near-sdk",
  "sha3",
+ "web3",
 ]
 
 [[package]]
