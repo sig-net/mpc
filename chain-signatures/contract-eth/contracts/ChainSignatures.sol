@@ -30,7 +30,7 @@ contract ChainSignatures is AccessControl {
 
     struct Response {
         bytes32 requestId;
-        Signature response;
+        Signature signature;
     }
 
     uint256 signatureDeposit;
@@ -63,12 +63,12 @@ contract ChainSignatures is AccessControl {
      * @dev Emitted when a signature response is received.
      * @param requestId The ID of the request. Must be calculated off-chain.
      * @param responder The address of the responder.
-     * @param response The signature response.
+     * @param signature The signature response.
      */
     event SignatureResponded(
         bytes32 indexed requestId,
         address responder,
-        Signature response
+        Signature signature
     );
 
     /**
@@ -117,7 +117,7 @@ contract ChainSignatures is AccessControl {
             emit SignatureResponded(
                 _responses[i].requestId,
                 msg.sender,
-                _responses[i].response
+                _responses[i].signature
             );
         }
     }
