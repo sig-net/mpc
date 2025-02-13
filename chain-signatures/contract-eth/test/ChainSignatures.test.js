@@ -59,7 +59,7 @@ describe("ChainSignatures", function () {
         .withArgs(addr1.address, payload, 0, requiredDeposit, 31337, path, "", "", "");
     });
 
-    it("Respond to a signature request", async function () {
+    it("Respond to a signature request with signature", async function () {
       const payload = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9"
       const path = "test";
       const requiredDeposit = await chainSignatures.getSignatureDeposit();
@@ -103,6 +103,39 @@ describe("ChainSignatures", function () {
       expect(parsedEvent.args[2][0][1]).to.equal(bigRY);
       expect(parsedEvent.args[2][1]).to.equal(s);
       expect(parsedEvent.args[2][2]).to.equal(0);
+    });
+
+    it("Respond to a signature request with error", async function () {
+      const payload = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9"
+      const path = "test";
+      const requiredDeposit = await chainSignatures.getSignatureDeposit();
+
+      const tx = await chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0, algo: "", dest: "", params: ""}, { value: requiredDeposit });
+      const receipt = await tx.wait();
+      const requestEvent = receipt.logs.find(log => 
+        chainSignatures.interface.parseLog(log)?.name === "SignatureRequested"
+      );
+      const parsedRequestEvent = chainSignatures.interface.parseLog(requestEvent);
+      console.log(parsedRequestEvent);
+
+      const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["address", "bytes", "string", "uint32", "uint256", "string", "string", "string"],
+        [addr1.address, payload, path, 0, 31337, "", "", ""]
+      );
+      const requestId = ethers.keccak256(encoded);
+
+      const errorMessage = "sorry";
+      const tx2 = await chainSignatures.connect(addr2).respondError([{ requestId: requestId, error: errorMessage }]);
+      const receipt2 = await tx2.wait();
+      const responseEvent = receipt2.logs.find(log => 
+        chainSignatures.interface.parseLog(log)?.name === "SignatureError"
+      );
+      const parsedEvent = chainSignatures.interface.parseLog(responseEvent);
+      console.log(parsedEvent);
+      
+      expect(parsedEvent.args[0]).to.equal(requestId);
+      expect(parsedEvent.args[1]).to.equal(addr2.address);
+      expect(parsedEvent.args[2]).to.equal(errorMessage);
     });
   });
 });
