@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { generateRequestId } = require("../utils/utils");
 
 describe("ChainSignatures", function () {
   let ChainSignatures;
@@ -46,6 +47,34 @@ describe("ChainSignatures", function () {
       const balanceExpectedAfterInWei = ethers.parseUnits("70000", "gwei"); 
       expect(balanceEthAfterWithdraw).to.equal(balanceExpectedAfterInWei);
     });
+
+    it("Non-admin shouldn't be able to withdraw", async function () {
+      const payload = ethers.keccak256(ethers.toUtf8Bytes("Test payload"));
+      const path = "test/path";
+      const requiredDeposit = await chainSignatures.getSignatureDeposit();
+  
+      await chainSignatures.connect(addr1).sign({payload, path, keyVersion: 0, algo: "", dest: "", params: ""}, { value: requiredDeposit });
+  
+      const balanceEth = await ethers.provider.getBalance(chainSignatures.getAddress());
+      const balanceExpectedInWei = ethers.parseUnits("50000", "gwei"); 
+      expect(balanceEth).to.equal(balanceExpectedInWei);
+      const withdrawlAmountInWei = ethers.parseUnits("30000", "gwei"); 
+      
+      // Expect withdrawal to fail with custom AccessControl error
+      await expect(
+          chainSignatures.connect(addr1).withdraw(withdrawlAmountInWei, addr1)
+      ).to.be.revertedWithCustomError(
+          chainSignatures,
+          "AccessControlUnauthorizedAccount"
+      ).withArgs(
+          addr1.address,
+          ethers.ZeroHash
+      );
+  
+      // Ensure the balance remains unchanged after the failed withdrawal
+      const balanceEthAfterFailedWithdraw = await ethers.provider.getBalance(chainSignatures.getAddress());
+      expect(balanceEthAfterFailedWithdraw).to.equal(balanceExpectedInWei);
+    });  
   });
 
   describe("Signing requests", function () {
@@ -72,11 +101,7 @@ describe("ChainSignatures", function () {
       const parsedRequestEvent = chainSignatures.interface.parseLog(requestEvent);
       console.log(parsedRequestEvent);
 
-      const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
-        ["address", "bytes", "string", "uint32", "uint256", "string", "string", "string"],
-        [addr1.address, payload, path, 0, 31337, "", "", ""]
-      );
-      const requestId = ethers.keccak256(encoded);
+      const requestId = generateRequestId(addr1.address, payload, path, 0, 31337, "", "", "");
 
       const bigR = [4, 235, 32, 243, 182, 197, 136, 46, 1, 139, 239, 143, 68, 206, 69, 33, 21, 197, 53, 152, 61, 231, 35, 110, 41, 52, 59, 59, 197, 198, 72, 248, 149, 64, 216, 248, 234, 27, 102, 47, 185, 225, 141, 23, 254, 91, 155, 253, 111, 45, 62, 172, 73, 217, 254, 251, 168, 191, 184, 149, 228, 119, 12, 209, 248];
       const bigRX = '0x' + bigR.slice(1, 33).map(byte => byte.toString(16).padStart(2, '0')).join('');
