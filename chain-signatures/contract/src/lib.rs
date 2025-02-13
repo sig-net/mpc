@@ -16,6 +16,7 @@ use mpc_crypto::{
 };
 use mpc_primitives::{SignId, Signature};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
+use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
 use near_sdk::store::IterableMap;
 use near_sdk::{
@@ -24,7 +25,7 @@ use near_sdk::{
 };
 use primitives::{
     CandidateInfo, Candidates, InternalSignRequest, Participants, PendingRequest, PkVotes,
-    SignRequest, SignaturePromiseError, SignatureResult, StorageKey, Votes, YieldIndex,
+    SignPoll, SignRequest, StorageKey, Votes, YieldIndex,
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -174,7 +175,10 @@ impl VersionedMpcContract {
         env::log_str(&serde_json::to_string(&entropy).unwrap());
         let epsilon = derive_epsilon_near(&predecessor, &path);
 
+        // lock the request such that it can't be submitted again until released either by erroring out
+        // or by finishing the request when the signature is submitted.
         self.lock_request(sign_id.clone(), payload, epsilon);
+
         let request = InternalSignRequest {
             id: sign_id,
             requester: predecessor,
@@ -693,10 +697,14 @@ impl VersionedMpcContract {
                 );
 
                 // Store the request in the contract's local state
-                let data_id: CryptoHash = env::read_register(DATA_ID_REGISTER)
-                    .expect("read_register failed")
-                    .try_into()
-                    .expect("conversion to CryptoHash failed");
+                let Some(bytes) = env::read_register(DATA_ID_REGISTER) else {
+                    let _ = self.remove_request(&request.id);
+                    panic_str("failed to read register for data id");
+                };
+                let Ok(data_id) = bytes.try_into() else {
+                    let _ = self.remove_request(&request.id);
+                    panic_str("failed to convert data id");
+                };
 
                 mpc_contract.add_request(&request.id, data_id);
 
@@ -721,16 +729,14 @@ impl VersionedMpcContract {
     #[handle_result]
     pub fn return_signature_on_finish(
         &mut self,
-        #[callback_unwrap] signature: SignatureResult<Signature, SignaturePromiseError>,
+        #[callback_unwrap] signature: SignPoll,
     ) -> Result<Signature, Error> {
-        match self {
-            Self::V0(_) => match signature {
-                SignatureResult::Ok(signature) => {
-                    log!("Signature is ready.");
-                    Ok(signature)
-                }
-                SignatureResult::Err(_) => Err(SignError::Timeout.into()),
-            },
+        match signature {
+            SignPoll::Ready(signature) => {
+                log!("Signature is ready.");
+                Ok(signature)
+            }
+            SignPoll::Timeout => Err(SignError::Timeout.into()),
         }
     }
 
@@ -759,7 +765,7 @@ impl VersionedMpcContract {
         &mut self,
         request: InternalSignRequest,
         #[callback_result] signature: Result<Signature, PromiseError>,
-    ) -> Result<SignatureResult<Signature, SignaturePromiseError>, Error> {
+    ) -> Result<SignPoll, Error> {
         // Clean up the local state
         if let Err(err) = self.remove_request(&request.id) {
             // refund must happen in clear_state_on_finish, because regardless of this success or fail
@@ -772,11 +778,11 @@ impl VersionedMpcContract {
         match signature {
             Ok(signature) => {
                 Self::refund_on_success(&request);
-                Ok(SignatureResult::Ok(signature))
+                Ok(SignPoll::Ready(signature))
             }
             Err(_) => {
                 Self::refund_on_fail(&request);
-                Ok(SignatureResult::Err(SignaturePromiseError::Failed))
+                Ok(SignPoll::Timeout)
             }
         }
     }

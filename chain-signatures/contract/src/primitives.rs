@@ -1,3 +1,4 @@
+use mpc_primitives::Signature;
 use mpc_primitives::{bytes::borsh_scalar, SignId};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
@@ -328,12 +329,7 @@ pub struct SignRequest {
 }
 
 #[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Clone, Debug)]
-pub enum SignatureResult<T, E> {
-    Ok(T),
-    Err(E),
-}
-
-#[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Clone, Debug)]
-pub enum SignaturePromiseError {
-    Failed,
+pub enum SignPoll {
+    Ready(Signature),
+    Timeout,
 }
