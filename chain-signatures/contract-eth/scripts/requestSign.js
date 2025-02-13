@@ -70,9 +70,9 @@ async function main() {
         console.log("\nSignature response received!");
         console.log("Request ID:", requestId);
         console.log("Response:")
-        console.log("  bigR:", event.args.response.bigR);
-        console.log("  s:", event.args.response.s);
-        console.log("  recoveryId:", event.args.response.recoveryId);
+        console.log("  bigR:", event.args.signature.bigR);
+        console.log("  s:", event.args.signature.s);
+        console.log("  recoveryId:", event.args.signature.recoveryId);
       });
     }
 
