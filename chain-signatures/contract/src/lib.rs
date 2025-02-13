@@ -86,7 +86,7 @@ impl MpcContract {
         );
     }
 
-    fn add_request(&mut self, sign_id: &SignId, data_id: CryptoHash) {
+    fn set_request_yield(&mut self, sign_id: &SignId, data_id: CryptoHash) {
         if let Some(request) = self.pending_requests.get_mut(sign_id) {
             request.index = Some(YieldIndex { data_id });
         }
@@ -686,43 +686,39 @@ impl VersionedMpcContract {
 
     #[private]
     pub fn sign_helper(&mut self, request: InternalSignRequest) {
-        match self {
-            Self::V0(mpc_contract) => {
-                let yield_promise = env::promise_yield_create(
-                    "clear_state_on_finish",
-                    &serde_json::to_vec(&(&request,)).unwrap(),
-                    CLEAR_STATE_ON_FINISH_CALL_GAS,
-                    GasWeight(0),
-                    DATA_ID_REGISTER,
-                );
+        let yield_promise = env::promise_yield_create(
+            "clear_state_on_finish",
+            &serde_json::to_vec(&(&request,)).unwrap(),
+            CLEAR_STATE_ON_FINISH_CALL_GAS,
+            GasWeight(0),
+            DATA_ID_REGISTER,
+        );
 
-                // Store the request in the contract's local state
-                let Some(bytes) = env::read_register(DATA_ID_REGISTER) else {
-                    let _ = self.remove_request(&request.id);
-                    panic_str("failed to read register for data id");
-                };
-                let Ok(data_id) = bytes.try_into() else {
-                    let _ = self.remove_request(&request.id);
-                    panic_str("failed to convert data id");
-                };
+        // Store the request in the contract's local state
+        let Some(bytes) = env::read_register(DATA_ID_REGISTER) else {
+            let _ = self.remove_request(&request.id);
+            panic_str("failed to read register for data id");
+        };
+        let Ok(data_id) = bytes.try_into() else {
+            let _ = self.remove_request(&request.id);
+            panic_str("failed to convert data id");
+        };
 
-                mpc_contract.add_request(&request.id, data_id);
+        self.set_request_yield(&request.id, data_id);
 
-                // NOTE: there's another promise after the clear_state_on_finish to avoid any errors
-                // that would rollback the state.
-                let final_yield_promise = env::promise_then(
-                    yield_promise,
-                    env::current_account_id(),
-                    "return_signature_on_finish",
-                    &[],
-                    NearToken::from_near(0),
-                    RETURN_SIGNATURE_ON_FINISH_CALL_GAS,
-                );
-                // The return value for this function call will be the value
-                // returned by the `sign_on_finish` callback.
-                env::promise_return(final_yield_promise);
-            }
-        }
+        // NOTE: there's another promise after the clear_state_on_finish to avoid any errors
+        // that would rollback the state.
+        let final_yield_promise = env::promise_then(
+            yield_promise,
+            env::current_account_id(),
+            "return_signature_on_finish",
+            &[],
+            NearToken::from_near(0),
+            RETURN_SIGNATURE_ON_FINISH_CALL_GAS,
+        );
+        // The return value for this function call will be the value
+        // returned by the `sign_on_finish` callback.
+        env::promise_return(final_yield_promise);
     }
 
     #[private]
@@ -817,6 +813,12 @@ impl VersionedMpcContract {
     fn get_request(&self, id: &SignId) -> Option<&PendingRequest> {
         match self {
             Self::V0(mpc_contract) => mpc_contract.pending_requests.get(id),
+        }
+    }
+
+    fn set_request_yield(&mut self, sign_id: &SignId, data_id: CryptoHash) {
+        match self {
+            Self::V0(mpc_contract) => mpc_contract.set_request_yield(sign_id, data_id),
         }
     }
 
