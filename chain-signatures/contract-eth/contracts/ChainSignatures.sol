@@ -141,9 +141,9 @@ contract ChainSignatures is AccessControl {
 
     /**
      * @dev Function to emit signature generation errors.
-     * @param _errors The array of signature errors.
+     * @param _errors The array of signature generation errors.
      */
-    function emitSignatureError(ErrorResponse[] calldata _errors) external {
+    function respondError(ErrorResponse[] calldata _errors) external {
         for (uint256 i = 0; i < _errors.length; i++) {
             emit SignatureError(
                 _errors[i].requestId,
