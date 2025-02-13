@@ -150,7 +150,7 @@ describe("ChainSignatures", function () {
       const requestId = ethers.keccak256(encoded);
 
       const errorMessage = "sorry";
-      const tx2 = await chainSignatures.connect(addr2).respondError([{ requestId: requestId, error: errorMessage }]);
+      const tx2 = await chainSignatures.connect(addr2).respondError([{ requestId: requestId, errorMessage: errorMessage }]);
       const receipt2 = await tx2.wait();
       const responseEvent = receipt2.logs.find(log => 
         chainSignatures.interface.parseLog(log)?.name === "SignatureError"
