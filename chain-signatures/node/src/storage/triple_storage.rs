@@ -42,40 +42,34 @@ impl TripleStorage {
     }
 
     pub async fn insert(&self, triple: Triple, mine: bool, back: bool) -> StoreResult<()> {
-        let mut conn = self.connect().await?;
-
-        let script = r#"
-            local mine_key = KEYS[1]
-            local triple_key = KEYS[2]
-            local used_key = KEYS[3]
+        let script = format!(
+            r#"
             local triple_id = ARGV[1]
             local triple_value = ARGV[2]
-            local mine = ARGV[3]
-            local back = ARGV[4]
 
-            if back == "true" then
-                redis.call("HDEL", used_key, triple_id)
-            elseif redis.call("HEXISTS", used_key, triple_id) == 1 then
-                return {err = "Triple " .. triple_id .. " has already been used"}
+            if {back} then
+                redis.call("HDEL", "{used_key}", triple_id)
+            elseif redis.call("HEXISTS", "{used_key}", triple_id) == 1 then
+                return {{err = "warn: triple " .. triple_id .. " has already been used"}}
             end
 
-            if mine == "true" then
-                redis.call("SADD", mine_key, triple_id)
+            if {mine} then
+                redis.call("SADD", "{mine_key}", triple_id)
             end
 
-            redis.call("HSET", triple_key, triple_id, triple_value)
+            redis.call("HSET", "{triple_key}", triple_id, triple_value)
 
             return "OK"
-        "#;
+        "#,
+            mine_key = self.mine_key,
+            triple_key = self.triple_key,
+            used_key = self.used_key,
+        );
 
-        let _: String = redis::Script::new(script)
-            .key(&self.mine_key)
-            .key(&self.triple_key)
-            .key(&self.used_key)
+        let mut conn = self.connect().await?;
+        let _: String = redis::Script::new(&script)
             .arg(triple.id)
             .arg(triple)
-            .arg(mine.to_string())
-            .arg(back.to_string())
             .invoke_async(&mut conn)
             .await?;
 
@@ -101,48 +95,48 @@ impl TripleStorage {
     }
 
     pub async fn take_two(&self, id1: TripleId, id2: TripleId) -> StoreResult<(Triple, Triple)> {
-        let mut conn = self.connect().await?;
-
-        let lua_script = r#"
+        let script = format!(
+            r#"
             -- Check if the given IDs belong to the mine triples set
-            if redis.call("SISMEMBER", KEYS[2], ARGV[1]) == 1 then
-                return {err = "Triple " .. ARGV[1] .. " cannot be taken as foreign"}
+            local forein_triple = redis.call("SMISMEMBER", "{mine_key}", ARGV[1], ARGV[2])
+            if forein_triple[1] == 1 then
+                return {{err = "warn: triple " .. ARGV[1] .. " cannot be taken as foreign"}}
             end
-
-            if redis.call("SISMEMBER", KEYS[2], ARGV[2]) == 1 then
-                return {err = "Triple " .. ARGV[2] .. " cannot be taken as foreign"}
+            if forein_triple[2] == 1 then
+                return {{err = "warn: triple " .. ARGV[2] .. " cannot be taken as foreign"}}
             end
 
             -- Fetch the triples
-            local v1 = redis.call("HGET", KEYS[1], ARGV[1])
+            local values = redis.call("HMGET", "{triple_key}", ARGV[1], ARGV[2])
+            local v1, v2 = values[1], values[2]
             if not v1 then
-                return {err = "Triple " .. ARGV[1] .. " is missing"}
+                return {{err = "warn: triple " .. ARGV[2] .. " is missing"}}
             end
-
-            local v2 = redis.call("HGET", KEYS[1], ARGV[2])
             if not v2 then
-                return {err = "Triple " .. ARGV[2] .. " is missing"}
+                return {{err = "warn: triple " .. ARGV[2] .. " is missing"}}
             end
 
             -- Delete the triples from the hash map
-            redis.call("HDEL", KEYS[1], ARGV[1], ARGV[2])
+            redis.call("HDEL", "{triple_key}", ARGV[1], ARGV[2])
 
             -- Add the triples to the used set and set expiration time. Note, HSET is used so
             -- we can expire on each field instead of the whole hash set.
-            redis.call("HSET", KEYS[3], ARGV[1], "1", ARGV[2], "1")
-            redis.call("HEXPIRE", KEYS[3], ARGV[3], "FIELDS", 2, ARGV[1], ARGV[2])
+            redis.call("HSET", "{used_key}", ARGV[1], "1", ARGV[2], "1")
+            redis.call("HEXPIRE", "{used_key}", {expire_secs}, "FIELDS", 2, ARGV[1], ARGV[2])
 
             -- Return the triples
-            return {v1, v2}
-        "#;
+            return {{v1, v2}}
+        "#,
+            triple_key = self.triple_key,
+            mine_key = self.mine_key,
+            used_key = self.used_key,
+            expire_secs = USED_EXPIRE_TIME.num_seconds(),
+        );
 
-        let result: Result<(Triple, Triple), RedisError> = redis::Script::new(lua_script)
-            .key(&self.triple_key)
-            .key(&self.mine_key)
-            .key(&self.used_key)
+        let mut conn = self.connect().await?;
+        let result: Result<(Triple, Triple), RedisError> = redis::Script::new(&script)
             .arg(id1.to_string())
             .arg(id2.to_string())
-            .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await;
 
@@ -150,48 +144,45 @@ impl TripleStorage {
     }
 
     pub async fn take_two_mine(&self) -> StoreResult<Option<(Triple, Triple)>> {
-        let mut conn = self.connect().await?;
-
-        let lua_script = r#"
-            -- Check the number of triples in the set
-            local count = redis.call("SCARD", KEYS[1])
-
-            if count < 2 then
+        let script = format!(
+            r#"
+            -- Pop two IDs atomically
+            local ids = redis.call("SPOP", "{mine_key}", 2)
+            -- Ensure we have exactly two IDs
+            if not ids or #ids < 2 then
                 return nil
             end
-
-            -- Pop two IDs atomically
-            local id1 = redis.call("SPOP", KEYS[1])
-            local id2 = redis.call("SPOP", KEYS[1])
+            local id1, id2 = ids[1], ids[2]
 
             -- Retrieve the corresponding triples
-            local v1 = redis.call("HGET", KEYS[2], id1)
+            local values = redis.call("HMGET", "{triple_key}", id1, id2)
+            local v1, v2 = values[1], values[2]
             if not v1 then
-                return {err = "Unexpected behavior. Triple " .. id1 .. " is missing"}
+                return {{err = "warn: unexpected behavior, triple " .. id1 .. " is missing"}}
             end
-
-            local v2 = redis.call("HGET", KEYS[2], id2)
             if not v2 then
-                return {err = "Unexpected behavior. Triple " .. id2 .. " is missing"}
+                return {{err = "warn: unexpected behavior, triple " .. id2 .. " is missing"}}
             end
 
             -- Delete the triples from the hash map
-            redis.call("HDEL", KEYS[2], id1, id2)
+            redis.call("HDEL", "{triple_key}", id1, id2)
 
             -- Add the triples to the used set and set expiration time. Note, HSET is used so
             -- we can expire on each field instead of the whole hash set.
-            redis.call("HSET", KEYS[3], id1, "1", id2, "1")
-            redis.call("HEXPIRE", KEYS[3], ARGV[1], "FIELDS", 2, id1, id2)
+            redis.call("HSET", "{used_key}", id1, "1", id2, "1")
+            redis.call("HEXPIRE", "{used_key}", {expire_secs}, "FIELDS", 2, id1, id2)
 
             -- Return the triples as a response
-            return {v1, v2}
-        "#;
+            return {{v1, v2}}
+        "#,
+            mine_key = self.mine_key,
+            triple_key = self.triple_key,
+            used_key = self.used_key,
+            expire_secs = USED_EXPIRE_TIME.num_seconds(),
+        );
 
-        redis::Script::new(lua_script)
-            .key(&self.mine_key)
-            .key(&self.triple_key)
-            .key(&self.used_key)
-            .arg(USED_EXPIRE_TIME.num_seconds())
+        let mut conn = self.connect().await?;
+        redis::Script::new(&script)
             .invoke_async(&mut conn)
             .await
             .map_err(StoreError::from)

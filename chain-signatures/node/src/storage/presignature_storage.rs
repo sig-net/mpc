@@ -59,38 +59,33 @@ impl PresignatureStorage {
     ) -> StoreResult<()> {
         let mut conn = self.connect().await?;
 
-        let script = r#"
-            local mine_key = KEYS[1]
-            local presig_key = KEYS[2]
-            local used_key = KEYS[3]
+        let script = format!(
+            r#"
             local presig_id = ARGV[1]
-            local presig_value = ARGV[2]
-            local mine = ARGV[3]
-            local back = ARGV[4]
+            local presig = ARGV[2]
 
-            if back == "true" then
-                redis.call("HDEL", used_key, presig_id)
-            elseif redis.call('HEXISTS', used_key, presig_id) == 1 then
-                return {err = 'Presignature ' .. presig_id .. ' is already used'}
+            if {back} then
+                redis.call("HDEL", "{used_key}", presig_id)
+            elseif redis.call('HEXISTS', "{used_key}", presig_id) == 1 then
+                return {{err = 'warn: presignature ' .. presig_id .. ' is already used'}}
             end
 
-            if mine == "true" then
-                redis.call("SADD", mine_key, presig_id)
+            if {mine} then
+                redis.call("SADD", "{mine_key}", presig_id)
             end
 
-            redis.call("HSET", presig_key, presig_id, presig_value)
+            redis.call("HSET", "{presig_key}", presig_id, presig)
 
             return "OK"
-        "#;
+        "#,
+            mine_key = self.mine_key,
+            presig_key = self.presig_key,
+            used_key = self.used_key,
+        );
 
-        let _: String = redis::Script::new(script)
-            .key(&self.mine_key)
-            .key(&self.presig_key)
-            .key(&self.used_key)
+        let _: String = redis::Script::new(&script)
             .arg(presignature.id)
             .arg(presignature)
-            .arg(mine.to_string())
-            .arg(back.to_string())
             .invoke_async(&mut conn)
             .await?;
 
@@ -118,35 +113,33 @@ impl PresignatureStorage {
     pub async fn take(&self, id: &PresignatureId) -> StoreResult<Presignature> {
         let mut conn = self.connect().await?;
 
-        let script = r#"
-            local mine_key = KEYS[1]
-            local presig_key = KEYS[2]
-            local used_key = KEYS[3]
+        let script = format!(
+            r#"
             local presig_id = ARGV[1]
 
-            if redis.call('SISMEMBER', mine_key, presig_id) == 1 then
-                return {err = 'Cannot take mine presignature as foreign owned'}
+            if redis.call('SISMEMBER', "{mine_key}", presig_id) == 1 then
+                return {{err = 'warn: cannot take mine presignature as foreign owned'}}
             end
 
-            local presig_value = redis.call("HGET", presig_key, presig_id)
-
-            if not presig_value then
-                return {err = "Presignature " .. presig_id .. " is missing"}
+            local presig = redis.call("HGET", "{presig_key}", presig_id)
+            if not presig then
+                return {{err = "warn: presignature " .. presig_id .. " is missing"}}
             end
 
-            redis.call("HDEL", presig_key, presig_id)
-            redis.call("HSET", used_key, presig_id, "1")
-            redis.call("HEXPIRE", used_key, ARGV[2], "FIELDS", "1", presig_id)
+            redis.call("HDEL", "{presig_key}", presig_id)
+            redis.call("HSET", "{used_key}", presig_id, "1")
+            redis.call("HEXPIRE", "{used_key}", {expire_secs}, "FIELDS", "1", presig_id)
 
-            return presig_value
-        "#;
+            return presig
+        "#,
+            mine_key = self.mine_key,
+            presig_key = self.presig_key,
+            used_key = self.used_key,
+            expire_secs = USED_EXPIRE_TIME.num_seconds(),
+        );
 
-        let result: Result<Presignature, RedisError> = redis::Script::new(script)
-            .key(&self.mine_key)
-            .key(&self.presig_key)
-            .key(&self.used_key)
+        let result: Result<Presignature, RedisError> = redis::Script::new(&script)
             .arg(id)
-            .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await;
 
@@ -156,33 +149,31 @@ impl PresignatureStorage {
     pub async fn take_mine(&self) -> StoreResult<Option<Presignature>> {
         let mut conn = self.connect().await?;
 
-        let script = r#"
-            local mine_key = KEYS[1]
-            local presig_key = KEYS[2]
-            local used_key = KEYS[3]
-
-            local presig_id = redis.call("SPOP", mine_key)
+        let script = format!(
+            r#"
+            local presig_id = redis.call("SPOP", "{mine_key}")
             if not presig_id then
                 return nil
             end
 
-            local presig_value = redis.call("HGET", presig_key, presig_id)
-            if not presig_value then
-                return {err = "Unexpected behavior. Presignature " .. presig_id .. " is missing"}
+            local presig = redis.call("HGET", "{presig_key}", presig_id)
+            if not presig then
+                return {{err = "warn: unexpected behavior, presignature " .. presig_id .. " is missing"}}
             end
 
-            redis.call("HDEL", presig_key, presig_id)
-            redis.call("HSET", used_key, presig_id, "1")
-            redis.call("HEXPIRE", used_key, ARGV[1], "FIELDS", "1", presig_id)
+            redis.call("HDEL", "{presig_key}", presig_id)
+            redis.call("HSET", "{used_key}", presig_id, "1")
+            redis.call("HEXPIRE", "{used_key}", {expire_secs}, "FIELDS", "1", presig_id)
 
-            return presig_value
-        "#;
+            return presig
+        "#,
+            mine_key = self.mine_key,
+            presig_key = self.presig_key,
+            used_key = self.used_key,
+            expire_secs = USED_EXPIRE_TIME.num_seconds(),
+        );
 
-        redis::Script::new(script)
-            .key(&self.mine_key)
-            .key(&self.presig_key)
-            .key(&self.used_key)
-            .arg(USED_EXPIRE_TIME.num_seconds())
+        redis::Script::new(&script)
             .invoke_async(&mut conn)
             .await
             .map_err(StoreError::from)
