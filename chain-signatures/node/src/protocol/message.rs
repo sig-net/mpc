@@ -405,7 +405,9 @@ impl MessageReceiver for GeneratingState {
                     *acc.entry(msg.from).or_default() += 1;
                     acc
                 });
-        tracing::info!(?message_counts, "generating: handling new messages");
+        if !message_counts.is_empty() {
+            tracing::info!(?message_counts, "generating: handling new messages");
+        }
         while let Some(msg) = inbox.generating.pop_front() {
             protocol.message(msg.from, msg.data);
         }
@@ -432,7 +434,9 @@ impl MessageReceiver for ResharingState {
                     }
                     acc
                 });
-        tracing::info!(?message_counts, "resharing: handling new messages");
+        if !message_counts.is_empty() {
+            tracing::info!(?message_counts, "resharing: handling new messages");
+        }
         let q = inbox.resharing.entry(self.old_epoch).or_default();
         let mut protocol = self.protocol.write().await;
         while let Some(msg) = q.pop_front() {
