@@ -1,5 +1,4 @@
-use mpc_primitives::Signature;
-use mpc_primitives::{bytes::borsh_scalar, SignId};
+use mpc_primitives::{bytes::borsh_scalar, SignId, Signature};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
