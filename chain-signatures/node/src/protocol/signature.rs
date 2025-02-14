@@ -228,7 +228,7 @@ pub struct SignatureManager {
     /// Ongoing signature generation protocols.
     generators: HashMap<SignId, SignatureGenerator>,
     /// Set of completed signatures
-    completed: HashMap<SignId, Instant>,
+    completed: HashMap<SignId, (PresignatureId, Instant)>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
 
@@ -343,7 +343,7 @@ impl SignatureManager {
         cfg: &ProtocolConfig,
         presignature_manager: &mut PresignatureManager,
     ) -> Result<&mut SignatureProtocol, GenerationError> {
-        if self.completed.contains_key(sign_id) {
+        if self.completed.contains_key(sign_id) && self.completed[sign_id].0 == presignature_id {
             tracing::warn!(
                 ?sign_id,
                 presignature_id,
@@ -413,27 +413,30 @@ impl SignatureManager {
                     Err(err) => {
                         remove.push(sign_id.clone());
 
-                        if generator.request.proposer == self.me {
-                            if generator.request.indexed.timestamp.elapsed()
-                                < generator.timeout_total
-                            {
-                                failed.push(sign_id.clone());
-                                tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
+                        if generator.request.indexed.timestamp.elapsed() < generator.timeout_total {
+                            failed.push(sign_id.clone());
+                            tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
+                            if generator.request.proposer == self.me {
                                 crate::metrics::SIGNATURE_GENERATOR_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])
                                     .inc();
-                            } else {
-                                self.completed.insert(sign_id.clone(), Instant::now());
+                            }
+                        } else {
+                            self.completed.insert(
+                                sign_id.clone(),
+                                (generator.presignature_id, Instant::now()),
+                            );
+                            tracing::warn!(
+                                ?err,
+                                "signature failed to be produced; trashing request"
+                            );
+                            if generator.request.proposer == self.me {
                                 crate::metrics::SIGNATURE_GENERATOR_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])
                                     .inc();
                                 crate::metrics::SIGNATURE_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])
                                     .inc();
-                                tracing::warn!(
-                                    ?err,
-                                    "signature failed to be produced; trashing request"
-                                );
                             }
                         }
                         break;
@@ -501,7 +504,8 @@ impl SignatureManager {
                         if generator.request.proposer == self.me {
                             rpc.publish(self.public_key, generator.request.clone(), output);
                         }
-                        self.completed.insert(sign_id.clone(), Instant::now());
+                        self.completed
+                            .insert(sign_id.clone(), (generator.presignature_id, Instant::now()));
                         // Do not retain the protocol
                         remove.push(sign_id.clone());
                     }
@@ -591,7 +595,7 @@ impl SignatureManager {
     /// Garbage collect all the completed signatures.
     pub fn garbage_collect(&mut self, cfg: &ProtocolConfig) {
         let before = self.completed.len();
-        self.completed.retain(|_, timestamp| {
+        self.completed.retain(|_, (_, timestamp)| {
             timestamp.elapsed() < Duration::from_millis(cfg.signature.garbage_timeout)
         });
         let garbage_collected = before.saturating_sub(self.completed.len());
@@ -607,7 +611,7 @@ impl SignatureManager {
         let entry = self
             .completed
             .entry(id.clone())
-            .and_modify(|e| *e = Instant::now());
+            .and_modify(|e| *e = (e.0, Instant::now()));
         matches!(entry, Entry::Occupied(_))
     }
 
