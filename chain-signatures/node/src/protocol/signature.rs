@@ -228,7 +228,7 @@ pub struct SignatureManager {
     /// Ongoing signature generation protocols.
     generators: HashMap<SignId, SignatureGenerator>,
     /// Set of completed signatures
-    completed: HashMap<SignId, (PresignatureId, Instant)>,
+    completed: HashMap<(SignId, PresignatureId), Instant>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
 
@@ -343,7 +343,10 @@ impl SignatureManager {
         cfg: &ProtocolConfig,
         presignature_manager: &mut PresignatureManager,
     ) -> Result<&mut SignatureProtocol, GenerationError> {
-        if self.completed.contains_key(sign_id) && self.completed[sign_id].0 == presignature_id {
+        if self
+            .completed
+            .contains_key(&(sign_id.clone(), presignature_id))
+        {
             tracing::warn!(
                 ?sign_id,
                 presignature_id,
@@ -423,8 +426,8 @@ impl SignatureManager {
                             }
                         } else {
                             self.completed.insert(
-                                sign_id.clone(),
-                                (generator.presignature_id, Instant::now()),
+                                (sign_id.clone(), generator.presignature_id),
+                                Instant::now(),
                             );
                             tracing::warn!(
                                 ?err,
@@ -505,7 +508,7 @@ impl SignatureManager {
                             rpc.publish(self.public_key, generator.request.clone(), output);
                         }
                         self.completed
-                            .insert(sign_id.clone(), (generator.presignature_id, Instant::now()));
+                            .insert((sign_id.clone(), generator.presignature_id), Instant::now());
                         // Do not retain the protocol
                         remove.push(sign_id.clone());
                     }
@@ -595,7 +598,7 @@ impl SignatureManager {
     /// Garbage collect all the completed signatures.
     pub fn garbage_collect(&mut self, cfg: &ProtocolConfig) {
         let before = self.completed.len();
-        self.completed.retain(|_, (_, timestamp)| {
+        self.completed.retain(|(_, _), timestamp| {
             timestamp.elapsed() < Duration::from_millis(cfg.signature.garbage_timeout)
         });
         let garbage_collected = before.saturating_sub(self.completed.len());
@@ -607,11 +610,11 @@ impl SignatureManager {
         }
     }
 
-    pub fn refresh_gc(&mut self, id: &SignId) -> bool {
+    pub fn refresh_gc(&mut self, sign_id: &SignId, presignature_id: PresignatureId) -> bool {
         let entry = self
             .completed
-            .entry(id.clone())
-            .and_modify(|e| *e = (e.0, Instant::now()));
+            .entry((sign_id.clone(), presignature_id))
+            .and_modify(|e| *e = Instant::now());
         matches!(entry, Entry::Occupied(_))
     }
 

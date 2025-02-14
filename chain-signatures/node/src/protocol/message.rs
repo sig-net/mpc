@@ -590,20 +590,31 @@ impl MessageReceiver for RunningState {
         let mut signature_manager = self.signature_manager.write().await;
         let signature_messages = inbox.signature.entry(self.epoch).or_default();
         signature_messages.retain(|sign_id, queue| {
-            // Skip message if it already timed out
-            if queue.is_empty()
-                || queue.iter().any(|msg| {
-                    util::is_elapsed_longer_than_timeout(
-                        msg.timestamp,
-                        protocol_cfg.signature.generation_timeout,
-                    )
-                })
-            {
-                return false;
+            let mut expired = HashSet::new();
+            let mut active = HashSet::new();
+
+            for msg in queue.iter() {
+                if expired.contains(&msg.presignature_id) {
+                    continue;
+                }
+
+                if util::is_elapsed_longer_than_timeout(
+                    msg.timestamp,
+                    protocol_cfg.signature.generation_timeout,
+                ) {
+                    expired.insert(msg.presignature_id);
+                } else {
+                    active.insert(msg.presignature_id);
+                }
             }
 
-            !signature_manager.refresh_gc(sign_id)
+            active.retain(|presig_id| !signature_manager.refresh_gc(sign_id, *presig_id));
+
+            queue.retain(|msg| active.contains(&msg.presignature_id));
+
+            queue.is_empty()
         });
+
         for (sign_id, queue) in signature_messages {
             // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
             let SignatureMessage {
