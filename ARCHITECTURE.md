@@ -17,7 +17,7 @@ But first, here is a visual high-level overview.
 The contract is simple in terms of functionality. It provides two main functions for users or developers to call into.
 
 - The most common function is `sign`, which when called will yield a signature for the user to consume however they wish. For example, this signature can be used to sign into arbitrary chains given the derivation path of the account of that chain. For more info on how the MPC node picks these `sign` requests, refer to the Indexer section.
-- The second method (and should realistically only be used by the MPC nodes themselves) is the `vote_*` methods. These allow the MPC nodes to each individually act as voters into the MPC network, facilitating the way new nodes join or current nodes get kicked out.
+- The second family of methods (which should realistically only be used by the MPC nodes themselves) are the `vote_*` methods. These allow the MPC nodes to each individually act as voters into the MPC network, facilitating the way new nodes join or current nodes get kicked out.
 
 Besides the two methods for users, there are also methods only used by the MPC nodes.
 
