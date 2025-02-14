@@ -1,9 +1,8 @@
 use super::contract::primitives::{ParticipantMap, Participants};
-use super::presignature::{GenerationError, PresignatureId};
-use super::signature::SignRequestIdentifier;
+use super::error::GenerationError;
+use super::presignature::PresignatureId;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
-use crate::indexer::ContractSignRequest;
 use crate::node_client::NodeClient;
 use crate::protocol::Config;
 use crate::protocol::MeshState;
@@ -12,9 +11,9 @@ use crate::util;
 
 use async_trait::async_trait;
 use cait_sith::protocol::{MessageData, Participant};
-use k256::Scalar;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
+use mpc_primitives::SignId;
 use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
@@ -93,15 +92,9 @@ impl From<PresignatureMessage> for Message {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct SignatureMessage {
-    #[serde(with = "serde_bytes")]
-    pub request_id: [u8; 32],
+    pub id: SignId,
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
-    pub request: ContractSignRequest,
-    #[serde(with = "cbor_scalar")]
-    pub epsilon: Scalar,
-    #[serde(with = "serde_bytes")]
-    pub entropy: [u8; 32],
     pub epoch: u64,
     pub from: Participant,
     #[serde(with = "serde_bytes")]
@@ -168,7 +161,7 @@ pub struct MessageInbox {
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
     presignature: HashMap<Epoch, HashMap<PresignatureId, VecDeque<PresignatureMessage>>>,
-    signature: HashMap<Epoch, HashMap<SignRequestIdentifier, VecDeque<SignatureMessage>>>,
+    signature: HashMap<Epoch, HashMap<SignId, VecDeque<SignatureMessage>>>,
 }
 
 impl MessageInbox {
@@ -198,11 +191,7 @@ impl MessageInbox {
                 .signature
                 .entry(message.epoch)
                 .or_default()
-                .entry(SignRequestIdentifier::new(
-                    message.request_id,
-                    message.epsilon,
-                    message.request.payload,
-                ))
+                .entry(message.id.clone())
                 .or_default()
                 .push_back(message),
             Message::Unknown(entries) => {
@@ -408,8 +397,18 @@ impl MessageReceiver for GeneratingState {
     ) -> Result<(), MessageError> {
         let mut inbox = channel.inbox().write().await;
         let mut protocol = self.protocol.write().await;
+        let message_counts: HashMap<Participant, usize> =
+            inbox
+                .generating
+                .iter()
+                .fold(HashMap::new(), |mut acc, msg| {
+                    *acc.entry(msg.from).or_default() += 1;
+                    acc
+                });
+        if !message_counts.is_empty() {
+            tracing::info!(?message_counts, "generating: handling new messages");
+        }
         while let Some(msg) = inbox.generating.pop_front() {
-            tracing::debug!("handling new generating message");
             protocol.message(msg.from, msg.data);
         }
         Ok(())
@@ -425,7 +424,19 @@ impl MessageReceiver for ResharingState {
         _mesh_state: MeshState,
     ) -> Result<(), MessageError> {
         let mut inbox = channel.inbox().write().await;
-        tracing::debug!("handling {} resharing messages", inbox.resharing.len());
+        let message_counts: HashMap<(Participant, Epoch), usize> =
+            inbox
+                .resharing
+                .iter()
+                .fold(HashMap::new(), |mut acc, (epoch, messages)| {
+                    for msg in messages {
+                        *acc.entry((msg.from, *epoch)).or_default() += 1;
+                    }
+                    acc
+                });
+        if !message_counts.is_empty() {
+            tracing::info!(?message_counts, "resharing: handling new messages");
+        }
         let q = inbox.resharing.entry(self.old_epoch).or_default();
         let mut protocol = self.protocol.write().await;
         while let Some(msg) = q.pop_front() {
@@ -444,7 +455,7 @@ impl MessageReceiver for RunningState {
         mesh_state: MeshState,
     ) -> Result<(), MessageError> {
         let protocol_cfg = &cfg.protocol;
-        let participants = &mesh_state.active;
+        let active = &mesh_state.active;
         let mut inbox = channel.inbox().write().await;
 
         // remove the triple_id that has already failed or taken from the triple_bins
@@ -470,7 +481,7 @@ impl MessageReceiver for RunningState {
 
             let protocol = match self
                 .triple_manager
-                .get_or_start_generation(id, participants, protocol_cfg)
+                .get_or_start_generation(id, active, protocol_cfg)
                 .await
             {
                 Ok(protocol) => protocol,
@@ -526,7 +537,7 @@ impl MessageReceiver for RunningState {
 
             let protocol = match presignature_manager
                 .get_or_start_generation(
-                    participants,
+                    active,
                     *id,
                     *triple0,
                     *triple1,
@@ -582,7 +593,7 @@ impl MessageReceiver for RunningState {
 
         let mut signature_manager = self.signature_manager.write().await;
         let signature_messages = inbox.signature.entry(self.epoch).or_default();
-        signature_messages.retain(|sign_request_identifier, queue| {
+        signature_messages.retain(|sign_id, queue| {
             // Skip message if it already timed out
             if queue.is_empty()
                 || queue.iter().any(|msg| {
@@ -595,16 +606,13 @@ impl MessageReceiver for RunningState {
                 return false;
             }
 
-            !signature_manager.refresh_gc(sign_request_identifier)
+            !signature_manager.refresh_gc(sign_id)
         });
-        for (sign_request_identifier, queue) in signature_messages {
+        for (sign_id, queue) in signature_messages {
             // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
             let SignatureMessage {
                 proposer,
                 presignature_id,
-                request,
-                epsilon,
-                entropy,
                 ..
             } = queue.front().unwrap();
 
@@ -618,33 +626,30 @@ impl MessageReceiver for RunningState {
                 continue;
             }
 
-            // if !self
-            //     .sign_queue
-            //     .read()
-            //     .await
-            //     .contains(message.proposer, receipt_id.clone())
-            // {
-            //     leftover_messages.push(message);
-            //     continue;
-            // };
-            // TODO: Validate that the message matches our sign_queue
             let protocol = match signature_manager
                 .get_or_start_protocol(
-                    participants,
-                    sign_request_identifier.request_id,
+                    sign_id,
                     *proposer,
                     *presignature_id,
-                    request,
-                    *epsilon,
-                    *entropy,
-                    &mut presignature_manager,
                     protocol_cfg,
+                    &mut presignature_manager,
                 )
                 .await
             {
                 Ok(protocol) => protocol,
                 Err(GenerationError::PresignatureIsGenerating(_)) => {
                     // We will revisit this this signature request later when the presignature has been generated.
+                    continue;
+                }
+                Err(err @ GenerationError::WaitingForIndexer(_)) => {
+                    // We will revisit this this signature request later when we have the request indexed.
+                    tracing::warn!(?sign_id, ?proposer, ?err, "waiting for indexer");
+                    continue;
+                }
+                Err(err @ GenerationError::InvalidProposer(_, _)) => {
+                    // trash the whole of these messages since we got an invalid set of participants.
+                    tracing::warn!(?sign_id, ?err, "signature generation cannot be started");
+                    queue.clear();
                     continue;
                 }
                 Err(
@@ -656,11 +661,7 @@ impl MessageReceiver for RunningState {
                     // and have the other nodes timeout in the following cases:
                     // - If a presignature is in GC, then it was used already or failed to be produced.
                     // - If a presignature is missing, that means our system cannot process this signature.
-                    tracing::warn!(
-                        ?sign_request_identifier,
-                        ?err,
-                        "signature cannot be generated"
-                    );
+                    tracing::warn!(?sign_id, ?err, "signature cannot be generated");
                     queue.clear();
                     continue;
                 }
@@ -668,7 +669,7 @@ impl MessageReceiver for RunningState {
                     // ignore the whole of the messages since the generation had bad parameters. Also have the other node who
                     // initiated the protocol resend the message or have it timeout on their side.
                     tracing::warn!(
-                        ?sign_request_identifier,
+                        ?sign_id,
                         presignature_id,
                         ?error,
                         "unable to initialize incoming signature protocol"
@@ -678,7 +679,7 @@ impl MessageReceiver for RunningState {
                 }
                 Err(err) => {
                     tracing::warn!(
-                        ?sign_request_identifier,
+                        ?sign_id,
                         ?err,
                         "Unexpected error encounted while generating signature"
                     );
@@ -1087,40 +1088,6 @@ fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {
     }
 }
 
-/// Scalar module for any scalars to be sent through messaging other nodes.
-/// There's an issue with serializing with ciborium when it comes to
-/// forward and backward compatibility, so we need to implement our own
-/// custom serialization here.
-pub mod cbor_scalar {
-    use k256::elliptic_curve::bigint::Encoding as _;
-    use k256::elliptic_curve::scalar::FromUintUnchecked as _;
-    use k256::Scalar;
-    use serde::{de, Deserialize as _, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(scalar: &Scalar, ser: S) -> Result<S::Ok, S::Error> {
-        let num = k256::U256::from(scalar);
-        let bytes = num.to_le_bytes();
-        serde_bytes::Bytes::new(&bytes).serialize(ser)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Scalar, D::Error> {
-        let bytes = match ciborium::Value::deserialize(deserializer)? {
-            ciborium::Value::Bytes(bytes) if bytes.len() != 32 => {
-                return Err(de::Error::custom("expected 32 bytes for Scalar"))
-            }
-            ciborium::Value::Bytes(bytes) => bytes,
-            _ => return Err(de::Error::custom("expected ciborium::Value::Bytes")),
-        };
-
-        let mut buf = [0u8; 32];
-        buf.copy_from_slice(&bytes[0..32]);
-
-        let num = k256::U256::from_le_bytes(buf);
-        let scalar = k256::Scalar::from_uint_unchecked(num);
-        Ok(scalar)
-    }
-}
-
 fn cbor_to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, MessageError> {
     let mut buf = Vec::new();
     ciborium::into_writer(value, &mut buf)
@@ -1150,17 +1117,14 @@ const fn cbor_name(value: &ciborium::Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use cait_sith::protocol::Participant;
-    use k256::Scalar;
     use mpc_keys::hpke::{self, Ciphered};
+    use mpc_primitives::SignId;
     use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-    use crate::{
-        indexer::ContractSignRequest,
-        protocol::{
-            contract::primitives::{ParticipantMap, Participants},
-            message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
-            ParticipantInfo,
-        },
+    use crate::protocol::{
+        contract::primitives::{ParticipantMap, Participants},
+        message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
+        ParticipantInfo,
     };
 
     #[test]
@@ -1336,18 +1300,10 @@ mod tests {
                 data: vec![8; 512],
             }),
             Message::Signature(SignatureMessage {
+                id: SignId::new([7; 32]),
                 proposer: from,
                 presignature_id: 1234,
-                request_id: [7; 32],
                 epoch: 0,
-                request: ContractSignRequest {
-                    payload: Scalar::ZERO,
-                    path: "test-something".to_string(),
-                    key_version: 1,
-                    chain: crate::protocol::Chain::NEAR,
-                },
-                epsilon: Scalar::ONE,
-                entropy: [9; 32],
                 from,
                 data: vec![78; 1222],
                 timestamp: 1234567,

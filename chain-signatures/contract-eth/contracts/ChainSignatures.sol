@@ -1,35 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
-import "./Secp256k1.sol";
-import "@openzeppelin/contracts/utils/Strings.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "hardhat/console.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 
-contract ChainSignatures is Initializable {
+/**
+ * @title Sig.Network signing contract
+ * @dev Contract for accepting signature requests and providing responses from the Sig.Network.
+ */
+contract ChainSignatures is AccessControl {
     struct SignRequest {
         bytes32 payload;
         string path;
         uint32 keyVersion;
-        PublicKey derivedPublicKey;
-    }
-
-    struct SignatureRequest {
-        uint256 epsilon;
-        uint256 payloadHash;
-        address requester;
-        PublicKey derivedPublicKey;
-    }
-
-    struct SignatureResponse {
-        AffinePoint bigR;
-        uint256 s;
-        uint8 recoveryId;
-    }
-
-    struct PublicKey {
-        uint256 x;
-        uint256 y;
+        string algo;
+        string dest;
+        string params;
     }
 
     struct AffinePoint {
@@ -37,134 +22,170 @@ contract ChainSignatures is Initializable {
         uint256 y;
     }
 
-    uint256 public threshold;
-    mapping(bytes32 => SignatureRequest) public pendingRequests;
-    uint256 public requestCounter;
-    PublicKey public publicKey;
-
-    mapping(bytes32 => uint256) public depositToRefund;
-
-    event SignatureRequested(bytes32 indexed requestId, address requester, uint256 epsilon, uint256 payloadHash, string path);
-    event SignatureResponded(bytes32 indexed requestId, SignatureResponse response);
-
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() initializer {}
-
-    function initialize(PublicKey memory _publicKey) public initializer {
-        publicKey = _publicKey;
+    struct Signature {
+        AffinePoint bigR;
+        uint256 s;
+        uint8 recoveryId;
     }
 
-    function getPublicKey() public view returns (PublicKey memory) {
-        return publicKey;
+    struct Response {
+        bytes32 requestId;
+        Signature signature;
     }
 
-    function derivedPublicKey(string memory path, address _predecessor) public view returns (PublicKey memory) {
-        address predecessor = _predecessor == address(0) ? msg.sender : _predecessor;
-        uint256 epsilon = deriveEpsilon(path, predecessor);
-        PublicKey memory _derivedPublicKey = deriveKey(publicKey, epsilon);
-        return _derivedPublicKey;
+    struct ErrorResponse {
+        bytes32 requestId;
+        string errorMessage;
     }
 
-    function deriveKey(PublicKey memory _publicKey, uint256 epsilon) public pure returns (PublicKey memory) {
-        // G * epsilon + publicKey
-        (uint256 epsilonGx, uint256 epsilonGy) = Secp256k1.ecMul(epsilon, Secp256k1.GX, Secp256k1.GY);
-        (uint256 resultX, uint256 resultY) = Secp256k1.ecAdd(epsilonGx, epsilonGy, _publicKey.x, _publicKey.y);
-        return PublicKey(resultX, resultY);
+    uint256 signatureDeposit;
+
+    /**
+     * @dev Emitted when a signature is requested.
+     * @param sender The address of the sender.
+     * @param payload The payload to be signed.
+     * @param keyVersion The version of the key used for signing.
+     * @param deposit The deposit amount.
+     * @param chainId The ID of the blockchain.
+     * @param path The derivation path for the user account.
+     * @param algo The algorithm used for signing.
+     * @param dest The response destination.
+     * @param params Additional parameters.
+     */
+    event SignatureRequested(
+        address sender,
+        bytes32 payload,
+        uint32 keyVersion,
+        uint256 deposit,
+        uint256 chainId,
+        string path,
+        string algo,
+        string dest,
+        string params
+    );
+
+    /**
+     * @dev Emitted when a signature response is received.
+     * @param requestId The ID of the request. Must be calculated off-chain.
+     * @param responder The address of the responder.
+     * @param signature The signature response.
+     */
+    event SignatureResponded(
+        bytes32 indexed requestId,
+        address responder,
+        Signature signature
+    );
+
+    /**
+     * @dev Emitted when a signature error is received.
+     * @param requestId The ID of the request. Must be calculated off-chain.
+     * @param responder The address of the responder.
+     * @param error The error message.
+     */
+    event SignatureError(
+        bytes32 indexed requestId,
+        address responder,
+        string error
+    );
+
+    /**
+     * @dev Emitted when a withdrawal is made.
+     * @param owner The address of the owner.
+     * @param amount The amount withdrawn.
+     */
+    event Withdraw(address indexed owner, uint amount);
+
+    /**
+     * @dev Constructor for the ChainSignatures contract.
+     * @param _mpc_network The address of the account controlled by the MPC network.
+     * @param _signatureDeposit The deposit required for signature requests.
+     */
+    constructor(address _mpc_network, uint256 _signatureDeposit) {
+        _grantRole(DEFAULT_ADMIN_ROLE, _mpc_network);
+        signatureDeposit = _signatureDeposit;
     }
 
-    function verifyDerivedKey(uint256 epsilon, PublicKey memory derivedPk) private view returns (bool) {
-        (uint256 epsilonGx, uint256 epsilonGy) = Secp256k1.ecSub(derivedPk.x, derivedPk.y, publicKey.x, publicKey.y);
-        // verify epsilonGx, epsilonGy is G * epsilon, based on:
-        // https://ethresear.ch/t/you-can-kinda-abuse-ecrecover-to-do-ecmul-in-secp256k1-today/2384
-        address recovered = ecrecover(bytes32(0), 27, bytes32(Secp256k1.GX), bytes32(mulmod(Secp256k1.GX, epsilon, Secp256k1.N)));
+    /**
+     * @dev Function to request a signature.
+     * @param _request The signature request details.
+     */
+    function sign(SignRequest memory _request) external payable {
+        require(msg.value >= signatureDeposit, "Insufficient deposit");
 
-        // epsilonG should match recovered
-        bytes32 epsilonGHash = keccak256(abi.encodePacked(epsilonGx, epsilonGy));
-        address epsilonGAddr = address(uint160(uint256(epsilonGHash)));
-        return epsilonGAddr == recovered;
-    }
-
-    function deriveEpsilon(string memory path, address requester) public pure returns (uint256) {
-        string memory requesterStr = Strings.toHexString(uint256(uint160(requester)), 20);
-        string memory epsilonString = string.concat("near-mpc-recovery v0.2.0 epsilon derivation:", requesterStr, ",", path);
-        console.log("Epsilon String:", epsilonString);
-        bytes32 epsilonBytes = keccak256(bytes(epsilonString));
-        uint256 epsilon = uint256(epsilonBytes);
-        return epsilon;
-    }
-
-    function latestKeyVersion() public pure returns (uint32) {
-        return 0;
-    }
-
-    function sign(SignRequest memory _request) external payable returns (bytes32) {
-        bytes32 payload = _request.payload;
-        string memory path = _request.path;
-        uint32 keyVersion = _request.keyVersion;
-
-        if (keyVersion > latestKeyVersion()) {
-            revert("This key version is unsupported. Call latestKeyVersion() to get the latest supported version");
-        }
-
-        uint256 requiredDeposit = getSignatureDeposit();
-        require(msg.value >= requiredDeposit, "Insufficient deposit");
-
-        // Concert payload to int as big-endian, check if payload is than the secp256k1 curve order
-        uint256 payloadHash = uint256(payload);
-        require(
-            payloadHash < 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141,
-            "Payload exceeds secp256k1 curve order"
+        emit SignatureRequested(
+            msg.sender,
+            _request.payload,
+            _request.keyVersion,
+            msg.value,
+            block.chainid,
+            _request.path,
+            _request.algo,
+            _request.dest,
+            _request.params
         );
-
-        bytes32 requestId = keccak256(abi.encodePacked(payload, msg.sender, path));
-        require(pendingRequests[requestId].requester == address(0), "Request already exists");
-
-        uint256 epsilon = deriveEpsilon(path, msg.sender);
-        PublicKey memory derivedPk = _request.derivedPublicKey;
-        require(verifyDerivedKey(epsilon, derivedPk), "Derived key verification failed");
-        SignatureRequest memory request = SignatureRequest(epsilon, payloadHash, msg.sender, derivedPk);
-        pendingRequests[requestId] = request;
-        depositToRefund[requestId] = msg.value - requiredDeposit;
-        requestCounter++;
-
-        emit SignatureRequested(requestId, msg.sender, epsilon, payloadHash, path);
-
-        return requestId;
     }
-    
-    function respond(bytes32 _requestId, SignatureResponse memory _response) external {        
-        SignatureRequest storage request = pendingRequests[_requestId];
-        require(request.requester != address(0), "Request not found");
 
-        PublicKey memory expectedPublicKey = request.derivedPublicKey;
-        // Derive Ethereum address from public key
-        bytes32 pkHash = keccak256(abi.encodePacked(expectedPublicKey.x, expectedPublicKey.y));
-        address expectedSigner = address(uint160(uint256(pkHash)));
-        // Verify the virtual signer is the derived address using ecrecover
-        address recoveredSigner = ecrecover(bytes32(request.payloadHash), _response.recoveryId+27, bytes32(_response.bigR.x), bytes32(_response.s));
-        require(recoveredSigner == expectedSigner, "Invalid signature");
-
-        emit SignatureResponded(_requestId, _response);
-
-        // Refund excess deposit
-        uint256 refund = depositToRefund[_requestId];
-
-        // Clean up
-        delete pendingRequests[_requestId];
-        delete depositToRefund[_requestId];
-        requestCounter--;
-
-        if (refund > 0) {
-            payable(request.requester).transfer(refund);
+    /**
+     * @dev Function to respond to signature requests.
+     * @param _responses The array of signature responses.
+     */
+    function respond(Response[] calldata _responses) external {
+        for (uint256 i = 0; i < _responses.length; i++) {
+            emit SignatureResponded(
+                _responses[i].requestId,
+                msg.sender,
+                _responses[i].signature
+            );
         }
     }
 
-    function getSignatureDeposit() public view returns (uint256) {
-        // Simplified deposit calculation
-        if (requestCounter <= 3) {
-            return 1 wei;
-        } else {
-            return (requestCounter - 3) * 4 * 1e15; // 0.004 ETH (~1 USD) first request after the first 3
+    /**
+     * @dev Function to emit signature generation errors.
+     * @param _errors The array of signature generation errors.
+     */
+    function respondError(ErrorResponse[] calldata _errors) external {
+        for (uint256 i = 0; i < _errors.length; i++) {
+            emit SignatureError(
+                _errors[i].requestId,
+                msg.sender,
+                _errors[i].errorMessage
+            );
         }
+    }
+
+    /**
+     * @dev Function to get the current signature deposit amount.
+     * @return The current signature deposit amount.
+     */
+    function getSignatureDeposit() external view returns (uint256) {
+        return signatureDeposit;
+    }
+
+    /**
+     * @dev Function to set the signature deposit amount.
+     * @param _amount The new deposit amount.
+     */
+    function setSignatureDeposit(
+        uint256 _amount
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        signatureDeposit = _amount;
+    }
+
+    /**
+     * @dev Function to withdraw funds from the contract.
+     * @param _amount The amount to withdraw.
+     * @param _receiver The address to receive the withdrawn funds.
+     */
+    function withdraw(
+        uint256 _amount,
+        address _receiver
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(
+            _amount <= address(this).balance,
+            "Withdraw amount must be smaller than total balance in contract"
+        );
+        address payable to = payable(_receiver);
+        to.transfer(_amount);
+        emit Withdraw(_receiver, _amount);
     }
 }

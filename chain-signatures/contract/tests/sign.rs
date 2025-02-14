@@ -3,9 +3,9 @@ use common::{candidates, create_response, init, init_env, sign_and_validate};
 
 use mpc_contract::errors;
 use mpc_contract::primitives::{CandidateInfo, SignRequest};
+use mpc_primitives::Signature;
 use near_workspaces::types::{AccountId, NearToken};
 
-use crypto_shared::SignatureResponse;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -68,8 +68,7 @@ async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
 
     let msg = "hello world!";
     println!("submitting: {msg}");
-    let (payload_hash, respond_req, respond_resp) =
-        create_response(alice.id(), msg, path, &sk).await;
+    let (payload_hash, sign_id, respond_resp) = create_response(alice.id(), msg, path, &sk).await;
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
@@ -92,8 +91,8 @@ async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
     let respond = contract
         .call("respond")
         .args_json(serde_json::json!({
-            "request": respond_req,
-            "response": respond_resp
+            "sign_id": sign_id,
+            "signature": respond_resp
         }))
         .max_gas()
         .transact()
@@ -106,7 +105,7 @@ async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
     let execution = execution.into_result()?;
 
     // Finally wait the result:
-    let returned_resp: SignatureResponse = execution.json()?;
+    let returned_resp: Signature = execution.json()?;
     assert_eq!(
         returned_resp, respond_resp,
         "Returned signature request does not match"
@@ -202,8 +201,7 @@ async fn test_contract_sign_request_deposits() -> anyhow::Result<()> {
 
     // Try to sign with no deposit, should fail.
     let msg = "without-deposit";
-    let (payload_hash, respond_req, respond_resp) =
-        create_response(predecessor_id, msg, path, &sk).await;
+    let (payload_hash, sign_id, signature) = create_response(predecessor_id, msg, path, &sk).await;
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
@@ -225,8 +223,8 @@ async fn test_contract_sign_request_deposits() -> anyhow::Result<()> {
     let respond = contract
         .call("respond")
         .args_json(serde_json::json!({
-            "request": respond_req,
-            "response": respond_resp
+            "sign_id": sign_id,
+            "signature": signature
         }))
         .max_gas()
         .transact()

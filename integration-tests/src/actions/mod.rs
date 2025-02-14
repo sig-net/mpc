@@ -7,8 +7,6 @@ use crate::containers::LakeIndexer;
 
 use anyhow::Context as _;
 use cait_sith::FullSignature;
-use crypto_shared::ScalarExt;
-use crypto_shared::{derive_epsilon, derive_key};
 use elliptic_curve::sec1::ToEncodedPoint;
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::point::AffineCoordinates;
@@ -16,6 +14,8 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
 use mpc_contract::errors::SignError;
 use mpc_contract::primitives::SignRequest;
+use mpc_crypto::ScalarExt;
+use mpc_crypto::{derive_epsilon_near, derive_key};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_fetch::ops::Function;
@@ -110,7 +110,7 @@ pub async fn validate_signature(
 ) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
-    let epsilon = derive_epsilon(account_id, "test");
+    let epsilon = derive_epsilon_near(account_id, "test");
     let user_pk = derive_key(mpc_pk, epsilon);
     signature
         .verify(
@@ -284,13 +284,13 @@ pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> web3::types::
 
 #[cfg(test)]
 mod tests {
-    use crypto_shared::{derive_epsilon, derive_key, ScalarExt as _};
     use elliptic_curve::sec1::FromEncodedPoint as _;
     use k256::ecdsa::VerifyingKey;
     use k256::elliptic_curve::ops::{Invert, Reduce};
     use k256::elliptic_curve::point::AffineCoordinates;
     use k256::elliptic_curve::ProjectivePoint;
     use k256::{AffinePoint, EncodedPoint, Scalar};
+    use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
 
     use super::{public_key_to_address, recover, x_coordinate};
 
@@ -300,12 +300,12 @@ mod tests {
     fn signatures_havent_changed() {
         const CHAIN_ID_ETH: u64 = 31337;
 
-        let big_r = "03f13a99141ce0a4043a7c02afdec6d52f25c6b3de01967acc5cf4a3fa43801589";
-        let s = "39e5631fcc06ffccf8469a3cdcdce0651ebafd998a4280ebbf5dc24a749c98fb";
-        let mpc_key = "04b5695a882aeaf36bf3933e21911b5cbcceae7fd7cb424f3ea221c7e8d390aad4ad2c1a427faec960f22a5442739c0a04fd64ab7ce4c93980417bd3d1d8bc04ea";
-        let account_id = "dev-20240719125040-80075249096169.test.near";
+        let big_r = "029b1b94bf4511b1a25986ba858cfa0fbdd5e4077c02e1d1102a194389b1f72df7";
+        let s = "25f3494bb7e7b3349a4b4d939d3e5ae1787a0863e4f698fb8ed2d3e11c195035";
+        let mpc_key = "045b4fa179e005361fd858f8a6f896d7afc23a53d3f95d6566a88cde954e7b2f1cb77c554705c35d4ffced67aeafbcda46d9d89d6f200c3a3d109f92872863b3dc";
+        let account_id = "dev-20250212213501-93636560094065.test.near";
         let payload_hash: [u8; 32] =
-            hex::decode("49f32740939bfdcbd8d1786075df7aca384381ec203975c3a6c1fd80acddcd4c")
+            hex::decode("835b9f469b36126284df2e06ecab9482cf495413ab9275faaafb2d40d79cf7bb")
                 .unwrap()
                 .try_into()
                 .unwrap();
@@ -318,7 +318,7 @@ mod tests {
         let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
 
         let account_id = account_id.parse().unwrap();
-        let derivation_epsilon: k256::Scalar = derive_epsilon(&account_id, "test");
+        let derivation_epsilon: k256::Scalar = derive_epsilon_near(&account_id, "test");
         let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
         let user_pk_y_parity = match user_pk.y_is_odd().unwrap_u8() {
             0 => secp256k1::Parity::Even,
@@ -455,7 +455,7 @@ mod tests {
     ) -> Result<(), &'static str> {
         // let z: Scalar = Scalar::reduce_bytes(z);
         let z =
-        <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(z);
+    <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(z);
         let (r, s) = sig.split_scalars();
         let s_inv = *s.invert_vartime();
         let u1 = z * s_inv;
@@ -476,9 +476,9 @@ mod tests {
         // println!("------------- verify_prehashed[end] -------------");
 
         let reduced =
-        <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
-            &x,
-        );
+    <Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
+        &x,
+    );
 
         //println!("reduced {reduced:#?}");
 
