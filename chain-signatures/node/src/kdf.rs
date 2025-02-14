@@ -1,7 +1,8 @@
 use anyhow::Context;
 use hkdf::Hkdf;
 use k256::{ecdsa::RecoveryId, elliptic_curve::sec1::ToEncodedPoint, AffinePoint, Scalar};
-use mpc_crypto::{kdf::recover, x_coordinate, ScalarExt, SignatureResponse};
+use mpc_crypto::{kdf::recover, x_coordinate, ScalarExt};
+use mpc_primitives::Signature;
 use near_primitives::hash::CryptoHash;
 use sha3::Sha3_256;
 
@@ -35,7 +36,7 @@ pub fn into_eth_sig(
     big_r: &k256::AffinePoint,
     s: &k256::Scalar,
     msg_hash: Scalar,
-) -> anyhow::Result<SignatureResponse> {
+) -> anyhow::Result<Signature> {
     let public_key = public_key.to_encoded_point(false);
     let signature = k256::ecdsa::Signature::from_scalars(x_coordinate(big_r), s)
         .context("cannot create signature from cait_sith signature")?;
@@ -47,7 +48,7 @@ pub fn into_eth_sig(
     .context("unable to use 0 as recovery_id to recover public key")?
     .to_encoded_point(false);
     if public_key == pk0 {
-        return Ok(SignatureResponse::new(*big_r, *s, 0));
+        return Ok(Signature::new(*big_r, *s, 0));
     }
 
     let pk1 = recover(
@@ -58,7 +59,7 @@ pub fn into_eth_sig(
     .context("unable to use 1 as recovery_id to recover public key")?
     .to_encoded_point(false);
     if public_key == pk1 {
-        return Ok(SignatureResponse::new(*big_r, *s, 1));
+        return Ok(Signature::new(*big_r, *s, 1));
     }
 
     anyhow::bail!("cannot use either recovery id (0 or 1) to recover pubic key")

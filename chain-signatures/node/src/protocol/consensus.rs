@@ -10,7 +10,7 @@ use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
-use crate::protocol::SignRequest;
+use crate::protocol::IndexedSignRequest;
 use crate::rpc::NearClient;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
@@ -33,7 +33,7 @@ pub trait ConsensusCtx {
     fn near_client(&self) -> &NearClient;
     fn mpc_contract_id(&self) -> &AccountId;
     fn my_address(&self) -> &Url;
-    fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<SignRequest>>>;
+    fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>;
     fn secret_storage(&self) -> &SecretNodeStorageBox;
     fn triple_storage(&self) -> &TripleStorage;
     fn presignature_storage(&self) -> &PresignatureStorage;

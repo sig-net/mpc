@@ -45,3 +45,22 @@ data "google_secret_manager_secret_version" "aws_access_key_secret_id" {
 data "google_secret_manager_secret_version" "aws_secret_key_secret_id" {
   secret = "multichain-indexer-aws-secret-key"
 }
+
+data "google_secret_manager_secret_version" "eth_account_sk_secret_id" {
+  count   = length(var.node_configs)
+  secret  = var.node_configs[0].eth_account_sk_secret_id
+  project = var.project_id
+}
+
+data "google_secret_manager_secret_version" "eth_rpc_ws_url_secret_id" {
+  count   = length(var.node_configs)
+  secret  = var.node_configs[0].eth_rpc_ws_url_secret_id
+  project = var.project_id
+}
+
+data "google_secret_manager_secret_version" "eth_rpc_http_url_secret_id" {
+  count   = length(var.node_configs)
+  secret  = var.node_configs[0].eth_rpc_http_url_secret_id
+  project = var.project_id
+}
+

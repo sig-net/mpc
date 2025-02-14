@@ -13,7 +13,6 @@ aws-config = "1.4"
 aws-sdk-s3 = "1.29"
 axum = "0.6.19"
 axum-extra = "0.7"
-ciborium = "0.2.2"
 chrono = "0.4.24"
 google-datastore1 = "=5.0.4"
 google-secretmanager1 = "5"
@@ -25,7 +24,6 @@ local-ip-address = "0.5.4"
 prometheus = "0.13.3"
 redis = "0.27.2"
 semver = "1.0.23"
-serde_bytes = "0.11.15"
 sysinfo = "0.32.0"
 tokio-retry = "0.3"
 tracing-stackdriver = "0.10.0"
@@ -34,6 +32,7 @@ tracing-stackdriver = "0.10.0"
 anyhow.workspace = true
 borsh.workspace = true
 cait-sith.workspace = true
+ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true
 hex.workspace = true
@@ -42,6 +41,7 @@ k256.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+serde_bytes.workspace = true
 serde_json.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
@@ -56,9 +56,10 @@ near-crypto = "0.26.0"
 near-fetch = "0.6.0"
 near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/2.3.0" }
 near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/2.3.0" }
-near-primitives = "0.26.0"
+near-primitives.workspace = true
 near-sdk.workspace = true
 
 mpc-contract.workspace = true
-mpc-keys.workspace = true
 mpc-crypto.workspace = true
+mpc-keys.workspace = true
+mpc-primitives.workspace = true

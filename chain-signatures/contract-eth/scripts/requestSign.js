@@ -1,4 +1,5 @@
 const hre = require("hardhat");
+const { generateRequestId } = require("../utils/utils");
 
 async function main() {
   let contractAddress;
@@ -54,12 +55,8 @@ async function main() {
       const parsedEvent = chainSignatures.interface.parseLog(requestEvent);
       console.log("Signature requested successfully!");
       console.log("Payload Hash:", parsedEvent.args.payload.toString());
-      const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
-        ["address", "bytes", "string", "uint32", "uint256", "string", "string", "string"],
-        [parsedEvent.args.sender, parsedEvent.args.payload, parsedEvent.args.path, parsedEvent.args.keyVersion, parsedEvent.args.chainId, parsedEvent.args.algo, parsedEvent.args.dest, parsedEvent.args.params]
-      );
-      const requestId = ethers.keccak256(encoded);
-
+      
+      const requestId = generateRequestId(parsedEvent.args.sender, parsedEvent.args.payload, parsedEvent.args.path, parsedEvent.args.keyVersion, parsedEvent.args.chainId, parsedEvent.args.algo, parsedEvent.args.dest, parsedEvent.args.params);
       console.log("Request ID:", requestId);
 
       // Add event listener for SignatureResponded
@@ -70,9 +67,9 @@ async function main() {
         console.log("\nSignature response received!");
         console.log("Request ID:", requestId);
         console.log("Response:")
-        console.log("  bigR:", event.args.response.bigR);
-        console.log("  s:", event.args.response.s);
-        console.log("  recoveryId:", event.args.response.recoveryId);
+        console.log("  bigR:", event.args.signature.bigR);
+        console.log("  s:", event.args.signature.s);
+        console.log("  recoveryId:", event.args.signature.recoveryId);
       });
     }
 

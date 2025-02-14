@@ -4,18 +4,20 @@ members = [
     "chain-signatures/contract",
     "chain-signatures/keys",
     "chain-signatures/node",
+    "chain-signatures/primitives",
 
     "integration-tests",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 
 [workspace.dependencies]
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 borsh = "1.5.3"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
+ciborium = "0.2.2"
 clap = { version = "4.5.4", features = ["derive", "env"] }
 deadpool-redis = "0.18.0"
 hex = "0.4.3"
@@ -30,6 +32,7 @@ k256 = { version = "0.13.1", features = [
 rand = "0.8.5"
 reqwest = { version = "0.11.16", features = ["blocking", "json"] }
 serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11.15"
 serde_json = "1"
 sha3 = "0.10.8"
 thiserror = "1"
@@ -40,12 +43,14 @@ url = { version = "2.4.0", features = ["serde"] }
 web3 = "0.19.0"
 
 near-account-id = "1.0.0"
-near-sdk = { version = "5.6.0", features = ["legacy", "unit-testing", "unstable"] }
+near-primitives = "0.26.0"
+near-sdk = { version = "5.6.0", features = ["unit-testing", "unstable"] }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-node = { path = "./chain-signatures/node" }
+mpc-primitives = { path = "./chain-signatures/primitives" }
 
 [patch.crates-io]
 # TODO: trigger Cargo.lock update for x25519-dalek once they release.
