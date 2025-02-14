@@ -364,6 +364,7 @@ impl SignatureManager {
             return Err(GenerationError::WaitingForIndexer(sign_id.clone()));
         };
         if proposer != request.proposer {
+            self.sign_queue.push_failed(request.clone());
             return Err(GenerationError::InvalidProposer(proposer, request.proposer));
         }
 
@@ -372,32 +373,41 @@ impl SignatureManager {
             Ok(presignature) => presignature,
             Err(err @ GenerationError::PresignatureIsGenerating(_)) => {
                 tracing::warn!(me = ?self.me, presignature_id, "presignature is generating, can't join signature generation protocol");
+                self.sign_queue.push_failed(request.clone());
                 return Err(err);
             }
             Err(err @ GenerationError::PresignatureIsMissing(_)) => {
                 tracing::warn!(me = ?self.me, presignature_id, "presignature is missing, can't join signature generation protocol");
+                self.sign_queue.push_failed(request.clone());
                 return Err(err);
             }
             Err(err @ GenerationError::PresignatureIsGarbageCollected(_)) => {
                 tracing::warn!(me = ?self.me, presignature_id, "presignature is garbage collected, can't join signature generation protocol");
+                self.sign_queue.push_failed(request.clone());
                 return Err(err);
             }
             Err(err) => return Err(err),
         };
         tracing::info!(me = ?self.me, presignature_id, "found presignature: ready to start signature generation");
-        let generator =
-            match Self::generate_internal(self.me, self.public_key, presignature, request, cfg) {
-                Ok(generator) => generator,
-                Err(err @ InitializationError::BadParameters(_)) => {
-                    tracing::warn!(
-                        ?sign_id,
-                        presignature_id,
-                        ?err,
-                        "failed to start signature generation"
-                    );
-                    return Err(GenerationError::CaitSithInitializationError(err));
-                }
-            };
+        let generator = match Self::generate_internal(
+            self.me,
+            self.public_key,
+            presignature,
+            request.clone(),
+            cfg,
+        ) {
+            Ok(generator) => generator,
+            Err(err @ InitializationError::BadParameters(_)) => {
+                self.sign_queue.push_failed(request);
+                tracing::warn!(
+                    ?sign_id,
+                    presignature_id,
+                    ?err,
+                    "failed to start signature generation"
+                );
+                return Err(GenerationError::CaitSithInitializationError(err));
+            }
+        };
         let generator = entry.insert(generator);
         crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
             .with_label_values(&[self.my_account_id.as_str()])
