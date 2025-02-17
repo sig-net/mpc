@@ -101,10 +101,10 @@ struct NodeIdFormatter {
 }
 
 impl NodeIdFormatter {
-    pub fn new(id: usize) -> Self {
+    pub fn new(node_id: &str) -> Self {
         Self {
             fmt: Format::default(),
-            repr: format!("NodeId({id})"),
+            repr: format!("NodeId({})", node_id),
         }
     }
 }
@@ -126,35 +126,14 @@ where
     }
 }
 
-pub fn install_global(node_id: Option<usize>) {
-    // Install global collector configured based on RUST_LOG env var.
-    let base_subscriber = Registry::default().with(EnvFilter::from_default_env());
-
-    if let Some(node_id) = node_id {
-        let fmt_layer =
-            tracing_subscriber::fmt::layer().event_format(NodeIdFormatter::new(node_id));
-        let subscriber = base_subscriber.with(fmt_layer);
-        tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
-    } else if is_running_on_gcp() {
-        let stackdriver = stackdriver_layer().with_writer(std::io::stderr);
-        let subscriber = base_subscriber.with(stackdriver);
-        tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
-    } else {
-        let fmt_layer = tracing_subscriber::fmt::layer().with_thread_ids(true);
-        let subscriber = base_subscriber.with(fmt_layer);
-        tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
-    }
-}
-
-// TODO: add Phuongs debug node id layer
-// TODO: what to do with GCP logs?
 pub fn setup(env: &str, node_id: &str, options: &Options, rt: &tokio::runtime::Runtime) {
     let subscriber = Registry::default().with(EnvFilter::from_default_env());
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(atty::is(atty::Stream::Stderr))
         .with_line_number(true)
-        .with_thread_names(true);
+        .with_thread_names(true)
+        .event_format(NodeIdFormatter::new(node_id));
 
     let trace_config = trace::config()
         .with_sampler(Sampler::AlwaysOn)
