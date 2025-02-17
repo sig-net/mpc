@@ -15,7 +15,9 @@ const INFURA_API_KEY = vars.get("INFURA_API_KEY", '');
 // To export your private key from Metamask, open Metamask and
 // go to Account Details > Export Private Key
 // npx hardhat vars set SEPOLIA_PRIVATE_KEY 
-const SEPOLIA_PRIVATE_KEY = vars.get("SEPOLIA_PRIVATE_KEY", 'ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80');
+const SEPOLIA_PRIVATE_KEY = vars.get("SEPOLIA_PRIVATE_KEY", 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+
+const MAINNET_PRIVATE_KEY = vars.get("MAINNET_PRIVATE_KEY", 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
 
 module.exports = {
   solidity: "0.8.27",
@@ -32,6 +34,10 @@ module.exports = {
     sepolia: {
       url: `https://sepolia.infura.io/v3/${INFURA_API_KEY}`,
       accounts: [SEPOLIA_PRIVATE_KEY],
+    },
+    mainnet: {
+      url: `https://mainnet.infura.io/v3/${INFURA_API_KEY}`,
+      accounts: [MAINNET_PRIVATE_KEY],
     },
   },
 };

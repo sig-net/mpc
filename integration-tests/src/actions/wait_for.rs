@@ -5,8 +5,8 @@ use anyhow::Context;
 use backon::ConstantBuilder;
 use backon::Retryable;
 use cait_sith::FullSignature;
-use crypto_shared::SignatureResponse;
 use k256::Secp256k1;
+use mpc_primitives::Signature;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_primitives::errors::ActionErrorKind;
 use near_primitives::hash::CryptoHash;
@@ -57,12 +57,12 @@ pub async fn signature_responded(
             return Ok(Outcome::Failed(format!("{:?}", outcome.status())));
         }
 
-        let result: SignatureResponse = outcome
+        let result: Signature = outcome
             .json()
             .map_err(|err| WaitForError::SerdeJson(format!("{err:?}")))?;
         Ok(Outcome::Signature(cait_sith::FullSignature::<Secp256k1> {
-            big_r: result.big_r.affine_point,
-            s: result.s.scalar,
+            big_r: result.big_r,
+            s: result.s,
         }))
     };
 
@@ -187,11 +187,11 @@ pub async fn batch_signature_responded(
                 {
                     match receipt_outcome.status {
                         ExecutionStatusView::SuccessValue(value) => {
-                            let result: SignatureResponse = serde_json::from_slice(&value)
+                            let result: Signature = serde_json::from_slice(&value)
                                 .map_err(|err| WaitForError::SerdeJson(format!("{err:?}")))?;
                             let signature = cait_sith::FullSignature::<Secp256k1> {
-                                big_r: result.big_r.affine_point,
-                                s: result.s.scalar,
+                                big_r: result.big_r,
+                                s: result.s,
                             };
                             signatures.push(signature);
                         }

@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
             let path = "../chain-signatures/contract/EXAMPLE.md";
             let mut file = File::create(path)?;
             let mut doc: Vec<String> = vec![];
-            let contract_account_id = AccountId::from_str("v1.signer-dev.testnet")?;
+            let contract_account_id = AccountId::from_str("dev.sig-net.testnet")?;
             let caller_account_id = AccountId::from_str("caller.testnet")?;
             let public_key: PublicKey =
                 "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae".parse()?;
@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
                 .to_string()
             );
 
-            doc.push(commands::sing_command(
+            doc.push(commands::sign_command(
                 &contract_account_id,
                 &caller_account_id,
             )?);

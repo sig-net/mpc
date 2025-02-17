@@ -1,8 +1,9 @@
-use crate::protocol::Chain::NEAR;
-use crate::protocol::{Chain, SignRequest};
+use crate::protocol::Chain;
+use crate::protocol::IndexedSignRequest;
 use crate::storage::app_data_storage::AppDataStorage;
-use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
+use mpc_crypto::{derive_epsilon_near, ScalarExt as _};
+use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use near_lake_framework::{Lake, LakeBuilder, LakeContext};
 use near_lake_primitives::actions::ActionMetaDataExt;
@@ -77,16 +78,6 @@ struct UnvalidatedContractSignRequest {
     pub payload: [u8; 32],
     pub path: String,
     pub key_version: u32,
-}
-
-/// A validated version of the sign request
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct ContractSignRequest {
-    #[serde(with = "crate::protocol::message::cbor_scalar")]
-    pub payload: Scalar,
-    pub path: String,
-    pub key_version: u32,
-    pub chain: Chain,
 }
 
 #[derive(Clone)]
@@ -172,7 +163,7 @@ impl Indexer {
 struct Context {
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
-    sign_tx: mpsc::Sender<SignRequest>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
     indexer: Indexer,
 }
 
@@ -193,7 +184,7 @@ async fn handle_block(
                 tracing::warn!("{err}");
                 anyhow::bail!(err);
             };
-            let ExecutionStatus::SuccessReceiptId(receipt_id) = receipt.status() else {
+            let ExecutionStatus::SuccessReceiptId(_receipt_id) = receipt.status() else {
                 continue;
             };
             let Some(function_call) = action.as_function_call() else {
@@ -233,29 +224,35 @@ async fn handle_block(
                     );
                     continue;
                 };
-                let epsilon = derive_epsilon(&action.predecessor_id(), &arguments.request.path);
+                let predecessor_id = action.predecessor_id();
+                let epsilon = derive_epsilon_near(&predecessor_id, &arguments.request.path);
+                let sign_id = SignId::from_parts(
+                    &predecessor_id,
+                    &arguments.request.payload,
+                    &arguments.request.path,
+                    arguments.request.key_version,
+                );
                 tracing::info!(
-                    receipt_id = %receipt_id,
-                    caller_id = receipt.predecessor_id().to_string(),
-                    our_account = ctx.node_account_id.to_string(),
+                    ?sign_id,
+                    caller_id = ?predecessor_id,
+                    our_account = ?ctx.node_account_id,
                     payload = hex::encode(arguments.request.payload),
                     key_version = arguments.request.key_version,
                     entropy = hex::encode(entropy),
                     "indexed new `sign` function call"
                 );
-                let request = ContractSignRequest {
-                    payload,
-                    path: arguments.request.path,
-                    key_version: arguments.request.key_version,
-                    chain: NEAR,
-                };
-                pending_requests.push(SignRequest {
-                    request_id: receipt_id.0,
-                    request,
-                    epsilon,
-                    entropy,
+                pending_requests.push(IndexedSignRequest {
+                    id: sign_id,
+                    args: SignArgs {
+                        entropy,
+                        epsilon,
+                        payload,
+                        path: arguments.request.path,
+                        key_version: arguments.request.key_version,
+                    },
+                    chain: Chain::NEAR,
                     // TODO: use indexer timestamp instead.
-                    time_added: Instant::now(),
+                    timestamp: Instant::now(),
                 });
             }
         }
@@ -273,9 +270,11 @@ async fn handle_block(
     // This way we can revisit the same block if we failed while not having added the requests partially.
     for request in pending_requests {
         tracing::info!(
-            request_id = ?near_primitives::hash::CryptoHash(request.request_id),
-            payload = hex::encode(request.request.payload.to_bytes()),
-            entropy = hex::encode(request.entropy),
+            sign_id = ?request.id,
+            payload = hex::encode(request.args.payload.to_bytes()),
+            entropy = hex::encode(request.args.entropy),
+            epsilon = hex::encode(request.args.epsilon.to_bytes()),
+
             "new sign request"
         );
         if let Err(err) = ctx.sign_tx.send(request).await {
@@ -302,7 +301,7 @@ pub fn run(
     options: &Options,
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
-    sign_tx: mpsc::Sender<SignRequest>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     rpc_client: near_fetch::Client,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, Indexer)> {

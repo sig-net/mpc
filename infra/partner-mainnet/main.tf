@@ -74,6 +74,22 @@ module "gce-container" {
       {
         name  = "MPC_REDIS_URL",
         value = var.redis_url
+      },
+      {
+        name  = "MPC_ETH_ACCOUNT_SK"
+        value = data.google_secret_manager_secret_version.eth_account_sk_secret_id[count.index].secret_data
+      },
+      {
+        name  = "MPC_ETH_RPC_WS_URL"
+        value = data.google_secret_manager_secret_version.eth_rpc_ws_url_secret_id[count.index].secret_data
+      },
+      {
+        name  = "MPC_ETH_RPC_HTTP_URL"
+        value = data.google_secret_manager_secret_version.eth_rpc_http_url_secret_id[count.index].secret_data
+      },
+      {
+        name  = "MPC_ETH_CONTRACT_ADDRESS"
+        value = var.node_configs["${count.index}"].eth_contract_address
       }
     ])
   }
@@ -137,6 +153,7 @@ module "ig_template" {
   name_prefix  = "multichain-partner-mainnet-${count.index}"
   machine_type = "n2d-standard-4"
 
+  startup_script = "docker rm watchtower ; docker run -d --name watchtower -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower --debug --interval 3600"
 
   source_image = var.source_image
   metadata     = merge(var.additional_metadata, { "gce-container-declaration" = module.gce-container["${count.index}"].metadata_value })
@@ -266,4 +283,5 @@ resource "google_compute_firewall" "app_port" {
     ports    = ["80", "3000"]
   }
 
+  depends_on = [ module.vpc ]
 }
