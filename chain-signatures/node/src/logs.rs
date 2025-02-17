@@ -163,5 +163,11 @@ pub fn setup(env: &str, node_id: &str, options: &Options, rt: &tokio::runtime::R
 
     let subscriber = subscriber.with(fmt_layer).with(otel_layer);
 
-    tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
+    if is_running_on_gcp() {
+        let stackdriver_layer = stackdriver_layer().with_writer(std::io::stderr);
+        let subscriber = subscriber.with(stackdriver_layer);
+        tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
+    } else {
+        tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
+    }
 }
