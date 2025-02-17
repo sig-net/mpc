@@ -30,32 +30,25 @@ pub struct Options {
         default_value = "http://localhost:4317"
     )]
     pub otlp_endpoint: String,
-    /// Debuggable id for each MPC node for logging purposes
-    #[arg(long, env("MPC_DEBUG_NODE_ID"))]
-    debug_id: Option<usize>,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
-            opentelemetry_level: OpenTelemetryLevel::OFF,
+            opentelemetry_level: OpenTelemetryLevel::DEBUG,
             otlp_endpoint: "http://localhost:4317".to_string(),
-            debug_id: None,
         }
     }
 }
 
 impl Options {
     pub fn into_str_args(self) -> Vec<String> {
-        let mut opts = vec![
+        let opts = vec![
             "--opentelemetry-level".to_string(),
             self.opentelemetry_level.to_string(),
             "--otlp-endpoint".to_string(),
             self.otlp_endpoint,
         ];
-        if let Some(debug_id) = self.debug_id {
-            opts.extend(vec!["--node-debug-id".to_string(), debug_id.to_string()]);
-        }
         opts
     }
 }
