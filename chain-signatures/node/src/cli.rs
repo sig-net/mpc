@@ -344,3 +344,178 @@ fn calculate_digest(
     // assuming it is safe since in case of overflow it will be a digest anyway
     hasher.finish() as i64
 }
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+
+    #[test]
+    fn test_digest_staking() {
+        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
+        let account_id = AccountId::from_str("sig.staking.near").unwrap();
+        let account_pk =
+            PublicKey::from_str("ed25519:B1vW5HddtmV526QjtwHwBDupKH9A7mgsVttYvE6sZP59").unwrap();
+        let cipher_pk = "395418b55b73977f16dfa0fe8a1c488fb6935451deaaa20c51cb5f542ec9c118";
+        let sign_pk =
+            PublicKey::from_str("ed25519:7dqefRWCwt4XsxnMpgj4pBSXWuzoFjEVQadarZ7GydpU").unwrap();
+        let _eth_account_pk = "04f92c9a55c73db4f916fa017b747a3b3bc14b100f4b40e1d67bbf913c6795563b101b8554db46f4206a3a8640e5baff935b7a4df30fe2719e59c1bb9cd7c97ba9";
+        let eth_address_address = "0x0751fbaa7324e74a5fa7775158acb6c2c50a6838";
+
+        let digest = calculate_digest(
+            mpc_contract_id,
+            account_id,
+            account_pk,
+            cipher_pk.to_string(),
+            sign_pk,
+            eth_address_address.to_string(),
+        );
+
+        assert_eq!(digest, 3046109414340735442);
+    }
+
+    #[test]
+    fn test_digest_luganodes() {
+        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
+        let account_id = AccountId::from_str("luganodes-sig.near").unwrap();
+        let account_pk =
+            PublicKey::from_str("ed25519:HKwJr6kRcARfjHawX6pVcQPxPdTQMvAN7r8Z2kUcPfLc").unwrap();
+        let cipher_pk = "fe24961ff9fe0fb11cca7f31dd7173b9f15177e5809eb1054f99faf196f1c25d";
+        let sign_pk =
+            PublicKey::from_str("ed25519:5GNBtNcnpmJh2iijxWiSepeHvWeet3UuhBTwWCncCdTh").unwrap();
+        let _eth_account_pk = "04f0e7b9b93febc13280307414ff7b61be68b73233d0f590987b4ac8bf5818a859b1810d5a692a416fd47a8cd16a784553d7465c071e0e41e09cf4b9a098cb841a";
+        let eth_address_address = "0x185636e329e6e9789e3ca0158497e26c07875e1b";
+
+        let digest = calculate_digest(
+            mpc_contract_id,
+            account_id,
+            account_pk,
+            cipher_pk.to_string(),
+            sign_pk,
+            eth_address_address.to_string(),
+        );
+
+        assert_eq!(digest, -3001561758580252479);
+    }
+
+    #[test]
+    fn test_digest_taxistake() {
+        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
+        let account_id = AccountId::from_str("taxistake-sig.near").unwrap();
+        let account_pk =
+            PublicKey::from_str("ed25519:5gEt9Aqo1hXwK3Ym6Fqw2zxgzHCEyMyZbJMH1C6irBam").unwrap();
+        let cipher_pk = "472a3f1d0c34b89f45d589949e5f907cc10b1ffdced34012a9b0a7244ae01124";
+        let sign_pk =
+            PublicKey::from_str("ed25519:7LY7SA8g2HamrdBNnQwadrjb2wfVRy5cbVaY8wyurxk8").unwrap();
+        let _eth_account_pk = "0452ef3e306b9aae7f8a9e5fe15824b367e34315e26be7bcafc676182a9c45d95714d3e7c8a29a2e3a12adcdc430ad56956e6fc0a8a0c1bd25a195dd2973d47714";
+        let eth_address_address = "0xa7134a9a7ad07f14e85898433611f8782fcfc6c5";
+
+        let digest = calculate_digest(
+            mpc_contract_id,
+            account_id,
+            account_pk,
+            cipher_pk.to_string(),
+            sign_pk,
+            eth_address_address.to_string(),
+        );
+
+        assert_eq!(digest, -7758795230692559988);
+    }
+
+    #[test]
+    fn test_digest_staking_for_all() {
+        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
+        let account_id = AccountId::from_str("sig-mpc-staking4all-01.near").unwrap();
+        let account_pk =
+            PublicKey::from_str("ed25519:9FfqwhurgHnRqbfQoekYZbqWUSiPokS7vF5akysmbSmL").unwrap();
+        let cipher_pk = "7983950637824082c17d45fb4d84111b872f537223bb26a54521b5ddf84b7417";
+        let sign_pk =
+            PublicKey::from_str("ed25519:2NxYvtbMRncbtEoX7963FweMUJ6TaWjyBeKxeCi1EMnd").unwrap();
+        let _eth_account_pk = "046cb1cbe5bab2e5b0de7068bbcd976a8370c54f0583ca26e8308994690dedb8933e8729b39a31cf72bab122165cfaafc2daf12a55c9b6b2e6dd61a4667725fd35";
+        let eth_address_address = "0x36307aa360b228139674325e797276aeccc37351";
+
+        let digest = calculate_digest(
+            mpc_contract_id,
+            account_id,
+            account_pk,
+            cipher_pk.to_string(),
+            sign_pk,
+            eth_address_address.to_string(),
+        );
+
+        assert_eq!(digest, 7755326457151237965);
+    }
+
+    #[test]
+    fn test_digest_lifted() {
+        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
+        let account_id = AccountId::from_str("lifted-sig.near").unwrap();
+        let account_pk =
+            PublicKey::from_str("ed25519:Ds7DppCJ84399g7oskRRTNbBLsm61CJJn7j5837JikiT").unwrap();
+        let cipher_pk = "196e53521c601145b5280c06468393ce41fd307276b574471401fad3d449480b";
+        let sign_pk =
+            PublicKey::from_str("ed25519:48AtaVmpT7r2Bo6AV6nRU27ioNe7NWwfYnZFgm8mU8T5").unwrap();
+        let _eth_account_pk = "042c56cb509a7a1381155b25fc2bc2ce97930e0aad1508485189235e63838fcf01b0b0cc678d52ca6911bf24344e5ab223a07750c4bfd5f3cf8c3c8224eaece3fc";
+        let eth_address_address = "0x04a028525e4823dc8e592f2916947ce3eca8eff3";
+
+        let digest = calculate_digest(
+            mpc_contract_id,
+            account_id,
+            account_pk,
+            cipher_pk.to_string(),
+            sign_pk,
+            eth_address_address.to_string(),
+        );
+
+        assert_eq!(digest, -906926706464261070);
+    }
+
+    #[test]
+    fn test_digest_piertwo() {
+        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
+        let account_id = AccountId::from_str("sig-piertwo.near").unwrap();
+        let account_pk =
+            PublicKey::from_str("ed25519:4w4vtSWsRwCdRhnwDG6YqXM5SfYn4d8AcN5d3qnPnjQD").unwrap();
+        let cipher_pk = "65171d682c0ed98eeb0797940c752ae8fafb9c9939533f42f0dbc9f7201ad409";
+        let sign_pk =
+            PublicKey::from_str("ed25519:nATG1EmJTTeEo9m7BGpcd49Zx3BxpaqazGohYSyQTt4").unwrap();
+        let _eth_account_pk = "04f92c9a55c73db4f916fa017b747a3b3bc14b100f4b40e1d67bbf913c6795563b101b8554db46f4206a3a8640e5baff935b7a4df30fe2719e59c1bb9cd7c97ba9";
+        let eth_address_address = "0x0751fbaa7324e74a5fa7775158acb6c2c50a6838";
+
+        let digest = calculate_digest(
+            mpc_contract_id,
+            account_id,
+            account_pk,
+            cipher_pk.to_string(),
+            sign_pk,
+            eth_address_address.to_string(),
+        );
+
+        assert_eq!(digest, -1340847738809657357);
+    }
+
+    #[test]
+    fn test_digest_natsai() {
+        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
+        let account_id = AccountId::from_str("natsai-bp.near").unwrap();
+        let account_pk =
+            PublicKey::from_str("ed25519:5eRSDpU4qyULkCsMVT2ghLhwR6VQb68K7pBAZFZDT9U6").unwrap();
+        let cipher_pk = "f11d23a6dff8823853e1777041d1bf60d185b63564536e9a5a7c94110cc1563a";
+        let sign_pk =
+            PublicKey::from_str("ed25519:9v1215AcbHrWhC3muPvUu5EPY93o7AYcSvcxMUeRYDx6").unwrap();
+        let _eth_account_pk = "04ced0dc6ededb6a19aaa42c46544ff81fbb984673ea4285b8b4e147a807292a43d82595588ae9c86382bac2921a8b5006c43bc993ce0f02a268dbda477b9f0b8c";
+        let eth_address_address = "0x31d22ddafdf238367030f29f9294e24979e258e7";
+
+        let digest = calculate_digest(
+            mpc_contract_id,
+            account_id,
+            account_pk,
+            cipher_pk.to_string(),
+            sign_pk,
+            eth_address_address.to_string(),
+        );
+
+        assert_eq!(digest, 2322347538510212936);
+    }
+}
