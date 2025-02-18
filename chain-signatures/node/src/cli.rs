@@ -315,7 +315,7 @@ fn configuration_digest(
     eth: indexer_eth::EthArgs,
 ) -> i64 {
     let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
-    let eth_contract_address = eth.eth_contract_address.unwrap_or_else(|| "".to_string());
+    let eth_contract_address = eth.eth_contract_address.unwrap_or_default();
     calculate_digest(
         mpc_contrac_id,
         account_id,
