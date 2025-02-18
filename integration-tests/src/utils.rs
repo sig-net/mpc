@@ -1,6 +1,10 @@
 use anyhow::Context;
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
-use near_workspaces::{Account, AccountId};
+use near_workspaces::{
+    network::Sandbox,
+    types::{KeyType, SecretKey},
+    Account, AccountId, Worker,
+};
 
 pub async fn vote_join(
     accounts: &[&Account],
@@ -140,4 +144,16 @@ pub async fn ping_until_ok(addr: &str, timeout: u64) -> anyhow::Result<()> {
     })
     .await?;
     Ok(())
+}
+
+// Account with short name for testing
+pub async fn dev_gen_indexed(worker: &Worker<Sandbox>, index: usize) -> anyhow::Result<Account> {
+    let account_id = format!("{}.test.near", index);
+    let account_id: AccountId = account_id.try_into().expect("Failed to create Acc ID");
+    let sk = SecretKey::from_seed(KeyType::ED25519, "seed");
+    let account = worker
+        .create_tla(account_id.clone(), sk)
+        .await?
+        .into_result()?;
+    Ok(account)
 }

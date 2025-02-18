@@ -22,7 +22,7 @@ use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
 use mpc_node::storage::triple_storage::TripleStorage;
-use mpc_node::{mesh, node_client, storage};
+use mpc_node::{logs, mesh, node_client, storage};
 use near_crypto::KeyFile;
 use near_workspaces::network::{Sandbox, ValidatorKey};
 use near_workspaces::types::{KeyType, SecretKey};
@@ -126,7 +126,7 @@ impl Nodes {
                 ctx,
                 nodes,
             } => {
-                nodes.push(local::Node::run(*next_id, ctx, cfg, new_account).await?);
+                nodes.push(local::Node::run(ctx, cfg, new_account).await?);
                 *next_id += 1;
                 Ok(nodes.len() - 1)
             }
@@ -135,7 +135,7 @@ impl Nodes {
                 ctx,
                 nodes,
             } => {
-                nodes.push(containers::Node::run(*next_id, ctx, cfg, new_account).await?);
+                nodes.push(containers::Node::run(ctx, cfg, new_account).await?);
                 *next_id += 1;
                 Ok(nodes.len() - 1)
             }
@@ -174,7 +174,7 @@ impl Nodes {
                 ctx,
                 nodes,
             } => {
-                nodes.push(local::Node::spawn(*next_id, ctx, config).await?);
+                nodes.push(local::Node::spawn(ctx, config).await?);
                 *next_id += 1;
             }
             Nodes::Docker {
@@ -182,7 +182,7 @@ impl Nodes {
                 ctx,
                 nodes,
             } => {
-                nodes.push(containers::Node::spawn(*next_id, ctx, config).await?);
+                nodes.push(containers::Node::spawn(ctx, config).await?);
                 *next_id += 1;
             }
         }
@@ -238,6 +238,7 @@ pub struct Context {
     pub mpc_contract: Contract,
     pub redis: containers::Redis,
     pub storage_options: storage::Options,
+    pub logging_options: logs::Options,
     pub mesh_options: mesh::Options,
     pub message_options: node_client::Options,
 }
@@ -272,6 +273,8 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         redis_url: redis.internal_address.clone(),
     };
 
+    let logging_options = logs::Options::default();
+
     let mesh_options = mpc_node::mesh::Options {
         refresh_active_timeout: 1000,
     };
@@ -291,6 +294,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         mpc_contract,
         redis,
         storage_options,
+        logging_options,
         mesh_options,
         message_options,
     })
@@ -303,8 +307,7 @@ pub async fn docker(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let node_futures = spawner
         .accounts
         .iter()
-        .enumerate()
-        .map(|(node_id, account)| containers::Node::run(node_id, &ctx, cfg, account));
+        .map(|account| containers::Node::run(&ctx, cfg, account));
     let nodes = futures::future::join_all(node_futures)
         .await
         .into_iter()
@@ -347,8 +350,8 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let cfg = &spawner.cfg;
 
     let mut node_cfgs = Vec::new();
-    for (node_id, account) in spawner.accounts.iter().enumerate() {
-        node_cfgs.push(local::Node::dry_run(node_id, &ctx, account, cfg).await?);
+    for account in spawner.accounts.iter() {
+        node_cfgs.push(local::Node::dry_run(&ctx, account, cfg).await?);
     }
 
     let candidates: HashMap<AccountId, CandidateInfo> = spawner
@@ -398,8 +401,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let node_futures = spawner
         .accounts
         .iter()
-        .enumerate()
-        .map(|(node_id, account)| local::Node::run(node_id, &ctx, cfg, account));
+        .map(|account| local::Node::run(&ctx, cfg, account));
     let nodes = futures::future::join_all(node_futures)
         .await
         .into_iter()
