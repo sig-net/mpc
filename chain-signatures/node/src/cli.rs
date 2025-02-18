@@ -11,7 +11,8 @@ use clap::Parser;
 use deadpool_redis::Runtime;
 use local_ip_address::local_ip;
 use near_account_id::AccountId;
-use near_crypto::{InMemorySigner, SecretKey};
+use near_crypto::{InMemorySigner, PublicKey, SecretKey};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use url::Url;
@@ -174,6 +175,18 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             logs::install_global(debug_id);
             let _span = tracing::trace_span!("cli").entered();
 
+            let digest = configuration_digest(
+                mpc_contract_id.clone(),
+                account_id.clone(),
+                account_sk.clone(),
+                cipher_pk.clone(),
+                sign_sk.clone(),
+                eth.clone(),
+            );
+
+            crate::metrics::CONFIGURATION_DIGEST
+                .with_label_values(&[account_id.as_str()])
+                .set(digest);
             let (sign_tx, sign_rx) = SignQueue::channel();
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -291,4 +304,43 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn configuration_digest(
+    mpc_contrac_id: AccountId,
+    account_id: AccountId,
+    account_sk: SecretKey,
+    cipher_pk: String,
+    sign_sk: Option<SecretKey>,
+    eth: indexer_eth::EthArgs,
+) -> i64 {
+    let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
+    let eth_contract_address = eth.eth_contract_address.unwrap_or_else(|| "".to_string());
+    calculate_digest(
+        mpc_contrac_id,
+        account_id,
+        account_sk.public_key(),
+        cipher_pk,
+        sign_sk.public_key(),
+        eth_contract_address,
+    )
+}
+
+fn calculate_digest(
+    mpc_contract_id: AccountId,
+    account_id: AccountId,
+    account_pk: PublicKey,
+    cipher_pk: String,
+    sign_pk: PublicKey,
+    eth_contract_address: String,
+) -> i64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    mpc_contract_id.hash(&mut hasher);
+    account_id.hash(&mut hasher);
+    account_pk.hash(&mut hasher);
+    cipher_pk.hash(&mut hasher);
+    sign_pk.hash(&mut hasher);
+    eth_contract_address.hash(&mut hasher);
+    // assuming it is safe since in case of overflow it will be a digest anyway
+    hasher.finish() as i64
 }
