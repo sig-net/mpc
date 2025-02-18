@@ -110,7 +110,7 @@ contract ChainSignatures is AccessControl {
      * @param _request The signature request details.
      */
     function sign(SignRequest memory _request) external payable {
-        require(msg.value >= signatureDeposit, "Insufficient deposit");
+        require(msg.value == signatureDeposit, "Insufficient deposit");
 
         emit SignatureRequested(
             msg.sender,
