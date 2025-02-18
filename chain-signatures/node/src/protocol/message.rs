@@ -612,7 +612,7 @@ impl MessageReceiver for RunningState {
 
             queue.retain(|msg| active.contains(&msg.presignature_id));
 
-            queue.is_empty()
+            !queue.is_empty()
         });
 
         for (sign_id, queue) in signature_messages {

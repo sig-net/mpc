@@ -363,9 +363,10 @@ impl SignatureManager {
         let Some(request) = self.sign_queue.take(sign_id) else {
             return Err(GenerationError::WaitingForIndexer(sign_id.clone()));
         };
-        if proposer != request.proposer {
-            self.sign_queue.push_failed(request.clone());
-            return Err(GenerationError::InvalidProposer(proposer, request.proposer));
+        let our_proposer = request.proposer;
+        if proposer != our_proposer {
+            self.sign_queue.push_failed(request);
+            return Err(GenerationError::InvalidProposer(proposer, our_proposer));
         }
 
         tracing::info!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
@@ -373,17 +374,17 @@ impl SignatureManager {
             Ok(presignature) => presignature,
             Err(err @ GenerationError::PresignatureIsGenerating(_)) => {
                 tracing::warn!(me = ?self.me, presignature_id, "presignature is generating, can't join signature generation protocol");
-                self.sign_queue.push_failed(request.clone());
+                self.sign_queue.push_failed(request);
                 return Err(err);
             }
             Err(err @ GenerationError::PresignatureIsMissing(_)) => {
                 tracing::warn!(me = ?self.me, presignature_id, "presignature is missing, can't join signature generation protocol");
-                self.sign_queue.push_failed(request.clone());
+                self.sign_queue.push_failed(request);
                 return Err(err);
             }
             Err(err @ GenerationError::PresignatureIsGarbageCollected(_)) => {
                 tracing::warn!(me = ?self.me, presignature_id, "presignature is garbage collected, can't join signature generation protocol");
-                self.sign_queue.push_failed(request.clone());
+                self.sign_queue.push_failed(request);
                 return Err(err);
             }
             Err(err) => return Err(err),
@@ -425,6 +426,8 @@ impl SignatureManager {
                     Ok(action) => action,
                     Err(err) => {
                         remove.push(sign_id.clone());
+                        self.completed
+                            .insert((sign_id.clone(), generator.presignature_id), Instant::now());
 
                         if generator.request.indexed.timestamp.elapsed() < generator.timeout_total {
                             failed.push(sign_id.clone());
@@ -435,10 +438,6 @@ impl SignatureManager {
                                     .inc();
                             }
                         } else {
-                            self.completed.insert(
-                                (sign_id.clone(), generator.presignature_id),
-                                Instant::now(),
-                            );
                             tracing::warn!(
                                 ?err,
                                 "signature failed to be produced; trashing request"
@@ -608,7 +607,7 @@ impl SignatureManager {
     /// Garbage collect all the completed signatures.
     pub fn garbage_collect(&mut self, cfg: &ProtocolConfig) {
         let before = self.completed.len();
-        self.completed.retain(|(_, _), timestamp| {
+        self.completed.retain(|_, timestamp| {
             timestamp.elapsed() < Duration::from_millis(cfg.signature.garbage_timeout)
         });
         let garbage_collected = before.saturating_sub(self.completed.len());
