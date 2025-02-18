@@ -18,9 +18,9 @@ describe("ChainSignatures", function () {
   describe("Changing signatureDeposit", function () {
     it("Should change signatureDeposit by setSignatureDeposit", async function () {
       const requiredDepositBeforeChange = await chainSignatures.getSignatureDeposit();
-      const depositExpectedInWei = ethers.parseUnits("50000", "gwei"); 
+      const depositExpectedInWei = ethers.parseUnits("50000", "gwei");
       expect(requiredDepositBeforeChange).to.equal(depositExpectedInWei);
-      const depositToSetInWei = ethers.parseUnits("100000", "gwei"); 
+      const depositToSetInWei = ethers.parseUnits("100000", "gwei");
       await chainSignatures.connect(owner).setSignatureDeposit(depositToSetInWei);
       const requiredDepositAfterChange = await chainSignatures.getSignatureDeposit();
       expect(requiredDepositAfterChange).to.equal(depositToSetInWei);
@@ -161,6 +161,25 @@ describe("ChainSignatures", function () {
       expect(parsedEvent.args[0]).to.equal(requestId);
       expect(parsedEvent.args[1]).to.equal(addr2.address);
       expect(parsedEvent.args[2]).to.equal(errorMessage);
+    });
+
+    it("Should not accept a signature deposit with 10x of required deposit", async function () {
+      const payload = ethers.keccak256(ethers.toUtf8Bytes("Test payload"));
+      const path = "test/path";
+      const requiredDeposit = await chainSignatures.getSignatureDeposit();
+
+      const maxDeposit = requiredDeposit * 10n;
+      await expect(chainSignatures.connect(addr1).sign({ payload, path, keyVersion: 0, algo: "", dest: "", params: "" }, { value: maxDeposit }))
+        .to.emit(chainSignatures, "SignatureRequested")
+        .withArgs(addr1.address, payload, 0, maxDeposit, 31337, path, "", "", "");
+
+      const excessiveDeposit = requiredDeposit * 10n + 1n;
+      await expect(
+        chainSignatures.connect(addr1).sign(
+          { payload, path, keyVersion: 0, algo: "", dest: "", params: "" },
+          { value: excessiveDeposit }
+        )
+      ).to.be.revertedWith("Deposit too high");
     });
   });
 });
