@@ -180,12 +180,15 @@ contract ChainSignatures is AccessControl {
         uint256 _amount,
         address _receiver
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_receiver != address(0), "Invalid receiver address");
         require(
             _amount <= address(this).balance,
             "Withdraw amount must be smaller than total balance in contract"
         );
-        address payable to = payable(_receiver);
-        to.transfer(_amount);
+
+        (bool success, ) = payable(_receiver).call{value: _amount}("");
+        require(success, "Transfer failed");
+
         emit Withdraw(_receiver, _amount);
     }
 }
