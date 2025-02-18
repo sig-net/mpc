@@ -26,6 +26,35 @@ cargo test -p integration-tests --jobs 1 -- --test-threads 1
 cargo test -p integration-tests --features docker-test
 ```
 
+## Logging and Tracing
+We have three types of logging available:
+
+### FMT
+This is the default logging format used for local development. It outputs logs to the console in a human-readable format.
+
+### OTLP
+OpenTelemetry Protocol is used for exporting logs to an OpenTelemetry collector. This is useful for integrating with various observability backends.
+
+#### Configuring Local OTLP Logging
+1. **Setup OTLP Backend**
+Start OTLP backend of your choice ([Jaeger](https://www.jaegertracing.io/docs/getting-started/), Grafana Tempo, etc.)
+
+2. **Set the OTLP Endpoint**:
+    - By default, the endpoint is set to `http://localhost:4318`.
+    - To change it, set the environment variable `MPC_OTLP_ENDPOINT` or pass it as a parameter when starting the node with `--otlp-endpoint` flag.
+
+3. **Set the OpenTelemetry Logging Level**:
+    - By default, the logging level is set to `off` when parameters are skipped and to `debug` when running the integration tests cluster.
+    - To change it, pass `-opentelemetry-level` value when starting the node, or set the environment variable `MPC_OPENTELEMETRY_LEVEL` to the desired level (`debug`, `info`, etc.).
+
+4. **Explore traces**:
+- Start the cluster or run tests
+- Open the page of your backend in browser
+- Explore traces
+
+### Stackdriver
+This logging format is used exclusively in Google Cloud Platform (GCP). It integrates with Google Cloud's operations suite (formerly Stackdriver) to provide structured logging.
+
 ## FAQ
 
 ### I want to run a test, but keep the docker containers from being destroyed
