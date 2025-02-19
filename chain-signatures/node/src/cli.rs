@@ -258,6 +258,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 cipher_pk = ?network.cipher_pk,
                 sign_pk = ?network.sign_sk.public_key(),
                 near_rpc_url = ?near_client.rpc_addr(),
+                eth_contract_address = ?eth.as_ref().map(|eth| eth.contract_address.as_str()),
                 "starting node",
             );
 
