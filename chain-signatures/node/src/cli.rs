@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn test_digest_staking() {
         let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("sig.staking.near").unwrap();
+        let account_id = AccountId::from_str("sig.stakin.near").unwrap();
         let account_pk =
             PublicKey::from_str("ed25519:B1vW5HddtmV526QjtwHwBDupKH9A7mgsVttYvE6sZP59").unwrap();
         let cipher_pk = "395418b55b73977f16dfa0fe8a1c488fb6935451deaaa20c51cb5f542ec9c118";
@@ -382,8 +382,8 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value: -1051225187120159700 (looks broken)
-        assert_eq!(digest, 7803275948027918491);
+        // Grafana value: -1051225187120159700
+        assert_eq!(digest, -1051225187120159684);
     }
 
     #[test]
