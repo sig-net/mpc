@@ -248,19 +248,24 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth);
+
+            tracing::info!(
+                %digest,
+                ?mpc_contract_id,
+                ?account_id,
+                ?my_address,
+                cipher_pk = ?network.cipher_pk,
+                sign_pk = ?network.sign_sk.public_key(),
+                near_rpc_url = ?near_client.rpc_addr(),
+                ?eth,
+                "starting node",
+            );
+
             let config = Arc::new(RwLock::new(Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network,
             })));
 
-            tracing::info!(
-                ?mpc_contract_id,
-                ?account_id,
-                ?my_address,
-                near_rpc_url = ?near_client.rpc_addr(),
-                ?eth,
-                "starting node",
-            );
             rt.block_on(async {
                 let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
                 let (sender, channel) =
