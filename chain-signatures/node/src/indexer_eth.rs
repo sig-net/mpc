@@ -63,12 +63,7 @@ pub struct EthArgs {
     #[clap(long, env("MPC_ETH_RPC_HTTP_URL"), requires = "eth_account_sk")]
     pub eth_rpc_http_url: Option<String>,
     /// The contract address to watch without the `0x` prefix
-    #[clap(
-        long,
-        env("MPC_ETH_CONTRACT_ADDR"),
-        requires = "eth_account_sk",
-        default_value("f8bdC0612361a1E49a8E01423d4C0cFc5dF4791A")
-    )]
+    #[clap(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
     pub eth_contract_address: Option<String>,
 }
 
