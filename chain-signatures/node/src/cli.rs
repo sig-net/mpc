@@ -382,6 +382,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
+        // Grafana value: -1051225187120159700 (looks broken)
         assert_eq!(digest, 7803275948027918491);
     }
 
@@ -405,6 +406,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
+        // Grafana value: 8063794122839817000 (looks broken)
         assert_eq!(digest, 8458603761268706511);
     }
 
@@ -428,6 +430,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
+        // Grafana value: --4992003418219577000
         assert_eq!(digest, -4992003418219576839);
     }
 
@@ -451,6 +454,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
+        // Grafana value --930268115875971800
         assert_eq!(digest, -930268115875971858);
     }
 
@@ -474,6 +478,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
+        // Grafan value: -1056529302944347500
         assert_eq!(digest, -1056529302944347488);
     }
 
@@ -497,6 +502,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
+        // Grafana value: 695826193095166700
         assert_eq!(digest, 695826193095166746);
     }
 
@@ -520,6 +526,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
+        // Grafana value: -8209029844787148000
         assert_eq!(digest, -8209029844787147492);
     }
 
@@ -542,7 +549,7 @@ mod tests {
             sign_pk,
             ETH_CONTRACT_ADDRESS.to_string(),
         );
-
+        // Grafana value: -4889179067099200000
         assert_eq!(digest, -4889179067099199685);
     }
 }
