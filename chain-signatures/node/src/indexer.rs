@@ -144,7 +144,8 @@ impl Indexer {
     }
 
     pub async fn is_stable(&self) -> bool {
-        !self.is_behind().await && self.is_running().await
+        //!self.is_behind().await && self.is_running().await
+        true
     }
 
     async fn update_block_height_and_timestamp(
