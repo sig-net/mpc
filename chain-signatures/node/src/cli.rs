@@ -9,10 +9,11 @@ use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, logs, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
+use k256::sha2::Sha256;
 use local_ip_address::local_ip;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
-use std::hash::{Hash, Hasher};
+use sha3::Digest;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use url::Url;
@@ -248,19 +249,23 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth);
-            let config = Arc::new(RwLock::new(Config::new(LocalConfig {
-                over: override_config.unwrap_or_else(Default::default),
-                network,
-            })));
 
             tracing::info!(
+                %digest,
                 ?mpc_contract_id,
                 ?account_id,
                 ?my_address,
+                cipher_pk = ?network.cipher_pk,
+                sign_pk = ?network.sign_sk.public_key(),
                 near_rpc_url = ?near_client.rpc_addr(),
                 ?eth,
                 "starting node",
             );
+
+            let config = Arc::new(RwLock::new(Config::new(LocalConfig {
+                over: override_config.unwrap_or_else(Default::default),
+                network,
+            })));
             rt.block_on(async {
                 let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
                 let (sender, channel) =
@@ -334,15 +339,19 @@ fn calculate_digest(
     sign_pk: PublicKey,
     eth_contract_address: String,
 ) -> i64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    mpc_contract_id.hash(&mut hasher);
-    account_id.hash(&mut hasher);
-    account_pk.hash(&mut hasher);
-    cipher_pk.hash(&mut hasher);
-    sign_pk.hash(&mut hasher);
-    eth_contract_address.hash(&mut hasher);
-    // assuming it is safe since in case of overflow it will be a digest anyway
-    hasher.finish() as i64
+    let mut hasher = Sha256::new();
+    hasher.update(mpc_contract_id.to_string());
+    hasher.update(account_id.to_string());
+    hasher.update(account_pk.to_string());
+    hasher.update(cipher_pk);
+    hasher.update(sign_pk.to_string());
+    hasher.update(eth_contract_address);
+
+    let result = hasher.finalize();
+    // Convert the first 8 bytes of the hash to an i64
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&result[..8]);
+    i64::from_le_bytes(bytes)
 }
 
 #[cfg(test)]
@@ -373,7 +382,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        assert_eq!(digest, -5133901121997383055);
+        assert_eq!(digest, 7803275948027918491);
     }
 
     #[test]
@@ -396,7 +405,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        assert_eq!(digest, 6106936132697964453);
+        assert_eq!(digest, 8458603761268706511);
     }
 
     #[test]
@@ -419,7 +428,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        assert_eq!(digest, 2082529402628922270);
+        assert_eq!(digest, -4992003418219576839);
     }
 
     #[test]
@@ -442,7 +451,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        assert_eq!(digest, 5568654967333294512);
+        assert_eq!(digest, -930268115875971858);
     }
 
     #[test]
@@ -465,7 +474,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        assert_eq!(digest, -2085491673628909472);
+        assert_eq!(digest, -1056529302944347488);
     }
 
     #[test]
@@ -488,7 +497,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        assert_eq!(digest, -3714662133972836364);
+        assert_eq!(digest, 695826193095166746);
     }
 
     #[test]
@@ -511,7 +520,7 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        assert_eq!(digest, -7584107802304520281);
+        assert_eq!(digest, -8209029844787147492);
     }
 
     #[test]
@@ -534,6 +543,6 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        assert_eq!(digest, -719242536013877857);
+        assert_eq!(digest, -4889179067099199685);
     }
 }
