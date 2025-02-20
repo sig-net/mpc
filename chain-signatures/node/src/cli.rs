@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn test_digest_luganodes() {
         let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("luganodes-sig.near").unwrap();
+        let account_id = AccountId::from_str("luganodes.near").unwrap();
         let account_pk =
             PublicKey::from_str("ed25519:HKwJr6kRcARfjHawX6pVcQPxPdTQMvAN7r8Z2kUcPfLc").unwrap();
         let cipher_pk = "fe24961ff9fe0fb11cca7f31dd7173b9f15177e5809eb1054f99faf196f1c25d";
@@ -406,8 +406,8 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value: 8063794122839817000 (looks broken)
-        assert_eq!(digest, 8458603761268706511);
+        //  Grafana value: 8063794122839817000
+        assert_eq!(digest, 8063794122839817496);
     }
 
     #[test]
