@@ -66,7 +66,7 @@ contract ChainSignatures is AccessControl {
 
     /**
      * @dev Emitted when a signature response is received.
-     * @notice This event can be emitted by anyone. Clients should always verify the validity of the signature.
+     * @notice Any address can emit this event. Clients should always verify the validity of the signature.
      * @param requestId The ID of the request. Must be calculated off-chain.
      * @param responder The address of the responder.
      * @param signature The signature response.
