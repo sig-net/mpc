@@ -79,7 +79,7 @@ contract ChainSignatures is AccessControl {
 
     /**
      * @dev Emitted when a signature error is received.
-     * @notice This event can be emitted by anyone. Clients should not relly any business logic on this event.
+     * @notice Any address can emit this event. Do not rely on it for business logic.
      * @param requestId The ID of the request. Must be calculated off-chain.
      * @param responder The address of the responder.
      * @param error The error message.
