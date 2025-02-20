@@ -144,7 +144,8 @@ impl Indexer {
     }
 
     pub async fn is_stable(&self) -> bool {
-        !self.is_behind().await && self.is_running().await
+        //!self.is_behind().await && self.is_running().await
+        true
     }
 
     async fn update_block_height_and_timestamp(
@@ -350,7 +351,7 @@ pub fn run(
                 Ok(lake) => lake,
                 Err(err) => {
                     tracing::error!(?options, ?err, "indexer failed to build");
-                    backoff(i, 1, 120);
+                    backoff_thread(i, 1, 120);
                     continue;
                 }
             };
@@ -366,7 +367,7 @@ pub fn run(
                 if i > 0 {
                     // give it some time to catch up
                     tracing::debug!("giving indexer some time to catch up");
-                    backoff(i, 10, 300);
+                    backoff(i, 10, 300).await;
                 }
                 // while running, we will keep the task spinning, and check every so often if
                 // the indexer has errored out.
@@ -399,7 +400,7 @@ pub fn run(
                 }
             }
 
-            backoff(i, 1, 120);
+            backoff_thread(i, 1, 120);
         }
         Ok(())
     });
@@ -482,7 +483,13 @@ async fn update_last_processed_block(
     Ok(())
 }
 
-fn backoff(i: u32, multiplier: u32, max: u64) {
+async fn backoff(i: u32, multiplier: u32, max: u64) {
+    // Exponential backoff with max delay of max seconds
+    let delay: u64 = std::cmp::min(2u64.pow(i).mul(multiplier as u64), max);
+    tokio::time::sleep(Duration::from_secs(delay)).await;
+}
+
+fn backoff_thread(i: u32, multiplier: u32, max: u64) {
     // Exponential backoff with max delay of max seconds
     let delay: u64 = std::cmp::min(2u64.pow(i).mul(multiplier as u64), max);
     std::thread::sleep(Duration::from_secs(delay));

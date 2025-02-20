@@ -228,7 +228,7 @@ pub struct SignatureManager {
     /// Ongoing signature generation protocols.
     generators: HashMap<SignId, SignatureGenerator>,
     /// Set of completed signatures
-    completed: HashMap<SignId, Instant>,
+    completed: HashMap<(SignId, PresignatureId), Instant>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
 
@@ -343,7 +343,10 @@ impl SignatureManager {
         cfg: &ProtocolConfig,
         presignature_manager: &mut PresignatureManager,
     ) -> Result<&mut SignatureProtocol, GenerationError> {
-        if self.completed.contains_key(sign_id) {
+        if self
+            .completed
+            .contains_key(&(sign_id.clone(), presignature_id))
+        {
             tracing::warn!(
                 ?sign_id,
                 presignature_id,
@@ -360,8 +363,10 @@ impl SignatureManager {
         let Some(request) = self.sign_queue.take(sign_id) else {
             return Err(GenerationError::WaitingForIndexer(sign_id.clone()));
         };
-        if proposer != request.proposer {
-            return Err(GenerationError::InvalidProposer(proposer, request.proposer));
+        let our_proposer = request.proposer;
+        if proposer != our_proposer {
+            self.sign_queue.push_failed(request);
+            return Err(GenerationError::InvalidProposer(proposer, our_proposer));
         }
 
         tracing::info!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
@@ -369,32 +374,41 @@ impl SignatureManager {
             Ok(presignature) => presignature,
             Err(err @ GenerationError::PresignatureIsGenerating(_)) => {
                 tracing::warn!(me = ?self.me, presignature_id, "presignature is generating, can't join signature generation protocol");
+                self.sign_queue.push_failed(request);
                 return Err(err);
             }
             Err(err @ GenerationError::PresignatureIsMissing(_)) => {
                 tracing::warn!(me = ?self.me, presignature_id, "presignature is missing, can't join signature generation protocol");
+                self.sign_queue.push_failed(request);
                 return Err(err);
             }
             Err(err @ GenerationError::PresignatureIsGarbageCollected(_)) => {
                 tracing::warn!(me = ?self.me, presignature_id, "presignature is garbage collected, can't join signature generation protocol");
+                self.sign_queue.push_failed(request);
                 return Err(err);
             }
             Err(err) => return Err(err),
         };
         tracing::info!(me = ?self.me, presignature_id, "found presignature: ready to start signature generation");
-        let generator =
-            match Self::generate_internal(self.me, self.public_key, presignature, request, cfg) {
-                Ok(generator) => generator,
-                Err(err @ InitializationError::BadParameters(_)) => {
-                    tracing::warn!(
-                        ?sign_id,
-                        presignature_id,
-                        ?err,
-                        "failed to start signature generation"
-                    );
-                    return Err(GenerationError::CaitSithInitializationError(err));
-                }
-            };
+        let generator = match Self::generate_internal(
+            self.me,
+            self.public_key,
+            presignature,
+            request.clone(),
+            cfg,
+        ) {
+            Ok(generator) => generator,
+            Err(err @ InitializationError::BadParameters(_)) => {
+                self.sign_queue.push_failed(request);
+                tracing::warn!(
+                    ?sign_id,
+                    presignature_id,
+                    ?err,
+                    "failed to start signature generation"
+                );
+                return Err(GenerationError::CaitSithInitializationError(err));
+            }
+        };
         let generator = entry.insert(generator);
         crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
             .with_label_values(&[self.my_account_id.as_str()])
@@ -412,28 +426,29 @@ impl SignatureManager {
                     Ok(action) => action,
                     Err(err) => {
                         remove.push(sign_id.clone());
+                        self.completed
+                            .insert((sign_id.clone(), generator.presignature_id), Instant::now());
 
-                        if generator.request.proposer == self.me {
-                            if generator.request.indexed.timestamp.elapsed()
-                                < generator.timeout_total
-                            {
-                                failed.push(sign_id.clone());
-                                tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
+                        if generator.request.indexed.timestamp.elapsed() < generator.timeout_total {
+                            failed.push(sign_id.clone());
+                            tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
+                            if generator.request.proposer == self.me {
                                 crate::metrics::SIGNATURE_GENERATOR_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])
                                     .inc();
-                            } else {
-                                self.completed.insert(sign_id.clone(), Instant::now());
+                            }
+                        } else {
+                            tracing::warn!(
+                                ?err,
+                                "signature failed to be produced; trashing request"
+                            );
+                            if generator.request.proposer == self.me {
                                 crate::metrics::SIGNATURE_GENERATOR_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])
                                     .inc();
                                 crate::metrics::SIGNATURE_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])
                                     .inc();
-                                tracing::warn!(
-                                    ?err,
-                                    "signature failed to be produced; trashing request"
-                                );
                             }
                         }
                         break;
@@ -501,7 +516,8 @@ impl SignatureManager {
                         if generator.request.proposer == self.me {
                             rpc.publish(self.public_key, generator.request.clone(), output);
                         }
-                        self.completed.insert(sign_id.clone(), Instant::now());
+                        self.completed
+                            .insert((sign_id.clone(), generator.presignature_id), Instant::now());
                         // Do not retain the protocol
                         remove.push(sign_id.clone());
                     }
@@ -603,10 +619,10 @@ impl SignatureManager {
         }
     }
 
-    pub fn refresh_gc(&mut self, id: &SignId) -> bool {
+    pub fn refresh_gc(&mut self, sign_id: &SignId, presignature_id: PresignatureId) -> bool {
         let entry = self
             .completed
-            .entry(id.clone())
+            .entry((sign_id.clone(), presignature_id))
             .and_modify(|e| *e = Instant::now());
         matches!(entry, Entry::Occupied(_))
     }
