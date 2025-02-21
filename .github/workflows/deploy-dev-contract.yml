@@ -24,12 +24,12 @@ jobs:
         run: 'npm install -g near-cli'
 
       - name: Install Rust
-        run: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-
-      - name: debug
-        run: cat ~/.near-credentials/testnet/dev.sig-net.testnet.json
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: wasm32-unknown-unknown
 
       - name: Build & Deploy Dev Contract
-        run: |
-          source $HOME/.cargo/env ; rustup target add wasm32-unknown-unknown && cargo build -p mpc-contract --target wasm32-unknown-unknown --release \
+        run: ./build-contract.sh \
           && (yes || true) | near deploy dev.sig-net.testnet target/wasm32-unknown-unknown/release/mpc_contract.wasm
