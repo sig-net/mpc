@@ -5,12 +5,12 @@ use super::state::{
 };
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
+use crate::protocol::IndexedSignRequest;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
-use crate::protocol::IndexedSignRequest;
 use crate::rpc::NearClient;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cait_sith::protocol::InitializationError;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use url::Url;
 
 use near_account_id::AccountId;
@@ -207,7 +207,9 @@ impl ConsensusProtocol for StartedState {
                             }))
                         }
                         None => {
-                            tracing::info!("started(initializing): we are not a part of the initial participant set, waiting for key generation to complete");
+                            tracing::info!(
+                                "started(initializing): we are not a part of the initial participant set, waiting for key generation to complete"
+                            );
                             Ok(NodeState::Started(self))
                         }
                     }
@@ -235,18 +237,24 @@ impl ConsensusProtocol for GeneratingState {
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => {
-                tracing::info!("generating(initializing): continuing generation, contract state has not been finalized yet");
+                tracing::info!(
+                    "generating(initializing): continuing generation, contract state has not been finalized yet"
+                );
                 Ok(NodeState::Generating(self))
             }
             ProtocolState::Running(contract_state) => {
                 if contract_state.epoch > 0 {
-                    tracing::warn!("generating(running): contract has already changed epochs, trying to rejoin as a new participant");
+                    tracing::warn!(
+                        "generating(running): contract has already changed epochs, trying to rejoin as a new participant"
+                    );
                     return Ok(NodeState::Joining(JoiningState {
                         participants: contract_state.participants,
                         public_key: contract_state.public_key,
                     }));
                 }
-                tracing::info!("generating(running): contract state has finished key generation, trying to catch up");
+                tracing::info!(
+                    "generating(running): contract state has finished key generation, trying to catch up"
+                );
                 if self.participants != contract_state.participants {
                     return Err(ConsensusError::MismatchedParticipants);
                 }
@@ -257,13 +265,17 @@ impl ConsensusProtocol for GeneratingState {
             }
             ProtocolState::Resharing(contract_state) => {
                 if contract_state.old_epoch > 0 {
-                    tracing::warn!("generating(resharing): contract has already changed epochs, trying to rejoin as a new participant");
+                    tracing::warn!(
+                        "generating(resharing): contract has already changed epochs, trying to rejoin as a new participant"
+                    );
                     return Ok(NodeState::Joining(JoiningState {
                         participants: contract_state.old_participants,
                         public_key: contract_state.public_key,
                     }));
                 }
-                tracing::warn!("generating(resharing): contract state is resharing without us, trying to catch up");
+                tracing::warn!(
+                    "generating(resharing): contract state is resharing without us, trying to catch up"
+                );
                 if self.participants != contract_state.old_participants {
                     return Err(ConsensusError::MismatchedParticipants);
                 }
@@ -286,7 +298,9 @@ impl ConsensusProtocol for WaitingForConsensusState {
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(contract_state) => {
-                tracing::info!("waiting(initializing): waiting for consensus, contract state has not been finalized yet");
+                tracing::info!(
+                    "waiting(initializing): waiting for consensus, contract state has not been finalized yet"
+                );
                 let public_key = self.public_key.into_near_public_key();
                 let has_voted = contract_state
                     .pk_votes
@@ -294,7 +308,9 @@ impl ConsensusProtocol for WaitingForConsensusState {
                     .map(|ps| ps.contains(ctx.my_account_id()))
                     .unwrap_or_default();
                 if !has_voted {
-                    tracing::info!("waiting(initializing): we haven't voted yet, voting for the generated public key");
+                    tracing::info!(
+                        "waiting(initializing): we haven't voted yet, voting for the generated public key"
+                    );
                     ctx.near_client()
                         .vote_public_key(&public_key)
                         .await
@@ -332,7 +348,9 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         .participants
                         .find_participant(ctx.my_account_id())
                     else {
-                        tracing::error!("waiting(running, unexpected): we do not belong to the participant set -- cannot progress!");
+                        tracing::error!(
+                            "waiting(running, unexpected): we do not belong to the participant set -- cannot progress!"
+                        );
                         return Ok(NodeState::WaitingForConsensus(self));
                     };
 
@@ -428,7 +446,9 @@ impl ConsensusProtocol for WaitingForConsensusState {
                                 }
                             }
                             None => {
-                                tracing::info!("waiting(resharing): we are not a part of the old participant set");
+                                tracing::info!(
+                                    "waiting(resharing): we are not a part of the old participant set"
+                                );
                             }
                         }
                         Ok(NodeState::WaitingForConsensus(self))
@@ -540,7 +560,9 @@ impl ConsensusProtocol for ResharingState {
                     }
                     Ordering::Less => Err(ConsensusError::EpochRollback),
                     Ordering::Equal => {
-                        tracing::info!("resharing(running): contract state has finished resharing, trying to catch up");
+                        tracing::info!(
+                            "resharing(running): contract state has finished resharing, trying to catch up"
+                        );
                         if contract_state.participants != self.new_participants {
                             return Err(ConsensusError::MismatchedParticipants);
                         }
@@ -646,7 +668,9 @@ impl ConsensusProtocol for JoiningState {
                     tracing::info!("joining(resharing): joining as a new participant");
                     start_resharing(None, ctx, contract_state).await
                 } else {
-                    tracing::info!("joining(resharing): network is resharing without us, waiting for them to finish");
+                    tracing::info!(
+                        "joining(resharing): network is resharing without us, waiting for them to finish"
+                    );
                     Ok(NodeState::Joining(self))
                 }
             }

@@ -10,8 +10,8 @@ pub mod state;
 pub mod triple;
 
 pub use consensus::ConsensusError;
-pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
+pub use contract::primitives::ParticipantInfo;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
 use semver::Version;
@@ -36,8 +36,8 @@ use reqwest::IntoUrl;
 use std::path::Path;
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 use url::Url;
 
 struct Ctx {

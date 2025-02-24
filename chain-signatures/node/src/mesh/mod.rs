@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use crate::node_client::NodeClient;
-use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ProtocolState;
+use crate::protocol::contract::primitives::Participants;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

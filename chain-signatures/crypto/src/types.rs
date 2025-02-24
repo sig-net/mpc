@@ -1,6 +1,6 @@
 use k256::{
-    elliptic_curve::{bigint::ArrayEncoding, CurveArithmetic, PrimeField},
     Scalar, Secp256k1, U256,
+    elliptic_curve::{CurveArithmetic, PrimeField, bigint::ArrayEncoding},
 };
 
 pub type PublicKey = <Secp256k1 as CurveArithmetic>::AffinePoint;

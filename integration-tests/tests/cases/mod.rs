@@ -1,17 +1,17 @@
 use integration_tests::actions::{self, add_latency};
 use integration_tests::cluster;
 
+use cait_sith::PresignOutput;
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::PresignOutput;
 use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
-use k256::elliptic_curve::point::AffineCoordinates;
 use k256::Secp256k1;
+use k256::elliptic_curve::point::AffineCoordinates;
 use mpc_contract::config::Config;
 use mpc_contract::update::ProposeUpdateArgs;
-use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt};
+use mpc_crypto::{self, ScalarExt, derive_epsilon_near, derive_key, x_coordinate};
 use mpc_node::kdf::into_eth_sig;
 use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
 use mpc_node::protocol::triple::{Triple, TripleManager};
@@ -291,10 +291,12 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_generated().await, 0);
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert_eq!(presignature_manager.len_potential().await, 0);
-    assert!(presignature_storage
-        .contains_used(&presignature_id)
-        .await
-        .unwrap());
+    assert!(
+        presignature_storage
+            .contains_used(&presignature_id)
+            .await
+            .unwrap()
+    );
 
     // Attempt to re-insert used presignature and check that it fails
     let presignature = dummy_presignature(presignature_id);
@@ -324,10 +326,12 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert!(presignature_manager.is_empty().await);
     assert_eq!(presignature_manager.len_potential().await, 0);
-    assert!(presignature_storage
-        .contains_used(&mine_presig_id)
-        .await
-        .unwrap());
+    assert!(
+        presignature_storage
+            .contains_used(&mine_presig_id)
+            .await
+            .unwrap()
+    );
 
     // Attempt to re-insert used mine presignature and check that it fails
     let mine_presignature = dummy_presignature(mine_presig_id);

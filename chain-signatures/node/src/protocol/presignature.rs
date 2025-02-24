@@ -707,8 +707,8 @@ const fn first_8_bytes(input: [u8; 32]) -> [u8; 8] {
 
 #[cfg(test)]
 mod tests {
-    use cait_sith::{protocol::Participant, PresignOutput};
-    use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
+    use cait_sith::{PresignOutput, protocol::Participant};
+    use k256::{Secp256k1, elliptic_curve::CurveArithmetic};
 
     use crate::protocol::presignature::Presignature;
 

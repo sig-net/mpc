@@ -2,7 +2,7 @@ use crate::protocol::Chain;
 use crate::protocol::IndexedSignRequest;
 use crate::storage::app_data_storage::AppDataStorage;
 use k256::Scalar;
-use mpc_crypto::{derive_epsilon_near, ScalarExt as _};
+use mpc_crypto::{ScalarExt as _, derive_epsilon_near};
 use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use near_lake_framework::{Lake, LakeBuilder, LakeContext};
@@ -15,7 +15,7 @@ use std::ops::Mul;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 /// Configures indexer.
 #[derive(Debug, Clone, clap::Parser)]

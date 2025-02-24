@@ -7,7 +7,7 @@ use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
 
 use crate::containers::DockerClient;
-use crate::{execute, NodeConfig, Nodes};
+use crate::{NodeConfig, Nodes, execute};
 
 use crate::cluster::Cluster;
 

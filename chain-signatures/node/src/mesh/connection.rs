@@ -5,8 +5,8 @@ use cait_sith::protocol::Participant;
 use tokio::sync::RwLock;
 
 use crate::node_client::NodeClient;
-use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ProtocolState;
+use crate::protocol::contract::primitives::Participants;
 use crate::web::StateView;
 use std::sync::Arc;
 use tokio::task::JoinSet;

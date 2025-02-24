@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use cait_sith::protocol::{InitializationError, Participant};
 use cait_sith::triples::TripleGenerationOutput;
-use cait_sith::{protocol::Protocol, KeygenOutput};
 use cait_sith::{FullSignature, PresignOutput};
-use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
+use cait_sith::{KeygenOutput, protocol::Protocol};
+use k256::{Secp256k1, elliptic_curve::CurveArithmetic};
 use mpc_crypto::PublicKey;
 use tokio::sync::{RwLock, RwLockWriteGuard};
 

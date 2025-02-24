@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
@@ -1130,12 +1130,12 @@ mod tests {
     use cait_sith::protocol::Participant;
     use mpc_keys::hpke::{self, Ciphered};
     use mpc_primitives::SignId;
-    use serde::{de::DeserializeOwned, Deserialize, Serialize};
+    use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
     use crate::protocol::{
+        ParticipantInfo,
         contract::primitives::{ParticipantMap, Participants},
         message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
-        ParticipantInfo,
     };
 
     #[test]

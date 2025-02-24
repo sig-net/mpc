@@ -198,7 +198,7 @@ pub async fn batch_signature_responded(
                         _ => {
                             return Err(WaitForError::Signature(SignatureError::Failed(
                                 "one signature not done.".to_string(),
-                            )))
+                            )));
                         }
                     }
                 }

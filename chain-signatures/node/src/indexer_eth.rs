@@ -1,8 +1,8 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use hex::ToHex;
 use k256::Scalar;
-use mpc_crypto::kdf::derive_epsilon_eth;
 use mpc_crypto::ScalarExt as _;
+use mpc_crypto::kdf::derive_epsilon_eth;
 use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
@@ -12,9 +12,9 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use web3::ethabi::{encode, Token};
+use web3::ethabi::{Token, encode};
 use web3::futures::StreamExt;
-use web3::types::{FilterBuilder, Log, H160, H256, U256};
+use web3::types::{FilterBuilder, H160, H256, Log, U256};
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     Scalar::from_bytes(

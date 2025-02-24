@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{execute, utils, NodeConfig};
+use crate::{NodeConfig, execute, utils};
 
 use crate::containers::LakeIndexer;
 use crate::execute::executable;

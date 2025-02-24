@@ -4,7 +4,7 @@ use tracing::{Event, Subscriber};
 use tracing_stackdriver::layer as stackdriver_layer;
 use tracing_subscriber::fmt::format::{Format, FormatEvent, Full};
 use tracing_subscriber::fmt::time::SystemTime;
-use tracing_subscriber::fmt::{format, FmtContext, FormatFields};
+use tracing_subscriber::fmt::{FmtContext, FormatFields, format};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, Registry};

@@ -1,5 +1,5 @@
 pub mod common;
-use common::{init_env, vote_update_till_completion, CONTRACT_FILE_PATH, INVALID_CONTRACT};
+use common::{CONTRACT_FILE_PATH, INVALID_CONTRACT, init_env, vote_update_till_completion};
 
 use std::collections::HashMap;
 
@@ -75,11 +75,13 @@ async fn test_propose_update_config() {
         .await
         .unwrap();
     dbg!(&execution);
-    assert!(execution
-        .into_result()
-        .unwrap_err()
-        .to_string()
-        .contains(&errors::VoteError::VoterNotParticipant.to_string()));
+    assert!(
+        execution
+            .into_result()
+            .unwrap_err()
+            .to_string()
+            .contains(&errors::VoteError::VoterNotParticipant.to_string())
+    );
 
     // have each participant propose a new update:
     let new_config = Config {

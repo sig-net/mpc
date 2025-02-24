@@ -4,8 +4,8 @@ use mpc_keys::hpke::Ciphered;
 use reqwest::IntoUrl;
 use std::str::Utf8Error;
 use std::time::Duration;
-use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
+use tokio_retry::strategy::{ExponentialBackoff, jitter};
 use url::Url;
 
 #[derive(Debug, Clone, clap::Parser)]

@@ -19,17 +19,17 @@ use mpc_crypto::{derive_epsilon_near, derive_key};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_fetch::ops::Function;
+use near_workspaces::Account;
 use near_workspaces::types::Gas;
 use near_workspaces::types::NearToken;
-use near_workspaces::Account;
 use rand::Rng;
 use wait_for::{SignatureError, WaitForError};
 
 use std::time::Duration;
 
 use k256::{
-    ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
     PublicKey as K256PublicKey,
+    ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
 };
 use serde_json::json;
 
@@ -286,11 +286,11 @@ pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> web3::types::
 mod tests {
     use elliptic_curve::sec1::FromEncodedPoint as _;
     use k256::ecdsa::VerifyingKey;
+    use k256::elliptic_curve::ProjectivePoint;
     use k256::elliptic_curve::ops::{Invert, Reduce};
     use k256::elliptic_curve::point::AffineCoordinates;
-    use k256::elliptic_curve::ProjectivePoint;
     use k256::{AffinePoint, EncodedPoint, Scalar};
-    use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
+    use mpc_crypto::{ScalarExt as _, derive_epsilon_near, derive_key};
 
     use super::{public_key_to_address, recover, x_coordinate};
 
@@ -482,11 +482,7 @@ mod tests {
 
         //println!("reduced {reduced:#?}");
 
-        if *r == reduced {
-            Ok(())
-        } else {
-            Err("error")
-        }
+        if *r == reduced { Ok(()) } else { Err("error") }
     }
 
     fn lincomb(

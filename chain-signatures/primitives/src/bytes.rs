@@ -3,10 +3,10 @@
 /// forward and backward compatibility, so we need to implement our own
 /// custom serialization here.
 pub mod cbor_scalar {
+    use k256::Scalar;
     use k256::elliptic_curve::bigint::Encoding as _;
     use k256::elliptic_curve::scalar::FromUintUnchecked as _;
-    use k256::Scalar;
-    use serde::{de, Deserialize as _, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize as _, Deserializer, Serialize, Serializer, de};
 
     pub fn serialize<S: Serializer>(scalar: &Scalar, ser: S) -> Result<S::Ok, S::Error> {
         let num = k256::U256::from(scalar);
@@ -17,7 +17,7 @@ pub mod cbor_scalar {
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Scalar, D::Error> {
         let bytes = match ciborium::Value::deserialize(deserializer)? {
             ciborium::Value::Bytes(bytes) if bytes.len() != 32 => {
-                return Err(de::Error::custom("expected 32 bytes for Scalar"))
+                return Err(de::Error::custom("expected 32 bytes for Scalar"));
             }
             ciborium::Value::Bytes(bytes) => bytes,
             _ => return Err(de::Error::custom("expected ciborium::Value::Bytes")),
@@ -74,7 +74,7 @@ pub mod borsh_affine_point {
 #[cfg(test)]
 mod tests {
     use borsh::{BorshDeserialize, BorshSerialize};
-    use k256::{elliptic_curve::PrimeField, Scalar};
+    use k256::{Scalar, elliptic_curve::PrimeField};
     use mpc_crypto::ScalarExt as _;
     use serde::{Deserialize, Serialize};
 

@@ -10,8 +10,8 @@ use cait_sith::protocol::{Action, InitializationError, MessageData, Participant,
 use cait_sith::triples::{TripleGenerationOutput, TriplePub, TripleShare};
 use chrono::Utc;
 use highway::{HighwayHash, HighwayHasher};
-use k256::elliptic_curve::group::GroupEncoding;
 use k256::Secp256k1;
+use k256::elliptic_curve::group::GroupEncoding;
 use mpc_contract::config::ProtocolConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;

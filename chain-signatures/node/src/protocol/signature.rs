@@ -1,10 +1,10 @@
 use super::contract::primitives::Participants;
 use super::state::RunningState;
 use crate::kdf::derive_delta;
+use crate::protocol::Chain;
 use crate::protocol::error::GenerationError;
 use crate::protocol::message::{MessageChannel, SignatureMessage};
 use crate::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
-use crate::protocol::Chain;
 use crate::rpc::RpcChannel;
 use crate::types::SignatureProtocol;
 use crate::util::AffinePointExt;
@@ -14,17 +14,17 @@ use cait_sith::{FullSignature, PresignOutput};
 use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
-use mpc_crypto::{derive_key, PublicKey};
+use mpc_crypto::{PublicKey, derive_key};
 use mpc_primitives::{SignArgs, SignId};
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
-use rand::SeedableRng;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 use near_account_id::AccountId;
 
@@ -431,7 +431,10 @@ impl SignatureManager {
 
                         if generator.request.indexed.timestamp.elapsed() < generator.timeout_total {
                             failed.push(sign_id.clone());
-                            tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
+                            tracing::warn!(
+                                ?err,
+                                "signature failed to be produced; pushing request back into failed queue"
+                            );
                             if generator.request.proposer == self.me {
                                 crate::metrics::SIGNATURE_GENERATOR_FAILURES
                                     .with_label_values(&[self.my_account_id.as_str()])

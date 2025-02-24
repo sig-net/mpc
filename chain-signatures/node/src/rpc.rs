@@ -19,7 +19,7 @@ use serde_json::json;
 use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use url::Url;
 use web3::contract::tokens::Tokenizable as _;
 use web3::ethabi::Token;
