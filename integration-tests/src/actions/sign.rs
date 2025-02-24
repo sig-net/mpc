@@ -188,7 +188,7 @@ impl SignAction<'_> {
     }
 
     fn payload_or_random(&mut self) -> [u8; 32] {
-        let payload = self.payload.unwrap_or_else(|| rand::thread_rng().gen());
+        let payload = self.payload.unwrap_or_else(|| rand::thread_rng().r#gen());
         self.payload = Some(payload);
         payload
     }

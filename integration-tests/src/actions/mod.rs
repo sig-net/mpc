@@ -46,7 +46,7 @@ pub async fn request_batch_random_sign(
     let mut payloads: Vec<([u8; 32], [u8; 32])> = vec![];
     let mut tx = nodes.rpc_client.batch(&signer, nodes.contract().id());
     for _ in 0..3 {
-        let payload: [u8; 32] = rand::thread_rng().gen();
+        let payload: [u8; 32] = rand::thread_rng().r#gen();
         let payload_hashed = web3::signing::keccak256(&payload);
         payloads.push((payload, payload_hashed));
         let request = SignRequest {
@@ -79,7 +79,7 @@ pub async fn request_batch_duplicate_sign(
     };
 
     let mut tx = nodes.rpc_client.batch(&signer, nodes.contract().id());
-    let payload: [u8; 32] = rand::thread_rng().gen();
+    let payload: [u8; 32] = rand::thread_rng().r#gen();
     let payload_hashed = web3::signing::keccak256(&payload);
     let sign_call_cnt = 2;
     for _ in 0..sign_call_cnt {

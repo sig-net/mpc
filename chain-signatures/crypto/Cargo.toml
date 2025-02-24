@@ -1,7 +1,7 @@
 [package]
 name = "mpc-crypto"
 version.workspace = true
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
 k256.workspace = true
