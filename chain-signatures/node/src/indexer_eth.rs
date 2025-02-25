@@ -290,12 +290,12 @@ pub async fn run(
                                 tracing::warn!("Failed to catch up: {:?}", err);
                             } else {
                                 latest_block_number = end_block;
+                                tracing::info!("Latest eth block number: {latest_block_number}");
+                                crate::metrics::LATEST_BLOCK_NUMBER_ETH
+                                    .with_label_values(&[node_near_account_id.as_str()])
+                                    .set(latest_block_number as i64);
                             }
                         }
-                        tracing::info!("Latest eth block number: {latest_block_number}");
-                        crate::metrics::LATEST_BLOCK_NUMBER_ETH
-                            .with_label_values(&[node_near_account_id.as_str()])
-                            .set(latest_block_number as i64);
                     }
                     match web3_ws.eth_subscribe().subscribe_logs(filter.clone()).await {
                         Ok(mut filtered_logs_sub) => {
