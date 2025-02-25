@@ -494,6 +494,15 @@ pub(crate) static CONFIGURATION_DIGEST: LazyLock<IntGaugeVec> = LazyLock::new(||
     .unwrap()
 });
 
+pub(crate) static LATEST_BLOCK_NUMBER_ETH: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_latest_block_number_eth",
+        "Latest eth block number seen by the node",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
 pub fn try_create_int_gauge_vec(name: &str, help: &str, labels: &[&str]) -> Result<IntGaugeVec> {
     check_metric_multichain_prefix(name)?;
     let opts = Opts::new(name, help);
