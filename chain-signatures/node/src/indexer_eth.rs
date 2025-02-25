@@ -324,7 +324,8 @@ pub async fn run(
                                     }
                                     _ = heartbeat_interval.tick() => {
                                         if latest_sign_request_time.elapsed() > heartbeat_interval.period() {
-                                            tracing::warn!("No sign request received in the last 60 seconds");
+                                            tracing::warn!("No sign request received in the last 60 seconds, unsubscribing...");
+                                            filtered_logs_sub.unsubscribe().await?;
                                             break;
                                         }
                                     }
