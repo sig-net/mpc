@@ -12,6 +12,8 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio_retry::strategy::FixedInterval;
+use tokio_retry::Retry;
 use web3::ethabi::{encode, Token};
 use web3::futures::StreamExt;
 use web3::transports::WebSocket;
@@ -265,39 +267,66 @@ pub async fn run(
         .topics(Some(vec![signature_requested_topic]), None, None, None);
 
     let filter = filter_builer.clone().build();
+    let mut latest_block_number: u64 = 0;
 
     loop {
         match web3::transports::WebSocket::new(&eth.rpc_ws_url).await {
             Ok(ws) => {
                 let web3_ws = web3::Web3::new(ws);
                 tracing::info!("Connected to Ethereum WebSocket");
-                let mut latest_block_number: u64 = web3_ws.eth().block_number().await?.as_u64();
+
+                let block_number_with_retry =
+                    Retry::spawn(FixedInterval::from_millis(100).take(3), || async {
+                        web3_ws.eth().block_number().await
+                    })
+                    .await;
+
                 loop {
-                    if let Ok(block_number) = web3_ws.eth().block_number().await {
-                        let end_block = block_number.as_u64();
-                        let last_block = latest_block_number;
-                        if last_block < end_block {
-                            if let Err(err) = catchup(
-                                last_block + 1,
-                                end_block,
-                                web3_ws.clone(),
-                                sign_tx.clone(),
-                                filter_builer.clone(),
-                                node_near_account_id.clone(),
-                            )
-                            .await
-                            {
-                                tracing::warn!("Failed to catch up: {:?}", err);
-                            } else {
-                                latest_block_number = end_block;
+                    match block_number_with_retry {
+                        Ok(block_number) => {
+                            let end_block = block_number.as_u64();
+                            if latest_block_number == 0 {
+                                latest_block_number = block_number.as_u64();
                                 tracing::info!("Latest eth block number: {latest_block_number}");
                                 crate::metrics::LATEST_BLOCK_NUMBER_ETH
                                     .with_label_values(&[node_near_account_id.as_str()])
                                     .set(latest_block_number as i64);
+                            } else if latest_block_number < end_block {
+                                if let Err(err) = catchup(
+                                    latest_block_number,
+                                    end_block,
+                                    web3_ws.clone(),
+                                    sign_tx.clone(),
+                                    filter_builer.clone(),
+                                    node_near_account_id.clone(),
+                                )
+                                .await
+                                {
+                                    tracing::warn!("Failed to catch up: {:?}", err);
+                                } else {
+                                    latest_block_number = end_block;
+                                    tracing::info!(
+                                        "Latest eth block number: {latest_block_number}"
+                                    );
+                                    crate::metrics::LATEST_BLOCK_NUMBER_ETH
+                                        .with_label_values(&[node_near_account_id.as_str()])
+                                        .set(latest_block_number as i64);
+                                }
                             }
                         }
+                        Err(err) => {
+                            tracing::warn!(
+                                "Eth indexer failed to get latest block number: {:?}",
+                                err
+                            );
+                            break;
+                        }
                     }
-                    match web3_ws.eth_subscribe().subscribe_logs(filter.clone()).await {
+                    let subscribe_end_result = match web3_ws
+                        .eth_subscribe()
+                        .subscribe_logs(filter.clone())
+                        .await
+                    {
                         Ok(mut filtered_logs_sub) => {
                             tracing::info!("Ethereum indexer subscribed and listening for logs");
 
@@ -314,25 +343,37 @@ pub async fn run(
                                         }) else {
                                             break;
                                         };
-                                        latest_sign_request_time = Instant::now();
-                                        latest_block_number = log.block_number.unwrap().as_u64();
-                                        tracing::info!("Latest eth sign request block number: {latest_block_number}");
-                                        crate::metrics::LATEST_BLOCK_NUMBER_ETH
-                                            .with_label_values(&[node_near_account_id.as_str()])
-                                            .set(latest_block_number as i64);
-                                        process_filtered_log(log, sign_tx.clone(), node_near_account_id.clone());
+                                        if let Err(err) = process_filtered_log(log.clone(), sign_tx.clone(), node_near_account_id.clone()) {
+                                            tracing::warn!("Failed to process eth sign request: {:?}", err);
+                                            break;
+                                        } else {
+                                            latest_sign_request_time = Instant::now();
+                                            latest_block_number = log.block_number.unwrap().as_u64();
+                                            tracing::info!("Latest eth sign request block number: {latest_block_number}");
+                                            crate::metrics::LATEST_BLOCK_NUMBER_ETH
+                                                .with_label_values(&[node_near_account_id.as_str()])
+                                                .set(latest_block_number as i64);
+                                        }
                                     }
                                     _ = heartbeat_interval.tick() => {
                                         if latest_sign_request_time.elapsed() > heartbeat_interval.period() {
                                             tracing::warn!("No sign request received in the last 60 seconds, unsubscribing...");
-                                            filtered_logs_sub.unsubscribe().await?;
                                             break;
                                         }
                                     }
                                 }
                             }
+                            Ok(filtered_logs_sub)
                         }
-                        Err(err) => tracing::warn!("Failed to subscribe to logs: {:?}", err),
+                        Err(err) => {
+                            tracing::warn!("Failed to subscribe to logs: {:?}", err);
+                            Err(err)
+                        }
+                    };
+                    if let Ok(filtered_logs_sub) = subscribe_end_result {
+                        if let Err(err) = filtered_logs_sub.unsubscribe().await {
+                            tracing::warn!("Failed to unsubscribe from logs: {:?}", err);
+                        }
                     }
                 }
             }
@@ -347,19 +388,19 @@ fn process_filtered_log(
     log: web3::types::Log,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
-) {
+) -> anyhow::Result<()> {
     tracing::info!("Received new Ethereum sign request: {:?}", log);
     crate::metrics::NUM_SIGN_REQUESTS_ETH
         .with_label_values(&[node_near_account_id.as_str()])
         .inc();
-    if let Ok(sign_request) = sign_request_from_filtered_log(log) {
-        let sign_tx = sign_tx.clone();
-        tokio::spawn(async move {
-            if let Err(err) = sign_tx.send(sign_request).await {
-                tracing::error!(?err, "Failed to send ETH sign request into queue");
-            }
-        });
-    }
+    let sign_request = sign_request_from_filtered_log(log)?;
+    let sign_tx = sign_tx.clone();
+    tokio::spawn(async move {
+        if let Err(err) = sign_tx.send(sign_request).await {
+            tracing::error!(?err, "Failed to send ETH sign request into queue");
+        }
+    });
+    Ok(())
 }
 
 async fn catchup(
@@ -378,7 +419,7 @@ async fn catchup(
 
     let logs = ws.eth().logs(filter).await?;
     for log in logs {
-        process_filtered_log(log, sign_tx.clone(), node_near_account_id.clone());
+        process_filtered_log(log, sign_tx.clone(), node_near_account_id.clone())?;
     }
     Ok(())
 }
