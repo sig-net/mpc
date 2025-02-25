@@ -278,7 +278,7 @@ pub async fn run(
                         let last_block = latest_block_number;
                         if last_block < end_block {
                             if let Err(err) = catchup(
-                                last_block,
+                                last_block + 1,
                                 end_block,
                                 web3_ws.clone(),
                                 sign_tx.clone(),
