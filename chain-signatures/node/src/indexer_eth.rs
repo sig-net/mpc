@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use web3::ethabi::{encode, Token};
 use web3::futures::StreamExt;
-use web3::types::{FilterBuilder, Log, H160, H256, U256};
+use web3::transports::WebSocket;
+use web3::types::{BlockNumber, FilterBuilder, Log, H160, H256, U256};
+use web3::Web3;
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     Scalar::from_bytes(
@@ -258,20 +260,55 @@ pub async fn run(
         b"SignatureRequested(address,bytes32,uint32,uint256,uint256,string,string,string,string)",
     ));
 
-    let filter = FilterBuilder::default()
+    let filter_builer = FilterBuilder::default()
         .address(vec![contract_address])
-        .topics(Some(vec![signature_requested_topic]), None, None, None)
-        .build();
+        .topics(Some(vec![signature_requested_topic]), None, None, None);
+
+    let filter = filter_builer.clone().build();
+
+    let mut latest_block_number: u64 =
+        web3::Web3::new(web3::transports::WebSocket::new(&eth.rpc_ws_url).await?)
+            .eth()
+            .block_number()
+            .await?
+            .as_u64();
 
     loop {
         match web3::transports::WebSocket::new(&eth.rpc_ws_url).await {
             Ok(ws) => {
                 let web3_ws = web3::Web3::new(ws);
+                tracing::info!("Connected to Ethereum WebSocket");
+                if let Ok(block_number) = web3_ws.eth().block_number().await {
+                    let end_block = block_number.as_u64();
+                    let last_block = latest_block_number;
+                    if last_block < end_block {
+                        if let Err(err) = catchup(
+                            last_block,
+                            end_block,
+                            web3_ws.clone(),
+                            sign_tx.clone(),
+                            filter_builer.clone(),
+                            node_near_account_id.clone(),
+                        )
+                        .await
+                        {
+                            tracing::warn!("Failed to catch up: {:?}", err);
+                        } else {
+                            latest_block_number = end_block;
+                        }
+                    }
+                    tracing::info!("Latest eth block number: {latest_block_number}");
+                    crate::metrics::LATEST_BLOCK_NUMBER_ETH
+                        .with_label_values(&[node_near_account_id.as_str()])
+                        .set(latest_block_number as i64);
+                }
                 match web3_ws.eth_subscribe().subscribe_logs(filter.clone()).await {
                     Ok(mut filtered_logs_sub) => {
-                        tracing::info!("Ethereum indexer connected and listening for logs");
+                        tracing::info!("Ethereum indexer subscribed and listening for logs");
 
                         let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(60));
+                        heartbeat_interval.tick().await;
+                        let mut latest_sign_request_time = Instant::now();
 
                         loop {
                             tokio::select! {
@@ -281,21 +318,19 @@ pub async fn run(
                                     }) else {
                                         break;
                                     };
-                                    tracing::info!("Received new Ethereum sign request: {:?}", log);
-                                    crate::metrics::NUM_SIGN_REQUESTS_ETH
+                                    latest_sign_request_time = Instant::now();
+                                    latest_block_number = log.block_number.unwrap().as_u64();
+                                    tracing::info!("Latest eth sign request block number: {latest_block_number}");
+                                    crate::metrics::LATEST_BLOCK_NUMBER_ETH
                                         .with_label_values(&[node_near_account_id.as_str()])
-                                        .inc();
-                                    if let Ok(sign_request) = sign_request_from_filtered_log(log) {
-                                        let sign_tx = sign_tx.clone();
-                                        tokio::spawn(async move {
-                                            if let Err(err) = sign_tx.send(sign_request).await {
-                                                tracing::error!(?err, "Failed to send ETH sign request into queue");
-                                            }
-                                        });
-                                    }
+                                        .set(latest_block_number as i64);
+                                    process_filtered_log(log, sign_tx.clone(), node_near_account_id.clone());
                                 }
                                 _ = heartbeat_interval.tick() => {
-                                    tracing::info!("Ethereum indexer is still running...");
+                                    if latest_sign_request_time.elapsed() > heartbeat_interval.period() {
+                                        tracing::warn!("No sign request received in the last 60 seconds");
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -309,6 +344,46 @@ pub async fn run(
         tracing::warn!("Ethereum WebSocket disconnected, reconnecting in 2 seconds...");
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
+}
+
+fn process_filtered_log(
+    log: web3::types::Log,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    node_near_account_id: AccountId,
+) {
+    tracing::info!("Received new Ethereum sign request: {:?}", log);
+    crate::metrics::NUM_SIGN_REQUESTS_ETH
+        .with_label_values(&[node_near_account_id.as_str()])
+        .inc();
+    if let Ok(sign_request) = sign_request_from_filtered_log(log) {
+        let sign_tx = sign_tx.clone();
+        tokio::spawn(async move {
+            if let Err(err) = sign_tx.send(sign_request).await {
+                tracing::error!(?err, "Failed to send ETH sign request into queue");
+            }
+        });
+    }
+}
+
+async fn catchup(
+    start_block: u64,
+    end_block: u64,
+    ws: Web3<WebSocket>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    filter_builder: FilterBuilder,
+    node_near_account_id: AccountId,
+) -> anyhow::Result<()> {
+    tracing::info!("Catching up from block {start_block} to block {end_block}");
+    let filter = filter_builder
+        .from_block(BlockNumber::Number(start_block.into()))
+        .to_block(BlockNumber::Number(end_block.into()))
+        .build();
+
+    let logs = ws.eth().logs(filter).await?;
+    for log in logs {
+        process_filtered_log(log, sign_tx.clone(), node_near_account_id.clone());
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
