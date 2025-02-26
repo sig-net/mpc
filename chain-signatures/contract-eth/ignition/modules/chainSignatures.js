@@ -1,6 +1,6 @@
 const { buildModule } = require("@nomicfoundation/hardhat-ignition/modules");
 
-const DEFAULT_ADMIN = "0x3Aa5ebB10DC797CAC828524e59A333d0A371443c";
+const DEFAULT_ADMIN = "0x3c0f802d66ac9fe56fa90afb0714dbc65b05a445";
 const DEFAULT_DEPOSIT_AMOUNT = "1200000000000000";
 
 module.exports = buildModule("ChainSignaturesModule", (m) => {
