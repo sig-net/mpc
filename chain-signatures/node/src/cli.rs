@@ -214,14 +214,14 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             }
             tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
 
-            let (indexer_handle, indexer) = indexer::run(
-                &indexer_options,
-                &mpc_contract_id,
-                &account_id,
-                sign_tx.clone(),
-                app_data_storage.clone(),
-                rpc_client.clone(),
-            )?;
+            // let (indexer_handle, indexer) = indexer::run(
+            //     &indexer_options,
+            //     &mpc_contract_id,
+            //     &account_id,
+            //     sign_tx.clone(),
+            //     app_data_storage.clone(),
+            //     rpc_client.clone(),
+            // )?;
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
@@ -290,7 +290,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
-                let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
+                // let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
+                let web_handle = tokio::spawn(web::run(web_port, sender, state));
                 let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");
 
@@ -301,7 +302,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 eth_indexer_handle.await??;
                 tracing::info!("spinning down");
 
-                indexer_handle.join().unwrap()?;
+                // indexer_handle.join().unwrap()?;
 
                 anyhow::Ok(())
             })?;
