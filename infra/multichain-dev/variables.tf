@@ -70,7 +70,6 @@ variable "env_variables" {
 variable "node_configs" {
   type = list(object({
     account              = string
-    cipher_pk            = string
     account_sk_secret_id = string
     cipher_sk_secret_id  = string
     sign_sk_secret_id    = string

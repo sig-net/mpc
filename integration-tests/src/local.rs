@@ -15,8 +15,7 @@ pub struct Node {
     pub address: String,
     pub account: Account,
     pub sign_sk: near_crypto::SecretKey,
-    pub cipher_pk: hpke::PublicKey,
-    cipher_sk: hpke::SecretKey,
+    pub cipher_sk: hpke::SecretKey,
     cfg: NodeConfig,
     web_port: u16,
 
@@ -29,7 +28,6 @@ pub struct Node {
 pub struct NodeEnvConfig {
     pub web_port: u16,
     pub account: Account,
-    pub cipher_pk: hpke::PublicKey,
     pub cipher_sk: hpke::SecretKey,
     pub sign_sk: near_crypto::SecretKey,
     pub cfg: NodeConfig,
@@ -42,7 +40,7 @@ impl fmt::Debug for NodeEnvConfig {
         f.debug_struct("NodeConfig")
             .field("web_port", &self.web_port)
             .field("account", &self.account)
-            .field("cipher_pk", &self.cipher_pk)
+            .field("cipher_pk", &self.cipher_sk.public_key())
             .field("cfg", &self.cfg)
             .field("near_rpc", &self.near_rpc)
             .finish()
@@ -59,7 +57,7 @@ impl Node {
         let account_id = account.id();
         let account_sk = account.secret_key();
         let web_port = utils::pick_unused_port().await?;
-        let (cipher_sk, cipher_pk) = hpke::generate();
+        let (cipher_sk, _cipher_pk) = hpke::generate();
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
@@ -84,7 +82,6 @@ impl Node {
             account_id: account_id.clone(),
             account_sk: account_sk.to_string().parse()?,
             web_port,
-            cipher_pk: hex::encode(cipher_pk.to_bytes()),
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
             sign_sk: Some(sign_sk.clone()),
             eth,
@@ -116,7 +113,6 @@ impl Node {
         let node_config = NodeEnvConfig {
             web_port,
             account: account.clone(),
-            cipher_pk,
             cipher_sk,
             sign_sk,
             cfg: cfg.clone(),
@@ -132,7 +128,7 @@ impl Node {
         account: &Account,
     ) -> anyhow::Result<Self> {
         let web_port = utils::pick_unused_port().await?;
-        let (cipher_sk, cipher_pk) = hpke::generate();
+        let (cipher_sk, _cipher_pk) = hpke::generate();
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
@@ -155,7 +151,6 @@ impl Node {
             NodeEnvConfig {
                 web_port,
                 account: account.clone(),
-                cipher_pk,
                 cipher_sk,
                 sign_sk,
                 cfg: cfg.clone(),
@@ -191,7 +186,6 @@ impl Node {
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
             web_port,
-            cipher_pk: hex::encode(config.cipher_pk.to_bytes()),
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             sign_sk: Some(config.sign_sk.clone()),
             eth,
@@ -218,7 +212,6 @@ impl Node {
             address,
             account: config.account,
             sign_sk: config.sign_sk,
-            cipher_pk: config.cipher_pk,
             cipher_sk: config.cipher_sk,
             near_rpc: config.near_rpc,
             cfg: config.cfg,
@@ -234,7 +227,6 @@ impl Node {
         NodeEnvConfig {
             web_port: self.web_port,
             account: self.account.clone(),
-            cipher_pk: self.cipher_pk.clone(),
             cipher_sk: self.cipher_sk.clone(),
             sign_sk: self.sign_sk.clone(),
             cfg: self.cfg.clone(),

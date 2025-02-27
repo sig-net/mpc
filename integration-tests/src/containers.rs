@@ -41,7 +41,6 @@ pub struct Node {
     pub address: String,
     pub account: Account,
     pub local_address: String,
-    pub cipher_pk: hpke::PublicKey,
     pub cipher_sk: hpke::SecretKey,
     pub sign_sk: near_crypto::SecretKey,
     cfg: NodeConfig,
@@ -60,7 +59,7 @@ impl Node {
         account: &Account,
     ) -> anyhow::Result<Self> {
         tracing::info!(id = %account.id(), "running node container");
-        let (cipher_sk, cipher_pk) = hpke::generate();
+        let (cipher_sk, _cipher_pk) = hpke::generate();
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
@@ -85,7 +84,6 @@ impl Node {
             NodeEnvConfig {
                 web_port: Self::CONTAINER_PORT,
                 account: account.clone(),
-                cipher_pk,
                 cipher_sk,
                 sign_sk,
                 cfg: cfg.clone(),
@@ -100,7 +98,6 @@ impl Node {
         NodeEnvConfig {
             web_port: Self::CONTAINER_PORT,
             account: self.account,
-            cipher_pk: self.cipher_pk,
             cipher_sk: self.cipher_sk,
             sign_sk: self.sign_sk,
             cfg: self.cfg,
@@ -132,7 +129,6 @@ impl Node {
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
             web_port: Self::CONTAINER_PORT,
-            cipher_pk: hex::encode(config.cipher_pk.to_bytes()),
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             indexer_options: indexer_options.clone(),
             eth: eth_args,
@@ -187,7 +183,6 @@ impl Node {
             address: full_address,
             account: config.account,
             local_address: format!("http://localhost:{host_port}"),
-            cipher_pk: config.cipher_pk,
             cipher_sk: config.cipher_sk,
             sign_sk: config.sign_sk,
             cfg: config.cfg,

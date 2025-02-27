@@ -38,10 +38,6 @@ variable "account_id" {
   type = string
 }
 
-variable "cipher_pk" {
-  type = string
-}
-
 variable "my_address" {
   type = string
 }

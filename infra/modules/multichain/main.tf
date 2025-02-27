@@ -34,10 +34,6 @@ resource "google_cloud_run_v2_service" "node" {
         value = var.account_id
       }
       env {
-        name  = "MPC_CIPHER_PK"
-        value = var.cipher_pk
-      }
-      env {
         name  = "MPC_LOCAL_ADDRESS"
         value = var.my_address
       }
