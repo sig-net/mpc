@@ -166,7 +166,7 @@ impl NearClient {
             my_addr: my_addr.clone(),
             my_account_id: signer.account_id.clone(),
             signer,
-            cipher_pk: network.cipher_pk.clone(),
+            cipher_pk: network.cipher_sk.public_key(),
             sign_pk: network.sign_sk.public_key(),
         }
     }
