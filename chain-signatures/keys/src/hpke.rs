@@ -68,13 +68,18 @@ impl PublicKey {
         Self::try_from_bytes(bytes).expect("invalid bytes")
     }
 
-    pub fn encrypt(&self, msg: &[u8], associated_data: &[u8]) -> Result<Ciphered, hpke::HpkeError> {
+    pub fn encrypt(
+        &self,
+        msg: &[u8],
+        sender_sk: &SecretKey,
+        associated_data: &[u8],
+    ) -> Result<Ciphered, hpke::HpkeError> {
         let mut csprng = <rand::rngs::StdRng as rand::SeedableRng>::from_entropy();
 
         // Encapsulate a key and use the resulting shared secret to encrypt a message. The AEAD context
         // is what you use to encrypt.
         let (encapped_key, mut sender_ctx) = hpke::setup_sender::<Aead, Kdf, Kem, _>(
-            &hpke::OpModeS::Base,
+            &hpke::OpModeS::Auth((sender_sk.0.clone(), sender_sk.public_key().0)),
             &self.0,
             INFO_ENTROPY,
             &mut csprng,
@@ -123,11 +128,12 @@ impl SecretKey {
     pub fn decrypt(
         &self,
         cipher: &Ciphered,
+        expected_sender_pk: &PublicKey,
         associated_data: &[u8],
     ) -> Result<Vec<u8>, hpke::HpkeError> {
         // Decapsulate and derive the shared secret. This creates a shared AEAD context.
         let mut receiver_ctx = hpke::setup_receiver::<Aead, Kdf, Kem>(
-            &OpModeR::Base,
+            &OpModeR::Auth(expected_sender_pk.0.clone()),
             &self.0,
             &cipher.encapped_key.0,
             INFO_ENTROPY,
@@ -154,13 +160,35 @@ pub fn generate() -> (SecretKey, PublicKey) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_encrypt_decrypt() {
-        let (sk, pk) = super::generate();
+    fn test_encrypt_decrypt_with_auth() {
+        let (sender_sk, sender_pk) = super::generate();
+        let (receiver_sk, receiver_pk) = super::generate();
+        let (malicious_sk, malicious_pk) = super::generate();
         let msg = b"hello world";
         let associated_data = b"associated data";
 
-        let cipher = pk.encrypt(msg, associated_data).unwrap();
-        let decrypted = sk.decrypt(&cipher, associated_data).unwrap();
+        // Positive case
+        let ciphered = receiver_pk
+            .encrypt(msg, &sender_sk, associated_data)
+            .unwrap();
+        let decrypted = receiver_sk
+            .decrypt(&ciphered, &sender_pk, associated_data)
+            .unwrap();
+
+        // Malicious party should not be able to decrypt the message
+        assert!(malicious_sk
+            .decrypt(&ciphered, &sender_pk, associated_data)
+            .is_err());
+
+        // Recipient should not be able to decrypt the message if the sender is wrong
+        assert!(receiver_sk
+            .decrypt(&ciphered, &malicious_pk, associated_data)
+            .is_err());
+
+        // Recipient should not be able to decrypt the message if the associated data is wrong
+        assert!(receiver_sk
+            .decrypt(&ciphered, &sender_pk, b"wrong associated data")
+            .is_err());
 
         assert_eq!(msg, &decrypted[..]);
     }
