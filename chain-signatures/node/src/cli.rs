@@ -299,9 +299,9 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_handle.await??;
                 protocol_handle.await??;
                 web_handle.await??;
-                eth_indexer_handle.await??;
                 tracing::info!("spinning down");
 
+                eth_indexer_handle.abort();
                 indexer_handle.join().unwrap()?;
                 system_handle.abort();
 

@@ -26,6 +26,15 @@ cargo test -p integration-tests --jobs 1 -- --test-threads 1
 cargo test -p integration-tests --features docker-test
 ```
 
+## Benchmarking
+
+Benchmarks collect metrics from node and represent them in a readable format for CI to pick up.
+
+To run benchmarks, simply run the `bench.sh` script in the root:
+```sh
+./bench.sh
+```
+
 ## FAQ
 
 ### I want to run a test, but keep the docker containers from being destroyed

@@ -4,8 +4,16 @@
 export ROOT_DIR=$(dirname -- "$0")
 export TARGET_DIR=$ROOT_DIR/target
 
-echo "running integration test build script"
-. $ROOT_DIR/build-contract.sh
-cargo build-node
+echo "running cargo build script"
+
+# add additional features if we're benchmarking:
+if echo "$@" | grep -q "bench"; then
+    FEATURES="--features bench"
+fi
+
+set -e
+cd $ROOT_DIR
+. $ROOT_DIR/build-contract.sh $FEATURES
+cargo build -p mpc-node $FEATURES
 
 exec "$@"
