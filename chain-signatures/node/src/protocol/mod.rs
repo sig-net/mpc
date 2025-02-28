@@ -172,16 +172,10 @@ impl MpcSignProtocol {
         crate::metrics::NODE_VERSION
             .with_label_values(&[my_account_id.as_str()])
             .set(node_version());
-        let mut last_hardware_pull = Instant::now();
 
         loop {
             let protocol_time = Instant::now();
             tracing::debug!("trying to advance chain signatures protocol");
-            // Hardware metric refresh
-            if last_hardware_pull.elapsed() > Duration::from_secs(5) {
-                update_system_metrics(my_account_id.as_str());
-                last_hardware_pull = Instant::now();
-            }
 
             crate::metrics::PROTOCOL_ITER_CNT
                 .with_label_values(&[my_account_id.as_str()])
@@ -295,57 +289,65 @@ fn parse_node_version(version: &str) -> i64 {
     (rc_num + version.patch * 1000 + version.minor * 1000000 + version.major * 1000000000) as i64
 }
 
-fn update_system_metrics(node_account_id: &str) {
-    let mut system = System::new_all();
+pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHandle<()> {
+    let node_account_id = node_account_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        loop {
+            let mut system = System::new_all();
 
-    // Refresh only the necessary components
-    system.refresh_all();
+            // Refresh only the necessary components
+            system.refresh_all();
 
-    let mut s =
-        System::new_with_specifics(RefreshKind::new().with_cpu(CpuRefreshKind::everything()));
-    // Wait a bit because CPU usage is based on diff.
-    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-    // Refresh CPUs again to get actual value.
-    s.refresh_cpu_specifics(CpuRefreshKind::everything());
+            let mut s = System::new_with_specifics(
+                RefreshKind::new().with_cpu(CpuRefreshKind::everything()),
+            );
+            // Wait a bit because CPU usage is based on diff.
+            std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+            // Refresh CPUs again to get actual value.
+            s.refresh_cpu_specifics(CpuRefreshKind::everything());
 
-    // Update CPU usage metric
-    let cpu_usage = s.global_cpu_usage() as i64;
-    crate::metrics::CPU_USAGE_PERCENTAGE
-        .with_label_values(&["global", node_account_id])
-        .set(cpu_usage);
+            // Update CPU usage metric
+            let cpu_usage = s.global_cpu_usage() as i64;
+            crate::metrics::CPU_USAGE_PERCENTAGE
+                .with_label_values(&["global", &node_account_id])
+                .set(cpu_usage);
 
-    // Update available memory metric
-    let available_memory = system.available_memory() as i64;
-    crate::metrics::AVAILABLE_MEMORY_BYTES
-        .with_label_values(&["available_mem", node_account_id])
-        .set(available_memory);
+            // Update available memory metric
+            let available_memory = system.available_memory() as i64;
+            crate::metrics::AVAILABLE_MEMORY_BYTES
+                .with_label_values(&["available_mem", &node_account_id])
+                .set(available_memory);
 
-    // Update used memory metric
-    let used_memory = system.used_memory() as i64;
-    crate::metrics::USED_MEMORY_BYTES
-        .with_label_values(&["used", node_account_id])
-        .set(used_memory);
+            // Update used memory metric
+            let used_memory = system.used_memory() as i64;
+            crate::metrics::USED_MEMORY_BYTES
+                .with_label_values(&["used", &node_account_id])
+                .set(used_memory);
 
-    let root_mount_point = Path::new("/");
-    // Update available disk space metric
-    let available_disk_space = Disks::new_with_refreshed_list()
-        .iter()
-        .find(|d| d.mount_point() == root_mount_point)
-        .expect("No disk found mounted at '/'")
-        .available_space() as i64;
-    crate::metrics::AVAILABLE_DISK_SPACE_BYTES
-        .with_label_values(&["available_disk", node_account_id])
-        .set(available_disk_space);
+            let root_mount_point = Path::new("/");
+            // Update available disk space metric
+            let available_disk_space = Disks::new_with_refreshed_list()
+                .iter()
+                .find(|d| d.mount_point() == root_mount_point)
+                .expect("No disk found mounted at '/'")
+                .available_space() as i64;
+            crate::metrics::AVAILABLE_DISK_SPACE_BYTES
+                .with_label_values(&["available_disk", &node_account_id])
+                .set(available_disk_space);
 
-    // Update total disk space metric
-    let total_disk_space = Disks::new_with_refreshed_list()
-        .iter()
-        .find(|d| d.mount_point() == root_mount_point)
-        .expect("No disk found mounted at '/'")
-        .total_space() as i64;
-    crate::metrics::TOTAL_DISK_SPACE_BYTES
-        .with_label_values(&["total_disk", node_account_id])
-        .set(total_disk_space);
+            // Update total disk space metric
+            let total_disk_space = Disks::new_with_refreshed_list()
+                .iter()
+                .find(|d| d.mount_point() == root_mount_point)
+                .expect("No disk found mounted at '/'")
+                .total_space() as i64;
+            crate::metrics::TOTAL_DISK_SPACE_BYTES
+                .with_label_values(&["total_disk", &node_account_id])
+                .set(total_disk_space);
+
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    })
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy, Hash)]
