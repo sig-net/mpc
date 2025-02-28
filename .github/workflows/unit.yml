@@ -26,6 +26,11 @@ jobs:
         with:
           profile: minimal
           toolchain: stable
+      - name: Install Rust (1.81.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.81.0
           target: wasm32-unknown-unknown
       - name: Install Node.js
         uses: actions/setup-node@v4

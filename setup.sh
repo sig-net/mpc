@@ -13,7 +13,7 @@ fi
 
 set -e
 cd $ROOT_DIR
-./build-contract.sh $FEATURES
+. $ROOT_DIR/build-contract.sh $FEATURES
 cargo build -p mpc-node $FEATURES
 
 exec "$@"
