@@ -127,7 +127,12 @@ where
 }
 
 pub fn setup(env: &str, node_id: &str, options: &Options, rt: &tokio::runtime::Runtime) {
-    tracing::info!("Setting up logs: env={}, node_id={}, options={:?}", env, node_id, options);
+    tracing::info!(
+        "Setting up logs: env={}, node_id={}, options={:?}",
+        env,
+        node_id,
+        options
+    );
     let subscriber = Registry::default().with(EnvFilter::from_default_env());
 
     let fmt_layer = tracing_subscriber::fmt::layer()

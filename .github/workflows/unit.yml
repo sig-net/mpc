@@ -26,6 +26,11 @@ jobs:
         with:
           profile: minimal
           toolchain: stable
+      - name: Install Rust (1.81.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.81.0
           target: wasm32-unknown-unknown
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -42,7 +47,7 @@ jobs:
           key: "${{ runner.os }}-cargo-${{ hashFiles('mpc-recovery/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
       - name: Compile Contract
-        run: cargo build -p mpc-contract --target wasm32-unknown-unknown --release
+        run: ./build-contract.sh
       - name: Compile eth contract
         run: cd chain-signatures/contract-eth && npm i && npx hardhat compile
       - name: Eth contract unit tests
