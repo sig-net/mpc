@@ -242,6 +242,7 @@ impl PresignatureManager {
                 tracing::error!(?store_error, "failed to look for mine presignature");
             })
             .ok()??;
+        self.gc.insert(presignature.id, Instant::now());
         tracing::debug!(id = ?presignature.id, "took presignature of mine");
         Some(presignature)
     }

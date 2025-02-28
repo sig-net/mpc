@@ -213,7 +213,6 @@ impl MessageInbox {
                 .or_default()
                 .push_back(message),
             Message::Signature(message) => {
-                tracing::info!(epoch = message.epoch, sign_id = ?message.id, "inbox: received signature message");
                 let subscriber = self
                     .signature_subs
                     .entry(message.epoch)

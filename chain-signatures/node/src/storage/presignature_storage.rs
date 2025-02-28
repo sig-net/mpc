@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
@@ -256,6 +256,8 @@ impl FromRedisValue for Presignature {
     }
 }
 
+// TODO: make use of redis pubsub for these sort of notifications instead of
+// relying on polling for the value to be available.
 async fn wait_for_hexist(
     conn: &mut Connection,
     key: &str,
@@ -263,14 +265,13 @@ async fn wait_for_hexist(
     timeout: Duration,
 ) -> bool {
     let delay = Duration::from_millis(25);
-    let start = tokio::time::Instant::now();
+    let start = Instant::now();
 
     while start.elapsed() < timeout {
         if conn.hexists::<_, _, bool>(key, field).await.is_ok() {
             return true;
         }
         tokio::time::sleep(delay).await;
-        // delay = std::cmp::min(delay * 2, Duration::from_secs(1)); // Exponential backoff
     }
     false
 }

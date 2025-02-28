@@ -136,14 +136,11 @@ impl ConsensusProtocol for StartedState {
 
                                     let signature_manager =
                                         Arc::new(RwLock::new(SignatureManager::new(
+                                            &ctx,
                                             *me,
-                                            ctx.my_account_id(),
                                             contract_state.threshold,
                                             public_key,
                                             epoch,
-                                            ctx.sign_rx(),
-                                            ctx.rpc_channel(),
-                                            ctx.msg_channel(),
                                         )));
 
                                     Ok(NodeState::Running(RunningState {
@@ -358,14 +355,11 @@ impl ConsensusProtocol for WaitingForConsensusState {
                     )));
 
                     let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
+                        &ctx,
                         *me,
-                        ctx.my_account_id(),
                         self.threshold,
                         self.public_key,
                         self.epoch,
-                        ctx.sign_rx(),
-                        ctx.rpc_channel(),
-                        ctx.msg_channel(),
                     )));
 
                     Ok(NodeState::Running(RunningState {
