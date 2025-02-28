@@ -24,11 +24,7 @@ pub struct Options {
     )]
     pub opentelemetry_level: OpenTelemetryLevel,
 
-    #[clap(
-        long,
-        env("MPC_OTLP_ENDPOINT"),
-        default_value = "http://localhost:4318"
-    )]
+    #[clap(long, env("MPC_OTLP_ENDPOINT"), default_value = "http://jaeger:4318")]
     pub otlp_endpoint: String,
 }
 
@@ -36,7 +32,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             opentelemetry_level: OpenTelemetryLevel::DEBUG,
-            otlp_endpoint: "http://localhost:4318".to_string(),
+            otlp_endpoint: "http://jaeger:4318".to_string(),
         }
     }
 }
@@ -126,13 +122,12 @@ where
     }
 }
 
-pub fn setup(env: &str, node_id: &str, options: &Options, rt: &tokio::runtime::Runtime) {
-    tracing::info!(
-        "Setting up logs: env={}, node_id={}, options={:?}",
-        env,
-        node_id,
-        options
-    );
+pub fn setup(
+    env: &str,
+    node_id: &str,
+    options: &Options,
+    rt: &tokio::runtime::Runtime,
+) -> anyhow::Result<()> {
     let subscriber = Registry::default().with(EnvFilter::from_default_env());
 
     let fmt_layer = tracing_subscriber::fmt::layer()
@@ -173,9 +168,18 @@ pub fn setup(env: &str, node_id: &str, options: &Options, rt: &tokio::runtime::R
         tracing::info!("Setting global logging subscriber: fmt, otel, stackdriver");
         let stackdriver_layer = stackdriver_layer().with_writer(std::io::stderr);
         let subscriber = subscriber.with(stackdriver_layer);
-        tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
+        tracing::subscriber::set_global_default(subscriber)
+            .map_err(|err| anyhow::anyhow!("Failed to set subscriber: {:?}", err))?;
     } else {
         tracing::info!("Setting global logging subscriber: fmt, otel");
-        tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
+        tracing::subscriber::set_global_default(subscriber)
+            .map_err(|err| anyhow::anyhow!("Failed to set subscriber: {:?}", err))?;
     }
+    tracing::info!(
+        "Set up logs: env={}, node_id={}, options={:?}",
+        env,
+        node_id,
+        options
+    );
+    Ok(())
 }

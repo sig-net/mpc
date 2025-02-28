@@ -180,7 +180,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 account_id.as_str(),
                 &logging_options,
                 &rt,
-            );
+            )?;
 
             let _span = tracing::trace_span!("cli").entered();
 
