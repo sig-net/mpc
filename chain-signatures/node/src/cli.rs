@@ -3,7 +3,7 @@ use crate::gcp::GcpService;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
-use crate::protocol::{MpcSignProtocol, SignQueue};
+use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
 use crate::rpc::{NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, logs, mesh, storage, web};
@@ -287,6 +287,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 tracing::info!("protocol initialized");
                 let rpc_handle = tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
                 let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
+                let system_handle = spawn_system_metrics(account_id.as_str()).await;
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
@@ -302,6 +303,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 tracing::info!("spinning down");
 
                 indexer_handle.join().unwrap()?;
+                system_handle.abort();
 
                 anyhow::Ok(())
             })?;
