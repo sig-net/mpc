@@ -1,5 +1,5 @@
-use std::sync::Mutex;
 use std::sync::LazyLock;
+use std::sync::Mutex;
 
 use prometheus::{
     self, exponential_buckets, CounterVec, HistogramOpts, HistogramVec, IntGaugeVec, Opts, Result,
