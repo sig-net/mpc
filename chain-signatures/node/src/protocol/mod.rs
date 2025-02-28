@@ -14,6 +14,7 @@ pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
+use semver::Version;
 pub use signature::{IndexedSignRequest, SignQueue};
 pub use state::NodeState;
 pub use sysinfo::{Components, CpuRefreshKind, Disks, RefreshKind, System};
@@ -275,7 +276,17 @@ impl MpcSignProtocol {
 
 /// our release versions take the form of "1.0.0-rc.2"
 fn node_version() -> i64 {
-    let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    parse_node_version(env!("CARGO_PKG_VERSION"))
+}
+
+fn parse_node_version(version: &str) -> i64 {
+    let version = match Version::parse(version) {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::error!("Failed to parse version: {}", version);
+            Version::new(999, 999, 999)
+        }
+    };
     let rc_num = if let Some(rc_str) = version.pre.split('.').nth(1) {
         rc_str.parse::<u64>().unwrap_or(0)
     } else {
@@ -341,4 +352,31 @@ fn update_system_metrics(node_account_id: &str) {
 pub enum Chain {
     NEAR,
     Ethereum,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_node_version() {
+        assert_eq!(parse_node_version("1.0.0-beta"), 1000000000);
+        assert_eq!(parse_node_version("1.0.0-rc.1"), 1000000001);
+        assert_eq!(parse_node_version("1.0.0-rc.2"), 1000000002);
+        assert_eq!(parse_node_version("1.2.3-rc.4"), 1002003004);
+        assert_eq!(parse_node_version("1.0.0"), 1000000000);
+        assert_eq!(parse_node_version("1.1.0"), 1001000000);
+        assert_eq!(parse_node_version("1.2.3"), 1002003000);
+        assert_eq!(parse_node_version("2.0.0"), 2000000000);
+        assert_eq!(parse_node_version("2.1.0"), 2001000000);
+        assert_eq!(parse_node_version("2.1.1-rc.5"), 2001001005);
+        assert_eq!(parse_node_version("2.1.1"), 2001001000);
+        assert_eq!(parse_node_version("10.20.30-rc.40"), 10020030040);
+    }
+
+    #[test]
+    fn test_parse_node_version_invalid() {
+        assert_eq!(parse_node_version("bad_version"), 999999999000);
+        assert_eq!(parse_node_version(""), 999999999000);
+    }
 }

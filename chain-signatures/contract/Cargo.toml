@@ -32,4 +32,5 @@ near-workspaces = "0.15.0"
 
 [features]
 default = []
+# utilized for benchmarking the node:
 bench = []

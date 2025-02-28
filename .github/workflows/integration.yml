@@ -81,7 +81,7 @@ jobs:
           aws --profile default configure set aws_secret_access_key "456"
 
       - name: Build Chain-Signatures Contract
-        run: cargo build -p mpc-contract --target wasm32-unknown-unknown --release
+        run: ./build-contract.sh
 
       - name: Build eth contract
         working-directory: ./chain-signatures/contract-eth
