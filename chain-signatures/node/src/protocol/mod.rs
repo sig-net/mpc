@@ -45,7 +45,6 @@ struct Ctx {
     account_id: AccountId,
     mpc_contract_id: AccountId,
     near: NearClient,
-    rpc_channel: RpcChannel,
     sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
@@ -84,17 +83,17 @@ impl ConsensusCtx for &mut MpcSignProtocol {
     fn presignature_storage(&self) -> &PresignatureStorage {
         &self.ctx.presignature_storage
     }
+
+    fn msg_channel(&self) -> &MessageChannel {
+        &self.msg_channel
+    }
+
+    fn rpc_channel(&self) -> &crate::rpc::RpcChannel {
+        &self.rpc_channel
+    }
 }
 
 impl CryptographicCtx for &mut MpcSignProtocol {
-    fn mpc_contract_id(&self) -> &AccountId {
-        &self.ctx.mpc_contract_id
-    }
-
-    fn my_account_id(&self) -> &AccountId {
-        &self.ctx.account_id
-    }
-
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox {
         &mut self.ctx.secret_storage
     }
@@ -107,18 +106,15 @@ impl CryptographicCtx for &mut MpcSignProtocol {
         &self.ctx.presignature_storage
     }
 
-    fn channel(&self) -> &MessageChannel {
-        &self.channel
-    }
-
-    fn rpc_channel(&self) -> &crate::rpc::RpcChannel {
-        &self.ctx.rpc_channel
+    fn msg_channel(&self) -> &MessageChannel {
+        &self.msg_channel
     }
 }
 
 pub struct MpcSignProtocol {
     ctx: Ctx,
-    channel: MessageChannel,
+    rpc_channel: RpcChannel,
+    msg_channel: MessageChannel,
     state: Arc<RwLock<NodeState>>,
 }
 
@@ -131,7 +127,7 @@ impl MpcSignProtocol {
         state: Arc<RwLock<NodeState>>,
         near: NearClient,
         rpc_channel: RpcChannel,
-        channel: MessageChannel,
+        msg_channel: MessageChannel,
         sign_rx: mpsc::Receiver<IndexedSignRequest>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
@@ -143,7 +139,6 @@ impl MpcSignProtocol {
             account_id,
             mpc_contract_id,
             near,
-            rpc_channel,
             sign_rx: Arc::new(RwLock::new(sign_rx)),
             secret_storage,
             triple_storage,
@@ -151,7 +146,8 @@ impl MpcSignProtocol {
         };
         MpcSignProtocol {
             ctx,
-            channel,
+            rpc_channel,
+            msg_channel,
             state,
         }
     }
@@ -238,7 +234,7 @@ impl MpcSignProtocol {
             }
 
             let message_time = Instant::now();
-            if let Err(err) = state.recv(&self.channel, cfg, mesh_state).await {
+            if let Err(err) = state.recv(&self.msg_channel, cfg, mesh_state).await {
                 tracing::warn!("protocol unable to receive messages: {err:?}");
             }
             crate::metrics::PROTOCOL_LATENCY_ITER_MESSAGE

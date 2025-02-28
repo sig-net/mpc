@@ -7,23 +7,18 @@ use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
-use crate::rpc::RpcChannel;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::{PresignatureStorage, TripleStorage};
 
 use async_trait::async_trait;
 use cait_sith::protocol::{Action, InitializationError, ProtocolError};
 use k256::elliptic_curve::group::GroupEncoding;
-use near_account_id::AccountId;
 
 pub trait CryptographicCtx {
-    fn mpc_contract_id(&self) -> &AccountId;
     fn secret_storage(&mut self) -> &mut SecretNodeStorageBox;
     fn triple_storage(&self) -> &TripleStorage;
     fn presignature_storage(&self) -> &PresignatureStorage;
-    fn my_account_id(&self) -> &AccountId;
-    fn channel(&self) -> &MessageChannel;
-    fn rpc_channel(&self) -> &RpcChannel;
+    fn msg_channel(&self) -> &MessageChannel;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -86,7 +81,7 @@ impl CryptographicProtocol for GeneratingState {
                             continue;
                         }
 
-                        ctx.channel()
+                        ctx.msg_channel()
                             .send(
                                 self.me,
                                 *p,
@@ -100,7 +95,7 @@ impl CryptographicProtocol for GeneratingState {
                 }
                 Action::SendPrivate(to, data) => {
                     tracing::debug!("generating: sending a private message to {to:?}");
-                    ctx.channel()
+                    ctx.msg_channel()
                         .send(
                             self.me,
                             to,
@@ -189,7 +184,7 @@ impl CryptographicProtocol for ResharingState {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;
                         }
-                        ctx.channel()
+                        ctx.msg_channel()
                             .send(
                                 self.me,
                                 *p,
@@ -207,7 +202,7 @@ impl CryptographicProtocol for ResharingState {
                     if self.new_participants.get(&to).is_none() {
                         tracing::error!("resharing: send_private unknown participant {to:?}");
                     } else {
-                        ctx.channel()
+                        ctx.msg_channel()
                             .send(
                                 self.me,
                                 to,
@@ -279,14 +274,14 @@ impl CryptographicProtocol for RunningState {
         let triple_task =
             self.triple_manager
                 .clone()
-                .execute(&active, &cfg.protocol, ctx.channel());
+                .execute(&active, &cfg.protocol, ctx.msg_channel());
 
         let presig_task =
-            PresignatureManager::execute(&self, &active, &cfg.protocol, ctx.channel());
+            PresignatureManager::execute(&self, &active, &cfg.protocol, ctx.msg_channel());
 
         let stable = mesh_state.stable;
         tracing::debug!(?stable, "stable participants");
-        let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol, &ctx);
+        let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol);
 
         match tokio::try_join!(triple_task, presig_task, sig_task) {
             Ok(_result) => (),

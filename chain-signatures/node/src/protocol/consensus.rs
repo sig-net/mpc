@@ -3,6 +3,7 @@ use super::state::{
     JoiningState, NodeState, PersistentNodeData, RunningState, StartedState,
     WaitingForConsensusState,
 };
+use super::MessageChannel;
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
 use crate::protocol::contract::primitives::Participants;
@@ -11,7 +12,7 @@ use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
 use crate::protocol::IndexedSignRequest;
-use crate::rpc::NearClient;
+use crate::rpc::{NearClient, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -37,6 +38,8 @@ pub trait ConsensusCtx {
     fn secret_storage(&self) -> &SecretNodeStorageBox;
     fn triple_storage(&self) -> &TripleStorage;
     fn presignature_storage(&self) -> &PresignatureStorage;
+    fn rpc_channel(&self) -> &RpcChannel;
+    fn msg_channel(&self) -> &MessageChannel;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -139,6 +142,8 @@ impl ConsensusProtocol for StartedState {
                                             public_key,
                                             epoch,
                                             ctx.sign_rx(),
+                                            ctx.rpc_channel(),
+                                            ctx.msg_channel(),
                                         )));
 
                                     Ok(NodeState::Running(RunningState {
@@ -359,6 +364,8 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.public_key,
                         self.epoch,
                         ctx.sign_rx(),
+                        ctx.rpc_channel(),
+                        ctx.msg_channel(),
                     )));
 
                     Ok(NodeState::Running(RunningState {

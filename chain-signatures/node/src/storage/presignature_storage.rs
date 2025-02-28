@@ -1,4 +1,5 @@
-use chrono::Duration;
+use std::time::Duration;
+
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
@@ -8,7 +9,9 @@ use crate::storage::error::{StoreError, StoreResult};
 
 // Can be used to "clear" redis storage in case of a breaking change
 const PRESIGNATURE_STORAGE_VERSION: &str = "v7";
-const USED_EXPIRE_TIME: Duration = Duration::hours(24);
+
+/// Expiration of 24 hours for used presignatures.
+const USED_EXPIRE_TIME: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureStorage {
     let presig_key = format!(
@@ -115,7 +118,16 @@ impl PresignatureStorage {
         Ok(result)
     }
 
-    pub async fn take(&self, id: &PresignatureId) -> StoreResult<Presignature> {
+    // TODO: make id: &PresignatureId, into id: PresignatureId
+    /// Take the presginature from the storage. Expects the node to not own this presignature.
+    /// If `timeout` is provided, this will block up till timeout for the presignature to be
+    /// available within storage. If none is provided, then try to take the presignature
+    /// immediately.
+    pub async fn take(
+        &self,
+        id: &PresignatureId,
+        timeout: Option<Duration>,
+    ) -> StoreResult<Presignature> {
         let mut conn = self.connect().await?;
 
         let script = r#"
@@ -141,12 +153,19 @@ impl PresignatureStorage {
             return presig_value
         "#;
 
-        let result: Result<Presignature, RedisError> = redis::Script::new(script)
+        let script = redis::Script::new(script);
+        if let Some(timeout) = timeout {
+            if !wait_for_hexist(&mut conn, &self.presig_key, *id, timeout).await {
+                return Err(StoreError::Timeout(timeout));
+            }
+        }
+
+        let result: Result<Presignature, RedisError> = script
             .key(&self.mine_key)
             .key(&self.presig_key)
             .key(&self.used_key)
             .arg(id)
-            .arg(USED_EXPIRE_TIME.num_seconds())
+            .arg(USED_EXPIRE_TIME.as_secs())
             .invoke_async(&mut conn)
             .await;
 
@@ -182,7 +201,7 @@ impl PresignatureStorage {
             .key(&self.mine_key)
             .key(&self.presig_key)
             .key(&self.used_key)
-            .arg(USED_EXPIRE_TIME.num_seconds())
+            .arg(USED_EXPIRE_TIME.as_secs())
             .invoke_async(&mut conn)
             .await
             .map_err(StoreError::from)
@@ -235,4 +254,23 @@ impl FromRedisValue for Presignature {
             ))
         })
     }
+}
+
+async fn wait_for_hexist(
+    conn: &mut Connection,
+    key: &str,
+    field: PresignatureId,
+    timeout: Duration,
+) -> bool {
+    let delay = Duration::from_millis(25);
+    let start = tokio::time::Instant::now();
+
+    while start.elapsed() < timeout {
+        if conn.hexists::<_, _, bool>(key, field).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(delay).await;
+        // delay = std::cmp::min(delay * 2, Duration::from_secs(1)); // Exponential backoff
+    }
+    false
 }

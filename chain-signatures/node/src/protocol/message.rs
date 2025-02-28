@@ -18,7 +18,7 @@ use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{hash_map, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -150,6 +150,29 @@ impl Message {
     }
 }
 
+enum MessageSubscriber<T> {
+    Subscribed(mpsc::Sender<T>),
+    Unsubscribed(Vec<T>),
+}
+
+impl<T> MessageSubscriber<T> {
+    pub async fn send(&mut self, message: T) -> Result<(), mpsc::error::SendError<T>> {
+        match self {
+            Self::Subscribed(tx) => tx.send(message).await,
+            Self::Unsubscribed(queue) => {
+                queue.push(message);
+                Ok(())
+            }
+        }
+    }
+}
+
+impl<T> Default for MessageSubscriber<T> {
+    fn default() -> Self {
+        Self::Unsubscribed(Vec::new())
+    }
+}
+
 #[derive(Default)]
 pub struct MessageInbox {
     /// encrypted messages that are pending to be decrypted. These are messages that we received
@@ -162,10 +185,12 @@ pub struct MessageInbox {
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
     presignature: HashMap<Epoch, HashMap<PresignatureId, VecDeque<PresignatureMessage>>>,
     signature: HashMap<Epoch, HashMap<SignId, VecDeque<SignatureMessage>>>,
+
+    signature_subs: HashMap<Epoch, HashMap<SignId, MessageSubscriber<SignatureMessage>>>,
 }
 
 impl MessageInbox {
-    pub fn push(&mut self, message: Message) {
+    pub async fn send(&mut self, message: Message) {
         match message {
             Message::Generating(message) => self.generating.push_back(message),
             Message::Resharing(message) => self
@@ -187,13 +212,19 @@ impl MessageInbox {
                 .entry(message.id)
                 .or_default()
                 .push_back(message),
-            Message::Signature(message) => self
-                .signature
-                .entry(message.epoch)
-                .or_default()
-                .entry(message.id.clone())
-                .or_default()
-                .push_back(message),
+            Message::Signature(message) => {
+                tracing::info!(epoch = message.epoch, sign_id = ?message.id, "inbox: received signature message");
+                let subscriber = self
+                    .signature_subs
+                    .entry(message.epoch)
+                    .or_default()
+                    .entry(message.id.clone())
+                    .or_default();
+
+                if let Err(err) = subscriber.send(message).await {
+                    tracing::warn!(?err, "inbox: failed to send signature message");
+                }
+            }
             Message::Unknown(entries) => {
                 tracing::warn!(
                     entries = ?entries.iter().map(|(k, v)| (k, cbor_name(v))).collect::<Vec<_>>(),
@@ -228,7 +259,11 @@ impl MessageInbox {
         }
     }
 
-    pub fn decrypt(&mut self, cipher_sk: &hpke::SecretKey, participants: &ParticipantMap) -> usize {
+    pub async fn decrypt(
+        &mut self,
+        cipher_sk: &hpke::SecretKey,
+        participants: &ParticipantMap,
+    ) -> usize {
         let mut count = 0;
         let mut retry = Vec::new();
 
@@ -248,7 +283,7 @@ impl MessageInbox {
 
             count += messages.len();
             for msg in messages {
-                self.push(msg);
+                self.send(msg).await;
             }
         }
 
@@ -290,7 +325,7 @@ impl MessageExecutor {
                 let mut inbox = self.inbox.write().await;
                 inbox.expire(&protocol);
                 inbox.extend(&mut self.incoming).await;
-                inbox.decrypt(&cipher_sk, &participants);
+                inbox.decrypt(&cipher_sk, &participants).await;
             }
 
             let active = {
@@ -360,6 +395,42 @@ impl MessageChannel {
         {
             tracing::error!(?err, "outbox: failed to send message to participants");
         }
+    }
+
+    pub async fn subscribe_sign(
+        &self,
+        epoch: u64,
+        sign_id: &SignId,
+    ) -> mpsc::Receiver<SignatureMessage> {
+        let mut inbox = self.inbox.write().await;
+        let subscribers = inbox.signature_subs.entry(epoch).or_default();
+        let (inbox_tx, inbox_rx) = mpsc::channel(10000);
+
+        match subscribers.entry(sign_id.clone()) {
+            hash_map::Entry::Vacant(entry) => {
+                entry.insert(MessageSubscriber::Subscribed(inbox_tx));
+            }
+            hash_map::Entry::Occupied(mut entry) => {
+                let old_sub = entry.insert(MessageSubscriber::Subscribed(inbox_tx.clone()));
+                match old_sub {
+                    MessageSubscriber::Subscribed(_old_inbox_tx) => {
+                        // drop the old subscriber
+                    }
+                    MessageSubscriber::Unsubscribed(queue) => {
+                        // drain the idling queue of messages into the new subscriber
+                        tokio::spawn(async move {
+                            for message in queue {
+                                if let Err(err) = inbox_tx.send(message).await {
+                                    tracing::warn!(?err, "inbox: failed to send signature message");
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        inbox_rx
     }
 }
 
@@ -619,90 +690,6 @@ impl MessageReceiver for RunningState {
             !queue.is_empty()
         });
 
-        for (sign_id, queue) in signature_messages {
-            // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
-            let SignatureMessage {
-                proposer,
-                presignature_id,
-                ..
-            } = queue.front().unwrap();
-
-            if !queue
-                .iter()
-                .all(|msg| presignature_id == &msg.presignature_id)
-            {
-                // Check that all messages in the queue have the same triple0 and triple1, otherwise this is an
-                // invalid message, so we should just bin the whole entire protocol and its message for this presignature id.
-                queue.clear();
-                continue;
-            }
-
-            let protocol = match signature_manager
-                .get_or_start_protocol(
-                    sign_id,
-                    *proposer,
-                    *presignature_id,
-                    protocol_cfg,
-                    &mut presignature_manager,
-                )
-                .await
-            {
-                Ok(protocol) => protocol,
-                Err(GenerationError::PresignatureIsGenerating(_)) => {
-                    // We will revisit this this signature request later when the presignature has been generated.
-                    continue;
-                }
-                Err(err @ GenerationError::WaitingForIndexer(_)) => {
-                    // We will revisit this this signature request later when we have the request indexed.
-                    tracing::warn!(?sign_id, ?proposer, ?err, "waiting for indexer");
-                    continue;
-                }
-                Err(err @ GenerationError::InvalidProposer(_, _)) => {
-                    // trash the whole of these messages since we got an invalid set of participants.
-                    tracing::warn!(?sign_id, ?err, "signature generation cannot be started");
-                    queue.clear();
-                    continue;
-                }
-                Err(
-                    err @ (GenerationError::AlreadyGenerated
-                    | GenerationError::PresignatureIsGarbageCollected(_)
-                    | GenerationError::PresignatureIsMissing(_)),
-                ) => {
-                    // We will have to remove the entirety of the messages we received for this signature request,
-                    // and have the other nodes timeout in the following cases:
-                    // - If a presignature is in GC, then it was used already or failed to be produced.
-                    // - If a presignature is missing, that means our system cannot process this signature.
-                    tracing::warn!(?sign_id, ?err, "signature cannot be generated");
-                    queue.clear();
-                    continue;
-                }
-                Err(GenerationError::CaitSithInitializationError(error)) => {
-                    // ignore the whole of the messages since the generation had bad parameters. Also have the other node who
-                    // initiated the protocol resend the message or have it timeout on their side.
-                    tracing::warn!(
-                        ?sign_id,
-                        presignature_id,
-                        ?error,
-                        "unable to initialize incoming signature protocol"
-                    );
-                    queue.clear();
-                    continue;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        ?sign_id,
-                        ?err,
-                        "Unexpected error encounted while generating signature"
-                    );
-                    queue.clear();
-                    continue;
-                }
-            };
-
-            while let Some(message) = queue.pop_front() {
-                protocol.message(message.from, message.data);
-            }
-        }
         self.triple_manager.garbage_collect(protocol_cfg).await;
         presignature_manager.garbage_collect(protocol_cfg);
         signature_manager.garbage_collect(protocol_cfg);

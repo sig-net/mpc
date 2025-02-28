@@ -1,5 +1,6 @@
 use std::fmt;
 use std::future::IntoFuture;
+use std::time::Instant;
 
 use cait_sith::FullSignature;
 use k256::Secp256k1;
@@ -139,6 +140,8 @@ impl SignAction<'_> {
         let account = self.account_or_new().await;
         let payload = self.payload_or_random();
         let payload_hash = self.payload_hash();
+
+        let started = Instant::now();
         let status = self.transact_sign(&account, payload_hash).await?;
 
         // We have to use seperate transactions because one could fail.
@@ -156,6 +159,8 @@ impl SignAction<'_> {
         };
 
         let signature = wait_for::signature_responded(status).await?;
+        tracing::info!(elapsed = ?started.elapsed(), "sign e2e time");
+
         let mut mpc_pk_bytes = vec![0x04];
         mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
 
