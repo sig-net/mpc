@@ -176,7 +176,7 @@ pub fn setup(
             .map_err(|err| anyhow::anyhow!("Failed to set subscriber: {:?}", err))?;
     }
     tracing::info!(
-        "Set up logs: env={}, node_id={}, options={:?}",
+        "Logging parameters: env={}, node_id={}, options={:?}",
         env,
         node_id,
         options
