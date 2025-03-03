@@ -1,9 +1,11 @@
 use std::fmt::{self, Display};
+use std::sync::OnceLock;
 
-use opentelemetry::KeyValue;
+use opentelemetry::{global, KeyValue};
 use opentelemetry_appender_tracing::layer;
-use opentelemetry_otlp::{LogExporter, Protocol, WithExportConfig};
+use opentelemetry_otlp::{LogExporter, Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use tracing::{Event, Subscriber};
 use tracing_stackdriver::layer as stackdriver_layer;
@@ -12,7 +14,8 @@ use tracing_subscriber::fmt::time::SystemTime;
 use tracing_subscriber::fmt::{format, FmtContext, FormatFields};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::{EnvFilter, Layer, Registry};
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
 #[derive(Debug, Clone, clap::Parser)]
 pub struct Options {
@@ -122,36 +125,57 @@ where
     }
 }
 
+fn get_resource(env: &str, node_id: &str) -> Resource {
+    static RESOURCE: OnceLock<Resource> = OnceLock::new();
+    RESOURCE
+        .get_or_init(|| {
+            Resource::builder()
+                .with_service_name(format!("mpc:{}:{}", env, node_id))
+                .with_attributes(vec![
+                    KeyValue::new("env", env.to_string()),
+                    KeyValue::new("node_id", node_id.to_string()),
+                ])
+                .build()
+        })
+        .clone()
+}
+
 pub fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Result<()> {
-    let otel_exporter = LogExporter::builder()
+    // Setup tracing
+    let otel_tracing_exporter = SpanExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary)
         .with_endpoint(options.otlp_endpoint.clone())
         .build()?;
 
-    let otel_recource = Resource::builder()
-        .with_service_name(format!("mpc:{}:{}", env, node_id))
-        .with_attributes(vec![
-            KeyValue::new("env", env.to_string()),
-            KeyValue::new("node_id", node_id.to_string()),
-        ])
+    let otel_tracing_provider = SdkTracerProvider::builder()
+        .with_batch_exporter(otel_tracing_exporter)
+        .with_resource(get_resource(env, node_id))
         .build();
 
-    let otel_provider = SdkLoggerProvider::builder()
-        .with_batch_exporter(otel_exporter)
-        .with_resource(otel_recource)
+    global::set_tracer_provider(otel_tracing_provider.clone()); // TODO: call shutdown
+
+    // Setup logging
+    let otel_log_exporter = LogExporter::builder()
+        .with_http()
+        .with_protocol(Protocol::HttpBinary)
+        .with_endpoint(options.otlp_endpoint.clone())
+        .build()?;
+
+    let otel_log_provider = SdkLoggerProvider::builder()
+        .with_batch_exporter(otel_log_exporter)
+        .with_resource(get_resource(env, node_id))
         .build();
 
-    // Trasing Subscriber
-    let otel_filter = EnvFilter::new(options.opentelemetry_level.to_string())
+    let otel_log_filter = EnvFilter::new(options.opentelemetry_level.to_string())
         .add_directive("hyper=off".parse().unwrap())
         .add_directive("opentelemetry=off".parse().unwrap())
         .add_directive("tonic=off".parse().unwrap())
         .add_directive("h2=off".parse().unwrap())
         .add_directive("reqwest=off".parse().unwrap());
 
-    let otel_layer =
-        layer::OpenTelemetryTracingBridge::new(&otel_provider).with_filter(otel_filter);
+    let otel_log_layer =
+        layer::OpenTelemetryTracingBridge::new(&otel_log_provider).with_filter(otel_log_filter);
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(atty::is(atty::Stream::Stderr))
@@ -159,24 +183,21 @@ pub fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Result<()> 
         .with_thread_names(true)
         .event_format(NodeIdFormatter::new(node_id));
 
-    let subscriber = Registry::default()
-        .with(EnvFilter::from_default_env())
-        .with(fmt_layer)
-        .with(otel_layer);
-
     if is_running_on_gcp() {
-        tracing::info!("Setting global logging subscriber: fmt, otel, stackdriver");
-        let stackdriver_layer = stackdriver_layer().with_writer(std::io::stderr);
-        let subscriber = subscriber.with(stackdriver_layer);
+        let stackdriver_log_layer = stackdriver_layer().with_writer(std::io::stderr);
 
-        // switching to tracing
-        tracing::subscriber::set_global_default(subscriber)
-            .map_err(|err| anyhow::anyhow!("Failed to set subscriber: {:?}", err))?;
+        tracing_subscriber::registry()
+            .with(fmt_layer)
+            .with(otel_log_layer)
+            .with(stackdriver_log_layer)
+            .init();
+        tracing::info!("Set global logging subscriber: fmt, otel, stackdriver");
     } else {
-        tracing::info!("Setting global logging subscriber: fmt, otel");
-        // switching to tracing
-        tracing::subscriber::set_global_default(subscriber)
-            .map_err(|err| anyhow::anyhow!("Failed to set subscriber: {:?}", err))?;
+        tracing_subscriber::registry()
+            .with(fmt_layer)
+            .with(otel_log_layer)
+            .init();
+        tracing::info!("Set global logging subscriber: fmt, otel");
     }
     tracing::info!(
         "Logging parameters: env={}, node_id={}, options={:?}",

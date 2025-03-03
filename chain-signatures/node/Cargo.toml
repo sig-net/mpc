@@ -32,7 +32,6 @@ tracing-stackdriver = "0.10.0"
 tracing-opentelemetry = "0.29.0"
 opentelemetry = { version = "0.28.0", features = ["trace"] }
 opentelemetry-otlp = { version = "0.28.0", features = [
-    "http-proto",
     "reqwest-client",
 ] }
 opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
