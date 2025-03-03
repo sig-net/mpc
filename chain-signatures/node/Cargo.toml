@@ -29,14 +29,14 @@ sysinfo = "0.32.0"
 tokio-retry = "0.3"
 tracing-appender = "0.2.2"
 tracing-stackdriver = "0.10.0"
-tracing-opentelemetry = "0.21.0"
-opentelemetry = { version = "0.20.0", features = ["rt-tokio", "trace"] }
-opentelemetry-otlp = { version = "0.13.0", features = [
+tracing-opentelemetry = "0.29.0"
+opentelemetry = { version = "0.28.0", features = ["trace"] }
+opentelemetry-otlp = { version = "0.28.0", features = [
     "http-proto",
     "reqwest-client",
 ] }
-opentelemetry_sdk = { version = "0.20.0", features = ["rt-tokio"] }
-opentelemetry-semantic-conventions = "0.14.0"
+opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
+opentelemetry-appender-tracing = "0.28.0"
 
 # workspace dependencies
 anyhow.workspace = true

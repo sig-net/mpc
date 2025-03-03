@@ -171,16 +171,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             mesh_options,
             message_options,
         } => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-
-            logs::setup(
-                &storage_options.env,
-                account_id.as_str(),
-                &logging_options,
-                &rt,
-            )?;
+            logs::setup(&storage_options.env, account_id.as_str(), &logging_options)?;
 
             let _span = tracing::trace_span!("cli").entered();
 
@@ -198,6 +189,11 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 .set(digest);
 
             let (sign_tx, sign_rx) = SignQueue::channel();
+
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+
             let gcp_service =
                 rt.block_on(async { GcpService::init(&account_id, &storage_options).await })?;
 

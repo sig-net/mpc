@@ -1,10 +1,10 @@
 use std::fmt::{self, Display};
 
-use opentelemetry::sdk::Resource;
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::trace::{self, RandomIdGenerator, Sampler};
-use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
+use opentelemetry_appender_tracing::layer;
+use opentelemetry_otlp::{LogExporter, Protocol, WithExportConfig};
+use opentelemetry_sdk::logs::SdkLoggerProvider;
+use opentelemetry_sdk::Resource;
 use tracing::{Event, Subscriber};
 use tracing_stackdriver::layer as stackdriver_layer;
 use tracing_subscriber::fmt::format::{Format, FormatEvent, Full};
@@ -122,13 +122,36 @@ where
     }
 }
 
-pub fn setup(
-    env: &str,
-    node_id: &str,
-    options: &Options,
-    rt: &tokio::runtime::Runtime,
-) -> anyhow::Result<()> {
-    let subscriber = Registry::default().with(EnvFilter::from_default_env());
+pub fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Result<()> {
+    let otel_exporter = LogExporter::builder()
+        .with_http()
+        .with_protocol(Protocol::HttpBinary)
+        .with_endpoint(options.otlp_endpoint.clone())
+        .build()?;
+
+    let otel_recource = Resource::builder()
+        .with_service_name(format!("mpc:{}:{}", env, node_id))
+        .with_attributes(vec![
+            KeyValue::new("env", env.to_string()),
+            KeyValue::new("node_id", node_id.to_string()),
+        ])
+        .build();
+
+    let otel_provider = SdkLoggerProvider::builder()
+        .with_batch_exporter(otel_exporter)
+        .with_resource(otel_recource)
+        .build();
+
+    // Trasing Subscriber
+    let otel_filter = EnvFilter::new(options.opentelemetry_level.to_string())
+        .add_directive("hyper=off".parse().unwrap())
+        .add_directive("opentelemetry=off".parse().unwrap())
+        .add_directive("tonic=off".parse().unwrap())
+        .add_directive("h2=off".parse().unwrap())
+        .add_directive("reqwest=off".parse().unwrap());
+
+    let otel_layer =
+        layer::OpenTelemetryTracingBridge::new(&otel_provider).with_filter(otel_filter);
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(atty::is(atty::Stream::Stderr))
@@ -136,42 +159,22 @@ pub fn setup(
         .with_thread_names(true)
         .event_format(NodeIdFormatter::new(node_id));
 
-    let trace_config = trace::config()
-        .with_sampler(Sampler::AlwaysOn)
-        .with_id_generator(RandomIdGenerator::default())
-        .with_resource(Resource::new(vec![
-            KeyValue::new(SERVICE_NAME, format!("mpc:{}:{}", env, node_id)),
-            KeyValue::new("env", env.to_string()),
-            KeyValue::new("node_id", node_id.to_string()),
-        ]));
-
-    let tracer = rt.block_on(async {
-        opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(
-                opentelemetry_otlp::new_exporter()
-                    .http()
-                    .with_endpoint(options.otlp_endpoint.clone()),
-            )
-            .with_trace_config(trace_config)
-            .install_batch(opentelemetry::runtime::Tokio)
-            .expect("Failed to build OpenTelemetry tracer")
-    });
-
-    let otel_layer = tracing_opentelemetry::layer()
-        .with_tracer(tracer)
-        .with_filter(EnvFilter::new(options.opentelemetry_level.to_string()));
-
-    let subscriber = subscriber.with(fmt_layer).with(otel_layer);
+    let subscriber = Registry::default()
+        .with(EnvFilter::from_default_env())
+        .with(fmt_layer)
+        .with(otel_layer);
 
     if is_running_on_gcp() {
         tracing::info!("Setting global logging subscriber: fmt, otel, stackdriver");
         let stackdriver_layer = stackdriver_layer().with_writer(std::io::stderr);
         let subscriber = subscriber.with(stackdriver_layer);
+
+        // switching to tracing
         tracing::subscriber::set_global_default(subscriber)
             .map_err(|err| anyhow::anyhow!("Failed to set subscriber: {:?}", err))?;
     } else {
         tracing::info!("Setting global logging subscriber: fmt, otel");
+        // switching to tracing
         tracing::subscriber::set_global_default(subscriber)
             .map_err(|err| anyhow::anyhow!("Failed to set subscriber: {:?}", err))?;
     }
