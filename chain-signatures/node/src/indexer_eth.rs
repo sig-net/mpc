@@ -12,8 +12,6 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tokio_retry::strategy::FixedInterval;
-use tokio_retry::Retry;
 use web3::ethabi::{encode, Token};
 use web3::futures::StreamExt;
 use web3::transports::WebSocket;
@@ -275,14 +273,8 @@ pub async fn run(
                 let web3_ws = web3::Web3::new(ws);
                 tracing::info!("Connected to Ethereum WebSocket");
 
-                let block_number_with_retry =
-                    Retry::spawn(FixedInterval::from_millis(100).take(3), || async {
-                        web3_ws.eth().block_number().await
-                    })
-                    .await;
-
                 loop {
-                    match block_number_with_retry {
+                    match web3_ws.eth().block_number().await {
                         Ok(block_number) => {
                             let end_block = block_number.as_u64();
                             if latest_block_number == 0 {
@@ -312,6 +304,11 @@ pub async fn run(
                                         .with_label_values(&[node_near_account_id.as_str()])
                                         .set(latest_block_number as i64);
                                 }
+                            } else {
+                                tracing::info!(
+                                    "Latest eth block number: {end_block}, is not greater than last time: {latest_block_number}"
+                                );
+                                break;
                             }
                         }
                         Err(err) => {
@@ -366,14 +363,20 @@ pub async fn run(
                             Ok(filtered_logs_sub)
                         }
                         Err(err) => {
-                            tracing::warn!("Failed to subscribe to logs: {:?}", err);
+                            tracing::warn!(
+                                "Failed to subscribe to logs: {:?}, will reconnect to websocket",
+                                err
+                            );
                             Err(err)
                         }
                     };
                     if let Ok(filtered_logs_sub) = subscribe_end_result {
                         if let Err(err) = filtered_logs_sub.unsubscribe().await {
-                            tracing::warn!("Failed to unsubscribe from logs: {:?}", err);
+                            tracing::warn!("Failed to unsubscribe from logs: {:?}, will reconnect to websocket", err);
+                            break;
                         }
+                    } else {
+                        break;
                     }
                 }
             }
