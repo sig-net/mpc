@@ -181,10 +181,13 @@ pub fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Result<()> 
         .with_ansi(atty::is(atty::Stream::Stderr))
         .with_line_number(true)
         .with_thread_names(true)
-        .event_format(NodeIdFormatter::new(node_id));
+        .event_format(NodeIdFormatter::new(node_id))
+        .with_filter(EnvFilter::from_default_env());
 
     if is_running_on_gcp() {
-        let stackdriver_log_layer = stackdriver_layer().with_writer(std::io::stderr);
+        let stackdriver_log_layer = stackdriver_layer()
+            .with_writer(std::io::stderr)
+            .with_filter(EnvFilter::from_default_env());
 
         tracing_subscriber::registry()
             .with(fmt_layer)
