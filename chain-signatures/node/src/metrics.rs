@@ -484,7 +484,7 @@ pub(crate) static LATEST_BLOCK_NUMBER: LazyLock<IntGaugeVec> = LazyLock::new(|| 
     )
     .unwrap()
 
-pub(crate) static PRESIGNATURE_BEFORE_POKE_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static PRESIGNATURE_BEFORE_POKE_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_presignature_before_poke_delay_sec",
         "per presignature protocol, delay between generator cration and first poke that returns SendMany/SendPrivate",
@@ -502,7 +502,8 @@ pub(crate) static NUM_UNIQUE_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new
     )
     .unwrap()
 
-pub(crate) static PRESIGNATURE_ACCRUED_WAIT_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+
+pub(crate) static PRESIGNATURE_ACCRUED_WAIT_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_presignature_accrued_wait_delay_sec",
         "per presignature protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
@@ -512,7 +513,7 @@ pub(crate) static PRESIGNATURE_ACCRUED_WAIT_DELAY: Lazy<HistogramVec> = Lazy::ne
     .unwrap()
 });
 
-pub(crate) static TRIPLE_BEFORE_POKE_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static TRIPLE_BEFORE_POKE_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_triple_before_poke_delay_sec",
         "per triple protocol, delay between generator cration and first poke that returns SendMany/SendPrivate",
@@ -522,7 +523,7 @@ pub(crate) static TRIPLE_BEFORE_POKE_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static TRIPLE_ACCRUED_WAIT_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static TRIPLE_ACCRUED_WAIT_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_triple_accrued_wait_delay_sec",
         "per triple protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
@@ -532,7 +533,7 @@ pub(crate) static TRIPLE_ACCRUED_WAIT_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static SIGNATURE_BEFORE_POKE_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static SIGNATURE_BEFORE_POKE_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_signature_before_poke_delay_sec",
         "per signature protocol, delay between generator cration and first poke that returns SendMany/SendPrivate",
@@ -542,7 +543,7 @@ pub(crate) static SIGNATURE_BEFORE_POKE_DELAY: Lazy<HistogramVec> = Lazy::new(||
     .unwrap()
 });
 
-pub(crate) static SIGNATURE_ACCRUED_WAIT_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static SIGNATURE_ACCRUED_WAIT_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_signature_accrued_wait_delay_sec",
         "per signature protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
@@ -552,7 +553,7 @@ pub(crate) static SIGNATURE_ACCRUED_WAIT_DELAY: Lazy<HistogramVec> = Lazy::new(|
     .unwrap()
 });
 
-pub(crate) static TRIPLE_LATENCY_TOTAL: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static TRIPLE_LATENCY_TOTAL: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_triple_latency_total_sec",
         "Latency of multichain triple generation, start from generator creation, end when triple generation complete.",
@@ -562,7 +563,7 @@ pub(crate) static TRIPLE_LATENCY_TOTAL: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static TRIPLE_POKES_CNT: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static TRIPLE_POKES_CNT: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_triple_pokes_cnt",
         "total pokes per triple protocol",
@@ -572,7 +573,7 @@ pub(crate) static TRIPLE_POKES_CNT: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static PRESIGNATURE_POKES_CNT: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static PRESIGNATURE_POKES_CNT: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_presignature_pokes_cnt",
         "total pokes per presignature protocol",
@@ -582,7 +583,7 @@ pub(crate) static PRESIGNATURE_POKES_CNT: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static SIGNATURE_POKES_CNT: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static SIGNATURE_POKES_CNT: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_signature_pokes_cnt",
         "total pokes per signature protocol",
@@ -592,7 +593,7 @@ pub(crate) static SIGNATURE_POKES_CNT: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static MSG_CLIENT_SEND_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static MSG_CLIENT_SEND_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_msg_client_send_delay_ms",
         "Delay between message creation and sending to the client",

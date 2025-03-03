@@ -479,7 +479,7 @@ impl SignatureManager {
                     Action::SendMany(data) => {
                         if generator.poked_latest.is_none() {
                             let now = Instant::now();
-                            let start_time = generator.generator_timestamp;
+                            let start_time = generator.timestamp;
                             signature_before_poke_delay_metric
                                 .observe((now - start_time).as_secs_f64());
                             generator.poked_latest = Some((now, Duration::from_millis(0), 1));
