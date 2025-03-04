@@ -491,7 +491,7 @@ impl SignatureManager {
                             generator.poked_latest =
                                 Some((now, total_wait + elapsed, total_pokes + 1));
                         }
-                        for to in generator.participants.iter() {
+                        for to in generator.request.participants.iter() {
                             if *to == self.me {
                                 continue;
                             }
@@ -515,7 +515,7 @@ impl SignatureManager {
                     Action::SendPrivate(to, data) => {
                         if generator.poked_latest.is_none() {
                             let now = Instant::now();
-                            let start_time = generator.generator_timestamp;
+                            let start_time = generator.timestamp;
                             signature_before_poke_delay_metric
                                 .observe((now - start_time).as_secs_f64());
                             generator.poked_latest = Some((now, Duration::from_millis(0), 1));
