@@ -21,6 +21,7 @@ highway = "1.1.0"
 http = "1.1.0"
 hyper-rustls = { version = "=0.24", features = ["http2"] }
 local-ip-address = "0.5.4"
+lru = "0.13.0"
 prometheus = "0.13.3"
 redis = "0.27.2"
 semver = "1.0.23"

@@ -19,6 +19,8 @@ use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::Hash;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -26,6 +28,13 @@ use tokio::sync::{mpsc, RwLock};
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
+
+/// Maximum size for the filter of messages. This is roughly determined by the
+/// max number of protocols that can be within our system. It's not an upper
+/// bound but merely to serve as a good enough amount to maintain the IDs of
+/// protocols long enough on the case that they make it back into the system
+/// somehow after being erased.
+pub const MAX_FILTER_SIZE: NonZeroUsize = NonZeroUsize::new(64 * 1024).unwrap();
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct GeneratingMessage {
@@ -150,12 +159,88 @@ impl Message {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MessageType {
+    Generating,
+    Resharing,
+    Triple,
+    Presignature,
+    Signature,
+}
+
+pub trait MessageId {
+    const TYPE: MessageType;
+    fn id(&self) -> u64;
+}
+
+impl MessageId for TripleMessage {
+    const TYPE: MessageType = MessageType::Triple;
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl MessageId for PresignatureMessage {
+    const TYPE: MessageType = MessageType::Presignature;
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl MessageId for SignatureMessage {
+    const TYPE: MessageType = MessageType::Signature;
+    fn id(&self) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        self.id.hash(&mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    }
+}
+
+#[derive(Debug)]
+struct MessageFilter {
+    filter_rx: mpsc::Receiver<(MessageType, u64)>,
+    filter: lru::LruCache<(MessageType, u64), ()>,
+}
+
+impl MessageFilter {
+    pub fn new(filter_rx: mpsc::Receiver<(MessageType, u64)>) -> Self {
+        Self {
+            filter_rx,
+            filter: lru::LruCache::new(MAX_FILTER_SIZE),
+        }
+    }
+
+    pub fn contains<M: MessageId>(&mut self, msg: &M) -> bool {
+        self.filter.get(&(M::TYPE, msg.id())).is_some()
+    }
+
+    fn extend(&mut self) {
+        loop {
+            let (msg_type, id) = match self.filter_rx.try_recv() {
+                Ok(msg) => msg,
+                Err(TryRecvError::Empty) => {
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    tracing::error!(
+                        "filter: channel disconnected, no more messages will be received"
+                    );
+                    break;
+                }
+            };
+
+            self.filter.put((msg_type, id), ());
+        }
+    }
+}
+
 pub struct MessageInbox {
     /// encrypted messages that are pending to be decrypted. These are messages that we received
     /// from other nodes that weren't able to be processed yet due to missing info such as the
     /// participant id in the case of slow resharing.
     try_decrypt: VecDeque<(Ciphered, Instant)>,
+
+    filter: MessageFilter,
 
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
@@ -165,6 +250,18 @@ pub struct MessageInbox {
 }
 
 impl MessageInbox {
+    pub fn new(filter_rx: mpsc::Receiver<(MessageType, u64)>) -> Self {
+        Self {
+            try_decrypt: VecDeque::new(),
+            filter: MessageFilter::new(filter_rx),
+            generating: VecDeque::new(),
+            resharing: HashMap::new(),
+            triple: HashMap::new(),
+            presignature: HashMap::new(),
+            signature: HashMap::new(),
+        }
+    }
+
     pub fn push(&mut self, message: Message) {
         match message {
             Message::Generating(message) => self.generating.push_back(message),
@@ -209,7 +306,8 @@ impl MessageInbox {
         });
     }
 
-    pub async fn extend(&mut self, incoming: &mut mpsc::Receiver<Ciphered>) {
+    pub fn extend(&mut self, incoming: &mut mpsc::Receiver<Ciphered>) {
+        self.filter.extend();
         loop {
             let encrypted = match incoming.try_recv() {
                 Ok(msg) => msg,
@@ -228,14 +326,18 @@ impl MessageInbox {
         }
     }
 
-    pub fn decrypt(&mut self, cipher_sk: &hpke::SecretKey, participants: &ParticipantMap) -> usize {
-        let mut count = 0;
+    pub fn decrypt(
+        &mut self,
+        cipher_sk: &hpke::SecretKey,
+        participants: &ParticipantMap,
+    ) -> Vec<Message> {
         let mut retry = Vec::new();
 
+        let mut messages = Vec::new();
         while let Some((encrypted, timestamp)) = self.try_decrypt.pop_front() {
-            let messages: Vec<Message> =
+            let decrypted: Vec<Message> =
                 match SignedMessage::decrypt(&encrypted, cipher_sk, participants) {
-                    Ok(msg) => msg,
+                    Ok(decrypted) => decrypted,
                     Err(err) => {
                         if matches!(err, MessageError::UnknownParticipant(_)) {
                             retry.push((encrypted, timestamp));
@@ -246,14 +348,28 @@ impl MessageInbox {
                     }
                 };
 
-            count += messages.len();
-            for msg in messages {
-                self.push(msg);
-            }
+            messages.extend(decrypted);
         }
 
         self.try_decrypt.extend(retry);
-        count
+        messages
+    }
+
+    /// Filter out all messages that have been filtered
+    pub fn filter(&mut self, mut messages: Vec<Message>) -> Vec<Message> {
+        messages.retain(|msg| match msg {
+            Message::Triple(msg) => !self.filter.contains(msg),
+            Message::Presignature(msg) => !self.filter.contains(msg),
+            Message::Signature(msg) => !self.filter.contains(msg),
+            _ => true,
+        });
+        messages
+    }
+
+    pub fn recv(&mut self, messages: Vec<Message>) {
+        for message in messages {
+            self.push(message);
+        }
     }
 }
 
@@ -289,8 +405,10 @@ impl MessageExecutor {
             {
                 let mut inbox = self.inbox.write().await;
                 inbox.expire(&protocol);
-                inbox.extend(&mut self.incoming).await;
-                inbox.decrypt(&cipher_sk, &participants);
+                inbox.extend(&mut self.incoming);
+                let messages = inbox.decrypt(&cipher_sk, &participants);
+                let messages = inbox.filter(messages);
+                inbox.recv(messages);
             }
 
             let active = {
@@ -310,6 +428,7 @@ impl MessageExecutor {
 pub struct MessageChannel {
     outgoing: mpsc::Sender<SendMessage>,
     inbox: Arc<RwLock<MessageInbox>>,
+    filter: mpsc::Sender<(MessageType, u64)>,
     _task: Arc<tokio::task::JoinHandle<()>>,
 }
 
@@ -324,7 +443,9 @@ impl MessageChannel {
         let (incoming_tx, incoming_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
 
-        let inbox = Arc::new(RwLock::new(MessageInbox::default()));
+        let (filter_tx, filter_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
+
+        let inbox = Arc::new(RwLock::new(MessageInbox::new(filter_rx)));
         let processor = MessageExecutor {
             incoming: incoming_rx,
             outgoing: outgoing_rx,
@@ -341,6 +462,7 @@ impl MessageChannel {
             Self {
                 inbox,
                 outgoing: outgoing_tx,
+                filter: filter_tx,
                 _task: Arc::new(tokio::spawn(processor.execute())),
             },
         )
@@ -359,6 +481,14 @@ impl MessageChannel {
             .await
         {
             tracing::error!(?err, "outbox: failed to send message to participants");
+        }
+    }
+
+    /// Marks this message as filtered. This is used to prevent the same message with the
+    /// corresponding MessageId from being processed again.
+    pub async fn mark_filtered<M: MessageId>(&self, msg: &M) {
+        if let Err(err) = self.filter.send((M::TYPE, msg.id())).await {
+            tracing::error!(?err, "failed to send filter message");
         }
     }
 }
