@@ -280,8 +280,11 @@ pub async fn run(
                             if latest_block_number == 0 {
                                 latest_block_number = block_number.as_u64();
                                 tracing::info!("Latest eth block number: {latest_block_number}");
-                                crate::metrics::LATEST_BLOCK_NUMBER_ETH
-                                    .with_label_values(&[node_near_account_id.as_str()])
+                                crate::metrics::LATEST_BLOCK_NUMBER
+                                    .with_label_values(&[
+                                        Chain::Ethereum.as_str(),
+                                        node_near_account_id.as_str(),
+                                    ])
                                     .set(latest_block_number as i64);
                             } else if latest_block_number < end_block {
                                 if let Err(err) = catchup(
@@ -300,8 +303,11 @@ pub async fn run(
                                     tracing::info!(
                                         "Latest eth block number: {latest_block_number}"
                                     );
-                                    crate::metrics::LATEST_BLOCK_NUMBER_ETH
-                                        .with_label_values(&[node_near_account_id.as_str()])
+                                    crate::metrics::LATEST_BLOCK_NUMBER
+                                        .with_label_values(&[
+                                            Chain::Ethereum.as_str(),
+                                            node_near_account_id.as_str(),
+                                        ])
                                         .set(latest_block_number as i64);
                                 }
                             } else {
@@ -347,8 +353,8 @@ pub async fn run(
                                             latest_sign_request_time = Instant::now();
                                             latest_block_number = log.block_number.unwrap().as_u64();
                                             tracing::info!("Latest eth sign request block number: {latest_block_number}");
-                                            crate::metrics::LATEST_BLOCK_NUMBER_ETH
-                                                .with_label_values(&[node_near_account_id.as_str()])
+                                            crate::metrics::LATEST_BLOCK_NUMBER
+                                                .with_label_values(&[Chain::Ethereum.as_str(),node_near_account_id.as_str()])
                                                 .set(latest_block_number as i64);
                                         }
                                     }

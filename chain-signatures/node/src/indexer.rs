@@ -263,8 +263,8 @@ async fn handle_block(
         .update_block_height_and_timestamp(block.block_height(), block.header().timestamp_nanosec())
         .await;
 
-    crate::metrics::LATEST_BLOCK_HEIGHT
-        .with_label_values(&[ctx.node_account_id.as_str()])
+    crate::metrics::LATEST_BLOCK_NUMBER
+        .with_label_values(&[Chain::NEAR.as_str(), ctx.node_account_id.as_str()])
         .set(block.block_height() as i64);
 
     // Add the requests after going through the whole block to avoid partial processing if indexer fails somewhere.

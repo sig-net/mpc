@@ -69,15 +69,6 @@ pub(crate) static SIGN_RESPOND_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static LATEST_BLOCK_HEIGHT: LazyLock<IntGaugeVec> = LazyLock::new(|| {
-    try_create_int_gauge_vec(
-        "multichain_latest_block_height",
-        "Latest block height seen by the node",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
-
 pub(crate) static TRIPLE_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_triple_latency_sec",
@@ -485,11 +476,11 @@ pub(crate) static CONFIGURATION_DIGEST: LazyLock<IntGaugeVec> = LazyLock::new(||
     .unwrap()
 });
 
-pub(crate) static LATEST_BLOCK_NUMBER_ETH: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+pub(crate) static LATEST_BLOCK_NUMBER: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec(
-        "multichain_latest_block_number_eth",
-        "Latest eth block number seen by the node",
-        &["node_account_id"],
+        "multichain_latest_block_number",
+        "Latest block number seen by the node",
+        &["chain", "node_account_id"],
     )
     .unwrap()
 });
