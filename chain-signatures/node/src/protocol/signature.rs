@@ -106,12 +106,18 @@ impl SignQueue {
                 other => other,
             }
         } {
+            let sign_id = indexed.id.clone();
+            if self.my_requests.iter().any(|req| req.indexed.id == sign_id)
+                || self.other_requests.contains_key(&sign_id)
+            {
+                tracing::info!(?sign_id, "skipping sign request: already in the sign queue");
+                continue;
+            }
             let mut rng = StdRng::from_seed(indexed.args.entropy);
             let subset = stable.keys().cloned().choose_multiple(&mut rng, threshold);
             let in_subset = subset.contains(&self.me);
             let proposer = *subset.choose(&mut rng).unwrap();
             let is_mine = proposer == self.me;
-            let sign_id = indexed.id.clone();
 
             tracing::info!(
                 ?sign_id,
