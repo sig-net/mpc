@@ -1,4 +1,3 @@
-use super::contract::primitives::Participants;
 use super::cryptography::CryptographicError;
 use super::message::{MessageChannel, TripleMessage};
 use crate::protocol::error::GenerationError;
@@ -54,16 +53,16 @@ impl TripleGenerator {
         id: TripleId,
         me: Participant,
         threshold: usize,
-        participants: Vec<Participant>,
+        participants: &[Participant],
         timeout: u64,
     ) -> Result<Self, InitializationError> {
         let protocol = Arc::new(RwLock::new(
-            cait_sith::triples::generate_triple::<Secp256k1>(&participants, me, threshold)?,
+            cait_sith::triples::generate_triple::<Secp256k1>(participants, me, threshold)?,
         ));
 
         Ok(Self {
             id,
-            participants,
+            participants: participants.to_vec(),
             protocol,
             timestamp: Arc::new(RwLock::new(None)),
             timeout: Duration::from_millis(timeout),
@@ -314,7 +313,7 @@ impl TripleTasks {
         id: TripleId,
         potential_len: usize,
         cfg: &ProtocolConfig,
-        participants: &Participants,
+        participants: &[Participant],
         my_account_id: &AccountId,
     ) -> Result<Option<TripleGenerator>, CryptographicError> {
         match self.generators.entry(id) {
@@ -326,7 +325,6 @@ impl TripleTasks {
                 }
 
                 tracing::info!(id, "joining protocol to generate a new triple");
-                let participants = participants.keys_vec();
                 let generator = e.insert(TripleGenerator::new(
                     id,
                     me,
@@ -649,7 +647,7 @@ impl TripleManager {
     /// Starts a new Beaver triple generation protocol.
     pub async fn generate(
         &self,
-        participants: &Participants,
+        participants: &[Participant],
         timeout: u64,
     ) -> Result<(), InitializationError> {
         let id = rand::random();
@@ -663,7 +661,6 @@ impl TripleManager {
 
         tracing::debug!(id, "starting protocol to generate a new triple");
         {
-            let participants = participants.keys_vec();
             let mut tasks = self.tasks.write().await;
             tasks.generators.insert(
                 id,
@@ -690,7 +687,7 @@ impl TripleManager {
     /// and the maximum number of all ongoing generation protocols is below the maximum.
     pub async fn stockpile(
         &self,
-        participants: &Participants,
+        participants: &[Participant],
         cfg: &ProtocolConfig,
     ) -> Result<(), InitializationError> {
         let not_enough_triples = {
@@ -724,7 +721,7 @@ impl TripleManager {
     pub async fn get_or_start_generation(
         &self,
         id: TripleId,
-        participants: &Participants,
+        participants: &[Participant],
         cfg: &ProtocolConfig,
     ) -> Result<Option<TripleGenerator>, CryptographicError> {
         if self.contains(id).await || { self.gc.read().await.contains_key(&id) } {
@@ -770,11 +767,11 @@ impl TripleManager {
 
     pub fn execute(
         self,
-        active: &Participants,
+        active: &[Participant],
         protocol_cfg: &ProtocolConfig,
         channel: &MessageChannel,
     ) -> JoinHandle<()> {
-        let active = active.clone();
+        let active = active.to_vec();
         let protocol_cfg = protocol_cfg.clone();
         let channel = channel.clone();
 

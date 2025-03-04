@@ -295,7 +295,7 @@ impl MessageExecutor {
 
             let active = {
                 let mesh_state = self.mesh_state.read().await;
-                mesh_state.active_with_potential()
+                mesh_state.active_all.clone()
             };
             self.outbox.expire(&protocol);
             self.outbox.extend(&mut self.outgoing);

@@ -344,3 +344,20 @@ impl From<mpc_contract::primitives::Votes> for Votes {
         }
     }
 }
+
+pub fn intersect(sets: &[&[Participant]]) -> HashSet<Participant> {
+    if let Some((first, rest)) = sets.split_first() {
+        let mut intersection = first.into_iter().copied().collect::<HashSet<_>>();
+        for set in rest {
+            let set = set.into_iter().copied().collect::<HashSet<_>>();
+            intersection.retain(|item| set.contains(item));
+        }
+        intersection
+    } else {
+        HashSet::new()
+    }
+}
+
+pub fn intersect_vec(sets: &[&[Participant]]) -> Vec<Participant> {
+    intersect(sets).into_iter().collect()
+}

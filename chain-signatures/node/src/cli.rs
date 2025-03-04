@@ -297,10 +297,12 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 tracing::info!("protocol http server spawned");
 
                 rpc_handle.await?;
-                mesh_handle.await??;
-                protocol_handle.await??;
-                web_handle.await??;
+                protocol_handle.await?;
+                web_handle.await?;
                 tracing::info!("spinning down");
+
+                mesh_handle.abort();
+                mesh_handle.await?;
 
                 eth_indexer_handle.abort();
                 indexer_handle.join().unwrap()?;

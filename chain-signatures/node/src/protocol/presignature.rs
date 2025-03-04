@@ -1,7 +1,7 @@
 use super::message::{MessageChannel, PresignatureMessage};
 use super::state::RunningState;
 use super::triple::{Triple, TripleId, TripleManager};
-use crate::protocol::contract::primitives::Participants;
+use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::error::GenerationError;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
@@ -91,7 +91,7 @@ pub struct PresignatureGenerator {
 impl PresignatureGenerator {
     pub fn new(
         protocol: PresignatureProtocol,
-        participants: Vec<Participant>,
+        participants: &[Participant],
         triple0: TripleId,
         triple1: TripleId,
         mine: bool,
@@ -99,7 +99,7 @@ impl PresignatureGenerator {
     ) -> Self {
         Self {
             protocol,
-            participants,
+            participants: participants.to_vec(),
             triple0,
             triple1,
             mine,
@@ -298,7 +298,7 @@ impl PresignatureManager {
 
     #[allow(clippy::too_many_arguments)]
     fn generate_internal(
-        participants: &Participants,
+        participants: &[Participant],
         me: Participant,
         threshold: usize,
         triple0: Triple,
@@ -308,13 +308,12 @@ impl PresignatureManager {
         mine: bool,
         timeout: u64,
     ) -> Result<PresignatureGenerator, InitializationError> {
-        let participants: Vec<_> = participants.keys().cloned().collect();
         let protocol = Box::new(cait_sith::presign(
-            &participants,
+            participants,
             me,
             // These paramaters appear to be to make it easier to use different indexing schemes for triples
             // Introduced in this PR https://github.com/LIT-Protocol/cait-sith/pull/7
-            &participants,
+            participants,
             me,
             PresignArguments {
                 triple0: (triple0.share, triple0.public),
@@ -339,7 +338,7 @@ impl PresignatureManager {
     /// Starts a new presignature generation protocol.
     pub async fn generate(
         &mut self,
-        participants: &Participants,
+        participants: &[Participant],
         triple0: Triple,
         triple1: Triple,
         public_key: &PublicKey,
@@ -384,7 +383,7 @@ impl PresignatureManager {
 
     pub async fn stockpile(
         &mut self,
-        active: &Participants,
+        active: &[Participant],
         pk: &PublicKey,
         sk_share: &SecretKeyShare,
         triple_manager: &TripleManager,
@@ -410,11 +409,14 @@ impl PresignatureManager {
             // that we proposed. This way in a non-BFT environment we are guaranteed to never try
             // to use the same triple as any other node.
             if let Some((triple0, triple1)) = triple_manager.take_two_mine().await {
-                let presig_participants = active
-                    .intersection(&[&triple0.public.participants, &triple1.public.participants]);
+                let presig_participants = intersect_vec(&[
+                    &active,
+                    &triple0.public.participants,
+                    &triple1.public.participants,
+                ]);
                 if presig_participants.len() < self.threshold {
                     tracing::warn!(
-                        participants = ?presig_participants.keys_vec(),
+                        participants = ?presig_participants,
                         "running: the intersection of participants is less than the threshold"
                     );
                     // TODO: do not insert back triples when we have a clear model for data consistency
@@ -447,7 +449,7 @@ impl PresignatureManager {
     #[allow(clippy::too_many_arguments)]
     pub async fn get_or_start_generation(
         &mut self,
-        participants: &Participants,
+        participants: &[Participant],
         id: PresignatureId,
         triple0: TripleId,
         triple1: TripleId,
@@ -647,13 +649,13 @@ impl PresignatureManager {
 
     pub fn execute(
         state: &RunningState,
-        active: &Participants,
+        active: &[Participant],
         protocol_cfg: &ProtocolConfig,
         channel: &MessageChannel,
     ) -> tokio::task::JoinHandle<()> {
         let triple_manager = state.triple_manager.clone();
         let presignature_manager = state.presignature_manager.clone();
-        let active = active.clone();
+        let active = active.to_vec();
         let protocol_cfg = protocol_cfg.clone();
         let pk = state.public_key;
         let sk_share = state.private_share;
