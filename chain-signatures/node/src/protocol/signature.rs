@@ -113,6 +113,9 @@ impl SignQueue {
                 tracing::info!(?sign_id, "skipping sign request: already in the sign queue");
                 continue;
             }
+            crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
+                .with_label_values(&[my_account_id.as_str()])
+                .inc();
             let mut rng = StdRng::from_seed(indexed.args.entropy);
             let subset = stable.keys().cloned().choose_multiple(&mut rng, threshold);
             let in_subset = subset.contains(&self.me);

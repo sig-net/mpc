@@ -27,7 +27,7 @@ pub(crate) static NUM_SIGN_REQUESTS_MINE: LazyLock<CounterVec> = LazyLock::new(|
     try_create_counter_vec(
         "multichain_sign_requests_count_mine",
         "number of multichain sign requests, marked by sign requests indexed",
-        &["chain", "node_account_id"],
+        &["node_account_id"],
     )
     .unwrap()
 });
@@ -481,6 +481,15 @@ pub(crate) static LATEST_BLOCK_NUMBER: LazyLock<IntGaugeVec> = LazyLock::new(|| 
         "multichain_latest_block_number",
         "Latest block number seen by the node",
         &["chain", "node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static NUM_UNIQUE_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_sign_requests_count_unique",
+        "number of multichain sign requests, marked by sign requests indexed and deduped",
+        &["node_account_id"],
     )
     .unwrap()
 });

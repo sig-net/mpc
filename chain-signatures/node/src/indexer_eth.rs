@@ -400,8 +400,9 @@ fn process_filtered_log(
 ) -> anyhow::Result<()> {
     tracing::info!("Received new Ethereum sign request: {:?}", log);
     crate::metrics::NUM_SIGN_REQUESTS
-        .with_label_values(&[Chain::NEAR.as_str(), node_near_account_id.as_str()])
+        .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
         .inc();
+
     let sign_request = sign_request_from_filtered_log(log)?;
     let sign_tx = sign_tx.clone();
     tokio::spawn(async move {
