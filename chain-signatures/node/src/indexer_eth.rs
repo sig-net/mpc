@@ -393,8 +393,8 @@ fn process_filtered_log(
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     tracing::info!("Received new Ethereum sign request: {:?}", log);
-    crate::metrics::NUM_SIGN_REQUESTS_ETH
-        .with_label_values(&[node_near_account_id.as_str()])
+    crate::metrics::NUM_SIGN_REQUESTS
+        .with_label_values(&[Chain::NEAR.as_str(), node_near_account_id.as_str()])
         .inc();
     let sign_request = sign_request_from_filtered_log(log)?;
     let sign_tx = sign_tx.clone();

@@ -282,7 +282,7 @@ async fn handle_block(
             tracing::error!(?err, "failed to send the sign request into sign queue");
         }
         crate::metrics::NUM_SIGN_REQUESTS
-            .with_label_values(&[ctx.node_account_id.as_str()])
+            .with_label_values(&[Chain::NEAR.as_str(), ctx.node_account_id.as_str()])
             .inc();
     }
 
