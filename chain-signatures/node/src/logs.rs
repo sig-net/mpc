@@ -1,6 +1,7 @@
 use std::fmt::{self, Display};
 use std::sync::OnceLock;
 
+use opentelemetry::trace::{TraceContextExt, Tracer};
 use opentelemetry::{global, KeyValue};
 use opentelemetry_appender_tracing::layer;
 use opentelemetry_otlp::{LogExporter, Protocol, SpanExporter, WithExportConfig};
@@ -27,7 +28,7 @@ pub struct Options {
     )]
     pub opentelemetry_level: OpenTelemetryLevel,
 
-    #[clap(long, env("MPC_OTLP_ENDPOINT"), default_value = "http://jaeger:4318")]
+    #[clap(long, env("MPC_OTLP_ENDPOINT"), default_value = "http://localhost:4318")]
     pub otlp_endpoint: String,
 }
 
@@ -35,7 +36,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             opentelemetry_level: OpenTelemetryLevel::DEBUG,
-            otlp_endpoint: "http://jaeger:4318".to_string(),
+            otlp_endpoint: "http://localhost:4318".to_string(),
         }
     }
 }
@@ -208,5 +209,39 @@ pub fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Result<()> 
         node_id,
         options
     );
+
+    // TODO: remove example logs
+    ////////////////////////////////////////////////////
+    let common_scope_attributes = vec![KeyValue::new("mpc-scope-key", "mpc-scope-value")];
+    let scope = opentelemetry::InstrumentationScope::builder("setup-func")
+        .with_version("1.0")
+        .with_attributes(common_scope_attributes)
+        .build();
+
+    let tracer = global::tracer_with_scope(scope.clone());
+
+    tracer.in_span("main mpc span", |cx| {
+        let span = cx.span();
+        span.add_event(
+            "some mpc event".to_string(),
+            vec![KeyValue::new("some_key", 100)],
+        );
+        span.set_attribute(KeyValue::new("another_key", "yes"));
+
+        tracing::info!(target: "my-target", "hello from {}. My price is {}. I am also inside a Span!", "banana", 2.99);
+
+        tracer.in_span("inner mpc span", |cx| {
+            let span = cx.span();
+            span.set_attribute(KeyValue::new("another.key", "yes"));
+            span.add_event("Sub span event", vec![]);
+        });
+    });
+
+    tracing::info!(target: "my-target", "hello from {}. My price is {}", "apple", 1.99);
+
+    otel_tracing_provider.shutdown()?;
+    otel_log_provider.shutdown()?;
+    ////////////////////////////////////////
+
     Ok(())
 }
