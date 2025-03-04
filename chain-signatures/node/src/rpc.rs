@@ -356,9 +356,10 @@ async fn execute_publish(
     mut action: PublishAction,
     near_account_id: AccountId,
 ) {
+    let chain = action.request.indexed.chain;
     tracing::info!(
         sign_id = ?action.request.indexed.id,
-        chain = ?action.request.indexed.chain,
+        chain = ?chain,
         started_at = ?action.timestamp.elapsed(),
         "trying to publish signature",
     );
@@ -382,7 +383,7 @@ async fn execute_publish(
     loop {
         let publish = match &client {
             ChainClient::Near(near) => {
-                try_publish_near(near, &action, &action.timestamp, &signature)
+                try_publish_near(near, &action, &action.timestamp, &signature, chain)
                     .await
                     .map_err(|_| ())
             }
@@ -393,6 +394,7 @@ async fn execute_publish(
                     &action.timestamp,
                     &signature,
                     &near_account_id,
+                    chain,
                 )
                 .await
             }
@@ -430,6 +432,7 @@ async fn try_publish_near(
     action: &PublishAction,
     timestamp: &Instant,
     signature: &Signature,
+    chain: Chain,
 ) -> Result<(), near_fetch::Error> {
     let outcome = near
         .call_respond(&action.request.indexed.id, signature)
@@ -441,7 +444,7 @@ async fn try_publish_near(
                 "failed to publish signature",
             );
             crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[near.my_account_id.as_str()])
+                .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
                 .inc();
         })?;
 
@@ -454,7 +457,7 @@ async fn try_publish_near(
             "smart contract threw error",
         );
         crate::metrics::SIGNATURE_PUBLISH_RESPONSE_ERRORS
-            .with_label_values(&[near.my_account_id.as_str()])
+            .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
             .inc();
     })?;
     tracing::info!(
@@ -466,17 +469,17 @@ async fn try_publish_near(
     );
 
     crate::metrics::NUM_SIGN_SUCCESS
-        .with_label_values(&[near.my_account_id.as_str()])
+        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .inc();
     crate::metrics::SIGN_TOTAL_LATENCY
-        .with_label_values(&[near.my_account_id.as_str()])
+        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
     crate::metrics::SIGN_RESPOND_LATENCY
-        .with_label_values(&[near.my_account_id.as_str()])
+        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
     if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
         crate::metrics::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[near.my_account_id.as_str()])
+            .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
             .inc();
     }
 
@@ -489,6 +492,7 @@ async fn try_publish_eth(
     timestamp: &Instant,
     signature: &Signature,
     near_account_id: &AccountId,
+    chain: Chain,
 ) -> Result<(), ()> {
     let params = [Token::Array(vec![Token::Tuple(vec![
         Token::FixedBytes(action.request.indexed.id.request_id.to_vec()),
@@ -541,17 +545,17 @@ async fn try_publish_eth(
                 "published ethereum signature successfully"
             );
             crate::metrics::NUM_SIGN_SUCCESS
-                .with_label_values(&[near_account_id.as_str()])
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                 .inc();
             crate::metrics::SIGN_TOTAL_LATENCY
-                .with_label_values(&[near_account_id.as_str()])
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                 .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
             crate::metrics::SIGN_RESPOND_LATENCY
-                .with_label_values(&[near_account_id.as_str()])
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                 .observe(timestamp.elapsed().as_secs_f64());
             if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
                 crate::metrics::NUM_SIGN_SUCCESS_30S
-                    .with_label_values(&[near_account_id.as_str()])
+                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                     .inc();
             }
             Ok(())
@@ -562,6 +566,9 @@ async fn try_publish_eth(
                 error = ?err,
                 "failed to publish ethereum signature"
             );
+            crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .inc();
             Err(())
         }
     }
