@@ -38,7 +38,7 @@ sha3 = "0.10.8"
 thiserror = "1"
 tokio = { version = "1.28", features = ["full"] }
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter","registry", "std", "fmt", "ansi"] }
 url = { version = "2.4.0", features = ["serde"] }
 web3 = "0.19.0"
 

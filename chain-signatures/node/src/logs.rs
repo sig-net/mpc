@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use opentelemetry::trace::{TraceContextExt, Tracer};
 use opentelemetry::{global, KeyValue};
-use opentelemetry_appender_tracing::layer;
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -28,7 +28,11 @@ pub struct Options {
     )]
     pub opentelemetry_level: OpenTelemetryLevel,
 
-    #[clap(long, env("MPC_OTLP_ENDPOINT"), default_value = "http://localhost:4318")]
+    #[clap(
+        long,
+        env("MPC_OTLP_ENDPOINT"),
+        default_value = "http://localhost:4318"
+    )]
     pub otlp_endpoint: String,
 }
 
@@ -141,44 +145,51 @@ fn get_resource(env: &str, node_id: &str) -> Resource {
         .clone()
 }
 
-pub fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Result<()> {
-    // Setup tracing
-    let otel_tracing_exporter = SpanExporter::builder()
+fn init_otlp_logs(env: &str, node_id: &str, otlp_endpont: &str) -> SdkLoggerProvider {
+    let exporter = LogExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary)
-        .with_endpoint(options.otlp_endpoint.clone())
-        .build()?;
+        .with_endpoint(format!("{otlp_endpont}/v1/logs"))
+        .build()
+        .expect("Failed to create log exporter");
 
-    let otel_tracing_provider = SdkTracerProvider::builder()
-        .with_batch_exporter(otel_tracing_exporter)
+    SdkLoggerProvider::builder()
+        .with_batch_exporter(exporter)
         .with_resource(get_resource(env, node_id))
-        .build();
+        .build()
+}
 
-    global::set_tracer_provider(otel_tracing_provider.clone()); // TODO: call shutdown
+fn init_otlp_traces(env: &str, node_id: &str, otlp_endpont: &str) -> SdkTracerProvider {
+    let exporter = SpanExporter::builder()
+        .with_http()
+        .with_protocol(Protocol::HttpBinary) //can be changed to `Protocol::HttpJson` to export in JSON format
+        .with_endpoint(format!("{otlp_endpont}/v1/traces"))
+        .build()
+        .expect("Failed to create trace exporter");
 
+    SdkTracerProvider::builder()
+        .with_simple_exporter(exporter)
+        .with_resource(get_resource(env, node_id))
+        .build()
+}
+
+pub fn setup(env: &str, node_id: &str, options: &Options, rt: &tokio::runtime::Runtime) -> anyhow::Result<()> {
     // Setup logging
-    let otel_log_exporter = LogExporter::builder()
-        .with_http()
-        .with_protocol(Protocol::HttpBinary)
-        .with_endpoint(options.otlp_endpoint.clone())
-        .build()?;
+    let log_otlp_provider = rt.block_on(async {
+        init_otlp_logs(env, node_id, options.otlp_endpoint.as_str())
+    });
+    let log_otel_layer = OpenTelemetryTracingBridge::new(&log_otlp_provider);
 
-    let otel_log_provider = SdkLoggerProvider::builder()
-        .with_batch_exporter(otel_log_exporter)
-        .with_resource(get_resource(env, node_id))
-        .build();
-
-    let otel_log_filter = EnvFilter::new(options.opentelemetry_level.to_string())
+    let log_otel_filter = EnvFilter::new(options.opentelemetry_level.to_string())
         .add_directive("hyper=off".parse().unwrap())
         .add_directive("opentelemetry=off".parse().unwrap())
         .add_directive("tonic=off".parse().unwrap())
         .add_directive("h2=off".parse().unwrap())
         .add_directive("reqwest=off".parse().unwrap());
 
-    let otel_log_layer =
-        layer::OpenTelemetryTracingBridge::new(&otel_log_provider).with_filter(otel_log_filter);
+    let log_otel_layer = log_otel_layer.with_filter(log_otel_filter);
 
-    let fmt_layer = tracing_subscriber::fmt::layer()
+    let log_fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(atty::is(atty::Stream::Stderr))
         .with_line_number(true)
         .with_thread_names(true)
@@ -186,23 +197,30 @@ pub fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Result<()> 
         .with_filter(EnvFilter::from_default_env());
 
     if is_running_on_gcp() {
-        let stackdriver_log_layer = stackdriver_layer()
+        let log_stackdriver_layer = stackdriver_layer()
             .with_writer(std::io::stderr)
             .with_filter(EnvFilter::from_default_env());
 
         tracing_subscriber::registry()
-            .with(fmt_layer)
-            .with(otel_log_layer)
-            .with(stackdriver_log_layer)
+            .with(log_fmt_layer)
+            .with(log_otel_layer)
+            .with(log_stackdriver_layer)
             .init();
         tracing::info!("Set global logging subscriber: fmt, otel, stackdriver");
     } else {
         tracing_subscriber::registry()
-            .with(fmt_layer)
-            .with(otel_log_layer)
+            .with(log_fmt_layer)
+            .with(log_otel_layer)
             .init();
         tracing::info!("Set global logging subscriber: fmt, otel");
     }
+
+    // Setup tracing
+    let tracer_provider = rt.block_on(async {
+        init_otlp_traces(env, node_id, options.otlp_endpoint.as_str())
+    });
+    global::set_tracer_provider(tracer_provider.clone());
+    
     tracing::info!(
         "Logging parameters: env={}, node_id={}, options={:?}",
         env,
@@ -212,7 +230,9 @@ pub fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Result<()> 
 
     // TODO: remove example logs
     ////////////////////////////////////////////////////
-    let common_scope_attributes = vec![KeyValue::new("mpc-scope-key", "mpc-scope-value")];
+    
+    rt.block_on(async {
+        let common_scope_attributes = vec![KeyValue::new("mpc-scope-key", "mpc-scope-value")];
     let scope = opentelemetry::InstrumentationScope::builder("setup-func")
         .with_version("1.0")
         .with_attributes(common_scope_attributes)
@@ -238,10 +258,10 @@ pub fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Result<()> 
     });
 
     tracing::info!(target: "my-target", "hello from {}. My price is {}", "apple", 1.99);
-
-    otel_tracing_provider.shutdown()?;
-    otel_log_provider.shutdown()?;
+    });
     ////////////////////////////////////////
 
+    log_otlp_provider.shutdown()?;
+    tracer_provider.shutdown()?;
     Ok(())
 }
