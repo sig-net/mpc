@@ -48,47 +48,50 @@ impl MeshState {
 
 pub struct Mesh {
     /// Pool of connections to participants. Used to check who is alive in the network.
-    connections: Arc<connection::Pool>,
+    connections: connection::Pool,
     state: Arc<RwLock<MeshState>>,
 }
 
 impl Mesh {
-    pub fn init(client: &NodeClient, options: Options) -> (Self, Arc<RwLock<MeshState>>) {
-        let state = Arc::new(RwLock::new(MeshState::default()));
-        let mesh = Self {
-            connections: Arc::new(connection::Pool::new(
+    pub fn new(client: &NodeClient, options: Options) -> Self {
+        Self {
+            connections: connection::Pool::new(
                 client,
                 Duration::from_millis(options.refresh_active_timeout),
-            )),
-            state: state.clone(),
-        };
-        (mesh, state)
+            ),
+            state: Arc::new(RwLock::new(MeshState::default())),
+        }
+    }
+
+    pub fn state(&self) -> &Arc<RwLock<MeshState>> {
+        &self.state
     }
 
     async fn ping(&mut self) {
-        let state = MeshState {
-            active: Arc::clone(&self.connections).ping().await,
-            active_potential: Arc::clone(&self.connections).ping_potential().await,
-            potential: self.connections.potential_participants().await,
-            stable: self.connections.stable_participants().await,
-        };
+        let active = self.connections.ping().await;
+        let active_potential = self.connections.ping_potential().await;
+        let potential = self.connections.potential_participants();
+        let stable = self.connections.stable_participants();
 
-        *self.state.write().await = state;
+        let mut state = self.state.write().await;
+        state.active = active;
+        state.active_potential = active_potential;
+        state.potential = potential;
+        state.stable = stable;
     }
 
     pub async fn run(
         mut self,
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
     ) -> anyhow::Result<()> {
+        let mut interval = tokio::time::interval(Duration::from_millis(300));
         loop {
-            {
-                let state = contract_state.read().await;
-                if let Some(state) = &*state {
-                    self.connections.establish_participants(state).await;
-                    self.ping().await;
-                }
+            interval.tick().await;
+            let state = contract_state.read().await;
+            if let Some(state) = &*state {
+                self.connections.establish_participants(state).await;
+                self.ping().await;
             }
-            tokio::time::sleep(Duration::from_millis(300)).await;
         }
     }
 }
