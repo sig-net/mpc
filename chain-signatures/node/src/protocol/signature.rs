@@ -598,7 +598,7 @@ impl SignatureManager {
             let sign_id = my_request.indexed.id.clone();
             let presignature_id = presignature.id;
             if let Err(InitializationError::BadParameters(err)) =
-                self.generate(presignature, my_request, cfg)
+                self.generate(presignature, my_request.clone(), cfg)
             {
                 tracing::warn!(
                     ?sign_id,
