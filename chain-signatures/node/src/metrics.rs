@@ -489,7 +489,7 @@ pub(crate) static NUM_UNIQUE_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new
     try_create_counter_vec(
         "multichain_sign_requests_count_unique",
         "number of multichain sign requests, marked by sign requests indexed and deduped",
-        &["node_account_id"],
+        &["chain", "node_account_id"],
     )
     .unwrap()
 });
