@@ -298,6 +298,7 @@ pub async fn run(
                                 .await
                                 {
                                     tracing::warn!("Failed to catch up: {:?}", err);
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
                                     continue;
                                 } else {
                                     latest_block_number = end_block;
@@ -335,7 +336,7 @@ pub async fn run(
                             tracing::info!("Ethereum indexer subscribed and listening for logs");
 
                             let mut heartbeat_interval =
-                                tokio::time::interval(Duration::from_secs(60));
+                                tokio::time::interval(Duration::from_secs(180));
                             heartbeat_interval.tick().await;
                             let mut latest_sign_request_time = Instant::now();
 
@@ -361,7 +362,7 @@ pub async fn run(
                                     }
                                     _ = heartbeat_interval.tick() => {
                                         if latest_sign_request_time.elapsed() > heartbeat_interval.period() {
-                                            tracing::warn!("No sign request received in the last 60 seconds, unsubscribing...");
+                                            tracing::warn!("No sign request received in the last 180 seconds, unsubscribing...");
                                             break;
                                         }
                                     }
