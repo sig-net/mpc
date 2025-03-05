@@ -298,6 +298,7 @@ pub async fn run(
                                 .await
                                 {
                                     tracing::warn!("Failed to catch up: {:?}", err);
+                                    continue;
                                 } else {
                                     latest_block_number = end_block;
                                     tracing::info!(
@@ -399,15 +400,15 @@ fn process_filtered_log(
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     tracing::info!("Received new Ethereum sign request: {:?}", log);
-    crate::metrics::NUM_SIGN_REQUESTS
-        .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
-        .inc();
-
     let sign_request = sign_request_from_filtered_log(log)?;
     let sign_tx = sign_tx.clone();
     tokio::spawn(async move {
         if let Err(err) = sign_tx.send(sign_request).await {
             tracing::error!(?err, "Failed to send ETH sign request into queue");
+        } else {
+            crate::metrics::NUM_SIGN_REQUESTS
+                .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
+                .inc();
         }
     });
     Ok(())

@@ -358,7 +358,7 @@ pub enum Chain {
 }
 
 impl Chain {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Chain::NEAR => "NEAR",
             Chain::Ethereum => "Ethereum",

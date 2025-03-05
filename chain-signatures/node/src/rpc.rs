@@ -383,7 +383,7 @@ async fn execute_publish(
     loop {
         let publish = match &client {
             ChainClient::Near(near) => {
-                try_publish_near(near, &action, &action.timestamp, &signature, chain)
+                try_publish_near(near, &action, &action.timestamp, &signature)
                     .await
                     .map_err(|_| ())
             }
@@ -394,7 +394,6 @@ async fn execute_publish(
                     &action.timestamp,
                     &signature,
                     &near_account_id,
-                    chain,
                 )
                 .await
             }
@@ -432,8 +431,8 @@ async fn try_publish_near(
     action: &PublishAction,
     timestamp: &Instant,
     signature: &Signature,
-    chain: Chain,
 ) -> Result<(), near_fetch::Error> {
+    let chain = action.request.indexed.chain;
     let outcome = near
         .call_respond(&action.request.indexed.id, signature)
         .await
@@ -492,7 +491,6 @@ async fn try_publish_eth(
     timestamp: &Instant,
     signature: &Signature,
     near_account_id: &AccountId,
-    chain: Chain,
 ) -> Result<(), ()> {
     let params = [Token::Array(vec![Token::Tuple(vec![
         Token::FixedBytes(action.request.indexed.id.request_id.to_vec()),
@@ -536,6 +534,8 @@ async fn try_publish_eth(
         .eth()
         .send_raw_transaction(signed.raw_transaction)
         .await;
+
+    let chain = action.request.indexed.chain;
     match result {
         Ok(tx_hash) => {
             tracing::info!(
