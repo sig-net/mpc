@@ -143,6 +143,7 @@ impl ConsensusProtocol for StartedState {
                                             public_key,
                                             epoch,
                                             ctx.sign_rx(),
+                                            ctx.msg_channel(),
                                         )));
 
                                     Ok(NodeState::Running(RunningState {
@@ -365,6 +366,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.public_key,
                         self.epoch,
                         ctx.sign_rx(),
+                        ctx.msg_channel(),
                     )));
 
                     Ok(NodeState::Running(RunningState {

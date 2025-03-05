@@ -772,7 +772,7 @@ impl MessageReceiver for RunningState {
 
         let mut signature_manager = self.signature_manager.write().await;
         let signature_messages = inbox.signature.entry(self.epoch).or_default();
-        signature_messages.retain(|sign_id, queue| {
+        signature_messages.retain(|_sign_id, queue| {
             let mut expired = HashSet::new();
             let mut active = HashSet::new();
 
@@ -790,8 +790,6 @@ impl MessageReceiver for RunningState {
                     active.insert(msg.presignature_id);
                 }
             }
-
-            active.retain(|presig_id| !signature_manager.refresh_gc(sign_id, *presig_id));
 
             queue.retain(|msg| active.contains(&msg.presignature_id));
 
@@ -881,7 +879,6 @@ impl MessageReceiver for RunningState {
                 protocol.message(message.from, message.data);
             }
         }
-        signature_manager.garbage_collect(protocol_cfg);
         Ok(())
     }
 }

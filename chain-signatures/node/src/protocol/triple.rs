@@ -642,8 +642,8 @@ impl TripleManager {
         Ok(())
     }
 
-    /// Check if the triple id is present in the system. This includes ongoing generation protocols,
-    /// the garbage collection and the triple storage.
+    /// Check if the triple id is present in the system. This includes ongoing generation protocols
+    /// and the triple storage.
     pub async fn contains_id(&self, id: TripleId) -> bool {
         self.tasks.read().await.generators.contains_key(&id) || self.contains(id).await
     }
