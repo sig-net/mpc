@@ -192,6 +192,17 @@ impl MessageId for SignatureMessage {
     fn id(&self) -> u64 {
         let mut hasher = std::hash::DefaultHasher::new();
         self.id.hash(&mut hasher);
+        self.presignature_id.hash(&mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    }
+}
+
+impl MessageId for (SignId, PresignatureId) {
+    const TYPE: MessageType = MessageType::Signature;
+    fn id(&self) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        self.1.hash(&mut hasher);
         std::hash::Hasher::finish(&hasher)
     }
 }
@@ -241,7 +252,7 @@ pub struct MessageInbox {
     try_decrypt: VecDeque<(Ciphered, Instant)>,
 
     filter: MessageFilter,
-
+    // idempotent: lru::LruCache<Signature, ()>,
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
@@ -442,8 +453,7 @@ impl MessageChannel {
     ) -> (mpsc::Sender<Ciphered>, Self) {
         let (incoming_tx, incoming_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
-
-        let (filter_tx, filter_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
+        let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
 
         let inbox = Arc::new(RwLock::new(MessageInbox::new(filter_rx)));
         let processor = MessageExecutor {
@@ -486,10 +496,45 @@ impl MessageChannel {
 
     /// Marks this message as filtered. This is used to prevent the same message with the
     /// corresponding MessageId from being processed again.
-    pub async fn mark_filtered<M: MessageId>(&self, msg: &M) {
+    pub async fn filter<M: MessageId>(&self, msg: &M) {
         if let Err(err) = self.filter.send((M::TYPE, msg.id())).await {
-            tracing::error!(?err, "failed to send filter message");
+            tracing::warn!(?err, "failed to send filter message");
         }
+    }
+
+    pub async fn filter_triple(&self, id: TripleId) {
+        if let Err(err) = self.filter.send((MessageType::Triple, id)).await {
+            tracing::warn!(?err, "failed to send filter message");
+        }
+    }
+
+    pub async fn filter_presignature(&self, id: PresignatureId) {
+        if let Err(err) = self.filter.send((MessageType::Presignature, id)).await {
+            tracing::warn!(?err, "failed to send filter message");
+        }
+    }
+
+    pub async fn filter_sign(&self, sign_id: SignId, presign_id: PresignatureId) {
+        self.filter(&(sign_id, presign_id)).await;
+    }
+}
+
+impl MessageChannel {
+    pub fn mock() -> (mpsc::Receiver<SendMessage>, Self) {
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
+        let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
+
+        let inbox = Arc::new(RwLock::new(MessageInbox::new(filter_rx)));
+
+        (
+            outgoing_rx,
+            Self {
+                inbox,
+                outgoing: outgoing_tx,
+                filter: filter_tx,
+                _task: Arc::new(tokio::spawn(async {})),
+            },
+        )
     }
 }
 
@@ -603,12 +648,6 @@ impl MessageReceiver for RunningState {
                 continue;
             }
 
-            // if triple id is in GC, remove these messages because the triple is currently
-            // being GC'ed, where this particular triple has previously failed or been utilized.
-            if self.triple_manager.refresh_gc(id).await {
-                continue;
-            }
-
             let protocol = match self
                 .triple_manager
                 .get_or_start_generation(id, active, protocol_cfg)
@@ -684,9 +723,8 @@ impl MessageReceiver for RunningState {
                     continue;
                 }
                 Err(
-                    err @ (GenerationError::AlreadyGenerated
-                    | GenerationError::TripleIsGarbageCollected(_)
-                    | GenerationError::TripleStoreError(_)),
+                    err
+                    @ (GenerationError::AlreadyGenerated | GenerationError::TripleStoreError(_)),
                 ) => {
                     // This triple has already been generated or removed from the triple manager, so we will have to bin
                     // the entirety of the messages we received for this presignature id, and have the other nodes timeout
@@ -833,7 +871,6 @@ impl MessageReceiver for RunningState {
                 protocol.message(message.from, message.data);
             }
         }
-        self.triple_manager.garbage_collect(protocol_cfg).await;
         presignature_manager.garbage_collect(protocol_cfg);
         signature_manager.garbage_collect(protocol_cfg);
         Ok(())

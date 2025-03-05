@@ -3,6 +3,7 @@ use super::state::{
     JoiningState, NodeState, PersistentNodeData, RunningState, StartedState,
     WaitingForConsensusState,
 };
+use super::MessageChannel;
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
 use crate::protocol::contract::primitives::Participants;
@@ -37,6 +38,7 @@ pub trait ConsensusCtx {
     fn secret_storage(&self) -> &SecretNodeStorageBox;
     fn triple_storage(&self) -> &TripleStorage;
     fn presignature_storage(&self) -> &PresignatureStorage;
+    fn msg_channel(&self) -> &MessageChannel;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -120,6 +122,7 @@ impl ConsensusProtocol for StartedState {
                                         epoch,
                                         ctx.my_account_id(),
                                         ctx.triple_storage(),
+                                        ctx.msg_channel(),
                                     );
 
                                     let presignature_manager =
@@ -342,6 +345,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.epoch,
                         ctx.my_account_id(),
                         ctx.triple_storage(),
+                        ctx.msg_channel(),
                     );
 
                     let presignature_manager = Arc::new(RwLock::new(PresignatureManager::new(

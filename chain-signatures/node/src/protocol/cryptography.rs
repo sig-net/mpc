@@ -276,10 +276,7 @@ impl CryptographicProtocol for RunningState {
             return Ok(NodeState::Running(self));
         }
 
-        let triple_task =
-            self.triple_manager
-                .clone()
-                .execute(&active, &cfg.protocol, ctx.channel());
+        let triple_task = self.triple_manager.clone().execute(&active, &cfg.protocol);
 
         let presig_task =
             PresignatureManager::execute(&self, &active, &cfg.protocol, ctx.channel());

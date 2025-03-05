@@ -482,16 +482,6 @@ impl PresignatureManager {
                                 );
                                 return Err(error);
                             }
-                            GenerationError::TripleIsGarbageCollected(_) => {
-                                tracing::warn!(
-                                    ?error,
-                                    id,
-                                    triple0,
-                                    triple1,
-                                    "could not initiate non-introduced presignature: one triple is in garbage collection"
-                                );
-                                return Err(error);
-                            }
                             GenerationError::TripleStoreError(_) => {
                                 tracing::warn!(
                                     ?error,
