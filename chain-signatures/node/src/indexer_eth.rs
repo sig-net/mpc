@@ -379,9 +379,21 @@ pub async fn run(
                         }
                     };
                     if let Ok(filtered_logs_sub) = subscribe_end_result {
-                        if let Err(err) = filtered_logs_sub.unsubscribe().await {
-                            tracing::warn!("Failed to unsubscribe from logs: {:?}, will reconnect to websocket", err);
-                            break;
+                        match filtered_logs_sub.unsubscribe().await {
+                            Ok(true) => {
+                                tracing::info!("Unsubscribed from logs");
+                            }
+                            Ok(false) => {
+                                tracing::warn!(
+                                    "Failed to unsubscribe from logs, will reconnect to websocket"
+                                );
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    "Failed to unsubscribe from logs: {:?}, will reconnect to websocket",
+                                    err
+                                );
+                            }
                         }
                     } else {
                         break;
