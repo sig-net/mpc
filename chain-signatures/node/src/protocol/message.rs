@@ -251,8 +251,14 @@ pub struct MessageInbox {
     /// participant id in the case of slow resharing.
     try_decrypt: VecDeque<(Ciphered, Instant)>,
 
+    /// This idempotent checker is used to check that the same batch of messages does not make
+    /// it back in the system somehow. Uses the signature to make this check.
+    idempotent: lru::LruCache<Signature, ()>,
+
+    /// A filter to filter out messages that have somehow made it back into the system after
+    /// being processed. This
     filter: MessageFilter,
-    // idempotent: lru::LruCache<Signature, ()>,
+
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
@@ -265,6 +271,7 @@ impl MessageInbox {
         Self {
             try_decrypt: VecDeque::new(),
             filter: MessageFilter::new(filter_rx),
+            idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
             generating: VecDeque::new(),
             resharing: HashMap::new(),
             triple: HashMap::new(),
@@ -346,20 +353,26 @@ impl MessageInbox {
 
         let mut messages = Vec::new();
         while let Some((encrypted, timestamp)) = self.try_decrypt.pop_front() {
-            let decrypted: Vec<Message> =
-                match SignedMessage::decrypt(&encrypted, cipher_sk, participants) {
-                    Ok(decrypted) => decrypted,
-                    Err(err) => {
-                        if matches!(err, MessageError::UnknownParticipant(_)) {
-                            retry.push((encrypted, timestamp));
-                        } else {
-                            tracing::error!(?err, "inbox: failed to decrypt/verify messages");
-                        }
-                        continue;
+            let decrypted: Result<Vec<Message>, _> =
+                SignedMessage::decrypt_with(&encrypted, cipher_sk, participants, |sig| {
+                    if self.idempotent.get(sig).is_some() {
+                        return true;
                     }
-                };
+                    self.idempotent.put(sig.clone(), ());
+                    false
+                });
 
-            messages.extend(decrypted);
+            match decrypted {
+                Ok(decrypted) => messages.extend(decrypted),
+                Err(err) => {
+                    if matches!(err, MessageError::UnknownParticipant(_)) {
+                        retry.push((encrypted, timestamp));
+                    } else {
+                        tracing::error!(?err, "inbox: failed to decrypt/verify messages");
+                    }
+                    continue;
+                }
+            };
         }
 
         self.try_decrypt.extend(retry);
@@ -549,7 +562,7 @@ pub enum MessageError {
     #[error("encryption failed: {0}")]
     Encryption(#[from] hpke::Error),
     #[error("verify failed: {0}")]
-    Verification(String),
+    Verification(&'static str),
 }
 
 #[async_trait]
@@ -940,6 +953,15 @@ impl SignedMessage {
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
     ) -> Result<T, MessageError> {
+        Self::decrypt_with(encrypted, cipher_sk, participants, |_| true)
+    }
+
+    pub fn decrypt_with<T: DeserializeOwned, F: FnMut(&Signature) -> bool>(
+        encrypted: &Ciphered,
+        cipher_sk: &hpke::SecretKey,
+        participants: &ParticipantMap,
+        mut fail: F,
+    ) -> Result<T, MessageError> {
         let msg = cipher_sk
             .decrypt(encrypted, Self::ASSOCIATED_DATA)
             .inspect_err(|err| {
@@ -949,11 +971,17 @@ impl SignedMessage {
         let info = participants
             .get(&from)
             .ok_or(MessageError::UnknownParticipant(from))?;
+
+        if fail(&sig) {
+            return Err(MessageError::Verification(
+                "signature did not pass verification from external",
+            ));
+        }
+
         if !sig.verify(&msg, &info.sign_pk) {
             tracing::error!(?from, "signed message erred out with invalid signature");
             return Err(MessageError::Verification(
-                "invalid signature while verifying authenticity of encrypted protocol message"
-                    .to_string(),
+                "invalid signature while verifying authenticity of encrypted protocol message",
             ));
         }
 
