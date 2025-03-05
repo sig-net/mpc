@@ -382,11 +382,6 @@ impl SignatureManager {
                 self.sign_queue.push_failed(request);
                 return Err(err);
             }
-            Err(err @ GenerationError::PresignatureIsGarbageCollected(_)) => {
-                tracing::warn!(me = ?self.me, presignature_id, "presignature is garbage collected, can't join signature generation protocol");
-                self.sign_queue.push_failed(request);
-                return Err(err);
-            }
             Err(err) => return Err(err),
         };
         tracing::info!(me = ?self.me, presignature_id, "found presignature: ready to start signature generation");

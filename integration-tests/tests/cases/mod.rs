@@ -262,12 +262,14 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let node_id = "test.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let presignature_storage = redis.presignature_storage(&node_id);
+    let (_, msg) = MessageChannel::mock();
     let mut presignature_manager = PresignatureManager::new(
         Participant::from(0),
         5,
         123,
         &node_id,
         &presignature_storage,
+        &msg,
     );
 
     let presignature = dummy_presignature(1);

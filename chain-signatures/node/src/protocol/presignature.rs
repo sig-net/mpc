@@ -135,14 +135,11 @@ pub struct PresignatureManager {
     generators: HashMap<PresignatureId, PresignatureGenerator>,
     /// The set of presignatures that were introduced to the system by the current node.
     introduced: HashSet<PresignatureId>,
-    /// Garbage collection for presignatures that have either been taken or failed. This
-    /// will be maintained for at most presignature timeout period just so messages are
-    /// cycled through the system.
-    gc: HashMap<PresignatureId, Instant>,
     me: Participant,
     threshold: usize,
     epoch: u64,
     my_account_id: AccountId,
+    msg: MessageChannel,
 }
 
 impl PresignatureManager {
@@ -152,16 +149,17 @@ impl PresignatureManager {
         epoch: u64,
         my_account_id: &AccountId,
         storage: &PresignatureStorage,
+        msg: &MessageChannel,
     ) -> Self {
         Self {
             presignature_storage: storage.clone(),
             generators: HashMap::new(),
             introduced: HashSet::new(),
-            gc: HashMap::new(),
             me,
             threshold,
             epoch,
             my_account_id: my_account_id.clone(),
+            msg: msg.clone(),
         }
     }
 
@@ -175,8 +173,7 @@ impl PresignatureManager {
         {
             tracing::error!(?store_err, mine, "failed to insert presignature");
         } else {
-            // Remove from taken list if it was there
-            self.gc.remove(&id);
+            // TODO: mark unfiltered
         }
     }
 
@@ -219,16 +216,13 @@ impl PresignatureManager {
                 if self.generators.contains_key(&id) {
                     tracing::warn!(id, ?store_err, "presignature is still generating");
                     GenerationError::PresignatureIsGenerating(id)
-                } else if self.gc.contains_key(&id) {
-                    tracing::warn!(id, ?store_err, "presignature was garbage collected");
-                    GenerationError::PresignatureIsGarbageCollected(id)
                 } else {
                     tracing::warn!(id, ?store_err, "presignature is missing");
                     GenerationError::PresignatureIsMissing(id)
                 }
             })?;
 
-        self.gc.insert(id, Instant::now());
+        self.msg.filter_presignature(id).await;
         tracing::debug!(id, "took presignature");
         Ok(presignature)
     }
@@ -279,21 +273,6 @@ impl PresignatureManager {
         let complete_presignatures = self.len_generated().await;
         let ongoing_generators = self.generators.len();
         complete_presignatures + ongoing_generators
-    }
-
-    pub fn garbage_collect(&mut self, cfg: &ProtocolConfig) {
-        let before = self.gc.len();
-        self.gc
-            .retain(|_, instant| instant.elapsed() < Duration::from_millis(cfg.garbage_timeout));
-        let removed = before.saturating_sub(self.gc.len());
-        if removed > 0 {
-            tracing::debug!("garbage collected {} presignatures", removed);
-        }
-    }
-
-    pub fn refresh_gc(&mut self, id: &PresignatureId) -> bool {
-        let entry = self.gc.entry(*id).and_modify(|e| *e = Instant::now());
-        matches!(entry, Entry::Occupied(_))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -349,10 +328,7 @@ impl PresignatureManager {
         let id = hash_as_id(triple0.id, triple1.id);
 
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        if self.generators.contains_key(&id)
-            || self.contains(&id).await
-            || self.gc.contains_key(&id)
-        {
+        if self.generators.contains_key(&id) || self.contains(&id).await {
             tracing::warn!(id, "presignature id collision");
             return Err(InitializationError::BadParameters(format!(
                 "id collision: presignature_id={id}"
@@ -462,9 +438,6 @@ impl PresignatureManager {
         } else if self.contains(&id).await {
             tracing::debug!(id, "presignature already generated");
             Err(GenerationError::AlreadyGenerated)
-        } else if self.gc.contains_key(&id) {
-            tracing::warn!(id, "presignature was garbage collected");
-            Err(GenerationError::PresignatureIsGarbageCollected(id))
         } else {
             match self.generators.entry(id) {
                 Entry::Vacant(entry) => {
@@ -534,7 +507,7 @@ impl PresignatureManager {
                         crate::metrics::PRESIGNATURE_GENERATOR_FAILURES
                             .with_label_values(&[self.my_account_id.as_str()])
                             .inc();
-                        self.gc.insert(*id, Instant::now());
+                        self.msg.filter_presignature(*id).await;
                         self.introduced.remove(id);
                         errors.push(e);
                         remove.push(*id);

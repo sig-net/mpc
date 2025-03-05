@@ -684,7 +684,7 @@ impl MessageReceiver for RunningState {
 
         let mut presignature_manager = self.presignature_manager.write().await;
         let presignature_messages = inbox.presignature.entry(self.epoch).or_default();
-        presignature_messages.retain(|id, queue| {
+        presignature_messages.retain(|_id, queue| {
             // Skip message if it already timed out
             if queue.is_empty()
                 || queue.iter().any(|msg| {
@@ -697,9 +697,7 @@ impl MessageReceiver for RunningState {
                 return false;
             }
 
-            // if presignature id is in GC, remove these messages because the presignature is currently
-            // being GC'ed, where this particular presignature has previously failed or been utilized.
-            !presignature_manager.refresh_gc(id)
+            true
         });
         for (id, queue) in presignature_messages {
             // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
@@ -846,7 +844,6 @@ impl MessageReceiver for RunningState {
                 }
                 Err(
                     err @ (GenerationError::AlreadyGenerated
-                    | GenerationError::PresignatureIsGarbageCollected(_)
                     | GenerationError::PresignatureIsMissing(_)),
                 ) => {
                     // We will have to remove the entirety of the messages we received for this signature request,
@@ -884,7 +881,6 @@ impl MessageReceiver for RunningState {
                 protocol.message(message.from, message.data);
             }
         }
-        presignature_manager.garbage_collect(protocol_cfg);
         signature_manager.garbage_collect(protocol_cfg);
         Ok(())
     }

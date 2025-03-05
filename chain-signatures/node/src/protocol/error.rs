@@ -19,8 +19,6 @@ pub enum GenerationError {
     PresignatureIsGenerating(PresignatureId),
     #[error("presignature {0} is missing")]
     PresignatureIsMissing(PresignatureId),
-    #[error("presignature {0} is in garbage collection")]
-    PresignatureIsGarbageCollected(TripleId),
     #[error("presignature access denied: id={0}, {1}")]
     PresignatureDenied(PresignatureId, &'static str),
     #[error("presignature bad parameters")]
