@@ -1,16 +1,25 @@
+mod filter;
+mod types;
+
+pub use crate::protocol::message::types::{
+    GeneratingMessage, Message, MessageError, MessageFilterId, PresignatureMessage, Protocols,
+    ResharingMessage, SignatureMessage, TripleMessage,
+};
+
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::error::GenerationError;
 use super::presignature::PresignatureId;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
 use crate::node_client::NodeClient;
+use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::Config;
 use crate::protocol::MeshState;
 use crate::types::Epoch;
 use crate::util;
 
 use async_trait::async_trait;
-use cait_sith::protocol::{MessageData, Participant};
+use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_primitives::SignId;
@@ -19,8 +28,6 @@ use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::Hash;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -28,222 +35,6 @@ use tokio::sync::{mpsc, RwLock};
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
-
-/// Maximum size for the filter of messages. This is roughly determined by the
-/// max number of protocols that can be within our system. It's not an upper
-/// bound but merely to serve as a good enough amount to maintain the IDs of
-/// protocols long enough on the case that they make it back into the system
-/// somehow after being erased.
-pub const MAX_FILTER_SIZE: NonZeroUsize = NonZeroUsize::new(64 * 1024).unwrap();
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct GeneratingMessage {
-    pub from: Participant,
-    #[serde(with = "serde_bytes")]
-    pub data: MessageData,
-}
-
-impl From<GeneratingMessage> for Message {
-    fn from(msg: GeneratingMessage) -> Self {
-        Message::Generating(msg)
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct ResharingMessage {
-    pub epoch: Epoch,
-    pub from: Participant,
-    #[serde(with = "serde_bytes")]
-    pub data: MessageData,
-}
-
-impl From<ResharingMessage> for Message {
-    fn from(msg: ResharingMessage) -> Self {
-        Message::Resharing(msg)
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct TripleMessage {
-    pub id: u64,
-    pub epoch: Epoch,
-    pub from: Participant,
-    #[serde(with = "serde_bytes")]
-    pub data: MessageData,
-    // UNIX timestamp as seconds since the epoch
-    pub timestamp: u64,
-}
-
-impl From<TripleMessage> for Message {
-    fn from(msg: TripleMessage) -> Self {
-        Message::Triple(msg)
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct PresignatureMessage {
-    pub id: u64,
-    pub triple0: TripleId,
-    pub triple1: TripleId,
-    pub epoch: Epoch,
-    pub from: Participant,
-    #[serde(with = "serde_bytes")]
-    pub data: MessageData,
-    // UNIX timestamp as seconds since the epoch
-    pub timestamp: u64,
-}
-
-impl From<PresignatureMessage> for Message {
-    fn from(msg: PresignatureMessage) -> Self {
-        Message::Presignature(msg)
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct SignatureMessage {
-    pub id: SignId,
-    pub proposer: Participant,
-    pub presignature_id: PresignatureId,
-    pub epoch: u64,
-    pub from: Participant,
-    #[serde(with = "serde_bytes")]
-    pub data: MessageData,
-    // UNIX timestamp as seconds since the epoch
-    pub timestamp: u64,
-}
-
-impl From<SignatureMessage> for Message {
-    fn from(msg: SignatureMessage) -> Self {
-        Message::Signature(msg)
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub enum Message {
-    Generating(GeneratingMessage),
-    Resharing(ResharingMessage),
-    Triple(TripleMessage),
-    Presignature(PresignatureMessage),
-    Signature(SignatureMessage),
-
-    /// Future compatibility with other messages. If in the future, we were to add a new
-    /// enum variant here, we can still deserialize the message as Unknown.
-    #[serde(untagged)]
-    Unknown(HashMap<String, ciborium::Value>),
-}
-
-impl Message {
-    pub const fn typename(&self) -> &'static str {
-        match self {
-            Message::Generating(_) => "Generating",
-            Message::Resharing(_) => "Resharing",
-            Message::Triple(_) => "Triple",
-            Message::Presignature(_) => "Presignature",
-            Message::Signature(_) => "Signature",
-            Message::Unknown(_) => "Unknown",
-        }
-    }
-
-    /// The size of the message in bytes.
-    pub fn size(&self) -> usize {
-        match self {
-            Message::Generating(msg) => std::mem::size_of::<GeneratingMessage>() + msg.data.len(),
-            Message::Resharing(msg) => std::mem::size_of::<ResharingMessage>() + msg.data.len(),
-            Message::Triple(msg) => std::mem::size_of::<TripleMessage>() + msg.data.len(),
-            Message::Presignature(msg) => {
-                std::mem::size_of::<PresignatureMessage>() + msg.data.len()
-            }
-            Message::Signature(msg) => std::mem::size_of::<SignatureMessage>() + msg.data.len(),
-            Message::Unknown(_msg) => usize::MAX,
-        }
-    }
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MessageType {
-    Generating,
-    Resharing,
-    Triple,
-    Presignature,
-    Signature,
-}
-
-pub trait MessageId {
-    const TYPE: MessageType;
-    fn id(&self) -> u64;
-}
-
-impl MessageId for TripleMessage {
-    const TYPE: MessageType = MessageType::Triple;
-    fn id(&self) -> u64 {
-        self.id
-    }
-}
-
-impl MessageId for PresignatureMessage {
-    const TYPE: MessageType = MessageType::Presignature;
-    fn id(&self) -> u64 {
-        self.id
-    }
-}
-
-impl MessageId for SignatureMessage {
-    const TYPE: MessageType = MessageType::Signature;
-    fn id(&self) -> u64 {
-        let mut hasher = std::hash::DefaultHasher::new();
-        self.id.hash(&mut hasher);
-        self.presignature_id.hash(&mut hasher);
-        std::hash::Hasher::finish(&hasher)
-    }
-}
-
-impl MessageId for (SignId, PresignatureId) {
-    const TYPE: MessageType = MessageType::Signature;
-    fn id(&self) -> u64 {
-        let mut hasher = std::hash::DefaultHasher::new();
-        self.0.hash(&mut hasher);
-        self.1.hash(&mut hasher);
-        std::hash::Hasher::finish(&hasher)
-    }
-}
-
-#[derive(Debug)]
-struct MessageFilter {
-    filter_rx: mpsc::Receiver<(MessageType, u64)>,
-    filter: lru::LruCache<(MessageType, u64), ()>,
-}
-
-impl MessageFilter {
-    pub fn new(filter_rx: mpsc::Receiver<(MessageType, u64)>) -> Self {
-        Self {
-            filter_rx,
-            filter: lru::LruCache::new(MAX_FILTER_SIZE),
-        }
-    }
-
-    pub fn contains<M: MessageId>(&mut self, msg: &M) -> bool {
-        self.filter.get(&(M::TYPE, msg.id())).is_some()
-    }
-
-    fn extend(&mut self) {
-        loop {
-            let (msg_type, id) = match self.filter_rx.try_recv() {
-                Ok(msg) => msg,
-                Err(TryRecvError::Empty) => {
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    tracing::error!(
-                        "filter: channel disconnected, no more messages will be received"
-                    );
-                    break;
-                }
-            };
-
-            self.filter.put((msg_type, id), ());
-        }
-    }
-}
 
 pub struct MessageInbox {
     /// encrypted messages that are pending to be decrypted. These are messages that we received
@@ -259,6 +50,9 @@ pub struct MessageInbox {
     /// being processed. This
     filter: MessageFilter,
 
+    /// Incoming messages that are pending to be processed. These are encrypted and signed.
+    incoming: mpsc::Receiver<Ciphered>,
+
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
@@ -267,11 +61,15 @@ pub struct MessageInbox {
 }
 
 impl MessageInbox {
-    pub fn new(filter_rx: mpsc::Receiver<(MessageType, u64)>) -> Self {
+    pub fn new(
+        incoming_rx: mpsc::Receiver<Ciphered>,
+        filter_rx: mpsc::Receiver<(Protocols, u64)>,
+    ) -> Self {
         Self {
             try_decrypt: VecDeque::new(),
             filter: MessageFilter::new(filter_rx),
             idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
+            incoming: incoming_rx,
             generating: VecDeque::new(),
             resharing: HashMap::new(),
             triple: HashMap::new(),
@@ -324,10 +122,10 @@ impl MessageInbox {
         });
     }
 
-    pub fn extend(&mut self, incoming: &mut mpsc::Receiver<Ciphered>) {
+    pub fn extend(&mut self) {
         self.filter.extend();
         loop {
-            let encrypted = match incoming.try_recv() {
+            let encrypted = match self.incoming.try_recv() {
                 Ok(msg) => msg,
                 Err(TryRecvError::Empty) => {
                     break;
@@ -398,7 +196,6 @@ impl MessageInbox {
 }
 
 struct MessageExecutor {
-    incoming: mpsc::Receiver<Ciphered>,
     outgoing: mpsc::Receiver<SendMessage>,
     inbox: Arc<RwLock<MessageInbox>>,
     outbox: MessageOutbox,
@@ -429,7 +226,7 @@ impl MessageExecutor {
             {
                 let mut inbox = self.inbox.write().await;
                 inbox.expire(&protocol);
-                inbox.extend(&mut self.incoming);
+                inbox.extend();
                 let messages = inbox.decrypt(&cipher_sk, &participants);
                 let messages = inbox.filter(messages);
                 inbox.recv(messages);
@@ -452,11 +249,27 @@ impl MessageExecutor {
 pub struct MessageChannel {
     outgoing: mpsc::Sender<SendMessage>,
     inbox: Arc<RwLock<MessageInbox>>,
-    filter: mpsc::Sender<(MessageType, u64)>,
-    _task: Arc<tokio::task::JoinHandle<()>>,
+    filter: mpsc::Sender<(Protocols, u64)>,
+    _task: Option<Arc<tokio::task::JoinHandle<()>>>,
 }
 
 impl MessageChannel {
+    pub fn new() -> (mpsc::Sender<Ciphered>, mpsc::Receiver<SendMessage>, Self) {
+        let (incoming_tx, incoming_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
+        let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
+
+        let inbox = Arc::new(RwLock::new(MessageInbox::new(incoming_rx, filter_rx)));
+        let channel = Self {
+            inbox,
+            outgoing: outgoing_tx,
+            filter: filter_tx,
+            _task: None,
+        };
+
+        (incoming_tx, outgoing_rx, channel)
+    }
+
     pub async fn spawn(
         client: NodeClient,
         id: &AccountId,
@@ -464,31 +277,19 @@ impl MessageChannel {
         protocol_state: &Arc<RwLock<NodeState>>,
         mesh_state: &Arc<RwLock<MeshState>>,
     ) -> (mpsc::Sender<Ciphered>, Self) {
-        let (incoming_tx, incoming_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
-        let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
-        let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
-
-        let inbox = Arc::new(RwLock::new(MessageInbox::new(filter_rx)));
-        let processor = MessageExecutor {
-            incoming: incoming_rx,
+        let (incoming_tx, outgoing_rx, mut channel) = Self::new();
+        let runner = MessageExecutor {
             outgoing: outgoing_rx,
-            inbox: inbox.clone(),
+            inbox: channel.inbox.clone(),
             outbox: MessageOutbox::new(client, id),
 
             config: config.clone(),
             protocol_state: protocol_state.clone(),
             mesh_state: mesh_state.clone(),
         };
+        channel._task = Some(Arc::new(tokio::spawn(runner.execute())));
 
-        (
-            incoming_tx,
-            Self {
-                inbox,
-                outgoing: outgoing_tx,
-                filter: filter_tx,
-                _task: Arc::new(tokio::spawn(processor.execute())),
-            },
-        )
+        (incoming_tx, channel)
     }
 
     /// Grab the inbox for all the messages we received from the network.
@@ -509,20 +310,20 @@ impl MessageChannel {
 
     /// Marks this message as filtered. This is used to prevent the same message with the
     /// corresponding MessageId from being processed again.
-    pub async fn filter<M: MessageId>(&self, msg: &M) {
-        if let Err(err) = self.filter.send((M::TYPE, msg.id())).await {
+    pub async fn filter<M: MessageFilterId>(&self, msg: &M) {
+        if let Err(err) = self.filter.send((M::PROTOCOL, msg.id())).await {
             tracing::warn!(?err, "failed to send filter message");
         }
     }
 
     pub async fn filter_triple(&self, id: TripleId) {
-        if let Err(err) = self.filter.send((MessageType::Triple, id)).await {
+        if let Err(err) = self.filter.send((Protocols::Triple, id)).await {
             tracing::warn!(?err, "failed to send filter message");
         }
     }
 
     pub async fn filter_presignature(&self, id: PresignatureId) {
-        if let Err(err) = self.filter.send((MessageType::Presignature, id)).await {
+        if let Err(err) = self.filter.send((Protocols::Presignature, id)).await {
             tracing::warn!(?err, "failed to send filter message");
         }
     }
@@ -530,39 +331,6 @@ impl MessageChannel {
     pub async fn filter_sign(&self, sign_id: SignId, presign_id: PresignatureId) {
         self.filter(&(sign_id, presign_id)).await;
     }
-}
-
-impl MessageChannel {
-    pub fn mock() -> (mpsc::Receiver<SendMessage>, Self) {
-        let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
-        let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
-
-        let inbox = Arc::new(RwLock::new(MessageInbox::new(filter_rx)));
-
-        (
-            outgoing_rx,
-            Self {
-                inbox,
-                outgoing: outgoing_tx,
-                filter: filter_tx,
-                _task: Arc::new(tokio::spawn(async {})),
-            },
-        )
-    }
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum MessageError {
-    #[error("unknown participant: {0:?}")]
-    UnknownParticipant(Participant),
-    #[error(transparent)]
-    JsonConversion(#[from] serde_json::Error),
-    #[error("cbor: {0:?}")]
-    CborConversion(String),
-    #[error("encryption failed: {0}")]
-    Encryption(#[from] hpke::Error),
-    #[error("verify failed: {0}")]
-    Verification(&'static str),
 }
 
 #[async_trait]

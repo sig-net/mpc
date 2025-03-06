@@ -151,7 +151,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
         .init_network()
         .await?;
 
-    let (_, msg) = MessageChannel::mock();
+    let (_, _, msg) = MessageChannel::new();
     let node_id = "test.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node_id);
@@ -262,7 +262,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let node_id = "test.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let presignature_storage = redis.presignature_storage(&node_id);
-    let (_, msg) = MessageChannel::mock();
+    let (_, _, msg) = MessageChannel::new();
     let mut presignature_manager = PresignatureManager::new(
         Participant::from(0),
         5,

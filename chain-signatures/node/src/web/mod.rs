@@ -65,12 +65,6 @@ pub async fn run(
     Ok(())
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MsgRequest {
-    pub from: Participant,
-    pub msg: Vec<u8>,
-}
-
 #[tracing::instrument(level = "debug", skip_all)]
 async fn msg(
     Extension(state): Extension<Arc<AxumState>>,
