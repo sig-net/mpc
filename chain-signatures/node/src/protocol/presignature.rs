@@ -149,7 +149,7 @@ impl PresignatureManager {
         epoch: u64,
         my_account_id: &AccountId,
         storage: &PresignatureStorage,
-        msg: &MessageChannel,
+        msg: MessageChannel,
     ) -> Self {
         Self {
             presignature_storage: storage.clone(),
@@ -159,7 +159,7 @@ impl PresignatureManager {
             threshold,
             epoch,
             my_account_id: my_account_id.clone(),
-            msg: msg.clone(),
+            msg,
         }
     }
 

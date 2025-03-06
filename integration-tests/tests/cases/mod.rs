@@ -155,14 +155,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let node_id = "test.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node_id);
-    let triple_manager = TripleManager::new(
-        Participant::from(0),
-        5,
-        123,
-        &node_id,
-        &triple_storage,
-        &msg,
-    );
+    let triple_manager =
+        TripleManager::new(Participant::from(0), 5, 123, &node_id, &triple_storage, msg);
 
     let triple_id_1: u64 = 1;
     let triple_1 = dummy_triple(triple_id_1);
@@ -269,7 +263,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         123,
         &node_id,
         &presignature_storage,
-        &msg,
+        msg,
     );
 
     let presignature = dummy_presignature(1);

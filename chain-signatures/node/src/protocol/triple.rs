@@ -466,20 +466,20 @@ impl TripleManager {
         epoch: u64,
         my_account_id: &AccountId,
         storage: &TripleStorage,
-        msg: &MessageChannel,
+        msg: MessageChannel,
     ) -> Self {
         Self {
             tasks: Arc::new(RwLock::new(TripleTasks::new(
                 threshold,
                 Duration::from_millis(100),
-                msg,
+                &msg,
             ))),
             me,
             threshold,
             epoch,
             triple_storage: storage.clone(),
             my_account_id: my_account_id.clone(),
-            msg: msg.clone(),
+            msg,
         }
     }
 

@@ -246,7 +246,7 @@ impl SignatureManager {
         public_key: PublicKey,
         epoch: u64,
         sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
-        msg: &MessageChannel,
+        msg: MessageChannel,
     ) -> Self {
         Self {
             generators: HashMap::new(),
@@ -256,7 +256,7 @@ impl SignatureManager {
             threshold,
             public_key,
             epoch,
-            msg: msg.clone(),
+            msg,
         }
     }
 

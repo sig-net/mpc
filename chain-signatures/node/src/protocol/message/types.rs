@@ -154,6 +154,8 @@ pub enum MessageError {
     Encryption(#[from] hpke::Error),
     #[error("verify failed: {0}")]
     Verification(&'static str),
+    #[error("idempotent check failed")]
+    Idempotent,
 }
 
 pub trait ProtocolType {

@@ -31,7 +31,7 @@ impl MessageFilter {
         self.filter.get(&(M::PROTOCOL, msg.id())).is_some()
     }
 
-    pub fn extend(&mut self) {
+    pub fn recv_updates(&mut self) {
         loop {
             let (msg_type, id) = match self.filter_rx.try_recv() {
                 Ok(msg) => msg,

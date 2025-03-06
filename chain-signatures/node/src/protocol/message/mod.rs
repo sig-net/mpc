@@ -47,7 +47,7 @@ pub struct MessageInbox {
     idempotent: lru::LruCache<Signature, ()>,
 
     /// A filter to filter out messages that have somehow made it back into the system after
-    /// being processed. This
+    /// being processed.
     filter: MessageFilter,
 
     /// Incoming messages that are pending to be processed. These are encrypted and signed.
@@ -121,8 +121,8 @@ impl MessageInbox {
             .retain(|(_, timestamp)| timestamp.elapsed() < timeout);
     }
 
-    pub fn extend(&mut self) {
-        self.filter.extend();
+    pub fn recv_updates(&mut self) {
+        self.filter.recv_updates();
         loop {
             let encrypted = match self.inbox_rx.try_recv() {
                 Ok(msg) => msg,
@@ -152,11 +152,11 @@ impl MessageInbox {
         while let Some((encrypted, timestamp)) = self.try_decrypt.pop_front() {
             let decrypted: Result<Vec<Message>, _> =
                 SignedMessage::decrypt_with(&encrypted, cipher_sk, participants, |sig| {
-                    if self.idempotent.get(sig).is_some() {
-                        return true;
+                    if self.idempotent.put(sig.clone(), ()).is_some() {
+                        Err(MessageError::Idempotent)
+                    } else {
+                        Ok(())
                     }
-                    self.idempotent.put(sig.clone(), ());
-                    false
                 });
 
             match decrypted {
@@ -165,7 +165,7 @@ impl MessageInbox {
                     if matches!(err, MessageError::UnknownParticipant(_)) {
                         retry.push((encrypted, timestamp));
                     } else {
-                        tracing::error!(?err, "inbox: failed to decrypt/verify messages");
+                        tracing::warn!(?err, "inbox: failed to decrypt/verify messages");
                     }
                     continue;
                 }
@@ -187,6 +187,30 @@ impl MessageInbox {
         messages
     }
 
+    pub fn filter_internal(&mut self) {
+        self.triple.retain(|_epoch, messages| {
+            messages.retain(|_id, messages| {
+                messages.retain(|msg| !self.filter.contains(msg));
+                !messages.is_empty()
+            });
+            !messages.is_empty()
+        });
+        self.presignature.retain(|_epoch, messages| {
+            messages.retain(|_id, messages| {
+                messages.retain(|msg| !self.filter.contains(msg));
+                !messages.is_empty()
+            });
+            !messages.is_empty()
+        });
+        self.signature.retain(|_epoch, messages| {
+            messages.retain(|_id, messages| {
+                messages.retain(|msg| !self.filter.contains(msg));
+                !messages.is_empty()
+            });
+            !messages.is_empty()
+        });
+    }
+
     pub fn recv(&mut self, messages: Vec<Message>) {
         for message in messages {
             self.push(message);
@@ -200,7 +224,7 @@ impl MessageInbox {
         participants: &ParticipantMap,
     ) {
         self.expire(expiration);
-        self.extend();
+        self.recv_updates();
         let messages = self.decrypt(cipher_sk, participants);
         let messages = self.filter(messages);
         self.recv(messages);
@@ -262,7 +286,7 @@ impl MessageExecutor {
                 mesh_state.active_with_potential()
             };
             self.outbox.expire(&protocol);
-            self.outbox.extend();
+            self.outbox.recv_updates();
             let compacted = self.outbox.compact();
             let encrypted = self.outbox.encrypt(&sign_sk, &active, compacted);
             self.outbox.send(&active, encrypted).await;
@@ -354,14 +378,6 @@ impl MessageChannel {
 
     pub async fn filter_sign(&self, sign_id: SignId, presign_id: PresignatureId) {
         self.filter(&(sign_id, presign_id)).await;
-    }
-}
-
-impl Drop for MessageChannel {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
     }
 }
 
@@ -692,6 +708,15 @@ impl MessageReceiver for NodeState {
         cfg: Config,
         mesh_state: MeshState,
     ) -> Result<(), MessageError> {
+        {
+            // TODO: remove this after adding subscription model for tasks
+            // This is a temporary fix to ensure that the filter is updated before processing messages,
+            // such that we avoid the race condition where a message is filtered out before it is processed.
+            let mut inbox = channel.inbox().write().await;
+            inbox.filter.recv_updates();
+            inbox.filter_internal();
+        }
+
         match self {
             NodeState::Generating(state) => state.recv(channel, cfg, mesh_state).await,
             NodeState::Resharing(state) => state.recv(channel, cfg, mesh_state).await,
@@ -747,14 +772,14 @@ impl SignedMessage {
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
     ) -> Result<T, MessageError> {
-        Self::decrypt_with(encrypted, cipher_sk, participants, |_| false)
+        Self::decrypt_with(encrypted, cipher_sk, participants, |_| Ok(()))
     }
 
-    pub fn decrypt_with<T: DeserializeOwned, F: FnMut(&Signature) -> bool>(
+    pub fn decrypt_with<T: DeserializeOwned, F: FnMut(&Signature) -> Result<(), MessageError>>(
         encrypted: &Ciphered,
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
-        mut fail: F,
+        mut check: F,
     ) -> Result<T, MessageError> {
         let msg = cipher_sk
             .decrypt(encrypted, Self::ASSOCIATED_DATA)
@@ -766,11 +791,8 @@ impl SignedMessage {
             .get(&from)
             .ok_or(MessageError::UnknownParticipant(from))?;
 
-        if fail(&sig) {
-            return Err(MessageError::Verification(
-                "signature did not pass verification from external",
-            ));
-        }
+        // Do external check before verifying the signature.
+        check(&sig)?;
 
         if !sig.verify(&msg, &info.sign_pk) {
             tracing::error!(?from, "signed message erred out with invalid signature");
@@ -820,7 +842,7 @@ impl MessageOutbox {
         }
     }
 
-    pub fn extend(&mut self) {
+    pub fn recv_updates(&mut self) {
         let mut message_count: i64 = 0;
         loop {
             let (msg, (from, to, timestamp)) = match self.outbox_rx.try_recv() {
