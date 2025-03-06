@@ -172,8 +172,6 @@ impl PresignatureManager {
             .await
         {
             tracing::error!(?store_err, mine, "failed to insert presignature");
-        } else {
-            // TODO: mark unfiltered
         }
     }
 
@@ -222,7 +220,6 @@ impl PresignatureManager {
                 }
             })?;
 
-        self.msg.filter_presignature(id).await;
         tracing::debug!(id, "took presignature");
         Ok(presignature)
     }
@@ -494,7 +491,7 @@ impl PresignatureManager {
     }
 
     /// Poke all ongoing presignature generation protocols to completion.
-    pub async fn poke(&mut self, channel: MessageChannel) {
+    pub async fn poke(&mut self) {
         let mut errors = Vec::new();
         let mut presignatures = Vec::new();
 
@@ -525,7 +522,7 @@ impl PresignatureManager {
                             if *to == self.me {
                                 continue;
                             }
-                            channel
+                            self.msg
                                 .send(
                                     self.me,
                                     *to,
@@ -543,7 +540,7 @@ impl PresignatureManager {
                         }
                     }
                     Action::SendPrivate(to, data) => {
-                        channel
+                        self.msg
                             .send(
                                 self.me,
                                 to,
@@ -587,6 +584,9 @@ impl PresignatureManager {
                         crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS
                             .with_label_values(&[self.my_account_id.as_str()])
                             .inc();
+
+                        self.msg.filter_presignature(*id).await;
+
                         // Do not retain the protocol
                         remove.push(*id);
                         break;
@@ -612,7 +612,6 @@ impl PresignatureManager {
         state: &RunningState,
         active: &Participants,
         protocol_cfg: &ProtocolConfig,
-        channel: &MessageChannel,
     ) -> tokio::task::JoinHandle<()> {
         let triple_manager = state.triple_manager.clone();
         let presignature_manager = state.presignature_manager.clone();
@@ -620,7 +619,6 @@ impl PresignatureManager {
         let protocol_cfg = protocol_cfg.clone();
         let pk = state.public_key;
         let sk_share = state.private_share;
-        let channel = channel.clone();
 
         tokio::task::spawn(async move {
             let mut presignature_manager = presignature_manager.write().await;
@@ -630,7 +628,7 @@ impl PresignatureManager {
             {
                 tracing::warn!(?err, "running: failed to stockpile presignatures");
             }
-            presignature_manager.poke(channel).await;
+            presignature_manager.poke().await;
 
             crate::metrics::NUM_PRESIGNATURES_MINE
                 .with_label_values(&[presignature_manager.my_account_id.as_str()])

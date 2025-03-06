@@ -277,9 +277,7 @@ impl CryptographicProtocol for RunningState {
         }
 
         let triple_task = self.triple_manager.clone().execute(&active, &cfg.protocol);
-
-        let presig_task =
-            PresignatureManager::execute(&self, &active, &cfg.protocol, ctx.channel());
+        let presig_task = PresignatureManager::execute(&self, &active, &cfg.protocol);
 
         let stable = mesh_state.stable;
         tracing::debug!(?stable, "stable participants");

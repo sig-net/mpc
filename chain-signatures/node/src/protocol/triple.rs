@@ -118,7 +118,7 @@ impl TripleGenerator {
         me: Participant,
         my_account_id: &AccountId,
         epoch: u64,
-        channel: MessageChannel,
+        msg: MessageChannel,
     ) -> GeneratorOutcome {
         loop {
             let action = match self.poke().await {
@@ -156,35 +156,33 @@ impl TripleGenerator {
                             continue;
                         }
 
-                        channel
-                            .send(
-                                me,
-                                *to,
-                                TripleMessage {
-                                    id: self.id,
-                                    epoch,
-                                    from: me,
-                                    data: data.clone(),
-                                    timestamp: Utc::now().timestamp() as u64,
-                                },
-                            )
-                            .await;
-                    }
-                }
-                Action::SendPrivate(to, data) => {
-                    channel
-                        .send(
+                        msg.send(
                             me,
-                            to,
+                            *to,
                             TripleMessage {
                                 id: self.id,
                                 epoch,
                                 from: me,
-                                data,
+                                data: data.clone(),
                                 timestamp: Utc::now().timestamp() as u64,
                             },
                         )
-                        .await
+                        .await;
+                    }
+                }
+                Action::SendPrivate(to, data) => {
+                    msg.send(
+                        me,
+                        to,
+                        TripleMessage {
+                            id: self.id,
+                            epoch,
+                            from: me,
+                            data,
+                            timestamp: Utc::now().timestamp() as u64,
+                        },
+                    )
+                    .await
                 }
                 Action::Return(output) => {
                     let elapsed = {
@@ -244,6 +242,7 @@ impl TripleGenerator {
                             .inc();
                     }
 
+                    msg.filter_triple(self.id).await;
                     break (self.id, Ok(Some((triple, triple_is_mine))));
                 }
             }
@@ -489,9 +488,6 @@ impl TripleManager {
         tracing::debug!(id, mine, "inserting triple");
         if let Err(e) = self.triple_storage.insert(triple, mine, back).await {
             tracing::warn!(?e, mine, "failed to insert triple");
-        } else if back {
-            // TODO:
-            // msg.remove_filter_triple(id).await;
         }
     }
 
@@ -551,9 +547,6 @@ impl TripleManager {
                     ))
                 })?;
 
-        self.msg.filter_triple(id0).await;
-        self.msg.filter_triple(id1).await;
-
         tracing::debug!(id0, id1, "took two triples");
         Ok((triple_0, triple_1))
     }
@@ -571,8 +564,6 @@ impl TripleManager {
             })
             .ok()??;
 
-        self.msg.filter_triple(triple_0.id).await;
-        self.msg.filter_triple(triple_1.id).await;
         tracing::debug!(triple_0.id, triple_1.id, "took two mine triples");
         Some((triple_0, triple_1))
     }
