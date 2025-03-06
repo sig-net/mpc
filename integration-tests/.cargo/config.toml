@@ -1,4 +1,0 @@
-# This is basically a prebuild script used to build the node/contract before running
-# integration-tests.
-[target.'cfg(not(target = "wasm32-unknown-unknown"))']
-runner = "./setup.sh"
