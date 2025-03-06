@@ -50,4 +50,8 @@ impl MessageFilter {
             self.filter.put((msg_type, id), ());
         }
     }
+
+    pub fn clear(&mut self) {
+        self.filter.clear();
+    }
 }
