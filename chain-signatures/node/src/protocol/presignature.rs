@@ -359,7 +359,12 @@ impl PresignatureManager {
             )));
         }
 
-        tracing::info!(id, "starting protocol to generate a new presignature");
+        tracing::info!(
+            id,
+            triple0 = triple0.id,
+            triple1 = triple1.id,
+            "starting protocol to generate a new presignature"
+        );
         let generator = Self::generate_internal(
             participants,
             self.me,
