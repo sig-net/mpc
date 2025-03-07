@@ -340,7 +340,7 @@ pub async fn docker(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
                 CandidateInfo {
                     account_id: account.id().as_str().parse().unwrap(),
                     url: node.address.clone(),
-                    cipher_pk: node.cipher_pk.to_bytes(),
+                    cipher_pk: node.cipher_sk.public_key().to_bytes(),
                     sign_pk: node.sign_sk.public_key().to_string().parse().unwrap(),
                 },
             )
@@ -382,7 +382,7 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
                 CandidateInfo {
                     account_id: account.id().as_str().parse().unwrap(),
                     url: format!("http://127.0.0.1:{0}", node_cfg.web_port),
-                    cipher_pk: node_cfg.cipher_pk.to_bytes(),
+                    cipher_pk: node_cfg.cipher_sk.public_key().to_bytes(),
                     sign_pk: node_cfg.sign_sk.public_key().to_string().parse().unwrap(),
                 },
             )
@@ -435,7 +435,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
                 CandidateInfo {
                     account_id: account.id().as_str().parse().unwrap(),
                     url: node.address.clone(),
-                    cipher_pk: node.cipher_pk.to_bytes(),
+                    cipher_pk: node.cipher_sk.public_key().to_bytes(),
                     sign_pk: node.sign_sk.public_key().to_string().parse().unwrap(),
                 },
             )

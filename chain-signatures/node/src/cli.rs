@@ -42,10 +42,6 @@ pub enum Cli {
         /// The web port for this server
         #[arg(long, env("MPC_WEB_PORT"))]
         web_port: u16,
-        // TODO: need to add in CipherPK type for parsing.
-        /// The cipher public key used to encrypt messages between nodes.
-        #[arg(long, env("MPC_CIPHER_PK"))]
-        cipher_pk: String,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"))]
         cipher_sk: String,
@@ -89,7 +85,6 @@ impl Cli {
                 mpc_contract_id,
                 account_sk,
                 web_port,
-                cipher_pk,
                 cipher_sk,
                 sign_sk,
                 eth,
@@ -114,8 +109,6 @@ impl Cli {
                     account_sk.to_string(),
                     "--web-port".to_string(),
                     web_port.to_string(),
-                    "--cipher-pk".to_string(),
-                    cipher_pk,
                     "--cipher-sk".to_string(),
                     cipher_sk,
                     "--redis-url".to_string(),
@@ -160,7 +153,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             mpc_contract_id,
             account_id,
             account_sk,
-            cipher_pk,
             cipher_sk,
             sign_sk,
             eth,
@@ -176,11 +168,13 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             logs::install_global(debug_id);
             let _span = tracing::trace_span!("cli").entered();
 
+            let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
+
             let digest = configuration_digest(
                 mpc_contract_id.clone(),
                 account_id.clone(),
                 account_sk.clone(),
-                cipher_pk.clone(),
+                format!("{:?}", cipher_sk.public_key()),
                 sign_sk.clone(),
                 eth.clone(),
             );
@@ -242,11 +236,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let contract_state = Arc::new(RwLock::new(None));
 
             let eth = eth.into_config();
-            let network = NetworkConfig {
-                cipher_sk: hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?,
-                cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
-                sign_sk,
-            };
+            let network = NetworkConfig { cipher_sk, sign_sk };
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth);
@@ -256,7 +246,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 ?mpc_contract_id,
                 ?account_id,
                 ?my_address,
-                cipher_pk = ?network.cipher_pk,
+                cipher_pk = ?network.cipher_sk.public_key(),
                 sign_pk = ?network.sign_sk.public_key(),
                 near_rpc_url = ?near_client.rpc_addr(),
                 eth_contract_address = ?eth.as_ref().map(|eth| eth.contract_address.as_str()),

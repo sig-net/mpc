@@ -63,7 +63,7 @@ impl NodeConnection {
         url: String,
         ping_interval: Duration,
     ) {
-        tracing::info!(target: "net[conn]", ?participant, ?url, "starting connection task");
+        tracing::info!(target: "net[conn]", to = ?(participant, &url), "starting connection task");
         let url = url.to_string();
         let mut interval = tokio::time::interval(ping_interval);
         loop {
@@ -71,8 +71,7 @@ impl NodeConnection {
             if let Err(err) = client.msg_empty(&url).await {
                 tracing::warn!(
                     target: "net[conn]",
-                    to = ?participant,
-                    url,
+                    to = ?(participant, &url),
                     ?err,
                     "call /msg empty failed",
                 );
@@ -93,8 +92,7 @@ impl NodeConnection {
                 Err(err) => {
                     tracing::warn!(
                         target: "net[conn]",
-                        to = ?participant,
-                        url,
+                        to = ?(participant, &url),
                         ?err,
                         "call /state failed",
                     );
