@@ -456,7 +456,7 @@ async fn try_publish_near(
             "smart contract threw error",
         );
         crate::metrics::SIGNATURE_PUBLISH_RESPONSE_ERRORS
-            .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
+            .with_label_values(&[near.my_account_id.as_str()])
             .inc();
     })?;
     tracing::info!(

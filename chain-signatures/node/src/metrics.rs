@@ -394,7 +394,7 @@ pub(crate) static SIGNATURE_PUBLISH_FAILURES: LazyLock<CounterVec> = LazyLock::n
     try_create_counter_vec(
         "multichain_signature_publish_failures",
         "number of failed signature publish",
-        &["node_account_id"],
+        &["chain", "node_account_id"],
     )
     .unwrap()
 });
