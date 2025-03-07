@@ -416,7 +416,15 @@ async fn catchup(
 
     let logs = ws.eth().logs(filter).await?;
     for log in logs {
-        process_filtered_log(log, sign_tx.clone(), node_near_account_id.clone())?;
+        if let Err(err) =
+            process_filtered_log(log.clone(), sign_tx.clone(), node_near_account_id.clone())
+        {
+            tracing::warn!(
+                "Failed to process ethereum log: {:?} because of {:?}",
+                log,
+                err
+            );
+        }
     }
     Ok(())
 }
