@@ -483,6 +483,7 @@ pub(crate) static LATEST_BLOCK_NUMBER: LazyLock<IntGaugeVec> = LazyLock::new(|| 
         &["chain", "node_account_id"],
     )
     .unwrap()
+});
 
 pub(crate) static PRESIGNATURE_BEFORE_POKE_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
@@ -501,7 +502,7 @@ pub(crate) static NUM_UNIQUE_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new
         &["chain", "node_account_id"],
     )
     .unwrap()
-
+});
 
 pub(crate) static PRESIGNATURE_ACCRUED_WAIT_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
