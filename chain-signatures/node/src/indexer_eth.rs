@@ -310,6 +310,7 @@ pub async fn run(
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             };
+            latest_block_number = end_block;
             tracing::info!("Latest eth block number: {latest_block_number}");
             crate::metrics::LATEST_BLOCK_NUMBER
                 .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
