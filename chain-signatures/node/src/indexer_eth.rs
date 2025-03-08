@@ -295,6 +295,9 @@ pub async fn run(
                         );
                 continue;
             }
+            if latest_block_number == 0 {
+                latest_block_number = end_block;
+            }
             let Ok(()) = catchup(
                 latest_block_number,
                 end_block,
