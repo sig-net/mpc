@@ -63,14 +63,14 @@ impl NodeConnection {
         url: String,
         ping_interval: Duration,
     ) {
-        let to = (participant, &url);
-        tracing::info!(target: "net[conn]", ?to, "starting connection task");
+        let node = (participant, &url);
+        tracing::info!(target: "net[conn]", ?node, "starting connection task");
         let url = url.to_string();
         let mut interval = tokio::time::interval(ping_interval);
         loop {
             interval.tick().await;
             if let Err(err) = client.msg_empty(&url).await {
-                tracing::warn!(target: "net[conn]", ?to, ?err, "checking /msg (empty) failed");
+                tracing::warn!(target: "net[conn]", ?node, ?err, "checking /msg (empty) failed");
                 *status.write().await = NodeStatus::Offline;
                 continue;
             }
@@ -86,12 +86,12 @@ impl NodeConnection {
                     };
                     let mut status = status.write().await;
                     if *status != new_status {
-                        tracing::info!(target: "net[conn]", ?to, ?new_status, "updated with new status");
+                        tracing::info!(target: "net[conn]", ?node, ?new_status, "updated with new status");
+                        *status = new_status;
                     }
-                    *status = new_status;
                 }
                 Err(err) => {
-                    tracing::warn!(target: "net[conn]", ?to, ?err, "checking /state failed");
+                    tracing::warn!(target: "net[conn]", ?node, ?err, "checking /state failed");
                     *status.write().await = NodeStatus::Offline;
                 }
             }
@@ -176,12 +176,12 @@ impl Pool {
                 self.potential.insert(*participant);
             }
 
-            let to = (*participant, &info.url);
+            let node = (*participant, &info.url);
             let potential = potential.then_some(true);
             match self.connections.entry(*participant) {
                 Entry::Occupied(mut conn) => {
                     if &conn.get().info != info {
-                        tracing::info!(target: "net[pool]", ?to, potential, "node connection updating");
+                        tracing::info!(target: "net[pool]", ?node, potential, "node connection updating");
                         conn.insert(NodeConnection::spawn(
                             &self.client,
                             participant,
@@ -191,7 +191,7 @@ impl Pool {
                     }
                 }
                 Entry::Vacant(conn) => {
-                    tracing::info!(target: "net[pool]", ?to, potential, "node connection created");
+                    tracing::info!(target: "net[pool]", ?node, potential, "node connection created");
                     conn.insert(NodeConnection::spawn(
                         &self.client,
                         participant,
