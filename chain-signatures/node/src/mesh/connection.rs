@@ -106,9 +106,9 @@ impl Drop for NodeConnection {
     }
 }
 
-// TODO: this is a basic connection pool and does not do most of the work yet. This is
-//       mostly here just to facilitate offline node handling for now.
-// TODO/NOTE: we can use libp2p to facilitate most the of low level TCP connection work.
+/// Pool that manages connections to nodes in the network. It is responsible for
+/// connecting to nodes, checking their status, and dropping connections that are
+/// no longer within the network.
 pub struct Pool {
     client: NodeClient,
 
@@ -118,11 +118,6 @@ pub struct Pool {
     /// All connections in the network, even including the potential ones that are going
     /// to join the network within the next epoch.
     connections: HashMap<Participant, NodeConnection>,
-
-    /// This is a list of potential participants that are not yet in the network. This is
-    /// useful for distinguishing which connections are active participants and which are
-    /// potential ones.
-    potential: HashSet<Participant>,
 }
 
 impl Pool {
@@ -132,7 +127,6 @@ impl Pool {
             client: client.clone(),
             ping_interval,
             connections: HashMap::new(),
-            potential: HashSet::new(),
         }
     }
 
@@ -141,16 +135,17 @@ impl Pool {
         match contract {
             ProtocolState::Initializing(init) => {
                 let participants: Participants = init.candidates.clone().into();
-                self.connect_nodes(&participants, false, &mut seen).await;
+                self.connect_nodes(&participants, &mut seen).await;
             }
             ProtocolState::Running(running) => {
-                self.connect_nodes(&running.participants, false, &mut seen)
-                    .await;
+                self.connect_nodes(&running.participants, &mut seen).await;
             }
             ProtocolState::Resharing(resharing) => {
-                self.connect_nodes(&resharing.old_participants, false, &mut seen)
-                    .await;
-                self.connect_nodes(&resharing.new_participants, true, &mut seen)
+                // NOTE: do NOT connect with old participants since only the new ones are
+                // operating under the new epoch and talking to each other. In the case of
+                // a resharing revert, we will go back to running state from the contract,
+                // and then the old participants would be connected again.
+                self.connect_nodes(&resharing.new_participants, &mut seen)
                     .await;
             }
         }
@@ -162,26 +157,16 @@ impl Pool {
     async fn connect_nodes(
         &mut self,
         participants: &Participants,
-        potential: bool,
         seen: &mut HashSet<Participant>,
     ) {
-        if potential {
-            // clear the potential list if we are connecting new set of potential participants
-            self.potential.clear();
-        }
-
         for (participant, info) in participants.iter() {
             seen.insert(*participant);
-            if potential {
-                self.potential.insert(*participant);
-            }
 
             let node = (*participant, &info.url);
-            let potential = potential.then_some(true);
             match self.connections.entry(*participant) {
                 Entry::Occupied(mut conn) => {
                     if &conn.get().info != info {
-                        tracing::info!(target: "net[pool]", ?node, potential, "node connection updating");
+                        tracing::info!(target: "net[pool]", ?node, "node connection updating");
                         conn.insert(NodeConnection::spawn(
                             &self.client,
                             participant,
@@ -191,7 +176,7 @@ impl Pool {
                     }
                 }
                 Entry::Vacant(conn) => {
-                    tracing::info!(target: "net[pool]", ?node, potential, "node connection created");
+                    tracing::info!(target: "net[pool]", ?node, "node connection created");
                     conn.insert(NodeConnection::spawn(
                         &self.client,
                         participant,
@@ -214,38 +199,23 @@ impl Pool {
         }
 
         for participant in remove {
-            tracing::info!(target: "net[pool]", ?participant, "node connection dropping");
+            tracing::info!(target: "net[pool]", node = ?participant, "node connection dropping");
             self.connections.remove(&participant);
         }
     }
 
     pub async fn status(&self) -> MeshState {
         let mut stable = Vec::new();
-        let mut active = Vec::new();
-        let mut active_potential = Vec::new();
-        let mut active_all = Participants::default();
-
+        let mut active = Participants::default();
         for (participant, conn) in self.connections.iter() {
             if let NodeStatus::Active(is_stable) = conn.status().await {
-                let is_potential = self.potential.contains(participant);
-                if is_stable && !is_potential {
+                active.insert(participant, conn.info.clone());
+                if is_stable {
                     stable.push(*participant);
-                }
-
-                active_all.insert(participant, conn.info.clone());
-                if is_potential {
-                    active_potential.push(*participant);
-                } else {
-                    active.push(*participant);
                 }
             }
         }
 
-        MeshState {
-            active,
-            active_potential,
-            active_all,
-            stable,
-        }
+        MeshState { active, stable }
     }
 }

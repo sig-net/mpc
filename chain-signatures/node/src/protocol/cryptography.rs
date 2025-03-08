@@ -158,7 +158,7 @@ impl CryptographicProtocol for ResharingState {
         _cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
-        tracing::info!(active_all = ?mesh_state.active_all, "progressing key reshare");
+        tracing::info!(active = ?mesh_state.active.keys_vec(), "progressing key reshare");
         let mut protocol = self.protocol.write().await;
         loop {
             let action = match protocol.poke() {
@@ -263,7 +263,7 @@ impl CryptographicProtocol for RunningState {
         cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
-        let active = mesh_state.active;
+        let active = mesh_state.active.keys_vec();
         if active.len() < self.threshold {
             tracing::warn!(?active, "running: not enough participants to progress");
             return Ok(NodeState::Running(self));

@@ -27,16 +27,10 @@ impl Options {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MeshState {
     /// Participants that are active in the network; as in they respond when pinged.
-    pub active: Vec<Participant>,
-
-    /// Potential participants that are active including participants belonging to the next epoch.
-    pub active_potential: Vec<Participant>,
-
-    /// Participants that are active in both the current and next epoch.
-    pub active_all: Participants,
+    pub active: Participants,
 
     /// Participants that are stable in the network; as in they have met certain criterias such
     /// as indexing the latest blocks.
@@ -70,10 +64,11 @@ impl Mesh {
         let mut interval = tokio::time::interval(self.ping_interval / 2);
         loop {
             interval.tick().await;
-            let state = contract_state.read().await;
-            if let Some(state) = &*state {
-                self.connections.connect(state).await;
-                *self.state.write().await = self.connections.status().await;
+            if let Some(contract) = &*contract_state.read().await {
+                self.connections.connect(contract).await;
+                let new_state = self.connections.status().await;
+                let mut state = self.state.write().await;
+                *state = new_state;
             }
         }
     }

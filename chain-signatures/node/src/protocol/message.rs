@@ -295,7 +295,7 @@ impl MessageExecutor {
 
             let active = {
                 let mesh_state = self.mesh_state.read().await;
-                mesh_state.active_all.clone()
+                mesh_state.active.clone()
             };
             self.outbox.expire(&protocol);
             self.outbox.extend(&mut self.outgoing);
@@ -455,7 +455,7 @@ impl MessageReceiver for RunningState {
         mesh_state: MeshState,
     ) -> Result<(), MessageError> {
         let protocol_cfg = &cfg.protocol;
-        let active = &mesh_state.active;
+        let active = mesh_state.active.keys_vec();
         let mut inbox = channel.inbox().write().await;
 
         // remove the triple_id that has already failed or taken from the triple_bins
@@ -481,7 +481,7 @@ impl MessageReceiver for RunningState {
 
             let protocol = match self
                 .triple_manager
-                .get_or_start_generation(id, active, protocol_cfg)
+                .get_or_start_generation(id, &active, protocol_cfg)
                 .await
             {
                 Ok(protocol) => protocol,
@@ -537,7 +537,7 @@ impl MessageReceiver for RunningState {
 
             let protocol = match presignature_manager
                 .get_or_start_generation(
-                    active,
+                    &active,
                     *id,
                     *triple0,
                     *triple1,
