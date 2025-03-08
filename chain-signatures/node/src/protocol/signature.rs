@@ -578,11 +578,8 @@ impl SignatureManager {
                 continue;
             };
 
-            let participants = intersect_vec(&[
-                &stable,
-                &presignature.participants,
-                &my_request.participants,
-            ]);
+            let participants =
+                intersect_vec(&[stable, &presignature.participants, &my_request.participants]);
             if participants.len() < self.threshold {
                 tracing::warn!(
                     ?participants,

@@ -16,7 +16,7 @@ use super::MeshState;
 
 type IsStable = bool;
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum NodeStatus {
     Active(IsStable),
     Offline,
@@ -63,39 +63,35 @@ impl NodeConnection {
         url: String,
         ping_interval: Duration,
     ) {
-        tracing::info!(target: "net[conn]", to = ?(participant, &url), "starting connection task");
+        let to = (participant, &url);
+        tracing::info!(target: "net[conn]", ?to, "starting connection task");
         let url = url.to_string();
         let mut interval = tokio::time::interval(ping_interval);
         loop {
             interval.tick().await;
             if let Err(err) = client.msg_empty(&url).await {
-                tracing::warn!(
-                    target: "net[conn]",
-                    to = ?(participant, &url),
-                    ?err,
-                    "call /msg empty failed",
-                );
+                tracing::warn!(target: "net[conn]", ?to, ?err, "checking /msg (empty) failed");
                 *status.write().await = NodeStatus::Offline;
                 continue;
             }
 
             match client.state(&url).await {
                 Ok(state) => {
-                    *status.write().await = match state {
+                    let new_status = match state {
                         StateView::Running { is_stable, .. }
                         | StateView::Resharing { is_stable, .. } => NodeStatus::Active(is_stable),
                         StateView::Joining { .. } | StateView::NotRunning { .. } => {
                             NodeStatus::Active(false)
                         }
                     };
+                    let mut status = status.write().await;
+                    if *status != new_status {
+                        tracing::info!(target: "net[conn]", ?to, ?new_status, "updated with new status");
+                    }
+                    *status = new_status;
                 }
                 Err(err) => {
-                    tracing::warn!(
-                        target: "net[conn]",
-                        to = ?(participant, &url),
-                        ?err,
-                        "call /state failed",
-                    );
+                    tracing::warn!(target: "net[conn]", ?to, ?err, "checking /state failed");
                     *status.write().await = NodeStatus::Offline;
                 }
             }
@@ -105,7 +101,7 @@ impl NodeConnection {
 
 impl Drop for NodeConnection {
     fn drop(&mut self) {
-        tracing::info!(target: "net[conn]", info = ?self.info, "dropping connection");
+        tracing::info!(target: "net[conn]", info = ?self.info, "connection dropped");
         self.task.abort();
     }
 }
@@ -115,6 +111,8 @@ impl Drop for NodeConnection {
 // TODO/NOTE: we can use libp2p to facilitate most the of low level TCP connection work.
 pub struct Pool {
     client: NodeClient,
+
+    /// The interval between checking the status of the nodes' connection status.
     ping_interval: Duration,
 
     /// All connections in the network, even including the potential ones that are going
@@ -138,21 +136,21 @@ impl Pool {
         }
     }
 
-    pub async fn connect(&mut self, contract_state: &ProtocolState) {
+    pub async fn connect(&mut self, contract: &ProtocolState) {
         let mut seen = HashSet::new();
-        match contract_state {
-            ProtocolState::Initializing(contract_state) => {
-                let participants: Participants = contract_state.candidates.clone().into();
+        match contract {
+            ProtocolState::Initializing(init) => {
+                let participants: Participants = init.candidates.clone().into();
                 self.connect_nodes(&participants, false, &mut seen).await;
             }
-            ProtocolState::Running(contract_state) => {
-                self.connect_nodes(&contract_state.participants, false, &mut seen)
+            ProtocolState::Running(running) => {
+                self.connect_nodes(&running.participants, false, &mut seen)
                     .await;
             }
-            ProtocolState::Resharing(contract_state) => {
-                self.connect_nodes(&contract_state.old_participants, false, &mut seen)
+            ProtocolState::Resharing(resharing) => {
+                self.connect_nodes(&resharing.old_participants, false, &mut seen)
                     .await;
-                self.connect_nodes(&contract_state.new_participants, true, &mut seen)
+                self.connect_nodes(&resharing.new_participants, true, &mut seen)
                     .await;
             }
         }
@@ -178,11 +176,12 @@ impl Pool {
                 self.potential.insert(*participant);
             }
 
-            let potential = potential.then(|| true);
+            let to = (*participant, &info.url);
+            let potential = potential.then_some(true);
             match self.connections.entry(*participant) {
                 Entry::Occupied(mut conn) => {
                     if &conn.get().info != info {
-                        tracing::info!(target: "net[pool]", potential, ?info, "updating participant info");
+                        tracing::info!(target: "net[pool]", ?to, potential, "node connection updating");
                         conn.insert(NodeConnection::spawn(
                             &self.client,
                             participant,
@@ -192,7 +191,7 @@ impl Pool {
                     }
                 }
                 Entry::Vacant(conn) => {
-                    tracing::info!(target: "net[pool]", potential, ?info, "adding participant");
+                    tracing::info!(target: "net[pool]", ?to, potential, "node connection created");
                     conn.insert(NodeConnection::spawn(
                         &self.client,
                         participant,
@@ -215,40 +214,9 @@ impl Pool {
         }
 
         for participant in remove {
-            tracing::info!(target: "net[pool]", ?participant, "dropping connected node");
+            tracing::info!(target: "net[pool]", ?participant, "node connection dropping");
             self.connections.remove(&participant);
         }
-    }
-
-    /// Get active participants that have a stable connection. This is useful for arbitrary metrics to
-    /// say whether or not a node is stable, such as a node being on track with the latest block height.
-    pub async fn stable_participants(&self) -> Vec<Participant> {
-        let mut active = Vec::new();
-        for (participant, conn) in self.connections.iter() {
-            if self.potential.contains(participant) {
-                continue;
-            }
-
-            if matches!(conn.status().await, NodeStatus::Active(true)) {
-                active.push(*participant);
-            }
-        }
-        active
-    }
-
-    /// Active participants that may or may not be stable.
-    pub async fn active_participants(&self) -> Vec<Participant> {
-        let mut active = Vec::new();
-        for (participant, conn) in self.connections.iter() {
-            if self.potential.contains(participant) {
-                continue;
-            }
-
-            if matches!(conn.status().await, NodeStatus::Active(_)) {
-                active.push(*participant);
-            }
-        }
-        active
     }
 
     pub async fn status(&self) -> MeshState {

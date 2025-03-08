@@ -158,18 +158,14 @@ impl CryptographicProtocol for ResharingState {
         _cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
-        // TODO: we are not using active potential participants here, but we should in the future.
-        // Currently resharing protocol does not timeout and restart with new set of participants.
-        // So if it picks up a participant that is not active, it will never be able to send a message to it.
-        let active = mesh_state.active_all;
-        tracing::info!(?active, "progressing key reshare");
+        tracing::info!(active_all = ?mesh_state.active_all, "progressing key reshare");
         let mut protocol = self.protocol.write().await;
         loop {
             let action = match protocol.poke() {
                 Ok(action) => action,
                 Err(err) => {
                     drop(protocol);
-                    tracing::debug!("got action fail, {}", err);
+                    tracing::warn!(?err, "resharing failed: refreshing...");
                     if let Err(refresh_err) = self.protocol.refresh().await {
                         tracing::warn!(?refresh_err, "unable to refresh reshare protocol");
                     }

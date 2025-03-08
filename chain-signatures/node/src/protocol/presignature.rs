@@ -415,7 +415,7 @@ impl PresignatureManager {
             // to use the same triple as any other node.
             if let Some((triple0, triple1)) = triple_manager.take_two_mine().await {
                 let presig_participants = intersect_vec(&[
-                    &active,
+                    active,
                     &triple0.public.participants,
                     &triple1.public.participants,
                 ]);
