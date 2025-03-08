@@ -47,20 +47,17 @@ pub async fn run(
         )
         .route("/msg", post(msg))
         .route("/state", get(state))
-        .route("/metrics", get(metrics));
+        .route("/metrics", get(metrics))
+        .layer(Extension(Arc::new(axum_state)));
 
     if cfg!(feature = "bench") {
         router = router.route("/bench/metrics", get(bench_metrics));
     }
 
-    let app = router.layer(Extension(Arc::new(axum_state)));
-
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!(?addr, "starting http server");
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, router).await.unwrap();
 
     Ok(())
 }
