@@ -18,7 +18,7 @@ pub(crate) static NUM_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
         "multichain_sign_requests_count",
         "number of multichain sign requests, marked by sign requests indexed",
-        &["node_account_id"],
+        &["chain", "node_account_id"],
     )
     .unwrap()
 });
@@ -36,7 +36,7 @@ pub(crate) static NUM_SIGN_SUCCESS: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
         "multichain_sign_requests_success",
         "number of successful multichain sign requests, marked by publish()",
-        &["node_account_id"],
+        &["chain", "node_account_id"],
     )
     .unwrap()
 });
@@ -45,7 +45,7 @@ pub(crate) static SIGN_TOTAL_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| 
     try_create_histogram_vec(
         "multichain_sign_latency_sec",
         "Latency of multichain signing, start from indexing sign request, end when publish() called.",
-        &["node_account_id"],
+        &["chain", "node_account_id"],
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
     .unwrap()
@@ -64,18 +64,9 @@ pub(crate) static SIGN_RESPOND_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
     Histogram::new(
         "multichain_sign_respond_latency_sec",
         "Latency of multichain signing, from received publish request to publish complete.",
-        &["node_account_id"],
+        &["chain", "node_account_id"],
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
-});
-
-pub(crate) static LATEST_BLOCK_HEIGHT: LazyLock<IntGaugeVec> = LazyLock::new(|| {
-    try_create_int_gauge_vec(
-        "multichain_latest_block_height",
-        "Latest block height seen by the node",
-        &["node_account_id"],
-    )
-    .unwrap()
 });
 
 pub(crate) static TRIPLE_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
@@ -270,7 +261,7 @@ pub(crate) static NUM_SIGN_SUCCESS_30S: LazyLock<CounterVec> = LazyLock::new(|| 
     try_create_counter_vec(
             "multichain_sign_requests_success_30s",
             "number of successful multichain sign requests that finished within 30s, marked by publish()",
-            &["node_account_id"],
+            &["chain", "node_account_id"],
         )
         .unwrap()
 });
@@ -403,7 +394,7 @@ pub(crate) static SIGNATURE_PUBLISH_FAILURES: LazyLock<CounterVec> = LazyLock::n
     try_create_counter_vec(
         "multichain_signature_publish_failures",
         "number of failed signature publish",
-        &["node_account_id"],
+        &["chain", "node_account_id"],
     )
     .unwrap()
 });
@@ -476,20 +467,29 @@ pub(crate) static PROTOCOL_ITER_CNT: LazyLock<CounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub(crate) static NUM_SIGN_REQUESTS_ETH: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
-        "multichain_sign_requests_count_eth",
-        "number of multichain sign requests from ethereum chain, marked by sign requests indexed",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
-
 pub(crate) static CONFIGURATION_DIGEST: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec(
         "multichain_configuration_digest",
         "Configuration digest",
         &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static LATEST_BLOCK_NUMBER: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_latest_block_number",
+        "Latest block number seen by the node",
+        &["chain", "node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static NUM_UNIQUE_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_sign_requests_count_unique",
+        "number of multichain sign requests, marked by sign requests indexed and deduped",
+        &["chain", "node_account_id"],
     )
     .unwrap()
 });

@@ -33,6 +33,7 @@ use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
 use reqwest::IntoUrl;
+use std::fmt;
 use std::path::Path;
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
@@ -354,6 +355,21 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
 pub enum Chain {
     NEAR,
     Ethereum,
+}
+
+impl Chain {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Chain::NEAR => "NEAR",
+            Chain::Ethereum => "Ethereum",
+        }
+    }
+}
+
+impl fmt::Display for Chain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 #[cfg(test)]
