@@ -67,7 +67,7 @@ impl Mesh {
     }
 
     pub async fn run(mut self, contract_state: Arc<RwLock<Option<ProtocolState>>>) {
-        let mut interval = tokio::time::interval(self.ping_interval);
+        let mut interval = tokio::time::interval(self.ping_interval / 2);
         loop {
             interval.tick().await;
             let state = contract_state.read().await;
