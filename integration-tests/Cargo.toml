@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-async-process = "1"
+async-process = "2.3.0"
 backon = "0.4"
 bollard = "0.17.0"
 clap.workspace = true
@@ -58,7 +58,7 @@ test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [build-dependencies]
 anyhow.workspace = true
-async-process = "1"
+async-process = "2.3.0"
 tokio.workspace = true
 
 
