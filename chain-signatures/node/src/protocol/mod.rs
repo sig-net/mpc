@@ -162,7 +162,7 @@ impl MpcSignProtocol {
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
         config: Arc<RwLock<Config>>,
         mesh_state: Arc<RwLock<MeshState>>,
-    ) -> anyhow::Result<()> {
+    ) {
         let my_account_id = self.ctx.account_id.as_str();
         let _span = tracing::info_span!("running", my_account_id);
         let my_account_id = self.ctx.account_id.clone();

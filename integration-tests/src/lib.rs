@@ -294,7 +294,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     };
 
     let mesh_options = mpc_node::mesh::Options {
-        refresh_active_timeout: 1000,
+        ping_interval: 1000,
     };
 
     let message_options = node_client::Options {

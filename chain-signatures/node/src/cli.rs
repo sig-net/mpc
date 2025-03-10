@@ -231,7 +231,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             tracing::info!(%my_address, "address detected");
             let client = NodeClient::new(&message_options);
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
-            let (mesh, mesh_state) = Mesh::init(&client, mesh_options);
+            let mesh = Mesh::new(&client, mesh_options);
+            let mesh_state = mesh.state().clone();
             let contract_state = Arc::new(RwLock::new(None));
 
             let eth = eth.into_config();
@@ -286,10 +287,12 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 tracing::info!("protocol http server spawned");
 
                 rpc_handle.await?;
-                mesh_handle.await??;
-                protocol_handle.await??;
-                web_handle.await??;
+                protocol_handle.await?;
+                web_handle.await?;
                 tracing::info!("spinning down");
+
+                mesh_handle.abort();
+                mesh_handle.await?;
 
                 eth_indexer_handle.abort();
                 indexer_handle.join().unwrap()?;

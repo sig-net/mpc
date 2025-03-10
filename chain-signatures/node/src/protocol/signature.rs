@@ -1,4 +1,4 @@
-use super::contract::primitives::Participants;
+use super::contract::primitives::intersect_vec;
 use super::state::RunningState;
 use crate::kdf::derive_delta;
 use crate::protocol::error::GenerationError;
@@ -93,9 +93,12 @@ impl SignQueue {
     pub async fn organize(
         &mut self,
         threshold: usize,
-        stable: &Participants,
+        stable: &[Participant],
         my_account_id: &AccountId,
     ) {
+        let mut stable = stable.to_vec();
+        stable.sort();
+
         let mut sign_rx = self.sign_rx.write().await;
         while let Ok(indexed) = {
             match sign_rx.try_recv() {
@@ -117,7 +120,7 @@ impl SignQueue {
                 .with_label_values(&[indexed.chain.as_str(), my_account_id.as_str()])
                 .inc();
             let mut rng = StdRng::from_seed(indexed.args.entropy);
-            let subset = stable.keys().cloned().choose_multiple(&mut rng, threshold);
+            let subset = stable.iter().copied().choose_multiple(&mut rng, threshold);
             let in_subset = subset.contains(&self.me);
             let proposer = *subset.choose(&mut rng).unwrap();
             let is_mine = proposer == self.me;
@@ -547,16 +550,16 @@ impl SignatureManager {
 
     pub async fn handle_requests(
         &mut self,
-        stable: &Participants,
+        stable: &[Participant],
         presignature_manager: &mut PresignatureManager,
         cfg: &ProtocolConfig,
     ) {
         if stable.len() < self.threshold {
             tracing::warn!(
-                "Require at least {} stable participants to handle_requests, got {}: {:?}",
+                "require at least {} stable participants to handle_requests, got {}: {:?}",
                 self.threshold,
                 stable.len(),
-                stable.keys_vec()
+                stable,
             );
             return;
         }
@@ -585,10 +588,10 @@ impl SignatureManager {
             };
 
             let participants =
-                stable.intersection(&[&presignature.participants, &my_request.participants]);
+                intersect_vec(&[stable, &presignature.participants, &my_request.participants]);
             if participants.len() < self.threshold {
                 tracing::warn!(
-                    participants = ?participants.keys_vec(),
+                    ?participants,
                     "intersection of stable participants and presignature participants is less than threshold, trashing presignature"
                 );
                 // TODO: do not insert back presignature when we have a clear model for data consistency
@@ -640,13 +643,13 @@ impl SignatureManager {
 
     pub fn execute(
         state: &RunningState,
-        stable: &Participants,
+        stable: &[Participant],
         protocol_cfg: &ProtocolConfig,
         ctx: &impl super::cryptography::CryptographicCtx,
     ) -> tokio::task::JoinHandle<()> {
         let presignature_manager = state.presignature_manager.clone();
         let signature_manager = state.signature_manager.clone();
-        let stable = stable.clone();
+        let stable = stable.to_vec();
         let protocol_cfg = protocol_cfg.clone();
         let rpc_channel = ctx.rpc_channel().clone();
         let channel = ctx.channel().clone();
