@@ -1,5 +1,4 @@
-use anyhow::Context;
-use hyper::{Body, Client, Method, Request, StatusCode, Uri};
+use hyper::StatusCode;
 use near_workspaces::{Account, AccountId};
 
 pub async fn vote_join(
@@ -98,26 +97,6 @@ pub async fn vote_leave(
     Ok(())
 }
 
-pub async fn get<U>(uri: U) -> anyhow::Result<StatusCode>
-where
-    Uri: TryFrom<U>,
-    <Uri as TryFrom<U>>::Error: Into<hyper::http::Error>,
-{
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::empty())
-        .context("failed to build the request")?;
-
-    let client = Client::new();
-    let response = client
-        .request(req)
-        .await
-        .context("failed to send the request")?;
-    Ok(response.status())
-}
-
 /// Request an unused port from the OS.
 pub async fn pick_unused_port() -> anyhow::Result<u16> {
     // Port 0 means the OS gives us an unused port
@@ -132,8 +111,8 @@ pub async fn pick_unused_port() -> anyhow::Result<u16> {
 pub async fn ping_until_ok(addr: &str, timeout: u64) -> anyhow::Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
         loop {
-            match get(addr).await {
-                Ok(status) if status == StatusCode::OK => break,
+            match reqwest::get(addr).await {
+                Ok(resp) if resp.status() == StatusCode::OK => break,
                 _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
             }
         }
