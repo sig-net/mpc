@@ -294,7 +294,6 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
 
                 // indexer_handle.join().unwrap()?;
                 eth_indexer_handle.abort();
-                indexer_handle.join().unwrap()?;
                 system_handle.abort();
 
                 anyhow::Ok(())
