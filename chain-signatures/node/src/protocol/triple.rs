@@ -1,4 +1,3 @@
-use super::contract::primitives::Participants;
 use super::cryptography::CryptographicError;
 use super::message::{MessageChannel, TripleMessage};
 use crate::protocol::error::GenerationError;
@@ -54,9 +53,15 @@ impl TripleGenerator {
         id: TripleId,
         me: Participant,
         threshold: usize,
-        participants: Vec<Participant>,
+        participants: &[Participant],
         timeout: u64,
     ) -> Result<Self, InitializationError> {
+        let mut participants = participants.to_vec();
+
+        // Participants can be out of order, so let's sort them before doing anything. Critical
+        // for the triple_is_mine check:
+        participants.sort();
+
         let protocol = Arc::new(RwLock::new(
             cait_sith::triples::generate_triple::<Secp256k1>(&participants, me, threshold)?,
         ));
@@ -187,26 +192,12 @@ impl TripleGenerator {
                 Action::Return(output) => {
                     let elapsed = {
                         let timestamp = self.timestamp.read().await;
-                        timestamp.map(|t| t.elapsed()).unwrap_or_default()
+                        let elapsed = timestamp.map(|t| t.elapsed()).unwrap_or_default();
+                        crate::metrics::TRIPLE_LATENCY
+                            .with_label_values(&[my_account_id.as_str()])
+                            .observe(elapsed.as_secs_f64());
+                        elapsed
                     };
-                    tracing::info!(
-                        id = self.id,
-                        ?me,
-                        big_a = ?output.1.big_a.to_base58(),
-                        big_b = ?output.1.big_b.to_base58(),
-                        big_c = ?output.1.big_c.to_base58(),
-                        ?elapsed,
-                        "completed triple generation"
-                    );
-
-                    {
-                        let timestamp = self.timestamp.read().await;
-                        if let Some(start_time) = &*timestamp {
-                            crate::metrics::TRIPLE_LATENCY
-                                .with_label_values(&[my_account_id.as_str()])
-                                .observe(start_time.elapsed().as_secs_f64());
-                        }
-                    }
 
                     crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS
                         .with_label_values(&[my_account_id.as_str()])
@@ -235,6 +226,18 @@ impl TripleGenerator {
 
                         triple_owner == me
                     };
+
+                    tracing::info!(
+                        id = self.id,
+                        ?me,
+                        triple_is_mine,
+                        participants = ?self.participants,
+                        big_a = ?triple.public.big_a.to_base58(),
+                        big_b = ?triple.public.big_b.to_base58(),
+                        big_c = ?triple.public.big_c.to_base58(),
+                        ?elapsed,
+                        "completed triple generation"
+                    );
 
                     if triple_is_mine {
                         crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS
@@ -315,7 +318,7 @@ impl TripleTasks {
         id: TripleId,
         potential_len: usize,
         cfg: &ProtocolConfig,
-        participants: &Participants,
+        participants: &[Participant],
         my_account_id: &AccountId,
     ) -> Result<Option<TripleGenerator>, CryptographicError> {
         match self.generators.entry(id) {
@@ -327,7 +330,6 @@ impl TripleTasks {
                 }
 
                 tracing::info!(id, "joining protocol to generate a new triple");
-                let participants = participants.keys_vec();
                 let generator = e.insert(TripleGenerator::new(
                     id,
                     me,
@@ -604,7 +606,7 @@ impl TripleManager {
     /// Starts a new Beaver triple generation protocol.
     pub async fn generate(
         &self,
-        participants: &Participants,
+        participants: &[Participant],
         timeout: u64,
     ) -> Result<(), InitializationError> {
         let id = rand::random();
@@ -616,9 +618,8 @@ impl TripleManager {
             )));
         }
 
-        tracing::debug!(id, "starting protocol to generate a new triple");
+        tracing::info!(id, "starting protocol to generate a new triple");
         {
-            let participants = participants.keys_vec();
             let mut tasks = self.tasks.write().await;
             tasks.generators.insert(
                 id,
@@ -643,7 +644,7 @@ impl TripleManager {
     /// and the maximum number of all ongoing generation protocols is below the maximum.
     pub async fn stockpile(
         &self,
-        participants: &Participants,
+        participants: &[Participant],
         cfg: &ProtocolConfig,
     ) -> Result<(), InitializationError> {
         let not_enough_triples = {
@@ -677,7 +678,7 @@ impl TripleManager {
     pub async fn get_or_start_generation(
         &self,
         id: TripleId,
-        participants: &Participants,
+        participants: &[Participant],
         cfg: &ProtocolConfig,
     ) -> Result<Option<TripleGenerator>, CryptographicError> {
         if self.contains(id).await {
@@ -718,8 +719,8 @@ impl TripleManager {
         }
     }
 
-    pub fn execute(self, active: &Participants, protocol_cfg: &ProtocolConfig) -> JoinHandle<()> {
-        let active = active.clone();
+    pub fn execute(self, active: &[Participant], protocol_cfg: &ProtocolConfig) -> JoinHandle<()> {
+        let active = active.to_vec();
         let protocol_cfg = protocol_cfg.clone();
 
         tokio::task::spawn(async move {

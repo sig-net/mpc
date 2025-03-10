@@ -28,8 +28,8 @@ pub async fn run(
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
     indexer: Indexer,
-) -> anyhow::Result<()> {
-    tracing::info!("running a node");
+) {
+    tracing::info!("starting web server");
     let axum_state = AxumState {
         sender,
         protocol_state,
@@ -61,8 +61,6 @@ pub async fn run(
         .serve(app.into_make_service())
         .await
         .unwrap();
-
-    Ok(())
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
