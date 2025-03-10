@@ -16,7 +16,7 @@ use crate::utils::{vote_join, vote_leave};
 use crate::{NodeConfig, Nodes};
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 use mpc_contract::{ProtocolContractState, RunningContractState};
-use mpc_node::web::StateView;
+use mpc_node::web::{BenchMetrics, StateView};
 
 use anyhow::Context;
 use url::Url;
@@ -67,6 +67,12 @@ impl Cluster {
     pub async fn fetch_states(&self) -> anyhow::Result<Vec<StateView>> {
         let tasks = (0..self.len()).map(|id| self.fetch_state(id));
         futures::future::try_join_all(tasks).await
+    }
+
+    pub async fn fetch_bench_metrics(&self, id: usize) -> anyhow::Result<BenchMetrics> {
+        let url = self.url(id).join("/bench/metrics").unwrap();
+        let metrics = self.http_client.get(url).send().await?.json().await?;
+        Ok(metrics)
     }
 
     pub fn wait(&self) -> WaitAction<'_, ()> {

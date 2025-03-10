@@ -29,3 +29,8 @@ digest = "0.10.7"
 # near dependencies
 near-crypto = "0.27.0"
 near-workspaces = "0.15.0"
+
+[features]
+default = []
+# utilized for benchmarking the node:
+bench = []

@@ -36,10 +36,6 @@ module "gce-container" {
         value = var.node_configs["${count.index}"].account
       },
       {
-        name  = "MPC_CIPHER_PK"
-        value = var.node_configs["${count.index}"].cipher_pk
-      },
-      {
         name  = "MPC_ACCOUNT_SK"
         value = data.google_secret_manager_secret_version.account_sk_secret_id[count.index].secret_data
       },

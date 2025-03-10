@@ -781,7 +781,7 @@ impl SignedMessage {
         let Self { msg, sig, from } = cbor_from_bytes(&msg)?;
         let info = participants
             .get(&from)
-            .ok_or_else(|| MessageError::UnknownParticipant(from))?;
+            .ok_or(MessageError::UnknownParticipant(from))?;
         if !sig.verify(&msg, &info.sign_pk) {
             tracing::error!(?from, "signed message erred out with invalid signature");
             return Err(MessageError::Verification(

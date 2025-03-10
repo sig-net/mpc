@@ -106,12 +106,21 @@ impl SignQueue {
                 other => other,
             }
         } {
+            let sign_id = indexed.id.clone();
+            if self.my_requests.iter().any(|req| req.indexed.id == sign_id)
+                || self.other_requests.contains_key(&sign_id)
+            {
+                tracing::info!(?sign_id, "skipping sign request: already in the sign queue");
+                continue;
+            }
+            crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
+                .with_label_values(&[indexed.chain.as_str(), my_account_id.as_str()])
+                .inc();
             let mut rng = StdRng::from_seed(indexed.args.entropy);
             let subset = stable.keys().cloned().choose_multiple(&mut rng, threshold);
             let in_subset = subset.contains(&self.me);
             let proposer = *subset.choose(&mut rng).unwrap();
             let is_mine = proposer == self.me;
-            let sign_id = indexed.id.clone();
 
             tracing::info!(
                 ?sign_id,
@@ -585,13 +594,14 @@ impl SignatureManager {
                 // TODO: do not insert back presignature when we have a clear model for data consistency
                 // between nodes and utilizing only presignatures that meet threshold requirements.
                 presignature_manager.insert(presignature, true, true).await;
+                self.sign_queue.push_failed(my_request);
                 continue;
             }
 
             let sign_id = my_request.indexed.id.clone();
             let presignature_id = presignature.id;
             if let Err(InitializationError::BadParameters(err)) =
-                self.generate(presignature, my_request, cfg)
+                self.generate(presignature, my_request.clone(), cfg)
             {
                 tracing::warn!(
                     ?sign_id,
@@ -599,6 +609,7 @@ impl SignatureManager {
                     ?err,
                     "failed to start signature generation: trashing presignature"
                 );
+                self.sign_queue.push_failed(my_request);
                 continue;
             }
         }

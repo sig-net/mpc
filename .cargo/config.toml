@@ -13,3 +13,14 @@ rustflags = [
   "-C", "link-arg=-undefined",
   "-C", "link-arg=dynamic_lookup",
 ]
+
+# This is basically a prebuild script used to build the node/contract before running
+# integration-tests.
+[target.'cfg(not(target = "wasm32-unknown-unknown"))']
+runner = "./setup.sh"
+
+
+[alias]
+build-node = "build -p mpc-node --release"
+build-test = "build -p integration-tests --tests"
+run-test = "test -p integration-tests -- --show-output"

@@ -63,3 +63,8 @@ mpc-contract.workspace = true
 mpc-crypto.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
+
+[features]
+default = []
+# utilized for benchmarking the node:
+bench = []

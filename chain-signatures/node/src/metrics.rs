@@ -1,9 +1,9 @@
-pub use prometheus::{
-    self, core::MetricVec, core::MetricVecBuilder, exponential_buckets, linear_buckets, Counter,
-    CounterVec, Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter,
-    IntCounterVec, IntGauge, IntGaugeVec, Opts, Result, TextEncoder,
-};
 use std::sync::LazyLock;
+use std::sync::Mutex;
+
+use prometheus::{
+    self, exponential_buckets, CounterVec, HistogramOpts, HistogramVec, IntGaugeVec, Opts, Result,
+};
 
 pub(crate) static NODE_RUNNING: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec(
@@ -18,7 +18,7 @@ pub(crate) static NUM_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
         "multichain_sign_requests_count",
         "number of multichain sign requests, marked by sign requests indexed",
-        &["node_account_id"],
+        &["chain", "node_account_id"],
     )
     .unwrap()
 });
@@ -36,7 +36,7 @@ pub(crate) static NUM_SIGN_SUCCESS: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
         "multichain_sign_requests_success",
         "number of successful multichain sign requests, marked by publish()",
-        &["node_account_id"],
+        &["chain", "node_account_id"],
     )
     .unwrap()
 });
@@ -45,39 +45,28 @@ pub(crate) static SIGN_TOTAL_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| 
     try_create_histogram_vec(
         "multichain_sign_latency_sec",
         "Latency of multichain signing, start from indexing sign request, end when publish() called.",
-        &["node_account_id"],
+        &["chain", "node_account_id"],
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
     .unwrap()
 });
 
-pub(crate) static SIGN_GENERATION_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
-    try_create_histogram_vec(
+pub(crate) static SIGN_GENERATION_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
+    Histogram::new(
         "multichain_sign_gen_latency_sec",
         "Latency of multichain signing, from start signature generation to completion.",
         &["node_account_id"],
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
-    .unwrap()
 });
 
-pub(crate) static SIGN_RESPOND_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
-    try_create_histogram_vec(
+pub(crate) static SIGN_RESPOND_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
+    Histogram::new(
         "multichain_sign_respond_latency_sec",
         "Latency of multichain signing, from received publish request to publish complete.",
-        &["node_account_id"],
+        &["chain", "node_account_id"],
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
-    .unwrap()
-});
-
-pub(crate) static LATEST_BLOCK_HEIGHT: LazyLock<IntGaugeVec> = LazyLock::new(|| {
-    try_create_int_gauge_vec(
-        "multichain_latest_block_height",
-        "Latest block height seen by the node",
-        &["node_account_id"],
-    )
-    .unwrap()
 });
 
 pub(crate) static TRIPLE_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
@@ -90,14 +79,13 @@ pub(crate) static TRIPLE_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub(crate) static PRESIGNATURE_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
-    try_create_histogram_vec(
+pub(crate) static PRESIGNATURE_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
+    Histogram::new(
         "multichain_presignature_latency_sec",
         "Latency of multichain presignature generation, start from starting generation, end when presignature generation complete.",
         &["node_account_id"],
         Some(exponential_buckets(1.0, 1.5, 20).unwrap()),
     )
-    .unwrap()
 });
 
 pub(crate) static SIGN_QUEUE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
@@ -273,7 +261,7 @@ pub(crate) static NUM_SIGN_SUCCESS_30S: LazyLock<CounterVec> = LazyLock::new(|| 
     try_create_counter_vec(
             "multichain_sign_requests_success_30s",
             "number of successful multichain sign requests that finished within 30s, marked by publish()",
-            &["node_account_id"],
+            &["chain", "node_account_id"],
         )
         .unwrap()
 });
@@ -406,7 +394,7 @@ pub(crate) static SIGNATURE_PUBLISH_FAILURES: LazyLock<CounterVec> = LazyLock::n
     try_create_counter_vec(
         "multichain_signature_publish_failures",
         "number of failed signature publish",
-        &["node_account_id"],
+        &["chain", "node_account_id"],
     )
     .unwrap()
 });
@@ -479,20 +467,29 @@ pub(crate) static PROTOCOL_ITER_CNT: LazyLock<CounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub(crate) static NUM_SIGN_REQUESTS_ETH: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
-        "multichain_sign_requests_count_eth",
-        "number of multichain sign requests from ethereum chain, marked by sign requests indexed",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
-
 pub(crate) static CONFIGURATION_DIGEST: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec(
         "multichain_configuration_digest",
         "Configuration digest",
         &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static LATEST_BLOCK_NUMBER: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_latest_block_number",
+        "Latest block number seen by the node",
+        &["chain", "node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static NUM_UNIQUE_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_sign_requests_count_unique",
+        "number of multichain sign requests, marked by sign requests indexed and deduped",
+        &["chain", "node_account_id"],
     )
     .unwrap()
 });
@@ -539,5 +536,49 @@ fn check_metric_multichain_prefix(name: &str) -> Result<()> {
             "Metrics are expected to start with 'multichain_', got {}",
             name
         )))
+    }
+}
+
+pub struct Histogram {
+    pub histogram: HistogramVec,
+    pub label_values: Mutex<Vec<String>>,
+    pub exact: Mutex<Vec<f64>>,
+}
+
+impl Histogram {
+    pub fn new(name: &str, help: &str, labels: &[&str], buckets: Option<Vec<f64>>) -> Self {
+        let histogram = try_create_histogram_vec(name, help, labels, buckets).unwrap();
+        Self {
+            histogram,
+            label_values: Mutex::new(Vec::new()),
+            exact: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[cfg(feature = "bench")]
+    pub fn with_label_values(&self, values: &[&str]) -> &Self {
+        let mut label_values = self.label_values.lock().unwrap();
+        *label_values = values.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    #[cfg(not(feature = "bench"))]
+    pub fn with_label_values(&self, values: &[&str]) -> prometheus::Histogram {
+        self.histogram.with_label_values(values)
+    }
+
+    pub fn observe(&self, value: f64) {
+        let mut exact = self.exact.lock().unwrap();
+        exact.push(value);
+
+        let label_values = self.label_values.lock().unwrap();
+        let label_values = label_values.iter().map(String::as_str).collect::<Vec<_>>();
+        self.histogram
+            .with_label_values(&label_values)
+            .observe(value);
+    }
+
+    pub fn exact(&self) -> Vec<f64> {
+        self.exact.lock().unwrap().clone()
     }
 }

@@ -10,7 +10,6 @@ node_configs = [
   {
     # Each node has a unique account ID
     account   = "{your_near_account_id}"
-    cipher_pk = "<your_cipher_pk>"
     # These 3 values below should match your secret names in google secrets manager
     account_sk_secret_id = "multichain-account-sk-mainnet-0"
     cipher_sk_secret_id  = "multichain-cipher-sk-mainnet-0"
