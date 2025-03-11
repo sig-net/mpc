@@ -575,6 +575,7 @@ impl SignatureManager {
             .with_label_values(&[self.my_account_id.as_str()])
             .set(self.sign_queue.len_mine() as i64);
 
+        let mut retry = Vec::new();
         while let Some(presignature) = {
             if self.sign_queue.is_empty_mine() {
                 None
@@ -591,13 +592,15 @@ impl SignatureManager {
                 intersect_vec(&[stable, &presignature.participants, &my_request.participants]);
             if participants.len() < self.threshold {
                 tracing::warn!(
+                    target: "sign[request]",
+                    sign_id = ?my_request.indexed.id,
+                    presignature_id = ?presignature.id,
                     ?participants,
-                    "intersection of stable participants and presignature participants is less than threshold, trashing presignature"
+                    "intersection < threshold, trashing presignature"
                 );
-                // TODO: do not insert back presignature when we have a clear model for data consistency
-                // between nodes and utilizing only presignatures that meet threshold requirements.
-                presignature_manager.insert(presignature, true, true).await;
-                self.sign_queue.push_failed(my_request);
+                retry.push(my_request);
+                // TODO: have protocol state sync with the protocol state of other nodes eventually
+                // so that we have storage consistency.
                 continue;
             }
 
@@ -606,15 +609,19 @@ impl SignatureManager {
             if let Err(InitializationError::BadParameters(err)) =
                 self.generate(presignature, my_request.clone(), cfg)
             {
+                retry.push(my_request);
                 tracing::warn!(
                     ?sign_id,
                     presignature_id,
                     ?err,
                     "failed to start signature generation: trashing presignature"
                 );
-                self.sign_queue.push_failed(my_request);
                 continue;
             }
+        }
+
+        for request in retry {
+            self.sign_queue.push_failed(request);
         }
     }
 
