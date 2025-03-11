@@ -208,14 +208,21 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             }
             tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
 
-            let (indexer_handle, indexer) = indexer::run(
-                &indexer_options,
-                &mpc_contract_id,
-                &account_id,
-                sign_tx.clone(),
-                app_data_storage.clone(),
-                rpc_client.clone(),
-            )?;
+            // NEAR Indexer is only used for integration tests
+            // TODO: Remove this once we have integration tests built on other chains
+            let (indexer_handle, indexer) = if storage_options.env == "integration-tests" {
+                let (handle, idx) = indexer::run(
+                    &indexer_options,
+                    &mpc_contract_id,
+                    &account_id,
+                    sign_tx.clone(),
+                    app_data_storage.clone(),
+                    rpc_client.clone(),
+                )?;
+                (Some(handle), Some(idx))
+            } else {
+                (None, None)
+            };
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
@@ -295,7 +302,9 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_handle.await?;
 
                 eth_indexer_handle.abort();
-                indexer_handle.join().unwrap()?;
+                if let Some(indexer_handle) = indexer_handle {
+                    indexer_handle.join().unwrap()?;
+                }
                 system_handle.abort();
 
                 anyhow::Ok(())

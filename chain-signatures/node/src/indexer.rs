@@ -81,7 +81,7 @@ struct UnvalidatedContractSignRequest {
 }
 
 #[derive(Clone)]
-pub struct Indexer {
+pub struct NearIndexer {
     app_data_storage: AppDataStorage,
     last_updated_timestamp: Arc<RwLock<Instant>>,
     latest_block_timestamp_nanosec: Arc<RwLock<Option<u64>>>,
@@ -89,7 +89,7 @@ pub struct Indexer {
     behind_threshold: Duration,
 }
 
-impl Indexer {
+impl NearIndexer {
     fn new(app_data_storage: AppDataStorage, options: &Options) -> Self {
         Self {
             app_data_storage: app_data_storage.clone(),
@@ -165,7 +165,7 @@ struct Context {
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
-    indexer: Indexer,
+    indexer: NearIndexer,
 }
 
 async fn handle_block(
@@ -305,7 +305,7 @@ pub fn run(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     rpc_client: near_fetch::Client,
-) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, Indexer)> {
+) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, NearIndexer)> {
     tracing::info!(
         s3_bucket = options.s3_bucket,
         s3_region = options.s3_region,
@@ -314,7 +314,7 @@ pub fn run(
         "starting indexer"
     );
 
-    let indexer = Indexer::new(app_data_storage.clone(), options);
+    let indexer = NearIndexer::new(app_data_storage.clone(), options);
     let context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
         node_account_id: node_account_id.clone(),
