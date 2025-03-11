@@ -1,7 +1,7 @@
 mod error;
 
 use self::error::Error;
-use crate::indexer::Indexer;
+use crate::indexer::NearIndexer;
 use crate::protocol::NodeState;
 use crate::web::error::Result;
 use anyhow::Context;
@@ -20,14 +20,14 @@ use tokio::sync::{mpsc::Sender, RwLock};
 struct AxumState {
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
-    indexer: Indexer,
+    indexer: Option<NearIndexer>,
 }
 
 pub async fn run(
     port: u16,
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
-    indexer: Indexer,
+    indexer: Option<NearIndexer>,
 ) {
     tracing::info!("starting web server");
     let axum_state = AxumState {
@@ -117,9 +117,16 @@ pub enum StateView {
 #[tracing::instrument(level = "debug", skip_all)]
 async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
     tracing::debug!("fetching state");
-    // TODO: rename to last_processed_block when making other breaking changes
-    let latest_block_height = state.indexer.last_processed_block().await.unwrap_or(0);
-    let is_stable = state.indexer.is_stable().await;
+
+    // TODO: remove once we have integration tests built using other chains
+    let (latest_block_height, is_stable) = if let Some(indexer) = &state.indexer {
+        let latest_block_height = indexer.last_processed_block().await.unwrap_or(0);
+        let is_stable = indexer.is_stable().await;
+        (latest_block_height, is_stable)
+    } else {
+        (0, true)
+    };
+
     let protocol_state = state.protocol_state.read().await;
 
     match &*protocol_state {
