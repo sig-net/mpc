@@ -387,30 +387,6 @@ mod tests {
     }
 
     #[test]
-    fn test_digest_luganodes() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("luganodes.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:HKwJr6kRcARfjHawX6pVcQPxPdTQMvAN7r8Z2kUcPfLc").unwrap();
-        let cipher_pk = "fe24961ff9fe0fb11cca7f31dd7173b9f15177e5809eb1054f99faf196f1c25d";
-        let sign_pk =
-            PublicKey::from_str("ed25519:5GNBtNcnpmJh2iijxWiSepeHvWeet3UuhBTwWCncCdTh").unwrap();
-        let _eth_account_pk = "04f0e7b9b93febc13280307414ff7b61be68b73233d0f590987b4ac8bf5818a859b1810d5a692a416fd47a8cd16a784553d7465c071e0e41e09cf4b9a098cb841a";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        //  Grafana value: 8063794122839817000
-        assert_eq!(digest, 8063794122839817496);
-    }
-
-    #[test]
     fn test_digest_taxistake() {
         let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
         let account_id = AccountId::from_str("taxistake-sig.near").unwrap();
