@@ -421,13 +421,12 @@ impl PresignatureManager {
                 ]);
                 if presig_participants.len() < self.threshold {
                     tracing::warn!(
+                        target: "presign[stockpile]",
+                        triple0 = triple0.id,
+                        triple1 = triple1.id,
                         participants = ?presig_participants,
-                        "running: the intersection of participants is less than the threshold"
+                        "intersection < threshold, trashing two triples"
                     );
-                    // TODO: do not insert back triples when we have a clear model for data consistency
-                    // between nodes and utilizing only triples that meet threshold requirements.
-                    triple_manager.insert(triple0, true, true).await;
-                    triple_manager.insert(triple1, true, true).await;
                 } else {
                     self.generate(
                         &presig_participants,
