@@ -964,6 +964,16 @@ impl MessageOutbox {
     ) {
         let start = Instant::now();
         let mut send_tasks = Vec::new();
+
+        let msg_send_delay_metric =
+            crate::metrics::MSG_CLIENT_SEND_DELAY.with_label_values(&[self.account_id.as_str()]);
+        let num_send_encrypted_failure_metric = crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
+            .with_label_values(&[self.account_id.as_str()]);
+        let send_encrypted_latency_metric =
+            crate::metrics::SEND_ENCRYPTED_LATENCY.with_label_values(&[self.account_id.as_str()]);
+        let failed_send_encrypted_latency_metric = crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
+            .with_label_values(&[self.account_id.as_str()]);
+
         for ((from, to), encrypted) in encrypted {
             for (encrypted_partition, partition) in encrypted {
                 // guaranteed to unwrap due to our previous loop check:
@@ -975,21 +985,25 @@ impl MessageOutbox {
                     .with_label_values(&[account_id.as_str()])
                     .inc_by(partition.messages.len() as f64);
 
+                let msg_send_delay_metric = msg_send_delay_metric.clone();
+                let num_send_encrypted_failure_metric = num_send_encrypted_failure_metric.clone();
+                let send_encrypted_latency_metric = send_encrypted_latency_metric.clone();
+                let failed_send_encrypted_latency_metric =
+                    failed_send_encrypted_latency_metric.clone();
+
                 let client = self.client.clone();
                 send_tasks.push(tokio::spawn(async move {
                     let start = Instant::now();
+                    for msg_inbox_time in partition.timestamps.iter() {
+                        msg_send_delay_metric.observe((start - *msg_inbox_time).as_millis() as f64);
+                    }
                     if let Err(err) = client.msg(url, &[&encrypted_partition]).await {
-                        crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
-                            .with_label_values(&[account_id.as_str()])
-                            .inc_by(partition.messages.len() as f64);
-                        crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
-                            .with_label_values(&[account_id.as_str()])
+                        num_send_encrypted_failure_metric.inc_by(partition.messages.len() as f64);
+                        failed_send_encrypted_latency_metric
                             .observe(start.elapsed().as_millis() as f64);
                         Err(((from, to), partition, err))
                     } else {
-                        crate::metrics::SEND_ENCRYPTED_LATENCY
-                            .with_label_values(&[account_id.as_str()])
-                            .observe(start.elapsed().as_millis() as f64);
+                        send_encrypted_latency_metric.observe(start.elapsed().as_millis() as f64);
                         Ok(partition.messages.len())
                     }
                 }));
