@@ -4,6 +4,7 @@ use near_primitives::{borsh::BorshDeserialize, types::AccountId};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
+    hash::Hash,
     str::FromStr,
 };
 
@@ -345,7 +346,7 @@ impl From<mpc_contract::primitives::Votes> for Votes {
     }
 }
 
-pub fn intersect(sets: &[&[Participant]]) -> HashSet<Participant> {
+pub fn intersect<T: Copy + Hash + Eq>(sets: &[&[T]]) -> HashSet<T> {
     if let Some((first, rest)) = sets.split_first() {
         let mut intersection = first.iter().copied().collect::<HashSet<_>>();
         for set in rest {
@@ -358,6 +359,19 @@ pub fn intersect(sets: &[&[Participant]]) -> HashSet<Participant> {
     }
 }
 
-pub fn intersect_vec(sets: &[&[Participant]]) -> Vec<Participant> {
+pub fn intersect_hash<T: Clone + Hash + Eq>(sets: impl Iterator<Item = HashSet<T>>) -> HashSet<T> {
+    let mut sets = sets.into_iter();
+    let Some(first) = sets.next() else {
+        return HashSet::new();
+    };
+    let mut intersection = first.clone();
+    for set in sets {
+        intersection.retain(|item| set.contains(item));
+    }
+
+    intersection
+}
+
+pub fn intersect_vec<T: Copy + Hash + Eq>(sets: &[&[T]]) -> Vec<T> {
     intersect(sets).into_iter().collect()
 }

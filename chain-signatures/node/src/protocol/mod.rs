@@ -8,6 +8,7 @@ pub mod presignature;
 pub mod signature;
 pub mod state;
 pub mod triple;
+pub mod sync;
 
 pub use consensus::ConsensusError;
 pub use contract::primitives::ParticipantInfo;

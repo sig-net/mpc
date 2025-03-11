@@ -1,7 +1,10 @@
+use crate::protocol::sync::{SyncUpdate, SyncView};
 use crate::web::StateView;
 use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
 use reqwest::IntoUrl;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::str::Utf8Error;
 use std::time::Duration;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
@@ -60,18 +63,22 @@ impl NodeClient {
         }
     }
 
-    async fn post_msg(&self, url: &Url, msg: &[&Ciphered]) -> Result<(), RequestError> {
+    pub async fn post_json<T: Serialize + ?Sized, R: DeserializeOwned>(
+        &self,
+        url: &Url,
+        payload: &T,
+    ) -> Result<R, RequestError> {
         let resp = self
             .http
             .post(url.clone())
             .header("content-type", "application/json")
-            .json(&msg)
+            .json(payload)
             .send()
             .await?;
 
         let status = resp.status();
         if status.is_success() {
-            Ok(())
+            Ok(resp.json::<R>().await?)
         } else {
             // TODO: parse response body and convert to mpc_node::Error type.
             let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
@@ -79,6 +86,10 @@ impl NodeClient {
             tracing::warn!("failed to send a message to {url} with code {status}: {resp}");
             Err(RequestError::Unsuccessful(status, resp.into()))
         }
+    }
+
+    async fn post_msg(&self, url: &Url, msg: &[&Ciphered]) -> Result<(), RequestError> {
+        self.post_json(url, msg).await
     }
 
     pub async fn msg(&self, base: impl IntoUrl, msg: &[&Ciphered]) -> Result<(), RequestError> {
@@ -105,5 +116,16 @@ impl NodeClient {
             .await?;
 
         Ok(resp.json::<StateView>().await?)
+    }
+
+    pub async fn sync(
+        &self,
+        base: impl IntoUrl,
+        update: &SyncUpdate,
+    ) -> Result<SyncView, RequestError> {
+        let mut url = base.into_url()?;
+        url.set_path("sync");
+
+        self.post_json(&url, update).await
     }
 }

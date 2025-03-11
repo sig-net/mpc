@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use near_account_id::AccountId;
@@ -32,6 +33,15 @@ pub struct Presignature {
     pub id: PresignatureId,
     pub output: PresignOutput<Secp256k1>,
     pub participants: Vec<Participant>,
+}
+
+impl fmt::Debug for Presignature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Presignature")
+            .field("id", &self.id)
+            .field("participants", &self.participants)
+            .finish()
+    }
 }
 
 impl Serialize for Presignature {

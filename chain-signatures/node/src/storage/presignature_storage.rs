@@ -49,6 +49,18 @@ impl PresignatureStorage {
             .map_err(StoreError::Connect)
     }
 
+    pub async fn fetch_mine(&self) -> StoreResult<Vec<PresignatureId>> {
+        let mut conn = self.connect().await?;
+        let result: Vec<PresignatureId> = conn.smembers(&self.mine_key).await?;
+        Ok(result)
+    }
+
+    pub async fn fetch_ids(&self) -> StoreResult<Vec<PresignatureId>> {
+        let mut conn = self.connect().await?;
+        let result: Vec<PresignatureId> = conn.hkeys(&self.presig_key).await?;
+        Ok(result)
+    }
+
     /// Insert a presignature into the storage. If `mine` is true, the presignature will be
     /// owned by the current node. If `back` is true, the presignature will be marked as unused.
     pub async fn insert(
