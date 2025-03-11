@@ -33,6 +33,7 @@ use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
 use reqwest::IntoUrl;
+use std::fmt;
 use std::path::Path;
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
@@ -157,7 +158,7 @@ impl MpcSignProtocol {
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
         config: Arc<RwLock<Config>>,
         mesh_state: Arc<RwLock<MeshState>>,
-    ) -> anyhow::Result<()> {
+    ) {
         let my_account_id = self.ctx.account_id.as_str();
         let _span = tracing::info_span!("running", my_account_id);
         let my_account_id = self.ctx.account_id.clone();
@@ -350,6 +351,21 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
 pub enum Chain {
     NEAR,
     Ethereum,
+}
+
+impl Chain {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Chain::NEAR => "NEAR",
+            Chain::Ethereum => "Ethereum",
+        }
+    }
+}
+
+impl fmt::Display for Chain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 #[cfg(test)]

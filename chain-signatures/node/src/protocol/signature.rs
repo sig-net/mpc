@@ -1,5 +1,5 @@
 use super::consensus::ConsensusCtx;
-use super::contract::primitives::Participants;
+use super::contract::primitives::intersect_vec;
 use super::state::RunningState;
 use crate::kdf::derive_delta;
 use crate::protocol::message::{MessageChannel, SignatureMessage};
@@ -98,28 +98,48 @@ impl SignQueue {
         self.len() == 0
     }
 
+    fn contains(&self, sign_id: &SignId) -> bool {
+        self.my_requests
+            .iter()
+            .any(|req| &req.indexed.id == sign_id)
+            || self
+                .other_requests
+                .iter()
+                .any(|req| &req.indexed.id == sign_id)
+    }
+
     pub async fn organize(
         &mut self,
         threshold: usize,
-        stable: &Participants,
+        stable: &[Participant],
         my_account_id: &AccountId,
     ) {
+        let mut stable = stable.to_vec();
+        stable.sort();
+
         let mut sign_rx = self.sign_rx.write().await;
         while let Ok(indexed) = {
             match sign_rx.try_recv() {
                 err @ Err(TryRecvError::Disconnected) => {
-                    tracing::error!("sign queue channel disconnected");
+                    tracing::error!(target: "sign[queue]", "channel disconnected");
                     err
                 }
                 other => other,
             }
         } {
+            let sign_id = indexed.id.clone();
+            if self.contains(&sign_id) {
+                tracing::info!(?sign_id, "skipping sign request: already in the sign queue");
+                continue;
+            }
+            crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
+                .with_label_values(&[indexed.chain.as_str(), my_account_id.as_str()])
+                .inc();
             let mut rng = StdRng::from_seed(indexed.args.entropy);
-            let subset = stable.keys().cloned().choose_multiple(&mut rng, threshold);
+            let subset = stable.iter().copied().choose_multiple(&mut rng, threshold);
             let in_subset = subset.contains(&self.me);
             let proposer = *subset.choose(&mut rng).unwrap();
             let is_mine = proposer == self.me;
-            let sign_id = indexed.id.clone();
 
             tracing::info!(
                 ?sign_id,
@@ -651,16 +671,16 @@ impl SignatureManager {
 
     pub async fn handle_requests(
         &mut self,
-        stable: &Participants,
+        stable: &[Participant],
         presignature_manager: &mut PresignatureManager,
         cfg: &ProtocolConfig,
     ) {
         if stable.len() < self.threshold {
             tracing::warn!(
-                "Require at least {} stable participants to handle_requests, got {}: {:?}",
+                "require at least {} stable participants to handle_requests, got {}: {:?}",
                 self.threshold,
                 stable.len(),
-                stable.keys_vec()
+                stable,
             );
             return;
         }
@@ -689,15 +709,16 @@ impl SignatureManager {
             };
 
             let participants =
-                stable.intersection(&[&presignature.participants, &my_request.participants]);
+                intersect_vec(&[stable, &presignature.participants, &my_request.participants]);
             if participants.len() < self.threshold {
                 tracing::warn!(
-                    participants = ?participants.keys_vec(),
+                    ?participants,
                     "intersection of stable participants and presignature participants is less than threshold, trashing presignature"
                 );
                 // TODO: do not insert back presignature when we have a clear model for data consistency
                 // between nodes and utilizing only presignatures that meet threshold requirements.
                 presignature_manager.insert(presignature, true, true).await;
+                self.sign_queue.retry(my_request);
                 continue;
             }
 
@@ -705,6 +726,7 @@ impl SignatureManager {
                 .await;
         }
 
+        // TODO: might want to handle the case of bad init somehow
         while let Some(request) = self.sign_queue.take() {
             let status = PresignatureStatus::Waiting(self.presignatures.clone());
             self.spawn_generation(status, request, cfg).await;
@@ -736,12 +758,12 @@ impl SignatureManager {
 
     pub fn execute(
         state: &RunningState,
-        stable: &Participants,
+        stable: &[Participant],
         protocol_cfg: &ProtocolConfig,
     ) -> tokio::task::JoinHandle<()> {
         let presignature_manager = state.presignature_manager.clone();
         let signature_manager = state.signature_manager.clone();
-        let stable = stable.clone();
+        let stable = stable.to_vec();
         let protocol_cfg = protocol_cfg.clone();
 
         // NOTE: signatures should only use stable and not active participants. The difference here is that
