@@ -1,9 +1,7 @@
-use core::sync;
 use std::time::Duration;
 
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
-use crate::protocol::sync::{SyncUpdate, SyncView};
 use crate::protocol::ProtocolState;
 use cait_sith::protocol::Participant;
 use std::sync::Arc;

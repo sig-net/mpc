@@ -3,6 +3,7 @@ use crate::gcp::GcpService;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
+use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
 use crate::rpc::{NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
@@ -247,6 +248,12 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth);
+            let (sync_channel, sync) = SyncTask::new(
+                &client,
+                triple_storage.clone(),
+                presignature_storage.clone(),
+                mesh_state.clone(),
+            );
 
             tracing::info!(
                 %digest,
@@ -283,13 +290,19 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 );
 
                 tracing::info!("protocol initialized");
+                let sync_handle = tokio::spawn(sync.run());
                 let rpc_handle = tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
                 let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
                 let system_handle = spawn_system_metrics(account_id.as_str()).await;
-                let protocol_handle =
-                    tokio::spawn(protocol.run(contract_state, config, mesh_state));
+                let protocol_handle = tokio::spawn(protocol.run(
+                    contract_state,
+                    config,
+                    mesh_state,
+                    sync_channel.clone(),
+                ));
                 tracing::info!("protocol thread spawned");
-                let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
+                let web_handle =
+                    tokio::spawn(web::run(web_port, sender, state, indexer, sync_channel));
                 let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");
 
@@ -300,6 +313,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
 
                 mesh_handle.abort();
                 mesh_handle.await?;
+                sync_handle.abort();
+                sync_handle.await?;
 
                 eth_indexer_handle.abort();
                 if let Some(indexer_handle) = indexer_handle {

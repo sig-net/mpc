@@ -89,7 +89,24 @@ impl NodeClient {
     }
 
     async fn post_msg(&self, url: &Url, msg: &[&Ciphered]) -> Result<(), RequestError> {
-        self.post_json(url, msg).await
+        let resp = self
+            .http
+            .post(url.clone())
+            .header("content-type", "application/json")
+            .json(&msg)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            // TODO: parse response body and convert to mpc_node::Error type.
+            let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+            let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
+            tracing::warn!("failed to send a message to {url} with code {status}: {resp}");
+            Err(RequestError::Unsuccessful(status, resp.into()))
+        }
     }
 
     pub async fn msg(&self, base: impl IntoUrl, msg: &[&Ciphered]) -> Result<(), RequestError> {

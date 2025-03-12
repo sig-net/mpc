@@ -7,8 +7,8 @@ pub mod message;
 pub mod presignature;
 pub mod signature;
 pub mod state;
-pub mod triple;
 pub mod sync;
+pub mod triple;
 
 pub use consensus::ConsensusError;
 pub use contract::primitives::ParticipantInfo;
@@ -27,6 +27,7 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::MessageReceiver as _;
+use crate::protocol::sync::SyncChannel;
 use crate::rpc::{NearClient, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
@@ -167,6 +168,7 @@ impl MpcSignProtocol {
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
         config: Arc<RwLock<Config>>,
         mesh_state: Arc<RwLock<MeshState>>,
+        sync_channel: SyncChannel,
     ) {
         let my_account_id = self.ctx.account_id.as_str();
         let _span = tracing::info_span!("running", my_account_id);

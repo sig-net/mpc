@@ -298,8 +298,8 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     };
 
     let message_options = node_client::Options {
-        timeout: 1000,
-        state_timeout: 1000,
+        timeout: 2000,
+        state_timeout: 2000,
     };
 
     Ok(Context {

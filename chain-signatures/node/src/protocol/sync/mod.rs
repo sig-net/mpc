@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use cait_sith::protocol::Participant;
+use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::JoinSet;
@@ -11,7 +14,7 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::storage::{PresignatureStorage, TripleStorage};
 
-use super::contract::primitives::{intersect, intersect_vec};
+use super::contract::primitives::{intersect, intersect_vec, Participants};
 use super::presignature::{Presignature, PresignatureId};
 use super::triple::{Triple, TripleId};
 
@@ -20,6 +23,19 @@ pub struct SyncUpdate {
     // from: Participant,
     triples: Vec<TripleId>,
     presignatures: Vec<PresignatureId>,
+}
+
+impl SyncUpdate {
+    pub fn empty() -> Self {
+        Self {
+            triples: Vec::new(),
+            presignatures: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.triples.is_empty() && self.presignatures.is_empty()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,7 +86,7 @@ impl SyncTask {
         (syncer, task)
     }
 
-    async fn process_sync(&self, update: SyncUpdate) -> anyhow::Result<SyncView> {
+    async fn process_sync(&self, update: SyncUpdate) -> SyncView {
         // TODO: check that `from` actually owns the triples/presignatures.
         // TODO: log the errors from storage.
         // TODO: make each process_sync a separate task
@@ -79,48 +95,146 @@ impl SyncTask {
 
         // TODO: maybe instead of Vec<T> we should have HashSet<T> for more efficient intersections.
         // TODO: remove the triples/presignatures in this task or another one.
-        Ok(SyncView {
+        SyncView {
             triples: intersect(&[&update.triples, &triple_ids]),
             presignatures: intersect(&[&update.presignatures, &presignature_ids]),
-        })
+        }
     }
 
     pub async fn run(mut self) {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
         let mut mesh_seen_triples = HashMap::new();
         let mut mesh_seen_presignatures = HashMap::new();
+
+        // NOTE: initial broadcast does nothing, since we need to set it for tokio::pin! to work.
+        // let update = SyncUpdate::empty();
+        // let active = Participants::default();
+        // let broadcast = broadcast_sync_update(self.client.clone(), update, active);
+        // tokio::pin!(broadcast);
+        // let timeout = std::time::Duration::from_secs(3);
+        // let sleep = tokio::time::sleep_until(tokio::time::Instant::now() + timeout);
+        // tokio::pin!(sleep);
+
+        // let broadcast = tokio::spawn(async { None });
+        // tokio::pin!(broadcast);
+
+        let mut broadcast: Option<tokio::task::JoinHandle<Option<Vec<(Participant, SyncView)>>>> =
+            None;
+        // let mut broadcast = tokio::spawn(async { None });
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let update = self.new_update().await;
-                    let views = self.broadcast_sync(update).await;
-
-                    mesh_seen_triples.clear();
-                    mesh_seen_presignatures.clear();
-                    for (p, view) in views {
-                        for triple in view.triples {
-                            let entry = mesh_seen_triples.entry(triple).or_insert_with(Vec::new);
-                            // entry.insert(p);
-                            entry.push(p);
+                // _ = &mut sleep => {
+                    // previous broadcast has not finished yet:
+                    // if broadcast.is_some() {
+                    //     continue;
+                    // }
+                    if let Some(handle) = broadcast.as_mut() {
+                        if !handle.is_finished() {
+                            continue;
                         }
 
-                        for presignature in view.presignatures {
-                            let entry = mesh_seen_presignatures.entry(presignature).or_insert_with(Vec::new);
-                            // entry.insert(p);
-                            entry.push(p);
+                        tracing::info!("processing broadcast");
+                        let start = Instant::now();
+                        let views = match handle.await {
+                            Ok(Some(views)) => views,
+                            Ok(None) => {
+                                broadcast = None;
+                                continue;
+                            }
+                            Err(err) => {
+                                tracing::error!(?err, "broadcast join handle failed");
+                                broadcast = None;
+                                continue;
+                            }
+                        };
+                        mesh_seen_triples.clear();
+                        mesh_seen_presignatures.clear();
+                        for (p, view) in views {
+                            for triple in view.triples {
+                                let entry = mesh_seen_triples.entry(triple).or_insert_with(Vec::new);
+                                // entry.insert(p);
+                                entry.push(p);
+                            }
+
+                            for presignature in view.presignatures {
+                                let entry = mesh_seen_presignatures.entry(presignature).or_insert_with(Vec::new);
+                                // entry.insert(p);
+                                entry.push(p);
+                            }
                         }
+                        tracing::info!(elapsed = ?start.elapsed(), "processed broadcast");
+                        broadcast = None;
+                        continue;
                     }
 
-                    // TODO: pull threshold from contract updates:
-                    // mesh_seen_triples.retain(|_, v| v.len() >= threshold);
-                    // mesh_seen_presignatures.retain(|_, v| v.len() >= threshold);
+                    let Some(update) = self.new_update().await else {
+                        continue;
+                    };
 
+                    let active = {
+                        let state = self.mesh_state.read().await;
+                        state.active.clone()
+                    };
+
+                    tracing::info!("commiting broadcast");
+                    broadcast = Some(tokio::spawn(broadcast_sync_update(self.client.clone(), update, active)));
+                    // broadcast.set(broadcast_sync_update(self.client.clone(), update, active));
+                    // broadcast.set(tokio::spawn(broadcast_sync_update(self.client.clone(), update, active)));
+                    // sleep.set(tokio::time::sleep_until(tokio::time::Instant::now() + timeout));
                 }
+                // broadcast completed
+                // Ok(Some(views)) = async {
+                //     if let Some(handle) = broadcast.as_mut() {
+                //         if handle.is_finished() {
+                //             Ok(None)
+                //         } else {
+                //             tracing::info!("awaiting broadcast");
+                //             handle.await
+                //         }
+                //     } else {
+                //         Ok(None)
+                //     }
+                // } => {
+                //     // let start = Instant::now();
+                //     // let views = self.broadcast_sync_update().await;
+
+                //     tracing::info!("processing broadcast");
+
+                //     mesh_seen_triples.clear();
+                //     mesh_seen_presignatures.clear();
+                //     for (p, view) in views {
+                //         for triple in view.triples {
+                //             let entry = mesh_seen_triples.entry(triple).or_insert_with(Vec::new);
+                //             // entry.insert(p);
+                //             entry.push(p);
+                //         }
+
+                //         for presignature in view.presignatures {
+                //             let entry = mesh_seen_presignatures.entry(presignature).or_insert_with(Vec::new);
+                //             // entry.insert(p);
+                //             entry.push(p);
+                //         }
+                //     }
+                //     broadcast = None;
+
+                //     // TODO: pull threshold from contract updates:
+                //     // mesh_seen_triples.retain(|_, v| v.len() >= threshold);
+                //     // mesh_seen_presignatures.retain(|_, v| v.len() >= threshold);
+                // }
                 // TODO: make process updates a separate task.
                 Some(req) = self.sync.update_rx.recv() => {
-                    let view = self.process_sync(req.update).await.unwrap();
-                    req.view_tx.send(view).unwrap();
+                    let start = Instant::now();
+                    let view = self.process_sync(req.update).await;
+                    if let Err(err) = req.view_tx.send(view) {
+                        tracing::error!(?err, "failed to send sync view");
+                    }
+                    tracing::info!(
+                        target: "sync",
+                        elapsed = ?start.elapsed(),
+                        "processed update",
+                    );
                 }
                 // TODO: need to make intersection more robust otherwise we end up trying to find non-existent triples/presignatures.
                 Some(req) = self.sync.request_triple_rx.recv() => {
@@ -143,12 +257,21 @@ impl SyncTask {
         }
     }
 
-    async fn new_update(&self) -> SyncUpdate {
-        SyncUpdate {
+    async fn new_update(&self) -> Option<SyncUpdate> {
+        // let Ok(triples) = self.triples.fetch_mine().await else {
+        //     return None;
+        // };
+        // let Ok(presignatures) = self.presignatures.fetch_mine().await else {
+        //     return None;
+        // };
+        let triples = self.triples.fetch_mine().await.unwrap_or_default();
+        let presignatures = self.presignatures.fetch_mine().await.unwrap_or_default();
+
+        Some(SyncUpdate {
             // from: self.me,
-            triples: self.triples.fetch_mine().await.unwrap(),
-            presignatures: self.presignatures.fetch_mine().await.unwrap(),
-        }
+            triples,
+            presignatures,
+        })
     }
 
     async fn take_two_triple(
@@ -166,7 +289,7 @@ impl SyncTask {
         // that we proposed. This way in a non-BFT environment we are guaranteed to never try
         // to use the same triple as any other node.
 
-        let rng = &mut rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         let mut failed = Vec::new();
         // Try to find a suitable triple pair:
         let found = loop {
@@ -174,7 +297,7 @@ impl SyncTask {
                 break None;
             }
 
-            let two = mesh_seen.keys().choose_multiple(rng, 2);
+            let two = mesh_seen.keys().choose_multiple(&mut rng, 2);
             let (&t0_id, &t1_id) = match two.as_slice() {
                 &[triple0, triple1] => (triple0, triple1),
                 _ => {
@@ -237,12 +360,12 @@ impl SyncTask {
         let active = self.mesh_state.read().await.active.keys_vec();
 
         let mut failed = Vec::new();
-        let rng = &mut rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         let found = loop {
             if mesh_seen.is_empty() {
                 break None;
             }
-            let Some(&presignature_id) = mesh_seen.keys().choose(rng) else {
+            let Some(&presignature_id) = mesh_seen.keys().choose(&mut rng) else {
                 tracing::warn!("unexpected, failed to take a presignature");
                 break None;
             };
@@ -283,38 +406,61 @@ impl SyncTask {
             value: presignature,
         })
     }
+}
 
-    async fn broadcast_sync(&self, update: SyncUpdate) -> Vec<(Participant, SyncView)> {
-        let active = {
-            let state = self.mesh_state.read().await;
-            state.active.clone()
-        };
-
-        let mut tasks = JoinSet::new();
-        let update = Arc::new(update);
-        for (&p, info) in active.iter() {
-            let client = self.client.clone();
-            let update = update.clone();
-            let url = info.url.clone();
-            tasks.spawn(async move {
-                let sync_view = client.sync(&url, &update).await;
-                (p, sync_view)
-            });
-        }
-
-        tasks
-            .join_all()
-            .await
-            .into_iter()
-            .filter_map(|(p, view)| {
-                if let Ok(view) = view {
-                    Some((p, view))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
+async fn broadcast_sync_update(
+    client: NodeClient,
+    update: SyncUpdate,
+    active: Participants,
+) -> Option<Vec<(Participant, SyncView)>> {
+    if update.is_empty() {
+        return None;
     }
+
+    let start = Instant::now();
+
+    let mut tasks = JoinSet::new();
+    let update = Arc::new(update);
+    for (&p, info) in active.iter() {
+        let client = client.clone();
+        let update = update.clone();
+        let url = info.url.clone();
+        tasks.spawn(async move {
+            let start = Instant::now();
+            let sync_view = client.sync(&url, &update).await;
+            tracing::info!(
+                target: "sync",
+                participant = ?p,
+                elapsed = ?start.elapsed(),
+                "sync completed",
+            );
+            (p, sync_view)
+        });
+    }
+
+    let views = tasks
+        .join_all()
+        .await
+        .into_iter()
+        .filter_map(|(p, view)| {
+            if let Ok(view) = view {
+                Some((p, view))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    tracing::info!(
+        target: "sync",
+        elapsed = ?start.elapsed(),
+        responded = ?views.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        // triples = mesh_seen_triples.len(),
+        // presignatures = mesh_seen_presignatures.len(),
+        "broadcast completed",
+    );
+
+    Some(views)
 }
 
 struct SyncUpdateRequest {
@@ -322,6 +468,7 @@ struct SyncUpdateRequest {
     view_tx: oneshot::Sender<SyncView>,
 }
 
+#[derive(Clone)]
 pub struct SyncChannel {
     update_tx: mpsc::Sender<SyncUpdateRequest>,
     request_triple: TripleChannel,
@@ -348,13 +495,14 @@ impl SyncChannel {
         (receiver, sender)
     }
 
-    pub async fn request_update(&mut self, update: SyncUpdate) -> SyncView {
+    pub async fn request_update(&self, update: SyncUpdate) -> SyncView {
         let (view_tx, view_rx) = oneshot::channel();
         self.update_tx
             .send(SyncUpdateRequest { update, view_tx })
             .await
             .unwrap();
-        view_rx.await.unwrap()
+        let view = view_rx.await;
+        view.unwrap()
     }
 
     pub async fn take_two_triple(
@@ -411,6 +559,14 @@ impl<T> ProtocolChannel<T> {
             .unwrap();
 
         resp_rx.await.unwrap()
+    }
+}
+
+impl<T> Clone for ProtocolChannel<T> {
+    fn clone(&self) -> Self {
+        Self {
+            request_tx: self.request_tx.clone(),
+        }
     }
 }
 
