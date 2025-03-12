@@ -8,7 +8,7 @@ use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, RwLock};
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
@@ -108,36 +108,16 @@ impl SyncTask {
         let mut mesh_seen_triples = HashMap::new();
         let mut mesh_seen_presignatures = HashMap::new();
 
-        // NOTE: initial broadcast does nothing, since we need to set it for tokio::pin! to work.
-        // let update = SyncUpdate::empty();
-        // let active = Participants::default();
-        // let broadcast = broadcast_sync_update(self.client.clone(), update, active);
-        // tokio::pin!(broadcast);
-        // let timeout = std::time::Duration::from_secs(3);
-        // let sleep = tokio::time::sleep_until(tokio::time::Instant::now() + timeout);
-        // tokio::pin!(sleep);
-
-        // let broadcast = tokio::spawn(async { None });
-        // tokio::pin!(broadcast);
-
-        let mut broadcast: Option<tokio::task::JoinHandle<Option<Vec<(Participant, SyncView)>>>> =
-            None;
-        // let mut broadcast = tokio::spawn(async { None });
-
+        let mut broadcast = Option::<JoinHandle<Option<Vec<(Participant, SyncView)>>>>::None;
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                // _ = &mut sleep => {
-                    // previous broadcast has not finished yet:
-                    // if broadcast.is_some() {
-                    //     continue;
-                    // }
                     if let Some(handle) = broadcast.as_mut() {
                         if !handle.is_finished() {
                             continue;
                         }
 
-                        tracing::info!("processing broadcast");
+                        tracing::info!(target: "sync", "processing broadcast");
                         let start = Instant::now();
                         let views = match handle.await {
                             Ok(Some(views)) => views,
@@ -156,18 +136,27 @@ impl SyncTask {
                         for (p, view) in views {
                             for triple in view.triples {
                                 let entry = mesh_seen_triples.entry(triple).or_insert_with(Vec::new);
-                                // entry.insert(p);
                                 entry.push(p);
                             }
 
                             for presignature in view.presignatures {
                                 let entry = mesh_seen_presignatures.entry(presignature).or_insert_with(Vec::new);
-                                // entry.insert(p);
                                 entry.push(p);
                             }
                         }
-                        tracing::info!(elapsed = ?start.elapsed(), "processed broadcast");
+
+                        // TODO: pull threshold from contract updates:
+                        // mesh_seen_triples.retain(|_, v| v.len() >= threshold);
+                        // mesh_seen_presignatures.retain(|_, v| v.len() >= threshold);
+
                         broadcast = None;
+                        tracing::info!(
+                            target: "sync",
+                            elapsed = ?start.elapsed(),
+                            triples = mesh_seen_triples.len(),
+                            presignatures = mesh_seen_presignatures.len(),
+                             "processed broadcast",
+                        );
                         continue;
                     }
 
@@ -180,51 +169,9 @@ impl SyncTask {
                         state.active.clone()
                     };
 
-                    tracing::info!("commiting broadcast");
+                    tracing::info!(target: "sync", "commit broadcast");
                     broadcast = Some(tokio::spawn(broadcast_sync_update(self.client.clone(), update, active)));
-                    // broadcast.set(broadcast_sync_update(self.client.clone(), update, active));
-                    // broadcast.set(tokio::spawn(broadcast_sync_update(self.client.clone(), update, active)));
-                    // sleep.set(tokio::time::sleep_until(tokio::time::Instant::now() + timeout));
                 }
-                // broadcast completed
-                // Ok(Some(views)) = async {
-                //     if let Some(handle) = broadcast.as_mut() {
-                //         if handle.is_finished() {
-                //             Ok(None)
-                //         } else {
-                //             tracing::info!("awaiting broadcast");
-                //             handle.await
-                //         }
-                //     } else {
-                //         Ok(None)
-                //     }
-                // } => {
-                //     // let start = Instant::now();
-                //     // let views = self.broadcast_sync_update().await;
-
-                //     tracing::info!("processing broadcast");
-
-                //     mesh_seen_triples.clear();
-                //     mesh_seen_presignatures.clear();
-                //     for (p, view) in views {
-                //         for triple in view.triples {
-                //             let entry = mesh_seen_triples.entry(triple).or_insert_with(Vec::new);
-                //             // entry.insert(p);
-                //             entry.push(p);
-                //         }
-
-                //         for presignature in view.presignatures {
-                //             let entry = mesh_seen_presignatures.entry(presignature).or_insert_with(Vec::new);
-                //             // entry.insert(p);
-                //             entry.push(p);
-                //         }
-                //     }
-                //     broadcast = None;
-
-                //     // TODO: pull threshold from contract updates:
-                //     // mesh_seen_triples.retain(|_, v| v.len() >= threshold);
-                //     // mesh_seen_presignatures.retain(|_, v| v.len() >= threshold);
-                // }
                 // TODO: make process updates a separate task.
                 Some(req) = self.sync.update_rx.recv() => {
                     let start = Instant::now();
@@ -260,12 +207,6 @@ impl SyncTask {
     }
 
     async fn new_update(&self) -> Option<SyncUpdate> {
-        // let Ok(triples) = self.triples.fetch_mine().await else {
-        //     return None;
-        // };
-        // let Ok(presignatures) = self.presignatures.fetch_mine().await else {
-        //     return None;
-        // };
         let triples = self.triples.fetch_mine().await.unwrap_or_default();
         let presignatures = self.presignatures.fetch_mine().await.unwrap_or_default();
 
@@ -314,6 +255,7 @@ impl SyncTask {
             };
             let Some((t1_id, t1_participants)) = mesh_seen.remove_entry(&t1_id) else {
                 tracing::warn!(t1_id, "unexpected, failed to take a seen triple");
+                failed.push((t0_id, t0_participants));
                 break None;
             };
 
@@ -342,7 +284,13 @@ impl SyncTask {
             return None;
         };
         // TODO: make triple_storage.take intake active to do intersection in Lua script side.
-        let (triple0, triple1) = self.triples.take_two_self(triple0, triple1).await.unwrap();
+        let (triple0, triple1) = match self.triples.take_two_self(triple0, triple1).await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::error!(target: "sync", ?err, "failed to take two triples");
+                return None;
+            }
+        };
 
         participants.sort();
         Some(ProtocolResponse {
@@ -457,8 +405,6 @@ async fn broadcast_sync_update(
         target: "sync",
         elapsed = ?start.elapsed(),
         responded = ?views.iter().map(|(p, _)| p).collect::<Vec<_>>(),
-        // triples = mesh_seen_triples.len(),
-        // presignatures = mesh_seen_presignatures.len(),
         "broadcast completed",
     );
 
@@ -503,6 +449,8 @@ impl SyncChannel {
             .send(SyncUpdateRequest { update, view_tx })
             .await
             .unwrap();
+
+        // TODO: add a timeout for the view_rx.
         let view = view_rx.await;
         view.unwrap()
     }
@@ -512,6 +460,7 @@ impl SyncChannel {
         threshold: usize,
     ) -> Option<ProtocolResponse<(Triple, Triple)>> {
         let start = Instant::now();
+        // TODO: add a timeout for the take.
         let result = self.request_triple.take(threshold).await;
         tracing::info!(target: "sync", elapsed = ?start.elapsed(), "take two triple");
         result
@@ -522,6 +471,7 @@ impl SyncChannel {
         threshold: usize,
     ) -> Option<ProtocolResponse<Presignature>> {
         let start = Instant::now();
+        // TODO: add a timeout for the take.
         let result = self.request_presignature.take(threshold).await;
         tracing::info!(target: "sync", elapsed = ?start.elapsed(), "take presignature");
         result

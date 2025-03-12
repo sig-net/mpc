@@ -220,7 +220,7 @@ impl TripleStorage {
             if not redis.call("SREM", KEYS[1], t0) then
                 return {err = "warn: unable to remove mine triple " .. t0}
             end
-            if not redis.call("SPOP", KEYS[1], t1) then
+            if not redis.call("SREM", KEYS[1], t1) then
                 return {err = "warn: unable to remove mine triple " .. t1}
             end
 
