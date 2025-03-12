@@ -242,8 +242,6 @@ impl SignatureGenerator {
 pub struct SignatureManager {
     /// Ongoing signature generation protocols.
     generators: HashMap<SignId, SignatureGenerator>,
-    /// Set of completed signatures
-    completed: HashMap<(SignId, PresignatureId), Instant>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
 
@@ -252,6 +250,7 @@ pub struct SignatureManager {
     threshold: usize,
     public_key: PublicKey,
     epoch: u64,
+    msg: MessageChannel,
 }
 
 impl SignatureManager {
@@ -262,16 +261,17 @@ impl SignatureManager {
         public_key: PublicKey,
         epoch: u64,
         sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+        msg: MessageChannel,
     ) -> Self {
         Self {
             generators: HashMap::new(),
-            completed: HashMap::new(),
             sign_queue: SignQueue::new(me, sign_rx),
             me,
             my_account_id: my_account_id.clone(),
             threshold,
             public_key,
             epoch,
+            msg,
         }
     }
 
@@ -358,18 +358,6 @@ impl SignatureManager {
         cfg: &ProtocolConfig,
         presignature_manager: &mut PresignatureManager,
     ) -> Result<&mut SignatureProtocol, GenerationError> {
-        if self
-            .completed
-            .contains_key(&(sign_id.clone(), presignature_id))
-        {
-            tracing::warn!(
-                ?sign_id,
-                presignature_id,
-                "presignature has already been used to generate a signature"
-            );
-            return Err(GenerationError::AlreadyGenerated);
-        }
-
         let entry = match self.generators.entry(sign_id.clone()) {
             Entry::Vacant(entry) => entry,
             Entry::Occupied(entry) => return Ok(&mut entry.into_mut().protocol),
@@ -394,11 +382,6 @@ impl SignatureManager {
             }
             Err(err @ GenerationError::PresignatureIsMissing(_)) => {
                 tracing::warn!(me = ?self.me, presignature_id, "presignature is missing, can't join signature generation protocol");
-                self.sign_queue.push_failed(request);
-                return Err(err);
-            }
-            Err(err @ GenerationError::PresignatureIsGarbageCollected(_)) => {
-                tracing::warn!(me = ?self.me, presignature_id, "presignature is garbage collected, can't join signature generation protocol");
                 self.sign_queue.push_failed(request);
                 return Err(err);
             }
@@ -455,8 +438,9 @@ impl SignatureManager {
                     Ok(action) => action,
                     Err(err) => {
                         remove.push(sign_id.clone());
-                        self.completed
-                            .insert((sign_id.clone(), generator.presignature_id), Instant::now());
+                        self.msg
+                            .filter_sign(sign_id.clone(), generator.presignature_id)
+                            .await;
 
                         if generator.request.indexed.timestamp.elapsed() < generator.timeout_total {
                             failed.push(sign_id.clone());
@@ -573,8 +557,9 @@ impl SignatureManager {
                         if generator.request.proposer == self.me {
                             rpc.publish(self.public_key, generator.request.clone(), output);
                         }
-                        self.completed
-                            .insert((sign_id.clone(), generator.presignature_id), Instant::now());
+                        self.msg
+                            .filter_sign(sign_id.clone(), generator.presignature_id)
+                            .await;
                         // Do not retain the protocol
                         remove.push(sign_id.clone());
                         if let Some((last_poked, total_wait, total_pokes)) = generator.poked_latest
@@ -679,29 +664,6 @@ impl SignatureManager {
         for request in retry {
             self.sign_queue.push_failed(request);
         }
-    }
-
-    /// Garbage collect all the completed signatures.
-    pub fn garbage_collect(&mut self, cfg: &ProtocolConfig) {
-        let before = self.completed.len();
-        self.completed.retain(|_, timestamp| {
-            timestamp.elapsed() < Duration::from_millis(cfg.signature.garbage_timeout)
-        });
-        let garbage_collected = before.saturating_sub(self.completed.len());
-        if garbage_collected > 0 {
-            tracing::debug!(
-                "garbage collected {} completed signatures",
-                garbage_collected
-            );
-        }
-    }
-
-    pub fn refresh_gc(&mut self, sign_id: &SignId, presignature_id: PresignatureId) -> bool {
-        let entry = self
-            .completed
-            .entry((sign_id.clone(), presignature_id))
-            .and_modify(|e| *e = Instant::now());
-        matches!(entry, Entry::Occupied(_))
     }
 
     pub fn execute(

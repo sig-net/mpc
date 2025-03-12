@@ -1,16 +1,25 @@
+mod filter;
+mod types;
+
+pub use crate::protocol::message::types::{
+    GeneratingMessage, Message, MessageError, MessageFilterId, PresignatureMessage, Protocols,
+    ResharingMessage, SignatureMessage, TripleMessage,
+};
+
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::error::GenerationError;
 use super::presignature::PresignatureId;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
 use crate::node_client::NodeClient;
+use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::Config;
 use crate::protocol::MeshState;
 use crate::types::Epoch;
 use crate::util;
 
 use async_trait::async_trait;
-use cait_sith::protocol::{MessageData, Participant};
+use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_primitives::SignId;
@@ -27,135 +36,22 @@ use tokio::sync::{mpsc, RwLock};
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct GeneratingMessage {
-    pub from: Participant,
-    #[serde(with = "serde_bytes")]
-    pub data: MessageData,
-}
-
-impl From<GeneratingMessage> for Message {
-    fn from(msg: GeneratingMessage) -> Self {
-        Message::Generating(msg)
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct ResharingMessage {
-    pub epoch: Epoch,
-    pub from: Participant,
-    #[serde(with = "serde_bytes")]
-    pub data: MessageData,
-}
-
-impl From<ResharingMessage> for Message {
-    fn from(msg: ResharingMessage) -> Self {
-        Message::Resharing(msg)
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct TripleMessage {
-    pub id: u64,
-    pub epoch: Epoch,
-    pub from: Participant,
-    #[serde(with = "serde_bytes")]
-    pub data: MessageData,
-    // UNIX timestamp as seconds since the epoch
-    pub timestamp: u64,
-}
-
-impl From<TripleMessage> for Message {
-    fn from(msg: TripleMessage) -> Self {
-        Message::Triple(msg)
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct PresignatureMessage {
-    pub id: u64,
-    pub triple0: TripleId,
-    pub triple1: TripleId,
-    pub epoch: Epoch,
-    pub from: Participant,
-    #[serde(with = "serde_bytes")]
-    pub data: MessageData,
-    // UNIX timestamp as seconds since the epoch
-    pub timestamp: u64,
-}
-
-impl From<PresignatureMessage> for Message {
-    fn from(msg: PresignatureMessage) -> Self {
-        Message::Presignature(msg)
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct SignatureMessage {
-    pub id: SignId,
-    pub proposer: Participant,
-    pub presignature_id: PresignatureId,
-    pub epoch: u64,
-    pub from: Participant,
-    #[serde(with = "serde_bytes")]
-    pub data: MessageData,
-    // UNIX timestamp as seconds since the epoch
-    pub timestamp: u64,
-}
-
-impl From<SignatureMessage> for Message {
-    fn from(msg: SignatureMessage) -> Self {
-        Message::Signature(msg)
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub enum Message {
-    Generating(GeneratingMessage),
-    Resharing(ResharingMessage),
-    Triple(TripleMessage),
-    Presignature(PresignatureMessage),
-    Signature(SignatureMessage),
-
-    /// Future compatibility with other messages. If in the future, we were to add a new
-    /// enum variant here, we can still deserialize the message as Unknown.
-    #[serde(untagged)]
-    Unknown(HashMap<String, ciborium::Value>),
-}
-
-impl Message {
-    pub const fn typename(&self) -> &'static str {
-        match self {
-            Message::Generating(_) => "Generating",
-            Message::Resharing(_) => "Resharing",
-            Message::Triple(_) => "Triple",
-            Message::Presignature(_) => "Presignature",
-            Message::Signature(_) => "Signature",
-            Message::Unknown(_) => "Unknown",
-        }
-    }
-
-    /// The size of the message in bytes.
-    pub fn size(&self) -> usize {
-        match self {
-            Message::Generating(msg) => std::mem::size_of::<GeneratingMessage>() + msg.data.len(),
-            Message::Resharing(msg) => std::mem::size_of::<ResharingMessage>() + msg.data.len(),
-            Message::Triple(msg) => std::mem::size_of::<TripleMessage>() + msg.data.len(),
-            Message::Presignature(msg) => {
-                std::mem::size_of::<PresignatureMessage>() + msg.data.len()
-            }
-            Message::Signature(msg) => std::mem::size_of::<SignatureMessage>() + msg.data.len(),
-            Message::Unknown(_msg) => usize::MAX,
-        }
-    }
-}
-
-#[derive(Default)]
 pub struct MessageInbox {
     /// encrypted messages that are pending to be decrypted. These are messages that we received
     /// from other nodes that weren't able to be processed yet due to missing info such as the
     /// participant id in the case of slow resharing.
     try_decrypt: VecDeque<(Ciphered, Instant)>,
+
+    /// This idempotent checker is used to check that the same batch of messages does not make
+    /// it back in the system somehow. Uses the signature to make this check.
+    idempotent: lru::LruCache<Signature, ()>,
+
+    /// A filter to filter out messages that have somehow made it back into the system after
+    /// being processed.
+    filter: MessageFilter,
+
+    /// Incoming messages that are pending to be processed. These are encrypted and signed.
+    inbox_rx: mpsc::Receiver<Ciphered>,
 
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
@@ -165,6 +61,23 @@ pub struct MessageInbox {
 }
 
 impl MessageInbox {
+    pub fn new(
+        inbox_rx: mpsc::Receiver<Ciphered>,
+        filter_rx: mpsc::Receiver<(Protocols, u64)>,
+    ) -> Self {
+        Self {
+            try_decrypt: VecDeque::new(),
+            idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
+            filter: MessageFilter::new(filter_rx),
+            inbox_rx,
+            generating: VecDeque::new(),
+            resharing: HashMap::new(),
+            triple: HashMap::new(),
+            presignature: HashMap::new(),
+            signature: HashMap::new(),
+        }
+    }
+
     pub fn push(&mut self, message: Message) {
         match message {
             Message::Generating(message) => self.generating.push_back(message),
@@ -203,15 +116,15 @@ impl MessageInbox {
         }
     }
 
-    pub fn expire(&mut self, protocol: &ProtocolConfig) {
-        self.try_decrypt.retain(|(_, timestamp)| {
-            timestamp.elapsed() < Duration::from_secs(protocol.message_timeout)
-        });
+    pub fn expire(&mut self, timeout: Duration) {
+        self.try_decrypt
+            .retain(|(_, timestamp)| timestamp.elapsed() < timeout);
     }
 
-    pub async fn extend(&mut self, incoming: &mut mpsc::Receiver<Ciphered>) {
+    pub fn recv_updates(&mut self) {
+        self.filter.recv_updates();
         loop {
-            let encrypted = match incoming.try_recv() {
+            let encrypted = match self.inbox_rx.try_recv() {
                 Ok(msg) => msg,
                 Err(TryRecvError::Empty) => {
                     break;
@@ -228,38 +141,114 @@ impl MessageInbox {
         }
     }
 
-    pub fn decrypt(&mut self, cipher_sk: &hpke::SecretKey, participants: &ParticipantMap) -> usize {
-        let mut count = 0;
+    pub fn decrypt(
+        &mut self,
+        cipher_sk: &hpke::SecretKey,
+        participants: &ParticipantMap,
+    ) -> Vec<Message> {
         let mut retry = Vec::new();
 
+        let mut messages = Vec::new();
         while let Some((encrypted, timestamp)) = self.try_decrypt.pop_front() {
-            let messages: Vec<Message> =
-                match SignedMessage::decrypt(&encrypted, cipher_sk, participants) {
-                    Ok(msg) => msg,
-                    Err(err) => {
-                        if matches!(err, MessageError::UnknownParticipant(_)) {
-                            retry.push((encrypted, timestamp));
-                        } else {
-                            tracing::error!(?err, "inbox: failed to decrypt/verify messages");
-                        }
-                        continue;
+            let decrypted: Result<Vec<Message>, _> =
+                SignedMessage::decrypt_with(&encrypted, cipher_sk, participants, |sig| {
+                    if self.idempotent.put(sig.clone(), ()).is_some() {
+                        Err(MessageError::Idempotent)
+                    } else {
+                        Ok(())
                     }
-                };
+                });
 
-            count += messages.len();
-            for msg in messages {
-                self.push(msg);
-            }
+            match decrypted {
+                Ok(decrypted) => messages.extend(decrypted),
+                Err(err) => {
+                    if matches!(err, MessageError::UnknownParticipant(_)) {
+                        retry.push((encrypted, timestamp));
+                    } else {
+                        tracing::warn!(?err, "inbox: failed to decrypt/verify messages");
+                    }
+                    continue;
+                }
+            };
         }
 
         self.try_decrypt.extend(retry);
-        count
+        messages
+    }
+
+    /// Filter out all messages that have been filtered
+    pub fn filter(&mut self, mut messages: Vec<Message>) -> Vec<Message> {
+        messages.retain(|msg| match msg {
+            Message::Triple(msg) => !self.filter.contains(msg),
+            Message::Presignature(msg) => !self.filter.contains(msg),
+            Message::Signature(msg) => !self.filter.contains(msg),
+            _ => true,
+        });
+        messages
+    }
+
+    pub fn filter_internal(&mut self) {
+        self.triple.retain(|_epoch, messages| {
+            messages.retain(|_id, messages| {
+                messages.retain(|msg| !self.filter.contains(msg));
+                !messages.is_empty()
+            });
+            !messages.is_empty()
+        });
+        self.presignature.retain(|_epoch, messages| {
+            messages.retain(|_id, messages| {
+                messages.retain(|msg| !self.filter.contains(msg));
+                !messages.is_empty()
+            });
+            !messages.is_empty()
+        });
+        self.signature.retain(|_epoch, messages| {
+            messages.retain(|_id, messages| {
+                messages.retain(|msg| !self.filter.contains(msg));
+                !messages.is_empty()
+            });
+            !messages.is_empty()
+        });
+    }
+
+    pub fn recv(&mut self, messages: Vec<Message>) {
+        for message in messages {
+            self.push(message);
+        }
+    }
+
+    pub fn update(
+        &mut self,
+        expiration: Duration,
+        cipher_sk: &hpke::SecretKey,
+        participants: &ParticipantMap,
+    ) {
+        self.expire(expiration);
+        self.recv_updates();
+        let messages = self.decrypt(cipher_sk, participants);
+        let messages = self.filter(messages);
+        self.recv(messages);
+    }
+
+    pub fn clear(&mut self) {
+        self.try_decrypt.clear();
+        self.generating.clear();
+        self.resharing.clear();
+        self.triple.clear();
+        self.presignature.clear();
+        self.signature.clear();
+    }
+
+    pub fn clear_filters(&mut self) {
+        self.filter.clear();
+    }
+
+    pub fn clear_idempotent(&mut self) {
+        self.idempotent.clear();
     }
 }
 
 struct MessageExecutor {
-    incoming: mpsc::Receiver<Ciphered>,
-    outgoing: mpsc::Receiver<SendMessage>,
     inbox: Arc<RwLock<MessageInbox>>,
     outbox: MessageOutbox,
 
@@ -288,9 +277,8 @@ impl MessageExecutor {
             };
             {
                 let mut inbox = self.inbox.write().await;
-                inbox.expire(&protocol);
-                inbox.extend(&mut self.incoming).await;
-                inbox.decrypt(&cipher_sk, &participants);
+                let expiration = Duration::from_millis(protocol.message_timeout);
+                inbox.update(expiration, &cipher_sk, &participants);
             }
 
             let active = {
@@ -298,7 +286,7 @@ impl MessageExecutor {
                 mesh_state.active.clone()
             };
             self.outbox.expire(&protocol);
-            self.outbox.extend(&mut self.outgoing);
+            self.outbox.recv_updates();
             let compacted = self.outbox.compact();
             let encrypted = self.outbox.encrypt(&sign_sk, &active, compacted);
             self.outbox.send(&active, encrypted).await;
@@ -310,10 +298,27 @@ impl MessageExecutor {
 pub struct MessageChannel {
     outgoing: mpsc::Sender<SendMessage>,
     inbox: Arc<RwLock<MessageInbox>>,
-    _task: Arc<tokio::task::JoinHandle<()>>,
+    filter: mpsc::Sender<(Protocols, u64)>,
+    task: Option<Arc<tokio::task::JoinHandle<()>>>,
 }
 
 impl MessageChannel {
+    pub fn new() -> (mpsc::Sender<Ciphered>, mpsc::Receiver<SendMessage>, Self) {
+        let (inbox_tx, inbox_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
+        let (outbox_tx, outbox_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
+        let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
+
+        let inbox = Arc::new(RwLock::new(MessageInbox::new(inbox_rx, filter_rx)));
+        let channel = Self {
+            inbox,
+            outgoing: outbox_tx,
+            filter: filter_tx,
+            task: None,
+        };
+
+        (inbox_tx, outbox_rx, channel)
+    }
+
     pub async fn spawn(
         client: NodeClient,
         id: &AccountId,
@@ -321,29 +326,18 @@ impl MessageChannel {
         protocol_state: &Arc<RwLock<NodeState>>,
         mesh_state: &Arc<RwLock<MeshState>>,
     ) -> (mpsc::Sender<Ciphered>, Self) {
-        let (incoming_tx, incoming_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
-        let (outgoing_tx, outgoing_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
-
-        let inbox = Arc::new(RwLock::new(MessageInbox::default()));
-        let processor = MessageExecutor {
-            incoming: incoming_rx,
-            outgoing: outgoing_rx,
-            inbox: inbox.clone(),
-            outbox: MessageOutbox::new(client, id),
+        let (inbox_tx, outbox_rx, mut channel) = Self::new();
+        let runner = MessageExecutor {
+            inbox: channel.inbox.clone(),
+            outbox: MessageOutbox::new(id, client, outbox_rx),
 
             config: config.clone(),
             protocol_state: protocol_state.clone(),
             mesh_state: mesh_state.clone(),
         };
+        channel.task = Some(Arc::new(tokio::spawn(runner.execute())));
 
-        (
-            incoming_tx,
-            Self {
-                inbox,
-                outgoing: outgoing_tx,
-                _task: Arc::new(tokio::spawn(processor.execute())),
-            },
-        )
+        (inbox_tx, channel)
     }
 
     /// Grab the inbox for all the messages we received from the network.
@@ -361,20 +355,30 @@ impl MessageChannel {
             tracing::error!(?err, "outbox: failed to send message to participants");
         }
     }
-}
 
-#[derive(thiserror::Error, Debug)]
-pub enum MessageError {
-    #[error("unknown participant: {0:?}")]
-    UnknownParticipant(Participant),
-    #[error(transparent)]
-    JsonConversion(#[from] serde_json::Error),
-    #[error("cbor: {0:?}")]
-    CborConversion(String),
-    #[error("encryption failed: {0}")]
-    Encryption(#[from] hpke::Error),
-    #[error("verify failed: {0}")]
-    Verification(String),
+    /// Marks this message as filtered. This is used to prevent the same message with the
+    /// corresponding MessageId from being processed again.
+    pub async fn filter<M: MessageFilterId>(&self, msg: &M) {
+        if let Err(err) = self.filter.send((M::PROTOCOL, msg.id())).await {
+            tracing::warn!(?err, "failed to send filter message");
+        }
+    }
+
+    pub async fn filter_triple(&self, id: TripleId) {
+        if let Err(err) = self.filter.send((Protocols::Triple, id)).await {
+            tracing::warn!(?err, "failed to send filter message");
+        }
+    }
+
+    pub async fn filter_presignature(&self, id: PresignatureId) {
+        if let Err(err) = self.filter.send((Protocols::Presignature, id)).await {
+            tracing::warn!(?err, "failed to send filter message");
+        }
+    }
+
+    pub async fn filter_sign(&self, sign_id: SignId, presign_id: PresignatureId) {
+        self.filter(&(sign_id, presign_id)).await;
+    }
 }
 
 #[async_trait]
@@ -397,15 +401,15 @@ impl MessageReceiver for GeneratingState {
     ) -> Result<(), MessageError> {
         let mut inbox = channel.inbox().write().await;
         let mut protocol = self.protocol.write().await;
-        let message_counts: HashMap<Participant, usize> =
-            inbox
-                .generating
-                .iter()
-                .fold(HashMap::new(), |mut acc, msg| {
-                    *acc.entry(msg.from).or_default() += 1;
-                    acc
-                });
-        if !message_counts.is_empty() {
+        if !inbox.generating.is_empty() {
+            let message_counts: HashMap<Participant, usize> =
+                inbox
+                    .generating
+                    .iter()
+                    .fold(HashMap::new(), |mut acc, msg| {
+                        *acc.entry(msg.from).or_default() += 1;
+                        acc
+                    });
             tracing::info!(?message_counts, "generating: handling new messages");
         }
         while let Some(msg) = inbox.generating.pop_front() {
@@ -424,17 +428,18 @@ impl MessageReceiver for ResharingState {
         _mesh_state: MeshState,
     ) -> Result<(), MessageError> {
         let mut inbox = channel.inbox().write().await;
-        let message_counts: HashMap<(Participant, Epoch), usize> =
-            inbox
-                .resharing
-                .iter()
-                .fold(HashMap::new(), |mut acc, (epoch, messages)| {
-                    for msg in messages {
-                        *acc.entry((msg.from, *epoch)).or_default() += 1;
-                    }
-                    acc
-                });
-        if !message_counts.is_empty() {
+        if !inbox.resharing.is_empty() {
+            let message_counts: HashMap<(Participant, Epoch), usize> =
+                inbox
+                    .resharing
+                    .iter()
+                    .fold(HashMap::new(), |mut acc, (epoch, messages)| {
+                        for msg in messages {
+                            *acc.entry((msg.from, *epoch)).or_default() += 1;
+                        }
+                        acc
+                    });
+
             tracing::info!(?message_counts, "resharing: handling new messages");
         }
         let q = inbox.resharing.entry(self.old_epoch).or_default();
@@ -473,12 +478,6 @@ impl MessageReceiver for RunningState {
                 continue;
             }
 
-            // if triple id is in GC, remove these messages because the triple is currently
-            // being GC'ed, where this particular triple has previously failed or been utilized.
-            if self.triple_manager.refresh_gc(id).await {
-                continue;
-            }
-
             let protocol = match self
                 .triple_manager
                 .get_or_start_generation(id, &active, protocol_cfg)
@@ -502,7 +501,7 @@ impl MessageReceiver for RunningState {
 
         let mut presignature_manager = self.presignature_manager.write().await;
         let presignature_messages = inbox.presignature.entry(self.epoch).or_default();
-        presignature_messages.retain(|id, queue| {
+        presignature_messages.retain(|_id, queue| {
             // Skip message if it already timed out
             if queue.is_empty()
                 || queue.iter().any(|msg| {
@@ -515,9 +514,7 @@ impl MessageReceiver for RunningState {
                 return false;
             }
 
-            // if presignature id is in GC, remove these messages because the presignature is currently
-            // being GC'ed, where this particular presignature has previously failed or been utilized.
-            !presignature_manager.refresh_gc(id)
+            true
         });
         for (id, queue) in presignature_messages {
             // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
@@ -554,9 +551,8 @@ impl MessageReceiver for RunningState {
                     continue;
                 }
                 Err(
-                    err @ (GenerationError::AlreadyGenerated
-                    | GenerationError::TripleIsGarbageCollected(_)
-                    | GenerationError::TripleStoreError(_)),
+                    err
+                    @ (GenerationError::AlreadyGenerated | GenerationError::TripleStoreError(_)),
                 ) => {
                     // This triple has already been generated or removed from the triple manager, so we will have to bin
                     // the entirety of the messages we received for this presignature id, and have the other nodes timeout
@@ -593,7 +589,7 @@ impl MessageReceiver for RunningState {
 
         let mut signature_manager = self.signature_manager.write().await;
         let signature_messages = inbox.signature.entry(self.epoch).or_default();
-        signature_messages.retain(|sign_id, queue| {
+        signature_messages.retain(|_sign_id, queue| {
             let mut expired = HashSet::new();
             let mut active = HashSet::new();
 
@@ -611,8 +607,6 @@ impl MessageReceiver for RunningState {
                     active.insert(msg.presignature_id);
                 }
             }
-
-            active.retain(|presig_id| !signature_manager.refresh_gc(sign_id, *presig_id));
 
             queue.retain(|msg| active.contains(&msg.presignature_id));
 
@@ -665,7 +659,6 @@ impl MessageReceiver for RunningState {
                 }
                 Err(
                     err @ (GenerationError::AlreadyGenerated
-                    | GenerationError::PresignatureIsGarbageCollected(_)
                     | GenerationError::PresignatureIsMissing(_)),
                 ) => {
                     // We will have to remove the entirety of the messages we received for this signature request,
@@ -703,9 +696,6 @@ impl MessageReceiver for RunningState {
                 protocol.message(message.from, message.data);
             }
         }
-        self.triple_manager.garbage_collect(protocol_cfg).await;
-        presignature_manager.garbage_collect(protocol_cfg);
-        signature_manager.garbage_collect(protocol_cfg);
         Ok(())
     }
 }
@@ -718,6 +708,15 @@ impl MessageReceiver for NodeState {
         cfg: Config,
         mesh_state: MeshState,
     ) -> Result<(), MessageError> {
+        {
+            // TODO: remove this after adding subscription model for tasks
+            // This is a temporary fix to ensure that the filter is updated before processing messages,
+            // such that we avoid the race condition where a message is filtered out before it is processed.
+            let mut inbox = channel.inbox().write().await;
+            inbox.filter.recv_updates();
+            inbox.filter_internal();
+        }
+
         match self {
             NodeState::Generating(state) => state.recv(channel, cfg, mesh_state).await,
             NodeState::Resharing(state) => state.recv(channel, cfg, mesh_state).await,
@@ -773,6 +772,15 @@ impl SignedMessage {
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
     ) -> Result<T, MessageError> {
+        Self::decrypt_with(encrypted, cipher_sk, participants, |_| Ok(()))
+    }
+
+    pub fn decrypt_with<T: DeserializeOwned, F: FnMut(&Signature) -> Result<(), MessageError>>(
+        encrypted: &Ciphered,
+        cipher_sk: &hpke::SecretKey,
+        participants: &ParticipantMap,
+        mut check: F,
+    ) -> Result<T, MessageError> {
         let msg = cipher_sk
             .decrypt(encrypted, Self::ASSOCIATED_DATA)
             .inspect_err(|err| {
@@ -782,11 +790,14 @@ impl SignedMessage {
         let info = participants
             .get(&from)
             .ok_or(MessageError::UnknownParticipant(from))?;
+
+        // Do external check before verifying the signature.
+        check(&sig)?;
+
         if !sig.verify(&msg, &info.sign_pk) {
             tracing::error!(?from, "signed message erred out with invalid signature");
             return Err(MessageError::Verification(
-                "invalid signature while verifying authenticity of encrypted protocol message"
-                    .to_string(),
+                "invalid signature while verifying authenticity of encrypted protocol message",
             ));
         }
 
@@ -807,8 +818,11 @@ pub struct Partition {
 /// Message outbox is the set of messages that are pending to be sent to other nodes.
 /// These messages will be signed and encrypted before being sent out.
 pub struct MessageOutbox {
-    client: NodeClient,
     account_id: AccountId,
+    client: NodeClient,
+
+    /// The messages that are pending to be sent to other nodes.
+    outbox_rx: mpsc::Receiver<SendMessage>,
 
     // NOTE: we have FromParticipant here to circumvent the chance that we change Participant
     // id for our own node in the middle of something like resharing or adding another curve
@@ -819,18 +833,19 @@ pub struct MessageOutbox {
 }
 
 impl MessageOutbox {
-    pub fn new(client: NodeClient, id: &AccountId) -> Self {
+    pub fn new(id: &AccountId, client: NodeClient, outbox_rx: mpsc::Receiver<SendMessage>) -> Self {
         Self {
             client,
-            messages: HashMap::new(),
             account_id: id.clone(),
+            outbox_rx,
+            messages: HashMap::new(),
         }
     }
 
-    pub fn extend(&mut self, outgoing: &mut mpsc::Receiver<SendMessage>) {
+    pub fn recv_updates(&mut self) {
         let mut message_count: i64 = 0;
         loop {
-            let (msg, (from, to, timestamp)) = match outgoing.try_recv() {
+            let (msg, (from, to, timestamp)) = match self.outbox_rx.try_recv() {
                 Ok(msg) => msg,
                 Err(TryRecvError::Empty) => {
                     break;
@@ -1141,6 +1156,8 @@ const fn cbor_name(value: &ciborium::Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use cait_sith::protocol::Participant;
     use mpc_keys::hpke::{self, Ciphered};
     use mpc_primitives::SignId;
@@ -1151,6 +1168,8 @@ mod tests {
         message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
         ParticipantInfo,
     };
+
+    use super::MessageChannel;
 
     #[test]
     fn test_sending_encrypted_message() {
@@ -1393,7 +1412,7 @@ mod tests {
         let batch_bytesize = batch.iter().map(|msg| msg.size()).sum::<usize>();
         dbg!(batch_bytesize);
 
-        let (_cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
+        let (_cipher_sk, cipher_pk) = hpke::generate();
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
         let ciphered = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
@@ -1408,5 +1427,128 @@ mod tests {
                 .contains(&ciphered_bytesize),
             "ciphered message size is not within 5% of the original message size"
         );
+    }
+
+    #[tokio::test]
+    async fn test_inbox() {
+        let expiration = Duration::from_secs(300);
+        let epoch = 299;
+        let from = Participant::from(0);
+        let (cipher_sk, cipher_pk) = hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
+        let participants = {
+            let mut map = Participants::default();
+            for i in 0..2 {
+                map.insert(
+                    &Participant::from(i),
+                    ParticipantInfo {
+                        sign_pk: sign_sk.public_key(),
+                        cipher_pk: cipher_pk.clone(),
+                        id: from.into(),
+                        url: "http://localhost:3030".to_string(),
+                        account_id: "test.near".parse().unwrap(),
+                    },
+                );
+            }
+            ParticipantMap::One(map)
+        };
+        let (inbox_tx, _outbox_rx, channel) = MessageChannel::new();
+
+        // Case 1:
+        // Check that the inbox received our messages correctly:
+        {
+            let batch = vec![
+                Message::Triple(TripleMessage {
+                    id: 1,
+                    epoch,
+                    from,
+                    data: vec![128u8; 1024],
+                    timestamp: 1,
+                }),
+                Message::Triple(crate::protocol::message::TripleMessage {
+                    id: 2,
+                    epoch,
+                    from,
+                    data: vec![255u8; 2048],
+                    timestamp: 2,
+                }),
+                Message::Triple(TripleMessage {
+                    id: 3,
+                    epoch,
+                    from,
+                    data: vec![101u8; 1337],
+                    timestamp: 3,
+                }),
+            ];
+            let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+            inbox_tx.try_send(encrypted).unwrap();
+            let mut inbox = channel.inbox().try_write().unwrap();
+            inbox.update(expiration, &cipher_sk, &participants);
+            assert_eq!(
+                inbox.triple.get(&epoch).unwrap().len(),
+                3,
+                "initial triple messages not found"
+            );
+            inbox.clear();
+        }
+
+        // Case 2:
+        // Check that inbox filters work correctly, and that the first message did not make it through:
+        let filter_id = 2;
+        let batch = vec![
+            Message::Triple(TripleMessage {
+                id: 1,
+                epoch,
+                from,
+                data: vec![129u8; 1024],
+                timestamp: 1,
+            }),
+            Message::Triple(crate::protocol::message::TripleMessage {
+                id: filter_id,
+                epoch,
+                from,
+                data: vec![229u8; 2048],
+                timestamp: 2,
+            }),
+            Message::Triple(TripleMessage {
+                id: 3,
+                epoch,
+                from,
+                data: vec![121u8; 1337],
+                timestamp: 3,
+            }),
+        ];
+        {
+            let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+            channel.filter_triple(filter_id).await;
+            inbox_tx.try_send(encrypted).unwrap();
+            let mut inbox = channel.inbox().try_write().unwrap();
+            inbox.update(expiration, &cipher_sk, &participants);
+            assert_eq!(
+                inbox.triple.get(&epoch).unwrap().len(),
+                2,
+                "inbox triple messages was not successfully filtered"
+            );
+            // do not clear messages, but clear the filters, have the next case check idempotentcy
+            inbox.clear_filters();
+        }
+
+        // Case 3:
+        // Check idempotentcy. The same set of messages (from case 2) encrypted and signed again should produce
+        // the same signature. Thus sending the same encrypted message should be idempotent.
+        {
+            let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+            channel.filter_triple(filter_id).await;
+            inbox_tx.try_send(encrypted).unwrap();
+            let mut inbox = channel.inbox().try_write().unwrap();
+            inbox.update(expiration, &cipher_sk, &participants);
+            assert_eq!(
+                inbox.triple.get(&epoch).unwrap().len(),
+                2,
+                "inbox should have two messages from prev case for idempotentcy"
+            );
+            inbox.clear();
+        }
     }
 }

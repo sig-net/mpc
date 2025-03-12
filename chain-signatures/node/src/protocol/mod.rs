@@ -85,6 +85,10 @@ impl ConsensusCtx for &mut MpcSignProtocol {
     fn presignature_storage(&self) -> &PresignatureStorage {
         &self.ctx.presignature_storage
     }
+
+    fn msg_channel(&self) -> &MessageChannel {
+        &self.channel
+    }
 }
 
 impl CryptographicCtx for &mut MpcSignProtocol {
