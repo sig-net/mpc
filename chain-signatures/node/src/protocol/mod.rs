@@ -91,6 +91,10 @@ impl ConsensusCtx for &mut MpcSignProtocol {
     fn msg_channel(&self) -> &MessageChannel {
         &self.channel
     }
+
+    fn sync_channel(&self) -> &SyncChannel {
+        &self.sync_channel
+    }
 }
 
 impl CryptographicCtx for &mut MpcSignProtocol {
@@ -126,6 +130,7 @@ impl CryptographicCtx for &mut MpcSignProtocol {
 pub struct MpcSignProtocol {
     ctx: Ctx,
     channel: MessageChannel,
+    sync_channel: SyncChannel,
     state: Arc<RwLock<NodeState>>,
 }
 
@@ -139,6 +144,7 @@ impl MpcSignProtocol {
         near: NearClient,
         rpc_channel: RpcChannel,
         channel: MessageChannel,
+        sync_channel: SyncChannel,
         sign_rx: mpsc::Receiver<IndexedSignRequest>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
@@ -159,6 +165,7 @@ impl MpcSignProtocol {
         MpcSignProtocol {
             ctx,
             channel,
+            sync_channel,
             state,
         }
     }
@@ -168,7 +175,6 @@ impl MpcSignProtocol {
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
         config: Arc<RwLock<Config>>,
         mesh_state: Arc<RwLock<MeshState>>,
-        sync_channel: SyncChannel,
     ) {
         let my_account_id = self.ctx.account_id.as_str();
         let _span = tracing::info_span!("running", my_account_id);

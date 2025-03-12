@@ -46,8 +46,10 @@ pub struct SyncView {
 
 #[derive(Default)]
 struct SyncCache {
-    triples: HashMap<TripleId, HashSet<Participant>>,
-    presignatures: HashMap<PresignatureId, HashSet<Participant>>,
+    other_seen_triples: HashMap<TripleId, HashSet<Participant>>,
+    other_seen_presignatures: HashMap<PresignatureId, HashSet<Participant>>,
+    taken_triples: HashSet<TripleId>,
+    taken_presignatures: HashSet<PresignatureId>,
 }
 
 struct SyncReceiver {
@@ -432,7 +434,7 @@ async fn broadcast_sync_update(
                 target: "sync",
                 participant = ?p,
                 elapsed = ?start.elapsed(),
-                "sync completed",
+                "call /sync completed",
             );
             (p, sync_view)
         });
@@ -509,14 +511,20 @@ impl SyncChannel {
         &mut self,
         threshold: usize,
     ) -> Option<ProtocolResponse<(Triple, Triple)>> {
-        self.request_triple.take(threshold).await
+        let start = Instant::now();
+        let result = self.request_triple.take(threshold).await;
+        tracing::info!(target: "sync", elapsed = ?start.elapsed(), "take two triple");
+        result
     }
 
     pub async fn take_presignature(
         &mut self,
         threshold: usize,
     ) -> Option<ProtocolResponse<Presignature>> {
-        self.request_presignature.take(threshold).await
+        let start = Instant::now();
+        let result = self.request_presignature.take(threshold).await;
+        tracing::info!(target: "sync", elapsed = ?start.elapsed(), "take presignature");
+        result
     }
 }
 

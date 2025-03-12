@@ -63,8 +63,6 @@ async fn test_signature_basic() -> anyhow::Result<()> {
     nodes.wait().signable().await?;
     nodes.sign().await?;
 
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-
     Ok(())
 }
 

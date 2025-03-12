@@ -1,5 +1,5 @@
-use super::contract::primitives::intersect_vec;
 use super::state::RunningState;
+use super::sync::{ProtocolResponse, SyncChannel};
 use crate::kdf::derive_delta;
 use crate::protocol::error::GenerationError;
 use crate::protocol::message::{MessageChannel, SignatureMessage};
@@ -245,6 +245,8 @@ pub struct SignatureManager {
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
 
+    sync_channel: SyncChannel,
+
     me: Participant,
     my_account_id: AccountId,
     threshold: usize,
@@ -262,10 +264,12 @@ impl SignatureManager {
         epoch: u64,
         sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
         msg: MessageChannel,
+        sync_channel: SyncChannel,
     ) -> Self {
         Self {
             generators: HashMap::new(),
             sign_queue: SignQueue::new(me, sign_rx),
+            sync_channel,
             me,
             my_account_id: my_account_id.clone(),
             threshold,
@@ -592,7 +596,7 @@ impl SignatureManager {
     pub async fn handle_requests(
         &mut self,
         stable: &[Participant],
-        presignature_manager: &mut PresignatureManager,
+        // presignature_manager: &mut PresignatureManager,
         cfg: &ProtocolConfig,
     ) {
         if stable.len() < self.threshold {
@@ -617,33 +621,20 @@ impl SignatureManager {
             .set(self.sign_queue.len_mine() as i64);
 
         let mut retry = Vec::new();
-        while let Some(presignature) = {
+        while let Some(ProtocolResponse {
+            participants: _,
+            value: presignature,
+        }) = {
             if self.sign_queue.is_empty_mine() {
                 None
             } else {
-                presignature_manager.take_mine().await
+                self.sync_channel.take_presignature(self.threshold).await
             }
         } {
             let Some(my_request) = self.sign_queue.take_mine() else {
                 tracing::warn!("unexpected state, no more requests to handle");
                 continue;
             };
-
-            let participants =
-                intersect_vec(&[stable, &presignature.participants, &my_request.participants]);
-            if participants.len() < self.threshold {
-                tracing::warn!(
-                    target: "sign[request]",
-                    sign_id = ?my_request.indexed.id,
-                    presignature_id = ?presignature.id,
-                    ?participants,
-                    "intersection < threshold, trashing presignature"
-                );
-                retry.push(my_request);
-                // TODO: have protocol state sync with the protocol state of other nodes eventually
-                // so that we have storage consistency.
-                continue;
-            }
 
             let sign_id = my_request.indexed.id.clone();
             let presignature_id = presignature.id;
@@ -672,7 +663,6 @@ impl SignatureManager {
         protocol_cfg: &ProtocolConfig,
         ctx: &impl super::cryptography::CryptographicCtx,
     ) -> tokio::task::JoinHandle<()> {
-        let presignature_manager = state.presignature_manager.clone();
         let signature_manager = state.signature_manager.clone();
         let stable = stable.to_vec();
         let protocol_cfg = protocol_cfg.clone();
@@ -686,11 +676,9 @@ impl SignatureManager {
 
         tokio::task::spawn(tokio::task::unconstrained(async move {
             let mut signature_manager = signature_manager.write().await;
-            let mut presignature_manager = presignature_manager.write().await;
             signature_manager
-                .handle_requests(&stable, &mut presignature_manager, &protocol_cfg)
+                .handle_requests(&stable, &protocol_cfg)
                 .await;
-            drop(presignature_manager);
             signature_manager.poke(channel, rpc_channel).await;
         }))
     }

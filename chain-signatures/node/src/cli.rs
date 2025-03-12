@@ -283,6 +283,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     near_client,
                     rpc_channel,
                     channel,
+                    sync_channel.clone(),
                     sign_rx,
                     key_storage,
                     triple_storage,
@@ -294,12 +295,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 let rpc_handle = tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
                 let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
                 let system_handle = spawn_system_metrics(account_id.as_str()).await;
-                let protocol_handle = tokio::spawn(protocol.run(
-                    contract_state,
-                    config,
-                    mesh_state,
-                    sync_channel.clone(),
-                ));
+                let protocol_handle =
+                    tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
                 let web_handle =
                     tokio::spawn(web::run(web_port, sender, state, indexer, sync_channel));
