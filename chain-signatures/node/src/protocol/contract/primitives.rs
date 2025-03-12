@@ -359,9 +359,9 @@ pub fn intersect<T: Copy + Hash + Eq>(sets: &[&[T]]) -> HashSet<T> {
     }
 }
 
-pub fn intersect_hash<T: Clone + Hash + Eq>(sets: impl Iterator<Item = HashSet<T>>) -> HashSet<T> {
+pub fn intersect_hash<T: Clone + Hash + Eq>(sets: &[&HashSet<T>]) -> HashSet<T> {
     let mut sets = sets.into_iter();
-    let Some(first) = sets.next() else {
+    let Some(&first) = sets.next() else {
         return HashSet::new();
     };
     let mut intersection = first.clone();
