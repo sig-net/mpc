@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
 use rand::rngs::StdRng;
@@ -18,9 +18,11 @@ use super::contract::primitives::{intersect, intersect_vec, Participants};
 use super::presignature::{Presignature, PresignatureId};
 use super::triple::{Triple, TripleId};
 
+const REQUEST_UPDATE_TIMEOUT: Duration = Duration::from_millis(50);
+const REQUEST_PROTOCOL_TIMEOUT: Duration = Duration::from_millis(50);
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
-    // from: Participant,
     triples: Vec<TripleId>,
     presignatures: Vec<PresignatureId>,
 }
@@ -44,6 +46,15 @@ pub struct SyncView {
     presignatures: HashSet<PresignatureId>,
 }
 
+impl SyncView {
+    fn empty() -> Self {
+        Self {
+            triples: HashSet::new(),
+            presignatures: HashSet::new(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct SyncCache {
     other_seen_triples: HashMap<TripleId, HashSet<Participant>>,
@@ -59,7 +70,6 @@ struct SyncReceiver {
 }
 
 pub struct SyncTask {
-    // me: Participant,
     client: NodeClient,
     triples: TripleStorage,
     presignatures: PresignatureStorage,
@@ -70,7 +80,6 @@ pub struct SyncTask {
 // TODO: add a watch channel for mesh active participants.
 impl SyncTask {
     pub fn new(
-        // me: Participant,
         client: &NodeClient,
         triples: TripleStorage,
         presignatures: PresignatureStorage,
@@ -78,7 +87,6 @@ impl SyncTask {
     ) -> (SyncChannel, Self) {
         let (sync_rx, syncer) = SyncChannel::new();
         let task = Self {
-            // me,
             client: client.clone(),
             triples,
             presignatures,
@@ -108,6 +116,7 @@ impl SyncTask {
         let mut mesh_seen_triples = HashMap::new();
         let mut mesh_seen_presignatures = HashMap::new();
 
+        // TODO: after adding watch to contract, make this immediately broadcast.
         let mut broadcast = Option::<JoinHandle<Option<Vec<(Participant, SyncView)>>>>::None;
         loop {
             tokio::select! {
@@ -189,8 +198,11 @@ impl SyncTask {
                 Some(req) = self.sync.request_triple_rx.recv() => {
                     match req {
                         ProtocolRequest::Take { threshold, resp } => {
-                            let triple = self.take_two_triple(threshold, &mut mesh_seen_triples).await;
-                            resp.send(triple).unwrap();
+                            let triples = self.take_two_triple(threshold, &mut mesh_seen_triples).await;
+                            let triple_ids = triples.as_ref().map(|p| (p.value.0.id, p.value.1.id));
+                            if let Err(err) = resp.send(triples) {
+                                tracing::error!(target: "sync[take]", ?triple_ids, ?err, "failed to respond with triple");
+                            }
                         }
                     }
                 }
@@ -198,7 +210,10 @@ impl SyncTask {
                     match req {
                         ProtocolRequest::Take { threshold, resp } => {
                             let presignature = self.take_presignature(threshold, &mut mesh_seen_presignatures).await;
-                            resp.send(presignature).unwrap();
+                            let presignature_id = presignature.as_ref().map(|p| p.value.id);
+                            if let Err(err) = resp.send(presignature) {
+                                tracing::error!(target: "sync[take]", ?err, presignature_id, "failed to respond with presignature");
+                            }
                         }
                     }
                 }
@@ -211,7 +226,6 @@ impl SyncTask {
         let presignatures = self.presignatures.fetch_mine().await.unwrap_or_default();
 
         Some(SyncUpdate {
-            // from: self.me,
             triples,
             presignatures,
         })
@@ -280,14 +294,12 @@ impl SyncTask {
         for (id, triple) in failed {
             mesh_seen.insert(id, triple);
         }
-        let Some((mut participants, triple0, triple1)) = found else {
-            return None;
-        };
+        let (mut participants, triple0, triple1) = found?;
         // TODO: make triple_storage.take intake active to do intersection in Lua script side.
         let (triple0, triple1) = match self.triples.take_two_self(triple0, triple1).await {
             Ok(value) => value,
             Err(err) => {
-                tracing::error!(target: "sync", ?err, "failed to take two triples");
+                tracing::warn!(target: "sync", triple_ids = ?(triple0, triple1), ?err, "failed to take two triples");
                 return None;
             }
         };
@@ -345,10 +357,14 @@ impl SyncTask {
         for (id, triple) in failed {
             mesh_seen.insert(id, triple);
         }
-        let Some((mut participants, presignature_id)) = found else {
-            return None;
+        let (mut participants, presignature_id) = found?;
+        let presignature = match self.presignatures.take_self(presignature_id).await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(target: "sync", presignature_id, ?err, "failed to take presignature");
+                return None;
+            }
         };
-        let presignature = self.presignatures.take_self(presignature_id).await.unwrap();
 
         participants.sort();
         Some(ProtocolResponse {
@@ -445,14 +461,26 @@ impl SyncChannel {
 
     pub async fn request_update(&self, update: SyncUpdate) -> SyncView {
         let (view_tx, view_rx) = oneshot::channel();
-        self.update_tx
+        if let Err(err) = self
+            .update_tx
             .send(SyncUpdateRequest { update, view_tx })
             .await
-            .unwrap();
+        {
+            tracing::warn!(target: "sync", ?err, "failed to request update");
+            return SyncView::empty();
+        }
 
-        // TODO: add a timeout for the view_rx.
-        let view = view_rx.await;
-        view.unwrap()
+        match tokio::time::timeout(REQUEST_UPDATE_TIMEOUT, view_rx).await {
+            Ok(Ok(view)) => view,
+            Ok(Err(err)) => {
+                tracing::warn!(target: "sync", ?err, "failed to receive view");
+                SyncView::empty()
+            }
+            Err(_) => {
+                tracing::warn!(target: "sync", "timeout trying to receive view");
+                SyncView::empty()
+            }
+        }
     }
 
     pub async fn take_two_triple(
@@ -460,7 +488,6 @@ impl SyncChannel {
         threshold: usize,
     ) -> Option<ProtocolResponse<(Triple, Triple)>> {
         let start = Instant::now();
-        // TODO: add a timeout for the take.
         let result = self.request_triple.take(threshold).await;
         tracing::info!(target: "sync", elapsed = ?start.elapsed(), "take two triple");
         result
@@ -471,7 +498,6 @@ impl SyncChannel {
         threshold: usize,
     ) -> Option<ProtocolResponse<Presignature>> {
         let start = Instant::now();
-        // TODO: add a timeout for the take.
         let result = self.request_presignature.take(threshold).await;
         tracing::info!(target: "sync", elapsed = ?start.elapsed(), "take presignature");
         result
@@ -508,15 +534,28 @@ impl<T> ProtocolChannel<T> {
 
     async fn take(&mut self, threshold: usize) -> Option<ProtocolResponse<T>> {
         let (resp_tx, resp_rx) = oneshot::channel();
-        self.request_tx
+        if let Err(err) = self
+            .request_tx
             .send(ProtocolRequest::Take {
                 threshold,
                 resp: resp_tx,
             })
             .await
-            .unwrap();
+        {
+            tracing::warn!(?err, "failed to request protocol.take");
+        }
 
-        resp_rx.await.unwrap()
+        match tokio::time::timeout(REQUEST_PROTOCOL_TIMEOUT, resp_rx).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(err)) => {
+                tracing::warn!(target: "sync", ?err, "failed to receive response for protocol.take");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(target: "sync", "timeout trying to receive response for protocol.take");
+                None
+            }
+        }
     }
 }
 
