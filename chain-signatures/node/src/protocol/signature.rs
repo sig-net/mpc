@@ -199,6 +199,8 @@ pub struct SignatureGenerator {
     pub timestamp: Instant,
     pub timeout: Duration,
     pub timeout_total: Duration,
+    /// latest poked time, total acrued wait time and total pokes per signature protocol
+    pub poked_latest: Option<(Instant, Duration, u64)>,
 }
 
 impl SignatureGenerator {
@@ -215,6 +217,7 @@ impl SignatureGenerator {
             timestamp: Instant::now(),
             timeout: Duration::from_millis(cfg.signature.generation_timeout),
             timeout_total: Duration::from_millis(cfg.signature.generation_timeout_total),
+            poked_latest: None,
         }
     }
 
@@ -413,10 +416,24 @@ impl SignatureManager {
 
     /// Pokes all of the ongoing generation protocols to completion
     pub async fn poke(&mut self, message: MessageChannel, rpc: RpcChannel) {
+        let signature_before_poke_delay_metric = crate::metrics::SIGNATURE_BEFORE_POKE_DELAY
+            .with_label_values(&[self.my_account_id.as_str()]);
+        let signature_accrued_wait_delay_metric = crate::metrics::SIGNATURE_ACCRUED_WAIT_DELAY
+            .with_label_values(&[self.my_account_id.as_str()]);
+        let signature_pokes_cnt_metric =
+            crate::metrics::SIGNATURE_POKES_CNT.with_label_values(&[self.my_account_id.as_str()]);
+        let signature_generator_failures_metric = crate::metrics::SIGNATURE_GENERATOR_FAILURES
+            .with_label_values(&[self.my_account_id.as_str()]);
+        let signature_failures_metric =
+            crate::metrics::SIGNATURE_FAILURES.with_label_values(&[self.my_account_id.as_str()]);
+        let signature_poke_cpu_time_metric = crate::metrics::SIGNATURE_POKE_CPU_TIME
+            .with_label_values(&[self.my_account_id.as_str()]);
+
         let mut remove = Vec::new();
         let mut failed = Vec::new();
         for (sign_id, generator) in self.generators.iter_mut() {
             loop {
+                let generator_poke_time = Instant::now();
                 let action = match generator.poke() {
                     Ok(action) => action,
                     Err(err) => {
@@ -429,9 +446,7 @@ impl SignatureManager {
                             failed.push(sign_id.clone());
                             tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
                             if generator.request.proposer == self.me {
-                                crate::metrics::SIGNATURE_GENERATOR_FAILURES
-                                    .with_label_values(&[self.my_account_id.as_str()])
-                                    .inc();
+                                signature_generator_failures_metric.inc();
                             }
                         } else {
                             tracing::warn!(
@@ -439,12 +454,8 @@ impl SignatureManager {
                                 "signature failed to be produced; trashing request"
                             );
                             if generator.request.proposer == self.me {
-                                crate::metrics::SIGNATURE_GENERATOR_FAILURES
-                                    .with_label_values(&[self.my_account_id.as_str()])
-                                    .inc();
-                                crate::metrics::SIGNATURE_FAILURES
-                                    .with_label_values(&[self.my_account_id.as_str()])
-                                    .inc();
+                                signature_generator_failures_metric.inc();
+                                signature_failures_metric.inc();
                             }
                         }
                         break;
@@ -477,6 +488,23 @@ impl SignatureManager {
                                 )
                                 .await;
                         }
+                        let (total_wait, total_pokes) =
+                            if let Some((last_poked, total_wait, total_pokes)) =
+                                &generator.poked_latest
+                            {
+                                (
+                                    *total_wait + (generator_poke_time - *last_poked),
+                                    total_pokes + 1,
+                                )
+                            } else {
+                                let start_time = generator.timestamp;
+                                signature_before_poke_delay_metric
+                                    .observe((generator_poke_time - start_time).as_millis() as f64);
+                                (Duration::from_millis(0), 1)
+                            };
+                        generator.poked_latest = Some((Instant::now(), total_wait, total_pokes));
+                        signature_poke_cpu_time_metric
+                            .observe(generator_poke_time.elapsed().as_millis() as f64);
                     }
                     Action::SendPrivate(to, data) => {
                         message
@@ -493,7 +521,24 @@ impl SignatureManager {
                                     timestamp: Utc::now().timestamp() as u64,
                                 },
                             )
-                            .await
+                            .await;
+                        let (total_wait, total_pokes) =
+                            if let Some((last_poked, total_wait, total_pokes)) =
+                                &generator.poked_latest
+                            {
+                                (
+                                    *total_wait + (generator_poke_time - *last_poked),
+                                    total_pokes + 1,
+                                )
+                            } else {
+                                let start_time = generator.timestamp;
+                                signature_before_poke_delay_metric
+                                    .observe((generator_poke_time - start_time).as_millis() as f64);
+                                (Duration::from_millis(0), 1)
+                            };
+                        generator.poked_latest = Some((Instant::now(), total_wait, total_pokes));
+                        signature_poke_cpu_time_metric
+                            .observe(generator_poke_time.elapsed().as_millis() as f64);
                     }
                     Action::Return(output) => {
                         tracing::info!(
@@ -517,6 +562,17 @@ impl SignatureManager {
                             .await;
                         // Do not retain the protocol
                         remove.push(sign_id.clone());
+                        if let Some((last_poked, total_wait, total_pokes)) = generator.poked_latest
+                        {
+                            let elapsed = generator_poke_time - last_poked;
+                            let total_wait = total_wait + elapsed;
+                            let total_pokes = total_pokes + 1;
+                            signature_accrued_wait_delay_metric
+                                .observe(total_wait.as_millis() as f64);
+                            signature_pokes_cnt_metric.observe(total_pokes as f64);
+                        }
+                        signature_poke_cpu_time_metric
+                            .observe(generator_poke_time.elapsed().as_millis() as f64);
                     }
                 }
             }
@@ -560,6 +616,7 @@ impl SignatureManager {
             .with_label_values(&[self.my_account_id.as_str()])
             .set(self.sign_queue.len_mine() as i64);
 
+        let mut retry = Vec::new();
         while let Some(presignature) = {
             if self.sign_queue.is_empty_mine() {
                 None
@@ -576,13 +633,15 @@ impl SignatureManager {
                 intersect_vec(&[stable, &presignature.participants, &my_request.participants]);
             if participants.len() < self.threshold {
                 tracing::warn!(
+                    target: "sign[request]",
+                    sign_id = ?my_request.indexed.id,
+                    presignature_id = ?presignature.id,
                     ?participants,
-                    "intersection of stable participants and presignature participants is less than threshold, trashing presignature"
+                    "intersection < threshold, trashing presignature"
                 );
-                // TODO: do not insert back presignature when we have a clear model for data consistency
-                // between nodes and utilizing only presignatures that meet threshold requirements.
-                presignature_manager.insert(presignature, true, true).await;
-                self.sign_queue.push_failed(my_request);
+                retry.push(my_request);
+                // TODO: have protocol state sync with the protocol state of other nodes eventually
+                // so that we have storage consistency.
                 continue;
             }
 
@@ -591,15 +650,19 @@ impl SignatureManager {
             if let Err(InitializationError::BadParameters(err)) =
                 self.generate(presignature, my_request.clone(), cfg)
             {
+                retry.push(my_request);
                 tracing::warn!(
                     ?sign_id,
                     presignature_id,
                     ?err,
                     "failed to start signature generation: trashing presignature"
                 );
-                self.sign_queue.push_failed(my_request);
                 continue;
             }
+        }
+
+        for request in retry {
+            self.sign_queue.push_failed(request);
         }
     }
 

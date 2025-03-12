@@ -86,6 +86,8 @@ pub struct PresignatureGenerator {
     pub mine: bool,
     pub timestamp: Instant,
     pub timeout: Duration,
+    /// latest poked time, total acrued wait time and total pokes per presignature protocol
+    pub poked_latest: Option<(Instant, Duration, u64)>,
 }
 
 impl PresignatureGenerator {
@@ -105,6 +107,7 @@ impl PresignatureGenerator {
             mine,
             timestamp: Instant::now(),
             timeout: Duration::from_millis(timeout),
+            poked_latest: None,
         }
     }
 
@@ -394,13 +397,12 @@ impl PresignatureManager {
                 ]);
                 if presig_participants.len() < self.threshold {
                     tracing::warn!(
+                        target: "presign[stockpile]",
+                        triple0 = triple0.id,
+                        triple1 = triple1.id,
                         participants = ?presig_participants,
-                        "running: the intersection of participants is less than the threshold"
+                        "intersection < threshold, trashing two triples"
                     );
-                    // TODO: do not insert back triples when we have a clear model for data consistency
-                    // between nodes and utilizing only triples that meet threshold requirements.
-                    triple_manager.insert(triple0, true, true).await;
-                    triple_manager.insert(triple1, true, true).await;
                 } else {
                     self.generate(
                         &presig_participants,
@@ -502,15 +504,35 @@ impl PresignatureManager {
         let mut errors = Vec::new();
         let mut presignatures = Vec::new();
 
+        let presignature_generator_failures_metric =
+            crate::metrics::PRESIGNATURE_GENERATOR_FAILURES
+                .with_label_values(&[self.my_account_id.as_str()]);
+        let presignature_before_poke_delay_metric = crate::metrics::PRESIGNATURE_BEFORE_POKE_DELAY
+            .with_label_values(&[self.my_account_id.as_str()]);
+        let presignature_accrued_wait_delay_metric =
+            crate::metrics::PRESIGNATURE_ACCRUED_WAIT_DELAY
+                .with_label_values(&[self.my_account_id.as_str()]);
+        let presignature_pokes_cnt_metric = crate::metrics::PRESIGNATURE_POKES_CNT
+            .with_label_values(&[self.my_account_id.as_str()]);
+        let presignature_latency_metric =
+            crate::metrics::PRESIGNATURE_LATENCY.with_label_values(&[self.my_account_id.as_str()]);
+        let presignature_generator_success_mine_metric =
+            crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS
+                .with_label_values(&[self.my_account_id.as_str()]);
+        let presignature_generator_success_metric =
+            crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS
+                .with_label_values(&[self.my_account_id.as_str()]);
+        let presignature_poke_cpu_time_metric = crate::metrics::PRESIGNATURE_POKE_CPU_TIME
+            .with_label_values(&[self.my_account_id.as_str()]);
+
         let mut remove = Vec::new();
         for (id, generator) in self.generators.iter_mut() {
             loop {
+                let generator_poke_time = Instant::now();
                 let action = match generator.poke() {
                     Ok(action) => action,
                     Err(e) => {
-                        crate::metrics::PRESIGNATURE_GENERATOR_FAILURES
-                            .with_label_values(&[self.my_account_id.as_str()])
-                            .inc();
+                        presignature_generator_failures_metric.inc();
                         self.msg.filter_presignature(*id).await;
                         self.introduced.remove(id);
                         errors.push(e);
@@ -545,6 +567,23 @@ impl PresignatureManager {
                                 )
                                 .await;
                         }
+                        let (total_wait, total_pokes) =
+                            if let Some((last_poked, total_wait, total_pokes)) =
+                                &generator.poked_latest
+                            {
+                                (
+                                    *total_wait + (generator_poke_time - *last_poked),
+                                    total_pokes + 1,
+                                )
+                            } else {
+                                let start_time = generator.timestamp;
+                                presignature_before_poke_delay_metric
+                                    .observe((generator_poke_time - start_time).as_millis() as f64);
+                                (Duration::from_millis(0), 1)
+                            };
+                        generator.poked_latest = Some((Instant::now(), total_wait, total_pokes));
+                        presignature_poke_cpu_time_metric
+                            .observe(generator_poke_time.elapsed().as_millis() as f64);
                     }
                     Action::SendPrivate(to, data) => {
                         self.msg
@@ -562,6 +601,23 @@ impl PresignatureManager {
                                 },
                             )
                             .await;
+                        let (total_wait, total_pokes) =
+                            if let Some((last_poked, total_wait, total_pokes)) =
+                                &generator.poked_latest
+                            {
+                                (
+                                    *total_wait + (generator_poke_time - *last_poked),
+                                    total_pokes + 1,
+                                )
+                            } else {
+                                let start_time = generator.timestamp;
+                                presignature_before_poke_delay_metric
+                                    .observe((generator_poke_time - start_time).as_millis() as f64);
+                                (Duration::from_millis(0), 1)
+                            };
+                        generator.poked_latest = Some((Instant::now(), total_wait, total_pokes));
+                        presignature_poke_cpu_time_metric
+                            .observe(generator_poke_time.elapsed().as_millis() as f64);
                     }
                     Action::Return(output) => {
                         tracing::info!(
@@ -578,24 +634,28 @@ impl PresignatureManager {
                         };
                         if generator.mine {
                             tracing::info!(id, "assigning presignature to myself");
-                            crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS
-                                .with_label_values(&[self.my_account_id.as_str()])
-                                .inc();
+                            presignature_generator_success_mine_metric.inc();
                         }
                         presignatures.push((presignature, generator.mine));
                         self.introduced.remove(id);
 
-                        crate::metrics::PRESIGNATURE_LATENCY
-                            .with_label_values(&[self.my_account_id.as_str()])
+                        presignature_latency_metric
                             .observe(generator.timestamp.elapsed().as_secs_f64());
-                        crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS
-                            .with_label_values(&[self.my_account_id.as_str()])
-                            .inc();
-
+                        presignature_generator_success_metric.inc();
                         self.msg.filter_presignature(*id).await;
-
                         // Do not retain the protocol
                         remove.push(*id);
+                        if let Some((last_poked, total_wait, total_pokes)) = generator.poked_latest
+                        {
+                            let elapsed = generator_poke_time - last_poked;
+                            let total_wait = total_wait + elapsed;
+                            let total_pokes = total_pokes + 1;
+                            presignature_accrued_wait_delay_metric
+                                .observe(total_wait.as_millis() as f64);
+                            presignature_pokes_cnt_metric.observe(total_pokes as f64);
+                        }
+                        presignature_poke_cpu_time_metric
+                            .observe(generator_poke_time.elapsed().as_millis() as f64);
                         break;
                     }
                 }
