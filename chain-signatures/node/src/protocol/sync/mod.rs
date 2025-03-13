@@ -173,10 +173,10 @@ impl SyncTask {
 
         // Do NOT start until we have our own participant info.
         // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
-        let me = loop {
+        let (threshold, me) = loop {
             watcher_interval.tick().await;
-            if let Some(me) = self.watcher.me().await {
-                break me;
+            if let Some(info) = self.watcher.info().await {
+                break info;
             }
         };
         tracing::info!(target: "sync", ?me, "mpc network ready, running...");
@@ -255,7 +255,7 @@ impl SyncTask {
                 // TODO: need to make intersection more robust otherwise we end up trying to find non-existent triples/presignatures.
                 Some(req) = self.requests.triples.recv() => {
                     match req {
-                        ProtocolRequest::Take { mine, threshold, resp } => {
+                        ProtocolRequest::Take { mine, resp } => {
                             let triples = self.take_two_triple(mine, threshold, &mut cache).await;
                             let triple_ids = triples.as_ref().map(|p| (p.value.0.id, p.value.1.id));
                             if let Err(err) = resp.send(triples) {
@@ -266,7 +266,7 @@ impl SyncTask {
                 }
                 Some(req) = self.requests.presignatures.recv() => {
                     match req {
-                        ProtocolRequest::Take { mine, threshold, resp } => {
+                        ProtocolRequest::Take { mine, resp } => {
                             let presignature = self.take_presignature(mine, threshold, &mut cache).await;
                             let presignature_id = presignature.as_ref().map(|p| p.value.id);
                             if let Err(err) = resp.send(presignature) {
@@ -548,24 +548,16 @@ impl SyncChannel {
         }
     }
 
-    pub async fn take_two_triple(
-        &self,
-        mine: bool,
-        threshold: usize,
-    ) -> Option<ProtocolResponse<(Triple, Triple)>> {
+    pub async fn take_two_triple(&self, mine: bool) -> Option<ProtocolResponse<(Triple, Triple)>> {
         let start = Instant::now();
-        let result = self.request_triple.take(mine, threshold).await;
+        let result = self.request_triple.take(mine).await;
         tracing::info!(target: "sync", elapsed = ?start.elapsed(), "take two triple");
         result
     }
 
-    pub async fn take_presignature(
-        &self,
-        mine: bool,
-        threshold: usize,
-    ) -> Option<ProtocolResponse<Presignature>> {
+    pub async fn take_presignature(&self, mine: bool) -> Option<ProtocolResponse<Presignature>> {
         let start = Instant::now();
-        let result = self.request_presignature.take(mine, threshold).await;
+        let result = self.request_presignature.take(mine).await;
         tracing::info!(target: "sync", elapsed = ?start.elapsed(), "take presignature");
         result
     }
@@ -574,7 +566,6 @@ impl SyncChannel {
 enum ProtocolRequest<T> {
     Take {
         mine: bool,
-        threshold: usize,
         resp: oneshot::Sender<Option<ProtocolResponse<T>>>,
     },
 }
@@ -600,13 +591,12 @@ impl<T> ProtocolChannel<T> {
         (request_rx, protocol_channel)
     }
 
-    async fn take(&self, mine: bool, threshold: usize) -> Option<ProtocolResponse<T>> {
+    async fn take(&self, mine: bool) -> Option<ProtocolResponse<T>> {
         let (resp_tx, resp_rx) = oneshot::channel();
         if let Err(err) = self
             .request_tx
             .send(ProtocolRequest::Take {
                 mine,
-                threshold,
                 resp: resp_tx,
             })
             .await

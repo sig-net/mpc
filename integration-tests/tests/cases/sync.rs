@@ -103,7 +103,7 @@ async fn test_protocol_sync_take() -> anyhow::Result<()> {
         let ProtocolResponse {
             participants,
             value: (take_t0, take_t1),
-        } = sync_channel.take_two_triple(mine, threshold).await.unwrap();
+        } = sync_channel.take_two_triple(mine).await.unwrap();
         assert!(triple_set.remove(&take_t0.id));
         assert!(triple_set.remove(&take_t1.id));
         assert_eq!(participants.len(), 1);
@@ -114,10 +114,7 @@ async fn test_protocol_sync_take() -> anyhow::Result<()> {
         let ProtocolResponse {
             participants,
             value: presignature,
-        } = sync_channel
-            .take_presignature(mine, threshold)
-            .await
-            .unwrap();
+        } = sync_channel.take_presignature(mine).await.unwrap();
         assert!(presignature_set.remove(&presignature.id));
         assert_eq!(participants.len(), 1);
     }

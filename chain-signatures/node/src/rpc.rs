@@ -120,6 +120,30 @@ impl NodeStateWatcher {
                 .copied(),
         }
     }
+
+    pub async fn threshold(&self) -> Option<usize> {
+        let state = self.contract_state.read().await;
+        match state.as_ref()? {
+            ProtocolState::Initializing(_) => None,
+            ProtocolState::Running(state) => Some(state.threshold),
+            ProtocolState::Resharing(state) => Some(state.threshold),
+        }
+    }
+
+    pub async fn info(&self) -> Option<(usize, Participant)> {
+        let state = self.contract_state.read().await;
+        match state.as_ref()? {
+            ProtocolState::Initializing(_) => None,
+            ProtocolState::Running(state) => Some((
+                state.threshold,
+                *state.participants.find_participant(&self.account_id)?,
+            )),
+            ProtocolState::Resharing(state) => Some((
+                state.threshold,
+                *state.new_participants.find_participant(&self.account_id)?,
+            )),
+        }
+    }
 }
 
 pub struct RpcExecutor {

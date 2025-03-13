@@ -403,10 +403,7 @@ impl PresignatureManager {
             if let Some(ProtocolResponse {
                 participants,
                 value: (triple0, triple1),
-            }) = self
-                .sync_channel
-                .take_two_triple(true, self.threshold)
-                .await
+            }) = self.sync_channel.take_two_triple(true).await
             {
                 self.generate(
                     &participants,
