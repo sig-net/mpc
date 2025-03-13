@@ -80,26 +80,23 @@ impl SyncCache {
 
         // Update the cache with our own info:
         for id in update.triples {
-            let entry = self.owned_triples.entry(id).or_insert_with(Vec::new);
+            let entry = self.owned_triples.entry(id).or_default();
             entry.push(self.me);
         }
         for id in update.presignatures {
-            let entry = self.owned_presignatures.entry(id).or_insert_with(Vec::new);
+            let entry = self.owned_presignatures.entry(id).or_default();
             entry.push(self.me);
         }
 
         // Update the cache with the info from other participants:
         for (p, view) in views {
             for triple in view.triples {
-                let entry = self.owned_triples.entry(triple).or_insert_with(Vec::new);
+                let entry = self.owned_triples.entry(triple).or_default();
                 entry.push(p);
             }
 
             for presignature in view.presignatures {
-                let entry = self
-                    .owned_presignatures
-                    .entry(presignature)
-                    .or_insert_with(Vec::new);
+                let entry = self.owned_presignatures.entry(presignature).or_default();
                 entry.push(p);
             }
         }

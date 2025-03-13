@@ -123,6 +123,7 @@ async fn test_protocol_sync_take() -> anyhow::Result<()> {
     Ok(())
 }
 
+// TODO: cleanup and move this to a common test utils module
 fn dummy_presignature(id: u64) -> Presignature {
     Presignature {
         id,
@@ -135,6 +136,7 @@ fn dummy_presignature(id: u64) -> Presignature {
     }
 }
 
+// TODO: cleanup and move this to a common test utils module
 fn dummy_triple(id: u64) -> Triple {
     Triple {
         id,

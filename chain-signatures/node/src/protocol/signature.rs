@@ -245,17 +245,17 @@ pub struct SignatureManager {
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
 
-    sync_channel: SyncChannel,
-
     me: Participant,
     my_account_id: AccountId,
     threshold: usize,
     public_key: PublicKey,
     epoch: u64,
     msg: MessageChannel,
+    sync_channel: SyncChannel,
 }
 
 impl SignatureManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         me: Participant,
         my_account_id: &AccountId,
@@ -269,13 +269,13 @@ impl SignatureManager {
         Self {
             generators: HashMap::new(),
             sign_queue: SignQueue::new(me, sign_rx),
-            sync_channel,
             me,
             my_account_id: my_account_id.clone(),
             threshold,
             public_key,
             epoch,
             msg,
+            sync_channel,
         }
     }
 
