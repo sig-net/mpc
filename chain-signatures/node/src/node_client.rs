@@ -34,6 +34,15 @@ impl Options {
     }
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            timeout: 1000,
+            state_timeout: 1000,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RequestError {
     #[error("http request was unsuccessful: {0} => {1}")]

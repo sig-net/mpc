@@ -12,6 +12,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
+use crate::rpc::NodeStateWatcher;
 use crate::storage::{PresignatureStorage, TripleStorage};
 
 use super::contract::primitives::{intersect, intersect_vec, Participants};
@@ -21,7 +22,7 @@ use super::triple::{Triple, TripleId};
 const REQUEST_UPDATE_TIMEOUT: Duration = Duration::from_millis(50);
 const REQUEST_PROTOCOL_TIMEOUT: Duration = Duration::from_millis(50);
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
     triples: Vec<TripleId>,
     presignatures: Vec<PresignatureId>,
@@ -55,24 +56,42 @@ impl SyncView {
     }
 }
 
-#[derive(Default)]
 struct SyncCache {
-    /// The set of triples seen by other participants that belong to us.
+    me: Participant,
+    /// The set of self owned triples seen by both us and other participants.
     owned_triples: HashMap<TripleId, Vec<Participant>>,
-    /// The set of presignatures seen by other participants that belong to us.
+    /// The set of self owned presignatures seen by both us and other participants.
     owned_presignatures: HashMap<PresignatureId, Vec<Participant>>,
 }
 
 impl SyncCache {
-    fn update(&mut self, views: Vec<(Participant, SyncView)>) {
-        self.owned_triples.clear();
-        self.owned_presignatures.clear();
+    fn new(me: Participant) -> Self {
+        Self {
+            me,
+            owned_triples: HashMap::new(),
+            owned_presignatures: HashMap::new(),
+        }
+    }
+
+    fn update(&mut self, update: SyncUpdate, views: Vec<(Participant, SyncView)>) {
+        // Clear the cache before updating it since we are only taking a temporary view of who has a share
+        // of the triples/presignatures. This is so storage for each can be updated and we can adapt to it.
+        self.clear();
+
+        // Update the cache with our own info:
+        for id in update.triples {
+            let entry = self.owned_triples.entry(id).or_insert_with(Vec::new);
+            entry.push(self.me);
+        }
+        for id in update.presignatures {
+            let entry = self.owned_presignatures.entry(id).or_insert_with(Vec::new);
+            entry.push(self.me);
+        }
+
+        // Update the cache with the info from other participants:
         for (p, view) in views {
             for triple in view.triples {
-                let entry = self
-                    .owned_triples
-                    .entry(triple)
-                    .or_insert_with(Vec::new);
+                let entry = self.owned_triples.entry(triple).or_insert_with(Vec::new);
                 entry.push(p);
             }
 
@@ -85,9 +104,14 @@ impl SyncCache {
             }
         }
     }
+
+    fn clear(&mut self) {
+        self.owned_triples.clear();
+        self.owned_presignatures.clear();
+    }
 }
 
-struct SyncRequestReceiver {
+pub struct SyncRequestReceiver {
     updates: mpsc::Receiver<SyncUpdateRequest>,
     triples: mpsc::Receiver<ProtocolRequest<(Triple, Triple)>>,
     presignatures: mpsc::Receiver<ProtocolRequest<Presignature>>,
@@ -98,6 +122,7 @@ pub struct SyncTask {
     triples: TripleStorage,
     presignatures: PresignatureStorage,
     mesh_state: Arc<RwLock<MeshState>>,
+    watcher: NodeStateWatcher,
     requests: SyncRequestReceiver,
 }
 
@@ -108,6 +133,7 @@ impl SyncTask {
         triples: TripleStorage,
         presignatures: PresignatureStorage,
         mesh_state: Arc<RwLock<MeshState>>,
+        watcher: NodeStateWatcher,
     ) -> (SyncChannel, Self) {
         let (requests, channel) = SyncChannel::new();
         let task = Self {
@@ -115,6 +141,7 @@ impl SyncTask {
             triples,
             presignatures,
             mesh_state,
+            watcher,
             requests,
         };
         (channel, task)
@@ -132,7 +159,6 @@ impl SyncTask {
             .unwrap_or_default();
 
         // TODO: maybe instead of Vec<T> we should have HashSet<T> for more efficient intersections.
-        // TODO: remove the triples/presignatures in this task or another one.
         SyncView {
             triples: intersect(&[&update.triples, &triple_ids]),
             presignatures: intersect(&[&update.presignatures, &presignature_ids]),
@@ -140,14 +166,24 @@ impl SyncTask {
     }
 
     pub async fn run(mut self) {
+        tracing::info!(target: "sync", "task has been started");
+        let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
         let mut broadcast_interval = tokio::time::interval(Duration::from_millis(500));
         let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(50));
-        let mut cache = SyncCache::default();
 
-        // TODO: handle per-contract protocol state so we can grab info easily.
+        // Do NOT start until we have our own participant info.
+        // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
+        let me = loop {
+            watcher_interval.tick().await;
+            if let Some(me) = self.watcher.me().await {
+                break me;
+            }
+        };
+        tracing::info!(target: "sync", ?me, "mpc network ready, running...");
+        let mut cache = SyncCache::new(me);
 
         // TODO: after adding watch to contract, make this immediately broadcast.
-        let mut broadcast = Option::<JoinHandle<Option<Vec<(Participant, SyncView)>>>>::None;
+        let mut broadcast = Option::<JoinHandle<_>>::None;
         loop {
             tokio::select! {
                 // do a new broadcast if there is no ongoing broadcast.
@@ -162,7 +198,10 @@ impl SyncTask {
 
                     let active = {
                         let state = self.mesh_state.read().await;
-                        state.active.clone()
+                        let mut active = state.active.clone();
+                        // do not broadcast to me
+                        active.remove(&me);
+                        active
                     };
 
                     tracing::info!(target: "sync", "commit broadcast");
@@ -179,19 +218,15 @@ impl SyncTask {
 
                     tracing::info!(target: "sync", "processing broadcast");
                     let start = Instant::now();
-                    let views = match handle.await {
-                        Ok(Some(views)) => views,
-                        Ok(None) => {
-                            broadcast = None;
-                            continue;
-                        }
+                    let (update, views) = match handle.await {
+                        Ok(result) => result,
                         Err(err) => {
                             tracing::error!(?err, "broadcast join handle failed");
                             broadcast = None;
                             continue;
                         }
                     };
-                    cache.update(views);
+                    cache.update(update, views);
                     // TODO: pull threshold from contract updates:
                     // cache.retain(|p| p.len() >= threshold);
 
@@ -224,7 +259,7 @@ impl SyncTask {
                             let triples = self.take_two_triple(threshold, &mut cache).await;
                             let triple_ids = triples.as_ref().map(|p| (p.value.0.id, p.value.1.id));
                             if let Err(err) = resp.send(triples) {
-                                tracing::error!(target: "sync[take]", ?triple_ids, ?err, "failed to respond with triple");
+                                tracing::error!(target: "sync", ?triple_ids, ?err, "failed to respond with two triples");
                             }
                         }
                     }
@@ -235,7 +270,7 @@ impl SyncTask {
                             let presignature = self.take_presignature(threshold, &mut cache).await;
                             let presignature_id = presignature.as_ref().map(|p| p.value.id);
                             if let Err(err) = resp.send(presignature) {
-                                tracing::error!(target: "sync[take]", ?err, presignature_id, "failed to respond with presignature");
+                                tracing::error!(target: "sync", presignature_id, ?err, "failed to respond with presignature");
                             }
                         }
                     }
@@ -286,27 +321,25 @@ impl SyncTask {
                 }
             };
 
-            let Some((t0_id, t0_participants)) = cache.owned_triples.remove_entry(&t0_id)
-            else {
+            let Some((t0_id, t0_participants)) = cache.owned_triples.remove_entry(&t0_id) else {
                 tracing::warn!(t0_id, "unexpected, failed to take a seen triple");
                 break None;
             };
-            let Some((t1_id, t1_participants)) = cache.owned_triples.remove_entry(&t1_id)
-            else {
+            let Some((t1_id, t1_participants)) = cache.owned_triples.remove_entry(&t1_id) else {
                 tracing::warn!(t1_id, "unexpected, failed to take a seen triple");
                 failed.push((t0_id, t0_participants));
                 break None;
             };
 
-            // TODO: threshold - 1 should be invalid once me is present
             let participants = intersect_vec(&[&active, &t0_participants, &t1_participants]);
-            if participants.len() < threshold - 1 {
+            if participants.len() < threshold {
                 tracing::warn!(
-                    target: "sync[triple.take]",
+                    target: "sync",
+                    intersection = ?participants,
+                    ?active,
                     triple0 = ?(t0_id, &t0_participants),
                     triple1 = ?(t1_id, &t1_participants),
-                    ?participants,
-                    "intersection < threshold"
+                    "intersection < threshold for two triple.take"
                 );
                 failed.push((t0_id, t0_participants));
                 failed.push((t1_id, t1_participants));
@@ -352,27 +385,25 @@ impl SyncTask {
             if cache.owned_presignatures.is_empty() {
                 break None;
             }
-            let Some(&presignature_id) = cache.owned_presignatures.keys().choose(&mut rng)
-            else {
+            let Some(&presignature_id) = cache.owned_presignatures.keys().choose(&mut rng) else {
                 tracing::warn!("unexpected, failed to take a presignature");
                 break None;
             };
 
-            let Some((presignature_id, presign_participants)) = cache
-                .owned_presignatures
-                .remove_entry(&presignature_id)
+            let Some((presignature_id, presign_participants)) =
+                cache.owned_presignatures.remove_entry(&presignature_id)
             else {
                 break None;
             };
 
-            // TODO: threshold - 1 should be invalid once me is present
             let participants = intersect_vec(&[&active, &presign_participants]);
-            if participants.len() < threshold - 1 {
+            if participants.len() < threshold {
                 tracing::warn!(
-                    target: "sync[presign.take]",
+                    target: "sync",
+                    intersection = ?participants,
+                    ?active,
                     presignature = ?(presignature_id, &presign_participants),
-                    ?participants,
-                    "intersection < threshold"
+                    "intersection < threshold for presignature.take"
                 );
                 failed.push((presignature_id, presign_participants));
                 continue;
@@ -406,18 +437,17 @@ async fn broadcast_sync(
     client: NodeClient,
     update: SyncUpdate,
     active: Participants,
-) -> Option<Vec<(Participant, SyncView)>> {
+) -> (SyncUpdate, Vec<(Participant, SyncView)>) {
     if update.is_empty() {
-        return None;
+        return (update, Vec::new());
     }
 
     let start = Instant::now();
-
     let mut tasks = JoinSet::new();
-    let update = Arc::new(update);
+    let arc_update = Arc::new(update.clone());
     for (&p, info) in active.iter() {
         let client = client.clone();
-        let update = update.clone();
+        let update = arc_update.clone();
         let url = info.url.clone();
         tasks.spawn(async move {
             let start = Instant::now();
@@ -452,7 +482,7 @@ async fn broadcast_sync(
         "broadcast completed",
     );
 
-    Some(views)
+    (update, views)
 }
 
 struct SyncUpdateRequest {
@@ -468,7 +498,7 @@ pub struct SyncChannel {
 }
 
 impl SyncChannel {
-    fn new() -> (SyncRequestReceiver, Self) {
+    pub fn new() -> (SyncRequestReceiver, Self) {
         let (request_update_tx, request_update_rx) = mpsc::channel(100);
         let (request_triple_rx, request_triple) = TripleChannel::new();
         let (request_presignature_rx, request_presignature) = PresignatureChannel::new();
@@ -596,9 +626,4 @@ impl<T> Clone for ProtocolChannel<T> {
             request_tx: self.request_tx.clone(),
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    fn test_protocol_sync() {}
 }

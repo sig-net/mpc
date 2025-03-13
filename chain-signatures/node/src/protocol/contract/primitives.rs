@@ -119,6 +119,10 @@ impl Participants {
         self.participants.insert(*id, info);
     }
 
+    pub fn remove(&mut self, id: &Participant) -> Option<ParticipantInfo> {
+        self.participants.remove(id)
+    }
+
     pub fn get(&self, id: &Participant) -> Option<&ParticipantInfo> {
         self.participants.get(id)
     }
@@ -225,7 +229,7 @@ pub struct CandidateInfo {
     pub sign_pk: near_crypto::PublicKey,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Candidates {
     pub candidates: BTreeMap<AccountId, CandidateInfo>,
 }
@@ -313,7 +317,7 @@ impl From<mpc_contract::primitives::PkVotes> for PkVotes {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Votes {
     pub votes: BTreeMap<AccountId, HashSet<AccountId>>,
 }

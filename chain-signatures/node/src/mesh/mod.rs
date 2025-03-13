@@ -40,8 +40,6 @@ pub struct MeshState {
 /// Set of connections to participants in the network. Each participant is pinged at regular
 /// intervals to check their aliveness. The connections can be dropped and reconnected at any time.
 pub struct Mesh {
-    client: NodeClient,
-
     /// Pool of connections to participants. Used to check who is alive in the network.
     connections: connection::Pool,
     state: Arc<RwLock<MeshState>>,
@@ -52,7 +50,6 @@ impl Mesh {
     pub fn new(client: &NodeClient, options: Options) -> Self {
         let ping_interval = Duration::from_millis(options.ping_interval);
         Self {
-            client: client.clone(),
             connections: connection::Pool::new(client, ping_interval),
             state: Arc::new(RwLock::new(MeshState::default())),
             ping_interval,

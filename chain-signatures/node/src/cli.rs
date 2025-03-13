@@ -5,7 +5,7 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
-use crate::rpc::{NearClient, RpcExecutor};
+use crate::rpc::{NearClient, NodeStateWatcher, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, logs, mesh, storage, web};
 use clap::Parser;
@@ -241,7 +241,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let mesh = Mesh::new(&client, mesh_options);
             let mesh_state = mesh.state().clone();
-            let contract_state = Arc::new(RwLock::new(None));
+            let watcher = NodeStateWatcher::new(&account_id);
+            let contract_state = watcher.state().clone();
 
             let eth = eth.into_config();
             let network = NetworkConfig { cipher_sk, sign_sk };
@@ -253,6 +254,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
+                watcher,
             );
 
             tracing::info!(
