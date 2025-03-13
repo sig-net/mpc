@@ -593,12 +593,7 @@ impl SignatureManager {
         }
     }
 
-    pub async fn handle_requests(
-        &mut self,
-        stable: &[Participant],
-        // presignature_manager: &mut PresignatureManager,
-        cfg: &ProtocolConfig,
-    ) {
+    pub async fn handle_requests(&mut self, stable: &[Participant], cfg: &ProtocolConfig) {
         if stable.len() < self.threshold {
             tracing::warn!(
                 "require at least {} stable participants to handle_requests, got {}: {:?}",

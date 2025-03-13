@@ -205,6 +205,7 @@ impl SyncTask {
                 // do a new broadcast if there is no ongoing broadcast.
                 _ = broadcast_interval.tick() => {
                     if broadcast.is_some() {
+                        // task is still ongoing, skip.
                         continue;
                     }
 
@@ -226,28 +227,27 @@ impl SyncTask {
                 }
                 // check that our broadcast has completed, and if so process the result.
                 _ = broadcast_check_interval.tick() => {
-                    let Some((start, handle)) = broadcast.as_mut() else {
+                    let Some((start, handle)) = broadcast.take() else {
                         continue;
                     };
                     if !handle.is_finished() {
+                        // task is not finished yet, put it back:
+                        broadcast = Some((start, handle));
                         continue;
                     }
 
                     let (update, views) = match handle.await {
                         Ok(result) => result,
                         Err(err) => {
-                            tracing::error!(?err, "broadcast join handle failed");
-                            broadcast = None;
+                            tracing::warn!(target: "sync", ?err, "broadcast task failed");
                             continue;
                         }
                     };
                     cache.update(update, views, threshold);
-
                     // TODO: add ability to remove from storage, but that requires more info in storage,
                     //      like who exactly owns the triple/presignature.
 
                     let elapsed = start.elapsed();
-                    broadcast = None;
                     tracing::info!(
                         target: "sync",
                         ?elapsed,
@@ -260,7 +260,7 @@ impl SyncTask {
                 Some(req) = self.requests.updates.recv() => {
                     let view = self.process_sync(req.update).await;
                     if let Err(err) = req.resp.send(view) {
-                        tracing::error!(?err, "failed to send sync view");
+                        tracing::warn!(target: "sync", ?err, "failed to send sync view");
                     }
                 }
                 Some(req) = self.requests.triples.recv() => {
@@ -269,7 +269,7 @@ impl SyncTask {
                             let triples = self.take_two_triple(mine, threshold, &mut cache).await;
                             let triple_ids = triples.as_ref().map(|p| (p.value.0.id, p.value.1.id));
                             if let Err(err) = resp.send(triples) {
-                                tracing::error!(target: "sync", ?triple_ids, ?err, "failed to respond with two triples");
+                                tracing::warn!(target: "sync", ?triple_ids, ?err, "failed to respond with two triples");
                             }
                         }
                     }
@@ -280,7 +280,7 @@ impl SyncTask {
                             let presignature = self.take_presignature(mine, threshold, &mut cache).await;
                             let presignature_id = presignature.as_ref().map(|p| p.value.id);
                             if let Err(err) = resp.send(presignature) {
-                                tracing::error!(target: "sync", presignature_id, ?err, "failed to respond with presignature");
+                                tracing::warn!(target: "sync", presignature_id, ?err, "failed to respond with presignature");
                             }
                         }
                     }
@@ -328,17 +328,17 @@ impl SyncTask {
             let (&t0_id, &t1_id) = match two.as_slice() {
                 &[triple0, triple1] => (triple0, triple1),
                 _ => {
-                    tracing::warn!("unexpected, failed to take two triples");
+                    tracing::warn!(target: "sync", "unexpected, failed to take two triples");
                     break None;
                 }
             };
 
             let Some((t0_id, t0_participants)) = cache.owned_triples.remove_entry(&t0_id) else {
-                tracing::warn!(t0_id, "unexpected, failed to take a seen triple");
+                tracing::warn!(target: "sync", t0_id, "unexpected, failed to take a seen triple");
                 break None;
             };
             let Some((t1_id, t1_participants)) = cache.owned_triples.remove_entry(&t1_id) else {
-                tracing::warn!(t1_id, "unexpected, failed to take a seen triple");
+                tracing::warn!(target: "sync", t1_id, "unexpected, failed to take a seen triple");
                 failed.push((t0_id, t0_participants));
                 break None;
             };
@@ -400,7 +400,7 @@ impl SyncTask {
                 break None;
             }
             let Some(&presignature_id) = cache.owned_presignatures.keys().choose(&mut rng) else {
-                tracing::warn!("unexpected, failed to take a presignature");
+                tracing::warn!(target: "sync", "unexpected, failed to take a presignature");
                 break None;
             };
 
