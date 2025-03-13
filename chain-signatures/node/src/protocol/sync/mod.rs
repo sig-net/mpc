@@ -19,8 +19,17 @@ use super::contract::primitives::{intersect, intersect_vec, Participants};
 use super::presignature::{Presignature, PresignatureId};
 use super::triple::{Triple, TripleId};
 
+/// How long for a synchronous [`SyncUpdate`] to get back a [`SyncView`] request before timeout.
 const REQUEST_UPDATE_TIMEOUT: Duration = Duration::from_millis(50);
+/// How long for a synchronous [`ProtocolRequest`] to get back a [`ProtocolResponse`] before timeout.
 const REQUEST_PROTOCOL_TIMEOUT: Duration = Duration::from_millis(50);
+/// The maximum number of protocol requests that can be queued. This will likely never get to
+/// this upper bound just purely based on our ProtocolConfig.
+const MAX_PROTOCOL_REQUESTS: usize = 128 * 1024;
+/// The maximum number of update requests that can be queued. This is pretty much just
+/// based on the number of participants in the network. If we have 1024 participants then
+/// our issue will more than likely not be the channel size.
+const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
@@ -73,7 +82,12 @@ impl SyncCache {
         }
     }
 
-    fn update(&mut self, update: SyncUpdate, views: Vec<(Participant, SyncView)>) {
+    fn update(
+        &mut self,
+        update: SyncUpdate,
+        views: Vec<(Participant, SyncView)>,
+        threshold: usize,
+    ) {
         // Clear the cache before updating it since we are only taking a temporary view of who has a share
         // of the triples/presignatures. This is so storage for each can be updated and we can adapt to it.
         self.clear();
@@ -100,6 +114,12 @@ impl SyncCache {
                 entry.push(p);
             }
         }
+
+        // Remove any triples/presignatures that do not have enough participants.
+        self.owned_triples
+            .retain(|_, participants| participants.len() >= threshold);
+        self.owned_presignatures
+            .retain(|_, participants| participants.len() >= threshold);
     }
 
     fn clear(&mut self) {
@@ -165,8 +185,8 @@ impl SyncTask {
     pub async fn run(mut self) {
         tracing::info!(target: "sync", "task has been started");
         let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
-        let mut broadcast_interval = tokio::time::interval(Duration::from_millis(500));
-        let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(50));
+        let mut broadcast_interval = tokio::time::interval(Duration::from_millis(250));
+        let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(25));
 
         // Do NOT start until we have our own participant info.
         // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
@@ -179,8 +199,7 @@ impl SyncTask {
         tracing::info!(target: "sync", ?me, "mpc network ready, running...");
         let mut cache = SyncCache::new(me);
 
-        // TODO: after adding watch to contract, make this immediately broadcast.
-        let mut broadcast = Option::<JoinHandle<_>>::None;
+        let mut broadcast = Option::<(Instant, JoinHandle<_>)>::None;
         loop {
             tokio::select! {
                 // do a new broadcast if there is no ongoing broadcast.
@@ -201,20 +220,19 @@ impl SyncTask {
                         active
                     };
 
-                    tracing::info!(target: "sync", "commit broadcast");
-                    broadcast = Some(tokio::spawn(broadcast_sync(self.client.clone(), update, active)));
+                    let start = Instant::now();
+                    let task = tokio::spawn(broadcast_sync(self.client.clone(), update, active));
+                    broadcast = Some((start, task));
                 }
                 // check that our broadcast has completed, and if so process the result.
                 _ = broadcast_check_interval.tick() => {
-                    let Some(handle) = broadcast.as_mut() else {
+                    let Some((start, handle)) = broadcast.as_mut() else {
                         continue;
                     };
                     if !handle.is_finished() {
                         continue;
                     }
 
-                    tracing::info!(target: "sync", "processing broadcast");
-                    let start = Instant::now();
                     let (update, views) = match handle.await {
                         Ok(result) => result,
                         Err(err) => {
@@ -223,33 +241,28 @@ impl SyncTask {
                             continue;
                         }
                     };
-                    cache.update(update, views);
-                    // TODO: pull threshold from contract updates:
-                    // cache.retain(|p| p.len() >= threshold);
+                    cache.update(update, views, threshold);
 
+                    // TODO: add ability to remove from storage, but that requires more info in storage,
+                    //      like who exactly owns the triple/presignature.
+
+                    let elapsed = start.elapsed();
                     broadcast = None;
                     tracing::info!(
                         target: "sync",
-                        elapsed = ?start.elapsed(),
+                        ?elapsed,
                         triples = cache.owned_triples.len(),
                         presignatures = cache.owned_presignatures.len(),
                         "processed broadcast",
                     );
                 }
-                // TODO: make process updates a separate task.
+                // TODO: maybe make process updates a separate task.
                 Some(req) = self.requests.updates.recv() => {
-                    let start = Instant::now();
                     let view = self.process_sync(req.update).await;
                     if let Err(err) = req.resp.send(view) {
                         tracing::error!(?err, "failed to send sync view");
                     }
-                    tracing::info!(
-                        target: "sync",
-                        elapsed = ?start.elapsed(),
-                        "processed update",
-                    );
                 }
-                // TODO: need to make intersection more robust otherwise we end up trying to find non-existent triples/presignatures.
                 Some(req) = self.requests.triples.recv() => {
                     match req {
                         ProtocolRequest::Take { mine, resp } => {
@@ -451,14 +464,7 @@ async fn broadcast_sync(
         let update = arc_update.clone();
         let url = info.url.clone();
         tasks.spawn(async move {
-            let start = Instant::now();
             let sync_view = client.sync(&url, &update).await;
-            tracing::info!(
-                target: "sync",
-                participant = ?p,
-                elapsed = ?start.elapsed(),
-                "call /sync completed",
-            );
             (p, sync_view)
         });
     }
@@ -500,7 +506,7 @@ pub struct SyncChannel {
 
 impl SyncChannel {
     pub fn new() -> (SyncRequestReceiver, Self) {
-        let (request_update_tx, request_update_rx) = mpsc::channel(100);
+        let (request_update_tx, request_update_rx) = mpsc::channel(MAX_SYNC_UPDATE_REQUESTS);
         let (request_triple_rx, request_triple) = TripleChannel::new();
         let (request_presignature_rx, request_presignature) = PresignatureChannel::new();
 
@@ -582,7 +588,7 @@ struct ProtocolChannel<T> {
 
 impl<T> ProtocolChannel<T> {
     fn new() -> (mpsc::Receiver<ProtocolRequest<T>>, Self) {
-        let (request_tx, request_rx) = mpsc::channel(10000);
+        let (request_tx, request_rx) = mpsc::channel(MAX_PROTOCOL_REQUESTS);
         let protocol_channel = Self { request_tx };
 
         (request_rx, protocol_channel)
