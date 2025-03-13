@@ -57,10 +57,34 @@ impl SyncView {
 
 #[derive(Default)]
 struct SyncCache {
-    other_seen_triples: HashMap<TripleId, HashSet<Participant>>,
-    other_seen_presignatures: HashMap<PresignatureId, HashSet<Participant>>,
-    taken_triples: HashSet<TripleId>,
-    taken_presignatures: HashSet<PresignatureId>,
+    /// The set of triples seen by other participants that belong to us.
+    owned_triples: HashMap<TripleId, Vec<Participant>>,
+    /// The set of presignatures seen by other participants that belong to us.
+    owned_presignatures: HashMap<PresignatureId, Vec<Participant>>,
+}
+
+impl SyncCache {
+    fn update(&mut self, views: Vec<(Participant, SyncView)>) {
+        self.owned_triples.clear();
+        self.owned_presignatures.clear();
+        for (p, view) in views {
+            for triple in view.triples {
+                let entry = self
+                    .owned_triples
+                    .entry(triple)
+                    .or_insert_with(Vec::new);
+                entry.push(p);
+            }
+
+            for presignature in view.presignatures {
+                let entry = self
+                    .owned_presignatures
+                    .entry(presignature)
+                    .or_insert_with(Vec::new);
+                entry.push(p);
+            }
+        }
+    }
 }
 
 struct SyncRequestReceiver {
@@ -100,8 +124,12 @@ impl SyncTask {
         // TODO: check that `from` actually owns the triples/presignatures.
         // TODO: log the errors from storage.
         // TODO: make each process_sync a separate task
-        let triple_ids = self.triples.fetch_ids().await.unwrap_or_default();
-        let presignature_ids = self.presignatures.fetch_ids().await.unwrap_or_default();
+        let triple_ids = self.triples.fetch_foreign_ids().await.unwrap_or_default();
+        let presignature_ids = self
+            .presignatures
+            .fetch_foreign_ids()
+            .await
+            .unwrap_or_default();
 
         // TODO: maybe instead of Vec<T> we should have HashSet<T> for more efficient intersections.
         // TODO: remove the triples/presignatures in this task or another one.
@@ -114,9 +142,9 @@ impl SyncTask {
     pub async fn run(mut self) {
         let mut broadcast_interval = tokio::time::interval(Duration::from_millis(500));
         let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(50));
+        let mut cache = SyncCache::default();
 
-        let mut mesh_seen_triples = HashMap::new();
-        let mut mesh_seen_presignatures = HashMap::new();
+        // TODO: handle per-contract protocol state so we can grab info easily.
 
         // TODO: after adding watch to contract, make this immediately broadcast.
         let mut broadcast = Option::<JoinHandle<Option<Vec<(Participant, SyncView)>>>>::None;
@@ -163,31 +191,17 @@ impl SyncTask {
                             continue;
                         }
                     };
-                    mesh_seen_triples.clear();
-                    mesh_seen_presignatures.clear();
-                    for (p, view) in views {
-                        for triple in view.triples {
-                            let entry = mesh_seen_triples.entry(triple).or_insert_with(Vec::new);
-                            entry.push(p);
-                        }
-
-                        for presignature in view.presignatures {
-                            let entry = mesh_seen_presignatures.entry(presignature).or_insert_with(Vec::new);
-                            entry.push(p);
-                        }
-                    }
-
+                    cache.update(views);
                     // TODO: pull threshold from contract updates:
-                    // mesh_seen_triples.retain(|_, v| v.len() >= threshold);
-                    // mesh_seen_presignatures.retain(|_, v| v.len() >= threshold);
+                    // cache.retain(|p| p.len() >= threshold);
 
                     broadcast = None;
                     tracing::info!(
                         target: "sync",
                         elapsed = ?start.elapsed(),
-                        triples = mesh_seen_triples.len(),
-                        presignatures = mesh_seen_presignatures.len(),
-                            "processed broadcast",
+                        triples = cache.owned_triples.len(),
+                        presignatures = cache.owned_presignatures.len(),
+                        "processed broadcast",
                     );
                 }
                 // TODO: make process updates a separate task.
@@ -207,7 +221,7 @@ impl SyncTask {
                 Some(req) = self.requests.triples.recv() => {
                     match req {
                         ProtocolRequest::Take { threshold, resp } => {
-                            let triples = self.take_two_triple(threshold, &mut mesh_seen_triples).await;
+                            let triples = self.take_two_triple(threshold, &mut cache).await;
                             let triple_ids = triples.as_ref().map(|p| (p.value.0.id, p.value.1.id));
                             if let Err(err) = resp.send(triples) {
                                 tracing::error!(target: "sync[take]", ?triple_ids, ?err, "failed to respond with triple");
@@ -218,7 +232,7 @@ impl SyncTask {
                 Some(req) = self.requests.presignatures.recv() => {
                     match req {
                         ProtocolRequest::Take { threshold, resp } => {
-                            let presignature = self.take_presignature(threshold, &mut mesh_seen_presignatures).await;
+                            let presignature = self.take_presignature(threshold, &mut cache).await;
                             let presignature_id = presignature.as_ref().map(|p| p.value.id);
                             if let Err(err) = resp.send(presignature) {
                                 tracing::error!(target: "sync[take]", ?err, presignature_id, "failed to respond with presignature");
@@ -243,9 +257,9 @@ impl SyncTask {
     async fn take_two_triple(
         &self,
         threshold: usize,
-        mesh_seen: &mut HashMap<TripleId, Vec<Participant>>,
+        cache: &mut SyncCache,
     ) -> Option<ProtocolResponse<(Triple, Triple)>> {
-        if mesh_seen.len() < 2 {
+        if cache.owned_triples.len() < 2 {
             return None;
         }
 
@@ -259,11 +273,11 @@ impl SyncTask {
         let mut failed = Vec::new();
         // Try to find a suitable triple pair:
         let found = loop {
-            if mesh_seen.len() < 2 {
+            if cache.owned_triples.len() < 2 {
                 break None;
             }
 
-            let two = mesh_seen.keys().choose_multiple(&mut rng, 2);
+            let two = cache.owned_triples.keys().choose_multiple(&mut rng, 2);
             let (&t0_id, &t1_id) = match two.as_slice() {
                 &[triple0, triple1] => (triple0, triple1),
                 _ => {
@@ -272,11 +286,13 @@ impl SyncTask {
                 }
             };
 
-            let Some((t0_id, t0_participants)) = mesh_seen.remove_entry(&t0_id) else {
+            let Some((t0_id, t0_participants)) = cache.owned_triples.remove_entry(&t0_id)
+            else {
                 tracing::warn!(t0_id, "unexpected, failed to take a seen triple");
                 break None;
             };
-            let Some((t1_id, t1_participants)) = mesh_seen.remove_entry(&t1_id) else {
+            let Some((t1_id, t1_participants)) = cache.owned_triples.remove_entry(&t1_id)
+            else {
                 tracing::warn!(t1_id, "unexpected, failed to take a seen triple");
                 failed.push((t0_id, t0_participants));
                 break None;
@@ -301,7 +317,7 @@ impl SyncTask {
         };
 
         for (id, triple) in failed {
-            mesh_seen.insert(id, triple);
+            cache.owned_triples.insert(id, triple);
         }
         let (mut participants, triple0, triple1) = found?;
         // TODO: make triple_storage.take intake active to do intersection in Lua script side.
@@ -323,9 +339,9 @@ impl SyncTask {
     async fn take_presignature(
         &self,
         threshold: usize,
-        mesh_seen: &mut HashMap<PresignatureId, Vec<Participant>>,
+        cache: &mut SyncCache,
     ) -> Option<ProtocolResponse<Presignature>> {
-        if mesh_seen.is_empty() {
+        if cache.owned_presignatures.is_empty() {
             return None;
         }
         let active = self.mesh_state.read().await.active.keys_vec();
@@ -333,16 +349,18 @@ impl SyncTask {
         let mut failed = Vec::new();
         let mut rng = StdRng::from_entropy();
         let found = loop {
-            if mesh_seen.is_empty() {
+            if cache.owned_presignatures.is_empty() {
                 break None;
             }
-            let Some(&presignature_id) = mesh_seen.keys().choose(&mut rng) else {
+            let Some(&presignature_id) = cache.owned_presignatures.keys().choose(&mut rng)
+            else {
                 tracing::warn!("unexpected, failed to take a presignature");
                 break None;
             };
 
-            let Some((presignature_id, presign_participants)) =
-                mesh_seen.remove_entry(&presignature_id)
+            let Some((presignature_id, presign_participants)) = cache
+                .owned_presignatures
+                .remove_entry(&presignature_id)
             else {
                 break None;
             };
@@ -364,7 +382,7 @@ impl SyncTask {
         };
 
         for (id, triple) in failed {
-            mesh_seen.insert(id, triple);
+            cache.owned_presignatures.insert(id, triple);
         }
         let (mut participants, presignature_id) = found?;
         let presignature = match self.presignatures.take_self(presignature_id).await {
@@ -497,7 +515,7 @@ impl SyncChannel {
     }
 
     pub async fn take_two_triple(
-        &mut self,
+        &self,
         threshold: usize,
     ) -> Option<ProtocolResponse<(Triple, Triple)>> {
         let start = Instant::now();
@@ -507,7 +525,7 @@ impl SyncChannel {
     }
 
     pub async fn take_presignature(
-        &mut self,
+        &self,
         threshold: usize,
     ) -> Option<ProtocolResponse<Presignature>> {
         let start = Instant::now();
@@ -545,7 +563,7 @@ impl<T> ProtocolChannel<T> {
         (request_rx, protocol_channel)
     }
 
-    async fn take(&mut self, threshold: usize) -> Option<ProtocolResponse<T>> {
+    async fn take(&self, threshold: usize) -> Option<ProtocolResponse<T>> {
         let (resp_tx, resp_rx) = oneshot::channel();
         if let Err(err) = self
             .request_tx

@@ -48,7 +48,7 @@ impl TripleStorage {
     }
 
     // TODO: add owner field otherwise fallback to this behavior:
-    pub async fn fetch_ids(&self) -> StoreResult<Vec<TripleId>> {
+    pub async fn fetch_foreign_ids(&self) -> StoreResult<Vec<TripleId>> {
         let mut conn = self.connect().await?;
         let result: Vec<TripleId> = conn.hkeys(&self.triple_key).await?;
         Ok(result)

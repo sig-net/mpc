@@ -55,7 +55,7 @@ impl PresignatureStorage {
         Ok(result)
     }
 
-    pub async fn fetch_ids(&self) -> StoreResult<Vec<PresignatureId>> {
+    pub async fn fetch_foreign_ids(&self) -> StoreResult<Vec<PresignatureId>> {
         let mut conn = self.connect().await?;
         let result: Vec<PresignatureId> = conn.hkeys(&self.presig_key).await?;
         Ok(result)
