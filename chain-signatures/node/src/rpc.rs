@@ -76,25 +76,25 @@ impl RpcChannel {
     }
 }
 
-// TODO: use tokio::watch channel in the future.
 #[derive(Clone)]
 pub struct NodeStateWatcher {
     account_id: AccountId,
+    // TODO: use tokio::watch channel in the future.
     contract_state: Arc<RwLock<Option<ProtocolState>>>,
 }
 
 impl NodeStateWatcher {
-    pub fn mock(id: &AccountId, state: ProtocolState) -> Self {
-        Self {
-            account_id: id.clone(),
-            contract_state: Arc::new(RwLock::new(Some(state))),
-        }
-    }
-
     pub fn new(id: &AccountId) -> Self {
         Self {
             account_id: id.clone(),
             contract_state: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn mock(id: &AccountId, state: ProtocolState) -> Self {
+        Self {
+            account_id: id.clone(),
+            contract_state: Arc::new(RwLock::new(Some(state))),
         }
     }
 

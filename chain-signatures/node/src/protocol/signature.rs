@@ -628,7 +628,9 @@ impl SignatureManager {
             if self.sign_queue.is_empty_mine() {
                 None
             } else {
-                self.sync_channel.take_presignature(self.threshold).await
+                self.sync_channel
+                    .take_presignature(true, self.threshold)
+                    .await
             }
         } {
             let Some(my_request) = self.sign_queue.take_mine() else {

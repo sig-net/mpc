@@ -97,12 +97,13 @@ async fn test_protocol_sync_take() -> anyhow::Result<()> {
     // Give it some time for sync to process the inserts
     tokio::time::sleep(Duration::from_secs(1)).await;
 
+    let mine = true;
     // Check that the inserted triples can be taken
     for _ in 0..5 {
         let ProtocolResponse {
             participants,
             value: (take_t0, take_t1),
-        } = sync_channel.take_two_triple(threshold).await.unwrap();
+        } = sync_channel.take_two_triple(mine, threshold).await.unwrap();
         assert!(triple_set.remove(&take_t0.id));
         assert!(triple_set.remove(&take_t1.id));
         assert_eq!(participants.len(), 1);
@@ -113,7 +114,10 @@ async fn test_protocol_sync_take() -> anyhow::Result<()> {
         let ProtocolResponse {
             participants,
             value: presignature,
-        } = sync_channel.take_presignature(threshold).await.unwrap();
+        } = sync_channel
+            .take_presignature(mine, threshold)
+            .await
+            .unwrap();
         assert!(presignature_set.remove(&presignature.id));
         assert_eq!(participants.len(), 1);
     }

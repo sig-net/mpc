@@ -255,8 +255,8 @@ impl SyncTask {
                 // TODO: need to make intersection more robust otherwise we end up trying to find non-existent triples/presignatures.
                 Some(req) = self.requests.triples.recv() => {
                     match req {
-                        ProtocolRequest::Take { threshold, resp } => {
-                            let triples = self.take_two_triple(threshold, &mut cache).await;
+                        ProtocolRequest::Take { mine, threshold, resp } => {
+                            let triples = self.take_two_triple(mine, threshold, &mut cache).await;
                             let triple_ids = triples.as_ref().map(|p| (p.value.0.id, p.value.1.id));
                             if let Err(err) = resp.send(triples) {
                                 tracing::error!(target: "sync", ?triple_ids, ?err, "failed to respond with two triples");
@@ -266,8 +266,8 @@ impl SyncTask {
                 }
                 Some(req) = self.requests.presignatures.recv() => {
                     match req {
-                        ProtocolRequest::Take { threshold, resp } => {
-                            let presignature = self.take_presignature(threshold, &mut cache).await;
+                        ProtocolRequest::Take { mine, threshold, resp } => {
+                            let presignature = self.take_presignature(mine, threshold, &mut cache).await;
                             let presignature_id = presignature.as_ref().map(|p| p.value.id);
                             if let Err(err) = resp.send(presignature) {
                                 tracing::error!(target: "sync", presignature_id, ?err, "failed to respond with presignature");
@@ -291,6 +291,8 @@ impl SyncTask {
 
     async fn take_two_triple(
         &self,
+        // TODO: utilize mine
+        _mine: bool,
         threshold: usize,
         cache: &mut SyncCache,
     ) -> Option<ProtocolResponse<(Triple, Triple)>> {
@@ -371,6 +373,8 @@ impl SyncTask {
 
     async fn take_presignature(
         &self,
+        // TODO: utilize mine
+        _mine: bool,
         threshold: usize,
         cache: &mut SyncCache,
     ) -> Option<ProtocolResponse<Presignature>> {
@@ -546,20 +550,22 @@ impl SyncChannel {
 
     pub async fn take_two_triple(
         &self,
+        mine: bool,
         threshold: usize,
     ) -> Option<ProtocolResponse<(Triple, Triple)>> {
         let start = Instant::now();
-        let result = self.request_triple.take(threshold).await;
+        let result = self.request_triple.take(mine, threshold).await;
         tracing::info!(target: "sync", elapsed = ?start.elapsed(), "take two triple");
         result
     }
 
     pub async fn take_presignature(
         &self,
+        mine: bool,
         threshold: usize,
     ) -> Option<ProtocolResponse<Presignature>> {
         let start = Instant::now();
-        let result = self.request_presignature.take(threshold).await;
+        let result = self.request_presignature.take(mine, threshold).await;
         tracing::info!(target: "sync", elapsed = ?start.elapsed(), "take presignature");
         result
     }
@@ -567,6 +573,7 @@ impl SyncChannel {
 
 enum ProtocolRequest<T> {
     Take {
+        mine: bool,
         threshold: usize,
         resp: oneshot::Sender<Option<ProtocolResponse<T>>>,
     },
@@ -593,11 +600,12 @@ impl<T> ProtocolChannel<T> {
         (request_rx, protocol_channel)
     }
 
-    async fn take(&self, threshold: usize) -> Option<ProtocolResponse<T>> {
+    async fn take(&self, mine: bool, threshold: usize) -> Option<ProtocolResponse<T>> {
         let (resp_tx, resp_rx) = oneshot::channel();
         if let Err(err) = self
             .request_tx
             .send(ProtocolRequest::Take {
+                mine,
                 threshold,
                 resp: resp_tx,
             })
