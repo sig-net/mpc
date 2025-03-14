@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::cluster::spawner::ClusterSpawner;
+use crate::local::NodeEnvConfig;
+use crate::{utils, NodeConfig};
 
-use super::{local::NodeEnvConfig, utils, NodeConfig};
 use anyhow::{anyhow, Context};
 use async_process::Child;
 use bollard::container::LogsOptions;
@@ -14,7 +15,7 @@ use bollard::Docker;
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use elliptic_curve::rand_core::OsRng;
-use futures::{lock::Mutex, StreamExt};
+use futures::StreamExt as _;
 use k256::Secp256k1;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
@@ -22,7 +23,6 @@ use mpc_node::config::OverrideConfig;
 use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
-use once_cell::sync::Lazy;
 use serde_json::json;
 use testcontainers::core::ExecCommand;
 use testcontainers::ContainerAsync;
@@ -36,14 +36,11 @@ use tracing;
 
 pub type Container = ContainerAsync<GenericImage>;
 
-static NETWORK_MUTEX: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
-
 pub struct Node {
     pub container: Container,
     pub address: String,
     pub account: Account,
     pub local_address: String,
-    pub cipher_pk: hpke::PublicKey,
     pub cipher_sk: hpke::SecretKey,
     pub sign_sk: near_crypto::SecretKey,
     cfg: NodeConfig,
@@ -62,7 +59,7 @@ impl Node {
         account: &Account,
     ) -> anyhow::Result<Self> {
         tracing::info!(id = %account.id(), "running node container");
-        let (cipher_sk, cipher_pk) = hpke::generate();
+        let (cipher_sk, _cipher_pk) = hpke::generate();
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
@@ -87,7 +84,6 @@ impl Node {
             NodeEnvConfig {
                 web_port: Self::CONTAINER_PORT,
                 account: account.clone(),
-                cipher_pk,
                 cipher_sk,
                 sign_sk,
                 cfg: cfg.clone(),
@@ -102,7 +98,6 @@ impl Node {
         NodeEnvConfig {
             web_port: Self::CONTAINER_PORT,
             account: self.account,
-            cipher_pk: self.cipher_pk,
             cipher_sk: self.cipher_sk,
             sign_sk: self.sign_sk,
             cfg: self.cfg,
@@ -134,7 +129,6 @@ impl Node {
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
             web_port: Self::CONTAINER_PORT,
-            cipher_pk: hex::encode(config.cipher_pk.to_bytes()),
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             indexer_options: indexer_options.clone(),
             eth: eth_args,
@@ -189,7 +183,6 @@ impl Node {
             address: full_address,
             account: config.account,
             local_address: format!("http://localhost:{host_port}"),
-            cipher_pk: config.cipher_pk,
             cipher_sk: config.cipher_sk,
             sign_sk: config.sign_sk,
             cfg: config.cfg,
@@ -529,7 +522,6 @@ impl DockerClient {
     }
 
     pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
-        let _lock = &NETWORK_MUTEX.lock().await;
         let list = self.docker.list_networks::<&str>(None).await?;
         if list.iter().any(|n| n.name == Some(network.to_string())) {
             return Ok(());

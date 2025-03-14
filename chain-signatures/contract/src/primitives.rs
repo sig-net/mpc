@@ -1,5 +1,4 @@
-use crypto_shared::{derive_epsilon, SerializableScalar};
-use k256::Scalar;
+use mpc_primitives::{bytes::borsh_scalar, SignId, Signature};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
@@ -24,34 +23,20 @@ pub struct YieldIndex {
     pub data_id: CryptoHash,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[borsh(crate = "near_sdk::borsh")]
-pub struct SignatureRequest {
-    pub epsilon: SerializableScalar,
-    pub payload_hash: SerializableScalar,
-}
-
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
-#[borsh(crate = "near_sdk::borsh")]
-pub struct ContractSignatureRequest {
-    pub request: SignatureRequest,
-    pub requester: AccountId,
-    pub deposit: NearToken,
-    pub required_deposit: NearToken,
-}
-
-impl SignatureRequest {
-    pub fn new(payload_hash: Scalar, predecessor_id: &AccountId, path: &str) -> Self {
-        let epsilon = derive_epsilon(predecessor_id, path);
-        let epsilon = SerializableScalar { scalar: epsilon };
-        let payload_hash = SerializableScalar {
-            scalar: payload_hash,
-        };
-        SignatureRequest {
-            epsilon,
-            payload_hash,
-        }
-    }
+pub struct PendingRequest {
+    pub index: Option<YieldIndex>,
+    #[borsh(
+        serialize_with = "borsh_scalar::serialize",
+        deserialize_with = "borsh_scalar::deserialize_reader"
+    )]
+    pub payload: k256::Scalar,
+    #[borsh(
+        serialize_with = "borsh_scalar::serialize",
+        deserialize_with = "borsh_scalar::deserialize_reader"
+    )]
+    pub epsilon: k256::Scalar,
 }
 
 #[derive(
@@ -326,6 +311,15 @@ impl PkVotes {
     }
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct InternalSignRequest {
+    pub id: SignId,
+    pub requester: AccountId,
+    pub deposit: NearToken,
+    pub required_deposit: NearToken,
+}
+
 #[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Debug)]
 pub struct SignRequest {
     pub payload: [u8; 32],
@@ -334,12 +328,7 @@ pub struct SignRequest {
 }
 
 #[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Clone, Debug)]
-pub enum SignatureResult<T, E> {
-    Ok(T),
-    Err(E),
-}
-
-#[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Clone, Debug)]
-pub enum SignaturePromiseError {
-    Failed,
+pub enum SignPoll {
+    Ready(Signature),
+    Timeout,
 }

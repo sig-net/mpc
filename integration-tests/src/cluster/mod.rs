@@ -13,10 +13,10 @@ use crate::cluster::spawner::ClusterSpawner;
 use crate::containers::DockerClient;
 use crate::local::NodeEnvConfig;
 use crate::utils::{vote_join, vote_leave};
-use crate::{utils, NodeConfig, Nodes};
+use crate::{NodeConfig, Nodes};
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 use mpc_contract::{ProtocolContractState, RunningContractState};
-use mpc_node::web::StateView;
+use mpc_node::web::{BenchMetrics, StateView};
 
 use anyhow::Context;
 use url::Url;
@@ -67,6 +67,12 @@ impl Cluster {
     pub async fn fetch_states(&self) -> anyhow::Result<Vec<StateView>> {
         let tasks = (0..self.len()).map(|id| self.fetch_state(id));
         futures::future::try_join_all(tasks).await
+    }
+
+    pub async fn fetch_bench_metrics(&self, id: usize) -> anyhow::Result<BenchMetrics> {
+        let url = self.url(id).join("/bench/metrics").unwrap();
+        let metrics = self.http_client.get(url).send().await?.json().await?;
+        Ok(metrics)
     }
 
     pub fn wait(&self) -> WaitAction<'_, ()> {
@@ -134,16 +140,7 @@ impl Cluster {
     pub async fn restart_node(&mut self, config: NodeEnvConfig) -> anyhow::Result<()> {
         self.nodes.restart_node(config).await
     }
-}
 
-impl Drop for Cluster {
-    fn drop(&mut self) {
-        let sk_local_path = self.nodes.ctx().storage_options.sk_share_local_path.clone();
-        let _task = tokio::task::spawn(utils::clear_local_sk_shares(sk_local_path));
-    }
-}
-
-impl Cluster {
     /// Starts a node and waits for the cluster to be in running. This does not have the node join the network,
     /// but it does appear as a candidate in the contract.
     pub async fn start(&mut self, node: Option<NodeEnvConfig>) -> anyhow::Result<Account> {

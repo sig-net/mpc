@@ -7,11 +7,8 @@ edition = "2021"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-borsh = "1.5.3"
-hex = "0.4.3"
+borsh.workspace = true
+hex.workspace = true
 hpke = { version = "0.11", features = ["serde_impls", "std"] }
-serde = { version = "1", features = ["derive"] }
-rand = { version = "0.8" }
-
-[dev-dependencies]
-hex = "*"
+serde.workspace = true
+rand.workspace = true

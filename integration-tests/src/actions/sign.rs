@@ -2,12 +2,10 @@ use std::fmt;
 use std::future::IntoFuture;
 
 use cait_sith::FullSignature;
-use crypto_shared::{
-    derive_epsilon, ScalarExt as _, SerializableAffinePoint, SerializableScalar, SignatureResponse,
-};
-use k256::{Scalar, Secp256k1};
+use k256::Secp256k1;
 use mpc_contract::errors;
-use mpc_contract::primitives::{SignRequest, SignatureRequest};
+use mpc_contract::primitives::SignRequest;
+use mpc_primitives::{SignId, Signature};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
@@ -162,11 +160,12 @@ impl SignAction<'_> {
         mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
 
         // Useful for populating the "signatures_havent_changed" test's hardcoded values
-        // dbg!(
+        // tracing::warn!(
+        //     "ref_string: big_r={}, s={}, mpc_pk_bytes={}, payload_hash={}, account_id={}",
         //     hex::encode(signature.big_r.to_encoded_point(true).to_bytes()),
         //     hex::encode(signature.s.to_bytes()),
         //     hex::encode(&mpc_pk_bytes),
-        //     hex::encode(&payload_hash),
+        //     hex::encode(payload_hash),
         //     account.id(),
         // );
         actions::validate_signature(account.id(), &mpc_pk_bytes, payload_hash, &signature).await?;
@@ -238,12 +237,6 @@ impl SignAction<'_> {
             public_key: rogue.secret_key().public_key().clone().into(),
             secret_key: rogue.secret_key().to_string().parse()?,
         };
-        let epsilon = derive_epsilon(predecessor, &self.path);
-
-        let request = SignatureRequest {
-            payload_hash: Scalar::from_bytes(payload_hash).unwrap().into(),
-            epsilon: SerializableScalar { scalar: epsilon },
-        };
 
         let big_r = serde_json::from_value(
             "02EC7FA686BB430A4B700BDA07F2E07D6333D9E33AEEF270334EB2D00D0A6FEC6C".into(),
@@ -252,21 +245,20 @@ impl SignAction<'_> {
             "20F90C540EE00133C911EA2A9ADE2ABBCC7AD820687F75E011DFEEC94DB10CD6".into(),
         )?; // Fake S
 
-        let response = SignatureResponse {
-            big_r: SerializableAffinePoint {
-                affine_point: big_r,
-            },
-            s: SerializableScalar { scalar: s },
+        let signature = Signature {
+            big_r,
+            s,
             recovery_id: 0,
         };
 
+        let sign_id = SignId::from_parts(predecessor, &payload_hash, &self.path, self.key_version);
         let status = self
             .nodes
             .rpc_client
             .call(&signer, self.nodes.contract().id(), "respond")
             .args_json(serde_json::json!({
-                "request": request,
-                "response": response,
+                "sign_id": sign_id,
+                "signature": signature,
             }))
             .max_gas()
             .transact_async()

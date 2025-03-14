@@ -4,7 +4,6 @@ use integration_tests::cluster;
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
-use crypto_shared::{self, derive_epsilon, derive_key, x_coordinate, ScalarExt};
 use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
@@ -12,9 +11,11 @@ use k256::elliptic_curve::point::AffineCoordinates;
 use k256::Secp256k1;
 use mpc_contract::config::Config;
 use mpc_contract::update::ProposeUpdateArgs;
+use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt};
 use mpc_node::kdf::into_eth_sig;
 use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
 use mpc_node::protocol::triple::{Triple, TripleManager};
+use mpc_node::protocol::MessageChannel;
 use mpc_node::util::NearPublicKeyExt as _;
 use test_log::test;
 
@@ -102,7 +103,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         nodes.wait().signable().await?;
         let outcome = nodes.sign().path(hd_path).await?;
 
-        let derivation_epsilon = derive_epsilon(outcome.account.id(), hd_path);
+        let derivation_epsilon = derive_epsilon_near(outcome.account.id(), hd_path);
         let user_pk = derive_key(mpc_pk, derivation_epsilon);
         let multichain_sig = into_eth_sig(
             &user_pk,
@@ -123,12 +124,12 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         let user_secp_pk =
             secp256k1::PublicKey::from_x_only_public_key(user_pk_x, user_pk_y_parity);
         let user_addr = actions::public_key_to_address(&user_secp_pk);
-        let r = x_coordinate(&multichain_sig.big_r.affine_point);
+        let r = x_coordinate(&multichain_sig.big_r);
         let s = multichain_sig.s;
         let signature_for_recovery: [u8; 64] = {
             let mut signature = [0u8; 64];
             signature[..32].copy_from_slice(&r.to_bytes());
-            signature[32..].copy_from_slice(&s.scalar.to_bytes());
+            signature[32..].copy_from_slice(&s.to_bytes());
             signature
         };
         let recovered_addr = web3::signing::recover(
@@ -150,11 +151,12 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
         .init_network()
         .await?;
 
+    let (_, _, msg) = MessageChannel::new();
     let node_id = "test.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node_id);
     let triple_manager =
-        TripleManager::new(Participant::from(0), 5, 123, &node_id, &triple_storage);
+        TripleManager::new(Participant::from(0), 5, 123, &node_id, &triple_storage, msg);
 
     let triple_id_1: u64 = 1;
     let triple_1 = dummy_triple(triple_id_1);
@@ -254,12 +256,14 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let node_id = "test.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let presignature_storage = redis.presignature_storage(&node_id);
+    let (_, _, msg) = MessageChannel::new();
     let mut presignature_manager = PresignatureManager::new(
         Participant::from(0),
         5,
         123,
         &node_id,
         &presignature_storage,
+        msg,
     );
 
     let presignature = dummy_presignature(1);

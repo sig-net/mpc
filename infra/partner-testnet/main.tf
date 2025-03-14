@@ -36,10 +36,6 @@ module "gce-container" {
         value = var.node_configs["${count.index}"].account
       },
       {
-        name  = "MPC_CIPHER_PK"
-        value = var.node_configs["${count.index}"].cipher_pk
-      },
-      {
         name  = "MPC_ACCOUNT_SK"
         value = data.google_secret_manager_secret_version.account_sk_secret_id[count.index].secret_data
       },
@@ -124,7 +120,7 @@ module "ig_template" {
   name_prefix  = "multichain-partner-${count.index}"
   machine_type = "n2d-standard-2"
 
-  startup_script = "docker rm watchtower ; docker run -d --name watchtower -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower --debug --interval 30"
+  startup_script = "docker rm watchtower ; docker run -d --name watchtower -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower --debug --interval 3600"
 
   source_image = var.source_image
   metadata     = merge(var.additional_metadata, { "gce-container-declaration" = module.gce-container["${count.index}"].metadata_value })

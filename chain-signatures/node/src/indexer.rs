@@ -1,8 +1,9 @@
-use crate::protocol::Chain::NEAR;
-use crate::protocol::{Chain, SignRequest};
+use crate::protocol::Chain;
+use crate::protocol::IndexedSignRequest;
 use crate::storage::app_data_storage::AppDataStorage;
-use crypto_shared::{derive_epsilon, ScalarExt};
 use k256::Scalar;
+use mpc_crypto::{derive_epsilon_near, ScalarExt as _};
+use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use near_lake_framework::{Lake, LakeBuilder, LakeContext};
 use near_lake_primitives::actions::ActionMetaDataExt;
@@ -79,18 +80,8 @@ struct UnvalidatedContractSignRequest {
     pub key_version: u32,
 }
 
-/// A validated version of the sign request
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct ContractSignRequest {
-    #[serde(with = "crate::protocol::message::cbor_scalar")]
-    pub payload: Scalar,
-    pub path: String,
-    pub key_version: u32,
-    pub chain: Chain,
-}
-
 #[derive(Clone)]
-pub struct Indexer {
+pub struct NearIndexer {
     app_data_storage: AppDataStorage,
     last_updated_timestamp: Arc<RwLock<Instant>>,
     latest_block_timestamp_nanosec: Arc<RwLock<Option<u64>>>,
@@ -98,7 +89,7 @@ pub struct Indexer {
     behind_threshold: Duration,
 }
 
-impl Indexer {
+impl NearIndexer {
     fn new(app_data_storage: AppDataStorage, options: &Options) -> Self {
         Self {
             app_data_storage: app_data_storage.clone(),
@@ -153,7 +144,8 @@ impl Indexer {
     }
 
     pub async fn is_stable(&self) -> bool {
-        !self.is_behind().await && self.is_running().await
+        //!self.is_behind().await && self.is_running().await
+        true
     }
 
     async fn update_block_height_and_timestamp(
@@ -172,8 +164,8 @@ impl Indexer {
 struct Context {
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
-    sign_tx: mpsc::Sender<SignRequest>,
-    indexer: Indexer,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    indexer: NearIndexer,
 }
 
 async fn handle_block(
@@ -193,7 +185,7 @@ async fn handle_block(
                 tracing::warn!("{err}");
                 anyhow::bail!(err);
             };
-            let ExecutionStatus::SuccessReceiptId(receipt_id) = receipt.status() else {
+            let ExecutionStatus::SuccessReceiptId(_receipt_id) = receipt.status() else {
                 continue;
             };
             let Some(function_call) = action.as_function_call() else {
@@ -233,29 +225,35 @@ async fn handle_block(
                     );
                     continue;
                 };
-                let epsilon = derive_epsilon(&action.predecessor_id(), &arguments.request.path);
+                let predecessor_id = action.predecessor_id();
+                let epsilon = derive_epsilon_near(&predecessor_id, &arguments.request.path);
+                let sign_id = SignId::from_parts(
+                    &predecessor_id,
+                    &arguments.request.payload,
+                    &arguments.request.path,
+                    arguments.request.key_version,
+                );
                 tracing::info!(
-                    receipt_id = %receipt_id,
-                    caller_id = receipt.predecessor_id().to_string(),
-                    our_account = ctx.node_account_id.to_string(),
+                    ?sign_id,
+                    caller_id = ?predecessor_id,
+                    our_account = ?ctx.node_account_id,
                     payload = hex::encode(arguments.request.payload),
                     key_version = arguments.request.key_version,
                     entropy = hex::encode(entropy),
                     "indexed new `sign` function call"
                 );
-                let request = ContractSignRequest {
-                    payload,
-                    path: arguments.request.path,
-                    key_version: arguments.request.key_version,
-                    chain: NEAR,
-                };
-                pending_requests.push(SignRequest {
-                    request_id: receipt_id.0,
-                    request,
-                    epsilon,
-                    entropy,
+                pending_requests.push(IndexedSignRequest {
+                    id: sign_id,
+                    args: SignArgs {
+                        entropy,
+                        epsilon,
+                        payload,
+                        path: arguments.request.path,
+                        key_version: arguments.request.key_version,
+                    },
+                    chain: Chain::NEAR,
                     // TODO: use indexer timestamp instead.
-                    time_added: Instant::now(),
+                    timestamp: Instant::now(),
                 });
             }
         }
@@ -265,24 +263,26 @@ async fn handle_block(
         .update_block_height_and_timestamp(block.block_height(), block.header().timestamp_nanosec())
         .await;
 
-    crate::metrics::LATEST_BLOCK_HEIGHT
-        .with_label_values(&[ctx.node_account_id.as_str()])
+    crate::metrics::LATEST_BLOCK_NUMBER
+        .with_label_values(&[Chain::NEAR.as_str(), ctx.node_account_id.as_str()])
         .set(block.block_height() as i64);
 
     // Add the requests after going through the whole block to avoid partial processing if indexer fails somewhere.
     // This way we can revisit the same block if we failed while not having added the requests partially.
     for request in pending_requests {
         tracing::info!(
-            request_id = ?near_primitives::hash::CryptoHash(request.request_id),
-            payload = hex::encode(request.request.payload.to_bytes()),
-            entropy = hex::encode(request.entropy),
+            sign_id = ?request.id,
+            payload = hex::encode(request.args.payload.to_bytes()),
+            entropy = hex::encode(request.args.entropy),
+            epsilon = hex::encode(request.args.epsilon.to_bytes()),
+
             "new sign request"
         );
         if let Err(err) = ctx.sign_tx.send(request).await {
             tracing::error!(?err, "failed to send the sign request into sign queue");
         }
         crate::metrics::NUM_SIGN_REQUESTS
-            .with_label_values(&[ctx.node_account_id.as_str()])
+            .with_label_values(&[Chain::NEAR.as_str(), ctx.node_account_id.as_str()])
             .inc();
     }
 
@@ -302,10 +302,10 @@ pub fn run(
     options: &Options,
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
-    sign_tx: mpsc::Sender<SignRequest>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     rpc_client: near_fetch::Client,
-) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, Indexer)> {
+) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, NearIndexer)> {
     tracing::info!(
         s3_bucket = options.s3_bucket,
         s3_region = options.s3_region,
@@ -314,7 +314,7 @@ pub fn run(
         "starting indexer"
     );
 
-    let indexer = Indexer::new(app_data_storage.clone(), options);
+    let indexer = NearIndexer::new(app_data_storage.clone(), options);
     let context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
         node_account_id: node_account_id.clone(),
@@ -351,7 +351,7 @@ pub fn run(
                 Ok(lake) => lake,
                 Err(err) => {
                     tracing::error!(?options, ?err, "indexer failed to build");
-                    backoff(i, 1, 120);
+                    backoff_thread(i, 1, 120);
                     continue;
                 }
             };
@@ -367,7 +367,7 @@ pub fn run(
                 if i > 0 {
                     // give it some time to catch up
                     tracing::debug!("giving indexer some time to catch up");
-                    backoff(i, 10, 300);
+                    backoff(i, 10, 300).await;
                 }
                 // while running, we will keep the task spinning, and check every so often if
                 // the indexer has errored out.
@@ -400,7 +400,7 @@ pub fn run(
                 }
             }
 
-            backoff(i, 1, 120);
+            backoff_thread(i, 1, 120);
         }
         Ok(())
     });
@@ -483,7 +483,13 @@ async fn update_last_processed_block(
     Ok(())
 }
 
-fn backoff(i: u32, multiplier: u32, max: u64) {
+async fn backoff(i: u32, multiplier: u32, max: u64) {
+    // Exponential backoff with max delay of max seconds
+    let delay: u64 = std::cmp::min(2u64.pow(i).mul(multiplier as u64), max);
+    tokio::time::sleep(Duration::from_secs(delay)).await;
+}
+
+fn backoff_thread(i: u32, multiplier: u32, max: u64) {
     // Exponential backoff with max delay of max seconds
     let delay: u64 = std::cmp::min(2u64.pow(i).mul(multiplier as u64), max);
     std::thread::sleep(Duration::from_secs(delay));

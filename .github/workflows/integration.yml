@@ -50,6 +50,12 @@ jobs:
         with:
           profile: minimal
           toolchain: stable
+
+      - name: Install Rust (1.81.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.81.0
           target: wasm32-unknown-unknown
 
       - name: Install Node.js
@@ -81,26 +87,22 @@ jobs:
           aws --profile default configure set aws_secret_access_key "456"
 
       - name: Build Chain-Signatures Contract
-        working-directory: ./chain-signatures
-        run: cargo build -p mpc-contract --target wasm32-unknown-unknown --release
+        run: ./build-contract.sh
 
       - name: Build eth contract
         working-directory: ./chain-signatures/contract-eth
         run: npm i && npx hardhat compile
 
       - name: Build Chain-Signatures Node
-        working-directory: ./chain-signatures
         run: cargo build -p mpc-node --release
 
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
-        working-directory: ./integration-tests
-        run: cargo build --tests
+        run: cargo build -p integration-tests --tests
 
       - name: Test
-        working-directory: ./integration-tests
-        run: cargo test --jobs 1 -- --test-threads 1
+        run: cargo test -p integration-tests --jobs 1 -- --test-threads 1
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1

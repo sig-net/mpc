@@ -7,18 +7,19 @@ edition = "2021"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-borsh = "1.5.3"
-near-sdk = { version = "5.6.0", features = ["legacy", "unit-testing"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde", "arithmetic", "expose-field"] }
-crypto-shared = { path = "../crypto-shared" }
-thiserror = "1"
+borsh.workspace = true
+k256.workspace = true
+mpc-crypto.workspace = true
+mpc-primitives.workspace = true
+near-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-anyhow = "1"
-rand = "0.8"
-tokio = { version = "1", features = ["full"] }
+anyhow.workspace = true
+rand.workspace = true
+tokio.workspace = true
 
 # crypto dependencies
 ecdsa = { version = "0.16.9", features = ["digest", "hazmat"] }
@@ -28,3 +29,8 @@ digest = "0.10.7"
 # near dependencies
 near-crypto = "0.27.0"
 near-workspaces = "0.15.0"
+
+[features]
+default = []
+# utilized for benchmarking the node:
+bench = []

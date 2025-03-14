@@ -1,21 +1,17 @@
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
-use crypto_shared::kdf::{check_ec_signature, derive_secret_key};
-use crypto_shared::{
-    derive_epsilon, derive_key, ScalarExt as _, SerializableAffinePoint, SerializableScalar,
-    SignatureResponse,
-};
 use digest::{Digest, FixedOutput};
 use ecdsa::signature::Verifier;
 use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::point::DecompressPoint as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
-use k256::{AffinePoint, FieldBytes, Scalar, Secp256k1};
-use mpc_contract::primitives::{
-    CandidateInfo, ParticipantInfo, Participants, SignRequest, SignatureRequest,
-};
+use k256::{AffinePoint, FieldBytes, Secp256k1};
+use mpc_contract::primitives::{CandidateInfo, ParticipantInfo, Participants, SignRequest};
 use mpc_contract::update::UpdateId;
+use mpc_crypto::kdf::{check_ec_signature, derive_secret_key};
+use mpc_crypto::{derive_epsilon_near, derive_key};
+use mpc_primitives::{SignId, Signature};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccountId, NearToken};
 use near_workspaces::{Account, Contract, Worker};
@@ -157,11 +153,11 @@ pub async fn create_response(
     msg: &str,
     path: &str,
     sk: &k256::SecretKey,
-) -> ([u8; 32], SignatureRequest, SignatureResponse) {
+) -> ([u8; 32], SignId, Signature) {
     let (digest, scalar_hash, payload_hash) = process_message(msg).await;
     let pk = sk.public_key();
 
-    let epsilon = derive_epsilon(predecessor_id, path);
+    let epsilon = derive_epsilon_near(predecessor_id, path);
     let derived_sk = derive_secret_key(sk, epsilon);
     let derived_pk = derive_key(pk.into(), epsilon);
     let signing_key = k256::ecdsa::SigningKey::from(&derived_sk);
@@ -174,8 +170,7 @@ pub async fn create_response(
 
     let s = signature.s();
     let (r_bytes, _s_bytes) = signature.split_bytes();
-    let payload_hash_s = Scalar::from_bytes(payload_hash).unwrap();
-    let respond_req = SignatureRequest::new(payload_hash_s, predecessor_id, path);
+    let sign_id = SignId::from_parts(predecessor_id, &payload_hash, path, 0);
     let big_r =
         AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0)).unwrap();
     let s: k256::Scalar = *s.as_ref();
@@ -188,20 +183,18 @@ pub async fn create_response(
         panic!("unable to use recovery id of 0 or 1");
     };
 
-    let respond_resp = SignatureResponse {
-        big_r: SerializableAffinePoint {
-            affine_point: big_r,
-        },
-        s: SerializableScalar { scalar: s },
+    let respond_resp = Signature {
+        big_r,
+        s,
         recovery_id,
     };
 
-    (payload_hash, respond_req, respond_resp)
+    (payload_hash, sign_id, respond_resp)
 }
 
 pub async fn sign_and_validate(
     request: &SignRequest,
-    respond: Option<(&SignatureRequest, &SignatureResponse)>,
+    respond: Option<(&SignId, &Signature)>,
     contract: &Contract,
 ) -> anyhow::Result<()> {
     let status = contract
@@ -217,13 +210,13 @@ pub async fn sign_and_validate(
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    if let Some((respond_req, respond_resp)) = respond {
+    if let Some((sign_id, respond_resp)) = respond {
         // Call `respond` as if we are the MPC network itself.
         let respond = contract
             .call("respond")
             .args_json(serde_json::json!({
-                "request": respond_req,
-                "response": respond_resp
+                "sign_id": sign_id,
+                "signature": respond_resp
             }))
             .max_gas()
             .transact()
@@ -236,7 +229,7 @@ pub async fn sign_and_validate(
     let execution = execution.into_result()?;
 
     // Finally wait the result:
-    let returned_resp: SignatureResponse = execution.json()?;
+    let returned_resp: Signature = execution.json()?;
     if let Some((_, respond_resp)) = respond {
         assert_eq!(
             &returned_resp, respond_resp,

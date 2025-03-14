@@ -1,7 +1,7 @@
 mod error;
 
 use self::error::Error;
-use crate::indexer::Indexer;
+use crate::indexer::NearIndexer;
 use crate::protocol::NodeState;
 use crate::web::error::Result;
 use anyhow::Context;
@@ -20,23 +20,23 @@ use tokio::sync::{mpsc::Sender, RwLock};
 struct AxumState {
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
-    indexer: Indexer,
+    indexer: Option<NearIndexer>,
 }
 
 pub async fn run(
     port: u16,
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
-    indexer: Indexer,
-) -> anyhow::Result<()> {
-    tracing::info!("running a node");
+    indexer: Option<NearIndexer>,
+) {
+    tracing::info!("starting web server");
     let axum_state = AxumState {
         sender,
         protocol_state,
         indexer,
     };
 
-    let app = Router::new()
+    let mut router = Router::new()
         // healthcheck endpoint
         .route(
             "/",
@@ -47,8 +47,13 @@ pub async fn run(
         )
         .route("/msg", post(msg))
         .route("/state", get(state))
-        .route("/metrics", get(metrics))
-        .layer(Extension(Arc::new(axum_state)));
+        .route("/metrics", get(metrics));
+
+    if cfg!(feature = "bench") {
+        router = router.route("/bench/metrics", get(bench_metrics));
+    }
+
+    let app = router.layer(Extension(Arc::new(axum_state)));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!(?addr, "starting http server");
@@ -56,14 +61,6 @@ pub async fn run(
         .serve(app.into_make_service())
         .await
         .unwrap();
-
-    Ok(())
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MsgRequest {
-    pub from: Participant,
-    pub msg: Vec<u8>,
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
@@ -114,9 +111,16 @@ pub enum StateView {
 #[tracing::instrument(level = "debug", skip_all)]
 async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
     tracing::debug!("fetching state");
-    // TODO: rename to last_processed_block when making other breaking changes
-    let latest_block_height = state.indexer.last_processed_block().await.unwrap_or(0);
-    let is_stable = state.indexer.is_stable().await;
+
+    // TODO: remove once we have integration tests built using other chains
+    let (latest_block_height, is_stable) = if let Some(indexer) = &state.indexer {
+        let latest_block_height = indexer.last_processed_block().await.unwrap_or(0);
+        let is_stable = indexer.is_stable().await;
+        (latest_block_height, is_stable)
+    } else {
+        (0, true)
+    };
+
     let protocol_state = state.protocol_state.read().await;
 
     match &*protocol_state {
@@ -191,4 +195,20 @@ async fn metrics() -> (StatusCode, String) {
             )
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchMetrics {
+    pub sig_gen: Vec<f64>,
+    pub sig_respond: Vec<f64>,
+    pub presig_gen: Vec<f64>,
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn bench_metrics() -> Json<BenchMetrics> {
+    Json(BenchMetrics {
+        sig_gen: crate::metrics::SIGN_GENERATION_LATENCY.exact(),
+        sig_respond: crate::metrics::SIGN_RESPOND_LATENCY.exact(),
+        presig_gen: crate::metrics::PRESIGNATURE_LATENCY.exact(),
+    })
 }

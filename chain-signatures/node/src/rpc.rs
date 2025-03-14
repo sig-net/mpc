@@ -1,19 +1,20 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
-use crate::protocol::signature::ToPublish;
+use crate::protocol::signature::SignRequest;
 use crate::protocol::{Chain, ProtocolState};
 use crate::util::AffinePointExt as _;
 
-use crypto_shared::SignatureResponse;
-use mpc_contract::primitives::SignatureRequest;
+use cait_sith::FullSignature;
+use k256::Secp256k1;
 use mpc_keys::hpke;
+use mpc_primitives::SignId;
+use mpc_primitives::Signature;
 
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
-use near_primitives::hash::CryptoHash;
 use serde_json::json;
 use std::str::FromStr as _;
 use std::sync::Arc;
@@ -25,16 +26,18 @@ use web3::ethabi::Token;
 use web3::types::U256;
 
 /// The maximum amount of times to retry publishing a signature.
-const MAX_PUBLISH_RETRY: u8 = 6;
+const MAX_PUBLISH_RETRY: usize = 6;
 /// The maximum number of concurrent RPC requests the system can make
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract state and config
 const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
 
 struct PublishAction {
-    public_key: crypto_shared::PublicKey,
-    to_publish: ToPublish,
+    public_key: mpc_crypto::PublicKey,
+    request: SignRequest,
+    output: FullSignature<Secp256k1>,
     timestamp: Instant,
+    retry_count: usize,
 }
 
 enum RpcAction {
@@ -47,18 +50,28 @@ pub struct RpcChannel {
 }
 
 impl RpcChannel {
-    pub async fn publish(self, public_key: crypto_shared::PublicKey, to_publish: ToPublish) {
-        if let Err(err) = self
-            .tx
-            .send(RpcAction::Publish(PublishAction {
-                public_key,
-                to_publish,
-                timestamp: Instant::now(),
-            }))
-            .await
-        {
-            tracing::error!(%err, "failed to send publish action");
-        }
+    pub fn publish(
+        &self,
+        public_key: mpc_crypto::PublicKey,
+        request: SignRequest,
+        output: FullSignature<Secp256k1>,
+    ) {
+        let rpc = self.clone();
+        tokio::spawn(async move {
+            if let Err(err) = rpc
+                .tx
+                .send(RpcAction::Publish(PublishAction {
+                    public_key,
+                    request,
+                    output,
+                    timestamp: Instant::now(),
+                    retry_count: 0,
+                }))
+                .await
+            {
+                tracing::error!(%err, "failed to send publish action");
+            }
+        });
     }
 }
 
@@ -88,6 +101,7 @@ impl RpcExecutor {
         config: Arc<RwLock<Config>>,
     ) {
         // spin up update task for updating contract state and config
+        let near_account_id = self.near.my_account_id.clone();
         let near = self.near.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
@@ -105,9 +119,11 @@ impl RpcExecutor {
                 return;
             };
             let task = match action {
-                RpcAction::Publish(action) => {
-                    execute_publish(self.client(&action.to_publish.chain), action)
-                }
+                RpcAction::Publish(action) => execute_publish(
+                    self.client(&action.request.indexed.chain),
+                    action,
+                    near_account_id.clone(),
+                ),
             };
             tokio::spawn(task);
         }
@@ -153,7 +169,7 @@ impl NearClient {
             my_addr: my_addr.clone(),
             my_account_id: signer.account_id.clone(),
             signer,
-            cipher_pk: network.cipher_pk.clone(),
+            cipher_pk: network.cipher_sk.public_key(),
             sign_pk: network.sign_sk.public_key(),
         }
     }
@@ -262,14 +278,14 @@ impl NearClient {
 
     pub async fn call_respond(
         &self,
-        request: &SignatureRequest,
-        response: &SignatureResponse,
+        id: &SignId,
+        response: &Signature,
     ) -> Result<ExecutionFinalResult, near_fetch::Error> {
         self.client
             .call(&self.signer, &self.contract_id, "respond")
             .args_json(json!({
-                "request": request,
-                "response": response,
+                "sign_id": id,
+                "signature": response,
             }))
             .max_gas()
             .transact()
@@ -335,31 +351,30 @@ async fn update_config(near: NearClient, config: Arc<RwLock<Config>>) {
 }
 
 /// Publish the signature and retry if it fails
-async fn execute_publish(client: ChainClient, mut action: PublishAction) {
-    let ToPublish {
-        request_id,
-        request,
-        signature,
-        chain,
-        ..
-    } = &action.to_publish;
-
+async fn execute_publish(
+    client: ChainClient,
+    mut action: PublishAction,
+    near_account_id: AccountId,
+) {
+    let chain = action.request.indexed.chain;
     tracing::info!(
-        ?chain,
-        request_id = ?CryptoHash(*request_id),
+        sign_id = ?action.request.indexed.id,
+        chain = ?chain,
         started_at = ?action.timestamp.elapsed(),
         "trying to publish signature",
     );
-    let expected_public_key = crypto_shared::derive_key(action.public_key, request.epsilon.scalar);
+    let expected_public_key =
+        mpc_crypto::derive_key(action.public_key, action.request.indexed.args.epsilon);
+
     // We do this here, rather than on the client side, so we can use the ecrecover system function on NEAR to validate our signature
     let Ok(signature) = crate::kdf::into_eth_sig(
         &expected_public_key,
-        &signature.big_r,
-        &signature.s,
-        request.payload_hash.scalar,
+        &action.output.big_r,
+        &action.output.s,
+        action.request.indexed.args.payload,
     ) else {
         tracing::error!(
-            request_id = ?CryptoHash(*request_id),
+            sign_id = ?action.request.indexed.id,
             "failed to generate a recovery id; trashing publish request",
         );
         return;
@@ -368,12 +383,19 @@ async fn execute_publish(client: ChainClient, mut action: PublishAction) {
     loop {
         let publish = match &client {
             ChainClient::Near(near) => {
-                try_publish_near(near, &action.to_publish, &action.timestamp, &signature)
+                try_publish_near(near, &action, &action.timestamp, &signature)
                     .await
                     .map_err(|_| ())
             }
             ChainClient::Ethereum(eth) => {
-                try_publish_eth(eth, &action.to_publish, &action.timestamp, &signature).await
+                try_publish_eth(
+                    eth,
+                    &action,
+                    &action.timestamp,
+                    &signature,
+                    &near_account_id,
+                )
+                .await
             }
             ChainClient::Err(msg) => {
                 tracing::warn!(msg, "no client for chain");
@@ -384,19 +406,19 @@ async fn execute_publish(client: ChainClient, mut action: PublishAction) {
             break;
         }
 
-        action.to_publish.retry_count += 1;
+        action.retry_count += 1;
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if action.to_publish.retry_count >= MAX_PUBLISH_RETRY {
+        if action.retry_count >= MAX_PUBLISH_RETRY {
             tracing::info!(
-                request_id = ?CryptoHash(action.to_publish.request_id),
+                sign_id = ?action.request.indexed.id,
                 elapsed = ?action.timestamp.elapsed(),
                 "exceeded max retries, trashing publish request",
             );
             break;
         } else {
             tracing::info!(
-                request_id = ?CryptoHash(action.to_publish.request_id),
-                retry_count = action.to_publish.retry_count,
+                sign_id = ?action.request.indexed.id,
+                retry_count = action.retry_count,
                 elapsed = ?action.timestamp.elapsed(),
                 "failed to publish, retrying"
             );
@@ -406,37 +428,29 @@ async fn execute_publish(client: ChainClient, mut action: PublishAction) {
 
 async fn try_publish_near(
     near: &NearClient,
-    to_publish: &ToPublish,
+    action: &PublishAction,
     timestamp: &Instant,
-    signature: &SignatureResponse,
+    signature: &Signature,
 ) -> Result<(), near_fetch::Error> {
-    let ToPublish {
-        request_id,
-        request,
-        time_added,
-        ..
-    } = to_publish;
-
+    let chain = action.request.indexed.chain;
     let outcome = near
-        .call_respond(request, signature)
+        .call_respond(&action.request.indexed.id, signature)
         .await
         .inspect_err(|err| {
             tracing::error!(
-                request_id = ?CryptoHash(*request_id),
-                ?request,
+                sign_id = ?action.request.indexed.id,
                 ?err,
                 "failed to publish signature",
             );
             crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[near.my_account_id.as_str()])
+                .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
                 .inc();
         })?;
 
     let _: () = outcome.json().inspect_err(|err| {
         tracing::error!(
-            request_id = ?CryptoHash(*request_id),
-            ?request,
-            big_r = signature.big_r.affine_point.to_base58(),
+            sign_id = ?action.request.indexed.id,
+            big_r = signature.big_r.to_base58(),
             s = ?signature.s,
             ?err,
             "smart contract threw error",
@@ -446,26 +460,25 @@ async fn try_publish_near(
             .inc();
     })?;
     tracing::info!(
-        request_id = ?CryptoHash(*request_id),
-        ?request,
-        big_r = signature.big_r.affine_point.to_base58(),
+        sign_id = ?action.request.indexed.id,
+        big_r = signature.big_r.to_base58(),
         s = ?signature.s,
         elapsed = ?timestamp.elapsed(),
         "published signature sucessfully",
     );
 
     crate::metrics::NUM_SIGN_SUCCESS
-        .with_label_values(&[near.my_account_id.as_str()])
+        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .inc();
     crate::metrics::SIGN_TOTAL_LATENCY
-        .with_label_values(&[near.my_account_id.as_str()])
-        .observe(time_added.elapsed().as_secs_f64());
+        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
+        .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
     crate::metrics::SIGN_RESPOND_LATENCY
-        .with_label_values(&[near.my_account_id.as_str()])
+        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
-    if time_added.elapsed().as_secs() <= 30 {
+    if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
         crate::metrics::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[near.my_account_id.as_str()])
+            .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
             .inc();
     }
 
@@ -474,29 +487,24 @@ async fn try_publish_near(
 
 async fn try_publish_eth(
     eth: &EthClient,
-    to_publish: &ToPublish,
+    action: &PublishAction,
     timestamp: &Instant,
-    signature: &SignatureResponse,
+    signature: &Signature,
+    near_account_id: &AccountId,
 ) -> Result<(), ()> {
-    let ToPublish { request_id, .. } = to_publish;
-    let params = [
-        Token::FixedBytes(request_id.to_vec()),
+    let params = [Token::Array(vec![Token::Tuple(vec![
+        Token::FixedBytes(action.request.indexed.id.request_id.to_vec()),
         Token::Tuple(vec![
             Token::Tuple(vec![
-                Token::Uint(U256::from_big_endian(&signature.big_r.affine_point.x())),
+                Token::Uint(U256::from_big_endian(&signature.big_r.x())),
                 Token::Uint(U256::from_big_endian(
-                    signature
-                        .big_r
-                        .affine_point
-                        .to_encoded_point(false)
-                        .y()
-                        .unwrap(),
+                    signature.big_r.to_encoded_point(false).y().unwrap(),
                 )),
             ]),
-            Token::Uint(U256::from_big_endian(&signature.s.scalar.to_bytes())),
+            Token::Uint(U256::from_big_endian(&signature.s.to_bytes())),
             signature.recovery_id.into_token(),
         ]),
-    ];
+    ])])];
 
     let data = eth
         .contract
@@ -509,7 +517,7 @@ async fn try_publish_eth(
     let txn = web3::types::TransactionParameters {
         to: Some(eth.contract.address()),
         data: web3::types::Bytes(data),
-        gas: web3::types::U256::from(100_000),
+        gas: web3::types::U256::from(40_000), // actually only using 28,000
         ..Default::default()
     };
 
@@ -526,22 +534,41 @@ async fn try_publish_eth(
         .eth()
         .send_raw_transaction(signed.raw_transaction)
         .await;
+
+    let chain = action.request.indexed.chain;
     match result {
         Ok(tx_hash) => {
             tracing::info!(
-                request_id = ?CryptoHash(*request_id),
+                sign_id = ?action.request.indexed.id,
                 tx_hash = ?tx_hash,
                 elapsed = ?timestamp.elapsed(),
                 "published ethereum signature successfully"
             );
+            crate::metrics::NUM_SIGN_SUCCESS
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .inc();
+            crate::metrics::SIGN_TOTAL_LATENCY
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
+            crate::metrics::SIGN_RESPOND_LATENCY
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .observe(timestamp.elapsed().as_secs_f64());
+            if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
+                crate::metrics::NUM_SIGN_SUCCESS_30S
+                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                    .inc();
+            }
             Ok(())
         }
         Err(err) => {
             tracing::error!(
-                request_id = ?CryptoHash(*request_id),
+                sign_id = ?action.request.indexed.id,
                 error = ?err,
                 "failed to publish ethereum signature"
             );
+            crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .inc();
             Err(())
         }
     }

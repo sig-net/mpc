@@ -70,7 +70,6 @@ variable "env_variables" {
 variable "node_configs" {
   type = list(object({
     account              = string
-    cipher_pk            = string
     account_sk_secret_id = string
     cipher_sk_secret_id  = string
     sign_sk_secret_id    = string
@@ -95,7 +94,7 @@ variable "static_env" {
     },
     {
       name  = "MPC_CONTRACT_ID"
-      value = "v1.signer-prod.testnet"
+      value = "v1.sig-net.testnet"
     },
     {
       name  = "MPC_INDEXER_S3_BUCKET"
