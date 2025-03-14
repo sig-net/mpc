@@ -147,8 +147,6 @@ impl MessageInbox {
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
     ) -> Vec<Message> {
-        let mut retry = Vec::new();
-
         let mut messages = Vec::new();
         while let Some((encrypted, timestamp)) = self.try_decrypt.pop_front() {
             let decrypted: Result<Vec<Message>, _> =
@@ -164,7 +162,8 @@ impl MessageInbox {
                 Ok(decrypted) => messages.extend(decrypted),
                 Err(err) => {
                     if matches!(err, MessageError::UnknownParticipant(_)) {
-                        retry.push((encrypted, timestamp));
+                        // retry the decryption later if we don't know the participant
+                        self.try_decrypt.push_back((encrypted, timestamp));
                     } else {
                         tracing::warn!(?err, "inbox: failed to decrypt/verify messages");
                     }
@@ -173,7 +172,6 @@ impl MessageInbox {
             };
         }
 
-        self.try_decrypt.extend(retry);
         messages
     }
 
@@ -979,32 +977,35 @@ impl MessageOutbox {
                     failed_send_encrypted_latency_metric.clone();
 
                 let client = self.client.clone();
-                tokio::spawn(timeout(
-                    Duration::from_millis(cfg.message_timeout),
-                    async move {
-                        loop {
-                            let start = Instant::now();
-                            for msg_inbox_time in partition.timestamps.iter() {
-                                msg_send_delay_metric
-                                    .observe((start - *msg_inbox_time).as_millis() as f64);
-                            }
-                            let Err(err) = client.msg(&url, &[&encrypted_partition]).await else {
-                                send_encrypted_latency_metric
-                                    .observe(start.elapsed().as_millis() as f64);
-                                tracing::debug!(elapsed = ?start.elapsed(), "outbox: sent encrypted messages");
-                                break;
-                            };
-
-                            num_send_encrypted_failure_metric
-                                .inc_by(partition.messages.len() as f64);
-                            failed_send_encrypted_latency_metric
-                                .observe(start.elapsed().as_millis() as f64);
-                            tracing::warn!(?err, "outbox: failed sending encrypted messages");
-
-                            tokio::time::sleep(Duration::from_millis(100)).await;
+                let send_task = timeout(Duration::from_millis(cfg.message_timeout), async move {
+                    loop {
+                        let start = Instant::now();
+                        for msg_inbox_time in partition.timestamps.iter() {
+                            msg_send_delay_metric
+                                .observe((start - *msg_inbox_time).as_millis() as f64);
                         }
-                    },
-                ));
+                        let Err(err) = client.msg(&url, &[&encrypted_partition]).await else {
+                            send_encrypted_latency_metric
+                                .observe(start.elapsed().as_millis() as f64);
+                            tracing::debug!(elapsed = ?start.elapsed(), "outbox: sent encrypted messages");
+                            break;
+                        };
+
+                        num_send_encrypted_failure_metric.inc_by(partition.messages.len() as f64);
+                        failed_send_encrypted_latency_metric
+                            .observe(start.elapsed().as_millis() as f64);
+                        tracing::warn!(?err, "outbox: failed sending encrypted messages");
+
+                        // retry after a short delay if we fail to send
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                });
+
+                tokio::spawn(async move {
+                    if let Err(_) = send_task.await {
+                        tracing::warn!(to = ?account_id, "outbox: send task timeout");
+                    }
+                });
             }
         }
     }
