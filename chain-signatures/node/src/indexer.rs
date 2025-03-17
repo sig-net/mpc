@@ -252,9 +252,8 @@ async fn handle_block(
                         key_version: arguments.request.key_version,
                     },
                     chain: Chain::NEAR,
-                    // TODO: use indexer timestamp instead.
-                    timestamp: Instant::now(),
-                    unix_timestamp: crate::util::current_unix_timestamp(),
+                    unix_timestamp_indexed: crate::util::current_unix_timestamp(),
+                    timestamp_sign_queue: Some(Instant::now()),
                 });
             }
         }

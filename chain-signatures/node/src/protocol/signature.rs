@@ -39,8 +39,8 @@ pub struct IndexedSignRequest {
     pub id: SignId,
     pub args: SignArgs,
     pub chain: Chain,
-    pub timestamp: Instant,
-    pub unix_timestamp: u64,
+    pub unix_timestamp_indexed: u64,
+    pub timestamp_sign_queue: Option<Instant>,
 }
 
 /// The sign request for the node to process. This contains relevant info for the node
@@ -190,7 +190,7 @@ impl SignQueue {
 
     pub fn expire(&mut self, cfg: &ProtocolConfig) {
         self.other_requests.retain(|_, request| {
-            request.indexed.timestamp.elapsed()
+            request.indexed.timestamp_sign_queue.unwrap().elapsed()
                 < Duration::from_millis(cfg.signature.generation_timeout_total)
         });
     }
@@ -227,15 +227,10 @@ impl SignatureGenerator {
     }
 
     pub fn poke(&mut self) -> Result<Action<FullSignature<Secp256k1>>, ProtocolError> {
-        if self.request.indexed.timestamp.elapsed() > self.timeout_total {
-            tracing::warn!(
-                sign_id = ?self.request.indexed.id,
-                presignature_id = ?self.dropper.id,
-                "signature protocol timed out completely",
-            );
-            return Err(ProtocolError::Other(
-                anyhow::anyhow!("signature protocol timed out completely").into(),
-            ));
+        if self.request.indexed.timestamp_sign_queue.unwrap().elapsed() > self.timeout_total {
+            let msg = "signature protocol timed out completely";
+            tracing::warn!(msg);
+            return Err(ProtocolError::Other(anyhow::anyhow!(msg).into()));
         }
 
         if self.timestamp.elapsed() > self.timeout {
@@ -386,7 +381,7 @@ impl SignatureManager {
             return Err(GenerationError::InvalidProposer(proposer, our_proposer));
         }
 
-        tracing::info!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
+        tracing::debug!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
         let presignature = match presignature_manager.take(presignature_id).await {
             Ok(presignature) => presignature,
             Err(err @ GenerationError::PresignatureIsGenerating(_)) => {
@@ -456,7 +451,14 @@ impl SignatureManager {
                             .filter_sign(sign_id.clone(), generator.dropper.id)
                             .await;
 
-                        if generator.request.indexed.timestamp.elapsed() < generator.timeout_total {
+                        if generator
+                            .request
+                            .indexed
+                            .timestamp_sign_queue
+                            .unwrap()
+                            .elapsed()
+                            < generator.timeout_total
+                        {
                             failed.push(sign_id.clone());
                             tracing::error!(
                                 ?sign_id,
