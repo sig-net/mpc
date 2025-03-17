@@ -1,6 +1,8 @@
 use crate::protocol::Chain;
 use crate::protocol::IndexedSignRequest;
 use crate::storage::app_data_storage::AppDataStorage;
+use crate::util::instant_from_block;
+
 use k256::Scalar;
 use mpc_crypto::{derive_epsilon_near, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId};
@@ -240,6 +242,7 @@ async fn handle_block(
                     payload = hex::encode(arguments.request.payload),
                     key_version = arguments.request.key_version,
                     entropy = hex::encode(entropy),
+                    since_block_creation = ?instant_from_block(&block).elapsed(),
                     "indexed new `sign` function call"
                 );
                 pending_requests.push(IndexedSignRequest {
@@ -278,6 +281,7 @@ async fn handle_block(
 
             "new sign request"
         );
+
         if let Err(err) = ctx.sign_tx.send(request).await {
             tracing::error!(?err, "failed to send the sign request into sign queue");
         }

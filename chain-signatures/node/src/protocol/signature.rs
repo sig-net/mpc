@@ -234,6 +234,11 @@ impl PresignatureStatus {
             Ok(None) => return Err(SignatureTaskError::Cancelled),
             _ => return Err(SignatureTaskError::TimeoutPresignatureNetwork),
         };
+        tracing::info!(
+            presignature_id = first_msg.presignature_id,
+            elapsed = ?started.elapsed(),
+            "sig[task].acceptor received proposed presignature id",
+        );
 
         let timeout_remaining = timeout - started.elapsed();
         // Proposer has chosen the presignature, so we can take it from the storage:
@@ -251,8 +256,11 @@ impl PresignatureStatus {
                 return Err(SignatureTaskError::Storage(err));
             }
         };
-
-        tracing::info!(presignature.id, "sig[task].acceptor found presignature");
+        tracing::info!(
+            presignature.id,
+            elapsed = ?started.elapsed(),
+            "sig[task].acceptor found presignature",
+        );
 
         Ok((presignature, Some(first_msg)))
     }
@@ -331,7 +339,7 @@ pub struct SignatureGenerator {
     timeout: Duration,
     timeout_total: Duration,
     /// latest poked time, total acrued wait time and total pokes per signature protocol
-    pub poked_latest: Option<(Instant, Duration, u64)>,
+    poked_latest: Option<(Instant, Duration, u64)>,
 }
 
 impl fmt::Debug for SignatureGenerator {
@@ -383,16 +391,16 @@ impl SignatureGenerator {
                 poked_latest: None,
             };
 
-            generator.run(inbox, rpc, outbox, my_account_id).await
+            generator.run(my_account_id, inbox, outbox, rpc).await
         })
     }
 
     pub async fn run(
         mut self,
-        mut inbox: mpsc::Receiver<SignatureMessage>,
-        rpc: RpcChannel,
-        outbox: MessageChannel,
         my_account_id: AccountId,
+        mut inbox: mpsc::Receiver<SignatureMessage>,
+        outbox: MessageChannel,
+        rpc: RpcChannel,
     ) -> SignatureTaskResult {
         let signature_before_poke_delay_metric = crate::metrics::SIGNATURE_BEFORE_POKE_DELAY
             .with_label_values(&[my_account_id.as_str()]);
@@ -527,7 +535,7 @@ impl SignatureGenerator {
                             elapsed = ?self.timestamp.elapsed(),
                             "completed signature generation"
                         );
-                        if self.request.proposer == self.me {
+                        if self.is_proposer() {
                             rpc.publish(self.public_key, self.request.clone(), output);
                         }
                         outbox

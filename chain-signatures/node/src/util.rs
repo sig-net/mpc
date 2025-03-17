@@ -2,7 +2,9 @@ use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::{AffinePoint, EncodedPoint};
 use mpc_crypto::{near_public_key_to_affine_point, PublicKey};
-use std::time::Duration;
+use near_lake_primitives::block::Block;
+
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub trait NearPublicKeyExt {
     fn into_affine_point(self) -> PublicKey;
@@ -75,4 +77,22 @@ pub fn is_elapsed_longer_than_timeout(timestamp_sec: u64, timeout: u64) -> bool 
     } else {
         false
     }
+}
+
+pub fn instant_from_nanos(nanos: u64) -> Instant {
+    let base = Instant::now();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+
+    if nanos <= now {
+        base - Duration::from_nanos(now - nanos)
+    } else {
+        base + Duration::from_nanos(nanos - now)
+    }
+}
+
+pub fn instant_from_block(block: &Block) -> Instant {
+    instant_from_nanos(block.header().timestamp_nanosec())
 }
