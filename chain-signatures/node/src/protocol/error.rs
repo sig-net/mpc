@@ -13,16 +13,12 @@ pub enum GenerationError {
     TripleStoreError(String),
     #[error("triple {0} is generating")]
     TripleIsGenerating(TripleId),
-    #[error("triple {0} is in garbage collection")]
-    TripleIsGarbageCollected(TripleId),
     #[error("triple access denied: id={0}, {1}")]
     TripleDenied(TripleId, &'static str),
     #[error("presignature {0} is generating")]
     PresignatureIsGenerating(PresignatureId),
     #[error("presignature {0} is missing")]
     PresignatureIsMissing(PresignatureId),
-    #[error("presignature {0} is in garbage collection")]
-    PresignatureIsGarbageCollected(TripleId),
     #[error("presignature access denied: id={0}, {1}")]
     PresignatureDenied(PresignatureId, &'static str),
     #[error("presignature bad parameters")]

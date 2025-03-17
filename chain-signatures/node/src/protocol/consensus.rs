@@ -123,6 +123,7 @@ impl ConsensusProtocol for StartedState {
                                         epoch,
                                         ctx.my_account_id(),
                                         ctx.triple_storage(),
+                                        ctx.msg_channel().clone(),
                                     );
 
                                     let presignature_manager =
@@ -132,6 +133,7 @@ impl ConsensusProtocol for StartedState {
                                             epoch,
                                             ctx.my_account_id(),
                                             ctx.presignature_storage(),
+                                            ctx.msg_channel().clone(),
                                         )));
 
                                     let signature_manager =
@@ -344,6 +346,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.epoch,
                         ctx.my_account_id(),
                         ctx.triple_storage(),
+                        ctx.msg_channel().clone(),
                     );
 
                     let presignature_manager = Arc::new(RwLock::new(PresignatureManager::new(
@@ -352,6 +355,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.epoch,
                         ctx.my_account_id(),
                         ctx.presignature_storage(),
+                        ctx.msg_channel().clone(),
                     )));
 
                     let signature_manager = Arc::new(RwLock::new(SignatureManager::new(

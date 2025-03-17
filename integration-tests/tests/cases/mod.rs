@@ -15,6 +15,7 @@ use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt}
 use mpc_node::kdf::into_eth_sig;
 use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
 use mpc_node::protocol::triple::{Triple, TripleManager};
+use mpc_node::protocol::MessageChannel;
 use mpc_node::util::NearPublicKeyExt as _;
 use test_log::test;
 
@@ -150,11 +151,12 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
         .init_network()
         .await?;
 
+    let (_, _, msg) = MessageChannel::new();
     let node_id = "test.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node_id);
     let triple_manager =
-        TripleManager::new(Participant::from(0), 5, 123, &node_id, &triple_storage);
+        TripleManager::new(Participant::from(0), 5, 123, &node_id, &triple_storage, msg);
 
     let triple_id_1: u64 = 1;
     let triple_1 = dummy_triple(triple_id_1);
@@ -254,12 +256,14 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let node_id = "test.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let presignature_storage = redis.presignature_storage(&node_id);
+    let (_, _, msg) = MessageChannel::new();
     let mut presignature_manager = PresignatureManager::new(
         Participant::from(0),
         5,
         123,
         &node_id,
         &presignature_storage,
+        msg,
     );
 
     let presignature = dummy_presignature(1);

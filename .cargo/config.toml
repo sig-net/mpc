@@ -19,7 +19,6 @@ rustflags = [
 [target.'cfg(not(target = "wasm32-unknown-unknown"))']
 runner = "./setup.sh"
 
-
 [alias]
 build-node = "build -p mpc-node --release"
 build-test = "build -p integration-tests --tests"
