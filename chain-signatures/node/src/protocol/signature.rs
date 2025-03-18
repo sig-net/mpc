@@ -444,14 +444,21 @@ impl SignatureManager {
 
                         if generator.request.indexed.timestamp.elapsed() < generator.timeout_total {
                             failed.push(sign_id.clone());
-                            tracing::warn!(?err, "signature failed to be produced; pushing request back into failed queue");
+                            tracing::error!(
+                                ?sign_id,
+                                presignature_id = generator.presignature_id,
+                                ?err,
+                                "signature failed to be produced; pushing request back into failed queue",
+                            );
                             if generator.request.proposer == self.me {
                                 signature_generator_failures_metric.inc();
                             }
                         } else {
-                            tracing::warn!(
+                            tracing::error!(
+                                ?sign_id,
+                                presignature_id = generator.presignature_id,
                                 ?err,
-                                "signature failed to be produced; trashing request"
+                                "signature failed to be produced; full timeout, trashing request",
                             );
                             if generator.request.proposer == self.me {
                                 signature_generator_failures_metric.inc();
@@ -463,7 +470,6 @@ impl SignatureManager {
                 };
                 match action {
                     Action::Wait => {
-                        tracing::debug!("signature: waiting");
                         // Retain protocol until we are finished
                         break;
                     }
