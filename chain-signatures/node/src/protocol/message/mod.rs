@@ -648,7 +648,13 @@ impl MessageReceiver for RunningState {
                 }
                 Err(err @ GenerationError::WaitingForIndexer(_)) => {
                     // We will revisit this this signature request later when we have the request indexed.
-                    tracing::warn!(?sign_id, ?proposer, ?err, "waiting for indexer");
+                    tracing::warn!(
+                        ?sign_id,
+                        ?presignature_id,
+                        ?proposer,
+                        ?err,
+                        "waiting for indexer"
+                    );
                     continue;
                 }
                 Err(err @ GenerationError::InvalidProposer(_, _)) => {
