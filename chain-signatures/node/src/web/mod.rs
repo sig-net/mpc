@@ -2,6 +2,7 @@ mod error;
 
 use self::error::Error;
 use crate::indexer::NearIndexer;
+use crate::protocol::sync::{SyncChannel, SyncUpdate, SyncView};
 use crate::protocol::NodeState;
 use crate::web::error::Result;
 use anyhow::Context;
@@ -21,6 +22,7 @@ struct AxumState {
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
     indexer: Option<NearIndexer>,
+    sync_channel: SyncChannel,
 }
 
 pub async fn run(
@@ -28,12 +30,14 @@ pub async fn run(
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
     indexer: Option<NearIndexer>,
+    sync_channel: SyncChannel,
 ) {
     tracing::info!("starting web server");
     let axum_state = AxumState {
         sender,
         protocol_state,
         indexer,
+        sync_channel,
     };
 
     let mut router = Router::new()
@@ -47,7 +51,8 @@ pub async fn run(
         )
         .route("/msg", post(msg))
         .route("/state", get(state))
-        .route("/metrics", get(metrics));
+        .route("/metrics", get(metrics))
+        .route("/sync", post(sync));
 
     if cfg!(feature = "bench") {
         router = router.route("/bench/metrics", get(bench_metrics));
@@ -211,4 +216,13 @@ async fn bench_metrics() -> Json<BenchMetrics> {
         sig_respond: crate::metrics::SIGN_RESPOND_LATENCY.exact(),
         presig_gen: crate::metrics::PRESIGNATURE_LATENCY.exact(),
     })
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn sync(
+    Extension(state): Extension<Arc<AxumState>>,
+    WithRejection(Json(update), _): WithRejection<Json<SyncUpdate>, Error>,
+) -> Result<Json<SyncView>> {
+    let view = state.sync_channel.request_update(update).await;
+    Ok(Json(view))
 }

@@ -4,6 +4,7 @@ use crate::protocol::signature::SignRequest;
 use crate::protocol::{Chain, ProtocolState};
 use crate::util::AffinePointExt as _;
 
+use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_keys::hpke;
@@ -72,6 +73,76 @@ impl RpcChannel {
                 tracing::error!(%err, "failed to send publish action");
             }
         });
+    }
+}
+
+#[derive(Clone)]
+pub struct NodeStateWatcher {
+    account_id: AccountId,
+    // TODO: use tokio::watch channel in the future.
+    contract_state: Arc<RwLock<Option<ProtocolState>>>,
+}
+
+impl NodeStateWatcher {
+    pub fn new(id: &AccountId) -> Self {
+        Self {
+            account_id: id.clone(),
+            contract_state: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn mock(id: &AccountId, state: ProtocolState) -> Self {
+        Self {
+            account_id: id.clone(),
+            contract_state: Arc::new(RwLock::new(Some(state))),
+        }
+    }
+
+    pub fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    pub fn state(&self) -> &Arc<RwLock<Option<ProtocolState>>> {
+        &self.contract_state
+    }
+
+    pub async fn me(&self) -> Option<Participant> {
+        let state = self.contract_state.read().await;
+        match state.as_ref()? {
+            ProtocolState::Initializing(_) => None,
+            ProtocolState::Running(state) => state
+                .participants
+                .find_participant(&self.account_id)
+                .copied(),
+            ProtocolState::Resharing(state) => state
+                .new_participants
+                .find_participant(&self.account_id)
+                .copied(),
+        }
+    }
+
+    pub async fn threshold(&self) -> Option<usize> {
+        let state = self.contract_state.read().await;
+        match state.as_ref()? {
+            ProtocolState::Initializing(_) => None,
+            ProtocolState::Running(state) => Some(state.threshold),
+            ProtocolState::Resharing(state) => Some(state.threshold),
+        }
+    }
+
+    pub async fn info(&self) -> Option<(usize, Participant)> {
+        let state = self.contract_state.read().await;
+        match state.as_ref()? {
+            ProtocolState::Initializing(_) => None,
+            ProtocolState::Running(state) => Some((
+                state.threshold,
+                *state.participants.find_participant(&self.account_id)?,
+            )),
+            ProtocolState::Resharing(state) => Some((
+                state.threshold,
+                *state.new_participants.find_participant(&self.account_id)?,
+            )),
+        }
     }
 }
 

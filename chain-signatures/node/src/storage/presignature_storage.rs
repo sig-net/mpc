@@ -49,6 +49,18 @@ impl PresignatureStorage {
             .map_err(StoreError::Connect)
     }
 
+    pub async fn fetch_mine(&self) -> StoreResult<Vec<PresignatureId>> {
+        let mut conn = self.connect().await?;
+        let result: Vec<PresignatureId> = conn.smembers(&self.mine_key).await?;
+        Ok(result)
+    }
+
+    pub async fn fetch_foreign_ids(&self) -> StoreResult<Vec<PresignatureId>> {
+        let mut conn = self.connect().await?;
+        let result: Vec<PresignatureId> = conn.hkeys(&self.presig_key).await?;
+        Ok(result)
+    }
+
     /// Insert a presignature into the storage. If `mine` is true, the presignature will be
     /// owned by the current node. If `back` is true, the presignature will be marked as unused.
     pub async fn insert(
@@ -182,6 +194,43 @@ impl PresignatureStorage {
             .key(&self.mine_key)
             .key(&self.presig_key)
             .key(&self.used_key)
+            .arg(USED_EXPIRE_TIME.num_seconds())
+            .invoke_async(&mut conn)
+            .await
+            .map_err(StoreError::from)
+    }
+
+    pub async fn take_self(&self, id: PresignatureId) -> StoreResult<Presignature> {
+        let mut conn = self.connect().await?;
+
+        let script = r#"
+            local mine_key = KEYS[1]
+            local presig_key = KEYS[2]
+            local used_key = KEYS[3]
+
+            local presig_id = ARGV[1]
+            -- remove the presignature from mine set
+            if not redis.call("SREM", mine_key, presig_id) then
+                return {err = "warn: unable to remove mine presignature " .. presig_id}
+            end
+
+            local presignature = redis.call("HGET", presig_key, presig_id)
+            if not presignature then
+                return {err = "warn: unexpected, presignature " .. presig_id .. " is missing"}
+            end
+
+            redis.call("HDEL", presig_key, presig_id)
+            redis.call("HSET", used_key, presig_id, "1")
+            redis.call("HEXPIRE", used_key, ARGV[2], "FIELDS", "1", presig_id)
+
+            return presignature
+        "#;
+
+        redis::Script::new(script)
+            .key(&self.mine_key)
+            .key(&self.presig_key)
+            .key(&self.used_key)
+            .arg(id)
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await

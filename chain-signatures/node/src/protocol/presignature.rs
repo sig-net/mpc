@@ -1,8 +1,8 @@
 use super::message::{MessageChannel, PresignatureMessage};
 use super::state::RunningState;
 use super::triple::{Triple, TripleId, TripleManager};
-use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::error::GenerationError;
+use crate::protocol::sync::{ProtocolResponse, SyncChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use near_account_id::AccountId;
@@ -32,6 +33,15 @@ pub struct Presignature {
     pub id: PresignatureId,
     pub output: PresignOutput<Secp256k1>,
     pub participants: Vec<Participant>,
+}
+
+impl fmt::Debug for Presignature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Presignature")
+            .field("id", &self.id)
+            .field("participants", &self.participants)
+            .finish()
+    }
 }
 
 impl Serialize for Presignature {
@@ -143,6 +153,7 @@ pub struct PresignatureManager {
     epoch: u64,
     my_account_id: AccountId,
     msg: MessageChannel,
+    sync_channel: SyncChannel,
 }
 
 impl PresignatureManager {
@@ -153,6 +164,7 @@ impl PresignatureManager {
         my_account_id: &AccountId,
         storage: &PresignatureStorage,
         msg: MessageChannel,
+        sync_channel: SyncChannel,
     ) -> Self {
         Self {
             presignature_storage: storage.clone(),
@@ -163,6 +175,7 @@ impl PresignatureManager {
             epoch,
             my_account_id: my_account_id.clone(),
             msg,
+            sync_channel,
         }
     }
 
@@ -364,10 +377,8 @@ impl PresignatureManager {
 
     pub async fn stockpile(
         &mut self,
-        active: &[Participant],
         pk: &PublicKey,
         sk_share: &SecretKeyShare,
-        triple_manager: &TripleManager,
         cfg: &ProtocolConfig,
     ) -> Result<(), InitializationError> {
         let not_enough_presignatures = {
@@ -389,31 +400,20 @@ impl PresignatureManager {
             // To ensure there is no contention between different nodes we are only using triples
             // that we proposed. This way in a non-BFT environment we are guaranteed to never try
             // to use the same triple as any other node.
-            if let Some((triple0, triple1)) = triple_manager.take_two_mine().await {
-                let presig_participants = intersect_vec(&[
-                    active,
-                    &triple0.public.participants,
-                    &triple1.public.participants,
-                ]);
-                if presig_participants.len() < self.threshold {
-                    tracing::warn!(
-                        target: "presign[stockpile]",
-                        triple0 = triple0.id,
-                        triple1 = triple1.id,
-                        participants = ?presig_participants,
-                        "intersection < threshold, trashing two triples"
-                    );
-                } else {
-                    self.generate(
-                        &presig_participants,
-                        triple0,
-                        triple1,
-                        pk,
-                        sk_share,
-                        cfg.presignature.generation_timeout,
-                    )
-                    .await?;
-                }
+            if let Some(ProtocolResponse {
+                participants,
+                value: (triple0, triple1),
+            }) = self.sync_channel.take_two_triple(true).await
+            {
+                self.generate(
+                    &participants,
+                    triple0,
+                    triple1,
+                    pk,
+                    sk_share,
+                    cfg.presignature.generation_timeout,
+                )
+                .await?;
             }
         }
 
@@ -677,12 +677,9 @@ impl PresignatureManager {
 
     pub fn execute(
         state: &RunningState,
-        active: &[Participant],
         protocol_cfg: &ProtocolConfig,
     ) -> tokio::task::JoinHandle<()> {
-        let triple_manager = state.triple_manager.clone();
         let presignature_manager = state.presignature_manager.clone();
-        let active = active.to_vec();
         let protocol_cfg = protocol_cfg.clone();
         let pk = state.public_key;
         let sk_share = state.private_share;
@@ -690,7 +687,7 @@ impl PresignatureManager {
         tokio::task::spawn(async move {
             let mut presignature_manager = presignature_manager.write().await;
             if let Err(err) = presignature_manager
-                .stockpile(&active, &pk, &sk_share, &triple_manager, &protocol_cfg)
+                .stockpile(&pk, &sk_share, &protocol_cfg)
                 .await
             {
                 tracing::warn!(?err, "running: failed to stockpile presignatures");

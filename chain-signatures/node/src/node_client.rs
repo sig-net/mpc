@@ -1,7 +1,10 @@
+use crate::protocol::sync::{SyncUpdate, SyncView};
 use crate::web::StateView;
 use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
 use reqwest::IntoUrl;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::str::Utf8Error;
 use std::time::Duration;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
@@ -31,6 +34,15 @@ impl Options {
     }
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            timeout: 1000,
+            state_timeout: 1000,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RequestError {
     #[error("http request was unsuccessful: {0} => {1}")]
@@ -57,6 +69,31 @@ impl NodeClient {
                 .build()
                 .unwrap(),
             options: options.clone(),
+        }
+    }
+
+    pub async fn post_json<T: Serialize + ?Sized, R: DeserializeOwned>(
+        &self,
+        url: &Url,
+        payload: &T,
+    ) -> Result<R, RequestError> {
+        let resp = self
+            .http
+            .post(url.clone())
+            .header("content-type", "application/json")
+            .json(payload)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status.is_success() {
+            Ok(resp.json::<R>().await?)
+        } else {
+            // TODO: parse response body and convert to mpc_node::Error type.
+            let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+            let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
+            tracing::warn!("failed to send a message to {url} with code {status}: {resp}");
+            Err(RequestError::Unsuccessful(status, resp.into()))
         }
     }
 
@@ -105,5 +142,16 @@ impl NodeClient {
             .await?;
 
         Ok(resp.json::<StateView>().await?)
+    }
+
+    pub async fn sync(
+        &self,
+        base: impl IntoUrl,
+        update: &SyncUpdate,
+    ) -> Result<SyncView, RequestError> {
+        let mut url = base.into_url()?;
+        url.set_path("sync");
+
+        self.post_json(&url, update).await
     }
 }

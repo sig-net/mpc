@@ -3,8 +3,9 @@ use crate::gcp::GcpService;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
+use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
-use crate::rpc::{NearClient, RpcExecutor};
+use crate::rpc::{NearClient, NodeStateWatcher, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, logs, mesh, storage, web};
 use clap::Parser;
@@ -240,13 +241,21 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let mesh = Mesh::new(&client, mesh_options);
             let mesh_state = mesh.state().clone();
-            let contract_state = Arc::new(RwLock::new(None));
+            let watcher = NodeStateWatcher::new(&account_id);
+            let contract_state = watcher.state().clone();
 
             let eth = eth.into_config();
             let network = NetworkConfig { cipher_sk, sign_sk };
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth);
+            let (sync_channel, sync) = SyncTask::new(
+                &client,
+                triple_storage.clone(),
+                presignature_storage.clone(),
+                mesh_state.clone(),
+                watcher,
+            );
 
             tracing::info!(
                 %digest,
@@ -276,6 +285,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     near_client,
                     rpc_channel,
                     channel,
+                    sync_channel.clone(),
                     sign_rx,
                     key_storage,
                     triple_storage,
@@ -283,13 +293,15 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 );
 
                 tracing::info!("protocol initialized");
+                let sync_handle = tokio::spawn(sync.run());
                 let rpc_handle = tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
                 let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
                 let system_handle = spawn_system_metrics(account_id.as_str()).await;
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
-                let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
+                let web_handle =
+                    tokio::spawn(web::run(web_port, sender, state, indexer, sync_channel));
                 let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");
 
@@ -300,6 +312,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
 
                 mesh_handle.abort();
                 mesh_handle.await?;
+                sync_handle.abort();
+                sync_handle.await?;
 
                 eth_indexer_handle.abort();
                 if let Some(indexer_handle) = indexer_handle {
