@@ -20,9 +20,9 @@ use super::presignature::{Presignature, PresignatureId};
 use super::triple::{Triple, TripleId};
 
 /// How long for a synchronous [`SyncUpdate`] to get back a [`SyncView`] request before timeout.
-const REQUEST_UPDATE_TIMEOUT: Duration = Duration::from_millis(50);
+const REQUEST_UPDATE_TIMEOUT: Duration = Duration::from_millis(500);
 /// How long for a synchronous [`ProtocolRequest`] to get back a [`ProtocolResponse`] before timeout.
-const REQUEST_PROTOCOL_TIMEOUT: Duration = Duration::from_millis(50);
+const REQUEST_PROTOCOL_TIMEOUT: Duration = Duration::from_millis(500);
 /// The maximum number of protocol requests that can be queued. This will likely never get to
 /// this upper bound just purely based on our ProtocolConfig.
 const MAX_PROTOCOL_REQUESTS: usize = 128 * 1024;
@@ -243,13 +243,16 @@ impl SyncTask {
                             continue;
                         }
                     };
+                    let cache_start = Instant::now();
                     cache.update(update, views, threshold);
                     // TODO: add ability to remove from storage, but that requires more info in storage,
                     //      like who exactly owns the triple/presignature.
 
+                    let cache_elapsed = cache_start.elapsed();
                     let elapsed = start.elapsed();
                     tracing::info!(
                         ?elapsed,
+                        ?cache_elapsed,
                         triples = cache.owned_triples.len(),
                         presignatures = cache.owned_presignatures.len(),
                         "processed broadcast",
