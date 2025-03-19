@@ -28,7 +28,10 @@ use near_account_id::AccountId;
 /// messages.
 pub type TripleId = u64;
 
-type GeneratorOutcome = (TripleId, Result<Option<(Triple, bool)>, ProtocolError>);
+type GeneratorOutcome = (
+    TripleId,
+    Result<Option<(Triple, Participant)>, ProtocolError>,
+);
 
 // TODO: why do we have Clone here? Triples can not be reused.
 /// A completed triple.
@@ -273,7 +276,7 @@ impl TripleGenerator {
                     };
 
                     // After creation the triple is assigned to a random node, which is NOT necessarily the one that initiated it's creation
-                    let triple_is_mine = {
+                    let triple_owner = {
                         // This is an entirely unpredictable value to all participants because it's a combination of big_c_i
                         // It is the same value across all participants
                         let big_c = triple.public.big_c;
@@ -285,14 +288,14 @@ impl TripleGenerator {
                         let num_participants = self.participants.len();
                         // This has a *tiny* bias towards lower indexed participants, they're up to (1 + num_participants / u64::MAX)^2 times more likely to be selected
                         // This is acceptably small that it will likely never result in a biased selection happening
-                        let triple_owner = self.participants[entropy % num_participants];
-
-                        triple_owner == me
+                        self.participants[entropy % num_participants]
                     };
+                    let triple_is_mine = triple_owner == me;
 
                     tracing::info!(
                         id = self.id,
                         ?me,
+                        ?triple_owner,
                         triple_is_mine,
                         participants = ?self.participants,
                         big_a = ?triple.public.big_a.to_base58(),
@@ -317,7 +320,7 @@ impl TripleGenerator {
                     triple_poke_cpu_time_metric
                         .observe(generator_poke_time.elapsed().as_millis() as f64);
 
-                    break (self.id, Ok(Some((triple, triple_is_mine))));
+                    break (self.id, Ok(Some((triple, triple_owner))));
                 }
             }
         }
@@ -424,7 +427,7 @@ impl TripleTasks {
         my_account_id: &AccountId,
         epoch: u64,
         cfg: &ProtocolConfig,
-    ) -> (Vec<(Triple, bool)>, HashMap<TripleId, ProtocolError>) {
+    ) -> (Vec<(Triple, Participant)>, HashMap<TripleId, ProtocolError>) {
         // Add more protocols to the ongoing pool if there is space.
         let to_generate_len = cfg.max_concurrent_generation as usize - self.ongoing.len();
         if !self.queued.is_empty() && to_generate_len > 0 {
@@ -508,15 +511,15 @@ impl TripleTasks {
 #[derive(Clone)]
 pub struct TripleManager {
     /// Triple Storage
-    pub triple_storage: TripleStorage,
+    triple_storage: TripleStorage,
 
     /// The set of ongoing triple generation protocols.
-    pub tasks: Arc<RwLock<TripleTasks>>,
+    tasks: Arc<RwLock<TripleTasks>>,
 
-    pub me: Participant,
-    pub threshold: usize,
-    pub epoch: u64,
-    pub my_account_id: AccountId,
+    me: Participant,
+    threshold: usize,
+    epoch: u64,
+    my_account_id: AccountId,
     msg: MessageChannel,
 }
 
@@ -556,10 +559,11 @@ impl TripleManager {
         }
     }
 
-    pub async fn insert(&self, triple: Triple, mine: bool, back: bool) {
+    pub async fn insert(&self, triple: Triple, owner: Participant) {
         let id = triple.id;
+        let mine = owner == self.me;
         tracing::debug!(id, mine, "inserting triple");
-        if let Err(e) = self.triple_storage.insert(triple, mine, back).await {
+        if let Err(e) = self.triple_storage.insert(triple, owner, mine).await {
             tracing::warn!(?e, mine, "failed to insert triple");
         }
     }
@@ -785,8 +789,8 @@ impl TripleManager {
             self.msg.filter_triple(id).await;
         }
 
-        for (triple, mine) in triples {
-            self.insert(triple, mine, false).await;
+        for (triple, owner) in triples {
+            self.insert(triple, owner).await;
         }
     }
 

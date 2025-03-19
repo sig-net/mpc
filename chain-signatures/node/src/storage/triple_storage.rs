@@ -1,6 +1,7 @@
 use crate::protocol::triple::{Triple, TripleId};
 use crate::storage::error::{StoreError, StoreResult};
 
+use cait_sith::protocol::Participant;
 use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
@@ -47,31 +48,33 @@ impl TripleStorage {
         Ok(result)
     }
 
-    // TODO: add owner field otherwise fallback to this behavior:
     pub async fn fetch_foreign_ids(&self) -> StoreResult<Vec<TripleId>> {
         let mut conn = self.connect().await?;
         let result: Vec<TripleId> = conn.hkeys(&self.triple_key).await?;
         Ok(result)
     }
 
-    pub async fn insert(&self, triple: Triple, mine: bool, back: bool) -> StoreResult<()> {
+    pub async fn insert(&self, triple: Triple, owner: Participant, mine: bool) -> StoreResult<()> {
         let mut conn = self.connect().await?;
+        let owner_key = format!(
+            "triples_owner:{TRIPLE_STORAGE_VERSION}:p{}",
+            Into::<u32>::into(owner)
+        );
 
         let script = r#"
             local mine_key = KEYS[1]
             local triple_key = KEYS[2]
             local used_key = KEYS[3]
+            local owner_key = KEYS[4]
             local triple_id = ARGV[1]
             local triple_value = ARGV[2]
             local mine = ARGV[3]
-            local back = ARGV[4]
 
-            if back == "true" then
-                redis.call("HDEL", used_key, triple_id)
-            elseif redis.call("HEXISTS", used_key, triple_id) == 1 then
+            if redis.call("HEXISTS", used_key, triple_id) == 1 then
                 return {err = "Triple " .. triple_id .. " has already been used"}
             end
 
+            redis.call("SADD", owner_key, triple_id)
             if mine == "true" then
                 redis.call("SADD", mine_key, triple_id)
             end
@@ -85,10 +88,10 @@ impl TripleStorage {
             .key(&self.mine_key)
             .key(&self.triple_key)
             .key(&self.used_key)
+            .key(&owner_key)
             .arg(triple.id)
             .arg(triple)
             .arg(mine.to_string())
-            .arg(back.to_string())
             .invoke_async(&mut conn)
             .await?;
 

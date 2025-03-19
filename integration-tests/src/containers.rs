@@ -704,15 +704,15 @@ impl Redis {
             for _ in 0..(cfg.protocol.triple.min_triples * mul) {
                 num_triples += 1;
                 let triple_id = rand::random();
-                for (participant, triple) in participant_ids
+                for (proposer, triple) in participant_ids
                     .iter()
                     .zip(shares_to_triples(triple_id, &public, &shares))
                 {
-                    let mine = participant == mine_idx;
+                    let mine = proposer == mine_idx;
                     storage
-                        .get(participant)
+                        .get(proposer)
                         .unwrap()
-                        .insert(triple, mine, false)
+                        .insert(triple, *proposer, mine)
                         .await
                         .unwrap();
                 }
