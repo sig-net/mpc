@@ -39,10 +39,7 @@ impl MessageFilter {
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
-                    tracing::warn!(
-                        target: "msg[filter]",
-                        "channel disconnected, no more messages will be received"
-                    );
+                    tracing::warn!("channel disconnected, no more messages will be received");
                     break;
                 }
             };
