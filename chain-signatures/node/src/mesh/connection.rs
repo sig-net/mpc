@@ -64,13 +64,13 @@ impl NodeConnection {
         ping_interval: Duration,
     ) {
         let node = (participant, &url);
-        tracing::info!(target: "net[conn]", ?node, "starting connection task");
+        tracing::info!(?node, "starting connection task");
         let url = url.to_string();
         let mut interval = tokio::time::interval(ping_interval);
         loop {
             interval.tick().await;
             if let Err(err) = client.msg_empty(&url).await {
-                tracing::warn!(target: "net[conn]", ?node, ?err, "checking /msg (empty) failed");
+                tracing::warn!(?node, ?err, "checking /msg (empty) failed");
                 *status.write().await = NodeStatus::Offline;
                 continue;
             }
@@ -86,12 +86,12 @@ impl NodeConnection {
                     };
                     let mut status = status.write().await;
                     if *status != new_status {
-                        tracing::info!(target: "net[conn]", ?node, ?new_status, "updated with new status");
+                        tracing::info!(?node, ?new_status, "updated with new status");
                         *status = new_status;
                     }
                 }
                 Err(err) => {
-                    tracing::warn!(target: "net[conn]", ?node, ?err, "checking /state failed");
+                    tracing::warn!(?node, ?err, "checking /state failed");
                     *status.write().await = NodeStatus::Offline;
                 }
             }
@@ -101,7 +101,7 @@ impl NodeConnection {
 
 impl Drop for NodeConnection {
     fn drop(&mut self) {
-        tracing::info!(target: "net[conn]", info = ?self.info, "connection dropped");
+        tracing::info!(info = ?self.info, "connection dropped");
         self.task.abort();
     }
 }
@@ -122,7 +122,7 @@ pub struct Pool {
 
 impl Pool {
     pub fn new(client: &NodeClient, ping_interval: Duration) -> Self {
-        tracing::info!(target: "net[pool]", "creating new connection pool");
+        tracing::info!("creating new connection pool");
         Self {
             client: client.clone(),
             ping_interval,
@@ -166,7 +166,7 @@ impl Pool {
             match self.connections.entry(*participant) {
                 Entry::Occupied(mut conn) => {
                     if &conn.get().info != info {
-                        tracing::info!(target: "net[pool]", ?node, "node connection updating");
+                        tracing::info!(?node, "node connection updating");
                         conn.insert(NodeConnection::spawn(
                             &self.client,
                             participant,
@@ -176,7 +176,7 @@ impl Pool {
                     }
                 }
                 Entry::Vacant(conn) => {
-                    tracing::info!(target: "net[pool]", ?node, "node connection created");
+                    tracing::info!(?node, "node connection created");
                     conn.insert(NodeConnection::spawn(
                         &self.client,
                         participant,
@@ -199,7 +199,6 @@ impl Pool {
         }
 
         for participant in remove {
-            tracing::info!(target: "net[pool]", node = ?participant, "node connection dropping");
             self.connections.remove(&participant);
         }
     }
