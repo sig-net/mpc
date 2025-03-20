@@ -71,6 +71,9 @@ struct SyncCache {
     owned_triples: HashMap<TripleId, Vec<Participant>>,
     /// The set of self owned presignatures seen by both us and other participants.
     owned_presignatures: HashMap<PresignatureId, Vec<Participant>>,
+
+    foreign_triples: Vec<TripleId>,
+    foreign_presignatures: Vec<PresignatureId>,
 }
 
 impl SyncCache {
@@ -79,6 +82,8 @@ impl SyncCache {
             me,
             owned_triples: HashMap::new(),
             owned_presignatures: HashMap::new(),
+            foreign_triples: Vec::new(),
+            foreign_presignatures: Vec::new(),
         }
     }
 
@@ -164,29 +169,12 @@ impl SyncTask {
         (channel, task)
     }
 
-    async fn process_sync(&self, update: SyncUpdate) -> SyncView {
-        // TODO: check that `from` actually owns the triples/presignatures.
-        // TODO: log the errors from storage.
-        // TODO: make each process_sync a separate task
-        let triple_ids = self.triples.fetch_foreign_ids().await.unwrap_or_default();
-        let presignature_ids = self
-            .presignatures
-            .fetch_foreign_ids()
-            .await
-            .unwrap_or_default();
-
-        // TODO: maybe instead of Vec<T> we should have HashSet<T> for more efficient intersections.
-        SyncView {
-            triples: intersect(&[&update.triples, &triple_ids]),
-            presignatures: intersect(&[&update.presignatures, &presignature_ids]),
-        }
-    }
-
     pub async fn run(mut self) {
         tracing::info!("task has been started");
         let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
-        let mut broadcast_interval = tokio::time::interval(Duration::from_millis(250));
-        let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(25));
+        let mut broadcast_interval = tokio::time::interval(Duration::from_millis(2000));
+        let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(100));
+        let mut update_foreign_interval = tokio::time::interval(Duration::from_millis(500));
 
         // Do NOT start until we have our own participant info.
         // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
@@ -258,20 +246,20 @@ impl SyncTask {
                         "processed broadcast",
                     );
                 }
-                // TODO: maybe make process updates a separate task.
+                _ = update_foreign_interval.tick() => {
+                    cache.foreign_triples = self.triples.fetch_foreign_ids().await.unwrap_or_default();
+                    cache.foreign_presignatures = self.presignatures.fetch_foreign_ids().await.unwrap_or_default();
+                }
                 Some(req) = self.requests.updates.recv() => {
-                    let view = self.process_sync(req.update).await;
-                    if let Err(err) = req.resp.send(view) {
-                        tracing::warn!(?err, "failed to send sync view");
-                    }
+                    tokio::spawn(req.process(cache.foreign_triples.clone(), cache.foreign_presignatures.clone()));
                 }
                 Some(req) = self.requests.triples.recv() => {
                     match req {
                         ProtocolRequest::Take { mine, resp } => {
                             let triples = self.take_two_triple(mine, threshold, &mut cache).await;
                             let triple_ids = triples.as_ref().map(|p| (p.value.0.id, p.value.1.id));
-                            if let Err(err) = resp.send(triples) {
-                                tracing::warn!(?triple_ids, ?err, "failed to respond with two triples");
+                            if let Err(_err) = resp.send(triples) {
+                                tracing::warn!(?triple_ids, "failed to respond with two triples");
                             }
                         }
                     }
@@ -281,8 +269,8 @@ impl SyncTask {
                         ProtocolRequest::Take { mine, resp } => {
                             let presignature = self.take_presignature(mine, threshold, &mut cache).await;
                             let presignature_id = presignature.as_ref().map(|p| p.value.id);
-                            if let Err(err) = resp.send(presignature) {
-                                tracing::warn!(presignature_id, ?err, "failed to respond with presignature");
+                            if let Err(_err) = resp.send(presignature) {
+                                tracing::warn!(presignature_id, "failed to respond with presignature");
                             }
                         }
                     }
@@ -494,6 +482,31 @@ async fn broadcast_sync(
 struct SyncUpdateRequest {
     update: SyncUpdate,
     resp: oneshot::Sender<SyncView>,
+}
+
+impl SyncUpdateRequest {
+    // async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
+    async fn process(self, triple_ids: Vec<TripleId>, presignature_ids: Vec<PresignatureId>) {
+        let start = Instant::now();
+        // TODO: check that `from` actually owns the triples/presignatures.
+        // TODO: log the errors from storage.
+        // TODO: maybe instead of Vec<T> we should have HashSet<T> for more efficient intersections.
+        let view = SyncView {
+            triples: intersect(&[&self.update.triples, &triple_ids]),
+            presignatures: intersect(&[&self.update.presignatures, &presignature_ids]),
+        };
+
+        // NOTE: err is ignored since it actually just Err(SyncView) which is a gigantic
+        // list of triples and presignatures.
+        if let Err(_) = self.resp.send(view) {
+            tracing::warn!(
+                triple_ids = triple_ids.len(),
+                presignature_ids = presignature_ids.len(),
+                elapsed = ?start.elapsed(),
+                "failed to send view due to timeout",
+            );
+        }
+    }
 }
 
 #[derive(Clone)]
