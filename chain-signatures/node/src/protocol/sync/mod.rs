@@ -498,7 +498,7 @@ impl SyncUpdateRequest {
 
         // NOTE: err is ignored since it actually just Err(SyncView) which is a gigantic
         // list of triples and presignatures.
-        if let Err(_) = self.resp.send(view) {
+        if self.resp.send(view).is_err() {
             tracing::warn!(
                 triple_ids = triple_ids.len(),
                 presignature_ids = presignature_ids.len(),
