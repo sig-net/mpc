@@ -772,10 +772,6 @@ impl TripleManager {
         }
     }
 
-    /// Pokes all of the ongoing generation protocols and returns a vector of
-    /// messages to be sent to the respective participant.
-    ///
-    /// An empty vector means we cannot progress until we receive a new message.
     pub async fn poke(&self, cfg: &ProtocolConfig) {
         let (triples, errors) = {
             let mut tasks = self.tasks.write().await;

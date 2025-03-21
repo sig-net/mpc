@@ -73,6 +73,45 @@ impl From<mpc_contract::primitives::Participants> for Participants {
     }
 }
 
+impl From<Participants> for mpc_contract::primitives::Participants {
+    fn from(participants: Participants) -> Self {
+        Self {
+            next_id: participants.len() as u32,
+            participants: participants
+                .participants
+                .iter()
+                .map(|(_, participant_info)| {
+                    (
+                        participant_info.account_id.clone(),
+                        mpc_contract::primitives::ParticipantInfo {
+                            account_id: participant_info.account_id.clone(),
+                            url: participant_info.url.clone(),
+                            cipher_pk: participant_info.cipher_pk.to_bytes(),
+                            sign_pk: near_sdk::PublicKey::from_parts(
+                                match participant_info.sign_pk.key_type() {
+                                    near_crypto::KeyType::ED25519 => near_sdk::CurveType::ED25519,
+                                    near_crypto::KeyType::SECP256K1 => {
+                                        near_sdk::CurveType::SECP256K1
+                                    }
+                                },
+                                participant_info.sign_pk.key_data().to_vec(),
+                            )
+                            .unwrap(),
+                        },
+                    )
+                })
+                .collect(),
+            account_to_participant_id: participants
+                .participants
+                .into_iter()
+                .map(|(participant, participant_info)| {
+                    (participant_info.account_id, participant.into())
+                })
+                .collect(),
+        }
+    }
+}
+
 impl From<Candidates> for Participants {
     fn from(candidates: Candidates) -> Self {
         Participants {

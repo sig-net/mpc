@@ -6,7 +6,7 @@ use near_workspaces::{Account, Worker};
 use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
 
-use crate::containers::DockerClient;
+use crate::containers::{self, DockerClient};
 use crate::{execute, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
@@ -139,6 +139,10 @@ impl ClusterSpawner {
         self.participants
             .extend((0..accounts.len() as u32).map(Participant::from));
         self.accounts.extend(accounts);
+    }
+
+    pub async fn spawn_redis(&self) -> containers::Redis {
+        containers::Redis::run(self).await
     }
 
     pub async fn run(&mut self) -> anyhow::Result<Nodes> {
