@@ -12,16 +12,52 @@ use near_account_id::AccountId;
 const TRIPLE_STORAGE_VERSION: &str = "v7";
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
+/// A pre-reserved slot for a triple that will eventually be inserted.
+#[derive(Clone)]
+pub struct TripleSlot {
+    id: TripleId,
+    me: Participant,
+    storage: TripleStorage,
+}
+
+impl TripleSlot {
+    // TODO: put inside a tokio task:
+    pub async fn insert(&self, triple: Triple, owner: Participant) -> bool {
+        if let Err(err) = self.storage.insert(triple, owner, owner == self.me).await {
+            tracing::warn!(id = self.id, ?err, "failed to insert triple");
+            return false;
+        }
+        return true;
+    }
+
+    // TODO: put inside a tokio task:
+    pub async fn unreserve(&self) {
+        let mut conn = match self.storage.connect().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!(?err, "failed to connect to redis");
+                return;
+            }
+        };
+        let result: Result<(), _> = conn.srem(&self.storage.reserved_key, self.id).await;
+        if let Err(err) = result {
+            tracing::warn!(id = self.id, ?err, "failed to unreserve triple");
+        }
+    }
+}
+
 pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
     let triple_key = format!("triples:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
     let mine_key = format!("triples_mine:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
     let used_key = format!("triples_used:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
+    let reserved_key = format!("triples_reserved:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
 
     TripleStorage {
         redis_pool: pool.clone(),
         triple_key,
         mine_key,
         used_key,
+        reserved_key,
     }
 }
 
@@ -31,6 +67,7 @@ pub struct TripleStorage {
     triple_key: String,
     mine_key: String,
     used_key: String,
+    reserved_key: String,
 }
 
 impl TripleStorage {
@@ -40,6 +77,58 @@ impl TripleStorage {
             .await
             .map_err(anyhow::Error::new)
             .map_err(StoreError::Connect)
+    }
+
+    // TODO: make triple reservation expire after some time
+    pub async fn reserve(&self, id: TripleId, me: Participant) -> Option<TripleSlot> {
+        let mut conn = match self.connect().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!(?err, "failed to connect to redis");
+                return None;
+            }
+        };
+        let script = r#"
+            local triple_key = KEYS[1]
+            local used_key = KEYS[2]
+            local reserved_key = KEYS[3]
+            local triple_id = ARGV[1]
+
+            -- cannot reserve this triple if it already exists.
+            if redis.call("SADD", reserved_key, triple_id) == 0 then
+                return {err = "WARN triple " .. triple_id .. " has already been reserved"}
+            end
+
+            -- cannot reserve this triple if its already in storage.
+            if redis.call("HEXISTS", triple_key, triple_id) == 1 then
+                return {err = "WARN triple " .. triple_id .. " has already been stored"}
+            end
+
+            -- cannot reserve this triple if it has already been used.
+            if redis.call("HEXISTS", used_key, triple_id) == 1 then
+                return {err = "WARN triple " .. triple_id .. " has already been used"}
+            end
+        "#;
+
+        let result: Result<(), _> = redis::Script::new(script)
+            .key(&self.triple_key)
+            .key(&self.used_key)
+            .key(&self.reserved_key)
+            .arg(id)
+            .invoke_async(&mut conn)
+            .await;
+
+        match result {
+            Ok(_) => Some(TripleSlot {
+                id,
+                me,
+                storage: self.clone(),
+            }),
+            Err(err) => {
+                tracing::warn!(?err, "failed to reserve triple");
+                None
+            }
+        }
     }
 
     pub async fn fetch_mine(&self) -> StoreResult<Vec<TripleId>> {
@@ -65,13 +154,20 @@ impl TripleStorage {
             local mine_key = KEYS[1]
             local triple_key = KEYS[2]
             local used_key = KEYS[3]
-            local owner_key = KEYS[4]
+            local reserved_key = KEYS[4]
+            local owner_key = KEYS[5]
             local triple_id = ARGV[1]
             local triple_value = ARGV[2]
             local mine = ARGV[3]
 
+            -- if the triple has not been reserved, then something went wrong when acquiring the
+            -- reservation for it via triple slot.
+            if redis.call("SISMEMBER", reserved_key, triple_id) == 0 then
+                return {err = "WARN triple " .. triple_id .. " has NOT been reserved"}
+            end
+
             if redis.call("HEXISTS", used_key, triple_id) == 1 then
-                return {err = "Triple " .. triple_id .. " has already been used"}
+                return {err = "WARN triple " .. triple_id .. " has already been used"}
             end
 
             redis.call("SADD", owner_key, triple_id)
@@ -88,6 +184,7 @@ impl TripleStorage {
             .key(&self.mine_key)
             .key(&self.triple_key)
             .key(&self.used_key)
+            .key(&self.reserved_key)
             .key(&owner_key)
             .arg(triple.id)
             .arg(triple)
@@ -140,8 +237,9 @@ impl TripleStorage {
                 return {err = "Triple " .. ARGV[2] .. " is missing"}
             end
 
-            -- Delete the triples from the hash map
+            -- Delete the triples from the hash map and reserved slots
             redis.call("HDEL", KEYS[1], ARGV[1], ARGV[2])
+            redis.call("SREM", KEYS[4], ARGV[1], ARGV[2])
 
             -- Add the triples to the used set and set expiration time. Note, HSET is used so
             -- we can expire on each field instead of the whole hash set.
@@ -156,6 +254,7 @@ impl TripleStorage {
             .key(&self.triple_key)
             .key(&self.mine_key)
             .key(&self.used_key)
+            .key(&self.reserved_key)
             .arg(id1.to_string())
             .arg(id2.to_string())
             .arg(USED_EXPIRE_TIME.num_seconds())
@@ -221,21 +320,21 @@ impl TripleStorage {
             local t1 = ARGV[2]
             -- remove the triples from mine set
             if not redis.call("SREM", KEYS[1], t0) then
-                return {err = "warn: unable to remove mine triple " .. t0}
+                return {err = "WARN unable to remove mine triple " .. t0}
             end
             if not redis.call("SREM", KEYS[1], t1) then
-                return {err = "warn: unable to remove mine triple " .. t1}
+                return {err = "WARN unable to remove mine triple " .. t1}
             end
 
             -- retrieve the corresponding triples
             local v1 = redis.call("HGET", KEYS[2], t0)
             if not v1 then
-                return {err = "warn: unexpected, mine triple " .. t0 .. " is missing"}
+                return {err = "WARN unexpected, mine triple " .. t0 .. " is missing"}
             end
 
             local v2 = redis.call("HGET", KEYS[2], t1)
             if not v2 then
-                return {err = "warn: unexpected, mine triple " .. t1 .. " is missing"}
+                return {err = "WARN unexpected, mine triple " .. t1 .. " is missing"}
             end
 
             -- delete the triples from the hash map

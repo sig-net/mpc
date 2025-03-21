@@ -39,8 +39,18 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_manager.is_empty().await);
     assert_eq!(triple_manager.len_potential().await, 0);
 
-    triple_manager.insert(triple_1.clone(), node1).await;
-    triple_manager.insert(triple_2.clone(), node1).await;
+    triple_manager
+        .reserve(triple_id_1)
+        .await
+        .unwrap()
+        .insert(triple_1.clone(), node1)
+        .await;
+    triple_manager
+        .reserve(triple_id_2)
+        .await
+        .unwrap()
+        .insert(triple_2.clone(), node1)
+        .await;
 
     // Check that the storage contains the foreign triple
     assert!(triple_manager.contains(triple_id_1).await);
@@ -66,10 +76,10 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_storage.contains_used(triple_id_1).await.unwrap());
     assert!(triple_storage.contains_used(triple_id_2).await.unwrap());
 
-    // Attempt to re-insert used triples and check that it fails
-    triple_manager.insert(triple_1, node1).await;
+    // Attempt to re-reserve used triples and check that it cannot be reserved since it is used.
+    assert!(triple_manager.reserve(triple_id_1).await.is_none());
+    assert!(triple_manager.reserve(triple_id_2).await.is_none());
     assert!(!triple_manager.contains(triple_id_1).await);
-    triple_manager.insert(triple_2, node1).await;
     assert!(!triple_manager.contains(triple_id_2).await);
 
     let mine_id_1: u64 = 3;
@@ -78,8 +88,18 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let mine_triple_2 = dummy_triple(mine_id_2);
 
     // Add mine triple and check that it is in the storage
-    triple_manager.insert(mine_triple_1.clone(), node0).await;
-    triple_manager.insert(mine_triple_2.clone(), node0).await;
+    triple_manager
+        .reserve(mine_id_1)
+        .await
+        .unwrap()
+        .insert(mine_triple_1.clone(), node0)
+        .await;
+    triple_manager
+        .reserve(mine_id_2)
+        .await
+        .unwrap()
+        .insert(mine_triple_2.clone(), node0)
+        .await;
     assert!(triple_manager.contains(mine_id_1).await);
     assert!(triple_manager.contains(mine_id_2).await);
     assert!(triple_manager.contains_mine(mine_id_1).await);
@@ -102,9 +122,9 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_storage.contains_used(mine_id_2).await.unwrap());
 
     // Attempt to re-insert used mine triples and check that it fails
-    triple_manager.insert(mine_triple_1, node0).await;
+    assert!(triple_manager.reserve(mine_id_1).await.is_none());
+    assert!(triple_manager.reserve(mine_id_2).await.is_none());
     assert!(!triple_manager.contains(mine_id_1).await);
-    triple_manager.insert(mine_triple_2, node0).await;
     assert!(!triple_manager.contains(mine_id_2).await);
 
     Ok(())

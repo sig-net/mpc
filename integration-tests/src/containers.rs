@@ -700,21 +700,22 @@ impl Redis {
         // - first/second loop add at least min_triples per node
         // - third loop: for each triple, store the shares individually per node
         let mut num_triples = 0;
-        for mine_idx in &participant_ids {
+        for owner in &participant_ids {
             for _ in 0..(cfg.protocol.triple.min_triples * mul) {
                 num_triples += 1;
                 let triple_id = rand::random();
-                for (proposer, triple) in participant_ids
+                for (me, triple) in participant_ids
                     .iter()
                     .zip(shares_to_triples(triple_id, &public, &shares))
                 {
-                    let mine = proposer == mine_idx;
                     storage
-                        .get(proposer)
+                        .get(me)
                         .unwrap()
-                        .insert(triple, *proposer, mine)
+                        .reserve(triple.id, *me)
                         .await
-                        .unwrap();
+                        .unwrap()
+                        .insert(triple, *owner)
+                        .await;
                 }
             }
         }
