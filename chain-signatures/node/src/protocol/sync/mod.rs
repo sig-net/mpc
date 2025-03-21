@@ -20,9 +20,9 @@ use super::presignature::{Presignature, PresignatureId};
 use super::triple::{Triple, TripleId};
 
 /// How long for a synchronous [`SyncUpdate`] to get back a [`SyncView`] request before timeout.
-const REQUEST_UPDATE_TIMEOUT: Duration = Duration::from_millis(50);
+const REQUEST_UPDATE_TIMEOUT: Duration = Duration::from_millis(500);
 /// How long for a synchronous [`ProtocolRequest`] to get back a [`ProtocolResponse`] before timeout.
-const REQUEST_PROTOCOL_TIMEOUT: Duration = Duration::from_millis(50);
+const REQUEST_PROTOCOL_TIMEOUT: Duration = Duration::from_millis(500);
 /// The maximum number of protocol requests that can be queued. This will likely never get to
 /// this upper bound just purely based on our ProtocolConfig.
 const MAX_PROTOCOL_REQUESTS: usize = 128 * 1024;
@@ -71,6 +71,9 @@ struct SyncCache {
     owned_triples: HashMap<TripleId, Vec<Participant>>,
     /// The set of self owned presignatures seen by both us and other participants.
     owned_presignatures: HashMap<PresignatureId, Vec<Participant>>,
+
+    foreign_triples: Vec<TripleId>,
+    foreign_presignatures: Vec<PresignatureId>,
 }
 
 impl SyncCache {
@@ -79,6 +82,8 @@ impl SyncCache {
             me,
             owned_triples: HashMap::new(),
             owned_presignatures: HashMap::new(),
+            foreign_triples: Vec::new(),
+            foreign_presignatures: Vec::new(),
         }
     }
 
@@ -164,29 +169,12 @@ impl SyncTask {
         (channel, task)
     }
 
-    async fn process_sync(&self, update: SyncUpdate) -> SyncView {
-        // TODO: check that `from` actually owns the triples/presignatures.
-        // TODO: log the errors from storage.
-        // TODO: make each process_sync a separate task
-        let triple_ids = self.triples.fetch_foreign_ids().await.unwrap_or_default();
-        let presignature_ids = self
-            .presignatures
-            .fetch_foreign_ids()
-            .await
-            .unwrap_or_default();
-
-        // TODO: maybe instead of Vec<T> we should have HashSet<T> for more efficient intersections.
-        SyncView {
-            triples: intersect(&[&update.triples, &triple_ids]),
-            presignatures: intersect(&[&update.presignatures, &presignature_ids]),
-        }
-    }
-
     pub async fn run(mut self) {
-        tracing::info!(target: "sync", "task has been started");
+        tracing::info!("task has been started");
         let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
-        let mut broadcast_interval = tokio::time::interval(Duration::from_millis(250));
-        let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(25));
+        let mut broadcast_interval = tokio::time::interval(Duration::from_millis(2000));
+        let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(100));
+        let mut update_foreign_interval = tokio::time::interval(Duration::from_millis(500));
 
         // Do NOT start until we have our own participant info.
         // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
@@ -196,7 +184,7 @@ impl SyncTask {
                 break info;
             }
         };
-        tracing::info!(target: "sync", ?me, "mpc network ready, running...");
+        tracing::info!(?me, "mpc network ready, running...");
         let mut cache = SyncCache::new(me);
 
         let mut broadcast = Option::<(Instant, JoinHandle<_>)>::None;
@@ -239,37 +227,39 @@ impl SyncTask {
                     let (update, views) = match handle.await {
                         Ok(result) => result,
                         Err(err) => {
-                            tracing::warn!(target: "sync", ?err, "broadcast task failed");
+                            tracing::warn!(?err, "broadcast task failed");
                             continue;
                         }
                     };
+                    let cache_start = Instant::now();
                     cache.update(update, views, threshold);
                     // TODO: add ability to remove from storage, but that requires more info in storage,
                     //      like who exactly owns the triple/presignature.
 
+                    let cache_elapsed = cache_start.elapsed();
                     let elapsed = start.elapsed();
                     tracing::info!(
-                        target: "sync",
                         ?elapsed,
+                        ?cache_elapsed,
                         triples = cache.owned_triples.len(),
                         presignatures = cache.owned_presignatures.len(),
                         "processed broadcast",
                     );
                 }
-                // TODO: maybe make process updates a separate task.
+                _ = update_foreign_interval.tick() => {
+                    cache.foreign_triples = self.triples.fetch_foreign_ids().await.unwrap_or_default();
+                    cache.foreign_presignatures = self.presignatures.fetch_foreign_ids().await.unwrap_or_default();
+                }
                 Some(req) = self.requests.updates.recv() => {
-                    let view = self.process_sync(req.update).await;
-                    if let Err(err) = req.resp.send(view) {
-                        tracing::warn!(target: "sync", ?err, "failed to send sync view");
-                    }
+                    tokio::spawn(req.process(cache.foreign_triples.clone(), cache.foreign_presignatures.clone()));
                 }
                 Some(req) = self.requests.triples.recv() => {
                     match req {
                         ProtocolRequest::Take { mine, resp } => {
                             let triples = self.take_two_triple(mine, threshold, &mut cache).await;
                             let triple_ids = triples.as_ref().map(|p| (p.value.0.id, p.value.1.id));
-                            if let Err(err) = resp.send(triples) {
-                                tracing::warn!(target: "sync", ?triple_ids, ?err, "failed to respond with two triples");
+                            if let Err(_err) = resp.send(triples) {
+                                tracing::warn!(?triple_ids, "failed to respond with two triples");
                             }
                         }
                     }
@@ -279,8 +269,8 @@ impl SyncTask {
                         ProtocolRequest::Take { mine, resp } => {
                             let presignature = self.take_presignature(mine, threshold, &mut cache).await;
                             let presignature_id = presignature.as_ref().map(|p| p.value.id);
-                            if let Err(err) = resp.send(presignature) {
-                                tracing::warn!(target: "sync", presignature_id, ?err, "failed to respond with presignature");
+                            if let Err(_err) = resp.send(presignature) {
+                                tracing::warn!(presignature_id, "failed to respond with presignature");
                             }
                         }
                     }
@@ -328,17 +318,17 @@ impl SyncTask {
             let (&t0_id, &t1_id) = match two.as_slice() {
                 &[triple0, triple1] => (triple0, triple1),
                 _ => {
-                    tracing::warn!(target: "sync", "unexpected, failed to take two triples");
+                    tracing::warn!("unexpected, failed to take two triples");
                     break None;
                 }
             };
 
             let Some((t0_id, t0_participants)) = cache.owned_triples.remove_entry(&t0_id) else {
-                tracing::warn!(target: "sync", t0_id, "unexpected, failed to take a seen triple");
+                tracing::warn!(t0_id, "unexpected, failed to take a seen triple");
                 break None;
             };
             let Some((t1_id, t1_participants)) = cache.owned_triples.remove_entry(&t1_id) else {
-                tracing::warn!(target: "sync", t1_id, "unexpected, failed to take a seen triple");
+                tracing::warn!(t1_id, "unexpected, failed to take a seen triple");
                 failed.push((t0_id, t0_participants));
                 break None;
             };
@@ -346,7 +336,6 @@ impl SyncTask {
             let participants = intersect_vec(&[&active, &t0_participants, &t1_participants]);
             if participants.len() < threshold {
                 tracing::warn!(
-                    target: "sync",
                     intersection = ?participants,
                     ?active,
                     triple0 = ?(t0_id, &t0_participants),
@@ -369,7 +358,7 @@ impl SyncTask {
         let (triple0, triple1) = match self.triples.take_two_self(triple0, triple1).await {
             Ok(value) => value,
             Err(err) => {
-                tracing::warn!(target: "sync", triple_ids = ?(triple0, triple1), ?err, "failed to take two triples");
+                tracing::warn!(triple_ids = ?(triple0, triple1), ?err, "failed to take two triples");
                 return None;
             }
         };
@@ -400,7 +389,7 @@ impl SyncTask {
                 break None;
             }
             let Some(&presignature_id) = cache.owned_presignatures.keys().choose(&mut rng) else {
-                tracing::warn!(target: "sync", "unexpected, failed to take a presignature");
+                tracing::warn!("unexpected, failed to take a presignature");
                 break None;
             };
 
@@ -413,7 +402,6 @@ impl SyncTask {
             let participants = intersect_vec(&[&active, &presign_participants]);
             if participants.len() < threshold {
                 tracing::warn!(
-                    target: "sync",
                     intersection = ?participants,
                     ?active,
                     presignature = ?(presignature_id, &presign_participants),
@@ -433,7 +421,7 @@ impl SyncTask {
         let presignature = match self.presignatures.take_self(presignature_id).await {
             Ok(value) => value,
             Err(err) => {
-                tracing::warn!(target: "sync", presignature_id, ?err, "failed to take presignature");
+                tracing::warn!(presignature_id, ?err, "failed to take presignature");
                 return None;
             }
         };
@@ -483,7 +471,6 @@ async fn broadcast_sync(
         .collect::<Vec<_>>();
 
     tracing::info!(
-        target: "sync",
         elapsed = ?start.elapsed(),
         responded = ?views.iter().map(|(p, _)| p).collect::<Vec<_>>(),
         "broadcast completed",
@@ -495,6 +482,31 @@ async fn broadcast_sync(
 struct SyncUpdateRequest {
     update: SyncUpdate,
     resp: oneshot::Sender<SyncView>,
+}
+
+impl SyncUpdateRequest {
+    // async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
+    async fn process(self, triple_ids: Vec<TripleId>, presignature_ids: Vec<PresignatureId>) {
+        let start = Instant::now();
+        // TODO: check that `from` actually owns the triples/presignatures.
+        // TODO: log the errors from storage.
+        // TODO: maybe instead of Vec<T> we should have HashSet<T> for more efficient intersections.
+        let view = SyncView {
+            triples: intersect(&[&self.update.triples, &triple_ids]),
+            presignatures: intersect(&[&self.update.presignatures, &presignature_ids]),
+        };
+
+        // NOTE: err is ignored since it actually just Err(SyncView) which is a gigantic
+        // list of triples and presignatures.
+        if self.resp.send(view).is_err() {
+            tracing::warn!(
+                triple_ids = triple_ids.len(),
+                presignature_ids = presignature_ids.len(),
+                elapsed = ?start.elapsed(),
+                "failed to send view due to timeout",
+            );
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -534,18 +546,18 @@ impl SyncChannel {
             })
             .await
         {
-            tracing::warn!(target: "sync", ?err, "failed to request update");
+            tracing::warn!(?err, "failed to request update");
             return SyncView::empty();
         }
 
         match tokio::time::timeout(REQUEST_UPDATE_TIMEOUT, view_rx).await {
             Ok(Ok(view)) => view,
             Ok(Err(err)) => {
-                tracing::warn!(target: "sync", ?err, "failed to receive view");
+                tracing::warn!(?err, "failed to receive view");
                 SyncView::empty()
             }
             Err(_) => {
-                tracing::warn!(target: "sync", "timeout trying to receive view");
+                tracing::warn!("timeout trying to receive view");
                 SyncView::empty()
             }
         }
@@ -554,14 +566,14 @@ impl SyncChannel {
     pub async fn take_two_triple(&self, mine: bool) -> Option<ProtocolResponse<(Triple, Triple)>> {
         let start = Instant::now();
         let result = self.request_triple.take(mine).await;
-        tracing::info!(target: "sync", elapsed = ?start.elapsed(), "take two triple");
+        tracing::info!(elapsed = ?start.elapsed(), "take two triple");
         result
     }
 
     pub async fn take_presignature(&self, mine: bool) -> Option<ProtocolResponse<Presignature>> {
         let start = Instant::now();
         let result = self.request_presignature.take(mine).await;
-        tracing::info!(target: "sync", elapsed = ?start.elapsed(), "take presignature");
+        tracing::info!(elapsed = ?start.elapsed(), "take presignature");
         result
     }
 }
@@ -610,11 +622,11 @@ impl<T> ProtocolChannel<T> {
         match tokio::time::timeout(REQUEST_PROTOCOL_TIMEOUT, resp_rx).await {
             Ok(Ok(resp)) => resp,
             Ok(Err(err)) => {
-                tracing::warn!(target: "sync", ?err, "failed to receive response for protocol.take");
+                tracing::warn!(?err, "failed to receive response for protocol.take");
                 None
             }
             Err(_) => {
-                tracing::warn!(target: "sync", "timeout trying to receive response for protocol.take");
+                tracing::warn!("timeout trying to receive response for protocol.take");
                 None
             }
         }
