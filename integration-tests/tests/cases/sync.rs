@@ -95,7 +95,7 @@ async fn test_protocol_sync_take() -> anyhow::Result<()> {
     }
 
     // Give it some time for sync to process the inserts
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     let mine = true;
     // Check that the inserted triples can be taken
