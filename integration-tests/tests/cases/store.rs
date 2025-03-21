@@ -127,6 +127,22 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(!triple_manager.contains(mine_id_1).await);
     assert!(!triple_manager.contains(mine_id_2).await);
 
+    triple_storage.clear().await.unwrap();
+    // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
+    for id in 10..=15 {
+        triple_manager
+            .reserve(id)
+            .await
+            .unwrap()
+            .insert(dummy_triple(id), node1)
+            .await;
+    }
+
+    // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
+    let mut outdated = triple_storage.remove_outdated(node1, &[13, 14, 15]).await;
+    outdated.sort();
+    assert_eq!(outdated, vec![10, 11, 12]);
+
     Ok(())
 }
 

@@ -46,11 +46,16 @@ impl TripleSlot {
     }
 }
 
+fn owner_key(base: &str, owner: Participant) -> String {
+    format!("{base}:p{}", Into::<u32>::into(owner))
+}
+
 pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
     let triple_key = format!("triples:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
     let mine_key = format!("triples_mine:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
     let used_key = format!("triples_used:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
     let reserved_key = format!("triples_reserved:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
+    let owner_keys = format!("triples_owners:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
 
     TripleStorage {
         redis_pool: pool.clone(),
@@ -58,6 +63,7 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
         mine_key,
         used_key,
         reserved_key,
+        owner_keys,
     }
 }
 
@@ -68,6 +74,7 @@ pub struct TripleStorage {
     mine_key: String,
     used_key: String,
     reserved_key: String,
+    owner_keys: String,
 }
 
 impl TripleStorage {
@@ -79,7 +86,18 @@ impl TripleStorage {
             .map_err(StoreError::Connect)
     }
 
-    // TODO: make triple reservation expire after some time
+    pub async fn reserved(&self) -> Vec<TripleId> {
+        let mut conn = match self.connect().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!(?err, "failed to connect to redis");
+                return Vec::new();
+            }
+        };
+        conn.smembers(&self.reserved_key).await.unwrap_or_default()
+    }
+
+    // TODO: make triple reservation expire after some time if it does not get stored.
     pub async fn reserve(&self, id: TripleId, me: Participant) -> Option<TripleSlot> {
         let mut conn = match self.connect().await {
             Ok(conn) => conn,
@@ -131,6 +149,73 @@ impl TripleStorage {
         }
     }
 
+    pub async fn remove_outdated(
+        &self,
+        owner: Participant,
+        owner_shares: &[TripleId],
+    ) -> Vec<TripleId> {
+        let mut conn = match self.connect().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!(?err, "failed to connect to redis");
+                return Vec::new();
+            }
+        };
+
+        let script = r#"
+            local triple_key = KEYS[1]
+            local reserved_key = KEYS[2]
+            local owner_key = KEYS[3]
+
+            -- convert the list of ids to a table for easy lookup
+            local owner_shares = {}
+            for _, value in ipairs(ARGV) do
+                owner_shares[value] = true
+            end
+
+            -- find all shares that the owner no longer tracks
+            local outdated = {}
+            local our_shares = redis.call("SMEMBERS", owner_key)
+            for _, id in ipairs(our_shares) do
+                if not owner_shares[id] then
+                    table.insert(outdated, id)
+                end
+            end
+
+            -- remove the outdated shares from our node
+            if #outdated > 0 then
+                redis.call("SREM", owner_key, unpack(outdated))
+                redis.call("SREM", reserved_key, unpack(outdated))
+                redis.call("HDEL", triple_key, unpack(outdated))
+            end
+
+            return outdated
+        "#;
+
+        let owner_key = owner_key(&self.owner_keys, owner);
+        let result: Result<Vec<TripleId>, _> = redis::Script::new(script)
+            .key(&self.triple_key)
+            .key(&self.reserved_key)
+            .key(&owner_key)
+            // NOTE: this encodes each entry of owner_shares as a separate ARGV[index] entry.
+            .arg(owner_shares)
+            .invoke_async(&mut conn)
+            .await;
+
+        match result {
+            Ok(outdated) => {
+                if !outdated.is_empty() {
+                    tracing::info!(?outdated, "removed outdated triples");
+                }
+                outdated
+            }
+            Err(err) => {
+                tracing::warn!(?err, "failed to remove outdated triples");
+                Vec::new()
+            }
+        }
+    }
+
     pub async fn fetch_mine(&self) -> StoreResult<Vec<TripleId>> {
         let mut conn = self.connect().await?;
         let result: Vec<TripleId> = conn.smembers(&self.mine_key).await?;
@@ -143,19 +228,16 @@ impl TripleStorage {
         Ok(result)
     }
 
-    pub async fn insert(&self, triple: Triple, owner: Participant, mine: bool) -> StoreResult<()> {
+    async fn insert(&self, triple: Triple, owner: Participant, mine: bool) -> StoreResult<()> {
         let mut conn = self.connect().await?;
-        let owner_key = format!(
-            "triples_owner:{TRIPLE_STORAGE_VERSION}:p{}",
-            Into::<u32>::into(owner)
-        );
 
         let script = r#"
             local mine_key = KEYS[1]
             local triple_key = KEYS[2]
             local used_key = KEYS[3]
             local reserved_key = KEYS[4]
-            local owner_key = KEYS[5]
+            local owner_keys = KEYS[5]
+            local owner_key = KEYS[6]
             local triple_id = ARGV[1]
             local triple_value = ARGV[2]
             local mine = ARGV[3]
@@ -171,6 +253,7 @@ impl TripleStorage {
             end
 
             redis.call("SADD", owner_key, triple_id)
+            redis.call("SADD", owner_keys, owner_key)
             if mine == "true" then
                 redis.call("SADD", mine_key, triple_id)
             end
@@ -180,11 +263,13 @@ impl TripleStorage {
             return "OK"
         "#;
 
+        let owner_key = owner_key(&self.owner_keys, owner);
         let _: String = redis::Script::new(script)
             .key(&self.mine_key)
             .key(&self.triple_key)
             .key(&self.used_key)
             .key(&self.reserved_key)
+            .key(&self.owner_keys)
             .key(&owner_key)
             .arg(triple.id)
             .arg(triple)
@@ -374,8 +459,21 @@ impl TripleStorage {
 
     pub async fn clear(&self) -> StoreResult<()> {
         let mut conn = self.connect().await?;
-        conn.del::<&str, ()>(&self.triple_key).await?;
-        conn.del::<&str, ()>(&self.mine_key).await?;
+        let script = r#"
+            local owner_keys = redis.call("SMEMBERS", KEYS[1])
+            redis.call("DEL", unpack(KEYS), unpack(owner_keys))
+        "#;
+
+        let _: () = redis::Script::new(script)
+            .key(&self.owner_keys)
+            .key(&self.triple_key)
+            .key(&self.mine_key)
+            .key(&self.used_key)
+            .key(&self.reserved_key)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(StoreError::from)?;
+
         Ok(())
     }
 }
