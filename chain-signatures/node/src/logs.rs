@@ -79,17 +79,18 @@ impl Display for OpenTelemetryLevel {
 }
 
 /// This will whether this code is being ran on top of GCP or not.
-fn is_running_on_gcp() -> bool {
+async fn is_running_on_gcp() -> bool {
     // Check if running in Google Cloud Run: https://cloud.google.com/run/docs/container-contract#services-env-vars
     if std::env::var("K_SERVICE").is_ok() {
         return true;
     }
 
-    let resp = reqwest::blocking::Client::new()
+    let resp = reqwest::Client::new()
         .get("http://metadata.google.internal/computeMetadata/v1/instance/id")
         .header("Metadata-Flavor", "Google")
         .timeout(std::time::Duration::from_millis(200))
-        .send();
+        .send()
+        .await;
 
     match resp {
         Ok(resp) => resp.status().is_success(),
@@ -145,11 +146,11 @@ fn get_resource(env: &str, node_id: &str) -> Resource {
         .clone()
 }
 
-fn init_otlp_logs(env: &str, node_id: &str, otlp_endpont: &str) -> SdkLoggerProvider {
+fn init_otlp_logs(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkLoggerProvider {
     let exporter = LogExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary)
-        .with_endpoint(format!("{otlp_endpont}/v1/logs"))
+        .with_endpoint(format!("{otlp_endpoint}/v1/logs"))
         .build()
         .expect("Failed to create log exporter");
 
@@ -159,11 +160,11 @@ fn init_otlp_logs(env: &str, node_id: &str, otlp_endpont: &str) -> SdkLoggerProv
         .build()
 }
 
-fn init_otlp_traces(env: &str, node_id: &str, otlp_endpont: &str) -> SdkTracerProvider {
+fn init_otlp_traces(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkTracerProvider {
     let exporter = SpanExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary) //can be changed to `Protocol::HttpJson` to export in JSON format
-        .with_endpoint(format!("{otlp_endpont}/v1/traces"))
+        .with_endpoint(format!("{otlp_endpoint}/v1/traces"))
         .build()
         .expect("Failed to create trace exporter");
 
@@ -173,11 +174,9 @@ fn init_otlp_traces(env: &str, node_id: &str, otlp_endpont: &str) -> SdkTracerPr
         .build()
 }
 
-pub fn setup(env: &str, node_id: &str, options: &Options, rt: &tokio::runtime::Runtime) -> anyhow::Result<()> {
+pub async fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Result<()> {
     // Setup logging
-    let log_otlp_provider = rt.block_on(async {
-        init_otlp_logs(env, node_id, options.otlp_endpoint.as_str())
-    });
+    let log_otlp_provider = init_otlp_logs(env, node_id, options.otlp_endpoint.as_str());
     let log_otel_layer = OpenTelemetryTracingBridge::new(&log_otlp_provider);
 
     let log_otel_filter = EnvFilter::new(options.opentelemetry_level.to_string())
@@ -196,7 +195,7 @@ pub fn setup(env: &str, node_id: &str, options: &Options, rt: &tokio::runtime::R
         .event_format(NodeIdFormatter::new(node_id))
         .with_filter(EnvFilter::from_default_env());
 
-    if is_running_on_gcp() {
+    if is_running_on_gcp().await {
         let log_stackdriver_layer = stackdriver_layer()
             .with_writer(std::io::stderr)
             .with_filter(EnvFilter::from_default_env());
@@ -216,11 +215,9 @@ pub fn setup(env: &str, node_id: &str, options: &Options, rt: &tokio::runtime::R
     }
 
     // Setup tracing
-    let tracer_provider = rt.block_on(async {
-        init_otlp_traces(env, node_id, options.otlp_endpoint.as_str())
-    });
+    let tracer_provider = init_otlp_traces(env, node_id, options.otlp_endpoint.as_str());
     global::set_tracer_provider(tracer_provider.clone());
-    
+
     tracing::info!(
         "Logging parameters: env={}, node_id={}, options={:?}",
         env,
@@ -230,9 +227,8 @@ pub fn setup(env: &str, node_id: &str, options: &Options, rt: &tokio::runtime::R
 
     // TODO: remove example logs
     ////////////////////////////////////////////////////
-    
-    rt.block_on(async {
-        let common_scope_attributes = vec![KeyValue::new("mpc-scope-key", "mpc-scope-value")];
+
+    let common_scope_attributes = vec![KeyValue::new("mpc-scope-key", "mpc-scope-value")];
     let scope = opentelemetry::InstrumentationScope::builder("setup-func")
         .with_version("1.0")
         .with_attributes(common_scope_attributes)
@@ -258,7 +254,6 @@ pub fn setup(env: &str, node_id: &str, options: &Options, rt: &tokio::runtime::R
     });
 
     tracing::info!(target: "my-target", "hello from {}. My price is {}", "apple", 1.99);
-    });
     ////////////////////////////////////////
 
     log_otlp_provider.shutdown()?;

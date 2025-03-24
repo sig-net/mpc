@@ -144,7 +144,7 @@ impl Cli {
     }
 }
 
-pub fn run(cmd: Cli) -> anyhow::Result<()> {
+pub async fn run(cmd: Cli) -> anyhow::Result<()> {
     match cmd {
         Cli::Start {
             near_rpc,
@@ -164,11 +164,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             mesh_options,
             message_options,
         } => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-
-            logs::setup(&storage_options.env, account_id.as_str(), &logging_options, &rt)?;
+            logs::setup(&storage_options.env, account_id.as_str(), &logging_options).await?;
 
             let _span = tracing::trace_span!("cli").entered();
 
@@ -189,8 +185,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let (sign_tx, sign_rx) = SignQueue::channel();
 
-            let gcp_service =
-                rt.block_on(async { GcpService::init(&account_id, &storage_options).await })?;
+            let gcp_service = GcpService::init(&account_id, &storage_options).await?;
 
             let key_storage =
                 storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
@@ -275,56 +270,50 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 over: override_config.unwrap_or_else(Default::default),
                 network,
             })));
-            rt.block_on(async {
-                let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
-                let (sender, channel) =
-                    MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
-                let protocol = MpcSignProtocol::init(
-                    my_address,
-                    mpc_contract_id,
-                    account_id.clone(),
-                    state.clone(),
-                    near_client,
-                    rpc_channel,
-                    channel,
-                    sync_channel.clone(),
-                    sign_rx,
-                    key_storage,
-                    triple_storage,
-                    presignature_storage,
-                );
+            let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
+            let (sender, channel) =
+                MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
+            let protocol = MpcSignProtocol::init(
+                my_address,
+                mpc_contract_id,
+                account_id.clone(),
+                state.clone(),
+                near_client,
+                rpc_channel,
+                channel,
+                sync_channel.clone(),
+                sign_rx,
+                key_storage,
+                triple_storage,
+                presignature_storage,
+            );
 
-                tracing::info!("protocol initialized");
-                let sync_handle = tokio::spawn(sync.run());
-                let rpc_handle = tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
-                let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
-                let system_handle = spawn_system_metrics(account_id.as_str()).await;
-                let protocol_handle =
-                    tokio::spawn(protocol.run(contract_state, config, mesh_state));
-                tracing::info!("protocol thread spawned");
-                let web_handle =
-                    tokio::spawn(web::run(web_port, sender, state, indexer, sync_channel));
-                let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
-                tracing::info!("protocol http server spawned");
+            tracing::info!("protocol initialized");
+            let sync_handle = tokio::spawn(sync.run());
+            let rpc_handle = tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
+            let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
+            let system_handle = spawn_system_metrics(account_id.as_str()).await;
+            let protocol_handle = tokio::spawn(protocol.run(contract_state, config, mesh_state));
+            tracing::info!("protocol thread spawned");
+            let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer, sync_channel));
+            let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
+            tracing::info!("protocol http server spawned");
 
-                rpc_handle.await?;
-                protocol_handle.await?;
-                web_handle.await?;
-                tracing::info!("spinning down");
+            rpc_handle.await?;
+            protocol_handle.await?;
+            web_handle.await?;
+            tracing::info!("spinning down");
 
-                mesh_handle.abort();
-                mesh_handle.await?;
-                sync_handle.abort();
-                sync_handle.await?;
+            mesh_handle.abort();
+            mesh_handle.await?;
+            sync_handle.abort();
+            sync_handle.await?;
 
-                eth_indexer_handle.abort();
-                if let Some(indexer_handle) = indexer_handle {
-                    indexer_handle.join().unwrap()?;
-                }
-                system_handle.abort();
-
-                anyhow::Ok(())
-            })?;
+            eth_indexer_handle.abort();
+            if let Some(indexer_handle) = indexer_handle {
+                indexer_handle.join().unwrap()?;
+            }
+            system_handle.abort();
         }
     }
 
