@@ -20,7 +20,7 @@ rand.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 shell-escape = "0.1.5"
-testcontainers = { version = "0.23.1" }
+testcontainers = "0.23.1"
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -53,12 +53,19 @@ mpc-node.workspace = true
 mpc-primitives.workspace = true
 
 [dev-dependencies]
+criterion = "0.5.1"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [build-dependencies]
 anyhow.workspace = true
 async-process = "1"
 tokio.workspace = true
+
+
+[[bench]]
+name = "sign"
+path = "benches/sign.rs"
+harness = false
 
 [features]
 default = []

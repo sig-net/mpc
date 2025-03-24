@@ -55,6 +55,15 @@ Start OTLP backend of your choice ([Jaeger](https://www.jaegertracing.io/docs/ge
 ### Stackdriver
 This logging format is used exclusively in Google Cloud Platform (GCP). It integrates with Google Cloud's operations suite (formerly Stackdriver) to provide structured logging.
 
+## Benchmarking
+
+Benchmarks collect metrics from node and represent them in a readable format for CI to pick up.
+
+To run benchmarks, simply run the `bench.sh` script in the root:
+```sh
+./bench.sh
+```
+
 ## FAQ
 
 ### I want to run a test, but keep the docker containers from being destroyed
