@@ -146,7 +146,7 @@ fn get_resource(env: &str, node_id: &str) -> Resource {
         .clone()
 }
 
-fn init_otlp_logs(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkLoggerProvider {
+async fn init_otlp_logs(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkLoggerProvider {
     let exporter = LogExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary)
@@ -160,7 +160,7 @@ fn init_otlp_logs(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkLoggerPro
         .build()
 }
 
-fn init_otlp_traces(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkTracerProvider {
+async fn init_otlp_traces(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkTracerProvider {
     let exporter = SpanExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary) //can be changed to `Protocol::HttpJson` to export in JSON format
@@ -169,14 +169,14 @@ fn init_otlp_traces(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkTracerP
         .expect("Failed to create trace exporter");
 
     SdkTracerProvider::builder()
-        .with_simple_exporter(exporter)
+        .with_batch_exporter(exporter)
         .with_resource(get_resource(env, node_id))
         .build()
 }
 
 pub async fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Result<()> {
     // Setup logging
-    let log_otlp_provider = init_otlp_logs(env, node_id, options.otlp_endpoint.as_str());
+    let log_otlp_provider = init_otlp_logs(env, node_id, options.otlp_endpoint.as_str()).await;
     let log_otel_layer = OpenTelemetryTracingBridge::new(&log_otlp_provider);
 
     let log_otel_filter = EnvFilter::new(options.opentelemetry_level.to_string())
@@ -215,7 +215,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Resul
     }
 
     // Setup tracing
-    let tracer_provider = init_otlp_traces(env, node_id, options.otlp_endpoint.as_str());
+    let tracer_provider = init_otlp_traces(env, node_id, options.otlp_endpoint.as_str()).await;
     global::set_tracer_provider(tracer_provider.clone());
 
     tracing::info!(
@@ -225,38 +225,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Resul
         options
     );
 
-    // TODO: remove example logs
-    ////////////////////////////////////////////////////
-
-    let common_scope_attributes = vec![KeyValue::new("mpc-scope-key", "mpc-scope-value")];
-    let scope = opentelemetry::InstrumentationScope::builder("setup-func")
-        .with_version("1.0")
-        .with_attributes(common_scope_attributes)
-        .build();
-
-    let tracer = global::tracer_with_scope(scope.clone());
-
-    tracer.in_span("main mpc span", |cx| {
-        let span = cx.span();
-        span.add_event(
-            "some mpc event".to_string(),
-            vec![KeyValue::new("some_key", 100)],
-        );
-        span.set_attribute(KeyValue::new("another_key", "yes"));
-
-        tracing::info!(target: "my-target", "hello from {}. My price is {}. I am also inside a Span!", "banana", 2.99);
-
-        tracer.in_span("inner mpc span", |cx| {
-            let span = cx.span();
-            span.set_attribute(KeyValue::new("another.key", "yes"));
-            span.add_event("Sub span event", vec![]);
-        });
-    });
-
-    tracing::info!(target: "my-target", "hello from {}. My price is {}", "apple", 1.99);
-    ////////////////////////////////////////
-
     log_otlp_provider.shutdown()?;
-    tracer_provider.shutdown()?;
+    tracer_provider.shutdown()?; // TODO: 
     Ok(())
 }
