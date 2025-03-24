@@ -87,7 +87,7 @@ impl Node {
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
-            logging_options: ctx.logging_options.clone(),
+            log_options: ctx.log_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 cfg.protocol.clone(),
             )?)),
@@ -185,7 +185,7 @@ impl Node {
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
-            logging_options: ctx.logging_options.clone(),
+            log_options: ctx.log_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),
             )?)),

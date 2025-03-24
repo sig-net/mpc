@@ -259,7 +259,7 @@ pub struct Context {
     pub mpc_contract: Contract,
     pub redis: containers::Redis,
     pub storage_options: storage::Options,
-    pub logging_options: logs::Options,
+    pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
     pub message_options: node_client::Options,
 }
@@ -294,7 +294,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         redis_url: redis.internal_address.clone(),
     };
 
-    let logging_options = logs::Options::default();
+    let log_options = logs::Options::default();
 
     let mesh_options = mpc_node::mesh::Options {
         ping_interval: 1000,
@@ -315,7 +315,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         mpc_contract,
         redis,
         storage_options,
-        logging_options,
+        log_options,
         mesh_options,
         message_options,
     })

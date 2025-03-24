@@ -63,7 +63,7 @@ pub enum Cli {
         storage_options: storage::Options,
         /// Logging options
         #[clap(flatten)]
-        logging_options: logs::Options,
+        log_options: logs::Options,
         /// The set of configurations that we will use to override contract configurations.
         #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
         override_config: Option<OverrideConfig>,
@@ -92,7 +92,7 @@ impl Cli {
                 indexer_options,
                 my_address,
                 storage_options,
-                logging_options,
+                log_options,
                 override_config,
                 client_header_referer,
                 mesh_options,
@@ -135,7 +135,7 @@ impl Cli {
                 args.extend(eth.into_str_args());
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
-                args.extend(logging_options.into_str_args());
+                args.extend(log_options.into_str_args());
                 args.extend(mesh_options.into_str_args());
                 args.extend(message_options.into_str_args());
                 args
@@ -158,13 +158,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             indexer_options,
             my_address,
             storage_options,
-            logging_options,
+            log_options,
             override_config,
             client_header_referer,
             mesh_options,
             message_options,
         } => {
-            logs::setup(&storage_options.env, account_id.as_str(), &logging_options).await?;
+            let _guard = logs::setup(&storage_options.env, account_id.as_str(), &log_options).await;
 
             let _span = tracing::trace_span!("cli").entered();
 

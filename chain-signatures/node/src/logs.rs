@@ -1,7 +1,6 @@
 use std::fmt::{self, Display};
 use std::sync::OnceLock;
 
-use opentelemetry::trace::{TraceContextExt, Tracer};
 use opentelemetry::{global, KeyValue};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, Protocol, SpanExporter, WithExportConfig};
@@ -75,6 +74,22 @@ impl Display for OpenTelemetryLevel {
             OpenTelemetryLevel::TRACE => "trace",
         };
         write!(f, "{}", str)
+    }
+}
+
+pub struct OtelGuard {
+    tracer_provider: SdkTracerProvider,
+    logger_provider: SdkLoggerProvider,
+}
+
+impl Drop for OtelGuard {
+    fn drop(&mut self) {
+        if let Err(err) = self.tracer_provider.shutdown() {
+            eprintln!("{err:?}");
+        }
+        if let Err(err) = self.logger_provider.shutdown() {
+            eprintln!("{err:?}");
+        }
     }
 }
 
@@ -174,10 +189,9 @@ async fn init_otlp_traces(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkT
         .build()
 }
 
-pub async fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Result<()> {
-    // Setup logging
-    let log_otlp_provider = init_otlp_logs(env, node_id, options.otlp_endpoint.as_str()).await;
-    let log_otel_layer = OpenTelemetryTracingBridge::new(&log_otlp_provider);
+pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtelGuard {
+    let logger_provider = init_otlp_logs(env, node_id, options.otlp_endpoint.as_str()).await;
+    let log_otel_layer = OpenTelemetryTracingBridge::new(&logger_provider);
 
     let log_otel_filter = EnvFilter::new(options.opentelemetry_level.to_string())
         .add_directive("hyper=off".parse().unwrap())
@@ -225,7 +239,8 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> anyhow::Resul
         options
     );
 
-    log_otlp_provider.shutdown()?;
-    tracer_provider.shutdown()?; // TODO: 
-    Ok(())
+    OtelGuard {
+        tracer_provider,
+        logger_provider,
+    }
 }
