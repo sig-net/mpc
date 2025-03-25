@@ -373,7 +373,7 @@ pub struct EthClient {
 
 impl EthClient {
     pub fn new(eth: &EthConfig) -> Self {
-        let transport = web3::transports::Http::new(&eth.rpc_http_url).unwrap();
+        let transport = web3::transports::Http::new(&eth.execution_rpc_http_url).unwrap();
         let client = web3::Web3::new(transport);
         let address = web3::types::H160::from_str(&eth.contract_address).unwrap();
 

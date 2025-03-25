@@ -23,10 +23,10 @@ enum Cli {
         nodes: usize,
         #[arg(short, long, default_value_t = 2)]
         threshold: usize,
-        #[arg(long, default_value = "ws://localhost:8545")]
-        eth_rpc_ws_url: String,
         #[arg(long, default_value = "http://localhost:8545")]
-        eth_rpc_http_url: String,
+        eth_consensus_rpc_http_url: String,
+        #[arg(long, default_value = "http://localhost:8545")]
+        eth_execution_rpc_http_url: String,
         #[arg(long, default_value = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512")]
         eth_contract_address: String,
         #[arg(
@@ -52,8 +52,8 @@ async fn main() -> anyhow::Result<()> {
         Cli::SetupEnv {
             nodes,
             threshold,
-            eth_rpc_ws_url,
-            eth_rpc_http_url,
+            eth_consensus_rpc_http_url,
+            eth_execution_rpc_http_url,
             eth_contract_address,
             eth_account_sk,
         } => {
@@ -64,12 +64,12 @@ async fn main() -> anyhow::Result<()> {
             let config = NodeConfig {
                 nodes,
                 threshold,
-                eth: EthConfig {
+                eth: Some(EthConfig {
                     account_sk: eth_account_sk,
-                    rpc_ws_url: eth_rpc_ws_url,
-                    rpc_http_url: eth_rpc_http_url,
+                    consensus_rpc_http_url: eth_consensus_rpc_http_url,
+                    execution_rpc_http_url: eth_execution_rpc_http_url,
                     contract_address: eth_contract_address,
-                },
+                }),
                 ..Default::default()
             };
             println!("Full config: {:?}", config);

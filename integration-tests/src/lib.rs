@@ -34,7 +34,7 @@ pub struct NodeConfig {
     pub nodes: usize,
     pub threshold: usize,
     pub protocol: ProtocolConfig,
-    pub eth: EthConfig,
+    pub eth: Option<EthConfig>,
 }
 
 impl Default for NodeConfig {
@@ -57,13 +57,7 @@ impl Default for NodeConfig {
                 },
                 ..Default::default()
             },
-            eth: EthConfig {
-                rpc_http_url: "http://localhost:8545".to_string(),
-                rpc_ws_url: "ws://localhost:8545".to_string(),
-                contract_address: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512".to_string(),
-                account_sk: "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
-                    .to_string(),
-            },
+            eth: None,
         }
     }
 }

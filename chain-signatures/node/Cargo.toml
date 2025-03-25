@@ -29,7 +29,8 @@ sysinfo = "0.32.0"
 tokio-retry = "0.3"
 tracing-stackdriver = "0.10.0"
 alloy = "0.9.1"
-helios = "{ git = "https://github.com/ppca/helios", branch = "xiangyi/make_config_type_public" }"
+alloy-sol-types = "0.8.24"
+helios = { git = "https://github.com/a16z/helios", branch = "master" }
 eyre = "0.6.8"
 
 # workspace dependencies

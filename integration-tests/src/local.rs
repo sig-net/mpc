@@ -69,10 +69,16 @@ impl Node {
             behind_threshold: 120,
         };
         let eth = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: Some(cfg.eth.account_sk.clone()),
-            eth_rpc_ws_url: Some(cfg.eth.rpc_ws_url.clone()),
-            eth_rpc_http_url: Some(cfg.eth.rpc_http_url.clone()),
-            eth_contract_address: Some(cfg.eth.contract_address.clone()),
+            eth_account_sk: cfg.eth.clone().map(|eth| eth.account_sk.clone()),
+            eth_consensus_rpc_http_url: cfg
+                .eth
+                .clone()
+                .map(|eth| eth.consensus_rpc_http_url.clone()),
+            eth_execution_rpc_http_url: cfg
+                .eth
+                .clone()
+                .map(|eth| eth.execution_rpc_http_url.clone()),
+            eth_contract_address: cfg.eth.clone().map(|eth| eth.contract_address.clone()),
         };
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
@@ -175,10 +181,22 @@ impl Node {
         };
 
         let eth = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: Some(config.cfg.eth.account_sk.clone()),
-            eth_rpc_ws_url: Some(config.cfg.eth.rpc_ws_url.clone()),
-            eth_rpc_http_url: Some(config.cfg.eth.rpc_http_url.clone()),
-            eth_contract_address: Some(config.cfg.eth.contract_address.clone()),
+            eth_account_sk: config.cfg.eth.clone().map(|eth| eth.account_sk.clone()),
+            eth_consensus_rpc_http_url: config
+                .cfg
+                .eth
+                .clone()
+                .map(|eth| eth.consensus_rpc_http_url.clone()),
+            eth_execution_rpc_http_url: config
+                .cfg
+                .eth
+                .clone()
+                .map(|eth| eth.execution_rpc_http_url.clone()),
+            eth_contract_address: config
+                .cfg
+                .eth
+                .clone()
+                .map(|eth| eth.contract_address.clone()),
         };
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
