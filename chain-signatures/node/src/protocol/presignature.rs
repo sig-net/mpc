@@ -3,7 +3,7 @@ use super::state::RunningState;
 use super::triple::{Triple, TripleId, TripleManager};
 use crate::protocol::error::GenerationError;
 use crate::protocol::sync::{ProtocolResponse, SyncChannel};
-use crate::storage::presignature_storage::PresignatureStorage;
+use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 
@@ -89,35 +89,38 @@ impl<'de> Deserialize<'de> for Presignature {
 
 /// An ongoing presignature generator.
 pub struct PresignatureGenerator {
+    pub owner: Participant,
     pub participants: Vec<Participant>,
     pub protocol: PresignatureProtocol,
     pub triple0: TripleId,
     pub triple1: TripleId,
-    pub mine: bool,
     pub timestamp: Instant,
     pub timeout: Duration,
     /// latest poked time, total acrued wait time and total pokes per presignature protocol
     pub poked_latest: Option<(Instant, Duration, u64)>,
+    pub slot: PresignatureSlot,
 }
 
 impl PresignatureGenerator {
     pub fn new(
+        owner: Participant,
         protocol: PresignatureProtocol,
         participants: &[Participant],
         triple0: TripleId,
         triple1: TripleId,
-        mine: bool,
         timeout: u64,
+        slot: PresignatureSlot,
     ) -> Self {
         Self {
-            protocol,
+            owner,
             participants: participants.to_vec(),
+            protocol,
             triple0,
             triple1,
-            mine,
             timestamp: Instant::now(),
             timeout: Duration::from_millis(timeout),
             poked_latest: None,
+            slot,
         }
     }
 
@@ -125,10 +128,10 @@ impl PresignatureGenerator {
         if self.timestamp.elapsed() > self.timeout {
             let id = hash_as_id(self.triple0, self.triple1);
             tracing::warn!(
+                owner = ?self.owner,
                 presignature_id = id,
                 self.triple0,
                 self.triple1,
-                self.mine,
                 "presignature protocol timed out"
             );
             return Err(ProtocolError::Other(
@@ -179,20 +182,8 @@ impl PresignatureManager {
         }
     }
 
-    pub async fn insert(&mut self, presignature: Presignature, mine: bool, back: bool) {
-        let id = presignature.id;
-        tracing::debug!(id, mine, "inserting presignature");
-        if let Err(store_err) = self
-            .presignature_storage
-            .insert(presignature, mine, back)
-            .await
-        {
-            tracing::error!(?store_err, mine, "failed to insert presignature");
-        }
-    }
-
     /// Returns true if the presignature with the given id is already generated
-    pub async fn contains(&self, id: &PresignatureId) -> bool {
+    pub async fn contains(&self, id: PresignatureId) -> bool {
         self.presignature_storage
             .contains(id)
             .await
@@ -203,7 +194,7 @@ impl PresignatureManager {
     }
 
     /// Returns true if the mine presignature with the given id is already generated
-    pub async fn contains_mine(&self, id: &PresignatureId) -> bool {
+    pub async fn contains_mine(&self, id: PresignatureId) -> bool {
         self.presignature_storage
             .contains_mine(id)
             .await
@@ -213,7 +204,7 @@ impl PresignatureManager {
             .unwrap_or(false)
     }
 
-    pub async fn contains_used(&self, id: &PresignatureId) -> bool {
+    pub async fn contains_used(&self, id: PresignatureId) -> bool {
         self.presignature_storage
             .contains_used(id)
             .await
@@ -224,7 +215,7 @@ impl PresignatureManager {
     pub async fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
         let presignature = self
             .presignature_storage
-            .take(&id)
+            .take(id)
             .await
             .map_err(|store_err| {
                 if self.generators.contains_key(&id) {
@@ -290,6 +281,7 @@ impl PresignatureManager {
 
     #[allow(clippy::too_many_arguments)]
     fn generate_internal(
+        owner: Participant,
         participants: &[Participant],
         me: Participant,
         threshold: usize,
@@ -297,8 +289,8 @@ impl PresignatureManager {
         triple1: Triple,
         public_key: &PublicKey,
         private_share: &SecretKeyShare,
-        mine: bool,
         timeout: u64,
+        slot: PresignatureSlot,
     ) -> Result<PresignatureGenerator, InitializationError> {
         let protocol = Box::new(cait_sith::presign(
             participants,
@@ -318,12 +310,13 @@ impl PresignatureManager {
             },
         )?);
         Ok(PresignatureGenerator::new(
+            owner,
             protocol,
             participants,
             triple0.id,
             triple1.id,
-            mine,
             timeout,
+            slot,
         ))
     }
 
@@ -340,12 +333,12 @@ impl PresignatureManager {
         let id = hash_as_id(triple0.id, triple1.id);
 
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        if self.generators.contains_key(&id) || self.contains(&id).await {
+        let Some(slot) = self.reserve(id).await else {
             tracing::warn!(id, "presignature id collision");
             return Err(InitializationError::BadParameters(format!(
                 "id collision: presignature_id={id}"
             )));
-        }
+        };
 
         tracing::info!(
             id,
@@ -353,7 +346,9 @@ impl PresignatureManager {
             triple1 = triple1.id,
             "starting protocol to generate a new presignature"
         );
+        let owner = self.me;
         let generator = Self::generate_internal(
+            owner,
             participants,
             self.me,
             self.threshold,
@@ -361,8 +356,8 @@ impl PresignatureManager {
             triple1,
             public_key,
             private_share,
-            true,
             timeout,
+            slot,
         )?;
         self.generators.insert(id, generator);
         self.introduced.insert(id);
@@ -429,6 +424,7 @@ impl PresignatureManager {
     #[allow(clippy::too_many_arguments)]
     pub async fn get_or_start_generation(
         &mut self,
+        from: Participant,
         participants: &[Participant],
         id: PresignatureId,
         triple0: TripleId,
@@ -441,13 +437,17 @@ impl PresignatureManager {
         if id != hash_as_id(triple0, triple1) {
             tracing::error!(id, "presignature id does not match the expected hash");
             Err(GenerationError::PresignatureBadParameters)
-        } else if self.contains(&id).await {
+        } else if self.contains(id).await {
             tracing::debug!(id, "presignature already generated");
             Err(GenerationError::AlreadyGenerated)
         } else {
             match self.generators.entry(id) {
                 Entry::Vacant(entry) => {
                     tracing::info!(id, "joining protocol to generate a new presignature");
+                    let Some(slot) = self.presignature_storage.reserve(id, self.me).await else {
+                        return Err(GenerationError::PresignatureReserveError);
+                    };
+
                     let (triple0, triple1) = match triple_manager.take_two(triple0, triple1).await {
                         Ok(result) => result,
                         Err(error) => match error {
@@ -477,7 +477,14 @@ impl PresignatureManager {
                             }
                         },
                     };
+
+                    // Owner is the node that initiated the presignature generation.
+                    // TODO: we need to validate that is the case but right now, our node just assumes so. Should be
+                    // mitigated via the initing the protocol.
+                    let owner = from;
+
                     let generator = Self::generate_internal(
+                        owner,
                         participants,
                         self.me,
                         self.threshold,
@@ -485,8 +492,8 @@ impl PresignatureManager {
                         triple1,
                         public_key,
                         private_share,
-                        false,
                         cfg.presignature.generation_timeout,
+                        slot,
                     )?;
                     let generator = entry.insert(generator);
                     crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS
@@ -502,7 +509,6 @@ impl PresignatureManager {
     /// Poke all ongoing presignature generation protocols to completion.
     pub async fn poke(&mut self) {
         let mut errors = Vec::new();
-        let mut presignatures = Vec::new();
 
         let presignature_generator_failures_metric =
             crate::metrics::PRESIGNATURE_GENERATOR_FAILURES
@@ -542,7 +548,6 @@ impl PresignatureManager {
                 };
                 match action {
                     Action::Wait => {
-                        tracing::debug!("presignature: waiting");
                         // Retain protocol until we are finished
                         break;
                     }
@@ -632,19 +637,19 @@ impl PresignatureManager {
                             output,
                             participants: generator.participants.clone(),
                         };
-                        if generator.mine {
+                        if generator.owner == self.me {
                             tracing::info!(id, "assigning presignature to myself");
                             presignature_generator_success_mine_metric.inc();
                         }
-                        presignatures.push((presignature, generator.mine));
+                        generator.slot.insert(presignature, generator.owner).await;
                         self.introduced.remove(id);
+                        // Do not retain the protocol
+                        remove.push(*id);
 
                         presignature_latency_metric
                             .observe(generator.timestamp.elapsed().as_secs_f64());
                         presignature_generator_success_metric.inc();
                         self.msg.filter_presignature(*id).await;
-                        // Do not retain the protocol
-                        remove.push(*id);
                         if let Some((last_poked, total_wait, total_pokes)) = generator.poked_latest
                         {
                             let elapsed = generator_poke_time - last_poked;
@@ -666,13 +671,13 @@ impl PresignatureManager {
             self.generators.remove(&id);
         }
 
-        for (presignature, mine) in presignatures {
-            self.insert(presignature, mine, false).await;
-        }
-
         if !errors.is_empty() {
             tracing::warn!(?errors, "failed to generate some presignatures");
         }
+    }
+
+    pub async fn reserve(&self, id: PresignatureId) -> Option<PresignatureSlot> {
+        self.presignature_storage.reserve(id, self.me).await
     }
 
     pub fn execute(

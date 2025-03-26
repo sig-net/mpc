@@ -4,6 +4,7 @@ pub mod presignature_storage;
 pub mod secret_storage;
 pub mod triple_storage;
 
+use cait_sith::protocol::Participant;
 pub use presignature_storage::PresignatureStorage;
 pub use triple_storage::TripleStorage;
 
@@ -47,4 +48,8 @@ impl Options {
 
         opts
     }
+}
+
+fn owner_key(base: &str, owner: Participant) -> String {
+    format!("{base}:p{}", Into::<u32>::into(owner))
 }

@@ -8,6 +8,8 @@ use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
 use near_account_id::AccountId;
 
+use super::owner_key;
+
 // Can be used to "clear" redis storage in case of a breaking change
 const TRIPLE_STORAGE_VERSION: &str = "v7";
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
@@ -44,10 +46,6 @@ impl TripleSlot {
             tracing::warn!(id = self.id, ?err, "failed to unreserve triple");
         }
     }
-}
-
-fn owner_key(base: &str, owner: Participant) -> String {
-    format!("{base}:p{}", Into::<u32>::into(owner))
 }
 
 pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
@@ -192,11 +190,10 @@ impl TripleStorage {
             return outdated
         "#;
 
-        let owner_key = owner_key(&self.owner_keys, owner);
         let result: Result<Vec<TripleId>, _> = redis::Script::new(script)
             .key(&self.triple_key)
             .key(&self.reserved_key)
-            .key(&owner_key)
+            .key(owner_key(&self.owner_keys, owner))
             // NOTE: this encodes each entry of owner_shares as a separate ARGV[index] entry.
             .arg(owner_shares)
             .invoke_async(&mut conn)
@@ -263,14 +260,13 @@ impl TripleStorage {
             return "OK"
         "#;
 
-        let owner_key = owner_key(&self.owner_keys, owner);
         let _: String = redis::Script::new(script)
             .key(&self.mine_key)
             .key(&self.triple_key)
             .key(&self.used_key)
             .key(&self.reserved_key)
             .key(&self.owner_keys)
-            .key(&owner_key)
+            .key(owner_key(&self.owner_keys, owner))
             .arg(triple.id)
             .arg(triple)
             .arg(mine.to_string())
@@ -298,6 +294,7 @@ impl TripleStorage {
         Ok(result)
     }
 
+    // TODO: remove triple ids from owner set, or have eventual deletion thru sync.
     pub async fn take_two(&self, id1: TripleId, id2: TripleId) -> StoreResult<(Triple, Triple)> {
         let mut conn = self.connect().await?;
 

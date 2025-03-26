@@ -91,7 +91,12 @@ async fn test_protocol_sync_take() -> anyhow::Result<()> {
     for i in 0..10 {
         let p = dummy_presignature(i);
         presignature_set.insert(p.id);
-        presignatures.insert(p, true, false).await.unwrap();
+        presignatures
+            .reserve(i, me)
+            .await
+            .unwrap()
+            .insert(p, me)
+            .await;
     }
 
     // Give it some time for sync to process the inserts

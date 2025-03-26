@@ -23,6 +23,8 @@ pub enum GenerationError {
     PresignatureDenied(PresignatureId, &'static str),
     #[error("presignature bad parameters")]
     PresignatureBadParameters,
+    #[error("unable to reserve a slot for presignature")]
+    PresignatureReserveError,
     #[error("waiting for missing sign request id={0:?}")]
     WaitingForIndexer(SignId),
     #[error("invalid proposer expected={0:?}, actual={1:?}")]

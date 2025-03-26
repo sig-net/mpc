@@ -5,7 +5,7 @@ use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
 use k256::Secp256k1;
-use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
+use mpc_node::protocol::presignature::{Presignature, PresignatureManager};
 use mpc_node::protocol::sync::SyncChannel;
 use mpc_node::protocol::triple::{Triple, TripleManager};
 use mpc_node::protocol::MessageChannel;
@@ -21,10 +21,10 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let node0 = Participant::from(0);
     let node1 = Participant::from(1);
     let (_, _, msg) = MessageChannel::new();
-    let node_id = "test.near".parse().unwrap();
+    let node0_id = "party0.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
-    let triple_storage = redis.triple_storage(&node_id);
-    let triple_manager = TripleManager::new(node0, 5, 123, &node_id, &triple_storage, msg);
+    let triple_storage = redis.triple_storage(&node0_id);
+    let triple_manager = TripleManager::new(node0, 5, 123, &node0_id, &triple_storage, msg);
 
     let triple_id_1: u64 = 1;
     let triple_1 = dummy_triple(triple_id_1);
@@ -153,94 +153,114 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         .init_network()
         .await?;
 
-    let node_id = "test.near".parse().unwrap();
-    let redis = containers::Redis::run(&spawner).await;
-    let presignature_storage = redis.presignature_storage(&node_id);
+    let node0 = Participant::from(0);
+    let node1 = Participant::from(1);
     let (_, _, msg) = MessageChannel::new();
     let (_, sync) = SyncChannel::new();
+    let node0_id = "party0.near".parse().unwrap();
+    let redis = containers::Redis::run(&spawner).await;
+    let presignature_storage = redis.presignature_storage(&node0_id);
     let mut presignature_manager = PresignatureManager::new(
         Participant::from(0),
         5,
         123,
-        &node_id,
+        &node0_id,
         &presignature_storage,
         msg,
         sync,
     );
 
-    let presignature = dummy_presignature(1);
-    let presignature_id: PresignatureId = presignature.id;
+    let id = 1;
+    let presignature = dummy_presignature(id);
 
     // Check that the storage is empty at the start
-    assert!(!presignature_manager.contains(&presignature_id).await);
-    assert!(!presignature_manager.contains_mine(&presignature_id).await);
+    assert!(!presignature_manager.contains(id).await);
+    assert!(!presignature_manager.contains_mine(id).await);
     assert_eq!(presignature_manager.len_generated().await, 0);
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert!(presignature_manager.is_empty().await);
     assert_eq!(presignature_manager.len_potential().await, 0);
 
-    presignature_manager
-        .insert(presignature, false, false)
-        .await;
+    // Insert presignature owned by node1, with our node0 view being that it is a foreign presignature
+    assert!(
+        presignature_manager
+            .reserve(presignature.id)
+            .await
+            .unwrap()
+            .insert(presignature, node1)
+            .await
+    );
 
     // Check that the storage contains the foreign presignature
-    assert!(presignature_manager.contains(&presignature_id).await);
-    assert!(!presignature_manager.contains_mine(&presignature_id).await);
+    assert!(presignature_manager.contains(id).await);
+    assert!(!presignature_manager.contains_mine(id).await);
     assert_eq!(presignature_manager.len_generated().await, 1);
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert_eq!(presignature_manager.len_potential().await, 1);
 
     // Take presignature and check that it is removed from the storage and added to used set
-    presignature_manager.take(presignature_id).await.unwrap();
-    assert!(!presignature_manager.contains(&presignature_id).await);
-    assert!(!presignature_manager.contains_mine(&presignature_id).await);
+    presignature_manager.take(id).await.unwrap();
+    assert!(!presignature_manager.contains(id).await);
+    assert!(!presignature_manager.contains_mine(id).await);
     assert_eq!(presignature_manager.len_generated().await, 0);
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert_eq!(presignature_manager.len_potential().await, 0);
-    assert!(presignature_storage
-        .contains_used(&presignature_id)
-        .await
-        .unwrap());
+    assert!(presignature_storage.contains_used(id).await.unwrap());
 
     // Attempt to re-insert used presignature and check that it fails
-    let presignature = dummy_presignature(presignature_id);
-    presignature_manager
-        .insert(presignature, false, false)
-        .await;
-    assert!(!presignature_manager.contains(&presignature_id).await);
+    assert!(presignature_manager.reserve(id).await.is_none());
+    assert!(!presignature_manager.contains(id).await);
 
-    let mine_presignature = dummy_presignature(2);
-    let mine_presig_id: PresignatureId = mine_presignature.id;
+    let id2 = 2;
+    let mine_presignature = dummy_presignature(id2);
 
-    // Add mine presignature and check that it is in the storage
-    presignature_manager
-        .insert(mine_presignature, true, false)
-        .await;
-    assert!(presignature_manager.contains(&mine_presig_id).await);
-    assert!(presignature_manager.contains_mine(&mine_presig_id).await);
+    // Add a presignature to our own node0
+    assert!(
+        presignature_manager
+            .reserve(id2)
+            .await
+            .unwrap()
+            .insert(mine_presignature, node0)
+            .await
+    );
+
+    assert!(presignature_manager.contains(id2).await);
+    assert!(presignature_manager.contains_mine(id2).await);
     assert_eq!(presignature_manager.len_generated().await, 1);
     assert_eq!(presignature_manager.len_mine().await, 1);
     assert_eq!(presignature_manager.len_potential().await, 1);
 
     // Take mine presignature and check that it is removed from the storage and added to used set
     presignature_manager.take_mine().await.unwrap();
-    assert!(!presignature_manager.contains(&mine_presig_id).await);
-    assert!(!presignature_manager.contains_mine(&mine_presig_id).await);
+    assert!(!presignature_manager.contains(id2).await);
+    assert!(!presignature_manager.contains_mine(id2).await);
     assert_eq!(presignature_manager.len_generated().await, 0);
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert!(presignature_manager.is_empty().await);
     assert_eq!(presignature_manager.len_potential().await, 0);
-    assert!(presignature_storage
-        .contains_used(&mine_presig_id)
-        .await
-        .unwrap());
+    assert!(presignature_storage.contains_used(id2).await.unwrap());
 
     // Attempt to re-insert used mine presignature and check that it fails
-    let mine_presignature = dummy_presignature(mine_presig_id);
-    presignature_manager
-        .insert(mine_presignature, true, false)
+    assert!(presignature_manager.reserve(id2).await.is_none());
+    assert!(!presignature_manager.contains(id2).await);
+
+    presignature_storage.clear().await.unwrap();
+    // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
+    for id in 10..=15 {
+        presignature_manager
+            .reserve(id)
+            .await
+            .unwrap()
+            .insert(dummy_presignature(id), node1)
+            .await;
+    }
+
+    // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
+    let mut outdated = presignature_storage
+        .remove_outdated(node1, &[13, 14, 15])
         .await;
-    assert!(!presignature_manager.contains(&mine_presig_id).await);
+    outdated.sort();
+    assert_eq!(outdated, vec![10, 11, 12]);
 
     Ok(())
 }
