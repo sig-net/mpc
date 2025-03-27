@@ -254,7 +254,7 @@ impl PresignatureStorage {
 
             -- if the presignature has NOT been reserved, then something went wrong when acquiring the
             -- reservation for it via presignature slot.
-            if redis.call("SISMEMBER", reserved_key, presig_id) == 0 then
+            if redis.call("SREM", reserved_key, presig_id) == 0 then
                 return {err = "WARN presignature " .. presig_id .. " has NOT been reserved"}
             end
 
@@ -345,7 +345,7 @@ impl PresignatureStorage {
         result.map_err(StoreError::from)
     }
 
-    pub async fn take_mine(&self) -> StoreResult<Option<Presignature>> {
+    pub async fn take_mine(&self, me: Participant) -> StoreResult<Option<Presignature>> {
         let mut conn = self.connect().await?;
 
         let script = r#"
@@ -374,6 +374,7 @@ impl PresignatureStorage {
             .key(&self.mine_key)
             .key(&self.presig_key)
             .key(&self.used_key)
+            .key(&owner_key(&self.owner_keys, me))
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await

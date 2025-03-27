@@ -234,7 +234,7 @@ impl PresignatureManager {
     pub async fn take_mine(&mut self) -> Option<Presignature> {
         let presignature = self
             .presignature_storage
-            .take_mine()
+            .take_mine(self.me)
             .await
             .map_err(|store_error| {
                 tracing::error!(?store_error, "failed to look for mine presignature");

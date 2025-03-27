@@ -647,7 +647,7 @@ impl TripleManager {
     pub async fn take_two_mine(&self) -> Option<(Triple, Triple)> {
         let (triple_0, triple_1) = self
             .triple_storage
-            .take_two_mine()
+            .take_two_mine(self.me)
             .await
             .map_err(|store_error| {
                 tracing::warn!(?store_error, "failed to take two mine triples");

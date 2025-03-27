@@ -241,7 +241,7 @@ impl TripleStorage {
 
             -- if the triple has not been reserved, then something went wrong when acquiring the
             -- reservation for it via triple slot.
-            if redis.call("SISMEMBER", reserved_key, triple_id) == 0 then
+            if redis.call("SREM", reserved_key, triple_id) == 0 then
                 return {err = "WARN triple " .. triple_id .. " has NOT been reserved"}
             end
 
@@ -346,7 +346,7 @@ impl TripleStorage {
         result.map_err(StoreError::from)
     }
 
-    pub async fn take_two_mine(&self) -> StoreResult<Option<(Triple, Triple)>> {
+    pub async fn take_two_mine(&self, me: Participant) -> StoreResult<Option<(Triple, Triple)>> {
         let mut conn = self.connect().await?;
 
         let lua_script = r#"
@@ -374,6 +374,8 @@ impl TripleStorage {
 
             -- Delete the triples from the hash map
             redis.call("HDEL", KEYS[2], id1, id2)
+            -- delete the triples from our self owner set
+            redis.call("SREM", KEYS[4], id1, id2)
 
             -- Add the triples to the used set and set expiration time. Note, HSET is used so
             -- we can expire on each field instead of the whole hash set.
@@ -388,6 +390,7 @@ impl TripleStorage {
             .key(&self.mine_key)
             .key(&self.triple_key)
             .key(&self.used_key)
+            .key(&owner_key(&self.owner_keys, me))
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await
