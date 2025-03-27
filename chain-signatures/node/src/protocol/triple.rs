@@ -287,7 +287,7 @@ impl TripleGenerator {
                         triple_owner == me
                     };
 
-                    tracing::error!(
+                    tracing::info!(
                         id = self.id,
                         ?me,
                         triple_is_mine,
@@ -312,10 +312,6 @@ impl TripleGenerator {
                             let total_pokes = total_pokes + 1;
                             triple_accrued_wait_delay_metric.observe(total_wait.as_millis() as f64);
                             triple_pokes_cnt_metric.observe(total_pokes as f64);
-                            tracing::error!(
-                                "triple total pokes is {total_pokes}, total wait is {:?}",
-                                total_wait
-                            );
                         }
                     }
                     triple_poke_cpu_time_metric
