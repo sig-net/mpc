@@ -46,7 +46,7 @@ pub struct TripleGenerator {
     pub protocol: Arc<TripleProtocol>,
     pub timestamp: Arc<RwLock<Option<Instant>>>,
     pub timeout: Duration,
-    poked_latest: Option<(Instant, Duration, u64)>,
+    poked_latest: Arc<RwLock<Option<(Instant, Duration, u64)>>>,
     generator_created: Instant,
 }
 
@@ -74,7 +74,7 @@ impl TripleGenerator {
             protocol,
             timestamp: Arc::new(RwLock::new(None)),
             timeout: Duration::from_millis(timeout),
-            poked_latest: None,
+            poked_latest: Arc::new(RwLock::new(None)),
             generator_created: Instant::now(),
         })
     }
@@ -197,19 +197,22 @@ impl TripleGenerator {
                         )
                         .await;
                     }
-                    let (total_wait, total_pokes) =
-                        if let Some((last_poked, total_wait, total_pokes)) = self.poked_latest {
-                            (
-                                total_wait + (generator_poke_time - last_poked),
-                                total_pokes + 1,
-                            )
-                        } else {
-                            let start_time = self.generator_created;
-                            triple_before_poke_delay_metric
-                                .observe((generator_poke_time - start_time).as_millis() as f64);
-                            (Duration::from_millis(0), 1)
-                        };
-                    self.poked_latest = Some((Instant::now(), total_wait, total_pokes));
+                    {
+                        let mut poked_latest = self.poked_latest.write().await;
+                        let (total_wait, total_pokes) =
+                            if let Some((last_poked, total_wait, total_pokes)) = *poked_latest {
+                                (
+                                    total_wait + (generator_poke_time - last_poked),
+                                    total_pokes + 1,
+                                )
+                            } else {
+                                let start_time = self.generator_created;
+                                triple_before_poke_delay_metric
+                                    .observe((generator_poke_time - start_time).as_millis() as f64);
+                                (Duration::from_millis(0), 1)
+                            };
+                        *poked_latest = Some((Instant::now(), total_wait, total_pokes));
+                    }
                     triple_poke_cpu_time_metric
                         .observe(generator_poke_time.elapsed().as_millis() as f64);
                 }
@@ -226,19 +229,22 @@ impl TripleGenerator {
                         },
                     )
                     .await;
-                    let (total_wait, total_pokes) =
-                        if let Some((last_poked, total_wait, total_pokes)) = self.poked_latest {
-                            (
-                                total_wait + (generator_poke_time - last_poked),
-                                total_pokes + 1,
-                            )
-                        } else {
-                            let start_time = self.generator_created;
-                            triple_before_poke_delay_metric
-                                .observe((generator_poke_time - start_time).as_millis() as f64);
-                            (Duration::from_millis(0), 1)
-                        };
-                    self.poked_latest = Some((Instant::now(), total_wait, total_pokes));
+                    {
+                        let mut poked_latest = self.poked_latest.write().await;
+                        let (total_wait, total_pokes) =
+                            if let Some((last_poked, total_wait, total_pokes)) = *poked_latest {
+                                (
+                                    total_wait + (generator_poke_time - last_poked),
+                                    total_pokes + 1,
+                                )
+                            } else {
+                                let start_time = self.generator_created;
+                                triple_before_poke_delay_metric
+                                    .observe((generator_poke_time - start_time).as_millis() as f64);
+                                (Duration::from_millis(0), 1)
+                            };
+                        *poked_latest = Some((Instant::now(), total_wait, total_pokes));
+                    }
                     triple_poke_cpu_time_metric
                         .observe(generator_poke_time.elapsed().as_millis() as f64);
                 }
@@ -248,15 +254,6 @@ impl TripleGenerator {
                         let timestamp = self.timestamp.read().await;
                         timestamp.map(|t| now - t).unwrap_or_default()
                     };
-                    tracing::info!(
-                        id = self.id,
-                        ?me,
-                        big_a = ?output.1.big_a.to_base58(),
-                        big_b = ?output.1.big_b.to_base58(),
-                        big_c = ?output.1.big_c.to_base58(),
-                        ?elapsed,
-                        "completed triple generation"
-                    );
 
                     triple_latency_metric.observe(elapsed.as_secs_f64());
 
@@ -290,7 +287,7 @@ impl TripleGenerator {
                         triple_owner == me
                     };
 
-                    tracing::info!(
+                    tracing::error!(
                         id = self.id,
                         ?me,
                         triple_is_mine,
@@ -307,12 +304,19 @@ impl TripleGenerator {
                     }
 
                     msg.filter_triple(self.id).await;
-                    if let Some((last_poked, total_wait, total_pokes)) = self.poked_latest {
-                        let elapsed = generator_poke_time - last_poked;
-                        let total_wait = total_wait + elapsed;
-                        let total_pokes = total_pokes + 1;
-                        triple_accrued_wait_delay_metric.observe(total_wait.as_millis() as f64);
-                        triple_pokes_cnt_metric.observe(total_pokes as f64);
+                    {
+                        let poked_latest = self.poked_latest.read().await;
+                        if let Some((last_poked, total_wait, total_pokes)) = *poked_latest {
+                            let elapsed = generator_poke_time - last_poked;
+                            let total_wait = total_wait + elapsed;
+                            let total_pokes = total_pokes + 1;
+                            triple_accrued_wait_delay_metric.observe(total_wait.as_millis() as f64);
+                            triple_pokes_cnt_metric.observe(total_pokes as f64);
+                            tracing::error!(
+                                "triple total pokes is {total_pokes}, total wait is {:?}",
+                                total_wait
+                            );
+                        }
                     }
                     triple_poke_cpu_time_metric
                         .observe(generator_poke_time.elapsed().as_millis() as f64);
