@@ -730,11 +730,7 @@ impl TripleManager {
 
     /// Stockpile triples if the amount of unspent triples is below the minimum
     /// and the maximum number of all ongoing generation protocols is below the maximum.
-    pub async fn stockpile(
-        &self,
-        participants: &[Participant],
-        cfg: &ProtocolConfig,
-    ) -> Result<(), InitializationError> {
+    pub async fn stockpile(&self, participants: &[Participant], cfg: &ProtocolConfig) {
         let not_enough_triples = {
             // Stopgap to prevent too many triples in the system. This should be around min_triple*nodes*2
             // for good measure so that we have enough triples to do presig generation while also maintain
@@ -751,11 +747,13 @@ impl TripleManager {
         };
 
         if not_enough_triples {
-            tracing::debug!("not enough triples, generating");
-            self.generate(participants, cfg.triple.generation_timeout)
-                .await?;
+            if let Err(err) = self
+                .generate(participants, cfg.triple.generation_timeout)
+                .await
+            {
+                tracing::warn!(?err, "failed to stockpile triple");
+            }
         }
-        Ok(())
     }
 
     /// Ensures that the triple with the given id is either:
@@ -806,9 +804,7 @@ impl TripleManager {
         let protocol_cfg = protocol_cfg.clone();
 
         tokio::task::spawn(async move {
-            if let Err(err) = self.stockpile(&active, &protocol_cfg).await {
-                tracing::warn!(?err, "running: failed to stockpile triples");
-            }
+            self.stockpile(&active, &protocol_cfg).await;
             self.poke(&protocol_cfg).await;
 
             crate::metrics::NUM_TRIPLES_MINE

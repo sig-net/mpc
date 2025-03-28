@@ -6,7 +6,6 @@ use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
 use k256::Secp256k1;
 use mpc_node::protocol::presignature::{Presignature, PresignatureManager};
-use mpc_node::protocol::sync::SyncChannel;
 use mpc_node::protocol::triple::{Triple, TripleManager};
 use mpc_node::protocol::MessageChannel;
 use test_log::test;
@@ -156,18 +155,18 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let node0 = Participant::from(0);
     let node1 = Participant::from(1);
     let (_, _, msg) = MessageChannel::new();
-    let (_, sync) = SyncChannel::new();
     let node0_id = "party0.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
+    let triple_storage = redis.triple_storage(&node0_id);
     let presignature_storage = redis.presignature_storage(&node0_id);
     let mut presignature_manager = PresignatureManager::new(
         Participant::from(0),
         5,
         123,
         &node0_id,
+        &triple_storage,
         &presignature_storage,
         msg,
-        sync,
     );
 
     let id = 1;

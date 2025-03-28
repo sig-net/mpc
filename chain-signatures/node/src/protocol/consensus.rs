@@ -133,9 +133,9 @@ impl ConsensusProtocol for StartedState {
                                             contract_state.threshold,
                                             epoch,
                                             ctx.my_account_id(),
+                                            ctx.triple_storage(),
                                             ctx.presignature_storage(),
                                             ctx.msg_channel().clone(),
-                                            ctx.sync_channel().clone(),
                                         )));
 
                                     let signature_manager =
@@ -146,8 +146,8 @@ impl ConsensusProtocol for StartedState {
                                             public_key,
                                             epoch,
                                             ctx.sign_rx(),
+                                            ctx.presignature_storage(),
                                             ctx.msg_channel().clone(),
-                                            ctx.sync_channel().clone(),
                                         )));
 
                                     Ok(NodeState::Running(RunningState {
@@ -359,9 +359,9 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.threshold,
                         self.epoch,
                         ctx.my_account_id(),
+                        ctx.triple_storage(),
                         ctx.presignature_storage(),
                         ctx.msg_channel().clone(),
-                        ctx.sync_channel().clone(),
                     )));
 
                     let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
@@ -371,8 +371,8 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.public_key,
                         self.epoch,
                         ctx.sign_rx(),
+                        ctx.presignature_storage(),
                         ctx.msg_channel().clone(),
-                        ctx.sync_channel().clone(),
                     )));
 
                     Ok(NodeState::Running(RunningState {
