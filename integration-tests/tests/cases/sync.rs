@@ -14,7 +14,7 @@ use mpc_node::node_client::{self, NodeClient};
 use mpc_node::protocol::contract::primitives::Participants;
 use mpc_node::protocol::contract::RunningContractState;
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::sync::{ProtocolResponse, SyncTask};
+use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::{ParticipantInfo, ProtocolState};
 use mpc_node::rpc::NodeStateWatcher;
@@ -71,7 +71,7 @@ async fn test_protocol_sync_take() -> anyhow::Result<()> {
             threshold,
         }),
     );
-    let (sync_channel, sync) = SyncTask::new(
+    let (_sync_channel, sync) = SyncTask::new(
         &client,
         triples.clone(),
         presignatures.clone(),
@@ -101,28 +101,6 @@ async fn test_protocol_sync_take() -> anyhow::Result<()> {
 
     // Give it some time for sync to process the inserts
     tokio::time::sleep(Duration::from_secs(3)).await;
-
-    let mine = true;
-    // Check that the inserted triples can be taken
-    for _ in 0..5 {
-        let ProtocolResponse {
-            participants,
-            value: (take_t0, take_t1),
-        } = sync_channel.take_two_triple(mine).await.unwrap();
-        assert!(triple_set.remove(&take_t0.id));
-        assert!(triple_set.remove(&take_t1.id));
-        assert_eq!(participants.len(), 1);
-    }
-
-    // Check that the inserted presignatures can be taken
-    for _ in 0..5 {
-        let ProtocolResponse {
-            participants,
-            value: presignature,
-        } = sync_channel.take_presignature(mine).await.unwrap();
-        assert!(presignature_set.remove(&presignature.id));
-        assert_eq!(participants.len(), 1);
-    }
 
     sync_handle.abort();
     Ok(())

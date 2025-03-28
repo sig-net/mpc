@@ -487,7 +487,7 @@ impl MessageReceiver for RunningState {
                 Err(err) => {
                     // ignore the message since the generation had bad parameters. Also have the other node who
                     // initiated the protocol resend the message or have it timeout on their side.
-                    tracing::warn!(?err, "unable to initialize incoming triple protocol");
+                    tracing::warn!(id, ?err, "unable to initialize incoming triple protocol");
                     continue;
                 }
             };

@@ -408,7 +408,7 @@ impl PresignatureManager {
             let t0_id = triple0.id;
             let t1_id = triple1.id;
             let participants = intersect_vec(&[
-                &active,
+                active,
                 &triple0.public.participants,
                 &triple1.public.participants,
             ]);

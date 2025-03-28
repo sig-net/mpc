@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -40,12 +39,6 @@ impl SyncUpdate {
     pub fn is_empty(&self) -> bool {
         self.triples.is_empty() && self.presignatures.is_empty()
     }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SyncView {
-    triples: HashSet<TripleId>,
-    presignatures: HashSet<PresignatureId>,
 }
 
 pub struct SyncRequestReceiver {
@@ -147,8 +140,8 @@ impl SyncTask {
 
     // TODO: use reserved values instead. Note that we cannot fetch our own triples via reserved
     async fn new_update(&self, me: Participant) -> SyncUpdate {
-        let triples = self.triples.fetch_mine().await.unwrap_or_default();
-        let presignatures = self.presignatures.fetch_mine().await.unwrap_or_default();
+        let triples = self.triples.fetch_owned(me).await;
+        let presignatures = self.presignatures.fetch_owned(me).await;
 
         SyncUpdate {
             from: me,

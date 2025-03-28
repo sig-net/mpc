@@ -27,9 +27,10 @@ impl TripleSlot {
     pub async fn insert(&self, triple: Triple, owner: Participant) -> bool {
         if let Err(err) = self.storage.insert(triple, owner, owner == self.me).await {
             tracing::warn!(id = self.id, ?err, "failed to insert triple");
-            return false;
+            false
+        } else {
+            true
         }
-        return true;
     }
 
     // TODO: put inside a tokio task:
@@ -213,16 +214,22 @@ impl TripleStorage {
         }
     }
 
-    pub async fn fetch_mine(&self) -> StoreResult<Vec<TripleId>> {
-        let mut conn = self.connect().await?;
-        let result: Vec<TripleId> = conn.smembers(&self.mine_key).await?;
-        Ok(result)
-    }
+    // TODO: me can potentially be integrated into storage if we eventually can wait for our own participant info to be determined.
+    pub async fn fetch_owned(&self, me: Participant) -> Vec<TripleId> {
+        let mut conn = match self.connect().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!(?err, "failed to connect to redis");
+                return Vec::new();
+            }
+        };
 
-    pub async fn fetch_foreign_ids(&self) -> StoreResult<Vec<TripleId>> {
-        let mut conn = self.connect().await?;
-        let result: Vec<TripleId> = conn.hkeys(&self.triple_key).await?;
-        Ok(result)
+        conn.sunion((&self.reserved_key, owner_key(&self.owner_keys, me)))
+            .await
+            .inspect_err(|err| {
+                tracing::warn!(?err, "failed to fetch (mine | reserved) triples");
+            })
+            .unwrap_or_default()
     }
 
     async fn insert(&self, triple: Triple, owner: Participant, mine: bool) -> StoreResult<()> {
@@ -294,7 +301,8 @@ impl TripleStorage {
         Ok(result)
     }
 
-    // TODO: remove triple ids from owner set, or have eventual deletion thru sync.
+    // TODO: need to pass in owner to delete the triple from the owner set, but we can have sync just do this
+    //       for now for us.
     pub async fn take_two(&self, id1: TripleId, id2: TripleId) -> StoreResult<(Triple, Triple)> {
         let mut conn = self.connect().await?;
 
@@ -390,55 +398,7 @@ impl TripleStorage {
             .key(&self.mine_key)
             .key(&self.triple_key)
             .key(&self.used_key)
-            .key(&owner_key(&self.owner_keys, me))
-            .arg(USED_EXPIRE_TIME.num_seconds())
-            .invoke_async(&mut conn)
-            .await
-            .map_err(StoreError::from)
-    }
-
-    pub async fn take_two_self(&self, t0: TripleId, t1: TripleId) -> StoreResult<(Triple, Triple)> {
-        let mut conn = self.connect().await?;
-
-        let lua_script = r#"
-            local t0 = ARGV[1]
-            local t1 = ARGV[2]
-            -- remove the triples from mine set
-            if not redis.call("SREM", KEYS[1], t0) then
-                return {err = "WARN unable to remove mine triple " .. t0}
-            end
-            if not redis.call("SREM", KEYS[1], t1) then
-                return {err = "WARN unable to remove mine triple " .. t1}
-            end
-
-            -- retrieve the corresponding triples
-            local v1 = redis.call("HGET", KEYS[2], t0)
-            if not v1 then
-                return {err = "WARN unexpected, mine triple " .. t0 .. " is missing"}
-            end
-
-            local v2 = redis.call("HGET", KEYS[2], t1)
-            if not v2 then
-                return {err = "WARN unexpected, mine triple " .. t1 .. " is missing"}
-            end
-
-            -- delete the triples from the hash map
-            redis.call("HDEL", KEYS[2], t0, t1)
-
-            -- add the triples to the used set and set expiration time. Note, HSET is used so
-            -- we can expire on each field instead of the whole hash set.
-            redis.call("HSET", KEYS[3], t0, "1", t1, "1")
-            redis.call("HEXPIRE", KEYS[3], ARGV[3], "FIELDS", 2, t0, t1)
-
-            return {v1, v2}
-        "#;
-
-        redis::Script::new(lua_script)
-            .key(&self.mine_key)
-            .key(&self.triple_key)
-            .key(&self.used_key)
-            .arg(t0)
-            .arg(t1)
+            .key(owner_key(&self.owner_keys, me))
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await

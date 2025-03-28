@@ -30,9 +30,10 @@ impl PresignatureSlot {
             .await
         {
             tracing::warn!(id = self.id, ?err, "failed to insert presignature");
-            return false;
+            false
+        } else {
+            true
         }
-        return true;
     }
 
     // TODO: put inside a tokio task:
@@ -102,16 +103,21 @@ impl PresignatureStorage {
             .map_err(StoreError::Connect)
     }
 
-    pub async fn fetch_mine(&self) -> StoreResult<Vec<PresignatureId>> {
-        let mut conn = self.connect().await?;
-        let result: Vec<PresignatureId> = conn.smembers(&self.mine_key).await?;
-        Ok(result)
-    }
+    pub async fn fetch_owned(&self, me: Participant) -> Vec<PresignatureId> {
+        let mut conn = match self.connect().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!(?err, "failed to connect to redis");
+                return Vec::new();
+            }
+        };
 
-    pub async fn fetch_foreign_ids(&self) -> StoreResult<Vec<PresignatureId>> {
-        let mut conn = self.connect().await?;
-        let result: Vec<PresignatureId> = conn.hkeys(&self.presig_key).await?;
-        Ok(result)
+        conn.sunion((&self.reserved_key, owner_key(&self.owner_keys, me)))
+            .await
+            .inspect_err(|err| {
+                tracing::warn!(?err, "failed to fetch (mine | reserved) presignatures");
+            })
+            .unwrap_or_default()
     }
 
     pub async fn reserve(&self, id: PresignatureId, me: Participant) -> Option<PresignatureSlot> {
@@ -307,6 +313,8 @@ impl PresignatureStorage {
         Ok(result)
     }
 
+    // TODO: need to pass in owner to delete the triple from the owner set, but we can have sync just do this
+    //       for now for us.
     pub async fn take(&self, id: PresignatureId) -> StoreResult<Presignature> {
         let mut conn = self.connect().await?;
 
@@ -374,44 +382,7 @@ impl PresignatureStorage {
             .key(&self.mine_key)
             .key(&self.presig_key)
             .key(&self.used_key)
-            .key(&owner_key(&self.owner_keys, me))
-            .arg(USED_EXPIRE_TIME.num_seconds())
-            .invoke_async(&mut conn)
-            .await
-            .map_err(StoreError::from)
-    }
-
-    pub async fn take_self(&self, id: PresignatureId) -> StoreResult<Presignature> {
-        let mut conn = self.connect().await?;
-
-        let script = r#"
-            local mine_key = KEYS[1]
-            local presig_key = KEYS[2]
-            local used_key = KEYS[3]
-
-            local presig_id = ARGV[1]
-            -- remove the presignature from mine set
-            if not redis.call("SREM", mine_key, presig_id) then
-                return {err = "warn: unable to remove mine presignature " .. presig_id}
-            end
-
-            local presignature = redis.call("HGET", presig_key, presig_id)
-            if not presignature then
-                return {err = "warn: unexpected, presignature " .. presig_id .. " is missing"}
-            end
-
-            redis.call("HDEL", presig_key, presig_id)
-            redis.call("HSET", used_key, presig_id, "1")
-            redis.call("HEXPIRE", used_key, ARGV[2], "FIELDS", "1", presig_id)
-
-            return presignature
-        "#;
-
-        redis::Script::new(script)
-            .key(&self.mine_key)
-            .key(&self.presig_key)
-            .key(&self.used_key)
-            .arg(id)
+            .key(owner_key(&self.owner_keys, me))
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await

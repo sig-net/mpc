@@ -87,7 +87,7 @@ fn env() -> (Runtime, SyncEnv) {
         let triples = redis.triple_storage(&node_id);
         let presignatures = redis.presignature_storage(&node_id);
         {
-            let participants = participants.clone().into();
+            let participants = into_contract_participants(&participants);
             redis
                 .stockpile_triples(&spawner.cfg, &participants, 1)
                 .await;
@@ -179,27 +179,12 @@ fn bench_load_keys(c: &mut Criterion) {
     c.bench_function("load 1024 mine triple keys", |b| {
         b.iter(|| {
             let task = || async {
-                env.triples.fetch_mine().await.unwrap();
+                env.triples.fetch_owned(env.me).await;
             };
 
             rt.block_on(task());
         })
     });
-    c.bench_function(
-        &format!(
-            "load (1024 x {}) foreign triple keys",
-            env.participants.len() - 1
-        ),
-        |b| {
-            b.iter(|| {
-                let task = || async {
-                    env.triples.fetch_foreign_ids().await.unwrap();
-                };
-
-                rt.block_on(task());
-            })
-        },
-    );
 
     // async drop:
     rt.block_on(async {
@@ -239,5 +224,40 @@ fn dummy_triple(id: u64) -> Triple {
             participants: vec![Participant::from(1), Participant::from(2)],
             threshold: 5,
         },
+    }
+}
+
+fn into_contract_participants(
+    participants: &Participants,
+) -> mpc_contract::primitives::Participants {
+    mpc_contract::primitives::Participants {
+        next_id: participants.len() as u32,
+        participants: participants
+            .participants
+            .values()
+            .map(|info| {
+                (
+                    info.account_id.clone(),
+                    mpc_contract::primitives::ParticipantInfo {
+                        account_id: info.account_id.clone(),
+                        url: info.url.clone(),
+                        cipher_pk: info.cipher_pk.to_bytes(),
+                        sign_pk: near_sdk::PublicKey::from_parts(
+                            match info.sign_pk.key_type() {
+                                near_crypto::KeyType::ED25519 => near_sdk::CurveType::ED25519,
+                                near_crypto::KeyType::SECP256K1 => near_sdk::CurveType::SECP256K1,
+                            },
+                            info.sign_pk.key_data().to_vec(),
+                        )
+                        .unwrap(),
+                    },
+                )
+            })
+            .collect(),
+        account_to_participant_id: participants
+            .participants
+            .iter()
+            .map(|(participant, info)| (info.account_id.clone(), (*participant).into()))
+            .collect(),
     }
 }
