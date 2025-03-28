@@ -1,3 +1,4 @@
+use super::contract::primitives::intersect_vec;
 use super::state::RunningState;
 use crate::kdf::derive_delta;
 use crate::protocol::error::GenerationError;
@@ -637,6 +638,19 @@ impl SignatureManager {
                 );
                 continue;
             };
+
+            let participants =
+                intersect_vec(&[stable, &presignature.participants, &my_request.participants]);
+            if participants.len() < self.threshold {
+                tracing::warn!(
+                    sign_id = ?my_request.indexed.id,
+                    presignature_id = ?presignature.id,
+                    ?participants,
+                    "intersection < threshold, trashing presignature"
+                );
+                retry.push(my_request);
+                continue;
+            }
 
             let sign_id = my_request.indexed.id.clone();
             let presignature_id = presignature.id;
