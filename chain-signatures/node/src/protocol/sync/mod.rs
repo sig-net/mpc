@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::mesh::MeshState;
@@ -13,14 +13,9 @@ use crate::rpc::NodeStateWatcher;
 use crate::storage::{PresignatureStorage, TripleStorage};
 
 use super::contract::primitives::Participants;
-use super::presignature::{Presignature, PresignatureId};
-use super::triple::{Triple, TripleId};
+use super::presignature::PresignatureId;
+use super::triple::TripleId;
 
-/// How long for a synchronous [`ProtocolRequest`] to get back a [`ProtocolResponse`] before timeout.
-const REQUEST_PROTOCOL_TIMEOUT: Duration = Duration::from_millis(500);
-/// The maximum number of protocol requests that can be queued. This will likely never get to
-/// this upper bound just purely based on our ProtocolConfig.
-const MAX_PROTOCOL_REQUESTS: usize = 128 * 1024;
 /// The maximum number of update requests that can be queued. This is pretty much just
 /// based on the number of participants in the network. If we have 1024 participants then
 /// our issue will more than likely not be the channel size.
@@ -53,73 +48,8 @@ pub struct SyncView {
     presignatures: HashSet<PresignatureId>,
 }
 
-struct SyncCache {
-    me: Participant,
-    /// The set of self owned triples seen by both us and other participants.
-    owned_triples: HashMap<TripleId, Vec<Participant>>,
-    /// The set of self owned presignatures seen by both us and other participants.
-    owned_presignatures: HashMap<PresignatureId, Vec<Participant>>,
-}
-
-impl SyncCache {
-    fn new(me: Participant) -> Self {
-        Self {
-            me,
-            owned_triples: HashMap::new(),
-            owned_presignatures: HashMap::new(),
-        }
-    }
-
-    fn update(
-        &mut self,
-        update: SyncUpdate,
-        // views: Vec<(Participant, SyncView)>,
-        threshold: usize,
-    ) {
-        // Clear the cache before updating it since we are only taking a temporary view of who has a share
-        // of the triples/presignatures. This is so storage for each can be updated and we can adapt to it.
-        self.clear();
-
-        // Update the cache with our own info:
-        for id in update.triples {
-            let entry = self.owned_triples.entry(id).or_default();
-            entry.push(self.me);
-        }
-        for id in update.presignatures {
-            let entry = self.owned_presignatures.entry(id).or_default();
-            entry.push(self.me);
-        }
-
-        // // Update the cache with the info from other participants:
-        // for (p, view) in views {
-        //     for triple in view.triples {
-        //         let entry = self.owned_triples.entry(triple).or_default();
-        //         entry.push(p);
-        //     }
-
-        //     for presignature in view.presignatures {
-        //         let entry = self.owned_presignatures.entry(presignature).or_default();
-        //         entry.push(p);
-        //     }
-        // }
-
-        // Remove any triples/presignatures that do not have enough participants.
-        self.owned_triples
-            .retain(|_, participants| participants.len() >= threshold);
-        self.owned_presignatures
-            .retain(|_, participants| participants.len() >= threshold);
-    }
-
-    fn clear(&mut self) {
-        self.owned_triples.clear();
-        self.owned_presignatures.clear();
-    }
-}
-
 pub struct SyncRequestReceiver {
     updates: mpsc::Receiver<SyncUpdate>,
-    triples: mpsc::Receiver<ProtocolRequest<(Triple, Triple)>>,
-    presignatures: mpsc::Receiver<ProtocolRequest<Presignature>>,
 }
 
 pub struct SyncTask {
@@ -160,14 +90,13 @@ impl SyncTask {
 
         // Do NOT start until we have our own participant info.
         // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
-        let (threshold, me) = loop {
+        let (_threshold, me) = loop {
             watcher_interval.tick().await;
             if let Some(info) = self.watcher.info().await {
                 break info;
             }
         };
         tracing::info!(?me, "mpc network ready, running...");
-        let cache = SyncCache::new(me);
 
         let mut broadcast = Option::<(Instant, JoinHandle<_>)>::None;
         loop {
@@ -203,26 +132,11 @@ impl SyncTask {
                         continue;
                     }
 
-                    let update = match handle.await {
-                        Ok(result) => result,
-                        Err(err) => {
-                            tracing::warn!(?err, "broadcast task failed");
-                            continue;
-                        }
-                    };
-                    // let cache_start = Instant::now();
-                    // cache.update(update, views, threshold);
-                    // TODO: add ability to remove from storage, but that requires more info in storage,
-                    //      like who exactly owns the triple/presignature.
-
-                    // ?cache_elapsed,
-                    // let cache_elapsed = cache_start.elapsed();
-                    tracing::info!(
-                        elapsed = ?start.elapsed(),
-                        triples = cache.owned_triples.len(),
-                        presignatures = cache.owned_presignatures.len(),
-                        "processed broadcast",
-                    );
+                    if let Err(err) = handle.await {
+                        tracing::warn!(?err, "broadcast task failed");
+                    } else {
+                        tracing::info!(elapsed = ?start.elapsed(), "processed broadcast");
+                    }
                 }
                 Some(req) = self.requests.updates.recv() => {
                     tokio::spawn(req.process(self.triples.clone(), self.presignatures.clone()));
@@ -306,25 +220,17 @@ impl SyncUpdate {
 #[derive(Clone)]
 pub struct SyncChannel {
     request_update: mpsc::Sender<SyncUpdate>,
-    request_triple: TripleChannel,
-    request_presignature: PresignatureChannel,
 }
 
 impl SyncChannel {
     pub fn new() -> (SyncRequestReceiver, Self) {
         let (request_update_tx, request_update_rx) = mpsc::channel(MAX_SYNC_UPDATE_REQUESTS);
-        let (request_triple_rx, request_triple) = TripleChannel::new();
-        let (request_presignature_rx, request_presignature) = PresignatureChannel::new();
 
         let requests = SyncRequestReceiver {
             updates: request_update_rx,
-            triples: request_triple_rx,
-            presignatures: request_presignature_rx,
         };
         let channel = Self {
             request_update: request_update_tx,
-            request_triple,
-            request_presignature,
         };
 
         (requests, channel)
@@ -333,83 +239,6 @@ impl SyncChannel {
     pub async fn request_update(&self, update: SyncUpdate) {
         if let Err(err) = self.request_update.send(update).await {
             tracing::warn!(?err, "failed to request update");
-        }
-    }
-
-    pub async fn take_two_triple(&self, mine: bool) -> Option<ProtocolResponse<(Triple, Triple)>> {
-        let start = Instant::now();
-        let result = self.request_triple.take(mine).await;
-        tracing::info!(elapsed = ?start.elapsed(), "take two triple");
-        result
-    }
-
-    pub async fn take_presignature(&self, mine: bool) -> Option<ProtocolResponse<Presignature>> {
-        let start = Instant::now();
-        let result = self.request_presignature.take(mine).await;
-        tracing::info!(elapsed = ?start.elapsed(), "take presignature");
-        result
-    }
-}
-
-enum ProtocolRequest<T> {
-    Take {
-        mine: bool,
-        resp: oneshot::Sender<Option<ProtocolResponse<T>>>,
-    },
-}
-
-#[derive(Debug)]
-pub struct ProtocolResponse<T> {
-    pub participants: Vec<Participant>,
-    pub value: T,
-}
-
-type TripleChannel = ProtocolChannel<(Triple, Triple)>;
-type PresignatureChannel = ProtocolChannel<Presignature>;
-
-struct ProtocolChannel<T> {
-    request_tx: mpsc::Sender<ProtocolRequest<T>>,
-}
-
-impl<T> ProtocolChannel<T> {
-    fn new() -> (mpsc::Receiver<ProtocolRequest<T>>, Self) {
-        let (request_tx, request_rx) = mpsc::channel(MAX_PROTOCOL_REQUESTS);
-        let protocol_channel = Self { request_tx };
-
-        (request_rx, protocol_channel)
-    }
-
-    async fn take(&self, mine: bool) -> Option<ProtocolResponse<T>> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        if let Err(err) = self
-            .request_tx
-            .send(ProtocolRequest::Take {
-                mine,
-                resp: resp_tx,
-            })
-            .await
-        {
-            tracing::warn!(?err, "failed to request protocol.take");
-        }
-
-        match tokio::time::timeout(REQUEST_PROTOCOL_TIMEOUT, resp_rx).await {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(err)) => {
-                tracing::warn!(?err, "failed to receive response for protocol.take");
-                None
-            }
-            Err(_) => {
-                tracing::warn!("timeout trying to receive response for protocol.take");
-                None
-            }
-        }
-    }
-}
-
-impl<T> Clone for ProtocolChannel<T> {
-    fn clone(&self) -> Self {
-        Self {
-            request_tx: self.request_tx.clone(),
         }
     }
 }
