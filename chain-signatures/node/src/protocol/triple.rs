@@ -28,7 +28,7 @@ use near_account_id::AccountId;
 /// messages.
 pub type TripleId = u64;
 
-type GeneratorOutcome = (TripleId, Result<Option<()>, ProtocolError>);
+type GeneratorOutcome = (TripleId, Result<bool, ProtocolError>);
 
 // TODO: why do we have Clone here? Triples can not be reused.
 /// A completed triple.
@@ -179,9 +179,8 @@ impl TripleGenerator {
 
             match action {
                 Action::Wait => {
-                    tracing::debug!("triple: waiting");
                     // Retain protocol until we are finished
-                    break (self.id, Ok(None));
+                    break (self.id, Ok(false));
                 }
                 Action::SendMany(data) => {
                     for to in &self.participants {
@@ -324,7 +323,7 @@ impl TripleGenerator {
                     triple_poke_cpu_time_metric
                         .observe(generator_poke_time.elapsed().as_millis() as f64);
 
-                    break (self.id, Ok(Some(())));
+                    break (self.id, Ok(true));
                 }
             }
         }
@@ -505,11 +504,10 @@ impl TripleTasks {
                 }
             };
             match outcome {
-                // triple is still generating
-                Ok(None) => {}
-                // triple is done generating
-                Ok(Some(())) => {
-                    self.remove(id);
+                Ok(done) => {
+                    if done {
+                        self.remove(id);
+                    }
                 }
                 Err(e) => {
                     tracing::info!(id, ?e, "triple completed with error");
