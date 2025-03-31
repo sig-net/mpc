@@ -30,9 +30,8 @@ pub type TripleId = u64;
 
 type GeneratorOutcome = (TripleId, Result<bool, ProtocolError>);
 
-// TODO: why do we have Clone here? Triples can not be reused.
 /// A completed triple.
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Triple {
     pub id: TripleId,
     pub share: TripleShare<Secp256k1>,
