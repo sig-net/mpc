@@ -38,7 +38,7 @@ pub fn sign_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
 }
 
 pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::Result<String> {
-    let payload_hashed = web3::signing::keccak256(&PAYLOAD);
+    let payload_hashed = alloy::primitives::keccak256(PAYLOAD);
     let path = "test";
     let key_version = 0;
 

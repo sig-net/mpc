@@ -5175,6 +5175,7 @@ dependencies = [
 name = "integration-tests"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "anyhow",
  "async-process 1.8.1",
  "backon",
@@ -6205,13 +6206,13 @@ dependencies = [
 name = "mpc-crypto"
 version = "1.1.2"
 dependencies = [
+ "alloy",
  "anyhow",
  "getrandom 0.2.15",
  "k256",
  "near-account-id",
  "near-sdk",
  "sha3",
- "web3",
 ]
 
 [[package]]
@@ -6283,7 +6284,6 @@ dependencies = [
  "tracing-stackdriver",
  "tracing-subscriber",
  "url 2.5.4",
- "web3",
 ]
 
 [[package]]

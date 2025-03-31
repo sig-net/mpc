@@ -29,10 +29,12 @@ sysinfo = "0.32.0"
 tokio-retry = "0.3"
 tracing-stackdriver = "0.10.0"
 alloy = "0.9.1"
+alloy-signer-local = "0.9.1"
 alloy-sol-types = "0.8.24"
 helios = { git = "https://github.com/sig-net/helios", rev = "7c8018157cf5adc176ba2de8c769c1a7cc6f6106" }
 
 # workspace dependencies
+alloy.workspace = true
 anyhow.workspace = true
 borsh.workspace = true
 cait-sith.workspace = true
@@ -53,7 +55,6 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
-web3.workspace = true
 
 near-account-id.workspace = true
 near-crypto = "0.26.0"
