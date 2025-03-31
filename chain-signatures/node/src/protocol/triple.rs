@@ -412,7 +412,7 @@ impl TripleTasks {
                     return Ok(None);
                 }
 
-                let Some(slot) = self.storage.reserve(id, me).await else {
+                let Some(slot) = self.storage.reserve(id).await else {
                     return Ok(None);
                 };
 
@@ -574,7 +574,7 @@ impl TripleManager {
     }
 
     pub async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
-        self.triple_storage.reserve(id, self.me).await
+        self.triple_storage.reserve(id).await
     }
 
     pub async fn contains(&self, id: TripleId) -> bool {
@@ -587,7 +587,7 @@ impl TripleManager {
 
     pub async fn contains_mine(&self, id: TripleId) -> bool {
         self.triple_storage
-            .contains_mine(id)
+            .contains_mine(id, self.me)
             .await
             .map_err(|e| tracing::warn!(?e, "failed to check if mine triple exists"))
             .unwrap_or(false)
@@ -609,6 +609,7 @@ impl TripleManager {
         &self,
         id0: TripleId,
         id1: TripleId,
+        owner: Participant,
     ) -> Result<(Triple, Triple), GenerationError> {
         {
             let tasks = self.tasks.read().await;
@@ -621,17 +622,17 @@ impl TripleManager {
             }
         }
 
-        let (triple_0, triple_1) =
-            self.triple_storage
-                .take_two(id0, id1)
-                .await
-                .map_err(|store_error| {
-                    tracing::warn!(?store_error, "failed to take two triples");
-                    GenerationError::TripleStoreError(format!(
-                        "failed to take two triples {:?}",
-                        store_error
-                    ))
-                })?;
+        let (triple_0, triple_1) = self
+            .triple_storage
+            .take_two(id0, id1, owner, self.me)
+            .await
+            .map_err(|store_error| {
+                tracing::warn!(?store_error, "failed to take two triples");
+                GenerationError::TripleStoreError(format!(
+                    "failed to take two triples {:?}",
+                    store_error
+                ))
+            })?;
 
         tracing::debug!(id0, id1, "took two triples");
         Ok((triple_0, triple_1))
@@ -661,7 +662,7 @@ impl TripleManager {
 
     /// Returns the number of unspent triples assigned to this node.
     pub async fn len_mine(&self) -> usize {
-        self.triple_storage.len_mine().await.unwrap_or(0)
+        self.triple_storage.len_mine(self.me).await.unwrap_or(0)
     }
 
     pub async fn len_ongoing(&self) -> usize {

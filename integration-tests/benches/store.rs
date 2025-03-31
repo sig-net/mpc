@@ -150,7 +150,7 @@ fn bench_load_keys(c: &mut Criterion) {
                 for i in 0..1000 {
                     let t = dummy_triple(i);
                     env.triples
-                        .reserve(t.id, env.me)
+                        .reserve(t.id)
                         .await
                         .unwrap()
                         .insert(t, env.me)
@@ -166,7 +166,7 @@ fn bench_load_keys(c: &mut Criterion) {
                 for i in 0..1000 {
                     let p = dummy_presignature(i);
                     env.presignatures
-                        .reserve(p.id, env.me)
+                        .reserve(p.id)
                         .await
                         .unwrap()
                         .insert(p, env.me)

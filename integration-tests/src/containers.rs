@@ -711,7 +711,7 @@ impl Redis {
                     storage
                         .get(me)
                         .unwrap()
-                        .reserve(triple.id, *me)
+                        .reserve(triple.id)
                         .await
                         .unwrap()
                         .insert(triple, *owner)

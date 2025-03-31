@@ -197,7 +197,7 @@ impl PresignatureManager {
     /// Returns true if the mine presignature with the given id is already generated
     pub async fn contains_mine(&self, id: PresignatureId) -> bool {
         self.presignatures
-            .contains_mine(id)
+            .contains_mine(id, self.me)
             .await
             .map_err(|e| {
                 tracing::warn!(?e, "failed to check if mine presignature exist");
@@ -213,16 +213,24 @@ impl PresignatureManager {
             .unwrap_or(false)
     }
 
-    pub async fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
-        let presignature = self.presignatures.take(id).await.map_err(|store_err| {
-            if self.generators.contains_key(&id) {
-                tracing::warn!(id, ?store_err, "presignature is still generating");
-                GenerationError::PresignatureIsGenerating(id)
-            } else {
-                tracing::warn!(id, ?store_err, "presignature is missing");
-                GenerationError::PresignatureIsMissing(id)
-            }
-        })?;
+    pub async fn take(
+        &mut self,
+        id: PresignatureId,
+        owner: Participant,
+    ) -> Result<Presignature, GenerationError> {
+        if self.generators.contains_key(&id) {
+            tracing::warn!(id, "presignature is still generating");
+            return Err(GenerationError::PresignatureIsGenerating(id));
+        }
+
+        let presignature =
+            self.presignatures
+                .take(id, owner, self.me)
+                .await
+                .map_err(|store_err| {
+                    tracing::warn!(id, ?store_err, "presignature is missing");
+                    GenerationError::PresignatureIsMissing(id)
+                })?;
 
         tracing::debug!(id, "took presignature");
         Ok(presignature)
@@ -233,8 +241,8 @@ impl PresignatureManager {
             .presignatures
             .take_mine(self.me)
             .await
-            .map_err(|store_error| {
-                tracing::error!(?store_error, "failed to look for mine presignature");
+            .map_err(|store_err| {
+                tracing::error!(?store_err, "failed to look for mine presignature");
             })
             .ok()??;
         tracing::debug!(id = ?presignature.id, "took presignature of mine");
@@ -255,7 +263,7 @@ impl PresignatureManager {
     /// Returns the number of unspent presignatures assigned to this node.
     pub async fn len_mine(&self) -> usize {
         self.presignatures
-            .len_mine()
+            .len_mine(self.me)
             .await
             .map_err(|e| {
                 tracing::error!(?e, "failed to count mine presignatures");
@@ -478,11 +486,19 @@ impl PresignatureManager {
             match self.generators.entry(id) {
                 Entry::Vacant(entry) => {
                     tracing::info!(id, "joining protocol to generate a new presignature");
-                    let Some(slot) = self.presignatures.reserve(id, self.me).await else {
+                    let Some(slot) = self.presignatures.reserve(id).await else {
                         return Err(GenerationError::PresignatureReserveError);
                     };
 
-                    let (triple0, triple1) = match triple_manager.take_two(triple0, triple1).await {
+                    // Owner is the node that initiated the presignature generation.
+                    // TODO: we need to validate that is the case but right now, our node just assumes so. Should be
+                    // mitigated via the initing the protocol.
+                    let owner = from;
+
+                    let (triple0, triple1) = match triple_manager
+                        .take_two(triple0, triple1, owner)
+                        .await
+                    {
                         Ok(result) => result,
                         Err(error) => match error {
                             GenerationError::TripleIsGenerating(_) => {
@@ -511,11 +527,6 @@ impl PresignatureManager {
                             }
                         },
                     };
-
-                    // Owner is the node that initiated the presignature generation.
-                    // TODO: we need to validate that is the case but right now, our node just assumes so. Should be
-                    // mitigated via the initing the protocol.
-                    let owner = from;
 
                     let generator = Self::generate_internal(
                         owner,
@@ -712,7 +723,7 @@ impl PresignatureManager {
     }
 
     pub async fn reserve(&self, id: PresignatureId) -> Option<PresignatureSlot> {
-        self.presignatures.reserve(id, self.me).await
+        self.presignatures.reserve(id).await
     }
 
     pub fn execute(

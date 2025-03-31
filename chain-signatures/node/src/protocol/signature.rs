@@ -379,7 +379,7 @@ impl SignatureManager {
         }
 
         tracing::info!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
-        let presignature = match presignature_manager.take(presignature_id).await {
+        let presignature = match presignature_manager.take(presignature_id, proposer).await {
             Ok(presignature) => presignature,
             Err(err @ GenerationError::PresignatureIsGenerating(_)) => {
                 tracing::warn!(me = ?self.me, presignature_id, "presignature is generating, can't join signature generation protocol");
