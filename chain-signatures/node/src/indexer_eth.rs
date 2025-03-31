@@ -315,7 +315,7 @@ pub async fn run(
         .build()
         .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?;
 
-    tracing::info!("Built Helios client on network \"{}\"", network);
+    tracing::info!("Built Helios client on network {}", network);
 
     client
         .start()
