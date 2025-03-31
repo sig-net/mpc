@@ -92,6 +92,10 @@ impl ConsensusCtx for &mut MpcSignProtocol {
         &self.channel
     }
 
+    fn rpc_channel(&self) -> &RpcChannel {
+        &self.ctx.rpc_channel
+    }
+
     fn sync_channel(&self) -> &SyncChannel {
         &self.sync_channel
     }

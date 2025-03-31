@@ -1,4 +1,5 @@
 mod filter;
+mod subscriber;
 mod types;
 
 pub use crate::protocol::message::types::{
@@ -13,6 +14,7 @@ use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
+use crate::protocol::message::subscriber::MessageSubscriber;
 use crate::protocol::Config;
 use crate::protocol::MeshState;
 use crate::types::Epoch;
@@ -27,7 +29,7 @@ use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{hash_map, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -57,7 +59,7 @@ pub struct MessageInbox {
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
     presignature: HashMap<Epoch, HashMap<PresignatureId, VecDeque<PresignatureMessage>>>,
-    signature: HashMap<Epoch, HashMap<SignId, VecDeque<SignatureMessage>>>,
+    signature: HashMap<Epoch, HashMap<SignId, MessageSubscriber<SignatureMessage>>>,
 }
 
 impl MessageInbox {
@@ -100,13 +102,15 @@ impl MessageInbox {
                 .entry(message.id)
                 .or_default()
                 .push_back(message),
-            Message::Signature(message) => self
-                .signature
-                .entry(message.epoch)
-                .or_default()
-                .entry(message.id.clone())
-                .or_default()
-                .push_back(message),
+            Message::Signature(message) => {
+                let subscriber = self
+                    .signature
+                    .entry(message.epoch)
+                    .or_default()
+                    .entry(message.id.clone())
+                    .or_default();
+                subscriber.send(message);
+            }
             Message::Unknown(entries) => {
                 tracing::warn!(
                     entries = ?entries.iter().map(|(k, v)| (k, cbor_name(v))).collect::<Vec<_>>(),
@@ -196,13 +200,6 @@ impl MessageInbox {
             !messages.is_empty()
         });
         self.presignature.retain(|_epoch, messages| {
-            messages.retain(|_id, messages| {
-                messages.retain(|msg| !self.filter.contains(msg));
-                !messages.is_empty()
-            });
-            !messages.is_empty()
-        });
-        self.signature.retain(|_epoch, messages| {
             messages.retain(|_id, messages| {
                 messages.retain(|msg| !self.filter.contains(msg));
                 !messages.is_empty()
@@ -378,6 +375,57 @@ impl MessageChannel {
 
     pub async fn filter_sign(&self, sign_id: SignId, presign_id: PresignatureId) {
         self.filter(&(sign_id, presign_id)).await;
+    }
+
+    pub async fn subscribe_sign(
+        &self,
+        epoch: u64,
+        sign_id: &SignId,
+    ) -> mpsc::Receiver<SignatureMessage> {
+        let mut inbox = self.inbox.write().await;
+        let subscribers = inbox.signature.entry(epoch).or_default();
+        let (inbox_tx, inbox_rx) = mpsc::channel(10000);
+
+        match subscribers.entry(sign_id.clone()) {
+            hash_map::Entry::Vacant(entry) => {
+                entry.insert(MessageSubscriber::Subscribed(inbox_tx));
+            }
+            hash_map::Entry::Occupied(mut entry) => {
+                let old_sub = entry.insert(MessageSubscriber::Subscribed(inbox_tx.clone()));
+                match old_sub {
+                    MessageSubscriber::Subscribed(_old_inbox_tx) => {
+                        // drop the old subscriber
+                    }
+                    MessageSubscriber::Unsubscribed(queue) => {
+                        // TODO: expire the queue of messages if its sitting in there for too long.
+                        // drain the idling queue of messages into the new subscriber
+                        tokio::spawn(async move {
+                            for message in queue {
+                                if let Err(err) = inbox_tx.send(message).await {
+                                    tracing::warn!(?err, "inbox: failed to send signature message");
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        inbox_rx
+    }
+
+    pub async fn unsubscribe_sign(&self, epoch: u64, sign_id: &SignId) {
+        let mut inbox = self.inbox.write().await;
+        let subscribers = inbox.signature.entry(epoch).or_default();
+
+        match subscribers.entry(sign_id.clone()) {
+            hash_map::Entry::Vacant(_) => {
+                // already vacant, do nothing.
+            }
+            hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(MessageSubscriber::Unsubscribed(Vec::new()));
+            }
+        }
     }
 }
 
@@ -591,121 +639,6 @@ impl MessageReceiver for RunningState {
             }
         }
 
-        let mut signature_manager = self.signature_manager.write().await;
-        let signature_messages = inbox.signature.entry(self.epoch).or_default();
-        signature_messages.retain(|_sign_id, queue| {
-            let mut expired = HashSet::new();
-            let mut active = HashSet::new();
-
-            for msg in queue.iter() {
-                if expired.contains(&msg.presignature_id) {
-                    continue;
-                }
-
-                if util::is_elapsed_longer_than_timeout(
-                    msg.timestamp,
-                    protocol_cfg.signature.generation_timeout,
-                ) {
-                    expired.insert(msg.presignature_id);
-                } else {
-                    active.insert(msg.presignature_id);
-                }
-            }
-
-            queue.retain(|msg| active.contains(&msg.presignature_id));
-
-            !queue.is_empty()
-        });
-
-        for (sign_id, queue) in signature_messages {
-            // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
-            let SignatureMessage {
-                proposer,
-                presignature_id,
-                ..
-            } = queue.front().unwrap();
-
-            if !queue
-                .iter()
-                .all(|msg| presignature_id == &msg.presignature_id)
-            {
-                // Check that all messages in the queue have the same triple0 and triple1, otherwise this is an
-                // invalid message, so we should just bin the whole entire protocol and its message for this presignature id.
-                queue.clear();
-                continue;
-            }
-
-            let protocol = match signature_manager
-                .get_or_start_protocol(
-                    sign_id,
-                    *proposer,
-                    *presignature_id,
-                    protocol_cfg,
-                    &mut presignature_manager,
-                )
-                .await
-            {
-                Ok(protocol) => protocol,
-                Err(GenerationError::PresignatureIsGenerating(_)) => {
-                    // We will revisit this this signature request later when the presignature has been generated.
-                    continue;
-                }
-                Err(err @ GenerationError::WaitingForIndexer(_)) => {
-                    // We will revisit this this signature request later when we have the request indexed.
-                    tracing::warn!(
-                        ?sign_id,
-                        ?presignature_id,
-                        ?proposer,
-                        ?err,
-                        "waiting for indexer"
-                    );
-                    continue;
-                }
-                Err(err @ GenerationError::InvalidProposer(_, _)) => {
-                    // trash the whole of these messages since we got an invalid set of participants.
-                    tracing::warn!(?sign_id, ?err, "signature generation cannot be started");
-                    queue.clear();
-                    continue;
-                }
-                Err(
-                    err @ (GenerationError::AlreadyGenerated
-                    | GenerationError::PresignatureIsMissing(_)),
-                ) => {
-                    // We will have to remove the entirety of the messages we received for this signature request,
-                    // and have the other nodes timeout in the following cases:
-                    // - If a presignature is in GC, then it was used already or failed to be produced.
-                    // - If a presignature is missing, that means our system cannot process this signature.
-                    tracing::warn!(?sign_id, ?err, "signature cannot be generated");
-                    queue.clear();
-                    continue;
-                }
-                Err(GenerationError::CaitSithInitializationError(error)) => {
-                    // ignore the whole of the messages since the generation had bad parameters. Also have the other node who
-                    // initiated the protocol resend the message or have it timeout on their side.
-                    tracing::warn!(
-                        ?sign_id,
-                        presignature_id,
-                        ?error,
-                        "unable to initialize incoming signature protocol"
-                    );
-                    queue.clear();
-                    continue;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        ?sign_id,
-                        ?err,
-                        "Unexpected error encounted while generating signature"
-                    );
-                    queue.clear();
-                    continue;
-                }
-            };
-
-            while let Some(message) = queue.pop_front() {
-                protocol.message(message.from, message.data);
-            }
-        }
         Ok(())
     }
 }

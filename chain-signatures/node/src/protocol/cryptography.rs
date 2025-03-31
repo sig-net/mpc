@@ -259,7 +259,7 @@ impl CryptographicProtocol for ResharingState {
 impl CryptographicProtocol for RunningState {
     async fn progress<C: CryptographicCtx + Send + Sync>(
         mut self,
-        ctx: C,
+        _ctx: C,
         cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
@@ -273,8 +273,7 @@ impl CryptographicProtocol for RunningState {
         let presig_task = PresignatureManager::execute(&self, &cfg.protocol, active);
 
         let stable = mesh_state.stable;
-        tracing::debug!(?stable, "stable participants");
-        let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol, &ctx);
+        let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol);
 
         match tokio::try_join!(triple_task, presig_task, sig_task) {
             Ok(_result) => (),

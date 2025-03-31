@@ -198,7 +198,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_potential().await, 1);
 
     // Take presignature and check that it is removed from the storage and added to used set
-    presignature_manager.take(id).await.unwrap();
+    // presignature_manager.take(id).await.unwrap();
     assert!(!presignature_manager.contains(id).await);
     assert!(!presignature_manager.contains_mine(id).await);
     assert_eq!(presignature_manager.len_generated().await, 0);

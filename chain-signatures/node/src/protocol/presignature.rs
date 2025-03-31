@@ -213,20 +213,20 @@ impl PresignatureManager {
             .unwrap_or(false)
     }
 
-    pub async fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
-        let presignature = self.presignatures.take(id).await.map_err(|store_err| {
-            if self.generators.contains_key(&id) {
-                tracing::warn!(id, ?store_err, "presignature is still generating");
-                GenerationError::PresignatureIsGenerating(id)
-            } else {
-                tracing::warn!(id, ?store_err, "presignature is missing");
-                GenerationError::PresignatureIsMissing(id)
-            }
-        })?;
+    // pub async fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
+    //     let presignature = self.presignatures.take(id).await.map_err(|store_err| {
+    //         if self.generators.contains_key(&id) {
+    //             tracing::warn!(id, ?store_err, "presignature is still generating");
+    //             GenerationError::PresignatureIsGenerating(id)
+    //         } else {
+    //             tracing::warn!(id, ?store_err, "presignature is missing");
+    //             GenerationError::PresignatureIsMissing(id)
+    //         }
+    //     })?;
 
-        tracing::debug!(id, "took presignature");
-        Ok(presignature)
-    }
+    //     tracing::debug!(id, "took presignature");
+    //     Ok(presignature)
+    // }
 
     pub async fn take_mine(&mut self) -> Option<Presignature> {
         let presignature = self

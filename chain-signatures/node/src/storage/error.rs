@@ -8,6 +8,8 @@ pub enum StoreError {
     Connect(#[from] anyhow::Error),
     #[error("empty: {0}")]
     Empty(&'static str),
+    #[error("timeout: {0:?} elapsed")]
+    Timeout(std::time::Duration),
     #[error("other: {0}")]
     Other(String),
 }

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use cait_sith::protocol::Participant;
 use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
@@ -315,7 +317,11 @@ impl PresignatureStorage {
 
     // TODO: need to pass in owner to delete the triple from the owner set, but we can have sync just do this
     //       for now for us.
-    pub async fn take(&self, id: PresignatureId) -> StoreResult<Presignature> {
+    pub async fn take(
+        &self,
+        id: PresignatureId,
+        timeout: Option<std::time::Duration>,
+    ) -> StoreResult<Presignature> {
         let mut conn = self.connect().await?;
 
         let script = r#"
@@ -340,6 +346,14 @@ impl PresignatureStorage {
 
             return presig_value
         "#;
+
+        // TODO: use std::time::Duration instead of chrono::Duration
+        // TODO: use BLPOP & LPUSH instead of this waiting.
+        if let Some(timeout) = timeout {
+            if !wait_for_hexist(&mut conn, &self.presig_key, id, timeout).await {
+                return Err(StoreError::Timeout(timeout));
+            }
+        }
 
         let result: Result<Presignature, RedisError> = redis::Script::new(script)
             .key(&self.mine_key)
@@ -449,4 +463,24 @@ impl FromRedisValue for Presignature {
             ))
         })
     }
+}
+
+// TODO: make use of redis pubsub for these sort of notifications instead of
+// relying on polling for the value to be available.
+async fn wait_for_hexist(
+    conn: &mut Connection,
+    key: &str,
+    field: PresignatureId,
+    timeout: std::time::Duration,
+) -> bool {
+    let delay = std::time::Duration::from_millis(25);
+    let start = Instant::now();
+
+    while start.elapsed() < timeout {
+        if conn.hexists::<_, _, bool>(key, field).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(delay).await;
+    }
+    false
 }

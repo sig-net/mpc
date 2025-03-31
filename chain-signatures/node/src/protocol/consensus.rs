@@ -13,7 +13,7 @@ use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleManager;
 use crate::protocol::IndexedSignRequest;
-use crate::rpc::NearClient;
+use crate::rpc::{NearClient, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -40,6 +40,7 @@ pub trait ConsensusCtx {
     fn triple_storage(&self) -> &TripleStorage;
     fn presignature_storage(&self) -> &PresignatureStorage;
     fn msg_channel(&self) -> &MessageChannel;
+    fn rpc_channel(&self) -> &RpcChannel;
     fn sync_channel(&self) -> &SyncChannel;
 }
 
@@ -141,13 +142,10 @@ impl ConsensusProtocol for StartedState {
                                     let signature_manager =
                                         Arc::new(RwLock::new(SignatureManager::new(
                                             *me,
-                                            ctx.my_account_id(),
                                             contract_state.threshold,
                                             public_key,
                                             epoch,
-                                            ctx.sign_rx(),
-                                            ctx.presignature_storage(),
-                                            ctx.msg_channel().clone(),
+                                            &ctx,
                                         )));
 
                                     Ok(NodeState::Running(RunningState {
@@ -366,13 +364,10 @@ impl ConsensusProtocol for WaitingForConsensusState {
 
                     let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
                         *me,
-                        ctx.my_account_id(),
                         self.threshold,
                         self.public_key,
                         self.epoch,
-                        ctx.sign_rx(),
-                        ctx.presignature_storage(),
-                        ctx.msg_channel().clone(),
+                        &ctx,
                     )));
 
                     Ok(NodeState::Running(RunningState {
