@@ -134,6 +134,7 @@ impl Node {
                 .eth
                 .clone()
                 .map(|eth| eth.contract_address.clone()),
+            eth_network: None,
         };
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),

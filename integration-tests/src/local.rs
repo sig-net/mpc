@@ -79,6 +79,7 @@ impl Node {
                 .clone()
                 .map(|eth| eth.execution_rpc_http_url.clone()),
             eth_contract_address: cfg.eth.clone().map(|eth| eth.contract_address.clone()),
+            eth_network: None,
         };
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
@@ -197,6 +198,7 @@ impl Node {
                 .eth
                 .clone()
                 .map(|eth| eth.contract_address.clone()),
+            eth_network: None,
         };
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),

@@ -42,6 +42,8 @@ pub struct EthConfig {
     pub execution_rpc_http_url: String,
     /// The contract address to watch without the `0x` prefix
     pub contract_address: String,
+    /// must be one of sepolia, mainnet
+    pub network: String,
 }
 
 impl fmt::Debug for EthConfig {
@@ -79,6 +81,14 @@ pub struct EthArgs {
     /// The contract address to watch without the `0x` prefix
     #[clap(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
     pub eth_contract_address: Option<String>,
+    /// the network that the eth indexer is running on. Either "sepolia"/"mainnet"
+    #[clap(
+        long,
+        env("MPC_ETH_NETWORK"),
+        requires = "eth_network",
+        default_value = "sepolia"
+    )]
+    pub eth_network: Option<String>,
 }
 
 impl EthArgs {
@@ -102,6 +112,9 @@ impl EthArgs {
         if let Some(eth_contract_address) = self.eth_contract_address {
             args.extend(["--eth-contract-address".to_string(), eth_contract_address]);
         }
+        if let Some(eth_network) = self.eth_network {
+            args.extend(["--eth-network".to_string(), eth_network]);
+        }
         args
     }
 
@@ -111,6 +124,7 @@ impl EthArgs {
             consensus_rpc_http_url: self.eth_consensus_rpc_http_url?,
             execution_rpc_http_url: self.eth_execution_rpc_http_url?,
             contract_address: self.eth_contract_address?,
+            network: self.eth_network?,
         })
     }
 }
@@ -292,8 +306,11 @@ pub async fn run(
 
     tracing::info!("running ethereum indexer");
 
+    let network = Network::from_str(eth.network.as_str())
+        .map_err(|err| anyhow::anyhow!("Network input incorrect: {:?}", err))?;
+
     let mut client: EthereumClient<FileDB> = EthereumClientBuilder::new()
-        .network(Network::Sepolia)
+        .network(network)
         .consensus_rpc(&eth.consensus_rpc_http_url)
         .execution_rpc(&eth.execution_rpc_http_url)
         .data_dir(PathBuf::from("/tmp/helios"))
@@ -393,7 +410,7 @@ async fn process_block(
             )
         })?
     else {
-        tracing::warn!("no receipts for block number {block_number}");
+        tracing::info!("no receipts for block number {block_number}");
         return Ok(());
     };
 
