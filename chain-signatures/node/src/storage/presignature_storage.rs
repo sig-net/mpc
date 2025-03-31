@@ -52,10 +52,6 @@ pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureStorage {
         "presignatures:{}:{}",
         PRESIGNATURE_STORAGE_VERSION, node_account_id
     );
-    let mine_key = format!(
-        "presignatures_mine:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
     let used_key = format!(
         "presignatures_used:{}:{}",
         PRESIGNATURE_STORAGE_VERSION, node_account_id
@@ -72,7 +68,6 @@ pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureStorage {
     PresignatureStorage {
         redis_pool: pool.clone(),
         presig_key,
-        mine_key,
         used_key,
         reserved_key,
         owner_keys,
@@ -83,7 +78,6 @@ pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureStorage {
 pub struct PresignatureStorage {
     redis_pool: Pool,
     presig_key: String,
-    mine_key: String,
     used_key: String,
     reserved_key: String,
     owner_keys: String,
@@ -308,10 +302,10 @@ impl PresignatureStorage {
             local presig_key = KEYS[1]
             local used_key = KEYS[2]
             local owner_key = KEYS[3]
-            local self_owner_key = KEYS[4]
+            local mine_key = KEYS[4]
             local presig_id = ARGV[1]
 
-            if redis.call("SISMEMBER", self_owner_key, presig_id) == 1 then
+            if redis.call("SISMEMBER", mine_key, presig_id) == 1 then
                 return {err = 'WARN presignature ' .. presig_id ..' cannot be taken as foreign owned'}
             end
             if redis.call("SISMEMBER", owner_key, presig_id) == 0 then
@@ -323,7 +317,7 @@ impl PresignatureStorage {
                 return {err = "WARN presignature " .. presig_id .. " is missing"}
             end
 
-            redis.call("SREM", self_owner_key, presig_id)
+            redis.call("SREM", owner_key, presig_id)
             redis.call("HDEL", presig_key, presig_id)
             redis.call("HSET", used_key, presig_id, "1")
             redis.call("HEXPIRE", used_key, ARGV[2], "FIELDS", "1", presig_id)
@@ -350,9 +344,9 @@ impl PresignatureStorage {
         let script = r#"
             local presig_key = KEYS[1]
             local used_key = KEYS[2]
-            local self_owner_key = KEYS[3]
+            local mine_key = KEYS[3]
 
-            local presig_id = redis.call("SPOP", self_owner_key)
+            local presig_id = redis.call("SPOP", mine_key)
             if not presig_id then
                 return nil
             end
@@ -401,7 +395,6 @@ impl PresignatureStorage {
         let _: () = redis::Script::new(script)
             .key(&self.owner_keys)
             .key(&self.presig_key)
-            .key(&self.mine_key)
             .key(&self.used_key)
             .key(&self.reserved_key)
             .invoke_async(&mut conn)

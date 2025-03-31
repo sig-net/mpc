@@ -50,7 +50,6 @@ impl TripleSlot {
 
 pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
     let triple_key = format!("triples:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
-    let mine_key = format!("triples_mine:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
     let used_key = format!("triples_used:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
     let reserved_key = format!("triples_reserved:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
     let owner_keys = format!("triples_owners:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
@@ -58,7 +57,6 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
     TripleStorage {
         redis_pool: pool.clone(),
         triple_key,
-        mine_key,
         used_key,
         reserved_key,
         owner_keys,
@@ -69,7 +67,6 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
 pub struct TripleStorage {
     redis_pool: Pool,
     triple_key: String,
-    mine_key: String,
     used_key: String,
     reserved_key: String,
     owner_keys: String,
@@ -306,12 +303,12 @@ impl TripleStorage {
             local triple_key = KEYS[1]
             local used_key = KEYS[2]
             local owner_key = KEYS[3]
-            local self_owner_key = KEYS[4]
+            local mine_key = KEYS[4]
             local triple_id1 = ARGV[1]
             local triple_id2 = ARGV[2]
 
             -- check if the given triple id belong to us, if so then we cannot take it as foreign
-            local check = redis.call("SMISMEMBER", self_owner_key, triple_id1, triple_id2)
+            local check = redis.call("SMISMEMBER", mine_key, triple_id1, triple_id2)
             if check[1] == 1 then
                 return {err = "WARN triple " .. triple_id1 .. " cannot be taken as foreign owned"}
             end
@@ -368,14 +365,14 @@ impl TripleStorage {
         let lua_script = r#"
             local triple_key = KEYS[1]
             local used_key = KEYS[2]
-            local self_owner_key = KEYS[3]
+            local mine_key = KEYS[3]
 
-            if redis.call("SCARD", self_owner_key) < 2 then
+            if redis.call("SCARD", mine_key) < 2 then
                 return nil
             end
 
             -- pop two triples from the self owner set and delete them once successfully fetched
-            local triple_ids = redis.call("SPOP", self_owner_key, 2)
+            local triple_ids = redis.call("SPOP", mine_key, 2)
             local triples = redis.call("HMGET", triple_key, unpack(triple_ids))
             if not triples[1] then
                 return {err = "WARN unexpected, triple " .. triple_ids[1] .. " is missing"}
@@ -426,7 +423,6 @@ impl TripleStorage {
         let _: () = redis::Script::new(script)
             .key(&self.owner_keys)
             .key(&self.triple_key)
-            .key(&self.mine_key)
             .key(&self.used_key)
             .key(&self.reserved_key)
             .invoke_async(&mut conn)
