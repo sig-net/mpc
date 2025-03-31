@@ -7,10 +7,8 @@ use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 use crate::protocol::presignature::{Presignature, PresignatureId};
 use crate::storage::error::{StoreError, StoreResult};
 
-use super::owner_key;
+use super::{owner_key, STORAGE_VERSION};
 
-// Can be used to "clear" redis storage in case of a breaking change
-const PRESIGNATURE_STORAGE_VERSION: &str = "v7";
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 /// A pre-reserved slot for a presignature that will eventually be inserted.
@@ -47,23 +45,11 @@ impl PresignatureSlot {
     }
 }
 
-pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureStorage {
-    let presig_key = format!(
-        "presignatures:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
-    let used_key = format!(
-        "presignatures_used:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
-    let reserved_key = format!(
-        "presingatures_reserved:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
-    let owner_keys = format!(
-        "presignatures_owners:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
+pub fn init(pool: &Pool, account_id: &AccountId) -> PresignatureStorage {
+    let presig_key = format!("presignatures:{STORAGE_VERSION}:{account_id}",);
+    let used_key = format!("presignatures_used:{STORAGE_VERSION}:{account_id}",);
+    let reserved_key = format!("presingatures_reserved:{STORAGE_VERSION}:{account_id}",);
+    let owner_keys = format!("presignatures_owners:{STORAGE_VERSION}:{account_id}",);
 
     PresignatureStorage {
         redis_pool: pool.clone(),

@@ -8,10 +8,8 @@ use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
 use near_account_id::AccountId;
 
-use super::owner_key;
+use super::{owner_key, STORAGE_VERSION};
 
-// Can be used to "clear" redis storage in case of a breaking change
-const TRIPLE_STORAGE_VERSION: &str = "v7";
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 /// A pre-reserved slot for a triple that will eventually be inserted.
@@ -49,10 +47,10 @@ impl TripleSlot {
 }
 
 pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
-    let triple_key = format!("triples:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
-    let used_key = format!("triples_used:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
-    let reserved_key = format!("triples_reserved:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
-    let owner_keys = format!("triples_owners:{}:{}", TRIPLE_STORAGE_VERSION, account_id);
+    let triple_key = format!("triples:{STORAGE_VERSION}:{account_id}");
+    let used_key = format!("triples_used:{STORAGE_VERSION}:{account_id}");
+    let reserved_key = format!("triples_reserved:{STORAGE_VERSION}:{account_id}");
+    let owner_keys = format!("triples_owners:{STORAGE_VERSION}:{account_id}");
 
     TripleStorage {
         redis_pool: pool.clone(),

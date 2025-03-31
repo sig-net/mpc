@@ -186,6 +186,16 @@ fn bench_load_keys(c: &mut Criterion) {
         })
     });
 
+    c.bench_function("load 1024 mine presignature keys", |b| {
+        b.iter(|| {
+            let task = || async {
+                env.presignatures.fetch_owned(env.me).await;
+            };
+
+            rt.block_on(task());
+        })
+    });
+
     // async drop:
     rt.block_on(async {
         drop(env);
