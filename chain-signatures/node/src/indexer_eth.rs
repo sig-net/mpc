@@ -304,8 +304,6 @@ pub async fn run(
         return Ok(());
     };
 
-    tracing::info!("running ethereum indexer");
-
     let network = Network::from_str(eth.network.as_str())
         .map_err(|err| anyhow::anyhow!("Network input incorrect: {:?}", err))?;
 
@@ -317,7 +315,7 @@ pub async fn run(
         .build()
         .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?;
 
-    tracing::info!("Built Helios client on network \"{}\"", Network::Sepolia);
+    tracing::info!("Built Helios client on network \"{}\"", network);
 
     client
         .start()
@@ -325,6 +323,8 @@ pub async fn run(
         .map_err(|err| anyhow::anyhow!("Failed to start Ethereum Helios client: {:?}", err))?;
 
     client.wait_synced().await;
+
+    tracing::info!("running ethereum indexer");
 
     let eth_contract_addr = Address::from_str(&format!("0x{}", eth.contract_address))?;
 
