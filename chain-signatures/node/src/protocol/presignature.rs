@@ -185,32 +185,16 @@ impl PresignatureManager {
 
     /// Returns true if the presignature with the given id is already generated
     pub async fn contains(&self, id: PresignatureId) -> bool {
-        self.presignatures
-            .contains(id)
-            .await
-            .map_err(|e| {
-                tracing::warn!(?e, "failed to check if presignature exist");
-            })
-            .unwrap_or(false)
+        self.presignatures.contains(id).await
     }
 
     /// Returns true if the mine presignature with the given id is already generated
     pub async fn contains_mine(&self, id: PresignatureId) -> bool {
-        self.presignatures
-            .contains_mine(id, self.me)
-            .await
-            .map_err(|e| {
-                tracing::warn!(?e, "failed to check if mine presignature exist");
-            })
-            .unwrap_or(false)
+        self.presignatures.contains_mine(id, self.me).await
     }
 
     pub async fn contains_used(&self, id: PresignatureId) -> bool {
-        self.presignatures
-            .contains_used(id)
-            .await
-            .map_err(|e| tracing::warn!(?e, "failed to check if presignature is used"))
-            .unwrap_or(false)
+        self.presignatures.contains_used(id).await
     }
 
     pub async fn take(
@@ -223,52 +207,30 @@ impl PresignatureManager {
             return Err(GenerationError::PresignatureIsGenerating(id));
         }
 
-        let presignature =
-            self.presignatures
-                .take(id, owner, self.me)
-                .await
-                .map_err(|store_err| {
-                    tracing::warn!(id, ?store_err, "presignature is missing");
-                    GenerationError::PresignatureIsMissing(id)
-                })?;
+        let presignature = self
+            .presignatures
+            .take(id, owner, self.me)
+            .await
+            .ok_or_else(|| GenerationError::PresignatureIsMissing(id))?;
 
         tracing::debug!(id, "took presignature");
         Ok(presignature)
     }
 
     pub async fn take_mine(&mut self) -> Option<Presignature> {
-        let presignature = self
-            .presignatures
-            .take_mine(self.me)
-            .await
-            .map_err(|store_err| {
-                tracing::error!(?store_err, "failed to look for mine presignature");
-            })
-            .ok()??;
+        let presignature = self.presignatures.take_mine(self.me).await?;
         tracing::debug!(id = ?presignature.id, "took presignature of mine");
         Some(presignature)
     }
 
     /// Returns the number of unspent presignatures available in the manager.
     pub async fn len_generated(&self) -> usize {
-        self.presignatures
-            .len_generated()
-            .await
-            .map_err(|e| {
-                tracing::error!(?e, "failed to count all presignatures");
-            })
-            .unwrap_or(0)
+        self.presignatures.len_generated().await.unwrap_or(0)
     }
 
     /// Returns the number of unspent presignatures assigned to this node.
     pub async fn len_mine(&self) -> usize {
-        self.presignatures
-            .len_mine(self.me)
-            .await
-            .map_err(|e| {
-                tracing::error!(?e, "failed to count mine presignatures");
-            })
-            .unwrap_or(0)
+        self.presignatures.len_mine(self.me).await.unwrap_or(0)
     }
 
     /// Returns if there are unspent presignatures available in the manager.
@@ -401,16 +363,8 @@ impl PresignatureManager {
 
             // TODO: have all this part be a separate task such that finding a pair of triples is done in parallel instead
             // of waiting for storage to respond here.
-            let (triple0, triple1) = match self.triples.take_two_mine(self.me).await {
-                Ok(Some(pair)) => pair,
-                Ok(None) => {
-                    tracing::warn!("no triples available for presignature generation");
-                    return;
-                }
-                Err(err) => {
-                    tracing::warn!(?err, "failed to take two triples");
-                    return;
-                }
+            let Some((triple0, triple1)) = self.triples.take_two_mine(self.me).await else {
+                return;
             };
 
             let t0_id = triple0.id;
@@ -507,17 +461,17 @@ impl PresignatureManager {
                                     id,
                                     triple0,
                                     triple1,
-                                    "could not initiate non-introduced presignature: one triple is generating"
+                                    "could not initiate non-introduced presignature: one or more triple are generating"
                                 );
                                 return Err(error);
                             }
-                            GenerationError::TripleStoreError(_) => {
+                            GenerationError::TripleIsMissing(_, _) => {
                                 tracing::warn!(
                                     ?error,
                                     id,
                                     triple0,
                                     triple1,
-                                    "could not initiate non-introduced presignature: triple store error"
+                                    "could not initiate non-introduced presignature: one or more triple are missing",
                                 );
                                 return Err(error);
                             }

@@ -70,8 +70,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_generated().await, 0);
     assert_eq!(triple_manager.len_mine().await, 0);
     assert_eq!(triple_manager.len_potential().await, 0);
-    assert!(triple_storage.contains_used(triple_id1).await.unwrap());
-    assert!(triple_storage.contains_used(triple_id2).await.unwrap());
+    assert!(triple_storage.contains_used(triple_id1).await);
+    assert!(triple_storage.contains_used(triple_id2).await);
 
     // Attempt to re-reserve used triples and check that it cannot be reserved since it is used.
     assert!(triple_manager.reserve(triple_id1).await.is_none());
@@ -113,8 +113,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_mine().await, 0);
     assert!(triple_manager.is_empty().await);
     assert_eq!(triple_manager.len_potential().await, 0);
-    assert!(triple_storage.contains_used(mine_id1).await.unwrap());
-    assert!(triple_storage.contains_used(mine_id2).await.unwrap());
+    assert!(triple_storage.contains_used(mine_id1).await);
+    assert!(triple_storage.contains_used(mine_id2).await);
 
     // Attempt to re-insert used mine triples and check that it fails
     assert!(triple_manager.reserve(mine_id1).await.is_none());
@@ -122,7 +122,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(!triple_manager.contains(mine_id1).await);
     assert!(!triple_manager.contains(mine_id2).await);
 
-    triple_storage.clear().await.unwrap();
+    assert!(triple_storage.clear().await);
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
         triple_manager
@@ -200,7 +200,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_generated().await, 0);
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert_eq!(presignature_manager.len_potential().await, 0);
-    assert!(presignature_storage.contains_used(id).await.unwrap());
+    assert!(presignature_storage.contains_used(id).await);
 
     // Attempt to re-insert used presignature and check that it fails
     assert!(presignature_manager.reserve(id).await.is_none());
@@ -233,13 +233,13 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert!(presignature_manager.is_empty().await);
     assert_eq!(presignature_manager.len_potential().await, 0);
-    assert!(presignature_storage.contains_used(id2).await.unwrap());
+    assert!(presignature_storage.contains_used(id2).await);
 
     // Attempt to re-insert used mine presignature and check that it fails
     assert!(presignature_manager.reserve(id2).await.is_none());
     assert!(!presignature_manager.contains(id2).await);
 
-    presignature_storage.clear().await.unwrap();
+    presignature_storage.clear().await;
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
         presignature_manager

@@ -624,9 +624,9 @@ impl SignatureManager {
             .set(self.sign_queue.len_mine() as i64);
 
         let mut retry = Vec::new();
-        while let Ok(Some(presignature)) = {
+        while let Some(presignature) = {
             if self.sign_queue.is_empty_mine() {
-                Ok(None)
+                None
             } else {
                 self.presignatures.take_mine(self.me).await
             }

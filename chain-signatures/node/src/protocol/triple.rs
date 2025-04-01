@@ -577,27 +577,15 @@ impl TripleManager {
     }
 
     pub async fn contains(&self, id: TripleId) -> bool {
-        self.triple_storage
-            .contains(id)
-            .await
-            .map_err(|e| tracing::warn!(?e, "failed to check if triple exists"))
-            .unwrap_or(false)
+        self.triple_storage.contains(id).await
     }
 
     pub async fn contains_mine(&self, id: TripleId) -> bool {
-        self.triple_storage
-            .contains_mine(id, self.me)
-            .await
-            .map_err(|e| tracing::warn!(?e, "failed to check if mine triple exists"))
-            .unwrap_or(false)
+        self.triple_storage.contains_mine(id, self.me).await
     }
 
     pub async fn contains_used(&self, id: TripleId) -> bool {
-        self.triple_storage
-            .contains_used(id)
-            .await
-            .map_err(|e| tracing::warn!(?e, "failed to check if triple is used"))
-            .unwrap_or(false)
+        self.triple_storage.contains_used(id).await
     }
 
     /// Take two unspent triple by theirs id with no way to return it. Only takes
@@ -625,14 +613,7 @@ impl TripleManager {
             .triple_storage
             .take_two(id0, id1, owner, self.me)
             .await
-            .map_err(|store_error| {
-                tracing::warn!(?store_error, "failed to take two triples");
-                GenerationError::TripleStoreError(format!(
-                    "failed to take two triples {:?}",
-                    store_error
-                ))
-            })?;
-
+            .ok_or_else(|| GenerationError::TripleIsMissing(id0, id1))?;
         tracing::debug!(id0, id1, "took two triples");
         Ok((triple_0, triple_1))
     }
@@ -641,15 +622,7 @@ impl TripleManager {
     /// It is very important to NOT reuse the same triple twice for two different
     /// protocols.
     pub async fn take_two_mine(&self) -> Option<(Triple, Triple)> {
-        let (triple_0, triple_1) = self
-            .triple_storage
-            .take_two_mine(self.me)
-            .await
-            .map_err(|store_error| {
-                tracing::warn!(?store_error, "failed to take two mine triples");
-            })
-            .ok()??;
-
+        let (triple_0, triple_1) = self.triple_storage.take_two_mine(self.me).await?;
         tracing::debug!(triple_0.id, triple_1.id, "took two mine triples");
         Some((triple_0, triple_1))
     }

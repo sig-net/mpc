@@ -555,8 +555,8 @@ impl MessageReceiver for RunningState {
                     continue;
                 }
                 Err(
-                    err
-                    @ (GenerationError::AlreadyGenerated | GenerationError::TripleStoreError(_)),
+                    err @ (GenerationError::AlreadyGenerated
+                    | GenerationError::TripleIsMissing(_, _)),
                 ) => {
                     // This triple has already been generated or removed from the triple manager, so we will have to bin
                     // the entirety of the messages we received for this presignature id, and have the other nodes timeout
