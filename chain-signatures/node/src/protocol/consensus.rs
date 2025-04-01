@@ -113,7 +113,7 @@ impl ConsensusProtocol for StartedState {
                         Ordering::Equal => {
                             match contract_state
                                 .participants
-                                .find_participant(&mpc.ctx.account_id)
+                                .find_participant(&mpc.my_account_id)
                             {
                                 Some(me) => {
                                     tracing::info!(
@@ -123,8 +123,8 @@ impl ConsensusProtocol for StartedState {
                                         *me,
                                         contract_state.threshold,
                                         epoch,
-                                        &mpc.ctx.account_id,
-                                        &mpc.ctx.triple_storage,
+                                        &mpc.my_account_id,
+                                        &mpc.triple_storage,
                                         mpc.msg.clone(),
                                     );
 
@@ -133,9 +133,9 @@ impl ConsensusProtocol for StartedState {
                                             *me,
                                             contract_state.threshold,
                                             epoch,
-                                            &mpc.ctx.account_id,
-                                            &mpc.ctx.triple_storage,
-                                            &mpc.ctx.presignature_storage,
+                                            &mpc.my_account_id,
+                                            &mpc.triple_storage,
+                                            &mpc.presignature_storage,
                                             mpc.msg.clone(),
                                         )));
 
@@ -196,7 +196,7 @@ impl ConsensusProtocol for StartedState {
             None => match contract_state {
                 ProtocolState::Initializing(contract_state) => {
                     let participants: Participants = contract_state.candidates.clone().into();
-                    match participants.find_participant(&mpc.ctx.account_id) {
+                    match participants.find_participant(&mpc.my_account_id) {
                         Some(me) => {
                             tracing::info!(
                                 "started(initializing): starting key generation as a part of the participant set"
@@ -298,12 +298,11 @@ impl ConsensusProtocol for WaitingForConsensusState {
                 let has_voted = contract_state
                     .pk_votes
                     .get(&public_key)
-                    .map(|ps| ps.contains(&mpc.ctx.account_id))
+                    .map(|ps| ps.contains(&mpc.my_account_id))
                     .unwrap_or_default();
                 if !has_voted {
                     tracing::info!("waiting(initializing): we haven't voted yet, voting for the generated public key");
-                    mpc.ctx
-                        .near
+                    mpc.near
                         .vote_public_key(&public_key)
                         .await
                         .map_err(|err| ConsensusError::CannotVote(format!("{err:?}")))?;
@@ -338,7 +337,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
 
                     let Some(me) = contract_state
                         .participants
-                        .find_participant(&mpc.ctx.account_id)
+                        .find_participant(&mpc.my_account_id)
                     else {
                         tracing::error!("waiting(running, unexpected): we do not belong to the participant set -- cannot progress!");
                         return Ok(NodeState::WaitingForConsensus(self));
@@ -348,8 +347,8 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         *me,
                         self.threshold,
                         self.epoch,
-                        &mpc.ctx.account_id,
-                        &mpc.ctx.triple_storage,
+                        &mpc.my_account_id,
+                        &mpc.triple_storage,
                         mpc.msg.clone(),
                     );
 
@@ -357,9 +356,9 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         *me,
                         self.threshold,
                         self.epoch,
-                        &mpc.ctx.account_id,
-                        &mpc.ctx.triple_storage,
-                        &mpc.ctx.presignature_storage,
+                        &mpc.my_account_id,
+                        &mpc.triple_storage,
+                        &mpc.presignature_storage,
                         mpc.msg.clone(),
                     )));
 
@@ -368,7 +367,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.threshold,
                         self.public_key,
                         self.epoch,
-                        &mpc,
+                        mpc,
                     )));
 
                     Ok(NodeState::Running(RunningState {
@@ -415,10 +414,10 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         tracing::info!(
                             "waiting(resharing): waiting for resharing consensus, contract state has not been finalized yet"
                         );
-                        let has_voted = contract_state.finished_votes.contains(&mpc.ctx.account_id);
+                        let has_voted = contract_state.finished_votes.contains(&mpc.my_account_id);
                         match contract_state
                             .old_participants
-                            .find_participant(&mpc.ctx.account_id)
+                            .find_participant(&mpc.my_account_id)
                         {
                             Some(_) => {
                                 if !has_voted {
@@ -427,9 +426,9 @@ impl ConsensusProtocol for WaitingForConsensusState {
                                         "waiting(resharing): we haven't voted yet, voting for resharing to complete"
                                     );
 
-                                    mpc.ctx.near.vote_reshared(self.epoch).await.map_err(
-                                        |err| ConsensusError::CannotVote(format!("{err:?}")),
-                                    )?;
+                                    mpc.near.vote_reshared(self.epoch).await.map_err(|err| {
+                                        ConsensusError::CannotVote(format!("{err:?}"))
+                                    })?;
                                 } else {
                                     tracing::info!(
                                         epoch = self.epoch,
@@ -506,10 +505,10 @@ impl ConsensusProtocol for RunningState {
                         tracing::info!("running(resharing): contract is resharing");
                         let is_in_old_participant_set = contract_state
                             .old_participants
-                            .contains_account_id(&mpc.ctx.account_id);
+                            .contains_account_id(&mpc.my_account_id);
                         let is_in_new_participant_set = contract_state
                             .new_participants
-                            .contains_account_id(&mpc.ctx.account_id);
+                            .contains_account_id(&mpc.my_account_id);
                         if !is_in_old_participant_set || !is_in_new_participant_set {
                             return Err(ConsensusError::HasBeenKicked);
                         }
@@ -612,14 +611,11 @@ impl ConsensusProtocol for JoiningState {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
             ProtocolState::Running(contract_state) => {
-                match contract_state
-                    .candidates
-                    .find_candidate(&mpc.ctx.account_id)
-                {
+                match contract_state.candidates.find_candidate(&mpc.my_account_id) {
                     Some(_) => {
                         let votes = contract_state
                             .join_votes
-                            .get(&mpc.ctx.account_id)
+                            .get(&mpc.my_account_id)
                             .cloned()
                             .unwrap_or_default();
                         let participant_account_ids_to_vote = contract_state
@@ -640,7 +636,7 @@ impl ConsensusProtocol for JoiningState {
                         tracing::info!(
                             "joining(running): sending a transaction to join the participant set"
                         );
-                        mpc.ctx.near.propose_join().await.map_err(|err| {
+                        mpc.near.propose_join().await.map_err(|err| {
                             tracing::error!(?err, "failed to join the participant set");
                             ConsensusError::CannotJoin(format!("{err:?}"))
                         })?;
@@ -651,7 +647,7 @@ impl ConsensusProtocol for JoiningState {
             ProtocolState::Resharing(contract_state) => {
                 if contract_state
                     .new_participants
-                    .contains_account_id(&mpc.ctx.account_id)
+                    .contains_account_id(&mpc.my_account_id)
                 {
                     tracing::info!("joining(resharing): joining as a new participant");
                     start_resharing(None, mpc, contract_state).await
@@ -674,7 +670,7 @@ impl ConsensusProtocol for NodeState {
     ) -> Result<NodeState, ConsensusError> {
         match self {
             NodeState::Starting => {
-                let persistent_node_data = mpc.ctx.secret_storage.load().await?;
+                let persistent_node_data = mpc.secret_storage.load().await?;
                 Ok(NodeState::Started(StartedState {
                     persistent_node_data,
                 }))
@@ -696,11 +692,11 @@ async fn start_resharing(
 ) -> Result<NodeState, ConsensusError> {
     let me = contract_state
         .new_participants
-        .find_participant(&mpc.ctx.account_id)
+        .find_participant(&mpc.my_account_id)
         .or_else(|| {
             contract_state
                 .old_participants
-                .find_participant(&mpc.ctx.account_id)
+                .find_participant(&mpc.my_account_id)
         })
         .expect("unexpected: cannot find us in the participant set while starting resharing");
     let protocol = ReshareProtocol::new(private_share, *me, &contract_state)?;

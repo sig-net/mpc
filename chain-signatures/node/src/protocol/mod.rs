@@ -25,33 +25,26 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::MessageReceiver as _;
-use crate::protocol::sync::SyncChannel;
 use crate::rpc::{NearClient, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
-use reqwest::IntoUrl;
 use std::fmt;
 use std::path::Path;
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
-use url::Url;
 
-struct Ctx {
-    account_id: AccountId,
+pub struct Mpc {
+    my_account_id: AccountId,
     near: NearClient,
     sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
-}
-
-pub struct Mpc {
-    ctx: Ctx,
     rpc: RpcChannel,
     msg: MessageChannel,
     state: Arc<RwLock<NodeState>>,
@@ -70,16 +63,13 @@ impl Mpc {
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
     ) -> Self {
-        let ctx = Ctx {
-            account_id,
+        Mpc {
+            my_account_id: account_id,
             near,
             sign_rx: Arc::new(RwLock::new(sign_rx)),
             secret_storage,
             triple_storage,
             presignature_storage,
-        };
-        Mpc {
-            ctx,
             rpc,
             msg,
             state,
@@ -92,9 +82,9 @@ impl Mpc {
         config: Arc<RwLock<Config>>,
         mesh_state: Arc<RwLock<MeshState>>,
     ) {
-        let my_account_id = self.ctx.account_id.as_str();
+        let my_account_id = self.my_account_id.as_str();
         let _span = tracing::info_span!("running", my_account_id);
-        let my_account_id = self.ctx.account_id.clone();
+        let my_account_id = self.my_account_id.clone();
 
         crate::metrics::NODE_RUNNING
             .with_label_values(&[my_account_id.as_str()])

@@ -107,7 +107,7 @@ impl MessageInbox {
                     .signature
                     .entry(message.epoch)
                     .or_default()
-                    .entry(message.id.clone())
+                    .entry(message.id)
                     .or_default();
                 subscriber.send(message);
             }
@@ -380,13 +380,13 @@ impl MessageChannel {
     pub async fn subscribe_sign(
         &self,
         epoch: u64,
-        sign_id: &SignId,
+        sign_id: SignId,
     ) -> mpsc::Receiver<SignatureMessage> {
         let mut inbox = self.inbox.write().await;
         let subscribers = inbox.signature.entry(epoch).or_default();
         let (inbox_tx, inbox_rx) = mpsc::channel(10000);
 
-        match subscribers.entry(sign_id.clone()) {
+        match subscribers.entry(sign_id) {
             hash_map::Entry::Vacant(entry) => {
                 entry.insert(MessageSubscriber::Subscribed(inbox_tx));
             }
@@ -414,11 +414,11 @@ impl MessageChannel {
         inbox_rx
     }
 
-    pub async fn unsubscribe_sign(&self, epoch: u64, sign_id: &SignId) {
+    pub async fn unsubscribe_sign(&self, epoch: u64, sign_id: SignId) {
         let mut inbox = self.inbox.write().await;
         let subscribers = inbox.signature.entry(epoch).or_default();
 
-        match subscribers.entry(sign_id.clone()) {
+        match subscribers.entry(sign_id) {
             hash_map::Entry::Vacant(_) => {
                 // already vacant, do nothing.
             }

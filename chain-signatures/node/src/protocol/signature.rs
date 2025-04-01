@@ -60,8 +60,8 @@ impl SignRequest {
 pub struct SignQueue {
     me: Participant,
     sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
-    my_requests: VecDeque<SignRequest>,
-    other_requests: VecDeque<SignRequest>,
+    requests: VecDeque<SignRequest>,
+    mine_count: usize,
 }
 
 impl SignQueue {
@@ -76,31 +76,21 @@ impl SignQueue {
         Self {
             me,
             sign_rx,
-            my_requests: VecDeque::new(),
-            other_requests: VecDeque::new(),
+            requests: VecDeque::new(),
+            mine_count: 0,
         }
     }
 
     pub fn contains(&self, sign_id: &SignId) -> bool {
-        self.my_requests
-            .iter()
-            .any(|req| &req.indexed.id == sign_id)
-            || self
-                .other_requests
-                .iter()
-                .any(|req| &req.indexed.id == sign_id)
+        self.requests.iter().any(|req| &req.indexed.id == sign_id)
     }
 
     pub fn len_mine(&self) -> usize {
-        self.my_requests.len()
-    }
-
-    pub fn is_empty_mine(&self) -> bool {
-        self.len_mine() == 0
+        self.mine_count
     }
 
     pub fn len(&self) -> usize {
-        self.my_requests.len() + self.other_requests.len()
+        self.requests.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -126,7 +116,7 @@ impl SignQueue {
                 other => other,
             }
         } {
-            let sign_id = indexed.id.clone();
+            let sign_id = indexed.id;
             if self.contains(&sign_id) {
                 tracing::info!(?sign_id, "skipping sign request: already in the sign queue");
                 continue;
@@ -161,13 +151,12 @@ impl SignQueue {
                     participants: subset,
                 };
                 if is_mine {
+                    self.mine_count += 1;
                     crate::metrics::NUM_SIGN_REQUESTS_MINE
                         .with_label_values(&[my_account_id.as_str()])
                         .inc();
-                    self.my_requests.push_back(request);
-                } else {
-                    self.other_requests.push_back(request);
                 }
+                self.requests.push_back(request);
             } else {
                 tracing::info!(
                     ?sign_id,
@@ -178,33 +167,34 @@ impl SignQueue {
     }
 
     pub fn push_failed(&mut self, request: SignRequest) {
-        // NOTE: this prioritizes old requests first then tries to do new ones if there's enough presignatures.
+        if request.proposer == self.me {
+            self.mine_count += 1;
+        }
+
+        // NOTE: this creates arbitrary ordering for requests regardless of who owns them or if they have
+        // failed before.
         // TODO: we need to decide how to prioritize certain requests over others such as with gas or time of
         // when the request made it into the NEAR network.
         // issue: https://github.com/near/mpc-recovery/issues/596
-        if request.proposer == self.me {
-            self.my_requests.push_front(request);
-        } else {
-            self.other_requests.push_front(request);
-        }
-    }
-
-    pub fn take_mine(&mut self) -> Option<SignRequest> {
-        self.my_requests.pop_front()
+        self.requests.push_front(request);
     }
 
     pub fn take(&mut self) -> Option<SignRequest> {
-        self.other_requests.pop_front()
+        self.requests.pop_front().inspect(|request| {
+            if request.proposer == self.me {
+                self.mine_count -= 1;
+            }
+        })
     }
 
     pub fn expire(&mut self, cfg: &ProtocolConfig) {
-        self.my_requests.retain(|request| {
-            request.indexed.timestamp.elapsed()
-                < Duration::from_millis(cfg.signature.generation_timeout_total)
-        });
-        self.other_requests.retain(|request| {
-            request.indexed.timestamp.elapsed()
-                < Duration::from_millis(cfg.signature.generation_timeout_total)
+        self.requests.retain(|request| {
+            let retain = request.indexed.timestamp.elapsed()
+                < Duration::from_millis(cfg.signature.generation_timeout_total);
+            if !retain && request.proposer == self.me {
+                self.mine_count -= 1;
+            }
+            retain
         });
     }
 }
@@ -273,13 +263,13 @@ impl PresignatureStatus {
 #[derive(Debug, thiserror::Error)]
 pub enum SignatureTaskError {
     #[error("sign[task] exhausted timeout")]
-    Timeout(SignatureGenerator),
+    Timeout(SignTask),
     #[error("sign[task] exhausted total timeout")]
-    TimeoutTotal(SignatureGenerator),
+    TimeoutTotal(SignTask),
     #[error("sign[task] protocol init failure: {0:?}")]
     Init(InitializationError, SignRequest),
     #[error("sign[task] protocol failure: {0:?}")]
-    Protocol(ProtocolError, SignatureGenerator),
+    Protocol(ProtocolError, SignTask),
     #[error("sign[task] cancelled")]
     Cancelled,
     #[error("sign[task] could not find proposed presignature in time")]
@@ -290,8 +280,8 @@ pub enum SignatureTaskError {
     Storage(#[from] StoreError),
 }
 
-type SignatureTaskResult = Result<SignatureGenerator, SignatureTaskError>;
-type SignatureTask = tokio::task::JoinHandle<SignatureTaskResult>;
+type SignTaskResult = Result<SignTask, SignatureTaskError>;
+type SignTaskHandle = tokio::task::JoinHandle<SignTaskResult>;
 
 fn start_sign(
     me: Participant,
@@ -331,8 +321,8 @@ fn start_sign(
     )?))
 }
 
-/// An ongoing signature generator.
-pub struct SignatureGenerator {
+/// An ongoing signature generation task.
+pub struct SignTask {
     epoch: u64,
     me: Participant,
     public_key: PublicKey,
@@ -346,9 +336,9 @@ pub struct SignatureGenerator {
     poked_latest: Option<(Instant, Duration, u64)>,
 }
 
-impl fmt::Debug for SignatureGenerator {
+impl fmt::Debug for SignTask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SignatureGenerator")
+        f.debug_struct("SignTask")
             .field("epoch", &self.epoch)
             .field("presignature_id", &self.presignature_id)
             .field("public_key", &self.public_key)
@@ -357,7 +347,8 @@ impl fmt::Debug for SignatureGenerator {
     }
 }
 
-impl SignatureGenerator {
+impl SignTask {
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         epoch: u64,
         me: Participant,
@@ -368,10 +359,10 @@ impl SignatureGenerator {
         rpc: RpcChannel,
         outbox: MessageChannel,
         cfg: ProtocolConfig,
-    ) -> SignatureTask {
+    ) -> SignTaskHandle {
         tokio::spawn(async move {
             let timestamp = Instant::now();
-            let mut inbox = outbox.subscribe_sign(epoch, &request.indexed.id).await;
+            let mut inbox = outbox.subscribe_sign(epoch, request.id()).await;
             let (presignature, first_msg) = status.fetch(&mut inbox, &cfg).await?;
 
             let presignature_id = presignature.id;
@@ -385,7 +376,7 @@ impl SignatureGenerator {
                 protocol.message(first_msg.from, first_msg.data);
             }
 
-            let generator = Self {
+            let task = Self {
                 epoch,
                 me,
                 public_key,
@@ -398,7 +389,7 @@ impl SignatureGenerator {
                 poked_latest: None,
             };
 
-            generator.run(my_account_id, inbox, outbox, rpc).await
+            task.run(my_account_id, inbox, outbox, rpc).await
         })
     }
 
@@ -408,7 +399,7 @@ impl SignatureGenerator {
         mut inbox: mpsc::Receiver<SignatureMessage>,
         outbox: MessageChannel,
         rpc: RpcChannel,
-    ) -> SignatureTaskResult {
+    ) -> SignTaskResult {
         let signature_before_poke_delay_metric = crate::metrics::SIGNATURE_BEFORE_POKE_DELAY
             .with_label_values(&[my_account_id.as_str()]);
         let signature_accrued_wait_delay_metric = crate::metrics::SIGNATURE_ACCRUED_WAIT_DELAY
@@ -451,7 +442,7 @@ impl SignatureGenerator {
                     Ok(action) => action,
                     Err(err) => {
                         outbox
-                            .filter_sign(self.request.id().clone(), self.presignature_id)
+                            .filter_sign(self.request.id(), self.presignature_id)
                             .await;
 
                         break 'task Err(SignatureTaskError::Protocol(err, self));
@@ -473,7 +464,7 @@ impl SignatureGenerator {
                                     self.me,
                                     *to,
                                     SignatureMessage {
-                                        id: self.request.id().clone(),
+                                        id: self.request.id(),
                                         proposer: self.request.proposer,
                                         presignature_id: self.presignature_id,
                                         epoch: self.epoch,
@@ -507,7 +498,7 @@ impl SignatureGenerator {
                                 self.me,
                                 to,
                                 SignatureMessage {
-                                    id: self.request.id().clone(),
+                                    id: self.request.id(),
                                     proposer: self.request.proposer,
                                     presignature_id: self.presignature_id,
                                     epoch: self.epoch,
@@ -548,7 +539,7 @@ impl SignatureGenerator {
                             rpc.publish(self.public_key, self.request.clone(), output);
                         }
                         outbox
-                            .filter_sign(self.request.id().clone(), self.presignature_id)
+                            .filter_sign(self.request.id(), self.presignature_id)
                             .await;
 
                         if let Some((last_poked, total_wait, total_pokes)) = self.poked_latest {
@@ -576,7 +567,7 @@ impl SignatureGenerator {
 
 pub struct SignatureManager {
     /// Ongoing signature generation protocols.
-    generators: HashMap<SignId, SignatureTask>,
+    tasks: HashMap<SignId, SignTaskHandle>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
     presignatures: PresignatureStorage,
@@ -600,11 +591,11 @@ impl SignatureManager {
         mpc: &Mpc,
     ) -> Self {
         Self {
-            generators: HashMap::new(),
-            sign_queue: SignQueue::new(me, mpc.ctx.sign_rx.clone()),
-            presignatures: mpc.ctx.presignature_storage.clone(),
+            tasks: HashMap::new(),
+            sign_queue: SignQueue::new(me, mpc.sign_rx.clone()),
+            presignatures: mpc.presignature_storage.clone(),
             me,
-            my_account_id: mpc.ctx.account_id.clone(),
+            my_account_id: mpc.my_account_id.clone(),
             threshold,
             public_key,
             epoch,
@@ -624,10 +615,10 @@ impl SignatureManager {
             PresignatureStatus::Proposed(_) => "proposer starting",
             PresignatureStatus::Waiting(_) => "acceptor joining",
         };
-        let sign_id = request.id().clone();
+        let sign_id = request.id();
         tracing::info!(?sign_id, "{entry} sign task to generate a new signature");
 
-        let sign_task = SignatureGenerator::spawn(
+        let sign_task = SignTask::spawn(
             self.epoch,
             self.me,
             self.my_account_id.clone(),
@@ -638,21 +629,22 @@ impl SignatureManager {
             self.msg.clone(),
             cfg.clone(),
         );
-        self.generators.insert(sign_id, sign_task);
+        self.tasks.insert(sign_id, sign_task);
         crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
             .with_label_values(&[self.my_account_id.as_str()])
             .inc();
     }
 
     async fn process_finished(&mut self) {
-        if self.generators.is_empty() {
+        if self.tasks.is_empty() {
             return;
         }
 
         let finished_tasks = self
-            .generators
+            .tasks
             .iter()
-            .map_while(|(sign_id, task)| task.is_finished().then(|| sign_id.clone()))
+            .map_while(|(sign_id, task)| task.is_finished().then_some(sign_id))
+            .copied()
             .collect::<Vec<_>>();
 
         let signature_generator_failures_metric = crate::metrics::SIGNATURE_GENERATOR_FAILURES
@@ -661,7 +653,7 @@ impl SignatureManager {
             crate::metrics::SIGNATURE_FAILURES.with_label_values(&[self.my_account_id.as_str()]);
 
         for sign_id in finished_tasks {
-            let Some(task) = self.generators.remove(&sign_id) else {
+            let Some(task) = self.tasks.remove(&sign_id) else {
                 tracing::warn!(?sign_id, "sign task not found");
                 continue;
             };
@@ -788,43 +780,46 @@ impl SignatureManager {
             .with_label_values(&[self.my_account_id.as_str()])
             .set(self.sign_queue.len_mine() as i64);
 
+        // TODO: might want to handle the case of bad init somehow
         let mut retry = Vec::new();
-        while let Ok(Some(presignature)) = {
-            if self.sign_queue.is_empty_mine() {
-                Ok(None)
+        while let Some(request) = self.sign_queue.take() {
+            let presignature_status = if request.proposer == self.me {
+                let presignature = match self.presignatures.take_mine(self.me).await {
+                    Ok(Some(presignature)) => presignature,
+                    Ok(None) => {
+                        retry.push(request);
+                        continue;
+                    }
+                    Err(store_err) => {
+                        tracing::warn!(
+                            sign_id = ?request.indexed.id,
+                            ?store_err,
+                            "failed to take presignature from storage"
+                        );
+                        retry.push(request);
+                        continue;
+                    }
+                };
+
+                let participants =
+                    intersect_vec(&[stable, &presignature.participants, &request.participants]);
+                if participants.len() < self.threshold {
+                    tracing::warn!(
+                        sign_id = ?request.indexed.id,
+                        presignature_id = ?presignature.id,
+                        ?participants,
+                        "intersection < threshold, trashing presignature"
+                    );
+                    retry.push(request);
+                    continue;
+                }
+                PresignatureStatus::Proposed(presignature)
             } else {
-                self.presignatures.take_mine(self.me).await
-            }
-        } {
-            let Some(my_request) = self.sign_queue.take_mine() else {
-                tracing::warn!(
-                    ?presignature,
-                    "unexpected, no more requests to handle. presignature will be removed",
-                );
-                continue;
+                PresignatureStatus::Waiting(self.presignatures.clone())
             };
 
-            let participants =
-                intersect_vec(&[stable, &presignature.participants, &my_request.participants]);
-            if participants.len() < self.threshold {
-                tracing::warn!(
-                    sign_id = ?my_request.indexed.id,
-                    presignature_id = ?presignature.id,
-                    ?participants,
-                    "intersection < threshold, trashing presignature"
-                );
-                retry.push(my_request);
-                continue;
-            }
-
             // TODO: make sure we handle retrying if the generation fails.
-            self.spawn_generation(PresignatureStatus::Proposed(presignature), my_request, cfg);
-        }
-
-        // TODO: might want to handle the case of bad init somehow
-        while let Some(request) = self.sign_queue.take() {
-            let status = PresignatureStatus::Waiting(self.presignatures.clone());
-            self.spawn_generation(status, request, cfg);
+            self.spawn_generation(presignature_status, request, cfg);
         }
 
         for request in retry {

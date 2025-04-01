@@ -103,8 +103,7 @@ impl CryptographicProtocol for GeneratingState {
                         "generating: successfully completed key generation"
                     );
                     // TODO: handle secret storage error
-                    mpc.ctx
-                        .secret_storage
+                    mpc.secret_storage
                         .store(&PersistentNodeData {
                             epoch: 0,
                             private_share: r.private_share,
@@ -128,7 +127,7 @@ impl CryptographicProtocol for GeneratingState {
 impl CryptographicProtocol for WaitingForConsensusState {
     async fn progress(
         mut self,
-        mpc: &mut Mpc,
+        _mpc: &mut Mpc,
         _cfg: Config,
         _mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
@@ -205,8 +204,7 @@ impl CryptographicProtocol for ResharingState {
                 }
                 Action::Return(private_share) => {
                     tracing::debug!("resharing: successfully completed key reshare");
-                    mpc.ctx
-                        .secret_storage
+                    mpc.secret_storage
                         .store(&PersistentNodeData {
                             epoch: self.old_epoch + 1,
                             private_share,
@@ -216,14 +214,14 @@ impl CryptographicProtocol for ResharingState {
 
                     // Clear triples from storage before starting the new epoch. This is necessary if the node has accumulated
                     // triples from previous epochs. If it was not able to clear the previous triples, we'll leave them as-is
-                    if let Err(err) = mpc.ctx.triple_storage.clear().await {
+                    if let Err(err) = mpc.triple_storage.clear().await {
                         tracing::error!(
                             ?err,
                             "failed to clear triples from storage on new epoch start"
                         );
                     }
 
-                    if let Err(err) = mpc.ctx.presignature_storage.clear().await {
+                    if let Err(err) = mpc.presignature_storage.clear().await {
                         tracing::error!(
                             ?err,
                             "failed to clear presignatures from storage on new epoch start"
