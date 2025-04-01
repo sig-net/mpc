@@ -1,6 +1,6 @@
-use super::consensus::ConsensusCtx;
 use super::contract::primitives::intersect_vec;
 use super::state::RunningState;
+use super::Mpc;
 use crate::kdf::derive_delta;
 use crate::protocol::message::{MessageChannel, SignatureMessage};
 use crate::protocol::presignature::{Presignature, PresignatureId};
@@ -597,19 +597,19 @@ impl SignatureManager {
         threshold: usize,
         public_key: PublicKey,
         epoch: u64,
-        ctx: &impl ConsensusCtx,
+        mpc: &Mpc,
     ) -> Self {
         Self {
             generators: HashMap::new(),
-            sign_queue: SignQueue::new(me, ctx.sign_rx().clone()),
-            presignatures: ctx.presignature_storage().clone(),
+            sign_queue: SignQueue::new(me, mpc.ctx.sign_rx.clone()),
+            presignatures: mpc.ctx.presignature_storage.clone(),
             me,
-            my_account_id: ctx.my_account_id().clone(),
+            my_account_id: mpc.ctx.account_id.clone(),
             threshold,
             public_key,
             epoch,
-            msg: ctx.msg_channel().clone(),
-            rpc: ctx.rpc_channel().clone(),
+            msg: mpc.msg.clone(),
+            rpc: mpc.rpc.clone(),
         }
     }
 

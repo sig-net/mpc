@@ -4,7 +4,7 @@ use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::sync::SyncTask;
-use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
+use crate::protocol::{spawn_system_metrics, Mpc, SignQueue};
 use crate::rpc::{NearClient, NodeStateWatcher, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, logs, mesh, storage, web};
@@ -277,15 +277,12 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
                 let (sender, channel) =
                     MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
-                let protocol = MpcSignProtocol::init(
-                    my_address,
-                    mpc_contract_id,
+                let protocol = Mpc::init(
                     account_id.clone(),
                     state.clone(),
                     near_client,
                     rpc_channel,
                     channel,
-                    sync_channel.clone(),
                     sign_rx,
                     key_storage,
                     triple_storage,

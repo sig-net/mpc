@@ -20,8 +20,6 @@ pub use signature::{IndexedSignRequest, SignQueue};
 pub use state::NodeState;
 pub use sysinfo::{Components, CpuRefreshKind, Disks, RefreshKind, System};
 
-use self::consensus::ConsensusCtx;
-use self::cryptography::CryptographicCtx;
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
@@ -44,132 +42,46 @@ use tokio::sync::RwLock;
 use url::Url;
 
 struct Ctx {
-    my_address: Url,
     account_id: AccountId,
-    mpc_contract_id: AccountId,
     near: NearClient,
-    rpc_channel: RpcChannel,
     sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     secret_storage: SecretNodeStorageBox,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
 }
 
-impl ConsensusCtx for &mut MpcSignProtocol {
-    fn my_account_id(&self) -> &AccountId {
-        &self.ctx.account_id
-    }
-
-    fn near_client(&self) -> &NearClient {
-        &self.ctx.near
-    }
-
-    fn mpc_contract_id(&self) -> &AccountId {
-        &self.ctx.mpc_contract_id
-    }
-
-    fn my_address(&self) -> &Url {
-        &self.ctx.my_address
-    }
-
-    fn sign_rx(&self) -> Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>> {
-        self.ctx.sign_rx.clone()
-    }
-
-    fn secret_storage(&self) -> &SecretNodeStorageBox {
-        &self.ctx.secret_storage
-    }
-
-    fn triple_storage(&self) -> &TripleStorage {
-        &self.ctx.triple_storage
-    }
-
-    fn presignature_storage(&self) -> &PresignatureStorage {
-        &self.ctx.presignature_storage
-    }
-
-    fn msg_channel(&self) -> &MessageChannel {
-        &self.channel
-    }
-
-    fn rpc_channel(&self) -> &RpcChannel {
-        &self.ctx.rpc_channel
-    }
-
-    fn sync_channel(&self) -> &SyncChannel {
-        &self.sync_channel
-    }
-}
-
-impl CryptographicCtx for &mut MpcSignProtocol {
-    fn mpc_contract_id(&self) -> &AccountId {
-        &self.ctx.mpc_contract_id
-    }
-
-    fn my_account_id(&self) -> &AccountId {
-        &self.ctx.account_id
-    }
-
-    fn secret_storage(&mut self) -> &mut SecretNodeStorageBox {
-        &mut self.ctx.secret_storage
-    }
-
-    fn triple_storage(&self) -> &TripleStorage {
-        &self.ctx.triple_storage
-    }
-
-    fn presignature_storage(&self) -> &PresignatureStorage {
-        &self.ctx.presignature_storage
-    }
-
-    fn channel(&self) -> &MessageChannel {
-        &self.channel
-    }
-
-    fn rpc_channel(&self) -> &crate::rpc::RpcChannel {
-        &self.ctx.rpc_channel
-    }
-}
-
-pub struct MpcSignProtocol {
+pub struct Mpc {
     ctx: Ctx,
-    channel: MessageChannel,
-    sync_channel: SyncChannel,
+    rpc: RpcChannel,
+    msg: MessageChannel,
     state: Arc<RwLock<NodeState>>,
 }
 
-impl MpcSignProtocol {
+impl Mpc {
     #![allow(clippy::too_many_arguments)]
-    pub fn init<U: IntoUrl>(
-        my_address: U,
-        mpc_contract_id: AccountId,
+    pub fn init(
         account_id: AccountId,
         state: Arc<RwLock<NodeState>>,
         near: NearClient,
-        rpc_channel: RpcChannel,
-        channel: MessageChannel,
-        sync_channel: SyncChannel,
+        rpc: RpcChannel,
+        msg: MessageChannel,
         sign_rx: mpsc::Receiver<IndexedSignRequest>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
     ) -> Self {
-        let my_address = my_address.into_url().unwrap();
         let ctx = Ctx {
-            my_address,
             account_id,
-            mpc_contract_id,
             near,
-            rpc_channel,
             sign_rx: Arc::new(RwLock::new(sign_rx)),
             secret_storage,
             triple_storage,
             presignature_storage,
         };
-        MpcSignProtocol {
+        Mpc {
             ctx,
-            channel,
-            sync_channel,
+            rpc,
+            msg,
             state,
         }
     }
@@ -256,7 +168,7 @@ impl MpcSignProtocol {
             }
 
             let message_time = Instant::now();
-            if let Err(err) = state.recv(&self.channel, cfg, mesh_state).await {
+            if let Err(err) = state.recv(&self.msg, cfg, mesh_state).await {
                 tracing::warn!("protocol unable to receive messages: {err:?}");
             }
             crate::metrics::PROTOCOL_LATENCY_ITER_MESSAGE
