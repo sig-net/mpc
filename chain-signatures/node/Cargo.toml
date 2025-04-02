@@ -28,7 +28,6 @@ semver = "1.0.23"
 sysinfo = "0.32.0"
 tokio-retry = "0.3"
 tracing-stackdriver = "0.10.0"
-alloy = "0.9.1"
 alloy-signer-local = "0.9.1"
 alloy-sol-types = "0.8.24"
 helios = { git = "https://github.com/sig-net/helios", rev = "7c8018157cf5adc176ba2de8c769c1a7cc6f6106" }
