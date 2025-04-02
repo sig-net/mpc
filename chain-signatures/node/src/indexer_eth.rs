@@ -127,6 +127,25 @@ impl EthArgs {
             network: self.eth_network?,
         })
     }
+
+    pub fn from_config(config: Option<EthConfig>) -> Self {
+        match config {
+            Some(config) if !config.account_sk.is_empty() => Self {
+                eth_account_sk: Some(config.account_sk),
+                eth_consensus_rpc_http_url: Some(config.consensus_rpc_http_url),
+                eth_execution_rpc_http_url: Some(config.execution_rpc_http_url),
+                eth_contract_address: Some(config.contract_address),
+                eth_network: Some(config.network),
+            },
+            _ => Self {
+                eth_account_sk: None,
+                eth_consensus_rpc_http_url: None,
+                eth_execution_rpc_http_url: None,
+                eth_contract_address: None,
+                eth_network: None,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
