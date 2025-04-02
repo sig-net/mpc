@@ -6243,7 +6243,6 @@ dependencies = [
  "ciborium",
  "clap",
  "deadpool-redis",
- "eyre",
  "google-datastore1",
  "google-secretmanager1",
  "helios",
