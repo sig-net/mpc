@@ -307,7 +307,7 @@ impl TripleStorage {
             -- check if the given triple id belong to the owner, if not then error out
             local check = redis.call("SMISMEMBER", owner_key, id1, id2)
             if check[1] == 0 or check[2] == 0 then
-                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " cannot be taken by diff owner than " .. owner_key}
+                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " cannot be taken by incorrect owner " .. owner_key}
             end
 
             -- fetch the triples and delete them once successfully fetched
@@ -418,36 +418,6 @@ impl TripleStorage {
             })
             .ok()?;
         Some(result)
-    }
-
-    pub async fn _clear(&self) -> Vec<String> {
-        const SCRIPT: &str = r#"
-            local owner_keys = redis.call("SMEMBERS", KEYS[1])
-            local del = {}
-            for _, key in ipairs(KEYS) do
-                table.insert(del, key)
-            end
-            for _, key in ipairs(owner_keys) do
-                table.insert(del, key)
-            end
-
-            return del
-        "#;
-
-        let Some(mut conn) = self.connect().await else {
-            return Vec::new();
-        };
-        redis::Script::new(SCRIPT)
-            .key(&self.owner_keys)
-            .key(&self.triple_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
-            .invoke_async(&mut conn)
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(?err, "failed to clear triple storage");
-            })
-            .unwrap_or_default()
     }
 
     /// Clear all triple storage, including used, reserved, and owned keys.

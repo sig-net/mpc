@@ -300,7 +300,7 @@ impl PresignatureStorage {
                 return {err = 'WARN presignature ' .. presig_id ..' cannot be taken as foreign owned'}
             end
             if redis.call("SISMEMBER", owner_key, presig_id) == 0 then
-                return {err = 'WARN presignature ' .. presig_id .. ' cannot be taken by different owner ' .. owner_key }
+                return {err = 'WARN presignature ' .. presig_id .. ' cannot be taken by incorrect owner ' .. owner_key }
             end
 
             local presig = redis.call("HGET", presig_key, presig_id)
