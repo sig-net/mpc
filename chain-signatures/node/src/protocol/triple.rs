@@ -613,7 +613,7 @@ impl TripleManager {
             .triple_storage
             .take_two(id0, id1, owner, self.me)
             .await
-            .ok_or_else(|| GenerationError::TripleIsMissing(id0, id1))?;
+            .ok_or(GenerationError::TripleIsMissing(id0, id1))?;
         tracing::debug!(id0, id1, "took two triples");
         Ok((triple_0, triple_1))
     }

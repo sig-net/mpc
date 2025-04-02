@@ -73,10 +73,8 @@ impl TripleStorage {
             .ok()
     }
 
-    // TODO: make triple reservation expire after some time if it does not get stored.
     pub async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
-        let mut conn = self.connect().await?;
-        let script = r#"
+        const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local used_key = KEYS[2]
             local reserved_key = KEYS[3]
@@ -98,7 +96,8 @@ impl TripleStorage {
             end
         "#;
 
-        let result: Result<(), _> = redis::Script::new(script)
+        let mut conn = self.connect().await?;
+        let result: Result<(), _> = redis::Script::new(SCRIPT)
             .key(&self.triple_key)
             .key(&self.used_key)
             .key(&self.reserved_key)
@@ -123,11 +122,7 @@ impl TripleStorage {
         owner: Participant,
         owner_shares: &[TripleId],
     ) -> Vec<TripleId> {
-        let Some(mut conn) = self.connect().await else {
-            return Vec::new();
-        };
-
-        let script = r#"
+        const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local reserved_key = KEYS[2]
             local owner_key = KEYS[3]
@@ -157,7 +152,10 @@ impl TripleStorage {
             return outdated
         "#;
 
-        let result: Result<Vec<TripleId>, _> = redis::Script::new(script)
+        let Some(mut conn) = self.connect().await else {
+            return Vec::with_capacity(0);
+        };
+        let result: Result<Vec<TripleId>, _> = redis::Script::new(SCRIPT)
             .key(&self.triple_key)
             .key(&self.reserved_key)
             .key(owner_key(&self.owner_keys, owner))
@@ -175,7 +173,7 @@ impl TripleStorage {
             }
             Err(err) => {
                 tracing::warn!(?err, "failed to remove outdated triples");
-                Vec::new()
+                Vec::with_capacity(0)
             }
         }
     }
@@ -195,11 +193,7 @@ impl TripleStorage {
     }
 
     async fn insert(&self, triple: Triple, owner: Participant) -> bool {
-        let Some(mut conn) = self.connect().await else {
-            return false;
-        };
-
-        let script = r#"
+        const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local used_key = KEYS[2]
             local reserved_key = KEYS[3]
@@ -223,20 +217,24 @@ impl TripleStorage {
             redis.call("HSET", triple_key, triple_id, triple)
         "#;
 
-        let triple_id = triple.id;
-        let result: Result<(), _> = redis::Script::new(script)
+        let id = triple.id;
+        let Some(mut conn) = self.connect().await else {
+            tracing::warn!(id, "failed to insert triple: connection failed");
+            return false;
+        };
+        let result: Result<(), _> = redis::Script::new(SCRIPT)
             .key(&self.triple_key)
             .key(&self.used_key)
             .key(&self.reserved_key)
             .key(&self.owner_keys)
             .key(owner_key(&self.owner_keys, owner))
-            .arg(triple_id)
+            .arg(id)
             .arg(triple)
             .invoke_async(&mut conn)
             .await;
 
         if let Err(err) = result {
-            tracing::warn!(triple_id, ?err, "failed to insert triple into storage");
+            tracing::warn!(id, ?err, "failed to insert triple into storage");
             false
         } else {
             true
@@ -251,7 +249,7 @@ impl TripleStorage {
             Ok(exists) => exists,
             Err(err) => {
                 tracing::warn!(id, ?err, "failed to check if triple is stored");
-                return false;
+                false
             }
         }
     }
@@ -292,54 +290,47 @@ impl TripleStorage {
         owner: Participant,
         me: Participant,
     ) -> Option<(Triple, Triple)> {
-        let mut conn = self.connect().await?;
-        let lua_script = r#"
+        const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local used_key = KEYS[2]
             local owner_key = KEYS[3]
             local mine_key = KEYS[4]
-            local triple_id1 = ARGV[1]
-            local triple_id2 = ARGV[2]
+            local id1 = ARGV[1]
+            local id2 = ARGV[2]
 
             -- check if the given triple id belong to us, if so then we cannot take it as foreign
-            local check = redis.call("SMISMEMBER", mine_key, triple_id1, triple_id2)
-            if check[1] == 1 then
-                return {err = "WARN triple " .. triple_id1 .. " cannot be taken as foreign owned"}
-            end
-            if check[2] == 1 then
-                return {err = "WARN triple " .. triple_id2 .. " cannot be taken as foreign owned"}
+            local check = redis.call("SMISMEMBER", mine_key, id1, id2)
+            if check[1] == 1 or check[2] == 1 then
+                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " cannot be taken as foreign owned"}
             end
 
-            -- check if the given triple id belong to the owner, if so then we cannot take it as foreign
-            check = redis.call("SMISMEMBER", owner_key, triple_id1, triple_id2)
-            if check[1] == 0 then
-                return {err = "WARN triple " .. triple_id1 .. " cannot by different owner " .. owner_key}
-            end
-            if check[2] == 0 then
-                return {err = "WARN triple " .. triple_id2 .. " cannot by different owner " .. owner_key }
+            -- check if the given triple id belong to the owner, if not then error out
+            local check = redis.call("SMISMEMBER", owner_key, id1, id2)
+            if check[1] == 0 or check[2] == 0 then
+                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " cannot be taken by diff owner than " .. owner_key}
             end
 
             -- fetch the triples and delete them once successfully fetched
-            local triples = redis.call("HMGET", triple_key, triple_id1, triple_id2)
+            local triples = redis.call("HMGET", triple_key, id1, id2)
             if not triples[1] then
-                return {err = "WARN unexpected, triple " .. triple_id1 .. " is missing"}
+                return {err = "WARN unexpected, triple " .. id1 .. " is missing"}
             end
             if not triples[2] then
-                return {err = "WARN unexpected, triple " .. triple_id2 .. " is missing"}
+                return {err = "WARN unexpected, triple " .. id2 .. " is missing"}
             end
-            redis.call("HDEL", triple_key, triple_id1, triple_id2)
-            redis.call("SREM", owner_key, triple_id1, triple_id2)
+            redis.call("HDEL", triple_key, id1, id2)
+            redis.call("SREM", owner_key, id1, id2)
 
             -- Add the triples to the used set and set expiration time. Note, HSET is used so
             -- we can expire on each field instead of the whole hash set.
-            redis.call("HSET", used_key, triple_id1, "1", triple_id2, "1")
-            redis.call("HEXPIRE", used_key, ARGV[3], "FIELDS", 2, triple_id1, triple_id2)
+            redis.call("HSET", used_key, id1, "1", id2, "1")
+            redis.call("HEXPIRE", used_key, ARGV[3], "FIELDS", 2, id1, id2)
 
-            -- Return the triples
             return triples
         "#;
 
-        match redis::Script::new(lua_script)
+        let mut conn = self.connect().await?;
+        match redis::Script::new(SCRIPT)
             .key(&self.triple_key)
             .key(&self.used_key)
             .key(owner_key(&self.owner_keys, owner))
@@ -353,13 +344,13 @@ impl TripleStorage {
             Ok(triples) => triples,
             Err(err) => {
                 tracing::warn!(id1, id2, ?err, "failed to take two triples from storage");
-                return None;
+                None
             }
         }
     }
 
     pub async fn take_two_mine(&self, me: Participant) -> Option<(Triple, Triple)> {
-        let lua_script = r#"
+        const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local used_key = KEYS[2]
             local mine_key = KEYS[3]
@@ -389,7 +380,7 @@ impl TripleStorage {
         "#;
 
         let mut conn = self.connect().await?;
-        match redis::Script::new(lua_script)
+        match redis::Script::new(SCRIPT)
             .key(&self.triple_key)
             .key(&self.used_key)
             .key(owner_key(&self.owner_keys, me))
@@ -400,7 +391,7 @@ impl TripleStorage {
             Ok(triples) => triples,
             Err(err) => {
                 tracing::warn!(?err, "failed to take two mine triples from storage");
-                return None;
+                None
             }
         }
     }
@@ -429,18 +420,56 @@ impl TripleStorage {
         Some(result)
     }
 
+    pub async fn _clear(&self) -> Vec<String> {
+        const SCRIPT: &str = r#"
+            local owner_keys = redis.call("SMEMBERS", KEYS[1])
+            local del = {}
+            for _, key in ipairs(KEYS) do
+                table.insert(del, key)
+            end
+            for _, key in ipairs(owner_keys) do
+                table.insert(del, key)
+            end
+
+            return del
+        "#;
+
+        let Some(mut conn) = self.connect().await else {
+            return Vec::new();
+        };
+        redis::Script::new(SCRIPT)
+            .key(&self.owner_keys)
+            .key(&self.triple_key)
+            .key(&self.used_key)
+            .key(&self.reserved_key)
+            .invoke_async(&mut conn)
+            .await
+            .inspect_err(|err| {
+                tracing::warn!(?err, "failed to clear triple storage");
+            })
+            .unwrap_or_default()
+    }
+
     /// Clear all triple storage, including used, reserved, and owned keys.
     /// Return true if successful, false otherwise.
     pub async fn clear(&self) -> bool {
+        const SCRIPT: &str = r#"
+            local owner_keys = redis.call("SMEMBERS", KEYS[1])
+            local del = {}
+            for _, key in ipairs(KEYS) do
+                table.insert(del, key)
+            end
+            for _, key in ipairs(owner_keys) do
+                table.insert(del, key)
+            end
+
+            redis.call("DEL", unpack(del))
+        "#;
+
         let Some(mut conn) = self.connect().await else {
             return false;
         };
-        let script = r#"
-            local owner_keys = redis.call("SMEMBERS", KEYS[1])
-            redis.call("DEL", unpack(KEYS), unpack(owner_keys))
-        "#;
-
-        let outcome: Option<()> = redis::Script::new(script)
+        let outcome: Option<()> = redis::Script::new(SCRIPT)
             .key(&self.owner_keys)
             .key(&self.triple_key)
             .key(&self.used_key)

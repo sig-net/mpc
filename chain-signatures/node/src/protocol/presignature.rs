@@ -211,7 +211,7 @@ impl PresignatureManager {
             .presignatures
             .take(id, owner, self.me)
             .await
-            .ok_or_else(|| GenerationError::PresignatureIsMissing(id))?;
+            .ok_or(GenerationError::PresignatureIsMissing(id))?;
 
         tracing::debug!(id, "took presignature");
         Ok(presignature)

@@ -187,7 +187,7 @@ impl PresignatureStorage {
             }
             Err(err) => {
                 tracing::warn!(?err, "failed to remove outdated presignatures");
-                Vec::new()
+                Vec::with_capacity(0)
             }
         }
     }
@@ -252,7 +252,7 @@ impl PresignatureStorage {
             Ok(exists) => exists,
             Err(err) => {
                 tracing::warn!(id, ?err, "failed to check if presignature is stored");
-                return false;
+                false
             }
         }
     }
@@ -398,15 +398,23 @@ impl PresignatureStorage {
     /// Clear all presignature storage, including used, reserved, and owned keys.
     /// Return true if successful, false otherwise.
     pub async fn clear(&self) -> bool {
+        const SCRIPT: &str = r#"
+            local owner_keys = redis.call("SMEMBERS", KEYS[1])
+            local del = {}
+            for _, key in ipairs(KEYS) do
+                table.insert(del, key)
+            end
+            for _, key in ipairs(owner_keys) do
+                table.insert(del, key)
+            end
+
+            redis.call("DEL", unpack(del))
+        "#;
+
         let Some(mut conn) = self.connect().await else {
             return false;
         };
-        let script = r#"
-            local owner_keys = redis.call("SMEMBERS", KEYS[1])
-            redis.call("DEL", unpack(KEYS), unpack(owner_keys))
-        "#;
-
-        let outcome: Option<()> = redis::Script::new(script)
+        let outcome: Option<()> = redis::Script::new(SCRIPT)
             .key(&self.owner_keys)
             .key(&self.presig_key)
             .key(&self.used_key)

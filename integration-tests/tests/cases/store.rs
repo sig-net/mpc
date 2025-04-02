@@ -122,6 +122,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(!triple_manager.contains(mine_id1).await);
     assert!(!triple_manager.contains(mine_id2).await);
 
+    // println!("{:#?}", triple_storage.clear().await);
     assert!(triple_storage.clear().await);
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
@@ -133,10 +134,24 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
             .await;
     }
 
+    // Have our node0 own 16 to 20
+    for id in 16..=20 {
+        triple_manager
+            .reserve(id)
+            .await
+            .unwrap()
+            .insert(dummy_triple(id), node0)
+            .await;
+    }
+
     // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
     let mut outdated = triple_storage.remove_outdated(node1, &[13, 14, 15]).await;
     outdated.sort();
     assert_eq!(outdated, vec![10, 11, 12]);
+
+    assert_eq!(triple_manager.len_generated().await, 8);
+    assert_eq!(triple_manager.len_mine().await, 5);
+    assert_eq!(triple_manager.len_potential().await, 8);
 
     Ok(())
 }
@@ -250,12 +265,26 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
             .await;
     }
 
+    // Have our node0 own 16 to 20
+    for id in 16..=20 {
+        presignature_manager
+            .reserve(id)
+            .await
+            .unwrap()
+            .insert(dummy_presignature(id), node0)
+            .await;
+    }
+
     // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
     let mut outdated = presignature_storage
         .remove_outdated(node1, &[13, 14, 15])
         .await;
     outdated.sort();
     assert_eq!(outdated, vec![10, 11, 12]);
+
+    assert_eq!(presignature_manager.len_generated().await, 8);
+    assert_eq!(presignature_manager.len_mine().await, 5);
+    assert_eq!(presignature_manager.len_potential().await, 8);
 
     Ok(())
 }
