@@ -146,7 +146,7 @@ mod tests {
         let admin_pk = admin_pk.to_encoded_point(false);
 
         // Calculate admin Ethereum address
-        let hash: [u8; 32] = *alloy::primitives::keccak256(admin_pk.as_bytes()[1..].to_vec());
+        let hash: [u8; 32] = *alloy::primitives::keccak256(&admin_pk.as_bytes()[1..]);
         let address = alloy::primitives::Address::from_slice(&hash[12..]);
 
         println!("Admin Ethereum address: {}", address);
