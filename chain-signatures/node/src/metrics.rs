@@ -600,7 +600,7 @@ pub(crate) static TRIPLE_POKES_CNT: LazyLock<HistogramVec> = LazyLock::new(|| {
         "multichain_triple_pokes_cnt",
         "total pokes per triple protocol",
         &["node_account_id"],
-        Some(linear_buckets(0.0, 1.0, 30).unwrap()),
+        Some(linear_buckets(0.0, 1.0, 500).unwrap()),
     )
     .unwrap()
 });
