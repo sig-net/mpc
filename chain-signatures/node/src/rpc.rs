@@ -149,11 +149,12 @@ impl NodeStateWatcher {
 pub struct RpcExecutor {
     near: NearClient,
     eth: Option<EthClient>,
+    solana: Option<SolanaClient>,
     action_rx: mpsc::Receiver<RpcAction>,
 }
 
 impl RpcExecutor {
-    pub fn new(near: &NearClient, eth: &Option<EthConfig>) -> (RpcChannel, Self) {
+    pub fn new(near: &NearClient, eth: &Option<EthConfig>, solana: &Option<SolanaClient>) -> (RpcChannel, Self) {
         let eth = eth.as_ref().map(EthClient::new);
         let (tx, rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         (
@@ -161,6 +162,7 @@ impl RpcExecutor {
             Self {
                 near: near.clone(),
                 eth,
+                solana: None,
                 action_rx: rx,
             },
         )
@@ -210,6 +212,9 @@ impl RpcExecutor {
                 } else {
                     ChainClient::Err("no eth client available for node")
                 }
+            }
+            Chain::Solana => {
+                unimplemented!()
             }
         }
     }
@@ -396,11 +401,15 @@ impl EthClient {
     }
 }
 
+#[derive(Clone)]
+pub struct SolanaClient {}
+
 /// Client related to a specific chain
 pub enum ChainClient {
     Err(&'static str),
     Near(NearClient),
     Ethereum(EthClient),
+    Solana(SolanaClient),
 }
 
 async fn update_contract(near: NearClient, contract_state: Arc<RwLock<Option<ProtocolState>>>) {
@@ -467,6 +476,12 @@ async fn execute_publish(
                     &near_account_id,
                 )
                 .await
+            }
+            ChainClient::Solana(sol) => {
+                unimplemented!()
+                // try_publish_sol(sol, &action, &action.timestamp, &signature)
+                //     .await
+                //     .map_err(|_| ())
             }
             ChainClient::Err(msg) => {
                 tracing::warn!(msg, "no client for chain");

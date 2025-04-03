@@ -9,6 +9,7 @@ use cluster::spawner::ClusterSpawner;
 use containers::Container;
 use deadpool_redis::Pool;
 use mpc_node::indexer_eth::EthConfig;
+use mpc_node::indexer_sol::SolConfig;
 use std::collections::HashMap;
 
 use self::local::NodeEnvConfig;
@@ -35,6 +36,7 @@ pub struct NodeConfig {
     pub threshold: usize,
     pub protocol: ProtocolConfig,
     pub eth: EthConfig,
+    pub sol: SolConfig,
 }
 
 impl Default for NodeConfig {
@@ -63,6 +65,12 @@ impl Default for NodeConfig {
                 contract_address: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512".to_string(),
                 account_sk: "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
                     .to_string(),
+            },
+            sol: SolConfig {
+                account_sk: ""
+                    .to_string(),
+                rpc_url: "https://api.devnet.solana.com".to_string(),
+                program_address: "4kZoBXmUBLveRS3sboGF557tYsR7SzLDsWmP4sz7VQEs".to_string(),
             },
         }
     }

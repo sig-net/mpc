@@ -7,7 +7,7 @@ use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
 use crate::rpc::{NearClient, NodeStateWatcher, RpcExecutor};
 use crate::storage::app_data_storage;
-use crate::{indexer, indexer_eth, logs, mesh, storage, web};
+use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
 use k256::sha2::Sha256;
@@ -52,6 +52,9 @@ pub enum Cli {
         /// Ethereum Indexer options
         #[clap(flatten)]
         eth: indexer_eth::EthArgs,
+        /// Solana Indexer options
+        #[clap(flatten)]
+        sol: indexer_sol::SolArgs,
         /// NEAR Lake Indexer options
         #[clap(flatten)]
         indexer_options: indexer::Options,
@@ -89,6 +92,7 @@ impl Cli {
                 cipher_sk,
                 sign_sk,
                 eth,
+                sol,
                 indexer_options,
                 my_address,
                 debug_id,
@@ -136,6 +140,7 @@ impl Cli {
                 }
 
                 args.extend(eth.into_str_args());
+                args.extend(sol.into_str_args());
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(mesh_options.into_str_args());
@@ -157,6 +162,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             cipher_sk,
             sign_sk,
             eth,
+            sol,
             indexer_options,
             my_address,
             debug_id,
@@ -245,10 +251,11 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let contract_state = watcher.state().clone();
 
             let eth = eth.into_config();
+            let sol = sol.into_config();
             let network = NetworkConfig { cipher_sk, sign_sk };
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
-            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth);
+            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &None);
             let (sync_channel, sync) = SyncTask::new(
                 &client,
                 triple_storage.clone(),
@@ -302,7 +309,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 tracing::info!("protocol thread spawned");
                 let web_handle =
                     tokio::spawn(web::run(web_port, sender, state, indexer, sync_channel));
-                let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
+                let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx.clone(), account_id.clone()));
+                let sol_indexer_handle = tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");
 
                 rpc_handle.await?;
@@ -316,6 +324,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 sync_handle.await?;
 
                 eth_indexer_handle.abort();
+                sol_indexer_handle.abort();
                 if let Some(indexer_handle) = indexer_handle {
                     indexer_handle.join().unwrap()?;
                 }

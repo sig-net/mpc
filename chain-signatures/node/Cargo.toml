@@ -31,7 +31,8 @@ tracing-stackdriver = "0.10.0"
 
 # workspace dependencies
 anyhow.workspace = true
-borsh.workspace = true
+# borsh.workspace = true
+borsh = "0.10.4" # solana anchor requires borsh 0.10
 cait-sith.workspace = true
 ciborium.workspace = true
 clap.workspace = true
@@ -51,6 +52,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 web3.workspace = true
+anchor-client.workspace = true
+anchor-lang.workspace = true
+solana-sdk.workspace = true
+solana-transaction-status.workspace = true
 
 near-account-id.workspace = true
 near-crypto = "0.26.0"
