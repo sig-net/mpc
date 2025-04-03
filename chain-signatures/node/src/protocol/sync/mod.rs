@@ -15,6 +15,9 @@ use super::contract::primitives::Participants;
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 
+/// The interval at which we will broadcast our state to the network
+const EVENTUAL_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
 /// The maximum number of update requests that can be queued. This is pretty much just
 /// based on the number of participants in the network. If we have 1024 participants then
 /// our issue will more than likely not be the channel size.
@@ -78,7 +81,7 @@ impl SyncTask {
     pub async fn run(mut self) {
         tracing::info!("task has been started");
         let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
-        let mut broadcast_interval = tokio::time::interval(Duration::from_millis(10000));
+        let mut broadcast_interval = tokio::time::interval(EVENTUAL_SYNC_INTERVAL);
         let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(100));
 
         // Do NOT start until we have our own participant info.
