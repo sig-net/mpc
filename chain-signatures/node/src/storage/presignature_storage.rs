@@ -76,7 +76,7 @@ impl PresignatureStorage {
 
     pub async fn fetch_owned(&self, me: Participant) -> Vec<PresignatureId> {
         let Some(mut conn) = self.connect().await else {
-            return Vec::with_capacity(0);
+            return Vec::new();
         };
 
         conn.sunion((&self.reserved_key, owner_key(&self.owner_keys, me)))

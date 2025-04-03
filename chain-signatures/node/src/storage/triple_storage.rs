@@ -153,7 +153,7 @@ impl TripleStorage {
         "#;
 
         let Some(mut conn) = self.connect().await else {
-            return Vec::with_capacity(0);
+            return Vec::new();
         };
         let result: Result<Vec<TripleId>, _> = redis::Script::new(SCRIPT)
             .key(&self.triple_key)
@@ -173,7 +173,7 @@ impl TripleStorage {
             }
             Err(err) => {
                 tracing::warn!(?err, "failed to remove outdated triples");
-                Vec::with_capacity(0)
+                Vec::new()
             }
         }
     }
@@ -181,7 +181,7 @@ impl TripleStorage {
     // TODO: me can potentially be integrated into storage if we eventually can wait for our own participant info to be determined.
     pub async fn fetch_owned(&self, me: Participant) -> Vec<TripleId> {
         let Some(mut conn) = self.connect().await else {
-            return Vec::with_capacity(0);
+            return Vec::new();
         };
 
         conn.sunion((&self.reserved_key, owner_key(&self.owner_keys, me)))
