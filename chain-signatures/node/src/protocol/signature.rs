@@ -281,7 +281,7 @@ pub enum SignatureTaskError {
 }
 
 type SignTaskResult = Result<SignTask, SignatureTaskError>;
-type SignTaskHandle = tokio::task::JoinHandle<SignTaskResult>;
+type SignTaskHandle = tokio::task::JoinHandle<Result<SignTaskResult, tokio::time::error::Elapsed>>;
 
 fn start_sign(
     me: Participant,
@@ -330,7 +330,6 @@ pub struct SignTask {
     presignature_id: PresignatureId,
     request: SignRequest,
     timestamp: Instant,
-    timeout: Duration,
     timeout_total: Duration,
     /// latest poked time, total acrued wait time and total pokes per signature protocol
     poked_latest: Option<(Instant, Duration, u64)>,
@@ -360,7 +359,8 @@ impl SignTask {
         outbox: MessageChannel,
         cfg: ProtocolConfig,
     ) -> SignTaskHandle {
-        tokio::spawn(async move {
+        let generation_timeout = Duration::from_millis(cfg.signature.generation_timeout);
+        let task = async move {
             let timestamp = Instant::now();
             let mut inbox = outbox.subscribe_sign(epoch, request.id()).await;
             let (presignature, first_msg) = status.fetch(&mut inbox, &cfg).await?;
@@ -370,6 +370,7 @@ impl SignTask {
                 Ok(protocol) => protocol,
                 Err(init_err) => return Err(SignatureTaskError::Init(init_err, request)),
             };
+            // TODO: replace this with init message.
             if let Some(first_msg) = first_msg {
                 // The first message was taken from the inbox so we need to send to the protocol here,
                 // otherwise this message will be missed from the entirety of the protocol.
@@ -384,13 +385,14 @@ impl SignTask {
                 protocol,
                 request,
                 timestamp,
-                timeout: Duration::from_millis(cfg.signature.generation_timeout),
                 timeout_total: Duration::from_millis(cfg.signature.generation_timeout_total),
                 poked_latest: None,
             };
 
             task.run(my_account_id, inbox, outbox, rpc).await
-        })
+        };
+
+        tokio::spawn(tokio::time::timeout(generation_timeout, task))
     }
 
     pub async fn run(
@@ -427,14 +429,9 @@ impl SignTask {
             }
 
             'compute: loop {
-                // TODO: move these timeouts to the task itself.
+                // TODO: move these timeouts to the task itself. This can be done with remaining time or accrued time.
                 if self.request.indexed.timestamp.elapsed() >= self.timeout_total {
                     break 'task Err(SignatureTaskError::TimeoutTotal(self));
-                }
-
-                // TODO: move these timeouts to the task itself. This can be done with remaining time or accrued time.
-                if self.timestamp.elapsed() >= self.timeout {
-                    break 'task Err(SignatureTaskError::Timeout(self));
                 }
 
                 let generator_poke_time = Instant::now();
@@ -686,6 +683,20 @@ impl SignatureManager {
             //     }
             // }
 
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(_timeout) => {
+                    tracing::warn!(?sign_id, "sign task timeout, retrying...");
+                    self.msg
+                        .filter_sign(sign_id, generator.presignature_id)
+                        .await;
+                    if generator.is_proposer() {
+                        signature_generator_failures_metric.inc();
+                    }
+                    self.sign_queue.push_failed(generator.request);
+                }
+            };
+
             let err = match outcome {
                 Err(err) => err,
                 Ok(generator) => {
@@ -721,16 +732,16 @@ impl SignatureManager {
                         signature_failures_metric.inc();
                     }
                 }
-                SignatureTaskError::Timeout(generator) => {
-                    tracing::warn!(?sign_id, "sign task timeout, retrying...");
-                    self.msg
-                        .filter_sign(sign_id, generator.presignature_id)
-                        .await;
-                    if generator.is_proposer() {
-                        signature_generator_failures_metric.inc();
-                    }
-                    self.sign_queue.push_failed(generator.request);
-                }
+                // SignatureTaskError::Timeout(generator) => {
+                //     tracing::warn!(?sign_id, "sign task timeout, retrying...");
+                //     self.msg
+                //         .filter_sign(sign_id, generator.presignature_id)
+                //         .await;
+                //     if generator.is_proposer() {
+                //         signature_generator_failures_metric.inc();
+                //     }
+                //     self.sign_queue.push_failed(generator.request);
+                // }
                 SignatureTaskError::Init(err, request) => {
                     // TODO: maybe need to broadcast error out to network participants.
                     tracing::warn!(
