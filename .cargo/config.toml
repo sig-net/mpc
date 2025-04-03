@@ -22,4 +22,6 @@ runner = "./setup.sh"
 [alias]
 build-node = "build -p mpc-node --release"
 build-test = "build -p integration-tests --tests"
-run-test = "test -p integration-tests -- --show-output"
+test-i = "test -p integration-tests -- --show-output"
+test-unit = "test --workspace --exclude integration-tests -- --show-output"
+test-basic = "test -p integration-tests -- --show-output --exact cases::test_signature_basic"

@@ -67,6 +67,11 @@ name = "sign"
 path = "benches/sign.rs"
 harness = false
 
+[[bench]]
+name = "store"
+path = "benches/store.rs"
+harness = false
+
 [features]
 default = []
 docker-test = []

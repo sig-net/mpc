@@ -2,7 +2,7 @@ mod error;
 
 use self::error::Error;
 use crate::indexer::NearIndexer;
-use crate::protocol::sync::{SyncChannel, SyncUpdate, SyncView};
+use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::NodeState;
 use crate::web::error::Result;
 use anyhow::Context;
@@ -222,7 +222,7 @@ async fn bench_metrics() -> Json<BenchMetrics> {
 async fn sync(
     Extension(state): Extension<Arc<AxumState>>,
     WithRejection(Json(update), _): WithRejection<Json<SyncUpdate>, Error>,
-) -> Result<Json<SyncView>> {
-    let view = state.sync_channel.request_update(update).await;
-    Ok(Json(view))
+) -> Result<()> {
+    state.sync_channel.request_update(update).await;
+    Ok(())
 }
