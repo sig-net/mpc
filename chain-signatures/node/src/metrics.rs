@@ -510,7 +510,7 @@ pub(crate) static PRESIGNATURE_ACCRUED_WAIT_DELAY: LazyLock<HistogramVec> = Lazy
         "multichain_presignature_accrued_wait_delay_ms",
         "per presignature protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
         &["node_account_id"],
-        Some(exponential_buckets(10.0, 1.5, 25).unwrap()),
+        Some(exponential_buckets(10.0, 1.5, 35).unwrap()),
     )
     .unwrap()
 });
@@ -540,7 +540,7 @@ pub(crate) static TRIPLE_ACCRUED_WAIT_DELAY: LazyLock<HistogramVec> = LazyLock::
         "multichain_triple_accrued_wait_delay_ms",
         "per triple protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
         &["node_account_id"],
-        Some(exponential_buckets(10.0, 1.5, 25).unwrap()),
+        Some(exponential_buckets(10.0, 1.5, 35).unwrap()),
     )
     .unwrap()
 });
@@ -570,7 +570,7 @@ pub(crate) static SIGNATURE_ACCRUED_WAIT_DELAY: LazyLock<HistogramVec> = LazyLoc
         "multichain_signature_accrued_wait_delay_ms",
         "per signature protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
         &["node_account_id"],
-        Some(exponential_buckets(10.0, 1.5, 25).unwrap()),
+        Some(exponential_buckets(10.0, 1.5, 35).unwrap()),
     )
     .unwrap()
 });
@@ -600,7 +600,7 @@ pub(crate) static TRIPLE_POKES_CNT: LazyLock<HistogramVec> = LazyLock::new(|| {
         "multichain_triple_pokes_cnt",
         "total pokes per triple protocol",
         &["node_account_id"],
-        Some(linear_buckets(0.0, 1.0, 30).unwrap()),
+        Some(linear_buckets(0.0, 1.0, 500).unwrap()),
     )
     .unwrap()
 });
