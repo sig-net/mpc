@@ -122,7 +122,6 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(!triple_manager.contains(mine_id1).await);
     assert!(!triple_manager.contains(mine_id2).await);
 
-    // println!("{:#?}", triple_storage.clear().await);
     assert!(triple_storage.clear().await);
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {

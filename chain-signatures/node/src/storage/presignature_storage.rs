@@ -167,7 +167,7 @@ impl PresignatureStorage {
         "#;
 
         let Some(mut conn) = self.connect().await else {
-            return Vec::with_capacity(0);
+            return Vec::new();
         };
         let result: Result<Vec<PresignatureId>, _> = redis::Script::new(SCRIPT)
             .key(&self.presig_key)
@@ -187,7 +187,7 @@ impl PresignatureStorage {
             }
             Err(err) => {
                 tracing::warn!(?err, "failed to remove outdated presignatures");
-                Vec::with_capacity(0)
+                Vec::new()
             }
         }
     }

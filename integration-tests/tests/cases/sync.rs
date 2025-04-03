@@ -86,12 +86,12 @@ async fn test_protocol_sync_take() -> anyhow::Result<()> {
     for i in 0..10 {
         let t = dummy_triple(i);
         triple_set.insert(t.id);
-        triples.reserve(i).await.unwrap().insert(t, me).await;
+        assert!(triples.reserve(i).await.unwrap().insert(t, me).await);
     }
     for i in 0..10 {
         let p = dummy_presignature(i);
         presignature_set.insert(p.id);
-        presignatures.reserve(i).await.unwrap().insert(p, me).await;
+        assert!(presignatures.reserve(i).await.unwrap().insert(p, me).await);
     }
 
     // Give it some time for sync to process the inserts
