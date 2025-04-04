@@ -396,7 +396,6 @@ impl PresignatureManager {
             let (triple0, triple1) = match self.triples.take_two_mine(self.me).await {
                 Ok(Some(pair)) => pair,
                 Ok(None) => {
-                    tracing::warn!("no triples available for presignature generation");
                     return;
                 }
                 Err(err) => {
@@ -575,7 +574,6 @@ impl PresignatureManager {
                         presignature_generator_failures_metric.inc();
                         self.msg.filter_presignature(*id).await;
                         self.introduced.remove(id);
-                        generator.slot.unreserve().await;
                         errors.push(e);
                         remove.push(*id);
                         break;

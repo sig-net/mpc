@@ -14,16 +14,16 @@ const PRESIGNATURE_STORAGE_VERSION: &str = "v7";
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 /// A pre-reserved slot for a presignature that will eventually be inserted.
-#[derive(Clone)]
 pub struct PresignatureSlot {
     id: PresignatureId,
     me: Participant,
     storage: PresignatureStorage,
+    stored: bool,
 }
 
 impl PresignatureSlot {
     // TODO: put inside a tokio task:
-    pub async fn insert(&self, presignature: Presignature, owner: Participant) -> bool {
+    pub async fn insert(&mut self, presignature: Presignature, owner: Participant) -> bool {
         if let Err(err) = self
             .storage
             .insert(presignature, owner, owner == self.me)
@@ -32,22 +32,21 @@ impl PresignatureSlot {
             tracing::warn!(id = self.id, ?err, "failed to insert presignature");
             false
         } else {
+            self.stored = true;
             true
         }
     }
+}
 
-    // TODO: put inside a tokio task:
-    pub async fn unreserve(&self) {
-        let mut conn = match self.storage.connect().await {
-            Ok(conn) => conn,
-            Err(err) => {
-                tracing::warn!(?err, "failed to connect to redis");
-                return;
-            }
-        };
-        let result: Result<(), _> = conn.srem(&self.storage.reserved_key, self.id).await;
-        if let Err(err) = result {
-            tracing::warn!(id = self.id, ?err, "failed to unreserve presignature");
+impl Drop for PresignatureSlot {
+    fn drop(&mut self) {
+        if !self.stored {
+            let storage = self.storage.clone();
+            let id = self.id;
+            tokio::spawn(async move {
+                tracing::info!(id, "unreserving presignature");
+                storage.unreserve(id).await;
+            });
         }
     }
 }
@@ -163,11 +162,26 @@ impl PresignatureStorage {
                 id,
                 me,
                 storage: self.clone(),
+                stored: false,
             }),
             Err(err) => {
-                tracing::warn!(?err, "failed to reserve presignature");
+                tracing::warn!(id, ?err, "failed to reserve presignature");
                 None
             }
+        }
+    }
+
+    async fn unreserve(self, id: PresignatureId) {
+        let mut conn = match self.connect().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!(?err, "failed to connect to redis");
+                return;
+            }
+        };
+        let result: Result<(), _> = conn.srem(&self.reserved_key, id).await;
+        if let Err(err) = result {
+            tracing::warn!(id, ?err, "failed to unreserve presignature");
         }
     }
 

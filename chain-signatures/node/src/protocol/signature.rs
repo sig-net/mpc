@@ -127,9 +127,11 @@ impl SignQueue {
             let is_mine = proposer == self.me;
 
             tracing::info!(
+                ?stable,
                 ?sign_id,
                 ?subset,
                 ?proposer,
+                me = ?self.me,
                 in_subset,
                 is_mine,
                 "sign queue: organizing request"
@@ -224,13 +226,22 @@ impl SignatureGenerator {
 
     pub fn poke(&mut self) -> Result<Action<FullSignature<Secp256k1>>, ProtocolError> {
         if self.request.indexed.timestamp.elapsed() > self.timeout_total {
-            let msg = "signature protocol timed out completely";
-            tracing::warn!(msg);
-            return Err(ProtocolError::Other(anyhow::anyhow!(msg).into()));
+            tracing::warn!(
+                sign_id = ?self.request.indexed.id,
+                presignature_id = ?self.presignature_id,
+                "signature protocol timed out completely",
+            );
+            return Err(ProtocolError::Other(
+                anyhow::anyhow!("signature protocol timed out completely").into(),
+            ));
         }
 
         if self.timestamp.elapsed() > self.timeout {
-            tracing::warn!(sign_id = ?self.request.indexed.id, "signature protocol timed out");
+            tracing::warn!(
+                sign_id = ?self.request.indexed.id,
+                presignature_id = ?self.presignature_id,
+                "signature protocol timed out",
+            );
             return Err(ProtocolError::Other(
                 anyhow::anyhow!("signature protocol timeout").into(),
             ));
