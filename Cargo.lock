@@ -4023,6 +4023,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-retry",
+ "tokio-stream",
  "tracing",
  "tracing-stackdriver",
  "tracing-subscriber",
@@ -7533,6 +7534,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

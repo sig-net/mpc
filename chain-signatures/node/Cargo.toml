@@ -26,7 +26,8 @@ prometheus = "0.13.3"
 redis = "0.27.2"
 semver = "1.0.23"
 sysinfo = "0.32.0"
-tokio-retry = "0.3"
+tokio-retry = "0.3.0"
+tokio-stream = { version = "0.1.17", features = ["sync"] }
 tracing-stackdriver = "0.10.0"
 
 # workspace dependencies
