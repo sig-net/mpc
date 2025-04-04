@@ -6,16 +6,20 @@ export TARGET_DIR=$ROOT_DIR/target
 
 CARGO_CMD_ARGS="$@"
 CARGO_BUILD_INDENT="            "
-echo "${CARGO_BUILD_INDENT} running MPC build script"
 
-# add additional features if we're benchmarking:
-if echo $CARGO_CMD_ARGS | grep -q "bench"; then
-    FEATURES="--features bench"
+# only run runner script inside integration tests:
+if echo $CARGO_CMD_ARGS | grep -q "integration-tests"; then
+    echo "${CARGO_BUILD_INDENT} running MPC build script"
+    # add additional features if we're benchmarking:
+    if echo $CARGO_CMD_ARGS | grep -q "bench"; then
+        FEATURES="--features bench"
+    fi
+
+    set --
+    set -e
+    . $ROOT_DIR/build-contract.sh $FEATURES
+    cargo build -p mpc-node --release $FEATURES
 fi
 
-set --
-set -e
-. $ROOT_DIR/build-contract.sh $FEATURES
-cargo build -p mpc-node --release $FEATURES
 
 exec $CARGO_CMD_ARGS

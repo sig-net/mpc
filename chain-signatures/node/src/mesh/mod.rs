@@ -4,6 +4,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ProtocolState;
 use cait_sith::protocol::Participant;
+use connection::{ConnectionWatcher, NodeStatusUpdate};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -44,15 +45,19 @@ pub struct Mesh {
     connections: connection::Pool,
     state: Arc<RwLock<MeshState>>,
     ping_interval: Duration,
+    conn_change: ConnectionWatcher,
 }
 
 impl Mesh {
     pub fn new(client: &NodeClient, options: Options) -> Self {
         let ping_interval = Duration::from_millis(options.ping_interval);
+        let connections = connection::Pool::new(client, ping_interval);
+        let conn_change = connections.watcher();
         Self {
-            connections: connection::Pool::new(client, ping_interval),
+            connections,
             state: Arc::new(RwLock::new(MeshState::default())),
             ping_interval,
+            conn_change,
         }
     }
 
@@ -61,15 +66,42 @@ impl Mesh {
     }
 
     pub async fn run(mut self, contract_state: Arc<RwLock<Option<ProtocolState>>>) {
-        let mut interval = tokio::time::interval(self.ping_interval / 2);
+        let mut contract_change_interval = tokio::time::interval(self.ping_interval / 2);
         loop {
-            interval.tick().await;
-            if let Some(contract) = &*contract_state.read().await {
-                self.connections.connect(contract).await;
-                let new_state = self.connections.status().await;
-                let mut state = self.state.write().await;
-                *state = new_state;
+            tokio::select! {
+                _ = contract_change_interval.tick() => {
+                    if let Some(contract) = &*contract_state.read().await {
+                        self.connections.connect(contract).await;
+                    }
+                }
+                Some((p, status)) = self.conn_change.next() => {
+                    self.update_mesh(p, status).await;
+                }
             }
+        }
+    }
+
+    async fn update_mesh(&self, participant: Participant, status: NodeStatusUpdate) {
+        update(&self.state, participant, status).await;
+    }
+}
+
+async fn update(
+    state: &Arc<RwLock<MeshState>>,
+    participant: Participant,
+    status: NodeStatusUpdate,
+) {
+    let mut state = state.write().await;
+    match status {
+        NodeStatusUpdate::Active(is_stable, info) => {
+            state.active.insert(&participant, info);
+            if is_stable {
+                state.stable.push(participant);
+            }
+        }
+        NodeStatusUpdate::Offline => {
+            state.active.remove(&participant);
+            state.stable.retain(|p| p != &participant);
         }
     }
 }
