@@ -1,9 +1,10 @@
 use super::message::{MessageChannel, PresignatureMessage};
 use super::state::RunningState;
-use super::triple::{Triple, TripleId, TripleManager};
+use super::triple::{TripleId, TripleManager};
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::error::GenerationError;
 use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
+use crate::storage::triple_storage::{TriplesTaken, TriplesTakenDropper};
 use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
@@ -93,8 +94,7 @@ pub struct PresignatureGenerator {
     pub owner: Participant,
     pub participants: Vec<Participant>,
     pub protocol: PresignatureProtocol,
-    pub triple0: TripleId,
-    pub triple1: TripleId,
+    pub dropper: TriplesTakenDropper,
     pub timestamp: Instant,
     pub timeout: Duration,
     /// latest poked time, total acrued wait time and total pokes per presignature protocol
@@ -107,8 +107,7 @@ impl PresignatureGenerator {
         owner: Participant,
         protocol: PresignatureProtocol,
         participants: &[Participant],
-        triple0: TripleId,
-        triple1: TripleId,
+        dropper: TriplesTakenDropper,
         timeout: u64,
         slot: PresignatureSlot,
     ) -> Self {
@@ -116,8 +115,7 @@ impl PresignatureGenerator {
             owner,
             participants: participants.to_vec(),
             protocol,
-            triple0,
-            triple1,
+            dropper,
             timestamp: Instant::now(),
             timeout: Duration::from_millis(timeout),
             poked_latest: None,
@@ -127,12 +125,11 @@ impl PresignatureGenerator {
 
     pub fn poke(&mut self) -> Result<Action<PresignOutput<Secp256k1>>, ProtocolError> {
         if self.timestamp.elapsed() > self.timeout {
-            let id = hash_as_id(self.triple0, self.triple1);
+            let id = hash_as_id(self.dropper.id0, self.dropper.id1);
             tracing::warn!(
                 owner = ?self.owner,
                 presignature_id = id,
-                self.triple0,
-                self.triple1,
+                triples = ?self.dropper,
                 "presignature protocol timed out"
             );
             return Err(ProtocolError::Other(
@@ -282,13 +279,13 @@ impl PresignatureManager {
         participants: &[Participant],
         me: Participant,
         threshold: usize,
-        triple0: Triple,
-        triple1: Triple,
+        triples: TriplesTaken,
         public_key: &PublicKey,
         private_share: &SecretKeyShare,
         timeout: u64,
         slot: PresignatureSlot,
     ) -> Result<PresignatureGenerator, InitializationError> {
+        let (triple0, triple1, dropper) = triples.take();
         let protocol = Box::new(cait_sith::presign(
             participants,
             me,
@@ -310,8 +307,7 @@ impl PresignatureManager {
             owner,
             protocol,
             participants,
-            triple0.id,
-            triple1.id,
+            dropper,
             timeout,
             slot,
         ))
@@ -321,13 +317,12 @@ impl PresignatureManager {
     pub async fn generate(
         &mut self,
         participants: &[Participant],
-        triple0: Triple,
-        triple1: Triple,
+        triples: TriplesTaken,
         public_key: &PublicKey,
         private_share: &SecretKeyShare,
         timeout: u64,
     ) -> Result<(), InitializationError> {
-        let id = hash_as_id(triple0.id, triple1.id);
+        let id = hash_as_id(triples.triple0.id, triples.triple1.id);
 
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
         let Some(slot) = self.reserve(id).await else {
@@ -339,8 +334,7 @@ impl PresignatureManager {
 
         tracing::info!(
             id,
-            triple0 = triple0.id,
-            triple1 = triple1.id,
+            ?triples,
             "starting protocol to generate a new presignature"
         );
         let owner = self.me;
@@ -349,8 +343,7 @@ impl PresignatureManager {
             participants,
             self.me,
             self.threshold,
-            triple0,
-            triple1,
+            triples,
             public_key,
             private_share,
             timeout,
@@ -393,7 +386,7 @@ impl PresignatureManager {
 
             // TODO: have all this part be a separate task such that finding a pair of triples is done in parallel instead
             // of waiting for storage to respond here.
-            let (triple0, triple1) = match self.triples.take_two_mine(self.me).await {
+            let triples = match self.triples.take_two_mine(self.me).await {
                 Ok(Some(pair)) => pair,
                 Ok(None) => {
                     return;
@@ -404,19 +397,19 @@ impl PresignatureManager {
                 }
             };
 
-            let t0_id = triple0.id;
-            let t1_id = triple1.id;
+            let t0_id = triples.triple0.id;
+            let t1_id = triples.triple1.id;
             let participants = intersect_vec(&[
                 active,
-                &triple0.public.participants,
-                &triple1.public.participants,
+                &triples.triple0.public.participants,
+                &triples.triple1.public.participants,
             ]);
             if participants.len() < self.threshold {
                 tracing::warn!(
                     intersection = ?participants,
                     ?active,
-                    triple0 = ?(triple0.id, &triple0.public.participants),
-                    triple1 = ?(triple1.id, &triple1.public.participants),
+                    triple0 = ?(t0_id, &triples.triple0.public.participants),
+                    triple1 = ?(t1_id, &triples.triple1.public.participants),
                     "intersection < threshold, trashing two triples"
                 );
                 return;
@@ -428,8 +421,7 @@ impl PresignatureManager {
             if let Err(err) = self
                 .generate(
                     &participants,
-                    triple0,
-                    triple1,
+                    triples,
                     pk,
                     sk_share,
                     cfg.presignature.generation_timeout,
@@ -481,7 +473,7 @@ impl PresignatureManager {
                         return Err(GenerationError::PresignatureReserveError);
                     };
 
-                    let (triple0, triple1) = match triple_manager.take_two(triple0, triple1).await {
+                    let triples = match triple_manager.take_two(triple0, triple1).await {
                         Ok(result) => result,
                         Err(error) => match error {
                             GenerationError::TripleIsGenerating(_) => {
@@ -521,8 +513,7 @@ impl PresignatureManager {
                         participants,
                         self.me,
                         self.threshold,
-                        triple0,
-                        triple1,
+                        triples,
                         public_key,
                         private_share,
                         cfg.presignature.generation_timeout,
@@ -595,8 +586,8 @@ impl PresignatureManager {
                                     *to,
                                     PresignatureMessage {
                                         id: *id,
-                                        triple0: generator.triple0,
-                                        triple1: generator.triple1,
+                                        triple0: generator.dropper.id0,
+                                        triple1: generator.dropper.id1,
                                         epoch: self.epoch,
                                         from: self.me,
                                         data: data.clone(),
@@ -630,8 +621,8 @@ impl PresignatureManager {
                                 to,
                                 PresignatureMessage {
                                     id: *id,
-                                    triple0: generator.triple0,
-                                    triple1: generator.triple1,
+                                    triple0: generator.dropper.id0,
+                                    triple1: generator.dropper.id1,
                                     epoch: self.epoch,
                                     from: self.me,
                                     data,

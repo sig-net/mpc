@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::protocol::triple::{Triple, TripleId};
 use crate::storage::error::{StoreError, StoreResult};
 
@@ -35,17 +37,83 @@ impl TripleSlot {
 
     // TODO: put inside a tokio task:
     pub async fn unreserve(&self) {
-        let mut conn = match self.storage.connect().await {
-            Ok(conn) => conn,
-            Err(err) => {
-                tracing::warn!(?err, "failed to connect to redis");
-                return;
-            }
+        self.storage.unreserve([self.id]).await;
+    }
+}
+
+pub struct TriplesTaken {
+    pub triple0: Triple,
+    pub triple1: Triple,
+    pub dropper: TriplesTakenDropper,
+}
+
+impl TriplesTaken {
+    pub fn owner(triple0: Triple, triple1: Triple, storage: TripleStorage) -> Self {
+        let dropper = TriplesTakenDropper {
+            id0: triple0.id,
+            id1: triple1.id,
+            storage: Some(storage),
         };
-        let result: Result<(), _> = conn.srem(&self.storage.reserved_key, self.id).await;
-        if let Err(err) = result {
-            tracing::warn!(id = self.id, ?err, "failed to unreserve triple");
+        Self {
+            triple0,
+            triple1,
+            dropper,
         }
+    }
+
+    pub fn foreigner(triple0: Triple, triple1: Triple) -> Self {
+        let dropper = TriplesTakenDropper {
+            id0: triple0.id,
+            id1: triple1.id,
+            storage: None,
+        };
+        Self {
+            triple0,
+            triple1,
+            dropper,
+        }
+    }
+
+    pub fn take(self) -> (Triple, Triple, TriplesTakenDropper) {
+        (self.triple0, self.triple1, self.dropper)
+    }
+}
+
+impl fmt::Debug for TriplesTaken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TriplesTaken")
+            .field(&self.triple0.id)
+            .field(&self.triple1.id)
+            .finish()
+    }
+}
+
+pub struct TriplesTakenDropper {
+    pub id0: TripleId,
+    pub id1: TripleId,
+    storage: Option<TripleStorage>,
+}
+
+impl Drop for TriplesTakenDropper {
+    fn drop(&mut self) {
+        let Some(storage) = self.storage.take() else {
+            return;
+        };
+        let id0 = self.id0;
+        let id1 = self.id1;
+        tokio::spawn(async move {
+            tracing::info!(id0, id1, "dropping taken triples");
+            storage.unreserve([id0, id1]).await;
+        });
+    }
+}
+
+impl fmt::Debug for TriplesTakenDropper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TriplesTakenRef")
+            .field(&self.id0)
+            .field(&self.id1)
+            .finish()
     }
 }
 
@@ -145,6 +213,20 @@ impl TripleStorage {
                 tracing::warn!(?err, "failed to reserve triple");
                 None
             }
+        }
+    }
+
+    async fn unreserve<const N: usize>(&self, triples: [TripleId; N]) {
+        let mut conn = match self.connect().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!(?err, "failed to connect to redis");
+                return;
+            }
+        };
+        let outcome: Result<(), _> = conn.srem(&self.reserved_key, &triples).await;
+        if let Err(err) = outcome {
+            tracing::warn!(?triples, ?err, "failed to unreserve triples");
         }
     }
 
@@ -303,7 +385,7 @@ impl TripleStorage {
 
     // TODO: need to pass in owner to delete the triple from the owner set, but we can have sync just do this
     //       for now for us.
-    pub async fn take_two(&self, id1: TripleId, id2: TripleId) -> StoreResult<(Triple, Triple)> {
+    pub async fn take_two(&self, id1: TripleId, id2: TripleId) -> StoreResult<TriplesTaken> {
         let mut conn = self.connect().await?;
 
         let lua_script = r#"
@@ -340,7 +422,7 @@ impl TripleStorage {
             return {v1, v2}
         "#;
 
-        let result: Result<(Triple, Triple), RedisError> = redis::Script::new(lua_script)
+        let (triple0, triple1): (Triple, Triple) = redis::Script::new(lua_script)
             .key(&self.triple_key)
             .key(&self.mine_key)
             .key(&self.used_key)
@@ -349,12 +431,13 @@ impl TripleStorage {
             .arg(id2.to_string())
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
-            .await;
+            .await
+            .map_err(StoreError::from)?;
 
-        result.map_err(StoreError::from)
+        Ok(TriplesTaken::foreigner(triple0, triple1))
     }
 
-    pub async fn take_two_mine(&self, me: Participant) -> StoreResult<Option<(Triple, Triple)>> {
+    pub async fn take_two_mine(&self, me: Participant) -> StoreResult<Option<TriplesTaken>> {
         let mut conn = self.connect().await?;
 
         let lua_script = r#"
@@ -380,6 +463,10 @@ impl TripleStorage {
                 return {err = "Unexpected behavior. Triple " .. id2 .. " is missing"}
             end
 
+            -- reserve the triples again, since the owner is taking them here, and should
+            -- not invalidate the other nodes when syncing.
+            redis.call("SADD", KEYS[5], id1, id2)
+
             -- Delete the triples from the hash map
             redis.call("HDEL", KEYS[2], id1, id2)
             -- delete the triples from our self owner set
@@ -394,15 +481,22 @@ impl TripleStorage {
             return {v1, v2}
         "#;
 
-        redis::Script::new(lua_script)
+        let triples: Option<(Triple, Triple)> = redis::Script::new(lua_script)
             .key(&self.mine_key)
             .key(&self.triple_key)
             .key(&self.used_key)
             .key(owner_key(&self.owner_keys, me))
+            .key(&self.reserved_key)
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await
-            .map_err(StoreError::from)
+            .map_err(StoreError::from)?;
+
+        let Some((triple0, triple1)) = triples else {
+            return Ok(None);
+        };
+
+        Ok(Some(TriplesTaken::owner(triple0, triple1, self.clone())))
     }
 
     pub async fn len_generated(&self) -> StoreResult<usize> {
