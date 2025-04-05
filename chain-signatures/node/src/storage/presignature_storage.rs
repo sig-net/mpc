@@ -66,7 +66,6 @@ impl Drop for PresignatureTakenDropper {
         if let Some(storage) = self.dropper.take() {
             let id = self.id;
             tokio::spawn(async move {
-                tracing::info!(id, "dropping taken presignature");
                 storage.unreserve(id).await;
             });
         }

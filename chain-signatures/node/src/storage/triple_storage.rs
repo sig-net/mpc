@@ -96,21 +96,19 @@ pub struct TriplesTakenDropper {
 
 impl Drop for TriplesTakenDropper {
     fn drop(&mut self) {
-        let Some(storage) = self.storage.take() else {
-            return;
-        };
-        let id0 = self.id0;
-        let id1 = self.id1;
-        tokio::spawn(async move {
-            tracing::info!(id0, id1, "dropping taken triples");
-            storage.unreserve([id0, id1]).await;
-        });
+        if let Some(storage) = self.storage.take() {
+            let id0 = self.id0;
+            let id1 = self.id1;
+            tokio::spawn(async move {
+                storage.unreserve([id0, id1]).await;
+            });
+        }
     }
 }
 
 impl fmt::Debug for TriplesTakenDropper {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("TriplesTakenRef")
+        f.debug_tuple("TriplesTakenDropper")
             .field(&self.id0)
             .field(&self.id1)
             .finish()
