@@ -3,6 +3,7 @@ use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
+use tokio::task::JoinHandle;
 
 use crate::protocol::presignature::{Presignature, PresignatureId};
 use crate::storage::error::{StoreError, StoreResult};
@@ -36,18 +37,25 @@ impl PresignatureSlot {
             true
         }
     }
+
+    pub fn unreserve(&self) -> Option<JoinHandle<()>> {
+        if self.stored {
+            return None;
+        }
+
+        let storage = self.storage.clone();
+        let id = self.id;
+        let task = tokio::spawn(async move {
+            tracing::info!(id, "unreserving presignature");
+            storage.unreserve(id).await;
+        });
+        Some(task)
+    }
 }
 
 impl Drop for PresignatureSlot {
     fn drop(&mut self) {
-        if !self.stored {
-            let storage = self.storage.clone();
-            let id = self.id;
-            tokio::spawn(async move {
-                tracing::info!(id, "unreserving presignature");
-                storage.unreserve(id).await;
-            });
-        }
+        self.unreserve();
     }
 }
 

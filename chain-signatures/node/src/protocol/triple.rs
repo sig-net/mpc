@@ -70,7 +70,7 @@ impl TripleGenerator {
                 Ok(protocol) => protocol,
                 Err(e) => {
                     slot.unreserve().await;
-                    return Err(e).into();
+                    return Err(e);
                 }
             };
         let protocol = Arc::new(RwLock::new(protocol));
@@ -653,15 +653,13 @@ impl TripleManager {
     /// It is very important to NOT reuse the same triple twice for two different
     /// protocols.
     pub async fn take_two_mine(&self) -> Option<TriplesTaken> {
-        let taken = self
-            .triple_storage
+        self.triple_storage
             .take_two_mine(self.me)
             .await
             .map_err(|store_error| {
                 tracing::warn!(?store_error, "failed to take two mine triples");
             })
-            .ok()?;
-        taken
+            .ok()?
     }
 
     /// Returns the number of unspent triples available in the manager.
