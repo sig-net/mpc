@@ -3,7 +3,9 @@ use super::state::RunningState;
 use super::triple::{TripleId, TripleManager};
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::error::GenerationError;
-use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
+use crate::storage::presignature_storage::{
+    PresignatureSlot, PresignatureStorage, PresignatureTaken,
+};
 use crate::storage::triple_storage::{TriplesTaken, TriplesTakenDropper};
 use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
@@ -210,7 +212,7 @@ impl PresignatureManager {
             .unwrap_or(false)
     }
 
-    pub async fn take(&mut self, id: PresignatureId) -> Result<Presignature, GenerationError> {
+    pub async fn take(&mut self, id: PresignatureId) -> Result<PresignatureTaken, GenerationError> {
         let presignature = self.presignatures.take(id).await.map_err(|store_err| {
             if self.generators.contains_key(&id) {
                 tracing::warn!(id, ?store_err, "presignature is still generating");
@@ -225,8 +227,8 @@ impl PresignatureManager {
         Ok(presignature)
     }
 
-    pub async fn take_mine(&mut self) -> Option<Presignature> {
-        let presignature = self
+    pub async fn take_mine(&mut self) -> Option<PresignatureTaken> {
+        let taken = self
             .presignatures
             .take_mine(self.me)
             .await
@@ -234,8 +236,8 @@ impl PresignatureManager {
                 tracing::error!(?store_error, "failed to look for mine presignature");
             })
             .ok()??;
-        tracing::debug!(id = ?presignature.id, "took presignature of mine");
-        Some(presignature)
+        tracing::debug!(id = ?taken.presignature.id, "took presignature of mine");
+        Some(taken)
     }
 
     /// Returns the number of unspent presignatures available in the manager.

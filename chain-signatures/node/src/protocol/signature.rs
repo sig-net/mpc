@@ -3,9 +3,10 @@ use super::state::RunningState;
 use crate::kdf::derive_delta;
 use crate::protocol::error::GenerationError;
 use crate::protocol::message::{MessageChannel, SignatureMessage};
-use crate::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
+use crate::protocol::presignature::{PresignatureId, PresignatureManager};
 use crate::protocol::Chain;
 use crate::rpc::RpcChannel;
+use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
 use crate::util::AffinePointExt;
@@ -197,7 +198,7 @@ impl SignQueue {
 /// An ongoing signature generator.
 pub struct SignatureGenerator {
     pub protocol: SignatureProtocol,
-    pub presignature_id: PresignatureId,
+    pub dropper: PresignatureTakenDropper,
     pub request: SignRequest,
     pub timestamp: Instant,
     pub timeout: Duration,
@@ -209,13 +210,13 @@ pub struct SignatureGenerator {
 impl SignatureGenerator {
     pub fn new(
         protocol: SignatureProtocol,
-        presignature_id: PresignatureId,
+        dropper: PresignatureTakenDropper,
         request: SignRequest,
         cfg: &ProtocolConfig,
     ) -> Self {
         Self {
             protocol,
-            presignature_id,
+            dropper,
             request,
             timestamp: Instant::now(),
             timeout: Duration::from_millis(cfg.signature.generation_timeout),
@@ -228,7 +229,7 @@ impl SignatureGenerator {
         if self.request.indexed.timestamp.elapsed() > self.timeout_total {
             tracing::warn!(
                 sign_id = ?self.request.indexed.id,
-                presignature_id = ?self.presignature_id,
+                presignature_id = ?self.dropper.id,
                 "signature protocol timed out completely",
             );
             return Err(ProtocolError::Other(
@@ -239,7 +240,7 @@ impl SignatureGenerator {
         if self.timestamp.elapsed() > self.timeout {
             tracing::warn!(
                 sign_id = ?self.request.indexed.id,
-                presignature_id = ?self.presignature_id,
+                presignature_id = ?self.dropper.id,
                 "signature protocol timed out",
             );
             return Err(ProtocolError::Other(
@@ -298,7 +299,7 @@ impl SignatureManager {
     fn generate_internal(
         me: Participant,
         public_key: PublicKey,
-        presignature: Presignature,
+        taken: PresignatureTaken,
         request: SignRequest,
         cfg: &ProtocolConfig,
     ) -> Result<SignatureGenerator, InitializationError> {
@@ -313,6 +314,7 @@ impl SignatureManager {
             ..
         } = indexed;
 
+        let (presignature, dropper) = taken.take();
         let PresignOutput { big_r, k, sigma } = presignature.output;
         let delta = derive_delta(*request_id, args.entropy, big_r);
         // TODO: Check whether it is okay to use invert_vartime instead
@@ -328,18 +330,13 @@ impl SignatureManager {
             output,
             args.payload,
         )?);
-        Ok(SignatureGenerator::new(
-            protocol,
-            presignature.id,
-            request,
-            cfg,
-        ))
+        Ok(SignatureGenerator::new(protocol, dropper, request, cfg))
     }
 
     /// Starts a new presignature generation protocol.
     pub fn generate(
         &mut self,
-        presignature: Presignature,
+        taken: PresignatureTaken,
         request: SignRequest,
         cfg: &ProtocolConfig,
     ) -> Result<(), InitializationError> {
@@ -347,12 +344,11 @@ impl SignatureManager {
         tracing::info!(
             ?sign_id,
             me = ?self.me,
-            presignature_id = presignature.id,
+            id = taken.presignature.id,
             participants = ?request.participants,
             "starting protocol to generate a new signature",
         );
-        let generator =
-            Self::generate_internal(self.me, self.public_key, presignature, request, cfg)?;
+        let generator = Self::generate_internal(self.me, self.public_key, taken, request, cfg)?;
         crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
             .with_label_values(&[self.my_account_id.as_str()])
             .inc();
@@ -456,14 +452,14 @@ impl SignatureManager {
                     Err(err) => {
                         remove.push(sign_id.clone());
                         self.msg
-                            .filter_sign(sign_id.clone(), generator.presignature_id)
+                            .filter_sign(sign_id.clone(), generator.dropper.id)
                             .await;
 
                         if generator.request.indexed.timestamp.elapsed() < generator.timeout_total {
                             failed.push(sign_id.clone());
                             tracing::error!(
                                 ?sign_id,
-                                presignature_id = generator.presignature_id,
+                                presignature_id = generator.dropper.id,
                                 ?err,
                                 "signature failed to be produced; pushing request back into failed queue",
                             );
@@ -473,7 +469,7 @@ impl SignatureManager {
                         } else {
                             tracing::error!(
                                 ?sign_id,
-                                presignature_id = generator.presignature_id,
+                                presignature_id = generator.dropper.id,
                                 ?err,
                                 "signature failed to be produced; full timeout, trashing request",
                             );
@@ -502,7 +498,7 @@ impl SignatureManager {
                                     SignatureMessage {
                                         id: sign_id.clone(),
                                         proposer: generator.request.proposer,
-                                        presignature_id: generator.presignature_id,
+                                        presignature_id: generator.dropper.id,
                                         epoch: self.epoch,
                                         from: self.me,
                                         data: data.clone(),
@@ -537,7 +533,7 @@ impl SignatureManager {
                                 SignatureMessage {
                                     id: sign_id.clone(),
                                     proposer: generator.request.proposer,
-                                    presignature_id: generator.presignature_id,
+                                    presignature_id: generator.dropper.id,
                                     epoch: self.epoch,
                                     from: self.me,
                                     data,
@@ -567,7 +563,7 @@ impl SignatureManager {
                         tracing::info!(
                             ?sign_id,
                             me = ?self.me,
-                            presignature_id = generator.presignature_id,
+                            presignature_id = generator.dropper.id,
                             big_r = ?output.big_r.to_base58(),
                             s = ?output.s,
                             elapsed = ?generator.timestamp.elapsed(),
@@ -581,7 +577,7 @@ impl SignatureManager {
                             rpc.publish(self.public_key, generator.request.clone(), output);
                         }
                         self.msg
-                            .filter_sign(sign_id.clone(), generator.presignature_id)
+                            .filter_sign(sign_id.clone(), generator.dropper.id)
                             .await;
                         // Do not retain the protocol
                         remove.push(sign_id.clone());
@@ -635,7 +631,7 @@ impl SignatureManager {
             .set(self.sign_queue.len_mine() as i64);
 
         let mut retry = Vec::new();
-        while let Ok(Some(presignature)) = {
+        while let Ok(Some(taken)) = {
             if self.sign_queue.is_empty_mine() {
                 Ok(None)
             } else {
@@ -644,18 +640,21 @@ impl SignatureManager {
         } {
             let Some(my_request) = self.sign_queue.take_mine() else {
                 tracing::warn!(
-                    ?presignature,
+                    presignature = ?taken.presignature,
                     "unexpected, no more requests to handle. presignature will be removed",
                 );
                 continue;
             };
 
-            let participants =
-                intersect_vec(&[stable, &presignature.participants, &my_request.participants]);
+            let participants = intersect_vec(&[
+                stable,
+                &taken.presignature.participants,
+                &my_request.participants,
+            ]);
             if participants.len() < self.threshold {
                 tracing::warn!(
                     sign_id = ?my_request.indexed.id,
-                    presignature_id = ?presignature.id,
+                    presignature_id = ?taken.presignature.id,
                     ?participants,
                     "intersection < threshold, trashing presignature"
                 );
@@ -664,9 +663,9 @@ impl SignatureManager {
             }
 
             let sign_id = my_request.indexed.id.clone();
-            let presignature_id = presignature.id;
+            let presignature_id = taken.presignature.id;
             if let Err(InitializationError::BadParameters(err)) =
-                self.generate(presignature, my_request.clone(), cfg)
+                self.generate(taken, my_request.clone(), cfg)
             {
                 retry.push(my_request);
                 tracing::warn!(
