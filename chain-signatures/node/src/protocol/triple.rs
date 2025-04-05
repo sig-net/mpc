@@ -52,7 +52,7 @@ pub struct TripleGenerator {
 }
 
 impl TripleGenerator {
-    pub fn new(
+    pub async fn new(
         id: TripleId,
         me: Participant,
         threshold: usize,
@@ -65,10 +65,15 @@ impl TripleGenerator {
         // Participants can be out of order, so let's sort them before doing anything. Critical
         // for the triple_is_mine check:
         participants.sort();
-
-        let protocol = Arc::new(RwLock::new(
-            cait_sith::triples::generate_triple::<Secp256k1>(&participants, me, threshold)?,
-        ));
+        let protocol =
+            match cait_sith::triples::generate_triple::<Secp256k1>(&participants, me, threshold) {
+                Ok(protocol) => protocol,
+                Err(e) => {
+                    slot.unreserve().await;
+                    return Err(e).into();
+                }
+            };
+        let protocol = Arc::new(RwLock::new(protocol));
 
         Ok(Self {
             id,
@@ -417,14 +422,17 @@ impl TripleTasks {
                 };
 
                 tracing::info!(id, "joining protocol to generate a new triple");
-                let generator = e.insert(TripleGenerator::new(
-                    id,
-                    me,
-                    self.threshold,
-                    participants,
-                    cfg.triple.generation_timeout,
-                    slot,
-                )?);
+                let generator = e.insert(
+                    TripleGenerator::new(
+                        id,
+                        me,
+                        self.threshold,
+                        participants,
+                        cfg.triple.generation_timeout,
+                        slot,
+                    )
+                    .await?,
+                );
                 self.queued.push_back(id);
                 crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
                     .with_label_values(&[my_account_id.as_str()])
@@ -633,7 +641,11 @@ impl TripleManager {
                 ))
             })?;
 
-        tracing::debug!(id0 = triples.triple0.id, id1 = triples.triple1.id, "took two triples");
+        tracing::debug!(
+            id0 = triples.triple0.id,
+            id1 = triples.triple1.id,
+            "took two triples"
+        );
         Ok(triples)
     }
 
@@ -705,7 +717,8 @@ impl TripleManager {
             let mut tasks = self.tasks.write().await;
             tasks.generators.insert(
                 id,
-                TripleGenerator::new(id, self.me, self.threshold, participants, timeout, slot)?,
+                TripleGenerator::new(id, self.me, self.threshold, participants, timeout, slot)
+                    .await?,
             );
             tasks.queued.push_back(id);
             tasks.introduced.insert(id);
