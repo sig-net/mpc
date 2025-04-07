@@ -14,14 +14,12 @@ use mpc_keys::hpke;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
 
-use alloy::{
-    contract::{ContractInstance, Interface},
-    dyn_abi::DynSolValue,
-    network::EthereumWallet,
-    primitives::U256,
-    providers::ProviderBuilder,
-    transports::http::{Client as ReqwestClient, Http},
-};
+use alloy::contract::{ContractInstance, Interface};
+use alloy::dyn_abi::DynSolValue;
+use alloy::network::EthereumWallet;
+use alloy::primitives::U256;
+use alloy::providers::ProviderBuilder;
+use alloy::transports::http::{Client as ReqwestClient, Http};
 use alloy_signer_local::PrivateKeySigner;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
@@ -425,7 +423,6 @@ impl EthClient {
         let abi_value = json.get("abi").expect("Failed to get ABI from artifact");
         let abi = serde_json::from_str(&abi_value.to_string()).unwrap();
 
-        // Create a new `ContractInstance` of the `Counter` contract from the abi
         let contract = ContractInstance::new(
             Address::from_str(&format!("0x{}", eth.contract_address)).unwrap(),
             provider.clone(),
