@@ -1,5 +1,6 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::{
+    consensus::BlockHeader,
     primitives::{
         hex::{self, ToHexExt},
         Address, Bytes, U256,
@@ -460,10 +461,19 @@ async fn process_block(
             })
         });
 
+    let block_timestamp = client
+        .get_block_by_number(BlockTag::Number(block_number), false)
+        .await
+        .ok()
+        .and_then(|block| block.map(|b| b.header.timestamp()));
+
     for log in filtered_logs {
-        if let Err(err) =
-            process_filtered_log(log.clone(), sign_tx.clone(), node_near_account_id.clone())
-        {
+        if let Err(err) = process_filtered_log(
+            log.clone(),
+            sign_tx.clone(),
+            node_near_account_id.clone(),
+            block_timestamp,
+        ) {
             tracing::warn!(?log, ?err, "Failed to process Ethereum log");
         }
     }
@@ -474,6 +484,7 @@ fn process_filtered_log(
     log: Log,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
+<<<<<<< HEAD
     ws: &Web3<WebSocket>,
 ) -> anyhow::Result<()> {
     tracing::info!("Received new Ethereum sign request: {:?}", log);
@@ -490,6 +501,21 @@ fn process_filtered_log(
     let indexed_unix_timestamp = sign_request.unix_timestamp;
 
     let ws_clone = ws.clone();
+=======
+    block_timestamp: Option<u64>,
+) -> anyhow::Result<()> {
+    tracing::info!("Received new Ethereum sign request: {:?}", log);
+    let sign_request = sign_request_from_filtered_log(log)?;
+    if let Some(block_timestamp) = block_timestamp {
+        crate::metrics::INDEXER_DELAY
+            .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
+            .observe(
+                crate::util::duration_between_unix(block_timestamp, sign_request.unix_timestamp)
+                    .as_secs() as f64,
+            );
+    }
+    let sign_tx = sign_tx.clone();
+>>>>>>> b8292d79 (add indexer delay here too)
     tokio::spawn(async move {
         if let Err(err) = sign_tx.send(sign_request).await {
             tracing::error!(?err, "Failed to send ETH sign request into queue");
