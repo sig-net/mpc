@@ -44,6 +44,8 @@ pub struct EthConfig {
     pub contract_address: String,
     /// must be one of sepolia, mainnet
     pub network: String,
+    /// path to store helios data
+    pub data_path: String,
 }
 
 impl fmt::Debug for EthConfig {
@@ -86,9 +88,12 @@ pub struct EthArgs {
         long,
         env("MPC_ETH_NETWORK"),
         requires = "eth_network",
-        default_value = "sepolia"
+        default_value = "sepolia",
+        value_parser = ["sepolia", "mainnet"],
     )]
     pub eth_network: Option<String>,
+    /// helios light client data path
+    pub eth_data_path: Option<String>,
 }
 
 impl EthArgs {
@@ -115,6 +120,9 @@ impl EthArgs {
         if let Some(eth_network) = self.eth_network {
             args.extend(["--eth-network".to_string(), eth_network]);
         }
+        if let Some(eth_data_path) = self.eth_data_path {
+            args.extend(["--eth-data-path".to_string(), eth_data_path]);
+        }
         args
     }
 
@@ -125,6 +133,7 @@ impl EthArgs {
             execution_rpc_http_url: self.eth_execution_rpc_http_url?,
             contract_address: self.eth_contract_address?,
             network: self.eth_network?,
+            data_path: self.eth_data_path?,
         })
     }
 
@@ -136,6 +145,7 @@ impl EthArgs {
                 eth_execution_rpc_http_url: Some(config.execution_rpc_http_url),
                 eth_contract_address: Some(config.contract_address),
                 eth_network: Some(config.network),
+                eth_data_path: Some(config.data_path),
             },
             _ => Self {
                 eth_account_sk: None,
@@ -143,6 +153,7 @@ impl EthArgs {
                 eth_execution_rpc_http_url: None,
                 eth_contract_address: None,
                 eth_network: None,
+                eth_data_path: None,
             },
         }
     }
@@ -183,7 +194,7 @@ sol! {
 fn sign_request_from_filtered_log(log: Log) -> anyhow::Result<IndexedSignRequest> {
     let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
-    if event.deposit == U256::from_str("0").unwrap() {
+    if event.deposit == U256::ZERO {
         tracing::warn!("deposit is 0, skipping sign request");
         return Err(anyhow::anyhow!("deposit is 0"));
     }
@@ -270,13 +281,13 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
 
     let chain_id = U256::from_be_slice(&data[128..160]);
 
-    let path = parse_string_args(data.clone(), 160);
+    let path = parse_string_args(&data, 160);
 
-    let algo = parse_string_args(data.clone(), 192);
+    let algo = parse_string_args(&data, 192);
 
-    let dest = parse_string_args(data.clone(), 224);
+    let dest = parse_string_args(&data, 224);
 
-    let params = parse_string_args(data.clone(), 256);
+    let params = parse_string_args(&data, 256);
 
     tracing::info!(
         "Parsed event: requester={}, payload_hash={}, path={}, deposit={}, chain_id={}, algo={}, dest={}, params={}",
@@ -303,7 +314,7 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
     })
 }
 
-fn parse_string_args(data: Bytes, offset_start: usize) -> String {
+fn parse_string_args(data: &Bytes, offset_start: usize) -> String {
     let offset: usize = U256::from_be_slice(&data[offset_start..offset_start + 32]).to::<usize>();
     let length: usize = U256::from_be_slice(&data[offset..offset + 32]).to::<usize>();
     if length == 0 {
@@ -330,7 +341,7 @@ pub async fn run(
         .network(network)
         .consensus_rpc(&eth.consensus_rpc_http_url)
         .execution_rpc(&eth.execution_rpc_http_url)
-        .data_dir(PathBuf::from("/tmp/helios"))
+        .data_dir(PathBuf::from(&eth.data_path))
         .build()
         .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?;
 
@@ -419,21 +430,25 @@ async fn process_block(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
-    let Some(block_receipts) = client
+    let start = Instant::now();
+    let block_receipts_result = client
         .get_block_receipts(BlockTag::Number(block_number))
-        .await
-        .map_err(|err| {
-            anyhow::anyhow!(
-                "Failed to get block receipts for block number {block_number}: {:?}",
-                err
-            )
-        })?
+        .await;
+    crate::metrics::ETH_BLOCK_RECEIPT_LATENCY
+        .with_label_values(&[node_near_account_id.as_str()])
+        .observe(start.elapsed().as_millis() as f64);
+    let Some(block_receipts) = block_receipts_result.map_err(|err| {
+        anyhow::anyhow!(
+            "Failed to get block receipts for block number {block_number}: {:?}",
+            err
+        )
+    })?
     else {
         tracing::info!("no receipts for block number {block_number}");
         return Ok(());
     };
 
-    let filtered_logs: Vec<Log> = block_receipts
+    let filtered_logs = block_receipts
         .into_iter()
         .filter_map(|receipt| receipt.as_ref().as_receipt().cloned())
         .flat_map(|receipt| {
@@ -443,10 +458,9 @@ async fn process_block(
                         .topic0()
                         .is_some_and(|topic0| *topic0 == SignatureRequested::SIGNATURE_HASH)
             })
-        })
-        .collect();
+        });
 
-    for log in filtered_logs.into_iter() {
+    for log in filtered_logs {
         if let Err(err) =
             process_filtered_log(log.clone(), sign_tx.clone(), node_near_account_id.clone())
         {

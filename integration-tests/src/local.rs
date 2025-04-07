@@ -69,19 +69,7 @@ impl Node {
             running_threshold: 120,
             behind_threshold: 120,
         };
-        let eth = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: cfg.eth.clone().map(|eth| eth.account_sk.clone()),
-            eth_consensus_rpc_http_url: cfg
-                .eth
-                .clone()
-                .map(|eth| eth.consensus_rpc_http_url.clone()),
-            eth_execution_rpc_http_url: cfg
-                .eth
-                .clone()
-                .map(|eth| eth.execution_rpc_http_url.clone()),
-            eth_contract_address: cfg.eth.clone().map(|eth| eth.contract_address.clone()),
-            eth_network: None,
-        };
+        let eth = mpc_node::indexer_eth::EthArgs::from_config(cfg.eth.clone());
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = mpc_node::cli::Cli::Start {

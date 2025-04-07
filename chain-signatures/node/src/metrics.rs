@@ -645,6 +645,16 @@ pub(crate) static INDEXER_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     .unwrap()
 });
 
+pub(crate) static ETH_BLOCK_RECEIPT_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
+    try_create_histogram_vec(
+        "multichain_eth_block_receipt_latency_ms",
+        "Latency of eth indexer getting block recepipts",
+        &["node_account_id"],
+        Some(exponential_buckets(5.0, 1.5, 20).unwrap()),
+    )
+    .unwrap()
+});
+
 pub fn try_create_int_gauge_vec(name: &str, help: &str, labels: &[&str]) -> Result<IntGaugeVec> {
     check_metric_multichain_prefix(name)?;
     let opts = Opts::new(name, help);
