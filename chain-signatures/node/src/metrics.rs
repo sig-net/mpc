@@ -637,10 +637,10 @@ pub(crate) static MSG_CLIENT_SEND_DELAY: LazyLock<HistogramVec> = LazyLock::new(
 
 pub(crate) static INDEXER_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
-        "multichain_indexer_delay_ms",
+        "multichain_indexer_delay_secs",
         "Delay between block time of the request and the time a request gets indexed",
         &["chain", "node_account_id"],
-        Some(exponential_buckets(5.0, 1.5, 20).unwrap()),
+        Some(exponential_buckets(0.0, 1.5, 20).unwrap()),
     )
     .unwrap()
 });
