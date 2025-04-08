@@ -86,9 +86,9 @@ impl SyncTask {
 
         // Do NOT start until we have our own participant info.
         // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
-        let (_threshold, me) = loop {
+        let me = loop {
             watcher_interval.tick().await;
-            if let Some(info) = self.watcher.info().await {
+            if let Some(info) = self.watcher.me().await {
                 break info;
             }
         };
@@ -155,21 +155,17 @@ impl SyncTask {
 }
 
 /// Broadcast an update to all participants specified by `active`.
-async fn broadcast_sync(
-    client: NodeClient,
-    update: SyncUpdate,
-    active: Participants,
-) -> SyncUpdate {
+async fn broadcast_sync(client: NodeClient, update: SyncUpdate, active: Participants) {
     if update.is_empty() {
-        return update;
+        return;
     }
 
     let start = Instant::now();
     let mut tasks = JoinSet::new();
-    let arc_update = Arc::new(update.clone());
+    let update = Arc::new(update);
     for (&p, info) in active.iter() {
         let client = client.clone();
-        let update = arc_update.clone();
+        let update = update.clone();
         let url = info.url.clone();
         tasks.spawn(async move {
             let sync_view = client.sync(&url, &update).await;
@@ -189,8 +185,6 @@ async fn broadcast_sync(
         responded = ?resps,
         "broadcast completed",
     );
-
-    update
 }
 
 impl SyncUpdate {

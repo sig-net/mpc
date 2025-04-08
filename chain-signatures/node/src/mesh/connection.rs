@@ -184,7 +184,7 @@ impl Pool {
         self.drop_connections(seen);
     }
 
-    async fn connect_nodes(
+    pub(crate) async fn connect_nodes(
         &mut self,
         participants: &Participants,
         seen: &mut HashSet<Participant>,
@@ -244,45 +244,16 @@ impl Pool {
 
         for participant in remove {
             self.connections.remove(&participant);
-            if let Err(err) = self
+            if let Err(_) = self
                 .conn_change_tx
                 .send(ConnectionUpdate::Drop(participant))
             {
-                tracing::warn!(?participant, "unable to send change for drop participant");
+                tracing::warn!(?participant, "unable to send update for drop participant");
             }
         }
     }
 
-    // pub async fn status(&self) -> MeshState {
-    //     let mut stable = Vec::new();
-    //     let mut active = Participants::default();
-    //     for (participant, conn) in self.connections.iter() {
-    //         if let NodeStatus::Active(is_stable) = conn.status().await {
-    //             active.insert(participant, conn.info.clone());
-    //             if is_stable {
-    //                 stable.push(*participant);
-    //             }
-    //         }
-    //     }
-
-    //     MeshState { active, stable }
-    // }
-
     pub fn watcher(&self) -> ConnectionWatcher {
-        // ConnectionWatcher {
-        //     watchers: self
-        //         .connections
-        //         .iter()
-        //         .map(|(&p, conn)| (p, conn.status_rx.clone()))
-        //         .collect(),
-        // }
-
-        // ConnectionWatcher::new(
-        //     self.connections
-        //         .iter()
-        //         .map(|(&p, conn)| (p, conn.status_rx.clone())),
-        // )
-
         ConnectionWatcher::new(self.conn_change_rx.resubscribe())
     }
 }
@@ -296,29 +267,22 @@ enum ConnectionUpdate {
 pub struct ConnectionWatcher {
     /// Watch for new connections and dropped connections from the pool. This
     /// is so that we can update our watchers when the pool changes.
+    // NOTE: this is a broadcast channel so that we can get a series of updates, and
+    // not just the latest entry with watcher channel.
     conn_update: broadcast::Receiver<ConnectionUpdate>,
     /// Set of active connections that we are watching.
     watchers: StreamMap<Participant, WatchStream<NodeStatusUpdate>>,
 }
 
 impl ConnectionWatcher {
-    fn new(
-        conn_update: broadcast::Receiver<ConnectionUpdate>,
-        // conn: impl IntoIterator<Item = (Participant, watch::Receiver<NodeStatus>)>,
-    ) -> Self {
-        // let mut watchers = StreamMap::new();
-        // for (id, receiver) in conn {
-        //     watchers.insert(id, WatchStream::new(receiver));
-        // }
-        // Self { watchers }
-
+    fn new(conn_update: broadcast::Receiver<ConnectionUpdate>) -> Self {
         Self {
             conn_update,
             watchers: StreamMap::new(),
         }
     }
 
-    pub async fn next(&mut self) -> Option<(Participant, NodeStatusUpdate)> {
+    pub async fn next(&mut self) -> (Participant, NodeStatusUpdate) {
         loop {
             tokio::select! {
                 // Update our watchers if the connections changed.
@@ -333,138 +297,11 @@ impl ConnectionWatcher {
                     }
                 }
                 // NOTE: if watchers.next() return None, it means that the connection is dropped
+                // or that the StreamMap is empty. In that case, we should just continue
                 Some(item) = self.watchers.next() => {
-                    return Some(item);
+                    return item;
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use mockito::ServerGuard;
-    use tokio::sync::RwLock;
-
-    use crate::mesh::MeshState;
-    use test_log::test;
-
-    use super::*;
-
-    struct Server {
-        id: u32,
-        server: ServerGuard,
-    }
-
-    impl Server {
-        async fn new(id: u32) -> Self {
-            let mut server = mockito::Server::new_async().await;
-            server
-                .mock("GET", "/state")
-                .with_status(201)
-                .with_header("content-type", "text/plain")
-                .with_body(
-                    serde_json::to_vec(&StateView::Running {
-                        participants: vec![Participant::from(0)],
-                        triple_count: 0,
-                        triple_mine_count: 0,
-                        triple_potential_count: 0,
-                        presignature_count: 0,
-                        presignature_mine_count: 0,
-                        presignature_potential_count: 0,
-                        latest_block_height: 0,
-                        is_stable: true,
-                    })
-                    .unwrap(),
-                )
-                .create_async()
-                .await;
-
-            server
-                .mock("POST", "/msg")
-                .with_status(201)
-                .with_header("content-type", "application/json")
-                .with_body("{}")
-                .create_async()
-                .await;
-
-            Self { id, server }
-        }
-
-        fn client(&self) -> NodeClient {
-            NodeClient::new(&crate::node_client::Options::default())
-        }
-
-        fn info(&self) -> ParticipantInfo {
-            ParticipantInfo {
-                id: self.id,
-                account_id: format!("p{}.test", self.id).parse().unwrap(),
-                url: self.server.url(),
-                cipher_pk: mpc_keys::hpke::PublicKey::from_bytes(&[0; 32]),
-                sign_pk: near_crypto::PublicKey::empty(near_crypto::KeyType::ED25519),
-            }
-        }
-    }
-
-    struct Servers {
-        servers: Vec<Server>,
-    }
-
-    // TODO: make this async spawn
-    impl Servers {
-        async fn new(num_nodes: u32) -> Self {
-            let mut servers = Vec::new();
-            for i in 0..num_nodes {
-                servers.push(Server::new(i).await);
-            }
-            Self { servers }
-        }
-
-        fn participants(&self) -> Participants {
-            let mut participants = Participants::default();
-            for server in &self.servers {
-                participants.insert(&Participant::from(server.id), server.info().clone());
-            }
-            participants
-        }
-    }
-
-    #[test(tokio::test)]
-    async fn test_connection_update() {
-        let num_nodes = 3;
-        // let state = Arc::new(RwLock::new(MeshState::default()));
-        let ping_interval = Duration::from_millis(1000);
-        let servers = Servers::new(num_nodes).await;
-        let participants = servers.participants();
-        let mut pool = Pool::new(&servers.servers[0].client(), ping_interval);
-        let mut watcher = pool.watcher();
-        pool.connect_nodes(&participants, &mut HashSet::new()).await;
-
-        // sleep a bit before trying to get the status.
-        tokio::time::sleep(ping_interval + Duration::from_millis(100)).await;
-
-        for i in 0..num_nodes {
-            match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
-                Ok(Some((participant, status))) => {
-                    tracing::info!(?participant, ?status, "got connection update");
-                    assert!(matches!(status, NodeStatusUpdate::Active(true, _)));
-                }
-                Ok(None) => {
-                    panic!("{i}: failed to get connection update");
-                }
-                Err(_) => {
-                    panic!("{i}: timeout waiting for connection update");
-                }
-            }
-        }
-
-        // crate::mesh::update(
-        //     &state,
-        //     Participant::from(0),
-        //     NodeStatusUpdate::Active(true, servers.servers[0].info()),
-        // )
-        // .await;
     }
 }
