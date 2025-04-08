@@ -143,20 +143,20 @@ pub struct Pool {
     /// to join the network within the next epoch.
     connections: HashMap<Participant, NodeConnection>,
 
-    conn_change_tx: broadcast::Sender<ConnectionUpdate>,
-    conn_change_rx: broadcast::Receiver<ConnectionUpdate>,
+    conn_update_tx: broadcast::Sender<ConnectionUpdate>,
+    conn_update_rx: broadcast::Receiver<ConnectionUpdate>,
 }
 
 impl Pool {
     pub fn new(client: &NodeClient, ping_interval: Duration) -> Self {
         tracing::info!("creating new connection pool");
-        let (conn_change_tx, conn_change_rx) = broadcast::channel(32);
+        let (conn_update_tx, conn_update_rx) = broadcast::channel(32);
         Self {
             client: client.clone(),
             ping_interval,
             connections: HashMap::new(),
-            conn_change_tx,
-            conn_change_rx,
+            conn_update_tx,
+            conn_update_rx,
         }
     }
 
@@ -204,9 +204,10 @@ impl Pool {
                             self.ping_interval,
                         ));
 
-                        if let Err(_) = self
-                            .conn_change_tx
+                        if self
+                            .conn_update_tx
                             .send(ConnectionUpdate::New(participant, conn.status_rx.clone()))
+                            .is_err()
                         {
                             tracing::warn!(?node, "failed to send new connection");
                         }
@@ -221,9 +222,10 @@ impl Pool {
                         self.ping_interval,
                     ));
 
-                    if let Err(_) = self
-                        .conn_change_tx
+                    if self
+                        .conn_update_tx
                         .send(ConnectionUpdate::New(participant, conn.status_rx.clone()))
+                        .is_err()
                     {
                         tracing::warn!(?node, "failed to send new connection");
                     }
@@ -244,9 +246,10 @@ impl Pool {
 
         for participant in remove {
             self.connections.remove(&participant);
-            if let Err(_) = self
-                .conn_change_tx
+            if self
+                .conn_update_tx
                 .send(ConnectionUpdate::Drop(participant))
+                .is_err()
             {
                 tracing::warn!(?participant, "unable to send update for drop participant");
             }
@@ -254,7 +257,7 @@ impl Pool {
     }
 
     pub fn watcher(&self) -> ConnectionWatcher {
-        ConnectionWatcher::new(self.conn_change_rx.resubscribe())
+        ConnectionWatcher::new(self.conn_update_rx.resubscribe())
     }
 }
 

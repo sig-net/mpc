@@ -82,6 +82,10 @@ impl Mesh {
         &self.state
     }
 
+    pub fn watcher(&self) -> ConnectionWatcher {
+        self.connections.watcher()
+    }
+
     pub async fn run(mut self, contract_state: Arc<RwLock<Option<ProtocolState>>>) {
         let mut contract_change_interval = tokio::time::interval(self.ping_interval / 2);
         tokio::spawn(async move {
@@ -109,97 +113,19 @@ mod tests {
     use super::*;
     use crate::mesh::connection::Pool;
     use crate::protocol::contract::RunningContractState;
-    use crate::protocol::ParticipantInfo;
-    use crate::web::StateView;
+    use crate::web::mock::MockServers;
 
-    use mockito::ServerGuard;
     use test_log::test;
-
-    struct MockServer {
-        id: u32,
-        server: ServerGuard,
-    }
-
-    impl MockServer {
-        async fn new(id: u32) -> Self {
-            let mut server = mockito::Server::new_async().await;
-            server
-                .mock("GET", "/state")
-                .with_status(201)
-                .with_header("content-type", "text/plain")
-                .with_body(
-                    serde_json::to_vec(&StateView::Running {
-                        participants: vec![Participant::from(0)],
-                        triple_count: 0,
-                        triple_mine_count: 0,
-                        triple_potential_count: 0,
-                        presignature_count: 0,
-                        presignature_mine_count: 0,
-                        presignature_potential_count: 0,
-                        latest_block_height: 0,
-                        is_stable: true,
-                    })
-                    .unwrap(),
-                )
-                .create_async()
-                .await;
-
-            server
-                .mock("POST", "/msg")
-                .with_status(201)
-                .with_header("content-type", "application/json")
-                .with_body("{}")
-                .create_async()
-                .await;
-
-            Self { id, server }
-        }
-
-        fn client(&self) -> NodeClient {
-            NodeClient::new(&crate::node_client::Options::default())
-        }
-
-        fn info(&self) -> ParticipantInfo {
-            ParticipantInfo {
-                id: self.id,
-                account_id: format!("p{}.test", self.id).parse().unwrap(),
-                url: self.server.url(),
-                cipher_pk: mpc_keys::hpke::PublicKey::from_bytes(&[0; 32]),
-                sign_pk: near_crypto::PublicKey::empty(near_crypto::KeyType::ED25519),
-            }
-        }
-    }
-
-    struct MockCluster {
-        servers: Vec<MockServer>,
-    }
-
-    // TODO: make this async spawn
-    impl MockCluster {
-        async fn new(num_nodes: u32) -> Self {
-            let mut servers = Vec::new();
-            for i in 0..num_nodes {
-                servers.push(MockServer::new(i).await);
-            }
-            Self { servers }
-        }
-
-        fn participants(&self) -> Participants {
-            let mut participants = Participants::default();
-            for server in &self.servers {
-                participants.insert(&Participant::from(server.id), server.info().clone());
-            }
-            participants
-        }
-    }
 
     #[test(tokio::test)]
     async fn test_pool_update() {
         let num_nodes = 3;
         let ping_interval = Duration::from_millis(1000);
-        let servers = MockCluster::new(num_nodes).await;
+        let servers = MockServers::new(num_nodes).await;
         let participants = servers.participants();
-        let mut pool = Pool::new(&servers.servers[0].client(), ping_interval);
+        let client = servers.client();
+
+        let mut pool = Pool::new(&client, ping_interval);
         let mut watcher = pool.watcher();
         pool.connect_nodes(&participants, &mut HashSet::new()).await;
 
@@ -226,9 +152,9 @@ mod tests {
         let sk = k256::SecretKey::random(&mut rand::thread_rng());
         let pk = sk.public_key();
         let ping_interval = Duration::from_millis(1000);
-        let servers = MockCluster::new(num_nodes).await;
+        let servers = MockServers::new(num_nodes).await;
         let participants = servers.participants();
-        let client = servers.servers[0].client();
+        let client = servers.client();
 
         let contract = Arc::new(RwLock::new(Some(ProtocolState::Running(
             RunningContractState {

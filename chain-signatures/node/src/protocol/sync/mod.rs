@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::mesh::MeshState;
+use crate::mesh::connection::{ConnectionWatcher, NodeStatusUpdate};
+use crate::mesh::{Mesh, MeshState};
 use crate::node_client::NodeClient;
 use crate::rpc::NodeStateWatcher;
 use crate::storage::{PresignatureStorage, TripleStorage};
@@ -53,6 +54,7 @@ pub struct SyncTask {
     triples: TripleStorage,
     presignatures: PresignatureStorage,
     mesh_state: Arc<RwLock<MeshState>>,
+    conn_watcher: ConnectionWatcher,
     watcher: NodeStateWatcher,
     requests: SyncRequestReceiver,
 }
@@ -63,7 +65,7 @@ impl SyncTask {
         client: &NodeClient,
         triples: TripleStorage,
         presignatures: PresignatureStorage,
-        mesh_state: Arc<RwLock<MeshState>>,
+        mesh: &Mesh,
         watcher: NodeStateWatcher,
     ) -> (SyncChannel, Self) {
         let (requests, channel) = SyncChannel::new();
@@ -71,7 +73,8 @@ impl SyncTask {
             client: client.clone(),
             triples,
             presignatures,
-            mesh_state,
+            conn_watcher: mesh.watcher(),
+            mesh_state: mesh.state().clone(),
             watcher,
             requests,
         };
@@ -83,6 +86,9 @@ impl SyncTask {
         let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
         let mut broadcast_interval = tokio::time::interval(EVENTUAL_SYNC_INTERVAL);
         let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(100));
+
+        // skip the first immediate broadcast.
+        broadcast_interval.tick().await;
 
         // Do NOT start until we have our own participant info.
         // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
@@ -98,6 +104,17 @@ impl SyncTask {
         loop {
             tokio::select! {
                 // do a new broadcast if there is no ongoing broadcast.
+                (p, status) = self.conn_watcher.next() => {
+                    if p == me {
+                        // do not sync with ourselves.
+                        continue;
+                    }
+                    if let NodeStatusUpdate::Active(_, info) = status {
+                        tracing::info!(?p, "node has become active, sending sync request");
+                        let update = self.new_update(me).await;
+                        tokio::spawn(send_sync(self.client.clone(), info.url, update));
+                    }
+                }
                 _ = broadcast_interval.tick() => {
                     if broadcast.is_some() {
                         // task is still ongoing, skip.
@@ -151,6 +168,28 @@ impl SyncTask {
             triples,
             presignatures,
         }
+    }
+}
+
+async fn send_sync(client: NodeClient, url: String, update: SyncUpdate) {
+    if update.is_empty() {
+        return;
+    }
+
+    let start = Instant::now();
+
+    // try up to 100 times to send the sync update. If the node is not reachable within
+    // the retry amount, odds are that it will never reply back to us.
+    for _ in 0..100 {
+        let Err(err) = client.sync(&url, &update).await else {
+            tracing::info!(
+                elapsed = ?start.elapsed(),
+                "sync completed",
+            );
+            break;
+        };
+        tracing::warn!(?err, "failed to send sync update");
+        tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
 
