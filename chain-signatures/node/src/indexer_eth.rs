@@ -404,19 +404,13 @@ fn process_filtered_log(
     let block_number = log.block_number.map(|bn| bn.as_u64());
     let indexed_unix_timestamp = sign_request.unix_timestamp;
 
-    let sign_tx_clone = sign_tx.clone();
     let ws_clone = ws.clone();
-    let node_near_account_id_clone = node_near_account_id.clone();
-
     tokio::spawn(async move {
-        if let Err(err) = sign_tx_clone.send(sign_request).await {
+        if let Err(err) = sign_tx.send(sign_request).await {
             tracing::error!(?err, "Failed to send ETH sign request into queue");
         } else {
             crate::metrics::NUM_SIGN_REQUESTS
-                .with_label_values(&[
-                    Chain::Ethereum.as_str(),
-                    node_near_account_id_clone.as_str(),
-                ])
+                .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
                 .inc();
         }
 
@@ -425,7 +419,7 @@ fn process_filtered_log(
                 &ws_clone,
                 block_number,
                 indexed_unix_timestamp,
-                &node_near_account_id_clone,
+                &node_near_account_id,
             )
             .await;
         }
