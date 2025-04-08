@@ -49,7 +49,10 @@ impl MeshState {
             }
             NodeStatusUpdate::Offline => {
                 self.active.remove(&participant);
-                self.stable.retain(|p| p != &participant);
+                if let Some(pos) = self.stable.iter().position(|p| p == &participant) {
+                    self.stable.swap_remove(pos);
+                    self.stable.sort();
+                }
             }
         }
     }
