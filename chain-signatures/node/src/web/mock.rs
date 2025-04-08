@@ -48,7 +48,11 @@ impl MockServer {
         Self { id, server }
     }
 
-    fn info(&self) -> ParticipantInfo {
+    pub fn id(&self) -> Participant {
+        Participant::from(self.id)
+    }
+
+    pub fn info(&self) -> ParticipantInfo {
         ParticipantInfo {
             id: self.id,
             account_id: format!("p{}.test", self.id).parse().unwrap(),
@@ -57,6 +61,24 @@ impl MockServer {
             sign_pk: near_crypto::PublicKey::empty(near_crypto::KeyType::ED25519),
         }
     }
+
+    pub async fn make_offline(&mut self) {
+        self.server
+            .mock("POST", "/msg")
+            .with_status(404)
+            .create_async()
+            .await;
+    }
+
+    pub async fn make_online(&mut self) {
+        self.server
+            .mock("POST", "/msg")
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .create_async()
+            .await;
+    }
 }
 
 pub struct MockServers {
@@ -64,23 +86,61 @@ pub struct MockServers {
 }
 
 impl MockServers {
-    pub async fn new(num_nodes: u32) -> Self {
-        let mut servers = Vec::new();
-        for i in 0..num_nodes {
-            servers.push(MockServer::new(i).await);
+    pub async fn new(nodes: usize) -> Self {
+        let mut servers = Self {
+            servers: Vec::new(),
+        };
+        for id in 0..nodes {
+            servers.push(id as u32).await;
         }
-        Self { servers }
+        servers
     }
 
     pub fn participants(&self) -> Participants {
         let mut participants = Participants::default();
         for server in &self.servers {
-            participants.insert(&Participant::from(server.id), server.info().clone());
+            participants.insert(&server.id(), server.info().clone());
         }
         participants
     }
 
     pub fn client(&self) -> NodeClient {
         NodeClient::new(&crate::node_client::Options::default())
+    }
+
+    pub async fn push(&mut self, id: u32) {
+        self.servers.push(MockServer::new(id).await);
+    }
+
+    pub async fn push_next(&mut self) -> Participant {
+        let id = self.servers.len() as u32;
+        self.push(id).await;
+        Participant::from(id)
+    }
+
+    pub async fn remove(&mut self, id: u32) {
+        self.servers.retain(|server| server.id != id);
+    }
+
+    pub async fn remove_back(&mut self) {
+        self.servers.pop();
+    }
+
+    pub async fn swap_remove_front(&mut self) {
+        self.servers.swap_remove(0);
+    }
+}
+
+impl std::ops::Index<usize> for MockServers {
+    type Output = MockServer;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.servers[index]
+    }
+}
+
+impl std::ops::IndexMut<usize> for MockServers {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.servers[index]
     }
 }

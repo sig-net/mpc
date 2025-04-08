@@ -21,7 +21,7 @@ use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -644,7 +644,8 @@ impl SignatureManager {
             if participants.len() < self.threshold {
                 tracing::warn!(
                     sign_id = ?my_request.indexed.id,
-                    presignature_id = ?presignature.id,
+                    sign_subset = ?my_request.participants,
+                    presignature = ?(presignature.id, presignature.participants),
                     ?participants,
                     "intersection < threshold, trashing presignature"
                 );
@@ -675,12 +676,12 @@ impl SignatureManager {
 
     pub fn execute(
         state: &RunningState,
-        stable: &[Participant],
+        stable: &BTreeSet<Participant>,
         protocol_cfg: &ProtocolConfig,
         ctx: &impl super::cryptography::CryptographicCtx,
     ) -> tokio::task::JoinHandle<()> {
         let signature_manager = state.signature_manager.clone();
-        let stable = stable.to_vec();
+        let stable = stable.iter().copied().collect::<Vec<_>>();
         let protocol_cfg = protocol_cfg.clone();
         let rpc_channel = ctx.rpc_channel().clone();
         let channel = ctx.channel().clone();

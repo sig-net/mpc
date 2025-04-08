@@ -1048,7 +1048,7 @@ impl MessageOutbox {
                 Ok(Err((route, partition, err))) => {
                     // since we failed, put back all the messages related to this
                     retry.push_back((route, partition));
-                    errors.push(err);
+                    errors.push((route.1, err));
                 }
                 Err(err) => {
                     tracing::warn!(?err, "outbox: task failed to send message");

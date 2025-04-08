@@ -43,6 +43,7 @@ impl NodeStatus {
 struct NodeConnection {
     info: ParticipantInfo,
     status_rx: watch::Receiver<NodeStatusUpdate>,
+    status_tx: watch::Sender<NodeStatusUpdate>,
     task: JoinHandle<()>,
 }
 
@@ -56,7 +57,7 @@ impl NodeConnection {
         let (status_tx, status_rx) = watch::channel(NodeStatusUpdate::Offline);
         let task = tokio::spawn(Self::run(
             client.clone(),
-            status_tx,
+            status_tx.clone(),
             participant,
             info.clone(),
             ping_interval,
@@ -64,8 +65,21 @@ impl NodeConnection {
         Self {
             info: info.clone(),
             status_rx,
+            status_tx,
             task,
         }
+    }
+
+    fn update(&mut self, client: &NodeClient, info: &ParticipantInfo, ping_interval: Duration) {
+        tracing::info!(?self.info, "updating connection");
+        self.task.abort();
+        self.task = tokio::spawn(Self::run(
+            client.clone(),
+            self.status_tx.clone(),
+            Participant::from(self.info.id),
+            info.clone(),
+            ping_interval,
+        ));
     }
 
     async fn run(
@@ -197,20 +211,8 @@ impl Pool {
                 Entry::Occupied(mut conn) => {
                     if &conn.get().info != info {
                         tracing::info!(?node, "node connection updating");
-                        let conn = conn.insert(NodeConnection::spawn(
-                            &self.client,
-                            participant,
-                            info,
-                            self.ping_interval,
-                        ));
-
-                        if self
-                            .conn_update_tx
-                            .send(ConnectionUpdate::New(participant, conn.status_rx.clone()))
-                            .is_err()
-                        {
-                            tracing::warn!(?node, "failed to send new connection");
-                        }
+                        conn.get_mut()
+                            .update(&self.client, info, self.ping_interval);
                     }
                 }
                 Entry::Vacant(conn) => {
@@ -221,16 +223,16 @@ impl Pool {
                         info,
                         self.ping_interval,
                     ));
-
+                    let watcher = conn.status_rx.clone();
                     if self
                         .conn_update_tx
-                        .send(ConnectionUpdate::New(participant, conn.status_rx.clone()))
+                        .send(ConnectionUpdate::New(participant, watcher))
                         .is_err()
                     {
                         tracing::warn!(?node, "failed to send new connection");
                     }
                 }
-            }
+            };
         }
     }
 
@@ -245,11 +247,12 @@ impl Pool {
         }
 
         for participant in remove {
-            self.connections.remove(&participant);
-            if self
-                .conn_update_tx
-                .send(ConnectionUpdate::Drop(participant))
-                .is_err()
+            let removed = self.connections.remove(&participant).is_some();
+            if removed
+                && self
+                    .conn_update_tx
+                    .send(ConnectionUpdate::Drop(participant))
+                    .is_err()
             {
                 tracing::warn!(?participant, "unable to send update for drop participant");
             }
@@ -295,7 +298,9 @@ impl ConnectionWatcher {
                             self.watchers.insert(participant, WatchStream::new(rx));
                         }
                         ConnectionUpdate::Drop(participant) => {
+                            tracing::debug!(?participant, "dropping watcher");
                             self.watchers.remove(&participant);
+                            return (participant, NodeStatusUpdate::Offline);
                         }
                     }
                 }

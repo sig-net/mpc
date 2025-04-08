@@ -1,14 +1,16 @@
+pub mod connection;
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ProtocolState;
-use cait_sith::protocol::Participant;
 use connection::{ConnectionWatcher, NodeStatusUpdate};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
-pub mod connection;
+use cait_sith::protocol::Participant;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "mesh_options")]
@@ -35,7 +37,7 @@ pub struct MeshState {
 
     /// Participants that are stable in the network; as in they have met certain criterias such
     /// as indexing the latest blocks.
-    pub stable: Vec<Participant>,
+    pub stable: BTreeSet<Participant>,
 }
 
 impl MeshState {
@@ -44,15 +46,12 @@ impl MeshState {
             NodeStatusUpdate::Active(is_stable, info) => {
                 self.active.insert(&participant, info);
                 if is_stable {
-                    self.stable.push(participant);
+                    self.stable.insert(participant);
                 }
             }
             NodeStatusUpdate::Offline => {
                 self.active.remove(&participant);
-                if let Some(pos) = self.stable.iter().position(|p| p == &participant) {
-                    self.stable.swap_remove(pos);
-                    self.stable.sort();
-                }
+                self.stable.remove(&participant);
             }
         }
     }
@@ -123,17 +122,16 @@ mod tests {
     #[test(tokio::test)]
     async fn test_pool_update() {
         let num_nodes = 3;
-        let ping_interval = Duration::from_millis(1000);
+        let ping_interval = Duration::from_millis(300);
         let servers = MockServers::new(num_nodes).await;
         let participants = servers.participants();
-        let client = servers.client();
 
-        let mut pool = Pool::new(&client, ping_interval);
+        let mut pool = Pool::new(&servers.client(), ping_interval);
         let mut watcher = pool.watcher();
         pool.connect_nodes(&participants, &mut HashSet::new()).await;
 
         // sleep a bit before trying to get the status.
-        tokio::time::sleep(ping_interval + Duration::from_millis(100)).await;
+        tokio::time::sleep(ping_interval).await;
 
         for i in 0..num_nodes {
             match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
@@ -150,15 +148,77 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_mesh_update() {
-        let threshold = 2;
         let num_nodes = 3;
+        let threshold = 2;
+        let sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let ping_interval = Duration::from_millis(300);
+
+        let mut servers = MockServers::new(num_nodes).await;
+        let contract = Arc::new(RwLock::new(Some(ProtocolState::Running(
+            RunningContractState {
+                epoch: 0,
+                public_key: *sk.public_key().as_affine(),
+                participants: servers.participants(),
+                candidates: Default::default(),
+                join_votes: Default::default(),
+                leave_votes: Default::default(),
+                threshold,
+            },
+        ))));
+
+        let mesh = Mesh::new(
+            &servers.client(),
+            Options {
+                ping_interval: ping_interval.as_millis() as u64,
+            },
+        );
+
+        let state = mesh.state().clone();
+        let mesh_task = tokio::spawn(mesh.run(contract.clone()));
+
+        // check that the mesh state is updated.
+        {
+            // give the mesh some time to run and update the connections.
+            tokio::time::sleep(ping_interval).await;
+            let state = state.read().await;
+            assert_eq!(state.active.len(), num_nodes);
+            assert_eq!(state.active, servers.participants());
+        }
+
+        // check that the mesh state is updated when a participant goes offline
+        {
+            servers[0].make_offline().await;
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            let state = state.read().await;
+            assert_eq!(state.active.len(), num_nodes - 1);
+            assert!(state.active.contains_key(&servers[1].id()));
+            assert!(state.active.contains_key(&servers[2].id()));
+            assert!(state.stable.contains(&servers[1].id()));
+            assert!(state.stable.contains(&servers[2].id()));
+        }
+
+        // check that the mesh state is updated when a participant goes back online.
+        {
+            servers[0].make_online().await;
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            let state = state.read().await;
+            assert_eq!(state.active.len(), num_nodes);
+        }
+
+        mesh_task.abort();
+    }
+
+    #[test(tokio::test)]
+    async fn test_mesh_contract_update() {
+        let mut num_nodes = 3;
+        let threshold = 2;
         let sk = k256::SecretKey::random(&mut rand::thread_rng());
         let pk = sk.public_key();
-        let ping_interval = Duration::from_millis(1000);
-        let servers = MockServers::new(num_nodes).await;
+        let ping_interval = Duration::from_millis(300);
+        let mut servers = MockServers::new(num_nodes).await;
         let participants = servers.participants();
-        let client = servers.client();
-
         let contract = Arc::new(RwLock::new(Some(ProtocolState::Running(
             RunningContractState {
                 epoch: 0,
@@ -172,22 +232,73 @@ mod tests {
         ))));
 
         let mesh = Mesh::new(
-            &client,
+            &servers.client(),
             Options {
                 ping_interval: ping_interval.as_millis() as u64,
             },
         );
-
         let state = mesh.state().clone();
-        let mesh_task = tokio::spawn(mesh.run(contract));
+        let mesh_task = tokio::spawn(mesh.run(contract.clone()));
 
-        // give the mesh some time to run and update the connections.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // check on node creation with contract change.
+        {
+            num_nodes += 1;
+            servers.push_next().await;
 
-        // check that the mesh state is updated.
-        let state = state.read().await;
-        assert_eq!(state.active.len(), num_nodes as usize);
-        assert_eq!(state.active, participants);
+            let mut contract = contract.write().await;
+            match contract.as_mut().unwrap() {
+                ProtocolState::Running(RunningContractState { participants, .. }) => {
+                    *participants = servers.participants();
+                }
+                _ => panic!("expected running contract"),
+            }
+            // need to drop our write lock of the contract so mesh can read from it.
+            drop(contract);
+
+            tokio::time::sleep(ping_interval).await;
+            let state = state.read().await;
+            assert_eq!(state.active.len(), num_nodes);
+            assert_eq!(state.active, servers.participants());
+            assert_eq!(state.stable.len(), num_nodes);
+            assert_eq!(
+                state.stable,
+                servers
+                    .participants()
+                    .keys()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+            );
+        }
+
+        // check on node deletion with contract change.
+        {
+            num_nodes -= 1;
+            servers.swap_remove_front().await;
+
+            let mut contract = contract.write().await;
+            match contract.as_mut().unwrap() {
+                ProtocolState::Running(RunningContractState { participants, .. }) => {
+                    *participants = servers.participants();
+                }
+                _ => panic!("expected running contract"),
+            }
+            // need to drop our write lock of the contract so mesh can read from it.
+            drop(contract);
+
+            tokio::time::sleep(ping_interval).await;
+            let state = state.read().await;
+            assert_eq!(state.active.len(), num_nodes);
+            assert_eq!(state.active, servers.participants());
+            assert_eq!(state.stable.len(), num_nodes);
+            assert_eq!(
+                state.stable,
+                servers
+                    .participants()
+                    .keys()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+            );
+        }
 
         mesh_task.abort();
     }
