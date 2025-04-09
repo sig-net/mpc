@@ -75,7 +75,7 @@ async fn test_signature_offline_node() -> anyhow::Result<()> {
 
     // Kill the node then have presignatures and signature generation only use the active set of nodes
     // to start generating presignatures and signatures.
-    let account_id = nodes.account_ids().into_iter().last().unwrap().clone();
+    let account_id = nodes.account_ids().into_iter().next_back().unwrap().clone();
     nodes.stop(&account_id).await.unwrap();
 
     nodes.wait().signable().await.unwrap();

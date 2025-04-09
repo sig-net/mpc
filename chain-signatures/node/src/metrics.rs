@@ -635,6 +635,16 @@ pub(crate) static MSG_CLIENT_SEND_DELAY: LazyLock<HistogramVec> = LazyLock::new(
     .unwrap()
 });
 
+pub(crate) static INDEXER_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
+    try_create_histogram_vec(
+        "multichain_indexer_delay_secs",
+        "Delay between block time of the request and the time a request gets indexed",
+        &["chain", "node_account_id"],
+        Some(exponential_buckets(0.01, 1.5, 30).unwrap()),
+    )
+    .unwrap()
+});
+
 pub fn try_create_int_gauge_vec(name: &str, help: &str, labels: &[&str]) -> Result<IntGaugeVec> {
     check_metric_multichain_prefix(name)?;
     let opts = Opts::new(name, help);

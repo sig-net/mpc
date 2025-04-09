@@ -159,6 +159,7 @@ fn sign_request_from_filtered_log(log: web3::types::Log) -> anyhow::Result<Index
         chain: Chain::Ethereum,
         // TODO: use indexer timestamp instead.
         timestamp: Instant::now(),
+        unix_timestamp: crate::util::current_unix_timestamp(),
     })
 }
 
@@ -301,7 +302,7 @@ pub async fn run(
             let Ok(()) = catchup(
                 latest_block_number,
                 end_block,
-                web3_ws.clone(),
+                &web3_ws,
                 sign_tx.clone(),
                 filter_builer.clone(),
                 node_near_account_id.clone(),
@@ -347,7 +348,7 @@ pub async fn run(
                         }) else {
                             break;
                         };
-                        let Ok(()) = process_filtered_log(log.clone(), sign_tx.clone(), node_near_account_id.clone()).inspect_err(|err| {
+                        let Ok(()) = process_filtered_log(log.clone(), sign_tx.clone(), node_near_account_id.clone(), &web3_ws).inspect_err(|err| {
                             tracing::warn!("Failed to process eth sign request: {:?}", err);
                         }) else {
                             break;
@@ -388,10 +389,22 @@ fn process_filtered_log(
     log: web3::types::Log,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
+    ws: &Web3<WebSocket>,
 ) -> anyhow::Result<()> {
     tracing::info!("Received new Ethereum sign request: {:?}", log);
-    let sign_request = sign_request_from_filtered_log(log)?;
-    let sign_tx = sign_tx.clone();
+
+    let sign_request = match sign_request_from_filtered_log(log.clone()) {
+        Ok(request) => request,
+        Err(err) => {
+            tracing::warn!("Failed to parse Ethereum sign request: {:?}", err);
+            return Err(err);
+        }
+    };
+
+    let block_number = log.block_number.map(|bn| bn.as_u64());
+    let indexed_unix_timestamp = sign_request.unix_timestamp;
+
+    let ws_clone = ws.clone();
     tokio::spawn(async move {
         if let Err(err) = sign_tx.send(sign_request).await {
             tracing::error!(?err, "Failed to send ETH sign request into queue");
@@ -400,14 +413,48 @@ fn process_filtered_log(
                 .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
                 .inc();
         }
+
+        if let Some(block_number) = block_number {
+            observe_indexer_latency(
+                &ws_clone,
+                block_number,
+                indexed_unix_timestamp,
+                &node_near_account_id,
+            )
+            .await;
+        }
     });
+
     Ok(())
+}
+
+async fn observe_indexer_latency(
+    ws: &Web3<WebSocket>,
+    block_number: u64,
+    indexed_unix_timestamp: u64,
+    node_near_account_id: &AccountId,
+) {
+    if let Ok(Some(block)) = ws
+        .eth()
+        .block(web3::types::BlockId::Number(BlockNumber::Number(
+            block_number.into(),
+        )))
+        .await
+    {
+        let block_time = block.timestamp.as_u64();
+        crate::metrics::INDEXER_DELAY
+            .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
+            .observe(
+                crate::util::duration_between_unix(block_time, indexed_unix_timestamp).as_secs()
+                    as f64,
+            );
+    }
 }
 
 async fn catchup(
     start_block: u64,
     end_block: u64,
-    ws: Web3<WebSocket>,
+    ws: &Web3<WebSocket>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     filter_builder: FilterBuilder,
     node_near_account_id: AccountId,
@@ -420,9 +467,12 @@ async fn catchup(
 
     let logs = ws.eth().logs(filter).await?;
     for log in logs {
-        if let Err(err) =
-            process_filtered_log(log.clone(), sign_tx.clone(), node_near_account_id.clone())
-        {
+        if let Err(err) = process_filtered_log(
+            log.clone(),
+            sign_tx.clone(),
+            node_near_account_id.clone(),
+            ws,
+        ) {
             tracing::warn!(
                 "Failed to process ethereum log: {:?} because of {:?}",
                 log,

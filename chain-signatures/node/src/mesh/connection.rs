@@ -80,7 +80,7 @@ impl NodeConnection {
                     let new_status = match state {
                         StateView::Running { is_stable, .. }
                         | StateView::Resharing { is_stable, .. } => NodeStatus::Active(is_stable),
-                        StateView::Joining { .. } | StateView::NotRunning { .. } => {
+                        StateView::Joining { .. } | StateView::NotRunning => {
                             NodeStatus::Active(false)
                         }
                     };

@@ -39,6 +39,7 @@ pub struct IndexedSignRequest {
     pub args: SignArgs,
     pub chain: Chain,
     pub timestamp: Instant,
+    pub unix_timestamp: u64,
 }
 
 /// The sign request for the node to process. This contains relevant info for the node
