@@ -170,28 +170,7 @@ impl Node {
             behind_threshold: 120,
         };
 
-<<<<<<< HEAD
         let eth = EthArgs::from_config(config.cfg.eth.clone());
-=======
-        let eth = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: config.cfg.eth.clone().map(|eth| eth.account_sk.clone()),
-            eth_consensus_rpc_http_url: config
-                .cfg
-                .eth
-                .clone()
-                .map(|eth| eth.consensus_rpc_http_url.clone()),
-            eth_execution_rpc_http_url: config
-                .cfg
-                .eth
-                .clone()
-                .map(|eth| eth.execution_rpc_http_url.clone()),
-            eth_contract_address: config
-                .cfg
-                .eth
-                .clone()
-                .map(|eth| eth.contract_address.clone()),
-        };
->>>>>>> cd78fe7e (helios: use helios for eth indexer)
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
