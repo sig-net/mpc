@@ -1,13 +1,9 @@
 use crate::protocol::{Chain, IndexedSignRequest};
-use alloy::{
-    consensus::BlockHeader,
-    primitives::{
-        hex::{self, ToHexExt},
-        Address, Bytes, U256,
-    },
-    rpc::types::Log,
-    sol_types::{sol, SolEvent},
-};
+use alloy::consensus::BlockHeader;
+use alloy::primitives::hex::{self, ToHexExt};
+use alloy::primitives::{Address, Bytes, U256};
+use alloy::rpc::types::Log;
+use alloy::sol_types::{sol, SolEvent};
 use helios::common::types::{BlockTag, SubscriptionEvent, SubscriptionType};
 use helios::ethereum::{
     config::networks::Network, database::FileDB, EthereumClient, EthereumClientBuilder,
@@ -484,24 +480,6 @@ fn process_filtered_log(
     log: Log,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
-<<<<<<< HEAD
-    ws: &Web3<WebSocket>,
-) -> anyhow::Result<()> {
-    tracing::info!("Received new Ethereum sign request: {:?}", log);
-
-    let sign_request = match sign_request_from_filtered_log(log.clone()) {
-        Ok(request) => request,
-        Err(err) => {
-            tracing::warn!("Failed to parse Ethereum sign request: {:?}", err);
-            return Err(err);
-        }
-    };
-
-    let block_number = log.block_number.map(|bn| bn.as_u64());
-    let indexed_unix_timestamp = sign_request.unix_timestamp;
-
-    let ws_clone = ws.clone();
-=======
     block_timestamp: Option<u64>,
 ) -> anyhow::Result<()> {
     tracing::info!("Received new Ethereum sign request: {:?}", log);
@@ -515,7 +493,6 @@ fn process_filtered_log(
             );
     }
     let sign_tx = sign_tx.clone();
->>>>>>> b8292d79 (add indexer delay here too)
     tokio::spawn(async move {
         if let Err(err) = sign_tx.send(sign_request).await {
             tracing::error!(?err, "Failed to send ETH sign request into queue");
@@ -524,42 +501,9 @@ fn process_filtered_log(
                 .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
                 .inc();
         }
-
-        if let Some(block_number) = block_number {
-            observe_indexer_latency(
-                &ws_clone,
-                block_number,
-                indexed_unix_timestamp,
-                &node_near_account_id,
-            )
-            .await;
-        }
     });
 
     Ok(())
-}
-
-async fn observe_indexer_latency(
-    ws: &Web3<WebSocket>,
-    block_number: u64,
-    indexed_unix_timestamp: u64,
-    node_near_account_id: &AccountId,
-) {
-    if let Ok(Some(block)) = ws
-        .eth()
-        .block(web3::types::BlockId::Number(BlockNumber::Number(
-            block_number.into(),
-        )))
-        .await
-    {
-        let block_time = block.timestamp.as_u64();
-        crate::metrics::INDEXER_DELAY
-            .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
-            .observe(
-                crate::util::duration_between_unix(block_time, indexed_unix_timestamp).as_secs()
-                    as f64,
-            );
-    }
 }
 
 #[derive(Debug)]
