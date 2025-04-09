@@ -86,6 +86,10 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let mine_id_2: u64 = 4;
     let mine_triple_2 = dummy_triple(mine_id_2);
 
+    // check that reserve and unreserve works:
+    let slot = triple_manager.reserve(mine_id_1).await.unwrap();
+    slot.unreserve().await;
+
     // Add mine triple and check that it is in the storage
     triple_manager
         .reserve(mine_id_1)
@@ -179,6 +183,12 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_mine().await, 0);
     assert!(presignature_manager.is_empty().await);
     assert_eq!(presignature_manager.len_potential().await, 0);
+
+    // check that reserve then dropping unreserves the slot:
+    let slot = presignature_manager.reserve(presignature.id).await.unwrap();
+    if let Some(task) = slot.unreserve() {
+        task.await.unwrap();
+    }
 
     // Insert presignature owned by node1, with our node0 view being that it is a foreign presignature
     assert!(
