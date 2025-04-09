@@ -37,7 +37,7 @@ enum Cli {
         #[arg(long, default_value = "sepolia")]
         eth_network: String,
         #[arg(long, default_value = "/tmp/data")]
-        eth_data_path: String,
+        eth_helios_data_path: String,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
             eth_contract_address,
             eth_account_sk,
             eth_network,
-            eth_data_path,
+            eth_helios_data_path,
         } => {
             println!(
                 "Setting up an environment with {} nodes, {} threshold ...",
@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
                     execution_rpc_http_url: eth_execution_rpc_http_url,
                     contract_address: eth_contract_address,
                     network: eth_network,
-                    data_path: eth_data_path,
+                    helios_data_path: eth_helios_data_path,
                 }),
                 ..Default::default()
             };

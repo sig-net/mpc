@@ -42,7 +42,7 @@ pub struct EthConfig {
     /// must be one of sepolia, mainnet
     pub network: String,
     /// path to store helios data
-    pub data_path: String,
+    pub helios_data_path: String,
 }
 
 impl fmt::Debug for EthConfig {
@@ -84,13 +84,19 @@ pub struct EthArgs {
     #[clap(
         long,
         env("MPC_ETH_NETWORK"),
-        requires = "eth_network",
+        requires = "eth_account_sk",
         default_value = "sepolia",
         value_parser = ["sepolia", "mainnet"],
     )]
     pub eth_network: Option<String>,
     /// helios light client data path
-    pub eth_data_path: Option<String>,
+    #[clap(
+        long,
+        env("MPC_ETH_HELIOS_DATA_PATH"),
+        requires = "eth_account_sk",
+        default_value = "/helios/sepolia"
+    )]
+    pub eth_helios_data_path: Option<String>,
 }
 
 impl EthArgs {
@@ -117,8 +123,8 @@ impl EthArgs {
         if let Some(eth_network) = self.eth_network {
             args.extend(["--eth-network".to_string(), eth_network]);
         }
-        if let Some(eth_data_path) = self.eth_data_path {
-            args.extend(["--eth-data-path".to_string(), eth_data_path]);
+        if let Some(eth_helios_data_path) = self.eth_helios_data_path {
+            args.extend(["--eth-helios-data-path".to_string(), eth_helios_data_path]);
         }
         args
     }
@@ -130,7 +136,7 @@ impl EthArgs {
             execution_rpc_http_url: self.eth_execution_rpc_http_url?,
             contract_address: self.eth_contract_address?,
             network: self.eth_network?,
-            data_path: self.eth_data_path?,
+            helios_data_path: self.eth_helios_data_path?,
         })
     }
 
@@ -142,7 +148,7 @@ impl EthArgs {
                 eth_execution_rpc_http_url: Some(config.execution_rpc_http_url),
                 eth_contract_address: Some(config.contract_address),
                 eth_network: Some(config.network),
-                eth_data_path: Some(config.data_path),
+                eth_helios_data_path: Some(config.helios_data_path),
             },
             _ => Self {
                 eth_account_sk: None,
@@ -150,7 +156,7 @@ impl EthArgs {
                 eth_execution_rpc_http_url: None,
                 eth_contract_address: None,
                 eth_network: None,
-                eth_data_path: None,
+                eth_helios_data_path: None,
             },
         }
     }
@@ -338,7 +344,7 @@ pub async fn run(
         .network(network)
         .consensus_rpc(&eth.consensus_rpc_http_url)
         .execution_rpc(&eth.execution_rpc_http_url)
-        .data_dir(PathBuf::from(&eth.data_path))
+        .data_dir(PathBuf::from(&eth.helios_data_path))
         .build()
         .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?;
 
