@@ -52,6 +52,8 @@ impl fmt::Debug for EthConfig {
             .field("consensus_rpc_http_url", &self.consensus_rpc_http_url)
             .field("execution_rpc_http_url", &self.execution_rpc_http_url)
             .field("contract_address", &self.contract_address)
+            .field("network", &self.network)
+            .field("helios_data_path", &self.helios_data_path)
             .finish()
     }
 }
