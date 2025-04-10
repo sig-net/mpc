@@ -243,9 +243,11 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 });
 
             tracing::info!(%my_address, "address detected");
+
             let client = NodeClient::new(&message_options);
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
-            let mesh = Mesh::new(&client, mesh_options);
+            let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
+            let mesh = Mesh::new(&client, mesh_options, synced_peer_rx);
             let mesh_state = mesh.state().clone();
             let watcher = NodeStateWatcher::new(&account_id);
             let contract_state = watcher.state().clone();
@@ -262,6 +264,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 presignature_storage.clone(),
                 mesh_state.clone(),
                 watcher,
+                synced_peer_tx,
             );
 
             tracing::info!(
