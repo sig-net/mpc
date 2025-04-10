@@ -131,6 +131,7 @@ impl SyncTask {
                         update,
                         receivers.into_iter(),
                         self.synced_peer_tx.clone(),
+                        me,
                     ));
                     broadcast = Some((start, task));
                 }
@@ -142,19 +143,15 @@ impl SyncTask {
                     }
 
                     let update = self.new_update(me).await;
-                    let active = {
-                        let state = self.mesh_state.read().await;
-                        let mut active = state.active.clone();
-                        // do not broadcast to me
-                        active.remove(&me);
-                        active
-                    };
+                    let state = self.mesh_state.read().await.clone();
+                    let active = state.active;
 
                     let start = Instant::now();
                     let task = tokio::spawn(broadcast_sync(
                         self.client.clone(),
                         update, active.into_iter(),
-                        self.synced_peer_tx.clone()
+                        self.synced_peer_tx.clone(),
+                        me
                     ));
                     broadcast = Some((start, task));
                 }
@@ -206,6 +203,7 @@ async fn broadcast_sync(
     update: SyncUpdate,
     receivers: impl Iterator<Item = (Participant, ParticipantInfo)>,
     synced_peer_tx: mpsc::Sender<Participant>,
+    me: Participant,
 ) {
     if update.is_empty() {
         return;
@@ -220,7 +218,16 @@ async fn broadcast_sync(
         let url = info.url;
         let synced_peer_tx_clone = synced_peer_tx.clone();
         tasks.spawn(async move {
-            let sync_view = client.sync(&url, &update).await;
+            // Only actually do the sync on other peers, not on self. (Hack) We
+            // still want to send the message to synced_peer_tx though, since
+            // the mesh does not currently understand which node is self, so it
+            // will trigger a sync to self.
+            let sync_view = if p != me {
+                let res = client.sync(&url, &update).await;
+                Some(res)
+            } else {
+                None
+            };
             let result = synced_peer_tx_clone.send(p).await;
             if result.is_err() {
                 tracing::error!(
@@ -235,7 +242,13 @@ async fn broadcast_sync(
         .join_all()
         .await
         .into_iter()
-        .filter_map(|(p, view)| if let Ok(()) = view { Some(p) } else { None })
+        .filter_map(|(p, view)| {
+            if let Some(Ok(())) = view {
+                Some(p)
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>();
 
     tracing::info!(
