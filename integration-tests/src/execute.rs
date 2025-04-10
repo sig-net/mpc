@@ -4,6 +4,14 @@ use async_process::Child;
 pub(crate) const PACKAGE_MULTICHAIN: &str = "mpc-node";
 
 pub fn target_dir() -> Option<std::path::PathBuf> {
+    // CARGO_TARGET_DIR can be set explicitly.
+    // https://doc.rust-lang.org/cargo/reference/environment-variables.html
+    if let Ok(out_dir) = std::env::var("CARGO_TARGET_DIR") {
+        return Some(out_dir.into());
+    };
+
+    // If CARGO_TARGET_DIR is not set, search for the default the target
+    // directory in the parents of the build artifact output directory.
     let mut out_dir = std::path::Path::new(std::env!("OUT_DIR"));
     loop {
         if out_dir.ends_with("target") {
