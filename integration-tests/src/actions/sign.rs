@@ -194,7 +194,7 @@ impl SignAction<'_> {
     }
 
     fn payload_hash(&mut self) -> [u8; 32] {
-        web3::signing::keccak256(&self.payload_or_random())
+        *alloy::primitives::keccak256(self.payload_or_random())
     }
 
     async fn transact_sign(

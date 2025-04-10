@@ -20,6 +20,7 @@ use k256::Secp256k1;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
+use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
@@ -117,12 +118,7 @@ impl Node {
             running_threshold: 120,
             behind_threshold: 120,
         };
-        let eth_args = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: Some(config.cfg.eth.account_sk.clone()),
-            eth_rpc_ws_url: Some(config.cfg.eth.rpc_ws_url.clone()),
-            eth_rpc_http_url: Some(config.cfg.eth.rpc_http_url.clone()),
-            eth_contract_address: Some(config.cfg.eth.contract_address.clone()),
-        };
+        let eth_args = EthArgs::from_config(config.cfg.eth.clone());
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
