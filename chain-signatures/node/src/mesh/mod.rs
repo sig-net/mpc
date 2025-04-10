@@ -32,8 +32,7 @@ pub struct MeshState {
     /// Participants that are active in the network; as in they respond when pinged.
     pub active: Participants,
 
-    /// Participants that are stable in the network; as in they have met certain criterias such
-    /// as indexing the latest blocks.
+    /// Participants that can be selected for a new protocol invocation.
     pub stable: Vec<Participant>,
 }
 
