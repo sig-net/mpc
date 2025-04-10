@@ -99,18 +99,22 @@ impl NodeConnection {
 
             match client.state(&url).await {
                 Ok(state) => {
-                    let new_status = match state {
+                    let mut new_status = match state {
                         StateView::Running { .. } | StateView::Resharing { .. } => {
-                            // The peer is running. But before we can reliably
-                            // use the connected node in protocols we initiate,
-                            // we need to ensure the peer has the up-to-date
-                            // data about out owned IDs.
-                            NodeStatus::Syncing
-                            // TODO: (Find out in review) Is my own ID also part of this list?
+                            NodeStatus::Active
                         }
                         StateView::Joining { .. } | StateView::NotRunning => NodeStatus::Inactive,
                     };
                     let mut status = status.write().await;
+                    if *status != NodeStatus::Active && new_status == NodeStatus::Active {
+                        // Sync when we want to enter an active state
+                        //
+                        // The peer is running. But before we can reliably
+                        // use the connected node in protocols we initiate,
+                        // we need to ensure the peer has the up-to-date
+                        // data about out owned IDs.
+                        new_status = NodeStatus::Syncing;
+                    }
                     if *status != new_status {
                         tracing::info!(?node, ?new_status, "updated with new status");
                         *status = new_status;
