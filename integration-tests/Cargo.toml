@@ -6,6 +6,7 @@ publish = false
 
 
 [dependencies]
+alloy.workspace = true
 anyhow.workspace = true
 async-process = "1"
 backon = "0.4"
