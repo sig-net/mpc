@@ -651,7 +651,7 @@ impl PresignatureManager {
                             .observe(generator_poke_time.elapsed().as_millis() as f64);
                     }
                     Action::Return(output) => {
-                        tracing::debug!(
+                        tracing::info!(
                             id,
                             me = ?self.me,
                             big_r = ?output.big_r.to_base58(),

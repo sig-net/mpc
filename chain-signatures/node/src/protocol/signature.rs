@@ -381,7 +381,7 @@ impl SignatureManager {
             return Err(GenerationError::InvalidProposer(proposer, our_proposer));
         }
 
-        tracing::debug!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
+        tracing::info!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
         let presignature = match presignature_manager.take(presignature_id).await {
             Ok(presignature) => presignature,
             Err(err @ GenerationError::PresignatureIsGenerating(_)) => {
