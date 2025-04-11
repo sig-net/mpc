@@ -41,7 +41,7 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 url = { version = "2.4.0", features = ["serde"] }
 web3 = "0.19.0"
-anchor-client = "0.31.0"
+anchor-client = { version = "0.31.0", features = ["async"] }
 anchor-lang = "0.31.0"
 solana-sdk = "2.2.2"
 solana-transaction-status = "2.2.6"

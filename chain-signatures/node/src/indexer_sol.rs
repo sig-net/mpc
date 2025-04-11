@@ -17,8 +17,6 @@ use std::str::FromStr;
 use tokio::sync::mpsc;
 use anchor_client::{
     anchor_lang::{AnchorDeserialize, AnchorSerialize},
-    solana_client::rpc_config::RpcTransactionLogsConfig,
-    solana_client::rpc_config::RpcTransactionLogsFilter,
     Client, Cluster, Program,
 };
 use anchor_lang::prelude::event;
@@ -118,7 +116,7 @@ pub struct SignatureRequestedEvent {
 }
 
 fn sign_request_from_event(event: SignatureRequestedEvent, tx_sig: Vec<u8>) -> anyhow::Result<IndexedSignRequest> {
-    tracing::debug!("found solana event: {:?}", event);
+    tracing::info!("found solana event: {:?}", event);
     if event.deposit == 0 {
         tracing::warn!("deposit is 0, skipping sign request");
         return Err(anyhow::anyhow!("deposit is 0"));
@@ -202,7 +200,6 @@ pub async fn run(
 
     tracing::info!("running solana indexer");
     let program_id = Pubkey::from_str(&sol.program_address)?;
-    
     let keypair = Keypair::from_base58_string(&sol.account_sk);
 
     let cluster = Cluster::Custom(sol.rpc_url.clone(), sol.rpc_url.replace("http", "ws"));
@@ -212,19 +209,27 @@ pub async fn run(
         CommitmentConfig::confirmed(),
     );
     let program = client.program(program_id)?;
-
-    subscribe_to_program_events(
-        &program,
-        sign_tx,
-        node_near_account_id,
-    ).await
+    loop {
+        let unsub = subscribe_to_program_events(
+            &program,
+            sign_tx.clone(),
+            node_near_account_id.clone(),
+        ).await;
+        if let Err(err) = unsub {
+            tracing::warn!("Failed to subscribe to solana events: {:?}", err);
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        } else {
+            unsub.unwrap().unsubscribe().await;
+            tracing::info!("unsubscribing to solana events");
+        }
+    }
 }
 
 async fn subscribe_to_program_events<C: Deref<Target = Keypair> + Clone>(
     program: &Program<C>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<anchor_client::EventUnsubscriber> {
     tracing::info!("Subscribing to program events");
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let event_unsubscriber = program
@@ -233,22 +238,20 @@ async fn subscribe_to_program_events<C: Deref<Target = Keypair> + Clone>(
             if sender.send((event, tx_sig)).is_err() {
                 println!("Error while transferring the event.")
             }
-        })?;
+        }).await?;
 
-    tokio::spawn(async move {
-        while let Some((event, tx_sig)) = receiver.recv().await {
-            if let Err(err) = process_anchor_event(
-                event,
-                tx_sig,
-                sign_tx.clone(),
-                node_near_account_id.clone(),
-            ).await {
-                tracing::warn!("Failed to process event: {:?}", err);
-            }
-        } 
-    });
+    while let Some((event, tx_sig)) = receiver.recv().await {
+        if let Err(err) = process_anchor_event(
+            event,
+            tx_sig,
+            sign_tx.clone(),
+            node_near_account_id.clone(),
+        ).await {
+            tracing::warn!("Failed to process event: {:?}", err);
+        }
+    }
 
-    Ok(())
+    Ok(event_unsubscriber)
 }
 
 async fn process_anchor_event(
