@@ -67,6 +67,25 @@ async fn test_signature_rogue() -> anyhow::Result<()> {
 }
 
 #[test(tokio::test)]
+async fn test_signature_many() -> anyhow::Result<()> {
+    let nodes = cluster::spawn()
+        .disable_prestockpile()
+        .with_config(|config| {
+            config.protocol.presignature.min_presignatures = 10;
+            config.protocol.presignature.max_presignatures = 100;
+        })
+        .await?;
+
+    for idx in 0..10 {
+        tracing::info!(idx, "producing signature");
+        nodes.wait().signable().await?;
+        nodes.sign().await?;
+    }
+
+    Ok(())
+}
+
+#[test(tokio::test)]
 async fn test_signature_offline_node() -> anyhow::Result<()> {
     let mut nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;

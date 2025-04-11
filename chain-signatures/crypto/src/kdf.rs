@@ -146,13 +146,14 @@ mod tests {
         let admin_pk = admin_pk.to_encoded_point(false);
 
         // Calculate admin Ethereum address
-        let hash: [u8; 32] = web3::signing::keccak256(&admin_pk.as_bytes()[1..]);
-        let address = web3::types::Address::from_slice(&hash[12..]);
+        let hash: [u8; 32] = *alloy::primitives::keccak256(&admin_pk.as_bytes()[1..]);
+        let address = alloy::primitives::Address::from_slice(&hash[12..]);
 
         println!("Admin Ethereum address: {}", address);
 
         let expected_address =
-            web3::types::Address::from_str("0x3c0f802d66ac9fe56fa90afb0714dbc65b05a445").unwrap();
+            alloy::primitives::Address::from_str("0x3c0f802d66ac9fe56fa90afb0714dbc65b05a445")
+                .unwrap();
 
         assert_eq!(address, expected_address);
     }
