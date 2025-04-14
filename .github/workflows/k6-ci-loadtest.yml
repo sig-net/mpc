@@ -1,0 +1,27 @@
+name: k6 Load Test
+
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+    paths:
+      - chain-signatures/**
+
+jobs:
+  run-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup K6
+        uses: grafana/setup-k6-action@v1
+      - name: Run k6 test
+        uses: grafana/run-k6-action@v1
+        env:
+          K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
+          K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
+        with:
+          path: ./infra/loadtests/high-load-evm.js
+          cloud-run-locally: false
