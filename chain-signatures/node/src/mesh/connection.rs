@@ -247,7 +247,13 @@ impl Pool {
                     active.insert(participant, conn.info.clone());
                     need_sync.push(*participant);
                 }
-                NodeStatus::Inactive | NodeStatus::Offline => (),
+                NodeStatus::Inactive => {
+                    // TODO: Adding inactive nodes to the active connections
+                    // list is confusing. But the way keygen works now, it is
+                    // still required.
+                    active.insert(participant, conn.info.clone());
+                }
+                NodeStatus::Offline => (),
             }
         }
 
