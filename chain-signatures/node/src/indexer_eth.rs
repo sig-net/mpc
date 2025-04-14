@@ -639,19 +639,20 @@ async fn refresh_finalized_epoch(
                     "Failed to get block {i} from untrusted RPC client"
                 ));
             };
-            if cur_block.header.hash == parent_hash {
-                epoch_write.insert(i, cur_block.header.hash);
+            let cur_block_hash = cur_block.header.hash_slow();
+            if cur_block_hash == parent_hash {
+                epoch_write.insert(i, cur_block_hash);
                 parent_hash = cur_block.header.inner.parent_hash;
             } else {
                 tracing::warn!(
                     "Block {i} hash mismatch: expected {}, got {}",
                     parent_hash,
-                    cur_block.header.hash
+                    cur_block_hash
                 );
                 return Err(anyhow::anyhow!(
                     "Block {i} hash mismatch: expected {}, got {}",
                     parent_hash,
-                    cur_block.header.hash
+                    cur_block_hash
                 ));
             }
         }
