@@ -1,13 +1,15 @@
 use std::fmt::{self, Display};
 use std::sync::OnceLock;
 
-use opentelemetry::{global, KeyValue};
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::KeyValue;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-use opentelemetry_otlp::{LogExporter, Protocol, SpanExporter, WithExportConfig};
+use opentelemetry_otlp::{LogExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
-use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::trace::{RandomIdGenerator, Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use tracing::{Event, Subscriber};
+use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_stackdriver::layer as stackdriver_layer;
 use tracing_subscriber::fmt::format::{Format, FormatEvent, Full};
 use tracing_subscriber::fmt::time::SystemTime;
@@ -77,17 +79,17 @@ impl Display for OpenTelemetryLevel {
     }
 }
 
-pub struct OtelGuard {
-    tracer_provider: SdkTracerProvider,
-    logger_provider: SdkLoggerProvider,
+pub struct OtlpGuard {
+    tracer_otlp_provider: SdkTracerProvider,
+    log_otlp_provider: SdkLoggerProvider,
 }
 
-impl Drop for OtelGuard {
+impl Drop for OtlpGuard {
     fn drop(&mut self) {
-        if let Err(err) = self.tracer_provider.shutdown() {
+        if let Err(err) = self.tracer_otlp_provider.shutdown() {
             eprintln!("{err:?}");
         }
-        if let Err(err) = self.logger_provider.shutdown() {
+        if let Err(err) = self.log_otlp_provider.shutdown() {
             eprintln!("{err:?}");
         }
     }
@@ -164,7 +166,6 @@ fn get_resource(env: &str, node_id: &str) -> Resource {
 async fn init_otlp_logs(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkLoggerProvider {
     let exporter = LogExporter::builder()
         .with_http()
-        .with_protocol(Protocol::HttpBinary)
         .with_endpoint(format!("{otlp_endpoint}/v1/logs"))
         .build()
         .expect("Failed to create log exporter");
@@ -178,29 +179,23 @@ async fn init_otlp_logs(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkLog
 async fn init_otlp_traces(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkTracerProvider {
     let exporter = SpanExporter::builder()
         .with_http()
-        .with_protocol(Protocol::HttpBinary) //can be changed to `Protocol::HttpJson` to export in JSON format
         .with_endpoint(format!("{otlp_endpoint}/v1/traces"))
         .build()
         .expect("Failed to create trace exporter");
 
     SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
+        .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+            1.0,
+        ))))
+        .with_id_generator(RandomIdGenerator::default())
         .with_resource(get_resource(env, node_id))
+        .with_batch_exporter(exporter)
         .build()
 }
 
-pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtelGuard {
-    let logger_provider = init_otlp_logs(env, node_id, options.otlp_endpoint.as_str()).await;
-    let log_otel_layer = OpenTelemetryTracingBridge::new(&logger_provider);
-
-    let log_otel_filter = EnvFilter::new(options.opentelemetry_level.to_string())
-        .add_directive("hyper=off".parse().unwrap())
-        .add_directive("opentelemetry=off".parse().unwrap())
-        .add_directive("tonic=off".parse().unwrap())
-        .add_directive("h2=off".parse().unwrap())
-        .add_directive("reqwest=off".parse().unwrap());
-
-    let log_otel_layer = log_otel_layer.with_filter(log_otel_filter);
+pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
+    let log_otlp_provider = init_otlp_logs(env, node_id, options.otlp_endpoint.as_str()).await;
+    let log_otlp_layer = OpenTelemetryTracingBridge::new(&log_otlp_provider);
 
     let log_fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(atty::is(atty::Stream::Stderr))
@@ -209,6 +204,9 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtelGuard {
         .event_format(NodeIdFormatter::new(node_id))
         .with_filter(EnvFilter::from_default_env());
 
+    let tracer_otlp_provider = init_otlp_traces(env, node_id, options.otlp_endpoint.as_str()).await;
+    let tracer_otlp = tracer_otlp_provider.tracer("mpc");
+
     if is_running_on_gcp().await {
         let log_stackdriver_layer = stackdriver_layer()
             .with_writer(std::io::stderr)
@@ -216,21 +214,19 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtelGuard {
 
         tracing_subscriber::registry()
             .with(log_fmt_layer)
-            .with(log_otel_layer)
+            .with(log_otlp_layer)
+            .with(OpenTelemetryLayer::new(tracer_otlp))
             .with(log_stackdriver_layer)
             .init();
-        tracing::info!("Set global logging subscriber: fmt, otel, stackdriver");
+        tracing::info!("Set global logging subscriber: fmt, otlp, stackdriver");
     } else {
         tracing_subscriber::registry()
             .with(log_fmt_layer)
-            .with(log_otel_layer)
+            .with(log_otlp_layer)
+            .with(OpenTelemetryLayer::new(tracer_otlp))
             .init();
-        tracing::info!("Set global logging subscriber: fmt, otel");
+        tracing::info!("Set global logging subscriber: fmt, otlp");
     }
-
-    // Setup tracing
-    let tracer_provider = init_otlp_traces(env, node_id, options.otlp_endpoint.as_str()).await;
-    global::set_tracer_provider(tracer_provider.clone());
 
     tracing::info!(
         "Logging parameters: env={}, node_id={}, options={:?}",
@@ -239,8 +235,8 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtelGuard {
         options
     );
 
-    OtelGuard {
-        tracer_provider,
-        logger_provider,
+    OtlpGuard {
+        tracer_otlp_provider,
+        log_otlp_provider,
     }
 }
