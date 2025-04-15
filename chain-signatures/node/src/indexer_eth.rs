@@ -433,7 +433,10 @@ pub async fn run(
     let finalized_epoch_clone = Arc::clone(&finalized_epoch);
     tokio::spawn(async move {
         tracing::info!("Spawned task to refresh finalized block and the finalized epoch's blocks");
+        let mut interval =
+            tokio::time::interval(Duration::from_millis(eth.refresh_finalized_interval));
         loop {
+            interval.tick().await;
             refresh_finalized_epoch(
                 &client_clone,
                 &untrusted_rpc_client,
@@ -444,7 +447,6 @@ pub async fn run(
             .unwrap_or_else(|err| {
                 tracing::warn!("Failed to refresh finalized epoch: {:?}", err);
             });
-            tokio::time::sleep(Duration::from_millis(eth.refresh_finalized_interval)).await;
         }
     });
 
@@ -454,7 +456,9 @@ pub async fn run(
     let requests_indexed_clone = Arc::clone(&requests_indexed);
     tokio::spawn(async move {
         tracing::info!("Spawned task to send indexed requests to send queue");
+        let mut interval = tokio::time::interval(Duration::from_millis(200));
         loop {
+            interval.tick().await;
             send_requests_when_final(
                 &Arc::clone(&requests_indexed_clone),
                 &finalized_block_clone,
@@ -466,7 +470,6 @@ pub async fn run(
             .unwrap_or_else(|err| {
                 tracing::warn!("Failed to send requests when final: {:?}", err);
             });
-            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     });
 
@@ -476,7 +479,9 @@ pub async fn run(
     let near_account_id_clone = node_near_account_id.clone();
     tokio::spawn(async move {
         tracing::info!("Spawned task to retry failed blocks");
+        let mut interval = tokio::time::interval(Duration::from_millis(200));
         loop {
+            interval.tick().await;
             retry_failed_blocks(
                 Arc::clone(&blocks_failed_clone),
                 Arc::clone(&client_clone),
@@ -485,11 +490,12 @@ pub async fn run(
                 Arc::clone(&requests_indexed_clone),
             )
             .await;
-            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     });
 
+    let mut interval = tokio::time::interval(Duration::from_millis(200));
     loop {
+        interval.tick().await;
         if block_heads_rx.is_empty() {
             continue;
         }
@@ -525,7 +531,6 @@ pub async fn run(
         crate::metrics::LATEST_BLOCK_NUMBER
             .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
             .set(block_number as i64);
-        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     Ok(())
 }
@@ -824,8 +829,10 @@ async fn poll_block_finalized(
     finalized_epoch: Arc<RwLock<HashMap<u64, alloy::primitives::B256>>>,
 ) -> bool {
     let mut last_logged_finalized_block = 0;
+    let mut interval = tokio::time::interval(Duration::from_millis(200));
 
     loop {
+        interval.tick().await;
         let current_finalized_block = { *finalized_block.read().await };
 
         if current_finalized_block >= block_number {
@@ -852,8 +859,6 @@ async fn poll_block_finalized(
                 "Block {block_number} not finalized yet, current finalized block: {last_logged_finalized_block}"
             );
         }
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
