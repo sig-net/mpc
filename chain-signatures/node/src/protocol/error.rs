@@ -9,8 +9,8 @@ pub enum GenerationError {
     AlreadyGenerated,
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
-    #[error("triple storage error: {0}")]
-    TripleStoreError(String),
+    #[error("triple one of or both {0} and {1} are missing")]
+    TripleIsMissing(TripleId, TripleId),
     #[error("triple {0} is generating")]
     TripleIsGenerating(TripleId),
     #[error("triple access denied: id={0}, {1}")]

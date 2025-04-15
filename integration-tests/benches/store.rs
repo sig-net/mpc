@@ -150,7 +150,7 @@ fn bench_load_keys(c: &mut Criterion) {
                 for i in 0..1000 {
                     let t = dummy_triple(i);
                     env.triples
-                        .reserve(t.id, env.me)
+                        .reserve(t.id)
                         .await
                         .unwrap()
                         .insert(t, env.me)
@@ -166,7 +166,7 @@ fn bench_load_keys(c: &mut Criterion) {
                 for i in 0..1000 {
                     let p = dummy_presignature(i);
                     env.presignatures
-                        .reserve(p.id, env.me)
+                        .reserve(p.id)
                         .await
                         .unwrap()
                         .insert(p, env.me)
@@ -180,6 +180,16 @@ fn bench_load_keys(c: &mut Criterion) {
         b.iter(|| {
             let task = || async {
                 env.triples.fetch_owned(env.me).await;
+            };
+
+            rt.block_on(task());
+        })
+    });
+
+    c.bench_function("load 1024 mine presignature keys", |b| {
+        b.iter(|| {
+            let task = || async {
+                env.presignatures.fetch_owned(env.me).await;
             };
 
             rt.block_on(task());

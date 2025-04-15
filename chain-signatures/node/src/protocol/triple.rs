@@ -30,9 +30,8 @@ pub type TripleId = u64;
 
 type GeneratorOutcome = (TripleId, Result<bool, ProtocolError>);
 
-// TODO: why do we have Clone here? Triples can not be reused.
 /// A completed triple.
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Triple {
     pub id: TripleId,
     pub share: TripleShare<Secp256k1>,
@@ -417,7 +416,7 @@ impl TripleTasks {
                     return Ok(None);
                 }
 
-                let Some(slot) = self.storage.reserve(id, me).await else {
+                let Some(slot) = self.storage.reserve(id).await else {
                     return Ok(None);
                 };
 
@@ -582,31 +581,19 @@ impl TripleManager {
     }
 
     pub async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
-        self.triple_storage.reserve(id, self.me).await
+        self.triple_storage.reserve(id).await
     }
 
     pub async fn contains(&self, id: TripleId) -> bool {
-        self.triple_storage
-            .contains(id)
-            .await
-            .map_err(|e| tracing::warn!(?e, "failed to check if triple exists"))
-            .unwrap_or(false)
+        self.triple_storage.contains(id).await
     }
 
     pub async fn contains_mine(&self, id: TripleId) -> bool {
-        self.triple_storage
-            .contains_mine(id)
-            .await
-            .map_err(|e| tracing::warn!(?e, "failed to check if mine triple exists"))
-            .unwrap_or(false)
+        self.triple_storage.contains_mine(id, self.me).await
     }
 
     pub async fn contains_used(&self, id: TripleId) -> bool {
-        self.triple_storage
-            .contains_used(id)
-            .await
-            .map_err(|e| tracing::warn!(?e, "failed to check if triple is used"))
-            .unwrap_or(false)
+        self.triple_storage.contains_used(id).await
     }
 
     /// Take two unspent triple by theirs id with no way to return it. Only takes
@@ -617,6 +604,7 @@ impl TripleManager {
         &self,
         id0: TripleId,
         id1: TripleId,
+        owner: Participant,
     ) -> Result<TriplesTaken, GenerationError> {
         {
             let tasks = self.tasks.read().await;
@@ -631,15 +619,9 @@ impl TripleManager {
 
         let triples = self
             .triple_storage
-            .take_two(id0, id1)
+            .take_two(id0, id1, owner, self.me)
             .await
-            .map_err(|store_error| {
-                tracing::warn!(?store_error, "failed to take two triples");
-                GenerationError::TripleStoreError(format!(
-                    "failed to take two triples {:?}",
-                    store_error
-                ))
-            })?;
+            .ok_or(GenerationError::TripleIsMissing(id0, id1))?;
 
         tracing::debug!(
             id0 = triples.triple0.id,
@@ -653,13 +635,13 @@ impl TripleManager {
     /// It is very important to NOT reuse the same triple twice for two different
     /// protocols.
     pub async fn take_two_mine(&self) -> Option<TriplesTaken> {
-        self.triple_storage
-            .take_two_mine(self.me)
-            .await
-            .map_err(|store_error| {
-                tracing::warn!(?store_error, "failed to take two mine triples");
-            })
-            .ok()?
+        let triples = self.triple_storage.take_two_mine(self.me).await?;
+        tracing::debug!(
+            id0 = triples.triple0.id,
+            id1 = triples.triple1.id,
+            "took two mine triples"
+        );
+        Some(triples)
     }
 
     /// Returns the number of unspent triples available in the manager.
@@ -669,7 +651,7 @@ impl TripleManager {
 
     /// Returns the number of unspent triples assigned to this node.
     pub async fn len_mine(&self) -> usize {
-        self.triple_storage.len_mine().await.unwrap_or(0)
+        self.triple_storage.len_mine(self.me).await.unwrap_or(0)
     }
 
     pub async fn len_ongoing(&self) -> usize {

@@ -387,7 +387,7 @@ impl SignatureManager {
         }
 
         tracing::info!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
-        let presignature = match presignature_manager.take(presignature_id).await {
+        let presignature = match presignature_manager.take(presignature_id, proposer).await {
             Ok(presignature) => presignature,
             Err(err @ GenerationError::PresignatureIsGenerating(_)) => {
                 tracing::warn!(me = ?self.me, presignature_id, "presignature is generating, can't join signature generation protocol");
@@ -632,9 +632,9 @@ impl SignatureManager {
             .set(self.sign_queue.len_mine() as i64);
 
         let mut retry = Vec::new();
-        while let Ok(Some(taken)) = {
+        while let Some(taken) = {
             if self.sign_queue.is_empty_mine() {
-                Ok(None)
+                None
             } else {
                 self.presignatures.take_mine(self.me).await
             }
