@@ -419,6 +419,7 @@ pub async fn run(
     let blocks_failed: Arc<RwLock<VecDeque<(u64, alloy::primitives::B256)>>> =
         Arc::new(RwLock::new(VecDeque::new()));
 
+    // A queue of blocks and requests that are indexed but not yet sent to the sign queue
     let requests_indexed: Arc<RwLock<VecDeque<BlockAndRequests>>> =
         Arc::new(RwLock::new(VecDeque::new()));
 
@@ -431,7 +432,7 @@ pub async fn run(
     let finalized_block_clone = Arc::clone(&finalized_block);
     let finalized_epoch_clone = Arc::clone(&finalized_epoch);
     tokio::spawn(async move {
-        tracing::info!("Spawned refresh task started");
+        tracing::info!("Spawned task to refresh finalized block and the finalized epoch's blocks");
         loop {
             refresh_finalized_epoch(
                 &client_clone,
@@ -565,16 +566,43 @@ async fn add_failed_block(
     block_hash: alloy::primitives::B256,
 ) {
     let mut blocks_failed_write = blocks_failed.write().await;
-    if let Some(pos) = blocks_failed_write
-        .iter()
-        .position(|&(num, _)| num >= block_number)
-    {
-        blocks_failed_write.insert(pos, (block_number, block_hash));
+    blocks_failed_write.push_back((block_number, block_hash));
+}
+
+/// add a block that has all its sign requests processed to the requests_indexed queue
+async fn add_success_block(
+    requests_indexed: &Arc<RwLock<VecDeque<BlockAndRequests>>>,
+    block_number: u64,
+    block_hash: alloy::primitives::B256,
+    indexed_requests: &[IndexedSignRequest],
+) {
+    let mut requests_indexed_write = requests_indexed.write().await;
+    //preserving the ordering by block number so that we only need to check finality of the first block when sending to sign queue
+    if let Some(pos) = requests_indexed_write.iter().position(
+        |&BlockAndRequests {
+             block_number: num,
+             block_hash: _,
+             indexed_requests: _,
+         }| num >= block_number,
+    ) {
+        requests_indexed_write.insert(
+            pos,
+            BlockAndRequests::new(block_number, block_hash, indexed_requests.to_vec()),
+        );
     } else {
-        blocks_failed_write.push_back((block_number, block_hash));
+        requests_indexed_write.push_back(BlockAndRequests::new(
+            block_number,
+            block_hash,
+            indexed_requests.to_vec(),
+        ));
     }
 }
 
+/// Polls for the latest finalized block and update the latest finalized blocks.
+/// Once finalized block gets updated, we fetch the blocks in the epoch ending with the finalized block.
+/// To ensure the blocks we fetched are proven, we fetch the latest finalized block from Helios.
+/// Then using an unstrusted RPC client, we go backwards to fetch the blocks in the epoch and check that the hash of the block's header == its next block's parent_hash.
+/// This is proven because the finalized block is already proven by helios, and by checking current block hash == next block's parent hash, we prove that each block is indeed included in the chain.
 async fn refresh_finalized_epoch(
     helios_client: &Arc<EthereumClient<FileDB>>,
     untrusted_rpc_client: &RootProvider<Http<AlloyClient>>,
@@ -582,7 +610,6 @@ async fn refresh_finalized_epoch(
     finalized_epoch: &Arc<RwLock<HashMap<u64, alloy::primitives::B256>>>,
 ) -> anyhow::Result<()> {
     tracing::info!("Refreshing finalized epoch");
-
     let Some(cur_finalized_block) = helios_client
         .get_block_by_number(BlockTag::Finalized, false)
         .await
@@ -625,6 +652,7 @@ async fn refresh_finalized_epoch(
 
         let mut parent_hash = cur_finalized_block.header.inner.parent_hash;
 
+        // go backwards from latest_finalized_block_number - 1, and check that each block's hash == next block's parent hash
         for i in (last_finalized_block_number + 1..=latest_finalized_block_number - 1).rev() {
             tracing::info!("Fetching block {i} from untrusted RPC client");
             let cur_block = untrusted_rpc_client
@@ -712,12 +740,13 @@ async fn process_block(
 
     let indexed_requests = parse_filtered_logs(filtered_logs);
     {
-        let mut requests_indexed = requests_indexed.write().await;
-        requests_indexed.push_back(BlockAndRequests::new(
+        add_success_block(
+            requests_indexed,
             block_number,
             block_hash,
-            indexed_requests.clone(),
-        ));
+            &indexed_requests,
+        )
+        .await;
     }
 
     let block_timestamp = client
@@ -742,6 +771,9 @@ async fn process_block(
     Ok(())
 }
 
+/// Sends a request to the sign queue when the block where the request is in is finalized.
+/// This assumes that the requests_indexed are ordered by block number.
+/// Whenever there are requests in requests_indexed queue, function will keep polling if the block where the first request is in has finalized, if finalized, it will send this request to the sign queue.
 async fn send_requests_when_final(
     requests_indexed: &Arc<RwLock<VecDeque<BlockAndRequests>>>,
     finalized_block: &Arc<RwLock<u64>>,
