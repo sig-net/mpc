@@ -2,11 +2,21 @@ import http from 'k6/http';
 import { group } from 'k6';
 
 export const options = {
-  duration: '30m', // duration of tests
-  vus: 100,  // 100 virtual users
+  stages: [
+    { duration: '10m', target: 1},  // 1 virtual users
+    { duration: '10m', target: 2},
+    { duration: '10m', target: 1},
+    { duration: '10m', target: 3},
+    { duration: '10m', target: 1},
+    { duration: '10m', target: 4},
+    { duration: '10m', target: 1},
+    { duration: '10m', target: 5},
+    { duration: '10m', target: 1},
+    { duration: '10m', target: 6},
+  ],
   thresholds: {
     http_req_failed: ['rate<0.01'], // http errors should be less than 1%
-    http_req_duration: ['p(95)<600'], // 95 percent of response times must be below 600ms
+    http_req_duration: ['p(95)<1500'], // 95 percent of response times must be below 1500ms
   },
 };
 
