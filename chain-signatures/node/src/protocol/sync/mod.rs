@@ -109,7 +109,7 @@ impl SyncTask {
                         // do not sync with ourselves.
                         continue;
                     }
-                    if let NodeStatusUpdate::Active(_, info) = status {
+                    if let NodeStatusUpdate::Active(info) = status {
                         tracing::info!(?p, "node has become active, sending sync request");
                         let update = self.new_update(me).await;
                         tokio::spawn(send_sync(self.client.clone(), info.url, update));

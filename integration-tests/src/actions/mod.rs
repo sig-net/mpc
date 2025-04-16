@@ -47,7 +47,7 @@ pub async fn request_batch_random_sign(
     let mut tx = nodes.rpc_client.batch(&signer, nodes.contract().id());
     for _ in 0..3 {
         let payload: [u8; 32] = rand::thread_rng().gen();
-        let payload_hashed = web3::signing::keccak256(&payload);
+        let payload_hashed: [u8; 32] = *alloy::primitives::keccak256(payload);
         payloads.push((payload, payload_hashed));
         let request = SignRequest {
             payload: payload_hashed,
@@ -80,7 +80,7 @@ pub async fn request_batch_duplicate_sign(
 
     let mut tx = nodes.rpc_client.batch(&signer, nodes.contract().id());
     let payload: [u8; 32] = rand::thread_rng().gen();
-    let payload_hashed = web3::signing::keccak256(&payload);
+    let payload_hashed: [u8; 32] = *alloy::primitives::keccak256(payload);
     let sign_call_cnt = 2;
     for _ in 0..sign_call_cnt {
         let request = SignRequest {
@@ -277,7 +277,7 @@ pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> web3::types::
     let public_key = public_key.serialize_uncompressed();
 
     debug_assert_eq!(public_key[0], 0x04);
-    let hash: [u8; 32] = web3::signing::keccak256(&public_key[1..]);
+    let hash: [u8; 32] = *alloy::primitives::keccak256(&public_key[1..]);
 
     web3::types::Address::from_slice(&hash[12..])
 }

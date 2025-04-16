@@ -3,6 +3,7 @@ use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
+use tokio::task::JoinHandle;
 
 use crate::protocol::presignature::{Presignature, PresignatureId};
 
@@ -11,31 +12,84 @@ use super::{owner_key, STORAGE_VERSION};
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 /// A pre-reserved slot for a presignature that will eventually be inserted.
-#[derive(Clone)]
 pub struct PresignatureSlot {
     id: PresignatureId,
     storage: PresignatureStorage,
+    stored: bool,
 }
 
 impl PresignatureSlot {
     // TODO: put inside a tokio task:
-    pub async fn insert(&self, presignature: Presignature, owner: Participant) -> bool {
-        self.storage.insert(presignature, owner).await
+    pub async fn insert(&mut self, presignature: Presignature, owner: Participant) -> bool {
+        self.stored = self.storage.insert(presignature, owner).await;
+        self.stored
     }
 
-    // TODO: put inside a tokio task:
-    pub async fn unreserve(&self) {
-        let Some(mut conn) = self.storage.connect().await else {
-            tracing::warn!(
-                id = self.id,
-                "unable to unreserve presignature: connection failed"
-            );
-            return;
-        };
-        let result: Result<(), _> = conn.srem(&self.storage.reserved_key, self.id).await;
-        if let Err(err) = result {
-            tracing::warn!(id = self.id, ?err, "failed to unreserve presignature");
+    pub fn unreserve(&self) -> Option<JoinHandle<()>> {
+        if self.stored {
+            return None;
         }
+
+        let storage = self.storage.clone();
+        let id = self.id;
+        let task = tokio::spawn(async move {
+            tracing::info!(id, "unreserving presignature");
+            storage.unreserve(id).await;
+        });
+        Some(task)
+    }
+}
+
+impl Drop for PresignatureSlot {
+    fn drop(&mut self) {
+        self.unreserve();
+    }
+}
+
+pub struct PresignatureTaken {
+    pub presignature: Presignature,
+    storage: PresignatureTakenDropper,
+}
+
+pub struct PresignatureTakenDropper {
+    pub id: PresignatureId,
+    dropper: Option<PresignatureStorage>,
+}
+
+impl Drop for PresignatureTakenDropper {
+    fn drop(&mut self) {
+        if let Some(storage) = self.dropper.take() {
+            let id = self.id;
+            tokio::spawn(async move {
+                storage.unreserve(id).await;
+            });
+        }
+    }
+}
+
+impl PresignatureTaken {
+    fn owner(presignature: Presignature, storage: PresignatureStorage) -> Self {
+        Self {
+            storage: PresignatureTakenDropper {
+                id: presignature.id,
+                dropper: Some(storage),
+            },
+            presignature,
+        }
+    }
+
+    fn foreigner(presignature: Presignature) -> Self {
+        Self {
+            storage: PresignatureTakenDropper {
+                id: presignature.id,
+                dropper: None,
+            },
+            presignature,
+        }
+    }
+
+    pub fn take(self) -> (Presignature, PresignatureTakenDropper) {
+        (self.presignature, self.storage)
     }
 }
 
@@ -123,11 +177,21 @@ impl PresignatureStorage {
             Ok(_) => Some(PresignatureSlot {
                 id,
                 storage: self.clone(),
+                stored: false,
             }),
             Err(err) => {
-                tracing::warn!(?err, "failed to reserve presignature");
+                tracing::warn!(id, ?err, "failed to reserve presignature");
                 None
             }
+        }
+    }
+
+    async fn unreserve(self, id: PresignatureId) {
+        let Some(mut conn) = self.connect().await else {
+            return;
+        };
+        if let Err(err) = conn.srem::<'_, _, _, ()>(&self.reserved_key, id).await {
+            tracing::warn!(id, ?err, "failed to unreserve presignature");
         }
     }
 
@@ -288,7 +352,7 @@ impl PresignatureStorage {
         id: PresignatureId,
         owner: Participant,
         me: Participant,
-    ) -> Option<Presignature> {
+    ) -> Option<PresignatureTaken> {
         const SCRIPT: &str = r#"
             local presig_key = KEYS[1]
             local used_key = KEYS[2]
@@ -327,7 +391,7 @@ impl PresignatureStorage {
             .invoke_async(&mut conn)
             .await
         {
-            Ok(presignature) => Some(presignature),
+            Ok(presignature) => Some(PresignatureTaken::foreigner(presignature)),
             Err(err) => {
                 tracing::warn!(id, ?owner, ?me, ?err, "failed to take presignature");
                 None
@@ -335,11 +399,12 @@ impl PresignatureStorage {
         }
     }
 
-    pub async fn take_mine(&self, me: Participant) -> Option<Presignature> {
+    pub async fn take_mine(&self, me: Participant) -> Option<PresignatureTaken> {
         const SCRIPT: &str = r#"
             local presig_key = KEYS[1]
             local used_key = KEYS[2]
-            local mine_key = KEYS[3]
+            local reserved_key = KEYS[3]
+            local mine_key = KEYS[4]
 
             local presig_id = redis.call("SPOP", mine_key)
             if not presig_id then
@@ -351,6 +416,7 @@ impl PresignatureStorage {
                 return {err = "WARN unexpected, presignature " .. presig_id .. " is missing"}
             end
 
+            redis.call("SADD", reserved_key, presig_id)
             redis.call("HDEL", presig_key, presig_id)
             redis.call("HSET", used_key, presig_id, "1")
             redis.call("HEXPIRE", used_key, ARGV[1], "FIELDS", "1", presig_id)
@@ -362,12 +428,14 @@ impl PresignatureStorage {
         match redis::Script::new(SCRIPT)
             .key(&self.presig_key)
             .key(&self.used_key)
+            .key(&self.reserved_key)
             .key(owner_key(&self.owner_keys, me))
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await
         {
-            Ok(presignature) => presignature,
+            Ok(Some(presignature)) => Some(PresignatureTaken::owner(presignature, self.clone())),
+            Ok(None) => None,
             Err(err) => {
                 tracing::warn!(?me, ?err, "failed to take my presignature");
                 None

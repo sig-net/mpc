@@ -35,19 +35,19 @@ pub struct MeshState {
     /// Participants that are active in the network; as in they respond when pinged.
     pub active: Participants,
 
-    /// Participants that are stable in the network; as in they have met certain criterias such
-    /// as indexing the latest blocks.
+    /// Participants that can be selected for a new protocol invocation.
     pub stable: BTreeSet<Participant>,
 }
 
 impl MeshState {
     pub fn update(&mut self, participant: Participant, status: NodeStatusUpdate) {
         match status {
-            NodeStatusUpdate::Active(is_stable, info) => {
+            NodeStatusUpdate::Active(info) => {
                 self.active.insert(&participant, info);
-                if is_stable {
-                    self.stable.insert(participant);
-                }
+                self.stable.insert(participant);
+            }
+            NodeStatusUpdate::Inactive(info) => {
+                self.active.insert(&participant, info);
             }
             NodeStatusUpdate::Offline => {
                 self.active.remove(&participant);
@@ -137,7 +137,7 @@ mod tests {
             match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
                 Ok((participant, status)) => {
                     tracing::info!(?participant, ?status, "got connection update");
-                    assert!(matches!(status, NodeStatusUpdate::Active(true, _)));
+                    assert!(matches!(status, NodeStatusUpdate::Active(_)));
                 }
                 Err(_) => {
                     panic!("{i}: timeout waiting for connection update");

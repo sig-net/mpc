@@ -2,7 +2,8 @@
 
 # expects this script to be at the root of the project:
 export ROOT_DIR=$(dirname -- "$0")
-export TARGET_DIR=$ROOT_DIR/target
+# Use CARGO_TARGET_DIR if it is set, or the default ./target location otherwise
+export TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT_DIR/target}
 
 CARGO_CMD_ARGS="$@"
 CARGO_BUILD_INDENT="            "

@@ -100,13 +100,11 @@ pub enum StateView {
         presignature_mine_count: usize,
         presignature_potential_count: usize,
         latest_block_height: BlockHeight,
-        is_stable: bool,
     },
     Resharing {
         old_participants: Vec<Participant>,
         new_participants: Vec<Participant>,
         latest_block_height: BlockHeight,
-        is_stable: bool,
     },
     Joining {
         participants: Vec<Participant>,
@@ -120,12 +118,10 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<State
     tracing::debug!("fetching state");
 
     // TODO: remove once we have integration tests built using other chains
-    let (latest_block_height, is_stable) = if let Some(indexer) = &state.indexer {
-        let latest_block_height = indexer.last_processed_block().await.unwrap_or(0);
-        let is_stable = indexer.is_stable().await;
-        (latest_block_height, is_stable)
+    let latest_block_height = if let Some(indexer) = &state.indexer {
+        indexer.last_processed_block().await.unwrap_or(0)
     } else {
-        (0, true)
+        0
     };
 
     let protocol_state = state.protocol_state.read().await;
@@ -150,7 +146,6 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<State
                 presignature_mine_count,
                 presignature_potential_count,
                 latest_block_height,
-                is_stable,
             }))
         }
         NodeState::Resharing(state) => {
@@ -160,7 +155,6 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<State
                 old_participants,
                 new_participants,
                 latest_block_height,
-                is_stable,
             }))
         }
         NodeState::Joining(state) => {
