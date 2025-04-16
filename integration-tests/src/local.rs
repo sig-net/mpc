@@ -8,7 +8,7 @@ use anyhow::Context;
 use async_process::Child;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
-use mpc_node::indexer_eth::{EthArgs, EthConfig};
+use mpc_node::indexer_eth::EthArgs;
 use near_workspaces::Account;
 use shell_escape::escape;
 
@@ -141,28 +141,10 @@ impl Node {
         );
         LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc).await?;
 
-        let eth_config = cfg.eth.clone();
-        let cfg = {
-            let new_eth_config = if let Some(eth_config) = eth_config {
-                Some(EthConfig {
-                    account_sk: eth_config.account_sk,
-                    consensus_rpc_http_url: eth_config.consensus_rpc_http_url,
-                    execution_rpc_http_url: eth_config.execution_rpc_http_url,
-                    contract_address: eth_config.contract_address,
-                    network: eth_config.network,
-                    helios_data_path: format!("{}_{}", eth_config.helios_data_path, node_id),
-                    refresh_finalized_interval: eth_config.refresh_finalized_interval,
-                })
-            } else {
-                None
-            };
-            NodeConfig {
-                nodes: cfg.nodes,
-                threshold: cfg.threshold,
-                protocol: cfg.protocol.clone(),
-                eth: new_eth_config,
-            }
-        };
+        let mut cfg = cfg.clone();
+        if let Some(ref mut eth_config) = cfg.eth {
+            eth_config.helios_data_path = format!("{}_{}", eth_config.helios_data_path, node_id);
+        }
 
         Self::spawn(
             node_id,
