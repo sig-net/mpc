@@ -35,7 +35,7 @@ jobs:
           SOL_CONTRACT: ${{ env.DEV_CONTRACT_SOL }}
           ENVIRONMENT: "dev"
         with:
-          path: ./infra/loadtests/smoketest-dev.js
+          path: ./infra/loadtests/smoketest.js
           cloud-run-locally: false
   run-long-dev:
     if: github.event.pull_request.merged == true && github.ref == 'refs/heads/develop'
@@ -55,7 +55,7 @@ jobs:
           SOL_CONTRACT: ${{ env.DEV_CONTRACT_SOL }}
           ENVIRONMENT: "dev"
         with:
-          path: ./infra/loadtests/2hour-dev.js
+          path: ./infra/loadtests/2hour.js
           cloud-run-locally: false
 
   run-smoke-testnet:
@@ -76,7 +76,7 @@ jobs:
           SOL_CONTRACT: ${{ env.TESTNET_SOL_CONTRACT }}
           ENVIRONMENT: "testnet"
         with:
-          path: ./infra/loadtests/smoketest-dev.js
+          path: ./infra/loadtests/smoketest.js
           cloud-run-locally: false
   run-long-testnet:
     if: github.event.pull_request.merged == true && github.ref == 'refs/heads/main'
@@ -96,5 +96,5 @@ jobs:
           SOL_CONTRACT: ${{ env.TESTNET_SOL_CONTRACT }}
           ENVIRONMENT: "testnet"
         with:
-          path: ./infra/loadtests/2hour-dev.js
+          path: ./infra/loadtests/2hour.js
           cloud-run-locally: false
