@@ -3,13 +3,15 @@ name: k6 Load Test
 on:
   push:
     branches:
-      - develop
+      - main
   pull_request:
+    types: [closed]
     paths:
       - chain-signatures/**
 
 jobs:
   run-test:
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -23,5 +25,5 @@ jobs:
           K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
           K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
         with:
-          path: ./infra/loadtests/high-load-evm.js
+          path: ./infra/loadtests/high-load-prod.js
           cloud-run-locally: false
