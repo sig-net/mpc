@@ -67,7 +67,7 @@ impl Default for NodeConfig {
                     .to_string(),
             },
             sol: SolConfig {
-                account_sk: ""
+                account_sk: "fS5jS6X5qvaquBV1bg2YWBdYeCiRSUwNAdNpgNkjS72oNxUJcZJZduaq2oCcXJb8erTbtqqq4wxriUmRJk7bMDw"
                     .to_string(),
                 rpc_url: "https://api.devnet.solana.com".to_string(),
                 program_address: "4kZoBXmUBLveRS3sboGF557tYsR7SzLDsWmP4sz7VQEs".to_string(),

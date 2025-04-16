@@ -69,6 +69,7 @@ mpc-contract.workspace = true
 mpc-crypto.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
+chain-signatures-project.workspace = true
 
 [features]
 default = []

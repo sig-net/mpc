@@ -315,6 +315,7 @@ dependencies = [
  "anchor-derive-accounts",
  "anchor-derive-serde",
  "anchor-derive-space",
+ "anchor-lang-idl",
  "base64 0.21.7",
  "bincode",
  "borsh 0.10.4",
@@ -332,6 +333,7 @@ dependencies = [
  "anchor-lang-idl-spec",
  "anyhow",
  "heck 0.3.3",
+ "regex",
  "serde",
  "serde_json",
  "sha2 0.10.8",
@@ -348,6 +350,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "anchor-spl"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9d989ebc64e6c1a9828d3a6f7b8e7a4d63cc8a4f667dcb191bd9067a3375c20"
+dependencies = [
+ "anchor-lang",
+ "spl-associated-token-account",
+ "spl-pod",
+ "spl-token",
+ "spl-token-2022 6.0.0",
+ "spl-token-group-interface",
+ "spl-token-metadata-interface",
+]
+
+[[package]]
 name = "anchor-syn"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -355,6 +372,7 @@ checksum = "564685b759db12a2424d1b2688cfdf0fec26a023813bc461274754fb0e5d97b0"
 dependencies = [
  "anyhow",
  "bs58 0.5.1",
+ "cargo_toml",
  "heck 0.3.3",
  "proc-macro2",
  "quote",
@@ -1889,6 +1907,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo_toml"
+version = "0.19.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a98356df42a2eb1bd8f1793ae4ee4de48e384dd974ce5eac8eee802edb7492be"
+dependencies = [
+ "serde",
+ "toml 0.8.20",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1981,6 +2009,14 @@ dependencies = [
  "cipher",
  "poly1305",
  "zeroize",
+]
+
+[[package]]
+name = "chain-signatures-project"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
 ]
 
 [[package]]
@@ -5123,6 +5159,7 @@ dependencies = [
  "axum-extra",
  "borsh 0.10.4",
  "cait-sith",
+ "chain-signatures-project",
  "chrono",
  "ciborium",
  "clap",

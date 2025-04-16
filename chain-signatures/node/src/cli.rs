@@ -255,7 +255,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let network = NetworkConfig { cipher_sk, sign_sk };
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
-            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &None);
+            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol);
             let (sync_channel, sync) = SyncTask::new(
                 &client,
                 triple_storage.clone(),

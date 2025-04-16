@@ -1,5 +1,10 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
+use crate::indexer_sol::SolConfig;
+use solana_sdk::commitment_config::CommitmentConfig;
+use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signer::keypair::Keypair;
+use anchor_lang::prelude::{Signer, Accounts, AnchorSerialize, AnchorDeserialize};
 use crate::protocol::signature::SignRequest;
 use crate::protocol::{Chain, ProtocolState};
 use crate::util::AffinePointExt as _;
@@ -154,15 +159,16 @@ pub struct RpcExecutor {
 }
 
 impl RpcExecutor {
-    pub fn new(near: &NearClient, eth: &Option<EthConfig>, solana: &Option<SolanaClient>) -> (RpcChannel, Self) {
+    pub fn new(near: &NearClient, eth: &Option<EthConfig>, solana: &Option<SolConfig>) -> (RpcChannel, Self) {
         let eth = eth.as_ref().map(EthClient::new);
+        let solana = solana.as_ref().map(SolanaClient::new);
         let (tx, rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         (
             RpcChannel { tx },
             Self {
                 near: near.clone(),
                 eth,
-                solana: None,
+                solana,
                 action_rx: rx,
             },
         )
@@ -214,7 +220,11 @@ impl RpcExecutor {
                 }
             }
             Chain::Solana => {
-                unimplemented!()
+                if let Some(sol) = &self.solana {
+                    ChainClient::Solana(sol.clone())
+                } else {
+                    ChainClient::Err("no solana client available for node")
+                }
             }
         }
     }
@@ -402,7 +412,29 @@ impl EthClient {
 }
 
 #[derive(Clone)]
-pub struct SolanaClient {}
+pub struct SolanaClient {
+    client: Arc<anchor_client::Client<Arc<Keypair>>>,
+    program_id: Pubkey,
+    payer: Arc<Keypair>,
+}
+
+impl SolanaClient {
+    pub fn new(sol: &SolConfig) -> Self {
+        let keypair = Keypair::from_base58_string(&sol.account_sk);
+        let payer = Arc::new(keypair);
+        let cluster = anchor_client::Cluster::Custom(sol.rpc_url.clone(), sol.rpc_url.replace("http", "ws"));
+        let client = anchor_client::Client::new_with_options(
+            cluster,
+            payer.clone(),
+            CommitmentConfig::confirmed(),
+        );
+        Self {
+            client: Arc::new(client),
+            program_id: Pubkey::from_str(&sol.program_address).unwrap(),
+            payer,
+        }
+    }   
+}
 
 /// Client related to a specific chain
 pub enum ChainClient {
@@ -478,10 +510,9 @@ async fn execute_publish(
                 .await
             }
             ChainClient::Solana(sol) => {
-                unimplemented!()
-                // try_publish_sol(sol, &action, &action.timestamp, &signature)
-                //     .await
-                //     .map_err(|_| ())
+                try_publish_sol(sol, &action, &action.timestamp, &signature)
+                    .await
+                    .map_err(|_| ())
             }
             ChainClient::Err(msg) => {
                 tracing::warn!(msg, "no client for chain");
@@ -660,3 +691,76 @@ async fn try_publish_eth(
     }
     // TODO: add metrics for Ethereum
 }
+
+use chain_signatures_project::instruction::Respond as SolanaRespond;
+use chain_signatures_project::Signature as SolanaContractSignature;
+use chain_signatures_project::AffinePoint as SolanaContractAffinePoint;
+use chain_signatures_project::accounts::Respond as SolanaRespondAccount;
+use solana_sdk::signature::Signer as SolanaSigner;
+async fn try_publish_sol(
+    sol: &SolanaClient,
+    action: &PublishAction,
+    timestamp: &Instant,
+    signature: &Signature,
+) -> Result<(), ()> {
+    let program = sol.client.program(sol.program_id).map_err(|_| ())?;
+    
+    let request_ids = vec![action.request.indexed.id.request_id];
+    let signature = SolanaContractSignature {
+        big_r: SolanaContractAffinePoint {
+            x: signature.big_r.to_encoded_point(false).as_bytes()[1..33].try_into().unwrap(),
+            y: signature.big_r.to_encoded_point(false).as_bytes()[33..65].try_into().unwrap(),
+        },
+        s: signature.s.to_bytes().into(),
+        recovery_id: signature.recovery_id,
+    };
+    
+    let tx = program
+        .request()
+        .signer(sol.payer.clone())
+        .accounts(SolanaRespondAccount {
+            responder: sol.payer.clone().try_pubkey().unwrap(),
+        })
+        .args(SolanaRespond {
+            request_ids,
+            signatures: vec![signature],
+        })
+        .send()
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                sign_id = ?action.request.indexed.id,
+                error = ?err,
+                "failed to publish solana signature"
+            );
+            crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                .with_label_values(&[Chain::Solana.as_str(), "solana"])
+                .inc();
+        })?;
+
+    tracing::info!(
+        sign_id = ?action.request.indexed.id,
+        tx_hash = ?tx,
+        elapsed = ?timestamp.elapsed(),
+        "published solana signature successfully"
+    );
+    
+    crate::metrics::NUM_SIGN_SUCCESS
+        .with_label_values(&[Chain::Solana.as_str(), "solana"])
+        .inc();
+    crate::metrics::SIGN_TOTAL_LATENCY
+        .with_label_values(&[Chain::Solana.as_str(), "solana"])
+        .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
+    crate::metrics::SIGN_RESPOND_LATENCY
+        .with_label_values(&[Chain::Solana.as_str(), "solana"])
+        .observe(timestamp.elapsed().as_secs_f64());
+    
+    if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
+        crate::metrics::NUM_SIGN_SUCCESS_30S
+            .with_label_values(&[Chain::Solana.as_str(), "solana"])
+            .inc();
+    }
+
+    Ok(())
+}
+
