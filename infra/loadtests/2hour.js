@@ -21,23 +21,23 @@ export const options = {
 };
 
 export default function () {
-  group("dev EVM", function() {
-    let devEvmContract = {"contractAddress":"0x69C6b28Fdc74618817fa380De29a653060e14009"} // dev contract EVM
+  group(`${__ENV.ENVIRONMENT} EVM`, function() {
+    let evmContract = {"contractAddress":`${__ENV.EVM_CONTRACT}`} // dev contract EVM
     
-    let response_evm_dev = http.post('https://contract-pinger-mainnet-1094058868047.europe-west1.run.app/evm_no_check', JSON.stringify(devEvmContract), {
+    let response_evm = http.post('https://contract-pinger-mainnet-1094058868047.europe-west1.run.app/evm_no_check', JSON.stringify(evmContract), {
       headers: { 'Content-Type': 'application/json' },
     }) 
-    console.log("EVM Dev: " + response_evm_dev)
+    console.log("EVM Dev: " + response_evm)
 
   })
 
-  group("dev solana", function() {
-    let devSolContract = {"contractAddress":"<add_sol_contract>"} // dev contract SOL
+  group(`${__ENV.ENVIRONMENT} solana`, function() {
+    let solContract = {"contractAddress":`${__ENV.SOL_CONTRACT}`} // dev contract SOL
     
-    let response_sol_dev = http.post('https://contract-pinger-mainnet-1094058868047.europe-west1.run.app/solana_no_check', JSON.stringify(devSolContract), {
+    let response_sol = http.post('https://contract-pinger-mainnet-1094058868047.europe-west1.run.app/solana_no_check', JSON.stringify(solContract), {
       headers: { 'Content-Type': 'application/json' },
     })
   
-    console.log("SOL Dev: " + response_sol_dev)
+    console.log("SOL Dev: " + response_sol)
   });
 }
