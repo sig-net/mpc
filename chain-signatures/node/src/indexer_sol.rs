@@ -219,11 +219,11 @@ pub async fn run(
         ).await;
         if let Err(err) = unsub {
             tracing::warn!("Failed to subscribe to solana events: {:?}", err);
-            tokio::time::sleep(Duration::from_secs(10)).await;
         } else {
             unsub.unwrap().unsubscribe().await;
             tracing::info!("unsubscribing to solana events");
         }
+        tokio::time::sleep(Duration::from_secs(10)).await;
     }
 }
 
