@@ -480,16 +480,16 @@ pub async fn run(
         });
     });
 
-    let client_clone = Arc::clone(&client);
     let near_account_id_clone = node_near_account_id.clone();
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let blocks_failed_send_clone = blocks_failed_send.clone();
+    let client_clone = Arc::clone(&client);
     tokio::spawn(async move {
         tracing::info!("Spawned task to retry failed blocks");
         retry_failed_blocks(
             blocks_failed_recv,
             blocks_failed_send_clone,
-            Arc::clone(&client_clone),
+            &client_clone,
             eth_contract_addr,
             near_account_id_clone.clone(),
             requests_indexed_send_clone,
@@ -543,7 +543,7 @@ pub async fn run(
 async fn retry_failed_blocks(
     mut blocks_failed_rx: mpsc::Receiver<BlockNumberAndHash>,
     blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
-    client: Arc<EthereumClient<FileDB>>,
+    client: &Arc<EthereumClient<FileDB>>,
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
@@ -556,7 +556,7 @@ async fn retry_failed_blocks(
         if let Err(err) = process_block(
             block_number,
             block_hash,
-            &client,
+            client,
             eth_contract_addr,
             node_near_account_id.clone(),
             requests_indexed.clone(),
@@ -761,7 +761,7 @@ async fn process_block(
 
 /// Sends a request to the sign queue when the block where the request is in is finalized.
 /// This assumes that the requests_indexed are ordered by block number.
-/// Whenever there are requests in requests_indexed queue, function will keep polling if the block where the first request is in has finalized, if finalized, it will send this request to the sign queue.
+/// Whenever there are requests in requests_indexed, function will keep polling if the block where the first request is in has finalized, if finalized, it will send this request to the sign queue.
 async fn send_requests_when_final(
     mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
     mut finalized_epoch: mpsc::Receiver<BlockNumberToHashMap>,
