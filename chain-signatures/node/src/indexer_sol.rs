@@ -24,6 +24,7 @@ use anchor_lang::Discriminator;
 use solana_sdk::signer::keypair::Keypair;
 use std::sync::Arc;
 use std::ops::Deref;
+use web3::ethabi::{encode, Token};
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     Scalar::from_bytes(
@@ -172,19 +173,20 @@ fn sign_request_from_event(event: SignatureRequestedEvent, tx_sig: Vec<u8>) -> a
 }
 
 fn calculate_request_id(event: &SignatureRequestedEvent) -> [u8; 32] {
+    // Encode the event data in ABI format
+    let encoded = encode(&[
+        Token::String(event.sender.to_string()),
+        Token::Bytes(event.payload.to_vec()),
+        Token::String(event.path.clone()),
+        Token::Uint(event.key_version.into()),
+        Token::Uint(event.chain_id.into()),
+        Token::String(event.algo.clone()),
+        Token::String(event.dest.clone()),
+        Token::String(event.params.clone()),
+    ]);
+    // Calculate keccak256 hash
     let mut hasher = Keccak256::new();
-    
-    // Encode the event data in a deterministic way
-    hasher.update(event.sender.to_bytes());
-    hasher.update(event.payload);
-    hasher.update(event.path.as_bytes());
-    hasher.update(&event.key_version.to_le_bytes());
-    hasher.update(&event.deposit.to_le_bytes());
-    hasher.update(&event.chain_id.to_le_bytes());
-    hasher.update(event.algo.as_bytes());
-    hasher.update(event.dest.as_bytes());
-    hasher.update(event.params.as_bytes());
-    
+    hasher.update(&encoded);
     hasher.finalize().into()
 }
 
