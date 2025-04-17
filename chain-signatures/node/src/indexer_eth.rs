@@ -622,7 +622,7 @@ async fn refresh_finalized_epoch(
         );
 
         if cur_finalized_block.header.number == last_finalized_block_number {
-            return Ok(());
+            continue;
         }
 
         finalized_block_number = cur_finalized_block.header.number;
@@ -788,22 +788,21 @@ async fn send_requests_when_final(
                         break;
                     } else {
                         tracing::warn!(
-                            "Block {block_number} hash mismatch: expected {block_hash:?}, got {finalized_block_hash:?}"
+                            "Block {block_number} hash mismatch: expected {block_hash:?}, got {finalized_block_hash:?}. Chain re-orged."
                         );
-                        return Err(anyhow::anyhow!(
-                            "Block {block_number} hash mismatch: expected {block_hash:?}, got {finalized_block_hash:?}"
-                        ));
+                        //TODO: handle the block reorg case
+                        break;
                     }
                 } else {
                     tracing::warn!(
-                        "Block not in finalized blocks map: {block_number}, hash: {block_hash:?}"
+                        "Block number {block_number} with hash: {block_hash:?} not in finalized epoch. "
                     );
                     if !finalized_blocks_map.is_empty()
                         && finalized_blocks_map.keys().all(|&k| k > block_number)
                     {
                         tracing::warn!("Block {block_number} is in history");
-                        //TODO: handle this case
-                        return Err(anyhow::anyhow!("Block {block_number} is in history"));
+                        //TODO: handle the block in history case which happens when a block is retried
+                        break;
                     } else {
                         let Some(received_map) = finalized_epoch.recv().await else {
                             tracing::warn!("Failed to receive finalized blocks");
