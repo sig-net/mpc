@@ -334,6 +334,24 @@ impl PresignatureStorage {
         }
     }
 
+    pub async fn contains_foreign(&self, id: PresignatureId, owner: Participant) -> bool {
+        let Some(mut conn) = self.connect().await else {
+            return false;
+        };
+        match conn.sismember(owner_key(&self.owner_keys, owner), id).await {
+            Ok(exists) => exists,
+            Err(err) => {
+                tracing::warn!(
+                    id,
+                    ?owner,
+                    ?err,
+                    "failed to check if presignature is stored by foreign owner"
+                );
+                false
+            }
+        }
+    }
+
     pub async fn contains_used(&self, id: PresignatureId) -> bool {
         let Some(mut conn) = self.connect().await else {
             return false;

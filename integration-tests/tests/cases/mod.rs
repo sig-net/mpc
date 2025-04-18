@@ -11,6 +11,7 @@ use test_log::test;
 
 pub mod nightly;
 pub mod store;
+pub mod sync;
 
 #[test(tokio::test)]
 async fn test_multichain_reshare() -> anyhow::Result<()> {
