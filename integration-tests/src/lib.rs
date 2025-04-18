@@ -101,6 +101,13 @@ impl Nodes {
         }
     }
 
+    pub fn account_id(&self, id: usize) -> &AccountId {
+        match self {
+            Nodes::Local { nodes, .. } => nodes[id].account.id(),
+            Nodes::Docker { nodes, .. } => nodes[id].account.id(),
+        }
+    }
+
     pub fn near_accounts(&self) -> Vec<&Account> {
         match self {
             Nodes::Local { nodes, .. } => nodes.iter().map(|node| &node.account).collect(),
