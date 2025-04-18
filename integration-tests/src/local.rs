@@ -70,11 +70,7 @@ impl Node {
             behind_threshold: 120,
         };
         let eth = mpc_node::indexer_eth::EthArgs::from_config(cfg.eth.clone());
-        let sol = mpc_node::indexer_sol::SolArgs {
-            sol_account_sk: Some(cfg.sol.account_sk.clone()),
-            sol_rpc_url: Some(cfg.sol.rpc_url.clone()),
-            sol_program_address: Some(cfg.sol.program_address.clone()),
-        };
+        let sol = mpc_node::indexer_sol::SolArgs::from_config(cfg.sol.clone());
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = mpc_node::cli::Cli::Start {
@@ -177,12 +173,7 @@ impl Node {
         };
 
         let eth = EthArgs::from_config(config.cfg.eth.clone());
-        let sol = mpc_node::indexer_sol::SolArgs {
-            // TODO: add from config
-            sol_account_sk: Some(config.cfg.sol.account_sk.clone()),
-            sol_rpc_url: Some(config.cfg.sol.rpc_url.clone()),
-            sol_program_address: Some(config.cfg.sol.program_address.clone()),
-        };
+        let sol = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),

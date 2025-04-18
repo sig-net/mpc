@@ -90,6 +90,21 @@ impl SolArgs {
             program_address: self.sol_program_address?,
         })
     }
+
+    pub fn from_config(config: Option<SolConfig>) -> Self {
+        match config {
+            Some(config) => SolArgs {
+                sol_account_sk: Some(config.account_sk),
+                sol_rpc_url: Some(config.rpc_url),
+                sol_program_address: Some(config.program_address),
+            },
+            None => SolArgs {
+                sol_account_sk: None,
+                sol_rpc_url: None,
+                sol_program_address: None,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]

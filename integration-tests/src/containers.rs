@@ -119,12 +119,7 @@ impl Node {
             behind_threshold: 120,
         };
         let eth_args = EthArgs::from_config(config.cfg.eth.clone());
-        let sol_args = mpc_node::indexer_sol::SolArgs {
-            // TODO solana: add from config
-            sol_account_sk: Some(config.cfg.sol.account_sk.clone()),
-            sol_rpc_url: Some(config.cfg.sol.rpc_url.clone()),
-            sol_program_address: Some(config.cfg.sol.program_address.clone()),
-        };
+        let sol_args = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),

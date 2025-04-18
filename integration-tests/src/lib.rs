@@ -36,7 +36,7 @@ pub struct NodeConfig {
     pub threshold: usize,
     pub protocol: ProtocolConfig,
     pub eth: Option<EthConfig>,
-    pub sol: SolConfig, // TODO solana: should this be optional?
+    pub sol: Option<SolConfig>,
 }
 
 impl Default for NodeConfig {
@@ -60,12 +60,13 @@ impl Default for NodeConfig {
                 ..Default::default()
             },
             eth: None,
-            sol: SolConfig { // TODO solana: should this be None as in Ethereum?
+            // TODO solana: remove hardcoded values
+            sol: Some(SolConfig {
                 account_sk: "fS5jS6X5qvaquBV1bg2YWBdYeCiRSUwNAdNpgNkjS72oNxUJcZJZduaq2oCcXJb8erTbtqqq4wxriUmRJk7bMDw"
                     .to_string(),
                 rpc_url: "https://api.devnet.solana.com".to_string(),
                 program_address: "4kZoBXmUBLveRS3sboGF557tYsR7SzLDsWmP4sz7VQEs".to_string(),
-            },
+            }),
         }
     }
 }
