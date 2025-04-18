@@ -7,10 +7,7 @@ declare_id!("4kZoBXmUBLveRS3sboGF557tYsR7SzLDsWmP4sz7VQEs");
 pub mod chain_signatures_project {
     use super::*;
 
-    pub fn initialize(
-        ctx: Context<Initialize>,
-        signature_deposit: u64,
-    ) -> Result<()> {
+    pub fn initialize(ctx: Context<Initialize>, signature_deposit: u64) -> Result<()> {
         let program_state = &mut ctx.accounts.program_state;
         program_state.admin = ctx.accounts.admin.key();
         program_state.signature_deposit = signature_deposit;
@@ -30,25 +27,22 @@ pub mod chain_signatures_project {
         let program_state = &ctx.accounts.program_state;
         let requester = &ctx.accounts.requester;
         let system_program = &ctx.accounts.system_program;
-        
+
         require!(
             ctx.accounts.requester.lamports() >= program_state.signature_deposit,
             ChainSignaturesError::InsufficientDeposit
         );
-        
+
         let transfer_instruction = anchor_lang::system_program::Transfer {
             from: requester.to_account_info(),
             to: program_state.to_account_info(),
         };
-        
+
         anchor_lang::system_program::transfer(
-            CpiContext::new(
-                system_program.to_account_info(),
-                transfer_instruction,
-            ),
+            CpiContext::new(system_program.to_account_info(), transfer_instruction),
             program_state.signature_deposit,
         )?;
-        
+
         emit!(SignatureRequestedEvent {
             sender: *requester.key,
             payload,
@@ -60,7 +54,7 @@ pub mod chain_signatures_project {
             dest,
             params,
         });
-        
+
         Ok(())
     }
 
@@ -73,7 +67,7 @@ pub mod chain_signatures_project {
             request_ids.len() == signatures.len(),
             ChainSignaturesError::InvalidInputLength
         );
-        
+
         for i in 0..request_ids.len() {
             emit!(SignatureRespondedEvent {
                 request_id: request_ids[i],
@@ -81,7 +75,7 @@ pub mod chain_signatures_project {
                 signature: signatures[i].clone(),
             });
         }
-        
+
         Ok(())
     }
 }

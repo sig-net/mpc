@@ -1,4 +1,10 @@
 use crate::protocol::{Chain, IndexedSignRequest};
+use anchor_client::{
+    anchor_lang::{AnchorDeserialize, AnchorSerialize},
+    Client, Cluster, Program,
+};
+use anchor_lang::prelude::event;
+use anchor_lang::Discriminator;
 use k256::Scalar;
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
@@ -6,24 +12,15 @@ use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
-use solana_sdk::{
-    commitment_config::CommitmentConfig,
-    pubkey::Pubkey,
-};
+use solana_sdk::signer::keypair::Keypair;
+use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey};
 use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use std::str::FromStr;
 use tokio::sync::mpsc;
-use anchor_client::{
-    anchor_lang::{AnchorDeserialize, AnchorSerialize},
-    Client, Cluster, Program,
-};
-use anchor_lang::prelude::event;
-use anchor_lang::Discriminator;
-use solana_sdk::signer::keypair::Keypair;
-use std::sync::Arc;
-use std::ops::Deref;
 use web3::ethabi::{encode, Token};
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
@@ -116,7 +113,10 @@ pub struct SignatureRequestedEvent {
     pub params: String,
 }
 
-fn sign_request_from_event(event: SignatureRequestedEvent, tx_sig: Vec<u8>) -> anyhow::Result<IndexedSignRequest> {
+fn sign_request_from_event(
+    event: SignatureRequestedEvent,
+    tx_sig: Vec<u8>,
+) -> anyhow::Result<IndexedSignRequest> {
     tracing::info!("found solana event: {:?}", event);
     if event.deposit == 0 {
         tracing::warn!("deposit is 0, skipping sign request");
@@ -134,7 +134,6 @@ fn sign_request_from_event(event: SignatureRequestedEvent, tx_sig: Vec<u8>) -> a
             event.payload,
         );
         return Err(anyhow::anyhow!(
-
             "failed to convert event payload hash to scalar"
         ));
     };
@@ -146,10 +145,7 @@ fn sign_request_from_event(event: SignatureRequestedEvent, tx_sig: Vec<u8>) -> a
 
     // Call the existing derive_epsilon_sol function with the correct parameters
     // to match the TypeScript implementation
-    let epsilon = derive_epsilon_sol(
-        &event.sender.to_string(),
-        &event.path,
-    );
+    let epsilon = derive_epsilon_sol(&event.sender.to_string(), &event.path);
 
     // Use transaction signature as entropy
     let mut entropy = [0u8; 32];
@@ -205,18 +201,13 @@ pub async fn run(
     let keypair = Keypair::from_base58_string(&sol.account_sk);
 
     let cluster = Cluster::Custom(sol.rpc_url.clone(), sol.rpc_url.replace("http", "ws"));
-    let client = Client::new_with_options(
-        cluster,
-        Arc::new(keypair),
-        CommitmentConfig::confirmed(),
-    );
+    let client =
+        Client::new_with_options(cluster, Arc::new(keypair), CommitmentConfig::confirmed());
     let program = client.program(program_id)?;
     loop {
-        let unsub = subscribe_to_program_events(
-            &program,
-            sign_tx.clone(),
-            node_near_account_id.clone(),
-        ).await;
+        let unsub =
+            subscribe_to_program_events(&program, sign_tx.clone(), node_near_account_id.clone())
+                .await;
         if let Err(err) = unsub {
             tracing::warn!("Failed to subscribe to solana events: {:?}", err);
         } else {
@@ -240,15 +231,13 @@ async fn subscribe_to_program_events<C: Deref<Target = Keypair> + Clone>(
             if sender.send((event, tx_sig)).is_err() {
                 println!("Error while transferring the event.")
             }
-        }).await?;
+        })
+        .await?;
 
     while let Some((event, tx_sig)) = receiver.recv().await {
-        if let Err(err) = process_anchor_event(
-            event,
-            tx_sig,
-            sign_tx.clone(),
-            node_near_account_id.clone(),
-        ).await {
+        if let Err(err) =
+            process_anchor_event(event, tx_sig, sign_tx.clone(), node_near_account_id.clone()).await
+        {
             tracing::warn!("Failed to process event: {:?}", err);
         }
     }
@@ -263,7 +252,7 @@ async fn process_anchor_event(
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     let sign_request = sign_request_from_event(event, tx_sig)?;
-    
+
     if let Err(err) = sign_tx.send(sign_request).await {
         tracing::error!(?err, "Failed to send Solana sign request into queue");
     } else {
@@ -271,6 +260,6 @@ async fn process_anchor_event(
             .with_label_values(&[Chain::Solana.as_str(), node_near_account_id.as_str()])
             .inc();
     }
-    
+
     Ok(())
 }
