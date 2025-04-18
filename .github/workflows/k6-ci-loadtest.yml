@@ -4,12 +4,20 @@ on:
   push:
     branches:
       - develop
-      - main
   pull_request:
     types: [closed]
     paths:
       - chain-signatures/**
   workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options:
+          - testnet
+          - dev
+        default: dev
+        required: true
+
 env: 
     DEV_CONTRACT_EVM: "0x69C6b28Fdc74618817fa380De29a653060e14009"
     DEV_CONTRACT_SOL: "<fill-in-contract-address>"
@@ -18,7 +26,7 @@ env:
 
 jobs:
   run-smoke-dev:
-    if: github.event.pull_request.merged == true && github.ref == 'refs/heads/develop'
+    if: github.event.pull_request.merged == true || github.event.inputs.environment == 'dev'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -38,7 +46,7 @@ jobs:
           path: ./infra/loadtests/smoketest.js
           cloud-run-locally: false
   run-long-dev:
-    if: github.event.pull_request.merged == true && github.ref == 'refs/heads/develop'
+    if: github.event.pull_request.merged == true || github.event.inputs.environment == 'dev'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -59,7 +67,7 @@ jobs:
           cloud-run-locally: false
 
   run-smoke-testnet:
-    if: github.event.pull_request.merged == true && github.ref == 'refs/heads/main'
+    if: github.event.inputs.environment == 'testnet'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -79,7 +87,7 @@ jobs:
           path: ./infra/loadtests/smoketest.js
           cloud-run-locally: false
   run-long-testnet:
-    if: github.event.pull_request.merged == true && github.ref == 'refs/heads/main'
+    if: github.event.inputs.environment == 'testnet'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
