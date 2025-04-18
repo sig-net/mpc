@@ -8,6 +8,7 @@ use anyhow::Context;
 use async_process::Child;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
+use mpc_node::indexer_eth::EthArgs;
 use near_workspaces::Account;
 use shell_escape::escape;
 
@@ -68,12 +69,7 @@ impl Node {
             running_threshold: 120,
             behind_threshold: 120,
         };
-        let eth = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: Some(cfg.eth.account_sk.clone()),
-            eth_rpc_ws_url: Some(cfg.eth.rpc_ws_url.clone()),
-            eth_rpc_http_url: Some(cfg.eth.rpc_http_url.clone()),
-            eth_contract_address: Some(cfg.eth.contract_address.clone()),
-        };
+        let eth = mpc_node::indexer_eth::EthArgs::from_config(cfg.eth.clone());
         let sol = mpc_node::indexer_sol::SolArgs {
             sol_account_sk: Some(cfg.sol.account_sk.clone()),
             sol_rpc_url: Some(cfg.sol.rpc_url.clone()),
@@ -180,13 +176,9 @@ impl Node {
             behind_threshold: 120,
         };
 
-        let eth = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: Some(config.cfg.eth.account_sk.clone()),
-            eth_rpc_ws_url: Some(config.cfg.eth.rpc_ws_url.clone()),
-            eth_rpc_http_url: Some(config.cfg.eth.rpc_http_url.clone()),
-            eth_contract_address: Some(config.cfg.eth.contract_address.clone()),
-        };
+        let eth = EthArgs::from_config(config.cfg.eth.clone());
         let sol = mpc_node::indexer_sol::SolArgs {
+            // TODO: add from config
             sol_account_sk: Some(config.cfg.sol.account_sk.clone()),
             sol_rpc_url: Some(config.cfg.sol.rpc_url.clone()),
             sol_program_address: Some(config.cfg.sol.program_address.clone()),

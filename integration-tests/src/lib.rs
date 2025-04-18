@@ -35,8 +35,8 @@ pub struct NodeConfig {
     pub nodes: usize,
     pub threshold: usize,
     pub protocol: ProtocolConfig,
-    pub eth: EthConfig,
-    pub sol: SolConfig,
+    pub eth: Option<EthConfig>,
+    pub sol: SolConfig, // TODO solana: should this be optional?
 }
 
 impl Default for NodeConfig {
@@ -59,14 +59,8 @@ impl Default for NodeConfig {
                 },
                 ..Default::default()
             },
-            eth: EthConfig {
-                rpc_http_url: "http://localhost:8545".to_string(),
-                rpc_ws_url: "ws://localhost:8545".to_string(),
-                contract_address: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512".to_string(),
-                account_sk: "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
-                    .to_string(),
-            },
-            sol: SolConfig {
+            eth: None,
+            sol: SolConfig { // TODO solana: should this be None as in Ethereum?
                 account_sk: "fS5jS6X5qvaquBV1bg2YWBdYeCiRSUwNAdNpgNkjS72oNxUJcZJZduaq2oCcXJb8erTbtqqq4wxriUmRJk7bMDw"
                     .to_string(),
                 rpc_url: "https://api.devnet.solana.com".to_string(),
