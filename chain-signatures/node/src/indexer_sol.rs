@@ -228,7 +228,7 @@ async fn subscribe_to_program_events<C: Deref<Target = Keypair> + Clone>(
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let event_unsubscriber = program
         .on(move |ctx, event: SignatureRequestedEvent| {
-            let tx_sig: Vec<u8> = ctx.signature.as_ref().to_vec().into();
+            let tx_sig: Vec<u8> = ctx.signature.as_ref().to_vec();
             if sender.send((event, tx_sig)).is_err() {
                 println!("Error while transferring the event.")
             }
