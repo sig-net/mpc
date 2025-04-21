@@ -76,12 +76,12 @@ module "gce-container" {
         value = data.google_secret_manager_secret_version.eth_account_sk_secret_id[count.index].secret_data
       },
       {
-        name  = "MPC_ETH_RPC_WS_URL"
-        value = data.google_secret_manager_secret_version.eth_rpc_ws_url_secret_id[count.index].secret_data
+        name  = "MPC_ETH_CONSENSUS_RPC_HTTP_URL"
+        value = data.google_secret_manager_secret_version.eth_consensus_rpc_url_secret_id[count.index].secret_data
       },
       {
-        name  = "MPC_ETH_RPC_HTTP_URL"
-        value = data.google_secret_manager_secret_version.eth_rpc_http_url_secret_id[count.index].secret_data
+        name  = "MPC_ETH_EXECUTION_RPC_HTTP_URL"
+        value = data.google_secret_manager_secret_version.eth_execution_rpc_url_secret_id[count.index].secret_data
       },
       {
         name  = "MPC_ETH_CONTRACT_ADDRESS"
