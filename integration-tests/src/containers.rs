@@ -20,6 +20,7 @@ use k256::Secp256k1;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
+use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
@@ -41,7 +42,6 @@ pub struct Node {
     pub address: String,
     pub account: Account,
     pub local_address: String,
-    pub cipher_pk: hpke::PublicKey,
     pub cipher_sk: hpke::SecretKey,
     pub sign_sk: near_crypto::SecretKey,
     cfg: NodeConfig,
@@ -60,7 +60,7 @@ impl Node {
         account: &Account,
     ) -> anyhow::Result<Self> {
         tracing::info!(id = %account.id(), "running node container");
-        let (cipher_sk, cipher_pk) = hpke::generate();
+        let (cipher_sk, _cipher_pk) = hpke::generate();
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
@@ -85,7 +85,6 @@ impl Node {
             NodeEnvConfig {
                 web_port: Self::CONTAINER_PORT,
                 account: account.clone(),
-                cipher_pk,
                 cipher_sk,
                 sign_sk,
                 cfg: cfg.clone(),
@@ -100,7 +99,6 @@ impl Node {
         NodeEnvConfig {
             web_port: Self::CONTAINER_PORT,
             account: self.account,
-            cipher_pk: self.cipher_pk,
             cipher_sk: self.cipher_sk,
             sign_sk: self.sign_sk,
             cfg: self.cfg,
@@ -120,19 +118,13 @@ impl Node {
             running_threshold: 120,
             behind_threshold: 120,
         };
-        let eth_args = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: Some(config.cfg.eth.account_sk.clone()),
-            eth_rpc_ws_url: Some(config.cfg.eth.rpc_ws_url.clone()),
-            eth_rpc_http_url: Some(config.cfg.eth.rpc_http_url.clone()),
-            eth_contract_address: Some(config.cfg.eth.contract_address.clone()),
-        };
+        let eth_args = EthArgs::from_config(config.cfg.eth.clone());
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
             web_port: Self::CONTAINER_PORT,
-            cipher_pk: hex::encode(config.cipher_pk.to_bytes()),
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             indexer_options: indexer_options.clone(),
             eth: eth_args,
@@ -187,7 +179,6 @@ impl Node {
             address: full_address,
             account: config.account,
             local_address: format!("http://localhost:{host_port}"),
-            cipher_pk: config.cipher_pk,
             cipher_sk: config.cipher_sk,
             sign_sk: config.sign_sk,
             cfg: config.cfg,
@@ -705,21 +696,22 @@ impl Redis {
         // - first/second loop add at least min_triples per node
         // - third loop: for each triple, store the shares individually per node
         let mut num_triples = 0;
-        for mine_idx in &participant_ids {
+        for owner in &participant_ids {
             for _ in 0..(cfg.protocol.triple.min_triples * mul) {
                 num_triples += 1;
                 let triple_id = rand::random();
-                for (participant, triple) in participant_ids
+                for (me, triple) in participant_ids
                     .iter()
                     .zip(shares_to_triples(triple_id, &public, &shares))
                 {
-                    let mine = participant == mine_idx;
                     storage
-                        .get(participant)
+                        .get(me)
                         .unwrap()
-                        .insert(triple, mine, false)
+                        .reserve(triple.id)
                         .await
-                        .unwrap();
+                        .unwrap()
+                        .insert(triple, *owner)
+                        .await;
                 }
             }
         }

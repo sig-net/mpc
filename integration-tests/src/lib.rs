@@ -34,7 +34,7 @@ pub struct NodeConfig {
     pub nodes: usize,
     pub threshold: usize,
     pub protocol: ProtocolConfig,
-    pub eth: EthConfig,
+    pub eth: Option<EthConfig>,
 }
 
 impl Default for NodeConfig {
@@ -57,13 +57,7 @@ impl Default for NodeConfig {
                 },
                 ..Default::default()
             },
-            eth: EthConfig {
-                rpc_http_url: "http://localhost:8545".to_string(),
-                rpc_ws_url: "ws://localhost:8545".to_string(),
-                contract_address: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512".to_string(),
-                account_sk: "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
-                    .to_string(),
-            },
+            eth: None,
         }
     }
 }
@@ -104,6 +98,13 @@ impl Nodes {
         match self {
             Nodes::Local { nodes, .. } => &nodes[id].address,
             Nodes::Docker { nodes, .. } => &nodes[id].address,
+        }
+    }
+
+    pub fn account_id(&self, id: usize) -> &AccountId {
+        match self {
+            Nodes::Local { nodes, .. } => nodes[id].account.id(),
+            Nodes::Docker { nodes, .. } => nodes[id].account.id(),
         }
     }
 
@@ -164,6 +165,21 @@ impl Nodes {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
         killed_node_config
+    }
+
+    pub fn kill_all(&mut self) {
+        match self {
+            Nodes::Local { nodes, .. } => {
+                for node in nodes.drain(..) {
+                    node.kill();
+                }
+            }
+            Nodes::Docker { nodes, .. } => {
+                for node in nodes.drain(..) {
+                    tokio::spawn(node.kill());
+                }
+            }
+        }
     }
 
     pub async fn restart_node(&mut self, config: NodeEnvConfig) -> anyhow::Result<()> {
@@ -227,6 +243,12 @@ impl Nodes {
     }
 }
 
+impl Drop for Nodes {
+    fn drop(&mut self) {
+        self.kill_all();
+    }
+}
+
 pub struct Context {
     pub docker_client: DockerClient,
     pub docker_network: String,
@@ -273,7 +295,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     };
 
     let mesh_options = mpc_node::mesh::Options {
-        refresh_active_timeout: 1000,
+        ping_interval: 1000,
     };
 
     let message_options = node_client::Options {
@@ -319,7 +341,7 @@ pub async fn docker(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
                 CandidateInfo {
                     account_id: account.id().as_str().parse().unwrap(),
                     url: node.address.clone(),
-                    cipher_pk: node.cipher_pk.to_bytes(),
+                    cipher_pk: node.cipher_sk.public_key().to_bytes(),
                     sign_pk: node.sign_sk.public_key().to_string().parse().unwrap(),
                 },
             )
@@ -361,7 +383,7 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
                 CandidateInfo {
                     account_id: account.id().as_str().parse().unwrap(),
                     url: format!("http://127.0.0.1:{0}", node_cfg.web_port),
-                    cipher_pk: node_cfg.cipher_pk.to_bytes(),
+                    cipher_pk: node_cfg.cipher_sk.public_key().to_bytes(),
                     sign_pk: node_cfg.sign_sk.public_key().to_string().parse().unwrap(),
                 },
             )
@@ -414,7 +436,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
                 CandidateInfo {
                     account_id: account.id().as_str().parse().unwrap(),
                     url: node.address.clone(),
-                    cipher_pk: node.cipher_pk.to_bytes(),
+                    cipher_pk: node.cipher_sk.public_key().to_bytes(),
                     sign_pk: node.sign_sk.public_key().to_string().parse().unwrap(),
                 },
             )

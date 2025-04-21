@@ -3,6 +3,8 @@ use super::state::{
     JoiningState, NodeState, PersistentNodeData, RunningState, StartedState,
     WaitingForConsensusState,
 };
+use super::sync::SyncChannel;
+use super::MessageChannel;
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
 use crate::protocol::contract::primitives::Participants;
@@ -37,6 +39,8 @@ pub trait ConsensusCtx {
     fn secret_storage(&self) -> &SecretNodeStorageBox;
     fn triple_storage(&self) -> &TripleStorage;
     fn presignature_storage(&self) -> &PresignatureStorage;
+    fn msg_channel(&self) -> &MessageChannel;
+    fn sync_channel(&self) -> &SyncChannel;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -120,6 +124,7 @@ impl ConsensusProtocol for StartedState {
                                         epoch,
                                         ctx.my_account_id(),
                                         ctx.triple_storage(),
+                                        ctx.msg_channel().clone(),
                                     );
 
                                     let presignature_manager =
@@ -128,7 +133,9 @@ impl ConsensusProtocol for StartedState {
                                             contract_state.threshold,
                                             epoch,
                                             ctx.my_account_id(),
+                                            ctx.triple_storage(),
                                             ctx.presignature_storage(),
+                                            ctx.msg_channel().clone(),
                                         )));
 
                                     let signature_manager =
@@ -139,6 +146,8 @@ impl ConsensusProtocol for StartedState {
                                             public_key,
                                             epoch,
                                             ctx.sign_rx(),
+                                            ctx.presignature_storage(),
+                                            ctx.msg_channel().clone(),
                                         )));
 
                                     Ok(NodeState::Running(RunningState {
@@ -342,6 +351,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.epoch,
                         ctx.my_account_id(),
                         ctx.triple_storage(),
+                        ctx.msg_channel().clone(),
                     );
 
                     let presignature_manager = Arc::new(RwLock::new(PresignatureManager::new(
@@ -349,7 +359,9 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.threshold,
                         self.epoch,
                         ctx.my_account_id(),
+                        ctx.triple_storage(),
                         ctx.presignature_storage(),
+                        ctx.msg_channel().clone(),
                     )));
 
                     let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
@@ -359,6 +371,8 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.public_key,
                         self.epoch,
                         ctx.sign_rx(),
+                        ctx.presignature_storage(),
+                        ctx.msg_channel().clone(),
                     )));
 
                     Ok(NodeState::Running(RunningState {

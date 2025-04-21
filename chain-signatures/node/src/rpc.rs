@@ -4,26 +4,34 @@ use crate::protocol::signature::SignRequest;
 use crate::protocol::{Chain, ProtocolState};
 use crate::util::AffinePointExt as _;
 
+use alloy::primitives::Address;
+use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
+use alloy::providers::RootProvider;
+use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_keys::hpke;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
 
+use alloy::contract::{ContractInstance, Interface};
+use alloy::dyn_abi::DynSolValue;
+use alloy::network::EthereumWallet;
+use alloy::primitives::U256;
+use alloy::providers::ProviderBuilder;
+use alloy::transports::http::{Client as ReqwestClient, Http};
+use alloy_signer_local::PrivateKeySigner;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
 use serde_json::json;
-use std::str::FromStr as _;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use url::Url;
-use web3::contract::tokens::Tokenizable as _;
-use web3::ethabi::Token;
-use web3::types::U256;
 
 /// The maximum amount of times to retry publishing a signature.
 const MAX_PUBLISH_RETRY: usize = 6;
@@ -31,6 +39,32 @@ const MAX_PUBLISH_RETRY: usize = 6;
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract state and config
 const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
+
+type EthHttp = Http<ReqwestClient>;
+
+type EthContractFillProvider = FillProvider<
+    JoinFill<
+        JoinFill<
+            alloy::providers::Identity,
+            JoinFill<
+                alloy::providers::fillers::GasFiller,
+                JoinFill<
+                    alloy::providers::fillers::BlobGasFiller,
+                    JoinFill<
+                        alloy::providers::fillers::NonceFiller,
+                        alloy::providers::fillers::ChainIdFiller,
+                    >,
+                >,
+            >,
+        >,
+        WalletFiller<EthereumWallet>,
+    >,
+    RootProvider<Http<ReqwestClient>>,
+    Http<ReqwestClient>,
+    alloy::network::Ethereum,
+>;
+
+type EthContractInstance = ContractInstance<EthHttp, EthContractFillProvider>;
 
 struct PublishAction {
     public_key: mpc_crypto::PublicKey,
@@ -75,6 +109,76 @@ impl RpcChannel {
     }
 }
 
+#[derive(Clone)]
+pub struct NodeStateWatcher {
+    account_id: AccountId,
+    // TODO: use tokio::watch channel in the future.
+    contract_state: Arc<RwLock<Option<ProtocolState>>>,
+}
+
+impl NodeStateWatcher {
+    pub fn new(id: &AccountId) -> Self {
+        Self {
+            account_id: id.clone(),
+            contract_state: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn mock(id: &AccountId, state: ProtocolState) -> Self {
+        Self {
+            account_id: id.clone(),
+            contract_state: Arc::new(RwLock::new(Some(state))),
+        }
+    }
+
+    pub fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    pub fn state(&self) -> &Arc<RwLock<Option<ProtocolState>>> {
+        &self.contract_state
+    }
+
+    pub async fn me(&self) -> Option<Participant> {
+        let state = self.contract_state.read().await;
+        match state.as_ref()? {
+            ProtocolState::Initializing(_) => None,
+            ProtocolState::Running(state) => state
+                .participants
+                .find_participant(&self.account_id)
+                .copied(),
+            ProtocolState::Resharing(state) => state
+                .new_participants
+                .find_participant(&self.account_id)
+                .copied(),
+        }
+    }
+
+    pub async fn threshold(&self) -> Option<usize> {
+        let state = self.contract_state.read().await;
+        match state.as_ref()? {
+            ProtocolState::Initializing(_) => None,
+            ProtocolState::Running(state) => Some(state.threshold),
+            ProtocolState::Resharing(state) => Some(state.threshold),
+        }
+    }
+
+    pub async fn info(&self) -> Option<(usize, Participant)> {
+        let state = self.contract_state.read().await;
+        match state.as_ref()? {
+            ProtocolState::Initializing(_) => None,
+            ProtocolState::Running(state) => Some((
+                state.threshold,
+                *state.participants.find_participant(&self.account_id)?,
+            )),
+            ProtocolState::Resharing(state) => Some((
+                state.threshold,
+                *state.new_participants.find_participant(&self.account_id)?,
+            )),
+        }
+    }
+}
+
 pub struct RpcExecutor {
     near: NearClient,
     eth: Option<EthClient>,
@@ -101,6 +205,7 @@ impl RpcExecutor {
         config: Arc<RwLock<Config>>,
     ) {
         // spin up update task for updating contract state and config
+        let near_account_id = self.near.my_account_id.clone();
         let near = self.near.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
@@ -118,9 +223,11 @@ impl RpcExecutor {
                 return;
             };
             let task = match action {
-                RpcAction::Publish(action) => {
-                    execute_publish(self.client(&action.request.indexed.chain), action)
-                }
+                RpcAction::Publish(action) => execute_publish(
+                    self.client(&action.request.indexed.chain),
+                    action,
+                    near_account_id.clone(),
+                ),
             };
             tokio::spawn(task);
         }
@@ -166,7 +273,7 @@ impl NearClient {
             my_addr: my_addr.clone(),
             my_account_id: signer.account_id.clone(),
             signer,
-            cipher_pk: network.cipher_pk.clone(),
+            cipher_pk: network.cipher_sk.public_key(),
             sign_pk: network.sign_sk.public_key(),
         }
     }
@@ -292,33 +399,36 @@ impl NearClient {
 
 #[derive(Clone)]
 pub struct EthClient {
-    client: web3::Web3<web3::transports::Http>,
-    contract: web3::contract::Contract<web3::transports::Http>,
-    account_sk: web3::signing::SecretKey,
+    contract: EthContractInstance,
 }
 
 impl EthClient {
     pub fn new(eth: &EthConfig) -> Self {
-        let transport = web3::transports::Http::new(&eth.rpc_http_url).unwrap();
-        let client = web3::Web3::new(transport);
-        let address = web3::types::H160::from_str(&eth.contract_address).unwrap();
-
-        let contract_json: serde_json::Value = serde_json::from_slice(include_bytes!(
+        let signer: PrivateKeySigner = eth
+            .account_sk
+            .parse()
+            .expect("cannot parse Eth account sk into PrivateKeySigner");
+        let wallet = EthereumWallet::from(signer.clone());
+        let provider = ProviderBuilder::new()
+            .with_recommended_fillers()
+            .wallet(wallet)
+            .on_http(eth.execution_rpc_http_url.parse().unwrap());
+        // Create a contract instance.
+        let json: serde_json::Value = serde_json::from_slice(include_bytes!(
             "../../contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
         ))
         .unwrap();
-        let contract = web3::contract::Contract::from_json(
-            client.eth(),
-            address,
-            contract_json["abi"].to_string().as_bytes(),
-        )
-        .unwrap();
-        Self {
-            client,
-            contract,
-            account_sk: web3::signing::SecretKey::from_str(&eth.account_sk)
-                .expect("failed to parse eth account sk, should not begin with 0x"),
-        }
+
+        // Get `abi` from the artifact.
+        let abi_value = json.get("abi").expect("Failed to get ABI from artifact");
+        let abi = serde_json::from_str(&abi_value.to_string()).unwrap();
+
+        let contract = ContractInstance::new(
+            Address::from_str(&format!("0x{}", eth.contract_address)).unwrap(),
+            provider.clone(),
+            Interface::new(abi),
+        );
+        Self { contract }
     }
 }
 
@@ -348,10 +458,15 @@ async fn update_config(near: NearClient, config: Arc<RwLock<Config>>) {
 }
 
 /// Publish the signature and retry if it fails
-async fn execute_publish(client: ChainClient, mut action: PublishAction) {
+async fn execute_publish(
+    client: ChainClient,
+    mut action: PublishAction,
+    near_account_id: AccountId,
+) {
+    let chain = action.request.indexed.chain;
     tracing::info!(
         sign_id = ?action.request.indexed.id,
-        chain = ?action.request.indexed.chain,
+        chain = ?chain,
         started_at = ?action.timestamp.elapsed(),
         "trying to publish signature",
     );
@@ -380,7 +495,14 @@ async fn execute_publish(client: ChainClient, mut action: PublishAction) {
                     .map_err(|_| ())
             }
             ChainClient::Ethereum(eth) => {
-                try_publish_eth(eth, &action, &action.timestamp, &signature).await
+                try_publish_eth(
+                    eth,
+                    &action,
+                    &action.timestamp,
+                    &signature,
+                    &near_account_id,
+                )
+                .await
             }
             ChainClient::Err(msg) => {
                 tracing::warn!(msg, "no client for chain");
@@ -417,6 +539,7 @@ async fn try_publish_near(
     timestamp: &Instant,
     signature: &Signature,
 ) -> Result<(), near_fetch::Error> {
+    let chain = action.request.indexed.chain;
     let outcome = near
         .call_respond(&action.request.indexed.id, signature)
         .await
@@ -427,7 +550,7 @@ async fn try_publish_near(
                 "failed to publish signature",
             );
             crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[near.my_account_id.as_str()])
+                .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
                 .inc();
         })?;
 
@@ -452,17 +575,17 @@ async fn try_publish_near(
     );
 
     crate::metrics::NUM_SIGN_SUCCESS
-        .with_label_values(&[near.my_account_id.as_str()])
+        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .inc();
     crate::metrics::SIGN_TOTAL_LATENCY
-        .with_label_values(&[near.my_account_id.as_str()])
+        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
     crate::metrics::SIGN_RESPOND_LATENCY
-        .with_label_values(&[near.my_account_id.as_str()])
+        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
     if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
         crate::metrics::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[near.my_account_id.as_str()])
+            .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
             .inc();
     }
 
@@ -474,49 +597,46 @@ async fn try_publish_eth(
     action: &PublishAction,
     timestamp: &Instant,
     signature: &Signature,
+    near_account_id: &AccountId,
 ) -> Result<(), ()> {
-    let params = [Token::Array(vec![Token::Tuple(vec![
-        Token::FixedBytes(action.request.indexed.id.request_id.to_vec()),
-        Token::Tuple(vec![
-            Token::Tuple(vec![
-                Token::Uint(U256::from_big_endian(&signature.big_r.x())),
-                Token::Uint(U256::from_big_endian(
+    let params = [DynSolValue::Array(vec![DynSolValue::Tuple(vec![
+        DynSolValue::FixedBytes(action.request.indexed.id.request_id.into(), 32),
+        DynSolValue::Tuple(vec![
+            DynSolValue::Tuple(vec![
+                DynSolValue::from(U256::from_be_slice(&signature.big_r.x())),
+                DynSolValue::from(U256::from_be_slice(
                     signature.big_r.to_encoded_point(false).y().unwrap(),
                 )),
             ]),
-            Token::Uint(U256::from_big_endian(&signature.s.to_bytes())),
-            signature.recovery_id.into_token(),
+            DynSolValue::from(U256::from_be_slice(&signature.s.to_bytes())),
+            DynSolValue::from(signature.recovery_id),
         ]),
     ])])];
 
-    let data = eth
-        .contract
-        .abi()
-        .function("respond")
-        .unwrap()
-        .encode_input(&params)
-        .unwrap();
-
-    let txn = web3::types::TransactionParameters {
-        to: Some(eth.contract.address()),
-        data: web3::types::Bytes(data),
-        gas: web3::types::U256::from(40_000), // actually only using 28,000
-        ..Default::default()
-    };
-
-    // should never panic because up to this point, txn is valid and key is valid
-    let signed = eth
-        .client
-        .accounts()
-        .sign_transaction(txn, &eth.account_sk)
-        .await
-        .unwrap();
-
     let result = eth
-        .client
-        .eth()
-        .send_raw_transaction(signed.raw_transaction)
+        .contract
+        .function("respond", &params)
+        .unwrap()
+        .gas(40000)
+        .send()
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                sign_id = ?action.request.indexed.id,
+                error = ?err,
+                "failed to publish ethereum signature"
+            );
+            crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                .with_label_values(&[
+                    action.request.indexed.chain.as_str(),
+                    near_account_id.as_str(),
+                ])
+                .inc();
+        })?
+        .watch()
         .await;
+
+    let chain = action.request.indexed.chain;
     match result {
         Ok(tx_hash) => {
             tracing::info!(
@@ -525,6 +645,20 @@ async fn try_publish_eth(
                 elapsed = ?timestamp.elapsed(),
                 "published ethereum signature successfully"
             );
+            crate::metrics::NUM_SIGN_SUCCESS
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .inc();
+            crate::metrics::SIGN_TOTAL_LATENCY
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
+            crate::metrics::SIGN_RESPOND_LATENCY
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .observe(timestamp.elapsed().as_secs_f64());
+            if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
+                crate::metrics::NUM_SIGN_SUCCESS_30S
+                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                    .inc();
+            }
             Ok(())
         }
         Err(err) => {
@@ -533,8 +667,10 @@ async fn try_publish_eth(
                 error = ?err,
                 "failed to publish ethereum signature"
             );
+            crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .inc();
             Err(())
         }
     }
-    // TODO: add metrics for Ethereum
 }

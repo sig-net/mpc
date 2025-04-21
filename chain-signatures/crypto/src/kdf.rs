@@ -135,8 +135,8 @@ mod tests {
         let hash: [u8; 32] = hasher.finalize().into();
         let epsilon = Scalar::from_non_biased(hash);
 
-        // Define root PK
-        let root_pk = "secp256k1:54hU5wcCmVUPFWLDALXMh1fFToZsVXrx9BbTbHzSfQq1Kd1rJZi52iPa4QQxo6s5TgjWqgpY8HamYuUDzG6fAaUq";
+        // Mainnet root PK
+        let root_pk = "secp256k1:4tY4qMzusmgX5wYdG35663Y3Qar3CTbpApotwk9ZKLoF79XA4DjG8XoByaKdNHKQX9Lz5hd7iJqsWdTKyA7dKa6Z";
         let root_pk = near_sdk::PublicKey::from_str(root_pk).unwrap();
         let root_pk = near_public_key_to_affine_point(root_pk);
 
@@ -146,13 +146,14 @@ mod tests {
         let admin_pk = admin_pk.to_encoded_point(false);
 
         // Calculate admin Ethereum address
-        let hash: [u8; 32] = web3::signing::keccak256(&admin_pk.as_bytes()[1..]);
-        let address = web3::types::Address::from_slice(&hash[12..]);
+        let hash: [u8; 32] = *alloy::primitives::keccak256(&admin_pk.as_bytes()[1..]);
+        let address = alloy::primitives::Address::from_slice(&hash[12..]);
 
         println!("Admin Ethereum address: {}", address);
 
         let expected_address =
-            web3::types::Address::from_str("0x64b4bc39ff1393ebb8605975bd68db67aa0a31c4").unwrap();
+            alloy::primitives::Address::from_str("0x3c0f802d66ac9fe56fa90afb0714dbc65b05a445")
+                .unwrap();
 
         assert_eq!(address, expected_address);
     }

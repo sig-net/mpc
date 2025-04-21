@@ -3,9 +3,11 @@ pub mod spawner;
 use std::collections::HashSet;
 
 use mpc_contract::primitives::Participants;
+use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{Finality, NearToken};
 use near_workspaces::{Account, AccountId, Contract, Worker};
+use spawner::Prestockpile;
 
 use crate::actions::sign::SignAction;
 use crate::actions::wait::WaitAction;
@@ -16,7 +18,7 @@ use crate::utils::{vote_join, vote_leave};
 use crate::{NodeConfig, Nodes};
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 use mpc_contract::{ProtocolContractState, RunningContractState};
-use mpc_node::web::StateView;
+use mpc_node::web::{BenchMetrics, StateView};
 
 use anyhow::Context;
 use url::Url;
@@ -46,8 +48,8 @@ impl Cluster {
         self.nodes.is_empty()
     }
 
-    pub fn account_id(&self, id: usize) -> &AccountId {
-        self.nodes.near_accounts()[id].id()
+    pub fn account_id(&self, idx: usize) -> &AccountId {
+        self.nodes.account_id(idx)
     }
 
     pub fn account_ids(&self) -> Vec<&AccountId> {
@@ -69,6 +71,12 @@ impl Cluster {
         futures::future::try_join_all(tasks).await
     }
 
+    pub async fn fetch_bench_metrics(&self, id: usize) -> anyhow::Result<BenchMetrics> {
+        let url = self.url(id).join("/bench/metrics").unwrap();
+        let metrics = self.http_client.get(url).send().await?.json().await?;
+        Ok(metrics)
+    }
+
     pub fn wait(&self) -> WaitAction<'_, ()> {
         WaitAction::new(self)
     }
@@ -83,6 +91,17 @@ impl Cluster {
 
     pub fn contract(&self) -> &Contract {
         self.nodes.contract()
+    }
+
+    pub fn triples(&self, idx: usize) -> TripleStorage {
+        self.nodes.ctx().redis.triple_storage(self.account_id(idx))
+    }
+
+    pub fn presignatures(&self, idx: usize) -> PresignatureStorage {
+        self.nodes
+            .ctx()
+            .redis
+            .presignature_storage(self.account_id(idx))
     }
 
     pub async fn contract_state(&self) -> anyhow::Result<ProtocolContractState> {
@@ -300,5 +319,19 @@ impl Cluster {
         );
 
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+
+    pub async fn prestockpile(&self, prestockpile: Prestockpile) {
+        let participants = self.participants().await.unwrap();
+        self.nodes
+            .ctx()
+            .redis
+            .stockpile_triples(&self.cfg, &participants, prestockpile.multiplier)
+            .await;
+
+        self.wait()
+            .min_mine_presignatures(self.cfg.protocol.presignature.min_presignatures as usize)
+            .await
+            .unwrap();
     }
 }

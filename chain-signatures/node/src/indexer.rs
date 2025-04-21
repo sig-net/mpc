@@ -81,22 +81,20 @@ struct UnvalidatedContractSignRequest {
 }
 
 #[derive(Clone)]
-pub struct Indexer {
+pub struct NearIndexer {
     app_data_storage: AppDataStorage,
     last_updated_timestamp: Arc<RwLock<Instant>>,
     latest_block_timestamp_nanosec: Arc<RwLock<Option<u64>>>,
     running_threshold: Duration,
-    behind_threshold: Duration,
 }
 
-impl Indexer {
+impl NearIndexer {
     fn new(app_data_storage: AppDataStorage, options: &Options) -> Self {
         Self {
             app_data_storage: app_data_storage.clone(),
             last_updated_timestamp: Arc::new(RwLock::new(Instant::now())),
             latest_block_timestamp_nanosec: Arc::new(RwLock::new(None)),
             running_threshold: Duration::from_secs(options.running_threshold),
-            behind_threshold: Duration::from_secs(options.behind_threshold),
         }
     }
 
@@ -129,25 +127,6 @@ impl Indexer {
         self.last_updated_timestamp.read().await.elapsed() <= self.running_threshold
     }
 
-    /// Check whether the indexer is behind with the latest block height from the chain.
-    pub async fn is_behind(&self) -> bool {
-        if let Some(latest_block_timestamp_nanosec) =
-            *self.latest_block_timestamp_nanosec.read().await
-        {
-            crate::util::is_elapsed_longer_than_timeout(
-                latest_block_timestamp_nanosec / 1_000_000_000,
-                self.behind_threshold.as_millis() as u64,
-            )
-        } else {
-            true
-        }
-    }
-
-    pub async fn is_stable(&self) -> bool {
-        //!self.is_behind().await && self.is_running().await
-        true
-    }
-
     async fn update_block_height_and_timestamp(
         &self,
         block_height: BlockHeight,
@@ -165,7 +144,7 @@ struct Context {
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
-    indexer: Indexer,
+    indexer: NearIndexer,
 }
 
 async fn handle_block(
@@ -254,6 +233,7 @@ async fn handle_block(
                     chain: Chain::NEAR,
                     // TODO: use indexer timestamp instead.
                     timestamp: Instant::now(),
+                    unix_timestamp: crate::util::current_unix_timestamp(),
                 });
             }
         }
@@ -263,8 +243,8 @@ async fn handle_block(
         .update_block_height_and_timestamp(block.block_height(), block.header().timestamp_nanosec())
         .await;
 
-    crate::metrics::LATEST_BLOCK_HEIGHT
-        .with_label_values(&[ctx.node_account_id.as_str()])
+    crate::metrics::LATEST_BLOCK_NUMBER
+        .with_label_values(&[Chain::NEAR.as_str(), ctx.node_account_id.as_str()])
         .set(block.block_height() as i64);
 
     // Add the requests after going through the whole block to avoid partial processing if indexer fails somewhere.
@@ -282,7 +262,7 @@ async fn handle_block(
             tracing::error!(?err, "failed to send the sign request into sign queue");
         }
         crate::metrics::NUM_SIGN_REQUESTS
-            .with_label_values(&[ctx.node_account_id.as_str()])
+            .with_label_values(&[Chain::NEAR.as_str(), ctx.node_account_id.as_str()])
             .inc();
     }
 
@@ -305,7 +285,7 @@ pub fn run(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     rpc_client: near_fetch::Client,
-) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, Indexer)> {
+) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, NearIndexer)> {
     tracing::info!(
         s3_bucket = options.s3_bucket,
         s3_region = options.s3_region,
@@ -314,7 +294,7 @@ pub fn run(
         "starting indexer"
     );
 
-    let indexer = Indexer::new(app_data_storage.clone(), options);
+    let indexer = NearIndexer::new(app_data_storage.clone(), options);
     let context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
         node_account_id: node_account_id.clone(),

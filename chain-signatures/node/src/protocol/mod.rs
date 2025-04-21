@@ -7,6 +7,7 @@ pub mod message;
 pub mod presignature;
 pub mod signature;
 pub mod state;
+pub mod sync;
 pub mod triple;
 
 pub use consensus::ConsensusError;
@@ -26,6 +27,7 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::MessageReceiver as _;
+use crate::protocol::sync::SyncChannel;
 use crate::rpc::{NearClient, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
@@ -33,6 +35,7 @@ use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
 use reqwest::IntoUrl;
+use std::fmt;
 use std::path::Path;
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
@@ -84,6 +87,14 @@ impl ConsensusCtx for &mut MpcSignProtocol {
     fn presignature_storage(&self) -> &PresignatureStorage {
         &self.ctx.presignature_storage
     }
+
+    fn msg_channel(&self) -> &MessageChannel {
+        &self.channel
+    }
+
+    fn sync_channel(&self) -> &SyncChannel {
+        &self.sync_channel
+    }
 }
 
 impl CryptographicCtx for &mut MpcSignProtocol {
@@ -119,6 +130,7 @@ impl CryptographicCtx for &mut MpcSignProtocol {
 pub struct MpcSignProtocol {
     ctx: Ctx,
     channel: MessageChannel,
+    sync_channel: SyncChannel,
     state: Arc<RwLock<NodeState>>,
 }
 
@@ -132,6 +144,7 @@ impl MpcSignProtocol {
         near: NearClient,
         rpc_channel: RpcChannel,
         channel: MessageChannel,
+        sync_channel: SyncChannel,
         sign_rx: mpsc::Receiver<IndexedSignRequest>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
@@ -152,6 +165,7 @@ impl MpcSignProtocol {
         MpcSignProtocol {
             ctx,
             channel,
+            sync_channel,
             state,
         }
     }
@@ -161,7 +175,7 @@ impl MpcSignProtocol {
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
         config: Arc<RwLock<Config>>,
         mesh_state: Arc<RwLock<MeshState>>,
-    ) -> anyhow::Result<()> {
+    ) {
         let my_account_id = self.ctx.account_id.as_str();
         let _span = tracing::info_span!("running", my_account_id);
         let my_account_id = self.ctx.account_id.clone();
@@ -172,16 +186,10 @@ impl MpcSignProtocol {
         crate::metrics::NODE_VERSION
             .with_label_values(&[my_account_id.as_str()])
             .set(node_version());
-        let mut last_hardware_pull = Instant::now();
 
         loop {
             let protocol_time = Instant::now();
             tracing::debug!("trying to advance chain signatures protocol");
-            // Hardware metric refresh
-            if last_hardware_pull.elapsed() > Duration::from_secs(5) {
-                update_system_metrics(my_account_id.as_str());
-                last_hardware_pull = Instant::now();
-            }
 
             crate::metrics::PROTOCOL_ITER_CNT
                 .with_label_values(&[my_account_id.as_str()])
@@ -295,63 +303,86 @@ fn parse_node_version(version: &str) -> i64 {
     (rc_num + version.patch * 1000 + version.minor * 1000000 + version.major * 1000000000) as i64
 }
 
-fn update_system_metrics(node_account_id: &str) {
-    let mut system = System::new_all();
+pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHandle<()> {
+    let node_account_id = node_account_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        loop {
+            let mut system = System::new_all();
 
-    // Refresh only the necessary components
-    system.refresh_all();
+            // Refresh only the necessary components
+            system.refresh_all();
 
-    let mut s =
-        System::new_with_specifics(RefreshKind::new().with_cpu(CpuRefreshKind::everything()));
-    // Wait a bit because CPU usage is based on diff.
-    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-    // Refresh CPUs again to get actual value.
-    s.refresh_cpu_specifics(CpuRefreshKind::everything());
+            let mut s = System::new_with_specifics(
+                RefreshKind::new().with_cpu(CpuRefreshKind::everything()),
+            );
+            // Wait a bit because CPU usage is based on diff.
+            std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+            // Refresh CPUs again to get actual value.
+            s.refresh_cpu_specifics(CpuRefreshKind::everything());
 
-    // Update CPU usage metric
-    let cpu_usage = s.global_cpu_usage() as i64;
-    crate::metrics::CPU_USAGE_PERCENTAGE
-        .with_label_values(&["global", node_account_id])
-        .set(cpu_usage);
+            // Update CPU usage metric
+            let cpu_usage = s.global_cpu_usage() as i64;
+            crate::metrics::CPU_USAGE_PERCENTAGE
+                .with_label_values(&["global", &node_account_id])
+                .set(cpu_usage);
 
-    // Update available memory metric
-    let available_memory = system.available_memory() as i64;
-    crate::metrics::AVAILABLE_MEMORY_BYTES
-        .with_label_values(&["available_mem", node_account_id])
-        .set(available_memory);
+            // Update available memory metric
+            let available_memory = system.available_memory() as i64;
+            crate::metrics::AVAILABLE_MEMORY_BYTES
+                .with_label_values(&["available_mem", &node_account_id])
+                .set(available_memory);
 
-    // Update used memory metric
-    let used_memory = system.used_memory() as i64;
-    crate::metrics::USED_MEMORY_BYTES
-        .with_label_values(&["used", node_account_id])
-        .set(used_memory);
+            // Update used memory metric
+            let used_memory = system.used_memory() as i64;
+            crate::metrics::USED_MEMORY_BYTES
+                .with_label_values(&["used", &node_account_id])
+                .set(used_memory);
 
-    let root_mount_point = Path::new("/");
-    // Update available disk space metric
-    let available_disk_space = Disks::new_with_refreshed_list()
-        .iter()
-        .find(|d| d.mount_point() == root_mount_point)
-        .expect("No disk found mounted at '/'")
-        .available_space() as i64;
-    crate::metrics::AVAILABLE_DISK_SPACE_BYTES
-        .with_label_values(&["available_disk", node_account_id])
-        .set(available_disk_space);
+            let root_mount_point = Path::new("/");
+            // Update available disk space metric
+            let available_disk_space = Disks::new_with_refreshed_list()
+                .iter()
+                .find(|d| d.mount_point() == root_mount_point)
+                .expect("No disk found mounted at '/'")
+                .available_space() as i64;
+            crate::metrics::AVAILABLE_DISK_SPACE_BYTES
+                .with_label_values(&["available_disk", &node_account_id])
+                .set(available_disk_space);
 
-    // Update total disk space metric
-    let total_disk_space = Disks::new_with_refreshed_list()
-        .iter()
-        .find(|d| d.mount_point() == root_mount_point)
-        .expect("No disk found mounted at '/'")
-        .total_space() as i64;
-    crate::metrics::TOTAL_DISK_SPACE_BYTES
-        .with_label_values(&["total_disk", node_account_id])
-        .set(total_disk_space);
+            // Update total disk space metric
+            let total_disk_space = Disks::new_with_refreshed_list()
+                .iter()
+                .find(|d| d.mount_point() == root_mount_point)
+                .expect("No disk found mounted at '/'")
+                .total_space() as i64;
+            crate::metrics::TOTAL_DISK_SPACE_BYTES
+                .with_label_values(&["total_disk", &node_account_id])
+                .set(total_disk_space);
+
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    })
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy, Hash)]
 pub enum Chain {
     NEAR,
     Ethereum,
+}
+
+impl Chain {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Chain::NEAR => "NEAR",
+            Chain::Ethereum => "Ethereum",
+        }
+    }
+}
+
+impl fmt::Display for Chain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 #[cfg(test)]

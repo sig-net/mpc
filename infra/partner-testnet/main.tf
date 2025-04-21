@@ -36,10 +36,6 @@ module "gce-container" {
         value = var.node_configs["${count.index}"].account
       },
       {
-        name  = "MPC_CIPHER_PK"
-        value = var.node_configs["${count.index}"].cipher_pk
-      },
-      {
         name  = "MPC_ACCOUNT_SK"
         value = data.google_secret_manager_secret_version.account_sk_secret_id[count.index].secret_data
       },
@@ -74,6 +70,22 @@ module "gce-container" {
       {
         name  = "MPC_REDIS_URL",
         value = var.redis_url
+      },
+      {
+        name  = "MPC_ETH_ACCOUNT_SK"
+        value = data.google_secret_manager_secret_version.eth_account_sk_secret_id[count.index].secret_data
+      },
+      {
+        name  = "MPC_ETH_CONSENSUS_RPC_HTTP_URL"
+        value = data.google_secret_manager_secret_version.eth_consensus_rpc_url_secret_id[count.index].secret_data
+      },
+      {
+        name  = "MPC_ETH_EXECUTION_RPC_HTTP_URL"
+        value = data.google_secret_manager_secret_version.eth_execution_rpc_url_secret_id[count.index].secret_data
+      },
+      {
+        name  = "MPC_ETH_CONTRACT_ADDRESS"
+        value = var.node_configs["${count.index}"].eth_contract_address
       }
     ])
   }

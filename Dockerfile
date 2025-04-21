@@ -1,3 +1,5 @@
+FROM redis:7.4.2 AS redis-bin
+
 FROM node:20 AS eth-builder
 WORKDIR /usr/src/app/contract-eth
 COPY chain-signatures/contract-eth/package.json chain-signatures/contract-eth/package-lock.json ./
@@ -21,15 +23,16 @@ COPY --from=eth-builder /usr/src/app/contract-eth/artifacts chain-signatures/con
 RUN cargo build --release --package mpc-node
 
 FROM debian:stable-slim AS runtime
-RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates curl redis-server
+RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates curl
 
 RUN update-ca-certificates
 
+COPY --from=redis-bin /usr/local/bin/redis-server /usr/local/bin/redis-server
 COPY --from=node-builder /usr/src/app/target/release/mpc-node /usr/local/bin/mpc-node
 COPY chain-signatures/node/redis.conf /etc/redis/redis.conf
 
 # Create a script to start both Redis and the Rust app
-RUN echo "#!/bin/bash\nchown redis:redis /data\nservice redis-server start &\nexec mpc-node start" > /start.sh \
+RUN echo "#!/bin/bash\nredis-server /etc/redis/redis.conf &\nexec mpc-node start" > /start.sh \
     && chmod +x /start.sh
 
 WORKDIR /usr/local/bin

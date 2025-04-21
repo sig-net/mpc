@@ -70,11 +70,14 @@ variable "env_variables" {
 variable "node_configs" {
   type = list(object({
     account              = string
-    cipher_pk            = string
     account_sk_secret_id = string
     cipher_sk_secret_id  = string
     sign_sk_secret_id    = string
     sk_share_secret_id   = string
+    eth_account_sk_secret_id = string
+    eth_consensus_rpc_url_secret_id = string
+    eth_execution_rpc_url_secret_id = string
+    eth_contract_address = string
   }))
 }
 

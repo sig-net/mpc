@@ -229,9 +229,10 @@ impl VersionedMpcContract {
     /// The fee is volatile and depends on the number of pending requests.
     /// If used on a client side, it can give outdated results.
     pub fn experimental_signature_deposit(&self) -> U128 {
-        let load = self.system_load();
-
-        match load {
+        if cfg!(feature = "bench") {
+            return U128(1);
+        }
+        match self.system_load() {
             0..=25 => U128(1),
             26..=50 => U128(NearToken::from_millinear(50).as_yoctonear()),
             51..=75 => U128(NearToken::from_millinear(500).as_yoctonear()),
