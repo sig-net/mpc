@@ -20,6 +20,7 @@ use k256::Secp256k1;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
+use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
@@ -117,12 +118,7 @@ impl Node {
             running_threshold: 120,
             behind_threshold: 120,
         };
-        let eth_args = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: Some(config.cfg.eth.account_sk.clone()),
-            eth_rpc_ws_url: Some(config.cfg.eth.rpc_ws_url.clone()),
-            eth_rpc_http_url: Some(config.cfg.eth.rpc_http_url.clone()),
-            eth_contract_address: Some(config.cfg.eth.contract_address.clone()),
-        };
+        let eth_args = EthArgs::from_config(config.cfg.eth.clone());
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -700,21 +696,22 @@ impl Redis {
         // - first/second loop add at least min_triples per node
         // - third loop: for each triple, store the shares individually per node
         let mut num_triples = 0;
-        for mine_idx in &participant_ids {
+        for owner in &participant_ids {
             for _ in 0..(cfg.protocol.triple.min_triples * mul) {
                 num_triples += 1;
                 let triple_id = rand::random();
-                for (participant, triple) in participant_ids
+                for (me, triple) in participant_ids
                     .iter()
                     .zip(shares_to_triples(triple_id, &public, &shares))
                 {
-                    let mine = participant == mine_idx;
                     storage
-                        .get(participant)
+                        .get(me)
                         .unwrap()
-                        .insert(triple, mine, false)
+                        .reserve(triple.id)
                         .await
-                        .unwrap();
+                        .unwrap()
+                        .insert(triple, *owner)
+                        .await;
                 }
             }
         }

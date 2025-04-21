@@ -14,11 +14,15 @@ use crate::web::StateView;
 
 use super::MeshState;
 
-type IsStable = bool;
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum NodeStatus {
-    Active(IsStable),
+    /// The connected node responds and is actively participating in the MPC
+    /// network.
+    Active,
+    /// The node responds but is in an inactive NodeState, hence it is not ready
+    /// for participating in any MPC protocols, yet.
+    Inactive,
+    /// The node can't be reached at the moment.
     Offline,
 }
 
@@ -64,13 +68,13 @@ impl NodeConnection {
         ping_interval: Duration,
     ) {
         let node = (participant, &url);
-        tracing::info!(target: "net[conn]", ?node, "starting connection task");
+        tracing::info!(?node, "starting connection task");
         let url = url.to_string();
         let mut interval = tokio::time::interval(ping_interval);
         loop {
             interval.tick().await;
             if let Err(err) = client.msg_empty(&url).await {
-                tracing::warn!(target: "net[conn]", ?node, ?err, "checking /msg (empty) failed");
+                tracing::warn!(?node, ?err, "checking /msg (empty) failed");
                 *status.write().await = NodeStatus::Offline;
                 continue;
             }
@@ -78,20 +82,19 @@ impl NodeConnection {
             match client.state(&url).await {
                 Ok(state) => {
                     let new_status = match state {
-                        StateView::Running { is_stable, .. }
-                        | StateView::Resharing { is_stable, .. } => NodeStatus::Active(is_stable),
-                        StateView::Joining { .. } | StateView::NotRunning { .. } => {
-                            NodeStatus::Active(false)
+                        StateView::Running { .. } | StateView::Resharing { .. } => {
+                            NodeStatus::Active
                         }
+                        StateView::Joining { .. } | StateView::NotRunning => NodeStatus::Inactive,
                     };
                     let mut status = status.write().await;
                     if *status != new_status {
-                        tracing::info!(target: "net[conn]", ?node, ?new_status, "updated with new status");
+                        tracing::info!(?node, ?new_status, "updated with new status");
                         *status = new_status;
                     }
                 }
                 Err(err) => {
-                    tracing::warn!(target: "net[conn]", ?node, ?err, "checking /state failed");
+                    tracing::warn!(?node, ?err, "checking /state failed");
                     *status.write().await = NodeStatus::Offline;
                 }
             }
@@ -101,7 +104,7 @@ impl NodeConnection {
 
 impl Drop for NodeConnection {
     fn drop(&mut self) {
-        tracing::info!(target: "net[conn]", info = ?self.info, "connection dropped");
+        tracing::info!(info = ?self.info, "connection dropped");
         self.task.abort();
     }
 }
@@ -122,7 +125,7 @@ pub struct Pool {
 
 impl Pool {
     pub fn new(client: &NodeClient, ping_interval: Duration) -> Self {
-        tracing::info!(target: "net[pool]", "creating new connection pool");
+        tracing::info!("creating new connection pool");
         Self {
             client: client.clone(),
             ping_interval,
@@ -166,7 +169,7 @@ impl Pool {
             match self.connections.entry(*participant) {
                 Entry::Occupied(mut conn) => {
                     if &conn.get().info != info {
-                        tracing::info!(target: "net[pool]", ?node, "node connection updating");
+                        tracing::info!(?node, "node connection updating");
                         conn.insert(NodeConnection::spawn(
                             &self.client,
                             participant,
@@ -176,7 +179,7 @@ impl Pool {
                     }
                 }
                 Entry::Vacant(conn) => {
-                    tracing::info!(target: "net[pool]", ?node, "node connection created");
+                    tracing::info!(?node, "node connection created");
                     conn.insert(NodeConnection::spawn(
                         &self.client,
                         participant,
@@ -199,7 +202,6 @@ impl Pool {
         }
 
         for participant in remove {
-            tracing::info!(target: "net[pool]", node = ?participant, "node connection dropping");
             self.connections.remove(&participant);
         }
     }
@@ -208,11 +210,18 @@ impl Pool {
         let mut stable = Vec::new();
         let mut active = Participants::default();
         for (participant, conn) in self.connections.iter() {
-            if let NodeStatus::Active(is_stable) = conn.status().await {
-                active.insert(participant, conn.info.clone());
-                if is_stable {
+            match conn.status().await {
+                NodeStatus::Active => {
+                    active.insert(participant, conn.info.clone());
                     stable.push(*participant);
                 }
+                NodeStatus::Inactive => {
+                    // TODO: should we really insert inactive nodes to the active list here?
+                    // For now, in the refactoring PR, I just keep the exact same behavior.
+                    // We can delete this line when in the next PR.
+                    active.insert(participant, conn.info.clone());
+                }
+                NodeStatus::Offline => (),
             }
         }
 

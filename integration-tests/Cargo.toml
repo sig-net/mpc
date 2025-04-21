@@ -6,6 +6,7 @@ publish = false
 
 
 [dependencies]
+alloy.workspace = true
 anyhow.workspace = true
 async-process = "1"
 backon = "0.4"
@@ -65,6 +66,11 @@ tokio.workspace = true
 [[bench]]
 name = "sign"
 path = "benches/sign.rs"
+harness = false
+
+[[bench]]
+name = "store"
+path = "benches/store.rs"
 harness = false
 
 [features]

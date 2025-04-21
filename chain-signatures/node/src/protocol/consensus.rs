@@ -3,6 +3,7 @@ use super::state::{
     JoiningState, NodeState, PersistentNodeData, RunningState, StartedState,
     WaitingForConsensusState,
 };
+use super::sync::SyncChannel;
 use super::MessageChannel;
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
@@ -39,6 +40,7 @@ pub trait ConsensusCtx {
     fn triple_storage(&self) -> &TripleStorage;
     fn presignature_storage(&self) -> &PresignatureStorage;
     fn msg_channel(&self) -> &MessageChannel;
+    fn sync_channel(&self) -> &SyncChannel;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -131,6 +133,7 @@ impl ConsensusProtocol for StartedState {
                                             contract_state.threshold,
                                             epoch,
                                             ctx.my_account_id(),
+                                            ctx.triple_storage(),
                                             ctx.presignature_storage(),
                                             ctx.msg_channel().clone(),
                                         )));
@@ -143,6 +146,7 @@ impl ConsensusProtocol for StartedState {
                                             public_key,
                                             epoch,
                                             ctx.sign_rx(),
+                                            ctx.presignature_storage(),
                                             ctx.msg_channel().clone(),
                                         )));
 
@@ -355,6 +359,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.threshold,
                         self.epoch,
                         ctx.my_account_id(),
+                        ctx.triple_storage(),
                         ctx.presignature_storage(),
                         ctx.msg_channel().clone(),
                     )));
@@ -366,6 +371,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         self.public_key,
                         self.epoch,
                         ctx.sign_rx(),
+                        ctx.presignature_storage(),
                         ctx.msg_channel().clone(),
                     )));
 

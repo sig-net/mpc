@@ -485,7 +485,7 @@ impl MessageReceiver for RunningState {
                 Err(err) => {
                     // ignore the message since the generation had bad parameters. Also have the other node who
                     // initiated the protocol resend the message or have it timeout on their side.
-                    tracing::warn!(?err, "unable to initialize incoming triple protocol");
+                    tracing::warn!(id, ?err, "unable to initialize incoming triple protocol");
                     continue;
                 }
             };
@@ -517,7 +517,10 @@ impl MessageReceiver for RunningState {
         for (id, queue) in presignature_messages {
             // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
             let PresignatureMessage {
-                triple0, triple1, ..
+                triple0,
+                triple1,
+                from,
+                ..
             } = queue.front().unwrap();
 
             if !queue
@@ -532,6 +535,7 @@ impl MessageReceiver for RunningState {
 
             let protocol = match presignature_manager
                 .get_or_start_generation(
+                    *from,
                     &active,
                     *id,
                     *triple0,
@@ -549,8 +553,8 @@ impl MessageReceiver for RunningState {
                     continue;
                 }
                 Err(
-                    err
-                    @ (GenerationError::AlreadyGenerated | GenerationError::TripleStoreError(_)),
+                    err @ (GenerationError::AlreadyGenerated
+                    | GenerationError::TripleIsMissing(_, _)),
                 ) => {
                     // This triple has already been generated or removed from the triple manager, so we will have to bin
                     // the entirety of the messages we received for this presignature id, and have the other nodes timeout
@@ -646,7 +650,13 @@ impl MessageReceiver for RunningState {
                 }
                 Err(err @ GenerationError::WaitingForIndexer(_)) => {
                     // We will revisit this this signature request later when we have the request indexed.
-                    tracing::warn!(?sign_id, ?proposer, ?err, "waiting for indexer");
+                    tracing::warn!(
+                        ?sign_id,
+                        ?presignature_id,
+                        ?proposer,
+                        ?err,
+                        "waiting for indexer"
+                    );
                     continue;
                 }
                 Err(err @ GenerationError::InvalidProposer(_, _)) => {

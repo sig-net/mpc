@@ -9,8 +9,8 @@ pub enum GenerationError {
     AlreadyGenerated,
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
-    #[error("triple storage error: {0}")]
-    TripleStoreError(String),
+    #[error("triple one of or both {0} and {1} are missing")]
+    TripleIsMissing(TripleId, TripleId),
     #[error("triple {0} is generating")]
     TripleIsGenerating(TripleId),
     #[error("triple access denied: id={0}, {1}")]
@@ -23,6 +23,8 @@ pub enum GenerationError {
     PresignatureDenied(PresignatureId, &'static str),
     #[error("presignature bad parameters")]
     PresignatureBadParameters,
+    #[error("unable to reserve a slot for presignature")]
+    PresignatureReserveError,
     #[error("waiting for missing sign request id={0:?}")]
     WaitingForIndexer(SignId),
     #[error("invalid proposer expected={0:?}, actual={1:?}")]

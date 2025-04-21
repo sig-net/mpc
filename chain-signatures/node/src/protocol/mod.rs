@@ -7,6 +7,7 @@ pub mod message;
 pub mod presignature;
 pub mod signature;
 pub mod state;
+pub mod sync;
 pub mod triple;
 
 pub use consensus::ConsensusError;
@@ -26,6 +27,7 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::MessageReceiver as _;
+use crate::protocol::sync::SyncChannel;
 use crate::rpc::{NearClient, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
@@ -89,6 +91,10 @@ impl ConsensusCtx for &mut MpcSignProtocol {
     fn msg_channel(&self) -> &MessageChannel {
         &self.channel
     }
+
+    fn sync_channel(&self) -> &SyncChannel {
+        &self.sync_channel
+    }
 }
 
 impl CryptographicCtx for &mut MpcSignProtocol {
@@ -124,6 +130,7 @@ impl CryptographicCtx for &mut MpcSignProtocol {
 pub struct MpcSignProtocol {
     ctx: Ctx,
     channel: MessageChannel,
+    sync_channel: SyncChannel,
     state: Arc<RwLock<NodeState>>,
 }
 
@@ -137,6 +144,7 @@ impl MpcSignProtocol {
         near: NearClient,
         rpc_channel: RpcChannel,
         channel: MessageChannel,
+        sync_channel: SyncChannel,
         sign_rx: mpsc::Receiver<IndexedSignRequest>,
         secret_storage: SecretNodeStorageBox,
         triple_storage: TripleStorage,
@@ -157,6 +165,7 @@ impl MpcSignProtocol {
         MpcSignProtocol {
             ctx,
             channel,
+            sync_channel,
             state,
         }
     }
