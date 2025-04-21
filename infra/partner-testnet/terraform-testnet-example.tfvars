@@ -15,5 +15,10 @@ node_configs = [
     cipher_sk_secret_id  = "multichain-cipher-sk-testnet-0"
     sign_sk_secret_id    = "multichain-sign-sk-testnet-0"
     sk_share_secret_id   = "multichain-sk-share-testnet-0"
+    domain               = "{your-domain-or-subdomain}"
+    eth_account_sk_secret_id = "multichain-eth-account-sk-testnet-0"
+    eth_consensus_rpc_url_secret_id = "multichain-eth-consensus-rpc-url-testnet"
+    eth_execution_rpc_url_secret_id = "multichain-eth-execution-rpc-url-testnet"
+    eth_contract_address = "D39b0aBc0acab7d48aC6DFC9612543f035233b68"
   },
 ]
