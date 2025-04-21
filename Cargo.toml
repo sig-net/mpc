@@ -2,7 +2,6 @@
 members = [
     "chain-signatures/crypto",
     "chain-signatures/contract",
-    "chain-signatures/contract-sol/programs/*",
     "chain-signatures/keys",
     "chain-signatures/node",
     "chain-signatures/primitives",
