@@ -211,8 +211,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
 
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
-            let (indexer_handle, indexer) = if storage_options.env == "integration-tests" {
-                let (handle, idx) = indexer::run(
+            let indexer = if storage_options.env == "integration-tests" {
+                let (_handle, indexer) = indexer::run(
                     &indexer_options,
                     &mpc_contract_id,
                     &account_id,
@@ -220,9 +220,9 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     app_data_storage.clone(),
                     rpc_client.clone(),
                 )?;
-                (Some(handle), Some(idx))
+                Some(indexer)
             } else {
-                (None, None)
+                None
             };
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
@@ -275,51 +275,37 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             })));
             rt.block_on(async {
                 let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
-                let (sender, channel) =
+                let (sender, msg_channel) =
                     MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
-                let protocol = MpcSignProtocol::init(
-                    my_address,
-                    mpc_contract_id,
-                    account_id.clone(),
-                    state.clone(),
-                    near_client,
+                let protocol = MpcSignProtocol {
+                    my_account_id: account_id.clone(),
+                    state: state.clone(),
+                    near: near_client,
                     rpc_channel,
-                    channel,
-                    sync_channel.clone(),
-                    sign_rx,
-                    key_storage,
+                    msg_channel,
+                    sign_rx: Arc::new(RwLock::new(sign_rx)),
+                    secret_storage: key_storage,
                     triple_storage,
                     presignature_storage,
-                );
+                };
 
                 tracing::info!("protocol initialized");
-                let sync_handle = tokio::spawn(sync.run());
-                let rpc_handle = tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
-                let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
+                tokio::spawn(sync.run());
+                tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
+                tokio::spawn(mesh.run(contract_state.clone()));
                 let system_handle = spawn_system_metrics(account_id.as_str()).await;
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
                 let web_handle =
                     tokio::spawn(web::run(web_port, sender, state, indexer, sync_channel));
-                let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
+                tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");
 
-                rpc_handle.await?;
                 protocol_handle.await?;
                 web_handle.await?;
-                tracing::info!("spinning down");
-
-                mesh_handle.abort();
-                mesh_handle.await?;
-                sync_handle.abort();
-                sync_handle.await?;
-
-                eth_indexer_handle.abort();
-                if let Some(indexer_handle) = indexer_handle {
-                    indexer_handle.join().unwrap()?;
-                }
                 system_handle.abort();
+                tracing::info!("spinning down");
 
                 anyhow::Ok(())
             })?;
