@@ -1,19 +1,27 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
 
 use cait_sith::protocol::Participant;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
+use tokio_stream::wrappers::WatchStream;
+use tokio_stream::{StreamExt as _, StreamMap};
 
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::{ParticipantInfo, ProtocolState};
 use crate::web::StateView;
 
-use super::MeshState;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeStatusUpdate {
+    Active(ParticipantInfo),
+    Inactive(ParticipantInfo),
+    Offline,
+}
 
+/// Enum representing the connection status of a node. Only used internally
+/// to track the status of the connection.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum NodeStatus {
     /// The connected node responds and is actively participating in the MPC
@@ -26,60 +34,85 @@ enum NodeStatus {
     Offline,
 }
 
+impl NodeStatus {
+    fn with_info(self, info: &ParticipantInfo) -> NodeStatusUpdate {
+        match self {
+            NodeStatus::Active => NodeStatusUpdate::Active(info.clone()),
+            NodeStatus::Inactive => NodeStatusUpdate::Inactive(info.clone()),
+            NodeStatus::Offline => NodeStatusUpdate::Offline,
+        }
+    }
+}
+
 /// A connection that runs in the background, constantly polling nodes for their
 /// active status.
 struct NodeConnection {
     info: ParticipantInfo,
-    status: Arc<RwLock<NodeStatus>>,
+    status_rx: watch::Receiver<NodeStatusUpdate>,
+    status_tx: watch::Sender<NodeStatusUpdate>,
     task: JoinHandle<()>,
 }
 
 impl NodeConnection {
     fn spawn(
         client: &NodeClient,
-        participant: &Participant,
+        participant: Participant,
         info: &ParticipantInfo,
         ping_interval: Duration,
     ) -> Self {
-        let status = Arc::new(RwLock::new(NodeStatus::Offline));
+        let (status_tx, status_rx) = watch::channel(NodeStatusUpdate::Offline);
         let task = tokio::spawn(Self::run(
             client.clone(),
-            status.clone(),
-            *participant,
-            info.url.clone(),
+            status_tx.clone(),
+            participant,
+            info.clone(),
             ping_interval,
         ));
         Self {
             info: info.clone(),
-            status,
+            status_rx,
+            status_tx,
             task,
         }
     }
 
-    async fn status(&self) -> NodeStatus {
-        *self.status.read().await
+    fn update(&mut self, client: &NodeClient, info: &ParticipantInfo, ping_interval: Duration) {
+        tracing::info!(?self.info, "updating connection");
+        self.task.abort();
+        self.task = tokio::spawn(Self::run(
+            client.clone(),
+            self.status_tx.clone(),
+            Participant::from(self.info.id),
+            info.clone(),
+            ping_interval,
+        ));
     }
 
     async fn run(
         client: NodeClient,
-        status: Arc<RwLock<NodeStatus>>,
+        status: watch::Sender<NodeStatusUpdate>,
         participant: Participant,
-        url: String,
+        info: ParticipantInfo,
         ping_interval: Duration,
     ) {
-        let node = (participant, &url);
+        let node = (participant, &info.url);
         tracing::info!(?node, "starting connection task");
-        let url = url.to_string();
         let mut interval = tokio::time::interval(ping_interval);
+
+        let mut current_status = NodeStatus::Offline;
         loop {
             interval.tick().await;
-            if let Err(err) = client.msg_empty(&url).await {
+            if let Err(err) = client.msg_empty(&info.url).await {
                 tracing::warn!(?node, ?err, "checking /msg (empty) failed");
-                *status.write().await = NodeStatus::Offline;
+                if let Err(err) = status.send(NodeStatusUpdate::Offline) {
+                    tracing::warn!(?node, ?err, "failed to make status offline on err /msg");
+                } else {
+                    current_status = NodeStatus::Offline;
+                }
                 continue;
             }
 
-            match client.state(&url).await {
+            match client.state(&info.url).await {
                 Ok(state) => {
                     let new_status = match state {
                         StateView::Running { .. } | StateView::Resharing { .. } => {
@@ -87,15 +120,22 @@ impl NodeConnection {
                         }
                         StateView::Joining { .. } | StateView::NotRunning => NodeStatus::Inactive,
                     };
-                    let mut status = status.write().await;
-                    if *status != new_status {
+                    if current_status != new_status {
                         tracing::info!(?node, ?new_status, "updated with new status");
-                        *status = new_status;
+                        if let Err(err) = status.send(new_status.with_info(&info)) {
+                            tracing::warn!(?node, ?err, "failed to update status for watcher");
+                        } else {
+                            current_status = new_status;
+                        }
                     }
                 }
                 Err(err) => {
                     tracing::warn!(?node, ?err, "checking /state failed");
-                    *status.write().await = NodeStatus::Offline;
+                    if let Err(err) = status.send(NodeStatusUpdate::Offline) {
+                        tracing::warn!(?node, ?err, "failed to make status offline on err /state");
+                    } else {
+                        current_status = NodeStatus::Offline;
+                    }
                 }
             }
         }
@@ -121,15 +161,21 @@ pub struct Pool {
     /// All connections in the network, even including the potential ones that are going
     /// to join the network within the next epoch.
     connections: HashMap<Participant, NodeConnection>,
+
+    conn_update_tx: broadcast::Sender<ConnectionUpdate>,
+    conn_update_rx: broadcast::Receiver<ConnectionUpdate>,
 }
 
 impl Pool {
     pub fn new(client: &NodeClient, ping_interval: Duration) -> Self {
         tracing::info!("creating new connection pool");
+        let (conn_update_tx, conn_update_rx) = broadcast::channel(32);
         Self {
             client: client.clone(),
             ping_interval,
             connections: HashMap::new(),
+            conn_update_tx,
+            conn_update_rx,
         }
     }
 
@@ -157,37 +203,41 @@ impl Pool {
         self.drop_connections(seen);
     }
 
-    async fn connect_nodes(
+    pub(crate) async fn connect_nodes(
         &mut self,
         participants: &Participants,
         seen: &mut HashSet<Participant>,
     ) {
-        for (participant, info) in participants.iter() {
-            seen.insert(*participant);
+        for (&participant, info) in participants.iter() {
+            seen.insert(participant);
 
-            let node = (*participant, &info.url);
-            match self.connections.entry(*participant) {
+            let node = (participant, &info.url);
+            match self.connections.entry(participant) {
                 Entry::Occupied(mut conn) => {
                     if &conn.get().info != info {
                         tracing::info!(?node, "node connection updating");
-                        conn.insert(NodeConnection::spawn(
-                            &self.client,
-                            participant,
-                            info,
-                            self.ping_interval,
-                        ));
+                        conn.get_mut()
+                            .update(&self.client, info, self.ping_interval);
                     }
                 }
                 Entry::Vacant(conn) => {
                     tracing::info!(?node, "node connection created");
-                    conn.insert(NodeConnection::spawn(
+                    let conn = conn.insert(NodeConnection::spawn(
                         &self.client,
                         participant,
                         info,
                         self.ping_interval,
                     ));
+                    let watcher = conn.status_rx.clone();
+                    if self
+                        .conn_update_tx
+                        .send(ConnectionUpdate::New(participant, watcher))
+                        .is_err()
+                    {
+                        tracing::warn!(?node, "failed to send new connection");
+                    }
                 }
-            }
+            };
         }
     }
 
@@ -202,29 +252,69 @@ impl Pool {
         }
 
         for participant in remove {
-            self.connections.remove(&participant);
+            let removed = self.connections.remove(&participant).is_some();
+            if removed
+                && self
+                    .conn_update_tx
+                    .send(ConnectionUpdate::Drop(participant))
+                    .is_err()
+            {
+                tracing::warn!(?participant, "unable to send update for drop participant");
+            }
         }
     }
 
-    pub async fn status(&self) -> MeshState {
-        let mut stable = Vec::new();
-        let mut active = Participants::default();
-        for (participant, conn) in self.connections.iter() {
-            match conn.status().await {
-                NodeStatus::Active => {
-                    active.insert(participant, conn.info.clone());
-                    stable.push(*participant);
+    pub fn watcher(&self) -> ConnectionWatcher {
+        ConnectionWatcher::new(self.conn_update_rx.resubscribe())
+    }
+}
+
+#[derive(Clone)]
+enum ConnectionUpdate {
+    New(Participant, watch::Receiver<NodeStatusUpdate>),
+    Drop(Participant),
+}
+
+pub struct ConnectionWatcher {
+    /// Watch for new connections and dropped connections from the pool. This
+    /// is so that we can update our watchers when the pool changes.
+    // NOTE: this is a broadcast channel so that we can get a series of updates, and
+    // not just the latest entry with watcher channel.
+    conn_update: broadcast::Receiver<ConnectionUpdate>,
+    /// Set of active connections that we are watching.
+    watchers: StreamMap<Participant, WatchStream<NodeStatusUpdate>>,
+}
+
+impl ConnectionWatcher {
+    fn new(conn_update: broadcast::Receiver<ConnectionUpdate>) -> Self {
+        Self {
+            conn_update,
+            watchers: StreamMap::new(),
+        }
+    }
+
+    pub async fn next(&mut self) -> (Participant, NodeStatusUpdate) {
+        loop {
+            tokio::select! {
+                // Update our watchers if the connections changed.
+                Ok(update) = self.conn_update.recv() => {
+                    match update {
+                        ConnectionUpdate::New(participant, rx) => {
+                            self.watchers.insert(participant, WatchStream::new(rx));
+                        }
+                        ConnectionUpdate::Drop(participant) => {
+                            tracing::debug!(?participant, "dropping watcher");
+                            self.watchers.remove(&participant);
+                            return (participant, NodeStatusUpdate::Offline);
+                        }
+                    }
                 }
-                NodeStatus::Inactive => {
-                    // TODO: should we really insert inactive nodes to the active list here?
-                    // For now, in the refactoring PR, I just keep the exact same behavior.
-                    // We can delete this line when in the next PR.
-                    active.insert(participant, conn.info.clone());
+                // NOTE: if watchers.next() return None, it means that the connection is dropped
+                // or that the StreamMap is empty. In that case, we should just continue
+                Some(item) = self.watchers.next() => {
+                    return item;
                 }
-                NodeStatus::Offline => (),
             }
         }
-
-        MeshState { active, stable }
     }
 }
