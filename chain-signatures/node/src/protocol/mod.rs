@@ -23,14 +23,12 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::MessageReceiver as _;
-use crate::protocol::sync::SyncChannel;
 use crate::rpc::{NearClient, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
-use reqwest::IntoUrl;
 use semver::Version;
 use std::fmt;
 use std::path::Path;
@@ -39,58 +37,20 @@ use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
-use url::Url;
 
 pub struct MpcSignProtocol {
-    my_address: Url,
-    my_account_id: AccountId,
-    mpc_contract_id: AccountId,
-    near: NearClient,
-    secret_storage: SecretNodeStorageBox,
-    triple_storage: TripleStorage,
-    presignature_storage: PresignatureStorage,
-    sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
-    state: Arc<RwLock<NodeState>>,
-
-    msg_channel: MessageChannel,
-    sync_channel: SyncChannel,
-    rpc_channel: RpcChannel,
+    pub(crate) my_account_id: AccountId,
+    pub(crate) near: NearClient,
+    pub(crate) secret_storage: SecretNodeStorageBox,
+    pub(crate) triple_storage: TripleStorage,
+    pub(crate) presignature_storage: PresignatureStorage,
+    pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+    pub(crate) state: Arc<RwLock<NodeState>>,
+    pub(crate) msg_channel: MessageChannel,
+    pub(crate) rpc_channel: RpcChannel,
 }
 
 impl MpcSignProtocol {
-    #![allow(clippy::too_many_arguments)]
-    pub fn init<U: IntoUrl>(
-        my_address: U,
-        mpc_contract_id: AccountId,
-        account_id: AccountId,
-        state: Arc<RwLock<NodeState>>,
-        near: NearClient,
-        rpc_channel: RpcChannel,
-        channel: MessageChannel,
-        sync_channel: SyncChannel,
-        sign_rx: mpsc::Receiver<IndexedSignRequest>,
-        secret_storage: SecretNodeStorageBox,
-        triple_storage: TripleStorage,
-        presignature_storage: PresignatureStorage,
-    ) -> Self {
-        let my_address = my_address.into_url().unwrap();
-        MpcSignProtocol {
-            my_address,
-            my_account_id: account_id,
-            mpc_contract_id,
-            near,
-            sign_rx: Arc::new(RwLock::new(sign_rx)),
-            secret_storage,
-            triple_storage,
-            presignature_storage,
-            state,
-
-            rpc_channel,
-            msg_channel: channel,
-            sync_channel,
-        }
-    }
-
     pub async fn run(
         mut self,
         contract_state: Arc<RwLock<Option<ProtocolState>>>,

@@ -275,22 +275,19 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             })));
             rt.block_on(async {
                 let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
-                let (sender, channel) =
+                let (sender, msg_channel) =
                     MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
-                let protocol = MpcSignProtocol::init(
-                    my_address,
-                    mpc_contract_id,
-                    account_id.clone(),
-                    state.clone(),
-                    near_client,
+                let protocol = MpcSignProtocol {
+                    my_account_id: account_id.clone(),
+                    state: state.clone(),
+                    near: near_client,
                     rpc_channel,
-                    channel,
-                    sync_channel.clone(),
-                    sign_rx,
-                    key_storage,
+                    msg_channel,
+                    sign_rx: Arc::new(RwLock::new(sign_rx)),
+                    secret_storage: key_storage,
                     triple_storage,
                     presignature_storage,
-                );
+                };
 
                 tracing::info!("protocol initialized");
                 let sync_handle = tokio::spawn(sync.run());
