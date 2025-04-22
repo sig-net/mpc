@@ -1012,8 +1012,8 @@ impl MessageOutbox {
                 });
 
                 tokio::spawn(async move {
-                    if let Err(_) = send_task.await {
-                        tracing::warn!(to = ?account_id, "outbox: send task timeout");
+                    if send_task.await.is_err() {
+                        tracing::warn!(to = ?account_id, "outbox: timeout/expired on sending messages");
                     }
                 });
             }

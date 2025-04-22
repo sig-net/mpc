@@ -1,15 +1,15 @@
-use crate::protocol::sync::SyncUpdate;
-use crate::web::StateView;
+use std::str::Utf8Error;
+use std::time::Duration;
+
 use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
 use reqwest::IntoUrl;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::str::Utf8Error;
-use std::time::Duration;
-use tokio_retry::strategy::{jitter, ExponentialBackoff};
-use tokio_retry::Retry;
 use url::Url;
+
+use crate::protocol::sync::SyncUpdate;
+use crate::web::StateView;
 
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "message_options")]
@@ -72,9 +72,9 @@ impl NodeClient {
         }
     }
 
-    pub async fn post_json<T: Serialize + ?Sized, R: DeserializeOwned>(
+    async fn post_json<T: Serialize + ?Sized, R: DeserializeOwned>(
         &self,
-        url: &Url,
+        url: Url,
         payload: &T,
     ) -> Result<R, RequestError> {
         let resp = self
@@ -97,7 +97,7 @@ impl NodeClient {
         }
     }
 
-    async fn post_msg(&self, url: &Url, msg: &[&Ciphered]) -> Result<(), RequestError> {
+    async fn post_msg(&self, url: Url, msg: &[&Ciphered]) -> Result<(), RequestError> {
         let resp = self
             .http
             .post(url.clone())
@@ -121,9 +121,7 @@ impl NodeClient {
     pub async fn msg(&self, base: impl IntoUrl, msg: &[&Ciphered]) -> Result<(), RequestError> {
         let mut url = base.into_url()?;
         url.set_path("msg");
-
-        let strategy = ExponentialBackoff::from_millis(10).map(jitter).take(3);
-        Retry::spawn(strategy, || self.post_msg(&url, msg)).await
+        self.post_msg(url, msg).await
     }
 
     pub async fn msg_empty(&self, base: impl IntoUrl) -> Result<(), RequestError> {
@@ -148,6 +146,6 @@ impl NodeClient {
         let mut url = base.into_url()?;
         url.set_path("sync");
 
-        self.post_json(&url, update).await
+        self.post_json(url, update).await
     }
 }
