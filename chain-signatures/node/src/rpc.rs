@@ -441,7 +441,6 @@ impl EthClient {
         let abi_value = json.get("abi").expect("Failed to get ABI from artifact");
         let abi = serde_json::from_str(&abi_value.to_string()).unwrap();
 
-        println!("eth: {:?}", eth);
         let contract = ContractInstance::new(
             Address::from_str(&format!("0x{}", eth.contract_address)).unwrap(),
             provider.clone(),
