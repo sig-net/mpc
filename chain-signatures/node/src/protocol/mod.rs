@@ -15,10 +15,8 @@ pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
-use semver::Version;
 pub use signature::{IndexedSignRequest, SignQueue};
 pub use state::NodeState;
-pub use sysinfo::{Components, CpuRefreshKind, Disks, RefreshKind, System};
 
 use self::consensus::ConsensusCtx;
 use self::cryptography::CryptographicCtx;
@@ -35,10 +33,12 @@ use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
 use reqwest::IntoUrl;
+use semver::Version;
 use std::fmt;
 use std::path::Path;
-use std::time::Instant;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use url::Url;
@@ -235,7 +235,7 @@ impl MpcSignProtocol {
             if let Some(contract_state) = contract_state {
                 let consensus_time = Instant::now();
                 let from_state = format!("{state}");
-                state = match state.advance(&mut self, contract_state, cfg.clone()).await {
+                state = match state.advance(&mut self, contract_state).await {
                     Ok(state) => {
                         tracing::debug!("advance ok: {from_state} => {state}");
                         state

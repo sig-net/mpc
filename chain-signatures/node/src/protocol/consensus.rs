@@ -5,7 +5,6 @@ use super::state::{
 };
 use super::sync::SyncChannel;
 use super::MessageChannel;
-use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::presignature::PresignatureManager;
@@ -73,7 +72,6 @@ pub trait ConsensusProtocol {
         self,
         ctx: C,
         contract_state: ProtocolState,
-        cfg: Config,
     ) -> Result<NodeState, ConsensusError>;
 }
 
@@ -83,7 +81,6 @@ impl ConsensusProtocol for StartedState {
         self,
         ctx: C,
         contract_state: ProtocolState,
-        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match self.persistent_node_data {
             Some(PersistentNodeData {
@@ -240,7 +237,6 @@ impl ConsensusProtocol for GeneratingState {
         self,
         _ctx: C,
         contract_state: ProtocolState,
-        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => {
@@ -291,7 +287,6 @@ impl ConsensusProtocol for WaitingForConsensusState {
         self,
         ctx: C,
         contract_state: ProtocolState,
-        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(contract_state) => {
@@ -459,7 +454,6 @@ impl ConsensusProtocol for RunningState {
         self,
         ctx: C,
         contract_state: ProtocolState,
-        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
@@ -534,7 +528,6 @@ impl ConsensusProtocol for ResharingState {
         self,
         _ctx: C,
         contract_state: ProtocolState,
-        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
@@ -611,7 +604,6 @@ impl ConsensusProtocol for JoiningState {
         self,
         ctx: C,
         contract_state: ProtocolState,
-        _cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match contract_state {
             ProtocolState::Initializing(_) => Err(ConsensusError::ContractStateRollback),
@@ -674,7 +666,6 @@ impl ConsensusProtocol for NodeState {
         self,
         ctx: C,
         contract_state: ProtocolState,
-        cfg: Config,
     ) -> Result<NodeState, ConsensusError> {
         match self {
             NodeState::Starting => {
@@ -683,12 +674,12 @@ impl ConsensusProtocol for NodeState {
                     persistent_node_data,
                 }))
             }
-            NodeState::Started(state) => state.advance(ctx, contract_state, cfg).await,
-            NodeState::Generating(state) => state.advance(ctx, contract_state, cfg).await,
-            NodeState::WaitingForConsensus(state) => state.advance(ctx, contract_state, cfg).await,
-            NodeState::Running(state) => state.advance(ctx, contract_state, cfg).await,
-            NodeState::Resharing(state) => state.advance(ctx, contract_state, cfg).await,
-            NodeState::Joining(state) => state.advance(ctx, contract_state, cfg).await,
+            NodeState::Started(state) => state.advance(ctx, contract_state).await,
+            NodeState::Generating(state) => state.advance(ctx, contract_state).await,
+            NodeState::WaitingForConsensus(state) => state.advance(ctx, contract_state).await,
+            NodeState::Running(state) => state.advance(ctx, contract_state).await,
+            NodeState::Resharing(state) => state.advance(ctx, contract_state).await,
+            NodeState::Joining(state) => state.advance(ctx, contract_state).await,
         }
     }
 }
