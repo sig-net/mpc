@@ -211,8 +211,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
 
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
-            let (indexer_handle, indexer) = if storage_options.env == "integration-tests" {
-                let (handle, idx) = indexer::run(
+            let indexer = if storage_options.env == "integration-tests" {
+                let (_handle, indexer) = indexer::run(
                     &indexer_options,
                     &mpc_contract_id,
                     &account_id,
@@ -220,9 +220,9 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     app_data_storage.clone(),
                     rpc_client.clone(),
                 )?;
-                (Some(handle), Some(idx))
+                Some(indexer)
             } else {
-                (None, None)
+                None
             };
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
@@ -290,33 +290,22 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 };
 
                 tracing::info!("protocol initialized");
-                let sync_handle = tokio::spawn(sync.run());
-                let rpc_handle = tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
-                let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
+                tokio::spawn(sync.run());
+                tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
+                tokio::spawn(mesh.run(contract_state.clone()));
                 let system_handle = spawn_system_metrics(account_id.as_str()).await;
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
                 let web_handle =
                     tokio::spawn(web::run(web_port, sender, state, indexer, sync_channel));
-                let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
+                tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");
 
-                rpc_handle.await?;
                 protocol_handle.await?;
                 web_handle.await?;
-                tracing::info!("spinning down");
-
-                mesh_handle.abort();
-                mesh_handle.await?;
-                sync_handle.abort();
-                sync_handle.await?;
-
-                eth_indexer_handle.abort();
-                if let Some(indexer_handle) = indexer_handle {
-                    indexer_handle.join().unwrap()?;
-                }
                 system_handle.abort();
+                tracing::info!("spinning down");
 
                 anyhow::Ok(())
             })?;

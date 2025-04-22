@@ -250,7 +250,7 @@ impl CryptographicProtocol for RunningState {
 
         let stable = mesh_state.stable;
         tracing::debug!(?stable, "stable participants");
-        let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol, &ctx);
+        let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol, ctx);
 
         match tokio::try_join!(triple_task, presig_task, sig_task) {
             Ok(_result) => (),
