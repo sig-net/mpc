@@ -1,4 +1,3 @@
-use super::message::MessageChannel;
 use super::signature::SignatureManager;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::MpcSignProtocol;
@@ -8,24 +7,9 @@ use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
-use crate::rpc::RpcChannel;
-use crate::storage::secret_storage::SecretNodeStorageBox;
-use crate::storage::{PresignatureStorage, TripleStorage};
 
-use async_trait::async_trait;
 use cait_sith::protocol::{Action, InitializationError, ProtocolError};
 use k256::elliptic_curve::group::GroupEncoding;
-use near_account_id::AccountId;
-
-pub trait CryptographicCtx {
-    fn mpc_contract_id(&self) -> &AccountId;
-    fn secret_storage(&mut self) -> &mut SecretNodeStorageBox;
-    fn triple_storage(&self) -> &TripleStorage;
-    fn presignature_storage(&self) -> &PresignatureStorage;
-    fn my_account_id(&self) -> &AccountId;
-    fn channel(&self) -> &MessageChannel;
-    fn rpc_channel(&self) -> &RpcChannel;
-}
 
 #[derive(thiserror::Error, Debug)]
 pub enum CryptographicError {
@@ -37,8 +21,7 @@ pub enum CryptographicError {
     SecretStorageError(#[from] SecretStorageError),
 }
 
-#[async_trait]
-pub trait CryptographicProtocol {
+pub(crate) trait CryptographicProtocol {
     async fn progress(
         self,
         ctx: &mut MpcSignProtocol,
@@ -47,7 +30,6 @@ pub trait CryptographicProtocol {
     ) -> Result<NodeState, CryptographicError>;
 }
 
-#[async_trait]
 impl CryptographicProtocol for GeneratingState {
     async fn progress(
         mut self,
@@ -138,10 +120,9 @@ impl CryptographicProtocol for GeneratingState {
     }
 }
 
-#[async_trait]
 impl CryptographicProtocol for WaitingForConsensusState {
     async fn progress(
-        mut self,
+        self,
         _ctx: &mut MpcSignProtocol,
         _cfg: Config,
         _mesh_state: MeshState,
@@ -151,7 +132,6 @@ impl CryptographicProtocol for WaitingForConsensusState {
     }
 }
 
-#[async_trait]
 impl CryptographicProtocol for ResharingState {
     async fn progress(
         mut self,
@@ -252,10 +232,9 @@ impl CryptographicProtocol for ResharingState {
     }
 }
 
-#[async_trait]
 impl CryptographicProtocol for RunningState {
     async fn progress(
-        mut self,
+        self,
         ctx: &mut MpcSignProtocol,
         cfg: Config,
         mesh_state: MeshState,
@@ -284,7 +263,6 @@ impl CryptographicProtocol for RunningState {
     }
 }
 
-#[async_trait]
 impl CryptographicProtocol for NodeState {
     async fn progress(
         self,
