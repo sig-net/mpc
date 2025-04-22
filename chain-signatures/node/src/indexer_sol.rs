@@ -219,6 +219,7 @@ pub async fn run(
     let cluster = Cluster::Custom(sol.rpc_url.clone(), sol.rpc_url.replace("http", "ws"));
     let client =
         Client::new_with_options(cluster, Arc::new(keypair), CommitmentConfig::confirmed());
+    tracing::info!("rpc url: {}, program id: {}", sol.rpc_url, program_id);
     let program = client.program(program_id)?;
     loop {
         let unsub =
@@ -244,12 +245,14 @@ async fn subscribe_to_program_events<C: Deref<Target = Keypair> + Clone>(
     let event_unsubscriber = program
         .on(move |ctx, event: SignatureRequestedEvent| {
             let tx_sig: Vec<u8> = ctx.signature.as_ref().to_vec();
+            tracing::info!("Received event: {:?}", event);
             if sender.send((event, tx_sig)).is_err() {
-                println!("Error while transferring the event.")
+                tracing::error!("Error while transferring the event.");
             }
         })
         .await?;
 
+    tracing::info!("Subscribed to program events");
     while let Some((event, tx_sig)) = receiver.recv().await {
         if let Err(err) =
             process_anchor_event(event, tx_sig, sign_tx.clone(), node_near_account_id.clone()).await
