@@ -430,7 +430,8 @@ impl SolanaClient {
         );
         Self {
             client: Arc::new(client),
-            program_id: Pubkey::from_str(&sol.program_address).unwrap(),
+            program_id: Pubkey::from_str(&sol.program_address)
+                .expect("Invalid Solana program address provided in configuration"),
             payer,
         }
     }   
