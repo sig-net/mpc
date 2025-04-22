@@ -16,7 +16,6 @@ use crate::util::AffinePointExt;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use cait_sith::protocol::InitializationError;
 use tokio::sync::RwLock;
 
@@ -44,8 +43,7 @@ pub enum ConsensusError {
     SecretStorageError(#[from] SecretStorageError),
 }
 
-#[async_trait]
-pub trait ConsensusProtocol {
+pub(crate) trait ConsensusProtocol {
     async fn advance(
         self,
         ctx: &mut MpcSignProtocol,
@@ -53,7 +51,6 @@ pub trait ConsensusProtocol {
     ) -> Result<NodeState, ConsensusError>;
 }
 
-#[async_trait]
 impl ConsensusProtocol for StartedState {
     async fn advance(
         self,
@@ -209,7 +206,6 @@ impl ConsensusProtocol for StartedState {
     }
 }
 
-#[async_trait]
 impl ConsensusProtocol for GeneratingState {
     async fn advance(
         self,
@@ -259,7 +255,6 @@ impl ConsensusProtocol for GeneratingState {
     }
 }
 
-#[async_trait]
 impl ConsensusProtocol for WaitingForConsensusState {
     async fn advance(
         self,
@@ -426,7 +421,6 @@ impl ConsensusProtocol for WaitingForConsensusState {
     }
 }
 
-#[async_trait]
 impl ConsensusProtocol for RunningState {
     async fn advance(
         self,
@@ -500,7 +494,6 @@ impl ConsensusProtocol for RunningState {
     }
 }
 
-#[async_trait]
 impl ConsensusProtocol for ResharingState {
     async fn advance(
         self,
@@ -576,7 +569,6 @@ impl ConsensusProtocol for ResharingState {
     }
 }
 
-#[async_trait]
 impl ConsensusProtocol for JoiningState {
     async fn advance(
         self,
@@ -635,7 +627,6 @@ impl ConsensusProtocol for JoiningState {
     }
 }
 
-#[async_trait]
 impl ConsensusProtocol for NodeState {
     async fn advance(
         self,
