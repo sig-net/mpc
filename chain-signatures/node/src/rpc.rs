@@ -1,14 +1,16 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
-use solana_sdk::commitment_config::CommitmentConfig;
-use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signer::keypair::Keypair;
-use anchor_lang::prelude::{Signer, Accounts, AnchorSerialize, AnchorDeserialize};
 use crate::protocol::signature::SignRequest;
 use crate::protocol::{Chain, ProtocolState};
 use crate::util::AffinePointExt as _;
+use solana_sdk::commitment_config::CommitmentConfig;
+use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signer::keypair::Keypair;
 
+use alloy::primitives::Address;
+use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
+use alloy::providers::RootProvider;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
@@ -16,20 +18,24 @@ use mpc_keys::hpke;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
 
+use alloy::contract::{ContractInstance, Interface};
+use alloy::dyn_abi::DynSolValue;
+use alloy::network::EthereumWallet;
+use alloy::primitives::U256;
+use alloy::providers::ProviderBuilder;
+use alloy::transports::http::{Client as ReqwestClient, Http};
+use alloy_signer_local::PrivateKeySigner;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
 use serde_json::json;
-use std::str::FromStr as _;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use url::Url;
-use web3::contract::tokens::Tokenizable as _;
-use web3::ethabi::Token;
-use web3::types::U256;
 
 /// The maximum amount of times to retry publishing a signature.
 const MAX_PUBLISH_RETRY: usize = 6;
@@ -37,6 +43,32 @@ const MAX_PUBLISH_RETRY: usize = 6;
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract state and config
 const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
+
+type EthHttp = Http<ReqwestClient>;
+
+type EthContractFillProvider = FillProvider<
+    JoinFill<
+        JoinFill<
+            alloy::providers::Identity,
+            JoinFill<
+                alloy::providers::fillers::GasFiller,
+                JoinFill<
+                    alloy::providers::fillers::BlobGasFiller,
+                    JoinFill<
+                        alloy::providers::fillers::NonceFiller,
+                        alloy::providers::fillers::ChainIdFiller,
+                    >,
+                >,
+            >,
+        >,
+        WalletFiller<EthereumWallet>,
+    >,
+    RootProvider<Http<ReqwestClient>>,
+    Http<ReqwestClient>,
+    alloy::network::Ethereum,
+>;
+
+type EthContractInstance = ContractInstance<EthHttp, EthContractFillProvider>;
 
 struct PublishAction {
     public_key: mpc_crypto::PublicKey,
@@ -159,7 +191,11 @@ pub struct RpcExecutor {
 }
 
 impl RpcExecutor {
-    pub fn new(near: &NearClient, eth: &Option<EthConfig>, solana: &Option<SolConfig>) -> (RpcChannel, Self) {
+    pub fn new(
+        near: &NearClient,
+        eth: &Option<EthConfig>,
+        solana: &Option<SolConfig>,
+    ) -> (RpcChannel, Self) {
         let eth = eth.as_ref().map(EthClient::new);
         let solana = solana.as_ref().map(SolanaClient::new);
         let (tx, rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
@@ -381,33 +417,36 @@ impl NearClient {
 
 #[derive(Clone)]
 pub struct EthClient {
-    client: web3::Web3<web3::transports::Http>,
-    contract: web3::contract::Contract<web3::transports::Http>,
-    account_sk: web3::signing::SecretKey,
+    contract: EthContractInstance,
 }
 
 impl EthClient {
     pub fn new(eth: &EthConfig) -> Self {
-        let transport = web3::transports::Http::new(&eth.rpc_http_url).unwrap();
-        let client = web3::Web3::new(transport);
-        let address = web3::types::H160::from_str(&eth.contract_address).unwrap();
-
-        let contract_json: serde_json::Value = serde_json::from_slice(include_bytes!(
+        let signer: PrivateKeySigner = eth
+            .account_sk
+            .parse()
+            .expect("cannot parse Eth account sk into PrivateKeySigner");
+        let wallet = EthereumWallet::from(signer.clone());
+        let provider = ProviderBuilder::new()
+            .with_recommended_fillers()
+            .wallet(wallet)
+            .on_http(eth.execution_rpc_http_url.parse().unwrap());
+        // Create a contract instance.
+        let json: serde_json::Value = serde_json::from_slice(include_bytes!(
             "../../contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
         ))
         .unwrap();
-        let contract = web3::contract::Contract::from_json(
-            client.eth(),
-            address,
-            contract_json["abi"].to_string().as_bytes(),
-        )
-        .unwrap();
-        Self {
-            client,
-            contract,
-            account_sk: web3::signing::SecretKey::from_str(&eth.account_sk)
-                .expect("failed to parse eth account sk, should not begin with 0x"),
-        }
+
+        // Get `abi` from the artifact.
+        let abi_value = json.get("abi").expect("Failed to get ABI from artifact");
+        let abi = serde_json::from_str(&abi_value.to_string()).unwrap();
+
+        let contract = ContractInstance::new(
+            Address::from_str(&format!("0x{}", eth.contract_address)).unwrap(),
+            provider.clone(),
+            Interface::new(abi),
+        );
+        Self { contract }
     }
 }
 
@@ -422,7 +461,8 @@ impl SolanaClient {
     pub fn new(sol: &SolConfig) -> Self {
         let keypair = Keypair::from_base58_string(&sol.account_sk);
         let payer = Arc::new(keypair);
-        let cluster = anchor_client::Cluster::Custom(sol.rpc_url.clone(), sol.rpc_url.replace("http", "ws"));
+        let cluster =
+            anchor_client::Cluster::Custom(sol.rpc_url.clone(), sol.rpc_url.replace("http", "ws"));
         let client = anchor_client::Client::new_with_options(
             cluster,
             payer.clone(),
@@ -434,7 +474,7 @@ impl SolanaClient {
                 .expect("Invalid Solana program address provided in configuration"),
             payer,
         }
-    }   
+    }
 }
 
 /// Client related to a specific chain
@@ -610,47 +650,41 @@ async fn try_publish_eth(
     signature: &Signature,
     near_account_id: &AccountId,
 ) -> Result<(), ()> {
-    let params = [Token::Array(vec![Token::Tuple(vec![
-        Token::FixedBytes(action.request.indexed.id.request_id.to_vec()),
-        Token::Tuple(vec![
-            Token::Tuple(vec![
-                Token::Uint(U256::from_big_endian(&signature.big_r.x())),
-                Token::Uint(U256::from_big_endian(
+    let params = [DynSolValue::Array(vec![DynSolValue::Tuple(vec![
+        DynSolValue::FixedBytes(action.request.indexed.id.request_id.into(), 32),
+        DynSolValue::Tuple(vec![
+            DynSolValue::Tuple(vec![
+                DynSolValue::from(U256::from_be_slice(&signature.big_r.x())),
+                DynSolValue::from(U256::from_be_slice(
                     signature.big_r.to_encoded_point(false).y().unwrap(),
                 )),
             ]),
-            Token::Uint(U256::from_big_endian(&signature.s.to_bytes())),
-            signature.recovery_id.into_token(),
+            DynSolValue::from(U256::from_be_slice(&signature.s.to_bytes())),
+            DynSolValue::from(signature.recovery_id),
         ]),
     ])])];
 
-    let data = eth
-        .contract
-        .abi()
-        .function("respond")
-        .unwrap()
-        .encode_input(&params)
-        .unwrap();
-
-    let txn = web3::types::TransactionParameters {
-        to: Some(eth.contract.address()),
-        data: web3::types::Bytes(data),
-        gas: web3::types::U256::from(40_000), // actually only using 28,000
-        ..Default::default()
-    };
-
-    // should never panic because up to this point, txn is valid and key is valid
-    let signed = eth
-        .client
-        .accounts()
-        .sign_transaction(txn, &eth.account_sk)
-        .await
-        .unwrap();
-
     let result = eth
-        .client
-        .eth()
-        .send_raw_transaction(signed.raw_transaction)
+        .contract
+        .function("respond", &params)
+        .unwrap()
+        .gas(40000)
+        .send()
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                sign_id = ?action.request.indexed.id,
+                error = ?err,
+                "failed to publish ethereum signature"
+            );
+            crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                .with_label_values(&[
+                    action.request.indexed.chain.as_str(),
+                    near_account_id.as_str(),
+                ])
+                .inc();
+        })?
+        .watch()
         .await;
 
     let chain = action.request.indexed.chain;
@@ -690,13 +724,12 @@ async fn try_publish_eth(
             Err(())
         }
     }
-    // TODO: add metrics for Ethereum
 }
 
-use chain_signatures_project::instruction::Respond as SolanaRespond;
-use chain_signatures_project::Signature as SolanaContractSignature;
-use chain_signatures_project::AffinePoint as SolanaContractAffinePoint;
 use chain_signatures_project::accounts::Respond as SolanaRespondAccount;
+use chain_signatures_project::instruction::Respond as SolanaRespond;
+use chain_signatures_project::AffinePoint as SolanaContractAffinePoint;
+use chain_signatures_project::Signature as SolanaContractSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
 async fn try_publish_sol(
     sol: &SolanaClient,
@@ -705,17 +738,21 @@ async fn try_publish_sol(
     signature: &Signature,
 ) -> Result<(), ()> {
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
-    
+
     let request_ids = vec![action.request.indexed.id.request_id];
     let signature = SolanaContractSignature {
         big_r: SolanaContractAffinePoint {
-            x: signature.big_r.to_encoded_point(false).as_bytes()[1..33].try_into().unwrap(),
-            y: signature.big_r.to_encoded_point(false).as_bytes()[33..65].try_into().unwrap(),
+            x: signature.big_r.to_encoded_point(false).as_bytes()[1..33]
+                .try_into()
+                .unwrap(),
+            y: signature.big_r.to_encoded_point(false).as_bytes()[33..65]
+                .try_into()
+                .unwrap(),
         },
         s: signature.s.to_bytes().into(),
         recovery_id: signature.recovery_id,
     };
-    
+
     let tx = program
         .request()
         .signer(sol.payer.clone())
@@ -745,7 +782,7 @@ async fn try_publish_sol(
         elapsed = ?timestamp.elapsed(),
         "published solana signature successfully"
     );
-    
+
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[Chain::Solana.as_str(), "solana"])
         .inc();
@@ -755,7 +792,7 @@ async fn try_publish_sol(
     crate::metrics::SIGN_RESPOND_LATENCY
         .with_label_values(&[Chain::Solana.as_str(), "solana"])
         .observe(timestamp.elapsed().as_secs_f64());
-    
+
     if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
         crate::metrics::NUM_SIGN_SUCCESS_30S
             .with_label_values(&[Chain::Solana.as_str(), "solana"])
@@ -764,4 +801,3 @@ async fn try_publish_sol(
 
     Ok(())
 }
-

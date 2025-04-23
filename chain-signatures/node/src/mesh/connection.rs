@@ -14,11 +14,15 @@ use crate::web::StateView;
 
 use super::MeshState;
 
-type IsStable = bool;
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum NodeStatus {
-    Active(IsStable),
+    /// The connected node responds and is actively participating in the MPC
+    /// network.
+    Active,
+    /// The node responds but is in an inactive NodeState, hence it is not ready
+    /// for participating in any MPC protocols, yet.
+    Inactive,
+    /// The node can't be reached at the moment.
     Offline,
 }
 
@@ -78,11 +82,10 @@ impl NodeConnection {
             match client.state(&url).await {
                 Ok(state) => {
                     let new_status = match state {
-                        StateView::Running { is_stable, .. }
-                        | StateView::Resharing { is_stable, .. } => NodeStatus::Active(is_stable),
-                        StateView::Joining { .. } | StateView::NotRunning { .. } => {
-                            NodeStatus::Active(false)
+                        StateView::Running { .. } | StateView::Resharing { .. } => {
+                            NodeStatus::Active
                         }
+                        StateView::Joining { .. } | StateView::NotRunning => NodeStatus::Inactive,
                     };
                     let mut status = status.write().await;
                     if *status != new_status {
@@ -207,11 +210,18 @@ impl Pool {
         let mut stable = Vec::new();
         let mut active = Participants::default();
         for (participant, conn) in self.connections.iter() {
-            if let NodeStatus::Active(is_stable) = conn.status().await {
-                active.insert(participant, conn.info.clone());
-                if is_stable {
+            match conn.status().await {
+                NodeStatus::Active => {
+                    active.insert(participant, conn.info.clone());
                     stable.push(*participant);
                 }
+                NodeStatus::Inactive => {
+                    // TODO: should we really insert inactive nodes to the active list here?
+                    // For now, in the refactoring PR, I just keep the exact same behavior.
+                    // We can delete this line when in the next PR.
+                    active.insert(participant, conn.info.clone());
+                }
+                NodeStatus::Offline => (),
             }
         }
 

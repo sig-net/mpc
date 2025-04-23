@@ -2,7 +2,8 @@ use std::sync::LazyLock;
 use std::sync::Mutex;
 
 use prometheus::{
-    self, exponential_buckets, CounterVec, HistogramOpts, HistogramVec, IntGaugeVec, Opts, Result,
+    self, exponential_buckets, linear_buckets, CounterVec, HistogramOpts, HistogramVec,
+    IntGaugeVec, Opts, Result,
 };
 
 pub(crate) static NODE_RUNNING: LazyLock<IntGaugeVec> = LazyLock::new(|| {
@@ -509,7 +510,7 @@ pub(crate) static PRESIGNATURE_ACCRUED_WAIT_DELAY: LazyLock<HistogramVec> = Lazy
         "multichain_presignature_accrued_wait_delay_ms",
         "per presignature protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
         &["node_account_id"],
-        Some(exponential_buckets(10.0, 1.5, 25).unwrap()),
+        Some(exponential_buckets(10.0, 1.5, 35).unwrap()),
     )
     .unwrap()
 });
@@ -529,7 +530,7 @@ pub(crate) static TRIPLE_BEFORE_POKE_DELAY: LazyLock<HistogramVec> = LazyLock::n
         "multichain_triple_before_poke_delay_ms",
         "per triple protocol, delay between generator creation and first poke that returns SendMany/SendPrivate",
         &["node_account_id"],
-        Some(exponential_buckets(1.0, 1.5, 25).unwrap()),
+        Some(exponential_buckets(1.0, 1.5, 30).unwrap()),
     )
     .unwrap()
 });
@@ -539,7 +540,7 @@ pub(crate) static TRIPLE_ACCRUED_WAIT_DELAY: LazyLock<HistogramVec> = LazyLock::
         "multichain_triple_accrued_wait_delay_ms",
         "per triple protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
         &["node_account_id"],
-        Some(exponential_buckets(10.0, 1.5, 25).unwrap()),
+        Some(exponential_buckets(10.0, 1.5, 35).unwrap()),
     )
     .unwrap()
 });
@@ -569,7 +570,7 @@ pub(crate) static SIGNATURE_ACCRUED_WAIT_DELAY: LazyLock<HistogramVec> = LazyLoc
         "multichain_signature_accrued_wait_delay_ms",
         "per signature protocol, total accrued wait time between each poke that returned SendMany/SendPrivate/Return",
         &["node_account_id"],
-        Some(exponential_buckets(10.0, 1.5, 25).unwrap()),
+        Some(exponential_buckets(10.0, 1.5, 35).unwrap()),
     )
     .unwrap()
 });
@@ -599,7 +600,7 @@ pub(crate) static TRIPLE_POKES_CNT: LazyLock<HistogramVec> = LazyLock::new(|| {
         "multichain_triple_pokes_cnt",
         "total pokes per triple protocol",
         &["node_account_id"],
-        None,
+        Some(linear_buckets(0.0, 1.0, 500).unwrap()),
     )
     .unwrap()
 });
@@ -609,7 +610,7 @@ pub(crate) static PRESIGNATURE_POKES_CNT: LazyLock<HistogramVec> = LazyLock::new
         "multichain_presignature_pokes_cnt",
         "total pokes per presignature protocol",
         &["node_account_id"],
-        None,
+        Some(linear_buckets(0.0, 1.0, 30).unwrap()),
     )
     .unwrap()
 });
@@ -619,7 +620,7 @@ pub(crate) static SIGNATURE_POKES_CNT: LazyLock<HistogramVec> = LazyLock::new(||
         "multichain_signature_pokes_cnt",
         "total pokes per signature protocol",
         &["node_account_id"],
-        None,
+        Some(linear_buckets(0.0, 1.0, 30).unwrap()),
     )
     .unwrap()
 });
@@ -630,6 +631,26 @@ pub(crate) static MSG_CLIENT_SEND_DELAY: LazyLock<HistogramVec> = LazyLock::new(
         "Delay between message creation and sending to the client",
         &["node_account_id"],
         Some(exponential_buckets(0.5, 1.5, 20).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static INDEXER_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
+    try_create_histogram_vec(
+        "multichain_indexer_delay_secs",
+        "Delay between block time of the request and the time a request gets indexed",
+        &["chain", "node_account_id"],
+        Some(exponential_buckets(0.01, 1.5, 30).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static ETH_BLOCK_RECEIPT_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
+    try_create_histogram_vec(
+        "multichain_eth_block_receipt_latency_ms",
+        "Latency of eth indexer getting block recepipts",
+        &["node_account_id"],
+        Some(exponential_buckets(5.0, 1.5, 20).unwrap()),
     )
     .unwrap()
 });

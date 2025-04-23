@@ -228,16 +228,12 @@ impl CryptographicProtocol for ResharingState {
 
                     // Clear triples from storage before starting the new epoch. This is necessary if the node has accumulated
                     // triples from previous epochs. If it was not able to clear the previous triples, we'll leave them as-is
-                    if let Err(err) = ctx.triple_storage().clear().await {
-                        tracing::error!(
-                            ?err,
-                            "failed to clear triples from storage on new epoch start"
-                        );
+                    if !ctx.triple_storage().clear().await {
+                        tracing::error!("failed to clear triples from storage on new epoch start");
                     }
 
-                    if let Err(err) = ctx.presignature_storage().clear().await {
+                    if !ctx.presignature_storage().clear().await {
                         tracing::error!(
-                            ?err,
                             "failed to clear presignatures from storage on new epoch start"
                         );
                     }
@@ -270,7 +266,7 @@ impl CryptographicProtocol for RunningState {
         }
 
         let triple_task = self.triple_manager.clone().execute(&active, &cfg.protocol);
-        let presig_task = PresignatureManager::execute(&self, &cfg.protocol);
+        let presig_task = PresignatureManager::execute(&self, &cfg.protocol, active);
 
         let stable = mesh_state.stable;
         tracing::debug!(?stable, "stable participants");
