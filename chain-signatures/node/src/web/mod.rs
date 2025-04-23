@@ -216,7 +216,7 @@ async fn bench_metrics() -> Json<BenchMetrics> {
 async fn sync(
     Extension(state): Extension<Arc<AxumState>>,
     WithRejection(Json(update), _): WithRejection<Json<SyncUpdate>, Error>,
-) -> Result<()> {
+) -> Result<Json<()>> {
     state.sync_channel.request_update(update).await;
-    Ok(())
+    Ok(Json(()))
 }

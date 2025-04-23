@@ -15,10 +15,10 @@ const DOCKER_NETWORK: &str = "mpc_it_network";
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
 
-struct Prestockpile {
+pub struct Prestockpile {
     /// Multiplier to increase the stockpile such that stockpiling presignatures does not trigger
     /// the number of triples to be lower than the stockpile limit.
-    multiplier: u32,
+    pub multiplier: u32,
 }
 
 pub struct ClusterSpawner {
@@ -167,7 +167,6 @@ impl IntoFuture for ClusterSpawner {
             let jsonrpc_client = connector.connect(&nodes.ctx().lake_indexer.rpc_host_address);
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
 
-            let cfg = self.cfg.clone();
             let cluster = Cluster {
                 cfg: self.cfg,
                 rpc_client,
@@ -178,22 +177,10 @@ impl IntoFuture for ClusterSpawner {
 
             if self.wait_for_running {
                 cluster.wait().running().nodes_running().await?;
-            }
 
-            if let Some(prestockpile) = self.prestockpile {
-                let participants = cluster.participants().await.unwrap();
-                cluster
-                    .nodes
-                    .ctx()
-                    .redis
-                    .stockpile_triples(&cfg, &participants, prestockpile.multiplier)
-                    .await;
-
-                cluster
-                    .wait()
-                    .min_mine_presignatures(cfg.protocol.presignature.min_presignatures as usize)
-                    .await
-                    .unwrap();
+                if let Some(prestockpile) = self.prestockpile {
+                    cluster.prestockpile(prestockpile).await;
+                }
             }
 
             Ok(cluster)
