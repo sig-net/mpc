@@ -7,10 +7,7 @@ declare_id!("CMGYAEsqXw5z52R8fmMZwPYQARHPEkGbefJA2FmeHLMh");
 pub mod chain_signatures_project {
     use super::*;
 
-    pub fn initialize(
-        ctx: Context<Initialize>,
-        signature_deposit: u64,
-    ) -> Result<()> {
+    pub fn initialize(ctx: Context<Initialize>, signature_deposit: u64) -> Result<()> {
         let program_state = &mut ctx.accounts.program_state;
         program_state.admin = ctx.accounts.admin.key();
         program_state.signature_deposit = signature_deposit;
