@@ -35,8 +35,8 @@ helios = { git = "https://github.com/sig-net/helios", rev = "7c8018157cf5adc176b
 # workspace dependencies
 alloy.workspace = true
 anyhow.workspace = true
-# borsh.workspace = true
-borsh = "0.10.4" # solana anchor requires borsh 0.10
+borsh.workspace = true
+borsh_sol = { package = "borsh", version = "0.10.4" } # solana anchor requires borsh 0.10
 cait-sith.workspace = true
 ciborium.workspace = true
 clap.workspace = true

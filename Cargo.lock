@@ -7357,6 +7357,7 @@ dependencies = [
  "axum 0.6.20",
  "axum-extra",
  "borsh 0.10.4",
+ "borsh 1.5.7",
  "cait-sith",
  "chain-signatures-project",
  "chrono",

@@ -23,6 +23,12 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use web3::ethabi::{encode, Token};
 
+// Needed for anchor_client/lang to operate well. They use a different version of borsh
+// than the one we use in MPC. This older version can have security implications but for
+// now only effects Solana.
+use borsh_sol as borsh;
+
+
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     Scalar::from_bytes(
         hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140")
