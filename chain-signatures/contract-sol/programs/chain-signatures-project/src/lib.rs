@@ -97,10 +97,7 @@ pub mod chain_signatures_project {
             algo,
             dest,
             params,
-            fee_payer: match &ctx.accounts.fee_payer {
-                Some(payer) => Some(*payer.key),
-                None => None,
-            },
+            fee_payer: ctx.accounts.fee_payer.as_ref().map(|payer| *payer.key),
         });
 
         Ok(())
