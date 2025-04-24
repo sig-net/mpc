@@ -249,6 +249,7 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
 pub enum Chain {
     NEAR,
     Ethereum,
+    Solana,
 }
 
 impl Chain {
@@ -256,6 +257,7 @@ impl Chain {
         match self {
             Chain::NEAR => "NEAR",
             Chain::Ethereum => "Ethereum",
+            Chain::Solana => "Solana",
         }
     }
 }

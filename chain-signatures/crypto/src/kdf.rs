@@ -44,6 +44,18 @@ pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
     Scalar::from_non_biased(hash)
 }
 
+const CHAIN_ID_SOLANA: &str = "0x800001f5";
+pub fn derive_epsilon_sol(requester: &str, path: &str) -> Scalar {
+    let derivation_path = format!(
+        "{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_SOLANA},{},{}",
+        requester, path
+    );
+    let mut hasher = Keccak256::new();
+    hasher.update(derivation_path.as_bytes());
+    let hash: [u8; 32] = hasher.finalize().into();
+    Scalar::from_non_biased(hash)
+}
+
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
     (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key).to_affine()
 }

@@ -18,7 +18,7 @@ on:
         default: dev
         required: true
 
-env: 
+env:
     DEV_CONTRACT_EVM: "0x69C6b28Fdc74618817fa380De29a653060e14009"
     DEV_CONTRACT_SOL: "<fill-in-contract-address>"
     TESTNET_EVM_CONTRACT: "0x83458E8Bf8206131Fe5c05127007FA164c0948A2"
@@ -31,7 +31,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Setup K6
         uses: grafana/setup-k6-action@v1
       - name: Run k6 test
@@ -51,7 +51,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Setup K6
         uses: grafana/setup-k6-action@v1
       - name: Run k6 test
@@ -72,7 +72,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Setup K6
         uses: grafana/setup-k6-action@v1
       - name: Run k6 test
@@ -92,7 +92,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Setup K6
         uses: grafana/setup-k6-action@v1
       - name: Run k6 test

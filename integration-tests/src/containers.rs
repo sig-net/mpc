@@ -119,6 +119,7 @@ impl Node {
             behind_threshold: 120,
         };
         let eth_args = EthArgs::from_config(config.cfg.eth.clone());
+        let sol_args = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -128,6 +129,7 @@ impl Node {
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             indexer_options: indexer_options.clone(),
             eth: eth_args,
+            sol: sol_args,
             my_address: None,
             debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
