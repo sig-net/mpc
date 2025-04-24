@@ -371,6 +371,7 @@ pub async fn run(
     let mut interval = interval(Duration::from_millis(100));
     let mut blocks_failed: VecDeque<u64> = VecDeque::new();
     const MAX_BLOCK_RETRIES_PER_TICK: usize = 10;
+    let mut receiver_state_update_timestamp = Instant::now();
     loop {
         for _ in 0..blocks_failed.len().min(MAX_BLOCK_RETRIES_PER_TICK) {
             if let Some(block_number) = blocks_failed.pop_front() {
@@ -392,6 +393,10 @@ pub async fn run(
         }
         interval.tick().await;
         if block_heads_rx.is_empty() {
+            if receiver_state_update_timestamp.elapsed() > Duration::from_secs(60) {
+                tracing::warn!("No new block heads received for 60 seconds, waiting...");
+                receiver_state_update_timestamp = Instant::now();
+            }
             continue;
         }
         let Ok(new_block_head) = block_heads_rx.recv().await.inspect_err(|err| {
@@ -402,8 +407,12 @@ pub async fn run(
         }) else {
             break;
         };
+        receiver_state_update_timestamp = Instant::now();
         let SubscriptionEvent::NewHeads(new_block) = new_block_head;
         let block_number = new_block.header.number;
+        if block_number % 10 == 0 {
+            tracing::info!("Received new block head: {block_number}");
+        }
         if let Err(err) = process_block(
             block_number,
             &client,
