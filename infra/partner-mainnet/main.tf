@@ -86,6 +86,18 @@ module "gce-container" {
       {
         name  = "MPC_ETH_CONTRACT_ADDRESS"
         value = var.node_configs["${count.index}"].eth_contract_address
+      },
+      {
+        name  = "MPC_SOL_ACCOUNT_SK"
+        value = data.google_secret_manager_secret_version.sol_account_sk_secret_id[count.index].secret_data
+      },
+      {
+        name  = "MPC_SOL_RPC_URL"
+        value = data.google_secret_manager_secret_version.sol_rpc_url_secret_id[count.index].secret_data
+      },
+      {
+        name  = "MPC_SOL_PROGRAM_ADDRESS"
+        value = var.node_configs["${count.index}"].sol_program_address
       }
     ])
   }
