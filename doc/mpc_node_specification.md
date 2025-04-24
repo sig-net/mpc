@@ -34,7 +34,7 @@ owns. All other participants follow blindly and must not make any decisions
 about the non-owned protocol invocation on their own. This makes it easier to
 avoid many common distributed faults, such as two nodes deciding differently on
 the same invocation. It is not byzantine fault-tolerant, however, which this
-specification explicitly not trying to achieve.
+specification explicitly not is trying to achieve.
 
 ## Protocol State Machine
 
@@ -68,11 +68,11 @@ the underlying cryptography. Signing messages and sending them out might reveal
 information. This could lead to security vulnerabilities if we later invoke the
 same protocol again but with a different set of participants, for example.
 
-Some nodes might already are in the `Running` state, while others are still in
-`Prepare`. In that case, the nodes in `Prepare` should reject messages they
-receive and those in `Running` should retry sending the rejected message. The
-message receiver can optionally also accept the message, store it in a buffer
-and process them later if and when the node is also in `Running` state.
+Nodes in the `Prepare` state may receive messages from other nodes that are
+already in the `Running` state. In that case, nodes should either reject
+messages or keep them in a buffer. If rejected, the sender (in `Running` state)
+must retry sending the rejected message. If buffered, the receiver should
+process the buffered messages right after it transitions to the `Running` state.
 
 #### Running
 
@@ -80,13 +80,13 @@ In the `Running` state, nodes continuously poke the local message generators and
 exchange messages to progress the protocol.
 
 Messages sent to participants that are offline or reject the message must be
-resent until either the receiver accepts the message or the protocol invocation
+retried until either the receiver accepts the message or the protocol invocation
 globally times out.
 
 
 ### Owner Transitions
 
-The owner of the protocol invocation progress the protocol:
+The owner of the protocol invocation progresses the protocol:
 
 - When a new valid request is registered (indexed for the signature protocol,
   initiated by background task for triple/pre-signature generation)
@@ -96,7 +96,7 @@ The owner of the protocol invocation progress the protocol:
     - Asynchronously send an INIT message to all the participants and wait until
       all messages have been received. (HTTP success response)
     - Transition to `Prepare` state
-- Once all INIT messages have been sent
+- Once all INIT messages have been answered with a success response
     - Wait for finality of the request (for signatures only)
     - Send out a START message all participants
     - Transition to `Running` state
@@ -152,15 +152,14 @@ persistent storage.
 
 ## Participant Selection
 
-When a propose selects a list of participants for a new protocol invocation, a
-node should check to conditions:
+When a proposer selects a list of participants for a new protocol invocation, it should check these conditions:
 
 - Participants must be online
 - Participants must hold the relevant P and T shares
 
-To enable that, node keep a connection status for every peer as well as a
-directory of each owned P and T with a list of share holders. Both are further
-specified below.
+To enable the first, nodes keep a connection status for every peer. For the
+second part, they keep a directory of each owned P and T with a list of share
+holders. Both data structures are further specified below.
 
 ### Node Connection Status
 
@@ -174,8 +173,9 @@ Peers that respond but indicate in their status response that they are not activ
 
 Peers that respond and are participating in the MPC network are first listed as
 `Syncing` and receive a sync request. Only after the response for that has been
-answered, can they transition to `Active` and are a valid choice for inclusion
-in the participant list of any protocol invocations.
+answered, can the connection status transition to `Active`. Only peers with a
+connection status `Active` are valid for inclusion in the participant list of
+any protocol invocations.
 
 ### Share holder directory
 
@@ -218,7 +218,7 @@ owned by node A that are not in the list, if B holds them as `Available`,
 not finished globally yet, even if on the owner's view it already has finished.
 
 Node B must always respond with a list of IDs that were in the request but node
-B n longer holds the corresponding input in storage, in any state.
+B no longer holds the corresponding input in storage, in any state.
 
 Node A (owner) uses the response to update its directory. Specifically, for all
 entries listed in the response, delete node B from the list in the directory, no
