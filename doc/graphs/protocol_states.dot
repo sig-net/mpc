@@ -1,0 +1,20 @@
+// Protocol invocation states
+digraph {
+    node [fontsize=32 shape=box]
+    edge [fontsize=16]
+
+    init [label=init shape=none]
+    prep [label=Prepare]
+    running [label=Running]
+    done [label=done shape=none]
+
+
+    init -> prep [label="ON INIT\nAND req indexed" color=red fontcolor=red]
+    init -> prep [label="ON req indexed\n->sending INIT" color=blue fontcolor=blue]
+
+    prep -> running [label="ON START\nAND req finalized" color=red fontcolor=red]
+    prep -> running [label="ON all INITs ok\nAND req finalized\n->send START" color=blue fontcolor=blue]
+
+    running -> done [label="ON protocol done" color=red fontcolor=red]
+    running -> done [label="ON protocol done\n->Broadcast DONE" color=blue fontcolor=blue]
+}
