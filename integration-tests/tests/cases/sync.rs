@@ -54,11 +54,13 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
         }),
     );
 
+    let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
     let mesh = Mesh::new(
         &client,
         mpc_node::mesh::Options {
             ping_interval: ping_interval.as_millis() as u64,
         },
+        synced_peer_rx,
     );
     let (sync_channel, sync) = SyncTask::new(
         &client,
@@ -66,6 +68,7 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
         node0_presignatures.clone(),
         mesh.state().clone(),
         watcher,
+        synced_peer_tx,
     );
     tokio::spawn(sync.run());
 
