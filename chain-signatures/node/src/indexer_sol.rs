@@ -28,7 +28,6 @@ use web3::ethabi::{encode, Token};
 // now only effects Solana.
 use borsh_sol as borsh;
 
-
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     Scalar::from_bytes(
         hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140")
