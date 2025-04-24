@@ -75,6 +75,7 @@ type EthContractFillProvider = FillProvider<
 
 type EthContractInstance = ContractInstance<EthHttp, EthContractFillProvider>;
 
+#[derive(Clone)]
 struct PublishAction {
     public_key: mpc_crypto::PublicKey,
     request: SignRequest,
@@ -221,7 +222,6 @@ impl RpcExecutor {
         config: Arc<RwLock<Config>>,
     ) {
         // spin up update task for updating contract state and config
-        let near_account_id = self.near.my_account_id.clone();
         let near = self.near.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
@@ -233,43 +233,43 @@ impl RpcExecutor {
         });
 
         let eth_client = self.client(&Chain::Ethereum);
-        let near_account_id_clone = near_account_id.clone();
+        let near_account_id_clone = self.near.my_account_id.clone();
         let (eth_rpc_tx, eth_rpc_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         // spin up update task for batch sending eth responses
-        tokio::spawn(async move {
+        tokio::spawn({
             run_batch_respond(
                 eth_client,
                 eth_rpc_rx,
                 ETH_RESPOND_BATCH_INTERVAL,
                 ETH_RESPOND_BATCH_SIZE,
-                &near_account_id_clone,
+                near_account_id_clone.clone(),
             )
-            .await;
         });
 
         // process incoming actions related to RPC
         loop {
-            let Some(action) = self.action_rx.recv().await else {
+            let Some(RpcAction::Publish(action)) = self.action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
                 return;
             };
-            match action {
-                RpcAction::Publish(action) => match action.request.indexed.chain {
-                    Chain::NEAR => {
-                        execute_publish(
-                            self.client(&action.request.indexed.chain),
-                            action,
-                            near_account_id.clone(),
-                        )
-                        .await;
+
+            let chain = action.request.indexed.chain;
+            let client = self.client(&chain);
+            let near_account_id = self.near.my_account_id.clone();
+            let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
+
+            tokio::spawn(async move {
+                match chain {
+                    Chain::NEAR | Chain::Solana => {
+                        execute_publish(client, action, near_account_id).await;
                     }
                     Chain::Ethereum => {
-                        if let Err(e) = eth_rpc_tx.send(action).await {
-                            tracing::warn!(%e, "failed to send action to eth rpc channel");
+                        if let Err(err) = eth_rpc_tx.send(action).await {
+                            tracing::error!(%err, "eth: failed to send publish action");
                         }
                     }
-                },
-            };
+                }
+            });
         }
     }
 
@@ -618,22 +618,27 @@ async fn run_batch_respond(
     mut actions_rx: mpsc::Receiver<PublishAction>,
     batch_interval: Duration,
     batch_size: usize,
-    near_account_id: &AccountId,
+    near_account_id: AccountId,
 ) {
     let mut start = Instant::now();
     let mut actions_batch: Vec<PublishAction> = vec![];
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     loop {
         interval.tick().await;
-        if start.elapsed() > batch_interval
-            || actions_batch.len() >= batch_size && !actions_batch.is_empty()
+        if (start.elapsed() > batch_interval || actions_batch.len() >= batch_size)
+            && !actions_batch.is_empty()
         {
             tracing::info!(
                 num_requests = actions_batch.len(),
                 "publishing batch of signatures",
             );
-            execute_batch_publish(&client, &mut actions_batch, near_account_id, Instant::now())
-                .await;
+            execute_batch_publish(
+                &client,
+                &mut actions_batch,
+                &near_account_id,
+                Instant::now(),
+            )
+            .await;
             start = Instant::now();
         }
         if let Ok(action) = actions_rx.try_recv() {
@@ -794,6 +799,10 @@ async fn try_batch_publish_eth(
     let chain = Chain::Ethereum;
     let mut params_vec = vec![];
     let num_requests = actions.len();
+    let sign_ids = actions
+        .iter()
+        .map(|action| action.request.indexed.id.clone())
+        .collect::<Vec<_>>();
     for action in actions {
         let signature = signatures
             .get(&action.request.indexed.id)
@@ -815,6 +824,8 @@ async fn try_batch_publish_eth(
 
     let params = [DynSolValue::Array(params_vec.clone())];
 
+    // The gas limit for the transaction.
+    // Experimented on Sepolia, sending a batch of 2 cost 35,000, and a batch of 3 cost 50,000+.
     let gas = std::cmp::max(40000, 20000 * num_requests as u64);
 
     let result = eth
@@ -826,7 +837,7 @@ async fn try_batch_publish_eth(
         .await
         .map_err(|err| {
             tracing::error!(
-                //sign_id = ?action.request.indexed.id,
+                ?sign_ids,
                 error = ?err,
                 "failed to publish ethereum signature"
             );
@@ -837,12 +848,11 @@ async fn try_batch_publish_eth(
         .watch()
         .await;
 
-    //let chain = Chain::Ethereum;
     match result {
         Ok(tx_hash) => {
             tracing::info!(
-                tx_hash = ?tx_hash,
-                num_requests = num_requests,
+                ?tx_hash,
+                num_requests,
                 "published ethereum signatures successfully"
             );
             crate::metrics::NUM_SIGN_SUCCESS
@@ -889,7 +899,6 @@ async fn execute_batch_publish(
         let expected_public_key =
             mpc_crypto::derive_key(action.public_key, action.request.indexed.args.epsilon);
 
-        // We do this here, rather than on the client side, so we can use the ecrecover system function on NEAR to validate our signature
         let Ok(signature) = crate::kdf::into_eth_sig(
             &expected_public_key,
             &action.output.big_r,
@@ -909,10 +918,12 @@ async fn execute_batch_publish(
     loop {
         let publish = match client {
             ChainClient::Near(_) => {
-                unimplemented!("near has no batch publish");
+                tracing::error!("near has no batch publish");
+                Ok(())
             }
             ChainClient::Solana(_) => {
-                unimplemented!("Solana has no batch publish");
+                tracing::error!("Solana has no batch publish");
+                Ok(())
             }
             ChainClient::Ethereum(eth) => {
                 try_batch_publish_eth(eth, actions, &signatures, near_account_id, start).await
