@@ -78,6 +78,9 @@ variable "node_configs" {
     eth_consensus_rpc_url_secret_id = string
     eth_execution_rpc_url_secret_id = string
     eth_contract_address = string
+    sol_account_sk_secret_id = string
+    sol_rpc_url_secret_id = string
+    sol_program_address = string
   }))
 }
 
