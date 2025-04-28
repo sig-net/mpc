@@ -551,7 +551,7 @@ async fn execute_publish(
                 .await
             }
             ChainClient::Solana(sol) => {
-                try_publish_sol(sol, &action, &action.timestamp, &signature)
+                try_publish_sol(sol, &action, &action.timestamp, &signature, &near_account_id)
                     .await
                     .map_err(|_| ())
             }
@@ -736,6 +736,7 @@ async fn try_publish_sol(
     action: &PublishAction,
     timestamp: &Instant,
     signature: &Signature,
+    near_account_id: &AccountId,
 ) -> Result<(), ()> {
     let chain = action.request.indexed.chain;
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
