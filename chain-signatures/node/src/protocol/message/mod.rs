@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, RwLock};
+use types::PositMessage;
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
@@ -53,6 +54,8 @@ pub struct MessageInbox {
     /// Incoming messages that are pending to be processed. These are encrypted and signed.
     inbox_rx: mpsc::Receiver<Ciphered>,
 
+    // TODO: need to expire messages that never get processed
+    proposals: VecDeque<PositMessage>,
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
@@ -70,6 +73,7 @@ impl MessageInbox {
             idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
             filter: MessageFilter::new(filter_rx),
             inbox_rx,
+            proposals: VecDeque::new(),
             generating: VecDeque::new(),
             resharing: HashMap::new(),
             triple: HashMap::new(),
@@ -80,6 +84,7 @@ impl MessageInbox {
 
     pub fn push(&mut self, message: Message) {
         match message {
+            Message::Proposal(message) => self.proposals.push_back(message),
             Message::Generating(message) => self.generating.push_back(message),
             Message::Resharing(message) => self
                 .resharing
@@ -232,6 +237,7 @@ impl MessageInbox {
 
     pub fn clear(&mut self) {
         self.try_decrypt.clear();
+        self.proposals.clear();
         self.generating.clear();
         self.resharing.clear();
         self.triple.clear();
@@ -1127,6 +1133,7 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
 
 fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {
     match msg {
+        Message::Proposal(_) => Duration::from_millis(cfg.message_timeout),
         Message::Generating(_) => Duration::from_millis(cfg.message_timeout),
         Message::Resharing(_) => Duration::from_millis(cfg.message_timeout),
         Message::Triple(_) => Duration::from_millis(cfg.triple.generation_timeout),

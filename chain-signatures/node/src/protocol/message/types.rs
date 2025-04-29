@@ -19,6 +19,41 @@ pub enum Protocols {
     Signature,
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub enum ProtocolId {
+    Triple(TripleId),
+    Presignature(PresignatureId),
+    Signature(SignId, PresignatureId),
+}
+
+/// All actions that can be taken when a new posit is introduced for a protocol.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub enum PositAction {
+    Propose(Vec<Participant>),
+    Accept,
+    Reject,
+}
+
+/// The message associated with positing a new protocol.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct PositMessage {
+    pub id: ProtocolId,
+    pub from: Participant,
+    pub action: PositAction,
+}
+
+impl PositMessage {
+    pub fn data_len(&self) -> usize {
+        match &self.action {
+            PositAction::Propose(participants) => {
+                participants.len() * std::mem::size_of::<Participant>()
+            }
+            PositAction::Accept => 0,
+            PositAction::Reject => 0,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct GeneratingMessage {
     pub from: Participant,
@@ -103,6 +138,7 @@ impl From<SignatureMessage> for Message {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Message {
+    Proposal(PositMessage),
     Generating(GeneratingMessage),
     Resharing(ResharingMessage),
     Triple(TripleMessage),
@@ -118,6 +154,7 @@ pub enum Message {
 impl Message {
     pub const fn typename(&self) -> &'static str {
         match self {
+            Message::Proposal(_) => "Proposal",
             Message::Generating(_) => "Generating",
             Message::Resharing(_) => "Resharing",
             Message::Triple(_) => "Triple",
@@ -130,6 +167,9 @@ impl Message {
     /// The size of the message in bytes.
     pub fn size(&self) -> usize {
         match self {
+            Message::Proposal(proposal) => {
+                std::mem::size_of::<PositMessage>() + proposal.data_len()
+            }
             Message::Generating(msg) => std::mem::size_of::<GeneratingMessage>() + msg.data.len(),
             Message::Resharing(msg) => std::mem::size_of::<ResharingMessage>() + msg.data.len(),
             Message::Triple(msg) => std::mem::size_of::<TripleMessage>() + msg.data.len(),
