@@ -15,6 +15,7 @@ pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
+use serde::{Deserialize, Serialize};
 pub use signature::{IndexedSignRequest, SignQueue};
 pub use state::NodeState;
 
@@ -28,9 +29,12 @@ use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
 
+use cait_sith::protocol::Participant;
 use near_account_id::AccountId;
 use semver::Version;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::Hash;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -265,6 +269,120 @@ impl Chain {
 impl fmt::Display for Chain {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+/// All actions that can be taken when a new posit is introduced for a protocol.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub enum PositAction {
+    Propose(Vec<Participant>),
+    Accept,
+    // TODO: Reject can also have a reason
+    Reject,
+}
+
+pub struct PositCounter<Store> {
+    participants: HashSet<Participant>,
+    accepts: HashSet<Participant>,
+    store: Option<Store>,
+}
+
+pub struct Posits<Id, Store> {
+    posits: HashMap<Id, PositCounter<Store>>,
+}
+
+impl<T: Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
+    pub fn new() -> Self {
+        Self {
+            posits: HashMap::new(),
+        }
+    }
+
+    pub fn propose(&mut self, id: T, store: Store, participants: &[Participant]) -> PositAction {
+        self.posits.insert(
+            id,
+            PositCounter {
+                participants: participants.iter().copied().collect(),
+                accepts: HashSet::new(),
+                store: Some(store),
+            },
+        );
+
+        PositAction::Propose(participants.to_vec())
+    }
+
+    // TODO: make the resp of this synchronous when each of the protocol
+    // managers are their own individual tasks such that they can respond
+    // without the need of the main consensus loop.
+    pub fn act(
+        &mut self,
+        id: T,
+        from: Participant,
+        action: &PositAction,
+        active: &[Participant],
+    ) -> (Option<Vec<Participant>>, Option<Store>, Option<PositAction>) {
+        match action {
+            PositAction::Accept => {
+                let (should_start, reply) = if let Some(counter) = self.posits.get_mut(&id) {
+                    counter.accepts.insert(from);
+                    // `- 1` to not include us
+                    let should_start = counter.accepts.len() == counter.participants.len() - 1;
+                    let should_start =
+                        should_start.then(|| counter.participants.iter().copied().collect());
+
+                    tracing::info!(?id, ?from, "received an Accept");
+                    if should_start.is_some() {
+                        tracing::info!(?id, "received all Accepts, starting protocol");
+                    }
+                    (should_start, None)
+                } else {
+                    tracing::warn!(?id, "received an Accept for a protocol we did NOT propose");
+                    (None, None)
+                };
+
+                let store = if should_start.is_some() {
+                    self.posits.remove(&id).and_then(|counter| counter.store)
+                } else {
+                    None
+                };
+
+                (should_start, store, reply)
+            }
+            PositAction::Reject => {
+                if let Some(counter) = self.posits.get_mut(&id) {
+                    counter.participants.remove(&from);
+                    // TODO: add and send Abort here
+                } else {
+                    tracing::warn!(?id, "received a reject for a protocol we did NOT propose");
+                }
+                (None, None, None)
+            }
+            PositAction::Propose(participants) => {
+                if self.posits.contains_key(&id) {
+                    tracing::warn!(
+                        ?id,
+                        ?participants,
+                        "received a protocol posit for an id that we already proposed"
+                    );
+                    return (None, None, Some(PositAction::Reject));
+                }
+
+                // Check that the participants are all active
+                for p in participants.iter() {
+                    if !active.contains(p) {
+                        tracing::warn!(?id, ?active, ?participants, "rejecting protocol posit");
+                        return (None, None, Some(PositAction::Reject));
+                    }
+                }
+
+                // Automatically join the protocol if we're accepting here.
+                (Some(participants.to_vec()), None, Some(PositAction::Accept))
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.posits.len()
     }
 }
 

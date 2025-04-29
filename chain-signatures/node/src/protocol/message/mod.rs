@@ -2,8 +2,8 @@ mod filter;
 mod types;
 
 pub use crate::protocol::message::types::{
-    GeneratingMessage, Message, MessageError, MessageFilterId, PresignatureMessage, Protocols,
-    ResharingMessage, SignatureMessage, TripleMessage,
+    GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
+    PresignatureMessage, Protocols, ResharingMessage, SignatureMessage, TripleMessage,
 };
 
 use super::contract::primitives::{ParticipantMap, Participants};
@@ -32,7 +32,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, RwLock};
-use types::PositMessage;
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
@@ -55,7 +54,7 @@ pub struct MessageInbox {
     inbox_rx: mpsc::Receiver<Ciphered>,
 
     // TODO: need to expire messages that never get processed
-    proposals: VecDeque<PositMessage>,
+    posit: VecDeque<PositMessage>,
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
@@ -73,7 +72,7 @@ impl MessageInbox {
             idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
             filter: MessageFilter::new(filter_rx),
             inbox_rx,
-            proposals: VecDeque::new(),
+            posit: VecDeque::new(),
             generating: VecDeque::new(),
             resharing: HashMap::new(),
             triple: HashMap::new(),
@@ -84,7 +83,7 @@ impl MessageInbox {
 
     pub fn push(&mut self, message: Message) {
         match message {
-            Message::Proposal(message) => self.proposals.push_back(message),
+            Message::Posit(message) => self.posit.push_back(message),
             Message::Generating(message) => self.generating.push_back(message),
             Message::Resharing(message) => self
                 .resharing
@@ -237,7 +236,7 @@ impl MessageInbox {
 
     pub fn clear(&mut self) {
         self.try_decrypt.clear();
-        self.proposals.clear();
+        self.posit.clear();
         self.generating.clear();
         self.resharing.clear();
         self.triple.clear();
@@ -469,6 +468,50 @@ impl MessageReceiver for RunningState {
         let active = mesh_state.active.keys_vec();
         let mut inbox = channel.inbox().write().await;
 
+        for posit in inbox.posit.drain(..) {
+            match posit.id {
+                PositProtocolId::Triple(_) => {}
+                PositProtocolId::Presignature(id, t0, t1) => {
+                    let mut presignature_manager = self.presignature_manager.write().await;
+                    let (should_join, triples) = presignature_manager
+                        .handle_posit(id, t0, t1, posit.from, posit.action, &active)
+                        .await;
+                    if let Some(participants) = should_join {
+                        let proposer = if triples.is_some() {
+                            presignature_manager.me
+                        } else {
+                            posit.from
+                        };
+                        let join_outcome = presignature_manager
+                            .start_protocol(
+                                id,
+                                t0,
+                                t1,
+                                triples,
+                                proposer,
+                                &participants,
+                                &self.triple_manager,
+                                &self.public_key,
+                                &self.private_share,
+                                protocol_cfg,
+                            )
+                            .await;
+
+                        if let Err(err) = join_outcome {
+                            tracing::warn!(
+                                id,
+                                t0,
+                                t1,
+                                ?err,
+                                "unable to join incoming presignature protocol"
+                            );
+                        }
+                    }
+                }
+                PositProtocolId::Signature(_, _) => {}
+            }
+        }
+
         // remove the triple_id that has already failed or taken from the triple_bins
         // and refresh the timestamp of failed and taken
         let triple_messages = inbox.triple.remove(&self.epoch).unwrap_or_default();
@@ -525,10 +568,7 @@ impl MessageReceiver for RunningState {
         for (id, queue) in presignature_messages {
             // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
             let PresignatureMessage {
-                triple0,
-                triple1,
-                from,
-                ..
+                triple0, triple1, ..
             } = queue.front().unwrap();
 
             if !queue
@@ -541,55 +581,8 @@ impl MessageReceiver for RunningState {
                 continue;
             }
 
-            let protocol = match presignature_manager
-                .get_or_start_generation(
-                    *from,
-                    &active,
-                    *id,
-                    *triple0,
-                    *triple1,
-                    &self.triple_manager,
-                    &self.public_key,
-                    &self.private_share,
-                    protocol_cfg,
-                )
-                .await
-            {
-                Ok(protocol) => protocol,
-                Err(GenerationError::TripleIsGenerating(_)) => {
-                    // We will go back to this presignature bin later when the triple is generated.
-                    continue;
-                }
-                Err(
-                    err @ (GenerationError::AlreadyGenerated
-                    | GenerationError::TripleIsMissing(_, _)),
-                ) => {
-                    // This triple has already been generated or removed from the triple manager, so we will have to bin
-                    // the entirety of the messages we received for this presignature id, and have the other nodes timeout
-                    tracing::warn!(id, ?err, "presignature cannot be generated");
-                    queue.clear();
-                    continue;
-                }
-                Err(GenerationError::CaitSithInitializationError(error)) => {
-                    // ignore these messages since the generation had bad parameters. Also have the other node who
-                    // initiated the protocol resend the message or have it timeout on their side.
-                    tracing::warn!(
-                        presignature_id = id,
-                        ?error,
-                        "unable to initialize incoming presignature protocol"
-                    );
-                    queue.clear();
-                    continue;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        presignature_id = id,
-                        ?err,
-                        "Unexpected error encounted while generating presignature"
-                    );
-                    queue.clear();
-                    continue;
-                }
+            let Some(protocol) = presignature_manager.generator(*id) else {
+                continue;
             };
 
             while let Some(message) = queue.pop_front() {
@@ -1133,7 +1126,7 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
 
 fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {
     match msg {
-        Message::Proposal(_) => Duration::from_millis(cfg.message_timeout),
+        Message::Posit(_) => Duration::from_millis(cfg.message_timeout),
         Message::Generating(_) => Duration::from_millis(cfg.message_timeout),
         Message::Resharing(_) => Duration::from_millis(cfg.message_timeout),
         Message::Triple(_) => Duration::from_millis(cfg.triple.generation_timeout),
