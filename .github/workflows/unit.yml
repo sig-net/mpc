@@ -59,7 +59,7 @@ jobs:
       - name: Test clippy
         run: cargo clippy --tests -- -Dclippy::all
       - name: Unit tests
-        run: cargo test --workspace --exclude integration-tests
+        run: cargo test --workspace --exclude chain-signatures-project --exclude integration-tests
 
   audit:
     name: Audit

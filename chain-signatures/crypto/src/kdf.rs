@@ -44,6 +44,18 @@ pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
     Scalar::from_non_biased(hash)
 }
 
+const CHAIN_ID_SOLANA: &str = "0x800001f5";
+pub fn derive_epsilon_sol(requester: &str, path: &str) -> Scalar {
+    let derivation_path = format!(
+        "{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_SOLANA},{},{}",
+        requester, path
+    );
+    let mut hasher = Keccak256::new();
+    hasher.update(derivation_path.as_bytes());
+    let hash: [u8; 32] = hasher.finalize().into();
+    Scalar::from_non_biased(hash)
+}
+
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
     (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key).to_affine()
 }
@@ -146,13 +158,14 @@ mod tests {
         let admin_pk = admin_pk.to_encoded_point(false);
 
         // Calculate admin Ethereum address
-        let hash: [u8; 32] = web3::signing::keccak256(&admin_pk.as_bytes()[1..]);
-        let address = web3::types::Address::from_slice(&hash[12..]);
+        let hash: [u8; 32] = *alloy::primitives::keccak256(&admin_pk.as_bytes()[1..]);
+        let address = alloy::primitives::Address::from_slice(&hash[12..]);
 
         println!("Admin Ethereum address: {}", address);
 
         let expected_address =
-            web3::types::Address::from_str("0x3c0f802d66ac9fe56fa90afb0714dbc65b05a445").unwrap();
+            alloy::primitives::Address::from_str("0x3c0f802d66ac9fe56fa90afb0714dbc65b05a445")
+                .unwrap();
 
         assert_eq!(address, expected_address);
     }

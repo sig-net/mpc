@@ -1,7 +1,7 @@
 use super::cryptography::CryptographicError;
 use super::message::{MessageChannel, TripleMessage};
 use crate::protocol::error::GenerationError;
-use crate::storage::triple_storage::TripleStorage;
+use crate::storage::triple_storage::{TripleSlot, TripleStorage, TriplesTaken};
 use crate::types::TripleProtocol;
 use crate::util::AffinePointExt;
 
@@ -28,11 +28,10 @@ use near_account_id::AccountId;
 /// messages.
 pub type TripleId = u64;
 
-type GeneratorOutcome = (TripleId, Result<Option<(Triple, bool)>, ProtocolError>);
+type GeneratorOutcome = (TripleId, Result<bool, ProtocolError>);
 
-// TODO: why do we have Clone here? Triples can not be reused.
 /// A completed triple.
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Triple {
     pub id: TripleId,
     pub share: TripleShare<Secp256k1>,
@@ -46,27 +45,34 @@ pub struct TripleGenerator {
     pub protocol: Arc<TripleProtocol>,
     pub timestamp: Arc<RwLock<Option<Instant>>>,
     pub timeout: Duration,
+    slot: TripleSlot,
     poked_latest: Arc<RwLock<Option<(Instant, Duration, u64)>>>,
     generator_created: Instant,
 }
 
 impl TripleGenerator {
-    pub fn new(
+    pub async fn new(
         id: TripleId,
         me: Participant,
         threshold: usize,
         participants: &[Participant],
         timeout: u64,
+        slot: TripleSlot,
     ) -> Result<Self, InitializationError> {
         let mut participants = participants.to_vec();
 
         // Participants can be out of order, so let's sort them before doing anything. Critical
         // for the triple_is_mine check:
         participants.sort();
-
-        let protocol = Arc::new(RwLock::new(
-            cait_sith::triples::generate_triple::<Secp256k1>(&participants, me, threshold)?,
-        ));
+        let protocol =
+            match cait_sith::triples::generate_triple::<Secp256k1>(&participants, me, threshold) {
+                Ok(protocol) => protocol,
+                Err(e) => {
+                    slot.unreserve().await;
+                    return Err(e);
+                }
+            };
+        let protocol = Arc::new(RwLock::new(protocol));
 
         Ok(Self {
             id,
@@ -74,6 +80,7 @@ impl TripleGenerator {
             protocol,
             timestamp: Arc::new(RwLock::new(None)),
             timeout: Duration::from_millis(timeout),
+            slot,
             poked_latest: Arc::new(RwLock::new(None)),
             generator_created: Instant::now(),
         })
@@ -168,15 +175,15 @@ impl TripleGenerator {
                         }
                     }
 
+                    self.slot.unreserve().await;
                     break (self.id, Err(e));
                 }
             };
 
             match action {
                 Action::Wait => {
-                    tracing::debug!("triple: waiting");
                     // Retain protocol until we are finished
-                    break (self.id, Ok(None));
+                    break (self.id, Ok(false));
                 }
                 Action::SendMany(data) => {
                     for to in &self.participants {
@@ -270,7 +277,7 @@ impl TripleGenerator {
                     };
 
                     // After creation the triple is assigned to a random node, which is NOT necessarily the one that initiated it's creation
-                    let triple_is_mine = {
+                    let triple_owner = {
                         // This is an entirely unpredictable value to all participants because it's a combination of big_c_i
                         // It is the same value across all participants
                         let big_c = triple.public.big_c;
@@ -282,14 +289,14 @@ impl TripleGenerator {
                         let num_participants = self.participants.len();
                         // This has a *tiny* bias towards lower indexed participants, they're up to (1 + num_participants / u64::MAX)^2 times more likely to be selected
                         // This is acceptably small that it will likely never result in a biased selection happening
-                        let triple_owner = self.participants[entropy % num_participants];
-
-                        triple_owner == me
+                        self.participants[entropy % num_participants]
                     };
+                    let triple_is_mine = triple_owner == me;
 
                     tracing::info!(
                         id = self.id,
                         ?me,
+                        ?triple_owner,
                         triple_is_mine,
                         participants = ?self.participants,
                         big_a = ?triple.public.big_a.to_base58(),
@@ -304,6 +311,7 @@ impl TripleGenerator {
                     }
 
                     msg.filter_triple(self.id).await;
+                    self.slot.insert(triple, triple_owner).await;
                     {
                         let poked_latest = self.poked_latest.read().await;
                         if let Some((last_poked, total_wait, total_pokes)) = *poked_latest {
@@ -317,7 +325,7 @@ impl TripleGenerator {
                     triple_poke_cpu_time_metric
                         .observe(generator_poke_time.elapsed().as_millis() as f64);
 
-                    break (self.id, Ok(Some((triple, triple_is_mine))));
+                    break (self.id, Ok(true));
                 }
             }
         }
@@ -333,6 +341,8 @@ pub struct TripleTasks {
     /// the same as the threshold for signing: we maintain a copy here for easy access.
     threshold: usize,
     msg: MessageChannel,
+
+    storage: TripleStorage,
 
     /// The pool of triple protocols that have yet to be completed.
     pub generators: HashMap<TripleId, TripleGenerator>,
@@ -364,11 +374,17 @@ impl std::fmt::Debug for TripleTasks {
 }
 
 impl TripleTasks {
-    pub fn new(threshold: usize, protocol_budget: Duration, msg: &MessageChannel) -> Self {
+    pub fn new(
+        threshold: usize,
+        protocol_budget: Duration,
+        msg: &MessageChannel,
+        storage: &TripleStorage,
+    ) -> Self {
         Self {
             protocol_budget,
             threshold,
             msg: msg.clone(),
+            storage: storage.clone(),
             generators: HashMap::new(),
             queued: VecDeque::new(),
             ongoing: HashSet::new(),
@@ -383,7 +399,7 @@ impl TripleTasks {
         self.introduced.remove(&id);
     }
 
-    pub fn entry(
+    pub async fn entry(
         &mut self,
         me: Participant,
         id: TripleId,
@@ -400,14 +416,22 @@ impl TripleTasks {
                     return Ok(None);
                 }
 
+                let Some(slot) = self.storage.reserve(id).await else {
+                    return Ok(None);
+                };
+
                 tracing::info!(id, "joining protocol to generate a new triple");
-                let generator = e.insert(TripleGenerator::new(
-                    id,
-                    me,
-                    self.threshold,
-                    participants,
-                    cfg.triple.generation_timeout,
-                )?);
+                let generator = e.insert(
+                    TripleGenerator::new(
+                        id,
+                        me,
+                        self.threshold,
+                        participants,
+                        cfg.triple.generation_timeout,
+                        slot,
+                    )
+                    .await?,
+                );
                 self.queued.push_back(id);
                 crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
                     .with_label_values(&[my_account_id.as_str()])
@@ -424,7 +448,7 @@ impl TripleTasks {
         my_account_id: &AccountId,
         epoch: u64,
         cfg: &ProtocolConfig,
-    ) -> (Vec<(Triple, bool)>, HashMap<TripleId, ProtocolError>) {
+    ) -> HashMap<TripleId, ProtocolError> {
         // Add more protocols to the ongoing pool if there is space.
         let to_generate_len = cfg.max_concurrent_generation as usize - self.ongoing.len();
         if !self.queued.is_empty() && to_generate_len > 0 {
@@ -455,7 +479,6 @@ impl TripleTasks {
             }
         }
 
-        let mut triples = Vec::new();
         let mut errors = HashMap::new();
 
         let mut interval = tokio::time::interval(Duration::from_millis(5));
@@ -486,10 +509,10 @@ impl TripleTasks {
                 }
             };
             match outcome {
-                Ok(None) => {}
-                Ok(Some((triple, mine))) => {
-                    self.remove(id);
-                    triples.push((triple, mine));
+                Ok(done) => {
+                    if done {
+                        self.remove(id);
+                    }
                 }
                 Err(e) => {
                     tracing::info!(id, ?e, "triple completed with error");
@@ -499,7 +522,7 @@ impl TripleTasks {
             }
         }
 
-        (triples, errors)
+        errors
     }
 }
 
@@ -508,15 +531,15 @@ impl TripleTasks {
 #[derive(Clone)]
 pub struct TripleManager {
     /// Triple Storage
-    pub triple_storage: TripleStorage,
+    triple_storage: TripleStorage,
 
     /// The set of ongoing triple generation protocols.
-    pub tasks: Arc<RwLock<TripleTasks>>,
+    tasks: Arc<RwLock<TripleTasks>>,
 
-    pub me: Participant,
-    pub threshold: usize,
-    pub epoch: u64,
-    pub my_account_id: AccountId,
+    me: Participant,
+    threshold: usize,
+    epoch: u64,
+    my_account_id: AccountId,
     msg: MessageChannel,
 }
 
@@ -546,6 +569,7 @@ impl TripleManager {
                 threshold,
                 Duration::from_millis(100),
                 &msg,
+                storage,
             ))),
             me,
             threshold,
@@ -556,36 +580,20 @@ impl TripleManager {
         }
     }
 
-    pub async fn insert(&self, triple: Triple, mine: bool, back: bool) {
-        let id = triple.id;
-        tracing::debug!(id, mine, "inserting triple");
-        if let Err(e) = self.triple_storage.insert(triple, mine, back).await {
-            tracing::warn!(?e, mine, "failed to insert triple");
-        }
+    pub async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
+        self.triple_storage.reserve(id).await
     }
 
     pub async fn contains(&self, id: TripleId) -> bool {
-        self.triple_storage
-            .contains(id)
-            .await
-            .map_err(|e| tracing::warn!(?e, "failed to check if triple exists"))
-            .unwrap_or(false)
+        self.triple_storage.contains(id).await
     }
 
     pub async fn contains_mine(&self, id: TripleId) -> bool {
-        self.triple_storage
-            .contains_mine(id)
-            .await
-            .map_err(|e| tracing::warn!(?e, "failed to check if mine triple exists"))
-            .unwrap_or(false)
+        self.triple_storage.contains_mine(id, self.me).await
     }
 
     pub async fn contains_used(&self, id: TripleId) -> bool {
-        self.triple_storage
-            .contains_used(id)
-            .await
-            .map_err(|e| tracing::warn!(?e, "failed to check if triple is used"))
-            .unwrap_or(false)
+        self.triple_storage.contains_used(id).await
     }
 
     /// Take two unspent triple by theirs id with no way to return it. Only takes
@@ -596,7 +604,8 @@ impl TripleManager {
         &self,
         id0: TripleId,
         id1: TripleId,
-    ) -> Result<(Triple, Triple), GenerationError> {
+        owner: Participant,
+    ) -> Result<TriplesTaken, GenerationError> {
         {
             let tasks = self.tasks.read().await;
             if tasks.generators.contains_key(&id0) {
@@ -608,37 +617,31 @@ impl TripleManager {
             }
         }
 
-        let (triple_0, triple_1) =
-            self.triple_storage
-                .take_two(id0, id1)
-                .await
-                .map_err(|store_error| {
-                    tracing::warn!(?store_error, "failed to take two triples");
-                    GenerationError::TripleStoreError(format!(
-                        "failed to take two triples {:?}",
-                        store_error
-                    ))
-                })?;
+        let triples = self
+            .triple_storage
+            .take_two(id0, id1, owner, self.me)
+            .await
+            .ok_or(GenerationError::TripleIsMissing(id0, id1))?;
 
-        tracing::debug!(id0, id1, "took two triples");
-        Ok((triple_0, triple_1))
+        tracing::debug!(
+            id0 = triples.triple0.id,
+            id1 = triples.triple1.id,
+            "took two triples"
+        );
+        Ok(triples)
     }
 
     /// Take two random unspent triple generated by this node. Either takes both or none.
     /// It is very important to NOT reuse the same triple twice for two different
     /// protocols.
-    pub async fn take_two_mine(&self) -> Option<(Triple, Triple)> {
-        let (triple_0, triple_1) = self
-            .triple_storage
-            .take_two_mine()
-            .await
-            .map_err(|store_error| {
-                tracing::warn!(?store_error, "failed to take two mine triples");
-            })
-            .ok()??;
-
-        tracing::debug!(triple_0.id, triple_1.id, "took two mine triples");
-        Some((triple_0, triple_1))
+    pub async fn take_two_mine(&self) -> Option<TriplesTaken> {
+        let triples = self.triple_storage.take_two_mine(self.me).await?;
+        tracing::debug!(
+            id0 = triples.triple0.id,
+            id1 = triples.triple1.id,
+            "took two mine triples"
+        );
+        Some(triples)
     }
 
     /// Returns the number of unspent triples available in the manager.
@@ -648,7 +651,7 @@ impl TripleManager {
 
     /// Returns the number of unspent triples assigned to this node.
     pub async fn len_mine(&self) -> usize {
-        self.triple_storage.len_mine().await.unwrap_or(0)
+        self.triple_storage.len_mine(self.me).await.unwrap_or(0)
     }
 
     pub async fn len_ongoing(&self) -> usize {
@@ -682,19 +685,20 @@ impl TripleManager {
     ) -> Result<(), InitializationError> {
         let id = rand::random();
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        if self.contains_id(id).await {
+        let Some(slot) = self.reserve(id).await else {
             tracing::warn!(id, "triple id collision");
             return Err(InitializationError::BadParameters(format!(
                 "id collision: triple_id={id}"
             )));
-        }
+        };
 
         tracing::info!(id, "starting protocol to generate a new triple");
         {
             let mut tasks = self.tasks.write().await;
             tasks.generators.insert(
                 id,
-                TripleGenerator::new(id, self.me, self.threshold, participants, timeout)?,
+                TripleGenerator::new(id, self.me, self.threshold, participants, timeout, slot)
+                    .await?,
             );
             tasks.queued.push_back(id);
             tasks.introduced.insert(id);
@@ -713,11 +717,7 @@ impl TripleManager {
 
     /// Stockpile triples if the amount of unspent triples is below the minimum
     /// and the maximum number of all ongoing generation protocols is below the maximum.
-    pub async fn stockpile(
-        &self,
-        participants: &[Participant],
-        cfg: &ProtocolConfig,
-    ) -> Result<(), InitializationError> {
+    pub async fn stockpile(&self, participants: &[Participant], cfg: &ProtocolConfig) {
         let not_enough_triples = {
             // Stopgap to prevent too many triples in the system. This should be around min_triple*nodes*2
             // for good measure so that we have enough triples to do presig generation while also maintain
@@ -734,11 +734,13 @@ impl TripleManager {
         };
 
         if not_enough_triples {
-            tracing::debug!("not enough triples, generating");
-            self.generate(participants, cfg.triple.generation_timeout)
-                .await?;
+            if let Err(err) = self
+                .generate(participants, cfg.triple.generation_timeout)
+                .await
+            {
+                tracing::warn!(?err, "failed to stockpile triple");
+            }
         }
-        Ok(())
     }
 
     /// Ensures that the triple with the given id is either:
@@ -757,23 +759,21 @@ impl TripleManager {
         } else {
             let potential_len = self.len_potential().await;
             let mut tasks = self.tasks.write().await;
-            tasks.entry(
-                self.me,
-                id,
-                potential_len,
-                cfg,
-                participants,
-                &self.my_account_id,
-            )
+            tasks
+                .entry(
+                    self.me,
+                    id,
+                    potential_len,
+                    cfg,
+                    participants,
+                    &self.my_account_id,
+                )
+                .await
         }
     }
 
-    /// Pokes all of the ongoing generation protocols and returns a vector of
-    /// messages to be sent to the respective participant.
-    ///
-    /// An empty vector means we cannot progress until we receive a new message.
     pub async fn poke(&self, cfg: &ProtocolConfig) {
-        let (triples, errors) = {
+        let errors = {
             let mut tasks = self.tasks.write().await;
             tasks
                 .poke(self.me, &self.my_account_id, self.epoch, cfg)
@@ -784,10 +784,6 @@ impl TripleManager {
             tracing::warn!(id, ?err, "failed to generate triple");
             self.msg.filter_triple(id).await;
         }
-
-        for (triple, mine) in triples {
-            self.insert(triple, mine, false).await;
-        }
     }
 
     pub fn execute(self, active: &[Participant], protocol_cfg: &ProtocolConfig) -> JoinHandle<()> {
@@ -795,9 +791,7 @@ impl TripleManager {
         let protocol_cfg = protocol_cfg.clone();
 
         tokio::task::spawn(async move {
-            if let Err(err) = self.stockpile(&active, &protocol_cfg).await {
-                tracing::warn!(?err, "running: failed to stockpile triples");
-            }
+            self.stockpile(&active, &protocol_cfg).await;
             self.poke(&protocol_cfg).await;
 
             crate::metrics::NUM_TRIPLES_MINE

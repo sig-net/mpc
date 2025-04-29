@@ -23,17 +23,21 @@ enum Cli {
         nodes: usize,
         #[arg(short, long, default_value_t = 2)]
         threshold: usize,
-        #[arg(long, default_value = "ws://localhost:8545")]
-        eth_rpc_ws_url: String,
         #[arg(long, default_value = "http://localhost:8545")]
-        eth_rpc_http_url: String,
-        #[arg(long, default_value = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512")]
+        eth_consensus_rpc_http_url: String,
+        #[arg(long, default_value = "http://localhost:8545")]
+        eth_execution_rpc_http_url: String,
+        #[arg(long, default_value = "e7f1725E7734CE288F8367e1Bb143E90bb3F0512")]
         eth_contract_address: String,
         #[arg(
             long,
             default_value = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
         )]
         eth_account_sk: String,
+        #[arg(long, default_value = "sepolia")]
+        eth_network: String,
+        #[arg(long, default_value = "/tmp/data")]
+        eth_helios_data_path: String,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
@@ -52,10 +56,12 @@ async fn main() -> anyhow::Result<()> {
         Cli::SetupEnv {
             nodes,
             threshold,
-            eth_rpc_ws_url,
-            eth_rpc_http_url,
+            eth_consensus_rpc_http_url,
+            eth_execution_rpc_http_url,
             eth_contract_address,
             eth_account_sk,
+            eth_network,
+            eth_helios_data_path,
         } => {
             println!(
                 "Setting up an environment with {} nodes, {} threshold ...",
@@ -64,12 +70,14 @@ async fn main() -> anyhow::Result<()> {
             let config = NodeConfig {
                 nodes,
                 threshold,
-                eth: EthConfig {
+                eth: Some(EthConfig {
                     account_sk: eth_account_sk,
-                    rpc_ws_url: eth_rpc_ws_url,
-                    rpc_http_url: eth_rpc_http_url,
+                    consensus_rpc_http_url: eth_consensus_rpc_http_url,
+                    execution_rpc_http_url: eth_execution_rpc_http_url,
                     contract_address: eth_contract_address,
-                },
+                    network: eth_network,
+                    helios_data_path: eth_helios_data_path,
+                }),
                 ..Default::default()
             };
             println!("Full config: {:?}", config);

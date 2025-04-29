@@ -2,7 +2,7 @@ use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::{AffinePoint, EncodedPoint};
 use mpc_crypto::{near_public_key_to_affine_point, PublicKey};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub trait NearPublicKeyExt {
     fn into_affine_point(self) -> PublicKey;
@@ -75,4 +75,15 @@ pub fn is_elapsed_longer_than_timeout(timestamp_sec: u64, timeout: u64) -> bool 
     } else {
         false
     }
+}
+
+pub fn duration_between_unix(from_timestamp: u64, to_timestamp: u64) -> Duration {
+    Duration::from_secs(to_timestamp - from_timestamp)
+}
+
+pub fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs()
 }

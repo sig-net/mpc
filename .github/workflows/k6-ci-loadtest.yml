@@ -1,0 +1,108 @@
+name: k6 Load Test
+
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+    types: [closed]
+    paths:
+      - chain-signatures/**
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options:
+          - testnet
+          - dev
+        default: dev
+        required: true
+
+env:
+    DEV_CONTRACT_EVM: "0x69C6b28Fdc74618817fa380De29a653060e14009"
+    DEV_CONTRACT_SOL: "BtGZEs9ZJX3hAQuY5er8iyWrGsrPRZYupEtVSS129XKo"
+    TESTNET_EVM_CONTRACT: "0x83458E8Bf8206131Fe5c05127007FA164c0948A2"
+    TESTNET_SOL_CONTRACT: "<fill-in-contract-address>"
+
+jobs:
+  run-smoke-dev:
+    if: github.event.pull_request.merged == true || github.event.inputs.environment == 'dev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup K6
+        uses: grafana/setup-k6-action@v1
+      - name: Run k6 test
+        uses: grafana/run-k6-action@v1
+        env:
+          K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
+          K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
+          EVM_CONTRACT: ${{ env.DEV_CONTRACT_EVM }}
+          SOL_CONTRACT: ${{ env.DEV_CONTRACT_SOL }}
+          ENVIRONMENT: "dev"
+        with:
+          path: ./infra/loadtests/smoketest.js
+          cloud-run-locally: false
+  run-long-dev:
+    if: github.event.pull_request.merged == true || github.event.inputs.environment == 'dev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup K6
+        uses: grafana/setup-k6-action@v1
+      - name: Run k6 test
+        uses: grafana/run-k6-action@v1
+        env:
+          K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
+          K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
+          EVM_CONTRACT: ${{ env.DEV_CONTRACT_EVM }}
+          SOL_CONTRACT: ${{ env.DEV_CONTRACT_SOL }}
+          ENVIRONMENT: "dev"
+        with:
+          path: ./infra/loadtests/2hour.js
+          cloud-run-locally: false
+
+  run-smoke-testnet:
+    if: github.event.inputs.environment == 'testnet'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup K6
+        uses: grafana/setup-k6-action@v1
+      - name: Run k6 test
+        uses: grafana/run-k6-action@v1
+        env:
+          K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
+          K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
+          EVM_CONTRACT: ${{ env.TESTNET_EVM_CONTRACT }}
+          SOL_CONTRACT: ${{ env.TESTNET_SOL_CONTRACT }}
+          ENVIRONMENT: "testnet"
+        with:
+          path: ./infra/loadtests/smoketest.js
+          cloud-run-locally: false
+  run-long-testnet:
+    if: github.event.inputs.environment == 'testnet'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup K6
+        uses: grafana/setup-k6-action@v1
+      - name: Run k6 test
+        uses: grafana/run-k6-action@v1
+        env:
+          K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
+          K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
+          EVM_CONTRACT: ${{ env.TESTNET_EVM_CONTRACT }}
+          SOL_CONTRACT: ${{ env.TESTNET_SOL_CONTRACT }}
+          ENVIRONMENT: "testnet"
+        with:
+          path: ./infra/loadtests/2hour.js
+          cloud-run-locally: false
