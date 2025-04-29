@@ -70,14 +70,14 @@ async fn main() -> anyhow::Result<()> {
             let config = NodeConfig {
                 nodes,
                 threshold,
-                eth: Some(EthConfig {
-                    account_sk: eth_account_sk,
-                    consensus_rpc_http_url: eth_consensus_rpc_http_url,
-                    execution_rpc_http_url: eth_execution_rpc_http_url,
-                    contract_address: eth_contract_address,
-                    network: eth_network,
-                    helios_data_path: eth_helios_data_path,
-                }),
+                // eth: Some(EthConfig {
+                //     account_sk: eth_account_sk,
+                //     consensus_rpc_http_url: eth_consensus_rpc_http_url,
+                //     execution_rpc_http_url: eth_execution_rpc_http_url,
+                //     contract_address: eth_contract_address,
+                //     network: eth_network,
+                //     helios_data_path: eth_helios_data_path,
+                // }),
                 ..Default::default()
             };
             println!("Full config: {:?}", config);

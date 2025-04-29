@@ -65,7 +65,7 @@ impl Default for NodeConfig {
                 account_sk: "fS5jS6X5qvaquBV1bg2YWBdYeCiRSUwNAdNpgNkjS72oNxUJcZJZduaq2oCcXJb8erTbtqqq4wxriUmRJk7bMDw"
                     .to_string(),
                 rpc_url: "https://api.devnet.solana.com".to_string(),
-                program_address: "BtGZEs9ZJX3hAQuY5er8iyWrGsrPRZYupEtVSS129XKo".to_string(),
+                program_address: "CMGYAEsqXw5z52R8fmMZwPYQARHPEkGbefJA2FmeHLMh".to_string(),
             }),
         }
     }
