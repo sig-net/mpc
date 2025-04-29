@@ -550,11 +550,15 @@ async fn execute_publish(
                 )
                 .await
             }
-            ChainClient::Solana(sol) => {
-                try_publish_sol(sol, &action, &action.timestamp, &signature, &near_account_id)
-                    .await
-                    .map_err(|_| ())
-            }
+            ChainClient::Solana(sol) => try_publish_sol(
+                sol,
+                &action,
+                &action.timestamp,
+                &signature,
+                &near_account_id,
+            )
+            .await
+            .map_err(|_| ()),
             ChainClient::Err(msg) => {
                 tracing::warn!(msg, "no client for chain");
                 Ok(())
