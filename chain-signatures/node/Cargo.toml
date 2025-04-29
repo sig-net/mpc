@@ -34,8 +34,7 @@ tracing-opentelemetry = "0.30.0"
 opentelemetry = { version = "0.29.0", default-features = false, features = [
     "trace",
 ] }
-# excluding "reqwest-blocking-client"
-opentelemetry-otlp = { version = "0.29.0" } # TODO, features?
+opentelemetry-otlp = { version = "0.29.0" }
 opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
     "trace",
     "rt-tokio",
