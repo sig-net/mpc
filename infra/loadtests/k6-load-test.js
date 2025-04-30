@@ -143,6 +143,7 @@ export default function () {
   let chain = __ENV.LT_CHAIN;
   let env = __ENV.LT_CHAIN_ENV;
   let check = __ENV.LT_CHECK_SIGNATURE === 'true'; // Convert string to boolean
+  console.log(__ENV)
 
   if (!chain || !env || !check) {
     console.error(`One or more required environment variables are not set: chain ${chain}, env ${env}, check ${check}`);
