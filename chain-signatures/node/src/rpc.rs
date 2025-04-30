@@ -550,11 +550,15 @@ async fn execute_publish(
                 )
                 .await
             }
-            ChainClient::Solana(sol) => {
-                try_publish_sol(sol, &action, &action.timestamp, &signature)
-                    .await
-                    .map_err(|_| ())
-            }
+            ChainClient::Solana(sol) => try_publish_sol(
+                sol,
+                &action,
+                &action.timestamp,
+                &signature,
+                &near_account_id,
+            )
+            .await
+            .map_err(|_| ()),
             ChainClient::Err(msg) => {
                 tracing::warn!(msg, "no client for chain");
                 Ok(())
@@ -736,7 +740,9 @@ async fn try_publish_sol(
     action: &PublishAction,
     timestamp: &Instant,
     signature: &Signature,
+    near_account_id: &AccountId,
 ) -> Result<(), ()> {
+    let chain = action.request.indexed.chain;
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
 
     let request_ids = vec![action.request.indexed.id.request_id];
@@ -772,7 +778,7 @@ async fn try_publish_sol(
                 "failed to publish solana signature"
             );
             crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[Chain::Solana.as_str(), "solana"])
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                 .inc();
         })?;
 
@@ -784,18 +790,17 @@ async fn try_publish_sol(
     );
 
     crate::metrics::NUM_SIGN_SUCCESS
-        .with_label_values(&[Chain::Solana.as_str(), "solana"])
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc();
     crate::metrics::SIGN_TOTAL_LATENCY
-        .with_label_values(&[Chain::Solana.as_str(), "solana"])
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
     crate::metrics::SIGN_RESPOND_LATENCY
-        .with_label_values(&[Chain::Solana.as_str(), "solana"])
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
-
     if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
         crate::metrics::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[Chain::Solana.as_str(), "solana"])
+            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .inc();
     }
 
