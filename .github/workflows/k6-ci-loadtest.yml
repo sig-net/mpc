@@ -62,7 +62,7 @@ jobs:
           LT_CHAIN: ${{ github.event.inputs.chain || 'Solana' }}
           LT_CHAIN_ENV: ${{ github.event.inputs.environment || 'dev' }}
           LT_CHECK_SIGNATURE: ${{ github.event.inputs.check_signature == 'true' }}
-          LT_STRATEGY: ${{ github.event.inputs.lt_strategy || 'ramping_high_rate_1h' }}
+          LT_STRATEGY: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.lt_strategy || 'ramping_high_rate_1h' }}
         with:
           path: ./infra/loadtests/k6-load-test.js
           cloud-run-locally: false
