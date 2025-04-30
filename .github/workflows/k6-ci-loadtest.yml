@@ -56,15 +56,15 @@ jobs:
         uses: grafana/setup-k6-action@v1
       - name: Run k6 test
         uses: grafana/run-k6-action@v1
+        with:
+          path: ./infra/loadtests/k6-load-test.js
+          fail-fast: true
+          debug: true
         env:
+          LT_TEST_PARAM: "hello world"
           K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
           K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
           LT_CHAIN: ${{ github.event.inputs.chain }}
           LT_CHAIN_ENV: ${{ github.event.inputs.environment }}
           LT_CHECK_SIGNATURE: ${{ github.event.inputs.check_signature == 'true' }}
           LT_STRATEGY: ${{ github.event.inputs.lt_strategy }}
-        with:
-          path: ./infra/loadtests/k6-load-test.js
-          cloud-run-locally: false
-          cloud-comment-on-pr: true
-          flags: --exit-on-running
