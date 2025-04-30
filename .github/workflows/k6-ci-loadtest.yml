@@ -62,6 +62,7 @@ jobs:
           LT_CHAIN: ${{ github.event.inputs.chain }}
           LT_CHAIN_ENV: ${{ github.event.inputs.environment }}
           LT_CHECK_SIGNATURE: ${{ github.event.inputs.check_signature == 'true' }}
+          LT_STRATEGY: ${{ github.event.inputs.lt_strategy }}
         with:
           path: ./infra/loadtests/k6-load-test.js
           cloud-run-locally: false
