@@ -135,6 +135,8 @@ const strategies = {
   },
 };
 
+console.log(`Environment Variables: ${JSON.stringify(__ENV)}`);
+
 export const options = strategies[__ENV.LT_STRATEGY] || (() => {
   throw new Error(`Invalid or missing LT_STRATEGY environment variable: ${__ENV.LT_STRATEGY}`);
 })();
