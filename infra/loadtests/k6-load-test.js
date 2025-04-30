@@ -135,9 +135,9 @@ const strategies = {
   },
 };
 
-export const options = __ENV.LT_STRATEGY === undefined ? (() => {
+export const options = strategies[__ENV.LT_STRATEGY] || (() => {
   throw new Error(`Invalid or missing LT_STRATEGY environment variable: ${__ENV.LT_STRATEGY}`);
-})() : strategies[`${__ENV.LT_STRATEGY}`]
+})();
 
 export default function () {
   let chain = __ENV.LT_CHAIN;
