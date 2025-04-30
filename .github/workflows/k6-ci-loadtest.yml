@@ -54,6 +54,16 @@ jobs:
 
       - name: Setup K6
         uses: grafana/setup-k6-action@v1
+
+      - name: Debug Environment Variables
+        run: |
+          echo "LT_STRATEGY=${{ github.event.inputs.lt_strategy }}"
+          echo "LT_CHAIN=${{ github.event.inputs.chain }}"
+          echo "LT_CHAIN_ENV=${{ github.event.inputs.environment }}"
+          echo "LT_CHECK_SIGNATURE=${{ github.event.inputs.check_signature }}"
+          echo "All Environment Variables:"
+          env
+
       - name: Run k6 test
         uses: grafana/run-k6-action@v1
         env:

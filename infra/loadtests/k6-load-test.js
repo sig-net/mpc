@@ -137,6 +137,12 @@ const strategies = {
 
 console.log(`Environment Variables: ${JSON.stringify(__ENV)}`);
 
+// Log individual environment variables for debugging
+console.log(`LT_STRATEGY: ${__ENV.LT_STRATEGY}`);
+console.log(`LT_CHAIN: ${__ENV.LT_CHAIN}`);
+console.log(`LT_CHAIN_ENV: ${__ENV.LT_CHAIN_ENV}`);
+console.log(`LT_CHECK_SIGNATURE: ${__ENV.LT_CHECK_SIGNATURE}`);
+
 export const options = strategies[__ENV.LT_STRATEGY] || (() => {
   throw new Error(`Invalid or missing LT_STRATEGY environment variable: ${__ENV.LT_STRATEGY}`);
 })();
