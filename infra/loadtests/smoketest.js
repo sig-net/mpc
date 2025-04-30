@@ -24,7 +24,12 @@ export const options = {
   },
 };
 
+// log environment variables
+console.log(`ENVIRONMENT outside: ${__ENV.ENVIRONMENT}`);
+
 export default function () {
+  // log environment variables
+  console.log(`ENVIRONMENT inside: ${__ENV.ENVIRONMENT}`);
   group(`${__ENV.ENVIRONMENT} EVM`, function () {
     let evmContract = { "contractAddress": `${__ENV.EVM_CONTRACT}` }
     let response_evm = http.post('https://contract-pinger-mainnet-1094058868047.europe-west1.run.app/evm_no_check', JSON.stringify(evmContract), {
