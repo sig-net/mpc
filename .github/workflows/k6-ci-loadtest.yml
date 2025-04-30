@@ -59,7 +59,7 @@ jobs:
         env:
           K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
           K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
-          LT_CHAIN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.chain || 'Solana' }}
+          LT_CHAIN: ${{ github.event.inputs.chain || 'Solana' }}
           LT_CHAIN_ENV: ${{ github.event.inputs.environment || 'dev' }}
           LT_CHECK_SIGNATURE: ${{ github.event.inputs.check_signature == 'true' }}
           LT_STRATEGY: ${{ github.event.inputs.lt_strategy || 'ramping_high_rate_1h' }}
@@ -67,4 +67,4 @@ jobs:
           path: ./infra/loadtests/k6-load-test.js
           cloud-run-locally: false
           cloud-comment-on-pr: true
-          flags: --exit-on-running
+          flags: --exit-on-running -–include-system-env-vars
