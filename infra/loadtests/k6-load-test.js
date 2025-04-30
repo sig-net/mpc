@@ -140,9 +140,9 @@ export const options = strategies[__ENV.LT_STRATEGY] || (() => {
 })();
 
 export default function () {
-  let chain = __ENV.LT_CHAIN;
-  let env = __ENV.LT_CHAIN_ENV;
-  let check = __ENV.LT_CHECK_SIGNATURE === 'true'; // Convert string to boolean
+  const chain = __ENV.LT_CHAIN;
+  const env = __ENV.LT_CHAIN_ENV;
+  const check = __ENV.LT_CHECK_SIGNATURE === 'true'; // Convert string to boolean
 
   if (!chain || !env || !check) {
     console.error(`One or more required environment variables are not set: chain ${chain}, env ${env}, check ${check}`);
@@ -150,15 +150,15 @@ export default function () {
   }
 
   group(`${chain} ${env}, check signature ${check}`, function () {
-    let params = JSON.stringify({
+    const requestBody = JSON.stringify({
       chain: chain,
       env: env,
       check: check,
     });
 
-    console.log(`Sending request to ${PINGER_URL} with params: ${params}`);
+    console.log(`Sending request to ${PINGER_URL} with params: ${requestBody}`);
 
-    let response = http.post(PINGER_URL, params, {
+    const response = http.post(PINGER_URL, requestBody, {
       headers: { 'Content-Type': 'application/json' },
     });
 
