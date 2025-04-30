@@ -71,6 +71,6 @@ jobs:
           K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
         with:
           path: ./infra/loadtests/k6-load-test.js
-          flags: --exit-on-running --env TEST_ENV_VAR=123 --env LT_CHAIN=${{ github.event.inputs.chain }} --env LT_CHAIN_ENV=${{ github.event.inputs.environment }} --env LT_CHECK_SIGNATURE=${{ github.event.inputs.check_signature == 'true' }} --env LT_STRATEGY=${{ github.event.inputs.lt_strategy }}
+          flags: --include-system-env-vars --exit-on-running --env TEST_ENV_VAR=123 --env LT_CHAIN=${{ github.event.inputs.chain }} --env LT_CHAIN_ENV=${{ github.event.inputs.environment }} --env LT_CHECK_SIGNATURE=${{ github.event.inputs.check_signature == 'true' }} --env LT_STRATEGY=${{ github.event.inputs.lt_strategy }}
           cloud-run-locally: false
           cloud-comment-on-pr: true
