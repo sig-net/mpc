@@ -67,4 +67,7 @@ jobs:
           path: ./infra/loadtests/k6-load-test.js
           cloud-run-locally: false
           cloud-comment-on-pr: true
-          flags: --exit-on-running --include-system-env-vars true
+          flags: >
+            --exit-on-running
+            --include-system-env-vars true
+            --env LT_CHAIN=${{ github.event.inputs.chain }}
