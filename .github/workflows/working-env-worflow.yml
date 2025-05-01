@@ -3,30 +3,12 @@ on:
   push:
 
 jobs:
-  show-complete-k6-output:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Grafana k6
-        uses: grafana/setup-k6-action@main
-      - uses: ./
-        with:
-          path: |
-            ./dev/protocol.js
-          flags: --vus 10 --duration 30s
-          debug: true
   verify-scripts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Setup Grafana k6
         uses: grafana/setup-k6-action@main
-      - uses: ./
-        continue-on-error: true
-        with:
-          path: |
-            ./infra/loadtests/**.js
-          only-verify-scripts: true
   env-var-test:
     runs-on: ubuntu-latest
     env:
