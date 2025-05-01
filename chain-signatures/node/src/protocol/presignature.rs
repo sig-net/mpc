@@ -255,18 +255,44 @@ impl PresignatureManager {
             self.posits.act(id.id, from, &action, active)
         };
 
+        if matches!(action, PositAction::Abort) {
+            self.abort(from, id.id);
+        }
+
         if let Some(reply_action) = reply_action {
-            self.msg
-                .send(
-                    self.me,
-                    from,
-                    PositMessage {
-                        id: PositProtocolId::Presignature(id),
-                        from: self.me,
-                        action: reply_action,
-                    },
-                )
-                .await;
+            if matches!(reply_action, PositAction::Abort) {
+                // broadcast out the abort to all participants except us.
+                if let Some(counter) = self.posits.remove(&id.id) {
+                    for &p in counter.participants.iter() {
+                        if p == self.me {
+                            continue;
+                        }
+                        self.msg
+                            .send(
+                                self.me,
+                                p,
+                                PositMessage {
+                                    id: PositProtocolId::Presignature(id),
+                                    from: self.me,
+                                    action: PositAction::Abort,
+                                },
+                            )
+                            .await;
+                    }
+                }
+            } else {
+                self.msg
+                    .send(
+                        self.me,
+                        from,
+                        PositMessage {
+                            id: PositProtocolId::Presignature(id),
+                            from: self.me,
+                            action: reply_action,
+                        },
+                    )
+                    .await;
+            }
         }
 
         (should_join, store)
@@ -357,6 +383,38 @@ impl PresignatureManager {
                 )
                 .await;
         }
+    }
+
+    /// Aborts the presignature generation protocol with the given id. Only the owner of this presignature
+    /// can cancel the generation. Any other node trying to cancel the generation will be ignored.
+    fn abort(&mut self, proposer: Participant, id: PresignatureId) {
+        let entry = match self.generators.entry(id) {
+            Entry::Occupied(entry) => entry,
+            Entry::Vacant(_) => {
+                tracing::warn!(
+                    id,
+                    ?proposer,
+                    "trying to abort presignature generation that doesn't exist"
+                );
+                return;
+            }
+        };
+
+        let owner = entry.get().owner;
+        if owner != proposer {
+            tracing::warn!(
+                id,
+                ?owner,
+                claimed_proposer = ?proposer,
+                "received abort request for presignature generation where owner does not match"
+            );
+            return;
+        }
+
+        // TODO: might want aborted metrics for generators
+        tracing::warn!(id, "aborting presignature generation");
+        self.introduced.remove(&id);
+        entry.remove();
     }
 
     async fn stockpile(&mut self, active: &[Participant], cfg: &ProtocolConfig) {
