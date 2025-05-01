@@ -471,22 +471,20 @@ impl MessageReceiver for RunningState {
         for posit in inbox.posit.drain(..) {
             match posit.id {
                 PositProtocolId::Triple(_) => {}
-                PositProtocolId::Presignature(id, t0, t1) => {
+                PositProtocolId::Presignature(id) => {
                     let mut presignature_manager = self.presignature_manager.write().await;
-                    let (should_join, triples) = presignature_manager
-                        .handle_posit(id, t0, t1, posit.from, posit.action, &active)
+                    let (should_start, triples) = presignature_manager
+                        .handle_posit(id, posit.from, posit.action, &active)
                         .await;
-                    if let Some(participants) = should_join {
+                    if let Some(participants) = should_start {
                         let proposer = if triples.is_some() {
                             presignature_manager.me
                         } else {
                             posit.from
                         };
-                        let join_outcome = presignature_manager
-                            .start_protocol(
+                        if let Err(err) = presignature_manager
+                            .generate(
                                 id,
-                                t0,
-                                t1,
                                 triples,
                                 proposer,
                                 &participants,
@@ -495,16 +493,9 @@ impl MessageReceiver for RunningState {
                                 &self.private_share,
                                 protocol_cfg,
                             )
-                            .await;
-
-                        if let Err(err) = join_outcome {
-                            tracing::warn!(
-                                id,
-                                t0,
-                                t1,
-                                ?err,
-                                "unable to join incoming presignature protocol"
-                            );
+                            .await
+                        {
+                            tracing::warn!(?id, ?err, "unable to start presignature protocol");
                         }
                     }
                 }

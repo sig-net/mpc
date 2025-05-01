@@ -298,12 +298,20 @@ impl<T: Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
         }
     }
 
-    pub fn propose(&mut self, id: T, store: Store, participants: &[Participant]) -> PositAction {
+    pub fn propose(
+        &mut self,
+        me: Participant,
+        id: T,
+        store: Store,
+        participants: &[Participant],
+    ) -> PositAction {
+        let mut accepts = HashSet::new();
+        accepts.insert(me);
         self.posits.insert(
             id,
             PositCounter {
                 participants: participants.iter().copied().collect(),
-                accepts: HashSet::new(),
+                accepts,
                 store: Some(store),
             },
         );
@@ -325,8 +333,7 @@ impl<T: Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
             PositAction::Accept => {
                 let (should_start, reply) = if let Some(counter) = self.posits.get_mut(&id) {
                     counter.accepts.insert(from);
-                    // `- 1` to not include us
-                    let should_start = counter.accepts.len() == counter.participants.len() - 1;
+                    let should_start = counter.accepts.len() == counter.participants.len();
                     let should_start =
                         should_start.then(|| counter.participants.iter().copied().collect());
 

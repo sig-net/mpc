@@ -4,7 +4,7 @@ use std::hash::{DefaultHasher, Hash as _};
 use cait_sith::protocol::{MessageData, Participant};
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::presignature::PresignatureId;
+use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
 use crate::protocol::triple::TripleId;
 use crate::protocol::PositAction;
 use crate::types::Epoch;
@@ -23,7 +23,7 @@ pub enum Protocols {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum PositProtocolId {
     Triple(TripleId),
-    Presignature(PresignatureId, TripleId, TripleId),
+    Presignature(FullPresignatureId),
     Signature(SignId, PresignatureId),
 }
 
