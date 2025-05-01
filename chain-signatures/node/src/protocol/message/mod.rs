@@ -473,20 +473,14 @@ impl MessageReceiver for RunningState {
                 PositProtocolId::Triple(_) => {}
                 PositProtocolId::Presignature(id) => {
                     let mut presignature_manager = self.presignature_manager.write().await;
-                    let (should_start, triples) = presignature_manager
-                        .handle_posit(id, posit.from, posit.action, &active)
+                    let start_protocol = presignature_manager
+                        .process_posit(id, posit.from, posit.action, &active)
                         .await;
-                    if let Some(participants) = should_start {
-                        let proposer = if triples.is_some() {
-                            presignature_manager.me
-                        } else {
-                            posit.from
-                        };
+                    if let Some((participants, positor)) = start_protocol {
                         if let Err(err) = presignature_manager
                             .generate(
                                 id,
-                                triples,
-                                proposer,
+                                positor,
                                 &participants,
                                 &self.triple_manager,
                                 &self.public_key,

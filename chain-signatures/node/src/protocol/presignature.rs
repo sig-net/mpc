@@ -1,9 +1,10 @@
 use super::message::{MessageChannel, PositMessage, PositProtocolId, PresignatureMessage};
-use super::posit::{PositAction, Posits};
+use super::posit::{PositAction, Positor, Posits};
 use super::state::RunningState;
 use super::triple::{TripleId, TripleManager};
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::error::GenerationError;
+use crate::protocol::posit::PositInternalAction;
 use crate::storage::presignature_storage::{
     PresignatureSlot, PresignatureStorage, PresignatureTaken,
 };
@@ -43,6 +44,11 @@ pub struct FullPresignatureId {
 }
 
 impl FullPresignatureId {
+    pub fn from_triples(t0: TripleId, t1: TripleId) -> Self {
+        let id = hash_as_id(t0, t1);
+        Self { id, t0, t1 }
+    }
+
     pub fn validate(&self) -> bool {
         self.id == hash_as_id(self.t0, self.t1)
     }
@@ -168,7 +174,7 @@ pub struct PresignatureManager {
     generators: HashMap<PresignatureId, PresignatureGenerator>,
     /// The set of presignatures that were introduced to the system by the current node.
     introduced: HashSet<PresignatureId>,
-
+    /// The protocol posits that are currently being proposed by us.
     posits: Posits<PresignatureId, TriplesTaken>,
 
     pub me: Participant,
@@ -193,7 +199,7 @@ impl PresignatureManager {
             presignatures: presignatures.clone(),
             generators: HashMap::new(),
             introduced: HashSet::new(),
-            posits: Posits::new(),
+            posits: Posits::new(me),
             me,
             threshold,
             epoch,
@@ -236,34 +242,48 @@ impl PresignatureManager {
         Ok(presignature)
     }
 
-    pub async fn handle_posit(
+    pub async fn process_posit(
         &mut self,
         id: FullPresignatureId,
         from: Participant,
         action: PositAction,
         active: &[Participant],
-    ) -> (Option<Vec<Participant>>, Option<TriplesTaken>) {
-        // TODO: check if we have these triples t0 and t1
+    ) -> Option<(Vec<Participant>, Positor<TriplesTaken>)> {
+        // TODO: we should also validate on us having the triple t0 and t1 here as well.
+        // For now, this validation is done in the `generate` function, so the protocol
+        // does not advance until the triples are available.
 
-        let (should_join, store, reply_action) = if !id.validate() {
+        let internal_actions = if !id.validate() {
             tracing::error!(?id, "presignature id does not match the expected hash");
-            (None, None, Some(PositAction::Reject))
+            vec![PositInternalAction::Reply(PositAction::Reject)]
         } else if self.contains(id.id).await {
             tracing::warn!(?id, "presignature already generated");
-            (None, None, Some(PositAction::Reject))
+            Vec::new()
+        } else if matches!(action, PositAction::Abort) {
+            self.abort(from, id.id);
+            Vec::new()
         } else {
             self.posits.act(id.id, from, &action, active)
         };
 
-        if matches!(action, PositAction::Abort) {
-            self.abort(from, id.id);
-        }
-
-        if let Some(reply_action) = reply_action {
-            if matches!(reply_action, PositAction::Abort) {
-                // broadcast out the abort to all participants except us.
-                if let Some(counter) = self.posits.remove(&id.id) {
-                    for &p in counter.participants.iter() {
+        let mut start = None;
+        for action in internal_actions {
+            match action {
+                PositInternalAction::Reply(action) => {
+                    self.msg
+                        .send(
+                            self.me,
+                            from,
+                            PositMessage {
+                                id: PositProtocolId::Presignature(id),
+                                from: self.me,
+                                action,
+                            },
+                        )
+                        .await;
+                }
+                PositInternalAction::AbortAllNodes(participants) => {
+                    for p in participants {
                         if p == self.me {
                             continue;
                         }
@@ -280,22 +300,13 @@ impl PresignatureManager {
                             .await;
                     }
                 }
-            } else {
-                self.msg
-                    .send(
-                        self.me,
-                        from,
-                        PositMessage {
-                            id: PositProtocolId::Presignature(id),
-                            from: self.me,
-                            action: reply_action,
-                        },
-                    )
-                    .await;
+                PositInternalAction::StartProtocol(participants, positor) => {
+                    start = Some((participants, positor));
+                }
             }
         }
 
-        (should_join, store)
+        start
     }
 
     pub async fn take_mine(&mut self) -> Option<PresignatureTaken> {
@@ -356,8 +367,7 @@ impl PresignatureManager {
             return;
         }
 
-        let id = hash_as_id(triples.triple0.id, triples.triple1.id);
-        let id = FullPresignatureId { id, t0, t1 };
+        let id = FullPresignatureId::from_triples(t0, t1);
         tracing::info!(
             ?id,
             ?triples,
@@ -442,11 +452,11 @@ impl PresignatureManager {
         self.generators.get_mut(&id).map(|gen| &mut gen.protocol)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn generate(
         &mut self,
         id: FullPresignatureId,
-        triples: Option<TriplesTaken>,
-        proposer: Participant,
+        positor: Positor<TriplesTaken>,
         participants: &[Participant],
         // TODO: we should just rely on triple storage
         triple_manager: &TripleManager,
@@ -454,9 +464,14 @@ impl PresignatureManager {
         private_share: &SecretKeyShare,
         cfg: &ProtocolConfig,
     ) -> Result<&mut PresignatureProtocol, GenerationError> {
+        let (proposer, triples) = match positor {
+            Positor::Proposer(proposer, triples) => (proposer, Some(triples)),
+            Positor::Deliberator(proposer) => (proposer, None),
+        };
+
         tracing::info!(
             ?id,
-            proposed = proposer == self.me,
+            ?proposer,
             "starting protocol to generate a new presignature"
         );
 
@@ -473,9 +488,6 @@ impl PresignatureManager {
             return Err(GenerationError::PresignatureReserveError);
         };
 
-        // TODO: we need to validate that the owner owns these triples our node just assumes so. Should be
-        // mitigated via the initing the protocol.
-
         let triples = if let Some(triples) = triples {
             triples
         } else {
@@ -488,7 +500,7 @@ impl PresignatureManager {
                         tracing::warn!(
                             ?id,
                             ?err,
-                            "could not initiate presignature: generating or missing"
+                            "could not initiate presignature: unexpected generating or missing"
                         );
                     }
                     _ => {
