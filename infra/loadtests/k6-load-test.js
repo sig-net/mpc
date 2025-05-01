@@ -135,11 +135,19 @@ const strategies = {
   },
 };
 
-export const options = strategies[__ENV.LT_STRATEGY] || (() => {
+console.log(`Environment Variables outside: ${JSON.stringify(__ENV)}`);
+
+// export const options = strategies[__ENV.LT_STRATEGY] || (() => {
+//   throw new Error(`Invalid or missing LT_STRATEGY environment variable: ${__ENV.LT_STRATEGY}`);
+// })();
+
+export const options = strategies["ramping_high_rate_1h"] || (() => {
   throw new Error(`Invalid or missing LT_STRATEGY environment variable: ${__ENV.LT_STRATEGY}`);
 })();
 
 export default function () {
+  console.log(`Environment Variables inside: ${JSON.stringify(__ENV)}`);
+
   let chain = __ENV.LT_CHAIN;
   let env = __ENV.LT_CHAIN_ENV;
   let check = __ENV.LT_CHECK_SIGNATURE === 'true'; // Convert string to boolean
