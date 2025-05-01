@@ -68,3 +68,4 @@ jobs:
           cloud-run-locally: false
           cloud-comment-on-pr: true
           flags: --exit-on-running
+          inspect-flags: --include-system-env-vars
