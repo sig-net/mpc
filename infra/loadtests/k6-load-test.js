@@ -150,11 +150,11 @@ export default function () {
   }
 
   group(`${chain} ${env}, check signature ${check}`, function () {
-    let params = JSON.stringify({
+    let params = {
       chain: chain,
       env: env,
       check: check,
-    });
+    };
 
     console.log(`Sending request to ${PINGER_URL} with params: ${params}`);
 
