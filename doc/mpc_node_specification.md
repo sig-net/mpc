@@ -24,7 +24,7 @@ network will be called `protocol invocation` in this document.
 ### Participant Roles
 
 Each protocol invocation (triple generation, pre-signature generation,
-signature) has a list of `Participants`. On of the participants is the `Owner`
+signature) has a list of `Participants`. One of the participants is the `Owner`
 who initiates the protocol.
 
 The `Owner` of a protocol will usually follow different steps than the rest.
@@ -83,6 +83,18 @@ Messages sent to participants that are offline or reject the message must be
 retried until either the receiver accepts the message or the protocol invocation
 globally times out.
 
+For recovery, we use the
+[Event-Sourcing](https://dev.to/alisamir/understanding-event-sourcing-a-detailed-guide-4cjp)
+pattern, while the protocol is running. The actual latest state is only held in
+memory but the stored events allow to recover it from persisted data.
+
+Specifically, this means tha all received messages during the `Running` state
+must be persisted before they are applied. These can be replayed on boot for
+recovery after a crash. After a protocol finishes, events can be discarded.
+
+Note: Unlike fully event-driven architectures, the MPC network does not need to
+have a separate even store component. The Event-Sourcing pattern is only applied
+locally within one node.
 
 ### Owner Transitions
 
