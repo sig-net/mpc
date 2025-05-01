@@ -4,9 +4,9 @@ use std::hash::{DefaultHasher, Hash as _};
 use cait_sith::protocol::{MessageData, Participant};
 use serde::{Deserialize, Serialize};
 
+use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
 use crate::protocol::triple::TripleId;
-use crate::protocol::PositAction;
 use crate::types::Epoch;
 use mpc_keys::hpke;
 use mpc_primitives::SignId;

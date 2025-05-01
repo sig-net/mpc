@@ -1,7 +1,7 @@
 use super::message::{MessageChannel, PositMessage, PositProtocolId, PresignatureMessage};
+use super::posit::{PositAction, Posits};
 use super::state::RunningState;
 use super::triple::{TripleId, TripleManager};
-use super::{PositAction, Posits};
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::error::GenerationError;
 use crate::storage::presignature_storage::{
