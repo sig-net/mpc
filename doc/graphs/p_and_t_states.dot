@@ -10,12 +10,12 @@ digraph {
     done [label=done shape=none]
 
 
-    init -> generating [label="ON created generator"]
+    init -> generating [label="ON receive INIT(generate)"]
 
     generating -> available [label="ON generating protocol success"]
     generating -> done [label="ON generating protocol failed"]
 
-    available -> using [label="ON removal from DB\n(start of following protocol)"]
+    available -> using [label="ON removal from DB\n= receive INIT(consume)\n(start of following protocol)"]
 
     using -> done [label="ON consuming protocol finish"]
 }
