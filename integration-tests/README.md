@@ -37,7 +37,7 @@ OpenTelemetry Protocol is used for exporting logs to an OpenTelemetry collector.
 
 #### Configuring Local OTLP Logging
 1. **Setup OTLP Backend**
-Start OTLP backend of your choiceю For example [Jaeger](https://www.jaegertracing.io/docs/getting-started/).
+Start OTLP backend of your choice. For example [Jaeger](https://www.jaegertracing.io/docs/getting-started/).
 
 2. **Set the OTLP Endpoint**:
     - By default, the endpoint is set to `http://localhost:4318`.
