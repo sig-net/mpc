@@ -159,7 +159,10 @@ export default function () {
     console.log(`Sending request to ${PINGER_URL} with params: ${params}`);
 
     let response = http.post(PINGER_URL, params, {
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-secret': __ENV.LT_PINGER_API_KEY || 'default-secret-key',
+       },
     });
 
     if (response.status >= 200 && response.status < 300) {

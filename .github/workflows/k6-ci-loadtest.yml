@@ -59,6 +59,7 @@ jobs:
         env:
           K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
           K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
+          LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
           LT_CHAIN: ${{ github.event.inputs.chain }}
           LT_CHAIN_ENV: ${{ github.event.inputs.environment }}
           LT_CHECK_SIGNATURE: ${{ github.event.inputs.check_signature == 'true' }}
