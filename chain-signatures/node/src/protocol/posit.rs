@@ -1,14 +1,15 @@
 use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
 
 pub type ProposerId = Participant;
 
-pub enum Positor<Store> {
-    Proposer(ProposerId, Store),
+pub enum Positor<S> {
+    Proposer(ProposerId, S),
     Deliberator(ProposerId),
 }
 
@@ -21,12 +22,19 @@ impl<T> Positor<T> {
 /// All actions that can be taken when a new posit is introduced for a protocol.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum PositAction {
-    Propose(Vec<Participant>),
+    Propose,
+    Start(Vec<Participant>),
     Accept,
     // TODO: Reject can also have a reason
     Reject,
     /// Aborts the protocol. Only the proposer can send this.
     Abort,
+}
+
+impl PositAction {
+    pub fn is_accept(&self) -> bool {
+        matches!(self, PositAction::Accept)
+    }
 }
 
 pub enum PositInternalAction<Store> {
@@ -41,6 +49,7 @@ pub enum PositInternalAction<Store> {
 pub struct PositCounter<Store> {
     pub participants: HashSet<Participant>,
     accepts: HashSet<Participant>,
+    rejects: HashSet<Participant>,
     store: Store,
 }
 
@@ -52,7 +61,7 @@ pub struct Posits<Id, Store> {
     posits: HashMap<Id, PositCounter<Store>>,
 }
 
-impl<T: Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
+impl<T: Copy + Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
     pub fn new(me: Participant) -> Self {
         Self {
             me,
@@ -74,11 +83,12 @@ impl<T: Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
             PositCounter {
                 participants: participants.iter().copied().collect(),
                 accepts,
+                rejects: HashSet::new(),
                 store,
             },
         );
 
-        PositAction::Propose(participants.to_vec())
+        PositAction::Propose
     }
 
     // TODO: make the resp of this synchronous when each of the protocol managers
@@ -91,78 +101,68 @@ impl<T: Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
         &mut self,
         id: T,
         from: Participant,
+        threshold: usize,
         action: &PositAction,
-        active: &[Participant],
     ) -> Vec<PositInternalAction<Store>> {
         match action {
-            PositAction::Propose(participants) => {
+            PositAction::Propose => {
                 if self.posits.contains_key(&id) {
                     tracing::warn!(
                         ?id,
-                        ?participants,
                         "received a protocol posit for an id that we already proposed"
                     );
                     return vec![PositInternalAction::Reply(PositAction::Reject)];
                 }
 
-                // Check that the participants are all active
-                for p in participants.iter() {
-                    if !active.contains(p) {
-                        tracing::warn!(?id, ?active, ?participants, "rejecting protocol posit");
-                        return vec![PositInternalAction::Reply(PositAction::Reject)];
-                    }
+                // No further checks necessary, we can just accept the posit.
+                vec![PositInternalAction::Reply(PositAction::Accept)]
+            }
+            PositAction::Start(participants) => {
+                if self.posits.contains_key(&id) {
+                    tracing::warn!(?id, "received an invalid Start for a protocol we proposed");
+                    return vec![PositInternalAction::Reply(PositAction::Reject)];
                 }
 
-                // Automatically join the protocol if we're accepting here.
-                vec![
-                    PositInternalAction::StartProtocol(
-                        participants.clone(),
-                        Positor::Deliberator(from),
-                    ),
-                    PositInternalAction::Reply(PositAction::Accept),
-                ]
+                vec![PositInternalAction::StartProtocol(
+                    participants.to_vec(),
+                    Positor::Deliberator(from),
+                )]
             }
             // There's no action to be done here for Abort. Abort should be handled one level above.
             PositAction::Abort => Vec::new(),
-            PositAction::Accept => {
-                let Some(counter) = self.posits.get_mut(&id) else {
-                    tracing::warn!(?id, "received an Accept for a protocol we did NOT propose");
-                    return Vec::new();
-                };
-
-                counter.accepts.insert(from);
-                let should_start = counter.accepts.len() == counter.participants.len();
-
-                let mut actions = Vec::new();
-                if should_start {
-                    tracing::info!(?id, "received all Accepts, starting protocol");
-                    let Some(counter) = self.posits.remove(&id) else {
+            PositAction::Accept | PositAction::Reject => {
+                let mut entry = match self.posits.entry(id) {
+                    Entry::Occupied(counter) => counter,
+                    Entry::Vacant(_) => {
                         tracing::warn!(
                             ?id,
-                            "invalid state, we should have been able to remove this posit"
+                            ?action,
+                            "received an action for a protocol we did NOT propose"
                         );
                         return Vec::new();
-                    };
-                    let participants = counter.participants.iter().copied().collect();
-                    actions.push(PositInternalAction::StartProtocol(
-                        participants,
-                        Positor::Proposer(self.me, counter.store),
-                    ));
-                }
-                actions
-            }
-            PositAction::Reject => {
-                // TODO: On the first reject, we should abort the protocol for now.
-                // We should be able to narrow down the list of participants eventually
-                // such that we can go up until the threshold amount.
-                if let Some(counter) = self.posits.remove(&id) {
-                    vec![PositInternalAction::AbortAllNodes(
-                        counter.participants.iter().copied().collect(),
-                    )]
+                    }
+                };
+
+                let counter = entry.get_mut();
+                if action.is_accept() {
+                    counter.accepts.insert(from);
                 } else {
-                    tracing::warn!(?id, "received a Reject for a protocol we did NOT propose");
-                    Vec::new()
+                    counter.rejects.insert(from);
                 }
+
+                let enough_votes = counter.accepts.len() >= threshold
+                    && counter.accepts.len() + counter.rejects.len() == counter.participants.len();
+                if !enough_votes {
+                    return Vec::new();
+                }
+
+                tracing::info!(?id, "received all Accepts, starting protocol");
+                let counter = entry.remove();
+                let participants = counter.accepts.iter().copied().collect();
+                vec![PositInternalAction::StartProtocol(
+                    participants,
+                    Positor::Proposer(self.me, counter.store),
+                )]
             }
         }
     }

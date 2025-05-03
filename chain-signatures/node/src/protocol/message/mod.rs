@@ -474,7 +474,7 @@ impl MessageReceiver for RunningState {
                 PositProtocolId::Presignature(id) => {
                     let mut presignature_manager = self.presignature_manager.write().await;
                     let start_protocol = presignature_manager
-                        .process_posit(id, posit.from, posit.action, &active)
+                        .process_posit(id, posit.from, posit.action)
                         .await;
                     if let Some((participants, positor)) = start_protocol {
                         if let Err(err) = presignature_manager

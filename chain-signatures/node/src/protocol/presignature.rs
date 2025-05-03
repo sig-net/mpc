@@ -177,7 +177,7 @@ pub struct PresignatureManager {
     /// The protocol posits that are currently being proposed by us.
     posits: Posits<PresignatureId, TriplesTaken>,
 
-    pub me: Participant,
+    me: Participant,
     threshold: usize,
     epoch: u64,
     my_account_id: AccountId,
@@ -247,7 +247,6 @@ impl PresignatureManager {
         id: FullPresignatureId,
         from: Participant,
         action: PositAction,
-        active: &[Participant],
     ) -> Option<(Vec<Participant>, Positor<TriplesTaken>)> {
         // TODO: we should also validate on us having the triple t0 and t1 here as well.
         // For now, this validation is done in the `generate` function, so the protocol
@@ -263,7 +262,7 @@ impl PresignatureManager {
             self.abort(from, id.id);
             Vec::new()
         } else {
-            self.posits.act(id.id, from, &action, active)
+            self.posits.act(id.id, from, self.threshold, &action)
         };
 
         let mut start = None;
@@ -301,6 +300,24 @@ impl PresignatureManager {
                     }
                 }
                 PositInternalAction::StartProtocol(participants, positor) => {
+                    if positor.is_proposer() {
+                        for &p in &participants {
+                            if p == self.me {
+                                continue;
+                            }
+                            self.msg
+                                .send(
+                                    self.me,
+                                    p,
+                                    PositMessage {
+                                        id: PositProtocolId::Presignature(id),
+                                        from: self.me,
+                                        action: PositAction::Start(participants.clone()),
+                                    },
+                                )
+                                .await;
+                        }
+                    }
                     start = Some((participants, positor));
                 }
             }
@@ -388,7 +405,7 @@ impl PresignatureManager {
                     PositMessage {
                         id: PositProtocolId::Presignature(id),
                         from: self.me,
-                        action: PositAction::Propose(participants.clone()),
+                        action: PositAction::Propose,
                     },
                 )
                 .await;

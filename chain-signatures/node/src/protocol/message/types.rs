@@ -38,7 +38,8 @@ pub struct PositMessage {
 impl PositMessage {
     pub fn data_len(&self) -> usize {
         match &self.action {
-            PositAction::Propose(participants) => {
+            PositAction::Propose => 0,
+            PositAction::Start(participants) => {
                 participants.len() * std::mem::size_of::<Participant>()
             }
             PositAction::Accept => 0,
