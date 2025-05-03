@@ -258,9 +258,6 @@ impl PresignatureManager {
         } else if self.contains(id.id).await {
             tracing::warn!(?id, "presignature already generated");
             Vec::new()
-        } else if matches!(action, PositAction::Abort) {
-            self.abort(from, id.id);
-            Vec::new()
         } else {
             self.posits.act(id.id, from, self.threshold, &action)
         };
@@ -280,24 +277,6 @@ impl PresignatureManager {
                             },
                         )
                         .await;
-                }
-                PositInternalAction::AbortAllNodes(participants) => {
-                    for p in participants {
-                        if p == self.me {
-                            continue;
-                        }
-                        self.msg
-                            .send(
-                                self.me,
-                                p,
-                                PositMessage {
-                                    id: PositProtocolId::Presignature(id),
-                                    from: self.me,
-                                    action: PositAction::Abort,
-                                },
-                            )
-                            .await;
-                    }
                 }
                 PositInternalAction::StartProtocol(participants, positor) => {
                     if positor.is_proposer() {

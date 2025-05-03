@@ -44,7 +44,6 @@ impl PositMessage {
             }
             PositAction::Accept => 0,
             PositAction::Reject => 0,
-            PositAction::Abort => 0,
         }
     }
 }

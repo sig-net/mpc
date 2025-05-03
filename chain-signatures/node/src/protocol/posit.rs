@@ -27,8 +27,6 @@ pub enum PositAction {
     Accept,
     // TODO: Reject can also have a reason
     Reject,
-    /// Aborts the protocol. Only the proposer can send this.
-    Abort,
 }
 
 impl PositAction {
@@ -39,7 +37,6 @@ impl PositAction {
 
 pub enum PositInternalAction<Store> {
     StartProtocol(Vec<Participant>, Positor<Store>),
-    AbortAllNodes(Vec<Participant>),
     Reply(PositAction),
 }
 
@@ -128,8 +125,6 @@ impl<T: Copy + Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
                     Positor::Deliberator(from),
                 )]
             }
-            // There's no action to be done here for Abort. Abort should be handled one level above.
-            PositAction::Abort => Vec::new(),
             PositAction::Accept | PositAction::Reject => {
                 let mut entry = match self.posits.entry(id) {
                     Entry::Occupied(counter) => counter,
