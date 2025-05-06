@@ -124,10 +124,12 @@ impl ConsensusProtocol for StartedState {
 
                                     Ok(NodeState::Running(RunningState {
                                         epoch,
+                                        me: *me,
                                         participants: contract_state.participants,
                                         threshold: contract_state.threshold,
                                         private_share,
                                         public_key,
+                                        triple_storage: ctx.triple_storage.clone(),
                                         triple_manager,
                                         presignature_manager,
                                         signature_manager,
@@ -345,10 +347,12 @@ impl ConsensusProtocol for WaitingForConsensusState {
 
                     Ok(NodeState::Running(RunningState {
                         epoch: self.epoch,
+                        me: *me,
                         participants: self.participants,
                         threshold: self.threshold,
                         private_share: self.private_share,
                         public_key: self.public_key,
+                        triple_storage: ctx.triple_storage.clone(),
                         triple_manager,
                         presignature_manager,
                         signature_manager,

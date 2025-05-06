@@ -542,7 +542,6 @@ impl MessageReceiver for RunningState {
                     *id,
                     *triple0,
                     *triple1,
-                    &self.triple_manager,
                     &self.public_key,
                     &self.private_share,
                     protocol_cfg,

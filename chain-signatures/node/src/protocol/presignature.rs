@@ -1,6 +1,6 @@
 use super::message::{MessageChannel, PresignatureMessage};
 use super::state::RunningState;
-use super::triple::{TripleId, TripleManager};
+use super::triple::TripleId;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::error::GenerationError;
 use crate::storage::presignature_storage::{
@@ -419,7 +419,6 @@ impl PresignatureManager {
         id: PresignatureId,
         triple0: TripleId,
         triple1: TripleId,
-        triple_manager: &TripleManager,
         public_key: &PublicKey,
         private_share: &SecretKeyShare,
         cfg: &ProtocolConfig,
@@ -443,34 +442,18 @@ impl PresignatureManager {
                     // mitigated via the initing the protocol.
                     let owner = from;
 
-                    let triples = match triple_manager.take_two(triple0, triple1, owner).await {
-                        Ok(result) => result,
-                        Err(error) => match error {
-                            GenerationError::TripleIsGenerating(_) => {
-                                tracing::warn!(
-                                    ?error,
-                                    id,
-                                    triple0,
-                                    triple1,
-                                    "could not initiate non-introduced presignature: one or more triple are generating"
-                                );
-                                return Err(error);
-                            }
-                            GenerationError::TripleIsMissing(_, _) => {
-                                tracing::warn!(
-                                    ?error,
-                                    id,
-                                    triple0,
-                                    triple1,
-                                    "could not initiate non-introduced presignature: one or more triple are missing",
-                                );
-                                return Err(error);
-                            }
-                            _ => {
-                                tracing::error!(?error, "Unexpected Generation Error");
-                                return Err(error);
-                            }
-                        },
+                    let Some(triples) = self
+                        .triples
+                        .take_two(triple0, triple1, owner, self.me)
+                        .await
+                    else {
+                        tracing::warn!(
+                            id,
+                            triple0,
+                            triple1,
+                            "could not initiate non-introduced presignature: one or more triple are missing",
+                        );
+                        return Err(GenerationError::TripleIsGenerating(triple0));
                     };
 
                     let generator = Self::generate_internal(
