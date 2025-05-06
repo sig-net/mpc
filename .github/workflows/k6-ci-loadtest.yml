@@ -81,5 +81,12 @@ jobs:
           path: ./infra/loadtests/k6-load-test.js
           cloud-run-locally: false
           cloud-comment-on-pr: true
-          flags: --exit-on-running --include-system-env-vars
+          flags: >
+            --exit-on-running
+            --include-system-env-vars
+            --tag chain=${{ steps.normalized.outputs.lt_chain }}
+            --tag env=${{ steps.normalized.outputs.lt_env }}
+            --tag check_signature=${{ steps.normalized.outputs.lt_check_signature }}
+            --tag strategy=${{ steps.normalized.outputs.lt_strategy }}
+            --tag run_id=${{ github.run_id }}
           inspect-flags: --include-system-env-vars
