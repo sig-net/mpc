@@ -149,26 +149,24 @@ export default function () {
     throw new Error("Missing required environment variables. Exiting script.");
   }
 
-  group(`${chain} ${env}, check signature ${check}`, function () {
-    let params = JSON.stringify({
-      chain: chain,
-      env: env,
-      check: check,
-    });
-
-    console.log(`Sending request to ${PINGER_URL} with params: ${params}`);
-
-    let response = http.post(PINGER_URL, params, {
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-secret': __ENV.LT_PINGER_API_KEY || 'default-secret-key',
-       },
-    });
-
-    if (response.status >= 200 && response.status < 300) {
-      console.log(`Status ${response.status}, Body: ${response.body}`);
-    } else {
-      console.error(`Request failed with status ${response.status}, Body: ${response.body}`);
-    }
+  let params = JSON.stringify({
+    chain: chain,
+    env: env,
+    check: check,
   });
+
+  console.log(`Sending request to ${PINGER_URL} with params: ${params}`);
+
+  let response = http.post(PINGER_URL, params, {
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-secret': __ENV.LT_PINGER_API_KEY || 'default-secret-key',
+    },
+  });
+
+  if (response.status >= 200 && response.status < 300) {
+    console.log(`Status ${response.status}, Body: ${response.body}`);
+  } else {
+    console.error(`Request failed with status ${response.status}, Body: ${response.body}`);
+  }
 }
