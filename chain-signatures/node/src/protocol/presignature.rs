@@ -391,38 +391,6 @@ impl PresignatureManager {
         }
     }
 
-    /// Aborts the presignature generation protocol with the given id. Only the owner of this presignature
-    /// can cancel the generation. Any other node trying to cancel the generation will be ignored.
-    fn abort(&mut self, proposer: Participant, id: PresignatureId) {
-        let entry = match self.generators.entry(id) {
-            Entry::Occupied(entry) => entry,
-            Entry::Vacant(_) => {
-                tracing::warn!(
-                    id,
-                    ?proposer,
-                    "trying to abort presignature generation that doesn't exist"
-                );
-                return;
-            }
-        };
-
-        let owner = entry.get().owner;
-        if owner != proposer {
-            tracing::warn!(
-                id,
-                ?owner,
-                claimed_proposer = ?proposer,
-                "received abort request for presignature generation where owner does not match"
-            );
-            return;
-        }
-
-        // TODO: might want aborted metrics for generators
-        tracing::warn!(id, "aborting presignature generation");
-        self.introduced.remove(&id);
-        entry.remove();
-    }
-
     async fn stockpile(&mut self, active: &[Participant], cfg: &ProtocolConfig) {
         let not_enough_presignatures = {
             // Stopgap to prevent too many presignatures in the system. This should be around min_presig*nodes*2
