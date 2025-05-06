@@ -36,6 +36,7 @@ helios = { git = "https://github.com/sig-net/helios", rev = "7c8018157cf5adc176b
 alloy.workspace = true
 anyhow.workspace = true
 borsh.workspace = true
+borsh_sol = { package = "borsh", version = "0.10.4" } # solana anchor requires borsh 0.10
 cait-sith.workspace = true
 ciborium.workspace = true
 clap.workspace = true
@@ -54,6 +55,11 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
+web3.workspace = true
+anchor-client.workspace = true
+anchor-lang.workspace = true
+solana-sdk.workspace = true
+solana-transaction-status.workspace = true
 
 near-account-id.workspace = true
 near-crypto = "0.26.0"
@@ -67,6 +73,7 @@ mpc-contract.workspace = true
 mpc-crypto.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
+chain-signatures-project.workspace = true
 
 [features]
 default = []

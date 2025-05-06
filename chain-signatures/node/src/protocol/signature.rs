@@ -1,5 +1,6 @@
 use super::contract::primitives::intersect_vec;
 use super::state::RunningState;
+use super::MpcSignProtocol;
 use crate::kdf::derive_delta;
 use crate::protocol::error::GenerationError;
 use crate::protocol::message::{MessageChannel, SignatureMessage};
@@ -757,13 +758,13 @@ impl SignatureManager {
         state: &RunningState,
         stable: &[Participant],
         protocol_cfg: &ProtocolConfig,
-        ctx: &impl super::cryptography::CryptographicCtx,
+        ctx: &MpcSignProtocol,
     ) -> tokio::task::JoinHandle<()> {
         let signature_manager = state.signature_manager.clone();
         let stable = stable.to_vec();
         let protocol_cfg = protocol_cfg.clone();
-        let rpc_channel = ctx.rpc_channel().clone();
-        let channel = ctx.channel().clone();
+        let rpc_channel = ctx.rpc_channel.clone();
+        let channel = ctx.msg_channel.clone();
 
         // NOTE: signatures should only use stable and not active participants. The difference here is that
         // stable participants utilizes more than the online status of a node, such as whether or not their

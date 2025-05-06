@@ -70,6 +70,7 @@ impl Node {
             behind_threshold: 120,
         };
         let eth = mpc_node::indexer_eth::EthArgs::from_config(cfg.eth.clone());
+        let sol = mpc_node::indexer_sol::SolArgs::from_config(cfg.sol.clone());
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = mpc_node::cli::Cli::Start {
@@ -81,6 +82,7 @@ impl Node {
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
             sign_sk: Some(sign_sk.clone()),
             eth,
+            sol,
             indexer_options,
             my_address: None,
             debug_id: Some(node_id),
@@ -171,6 +173,7 @@ impl Node {
         };
 
         let eth = EthArgs::from_config(config.cfg.eth.clone());
+        let sol = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -180,6 +183,7 @@ impl Node {
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             sign_sk: Some(config.sign_sk.clone()),
             eth,
+            sol,
             indexer_options,
             my_address: None,
             debug_id: Some(node_id),
