@@ -84,7 +84,6 @@ jobs:
           flags: >
             --exit-on-running
             --include-system-env-vars
-            --name "[${{ steps.normalized.outputs.lt_chain }}] [${{ steps.normalized.outputs.lt_env }}] check: ${{ steps.normalized.outputs.lt_check_signature }}"
             --tag chain=${{ steps.normalized.outputs.lt_chain }}
             --tag env=${{ steps.normalized.outputs.lt_env }}
             --tag check_signature=${{ steps.normalized.outputs.lt_check_signature }}
