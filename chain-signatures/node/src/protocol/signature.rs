@@ -328,6 +328,7 @@ pub struct SignatureManager {
     generators: HashMap<SignId, SignatureGenerator>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
+    /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
 
     me: Participant,

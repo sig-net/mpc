@@ -195,14 +195,14 @@ async fn validate_presignatures(
 ) {
     for id in valid {
         assert!(
-            presignatures.contains_foreign(*id, owner).await,
+            presignatures.contains_by_owner(*id, owner).await,
             "presignature={id} should be valid"
         );
     }
 
     for id in invalid {
         assert!(
-            !presignatures.contains_foreign(*id, owner).await,
+            !presignatures.contains_by_owner(*id, owner).await,
             "presignature={id} should be invalid"
         );
     }

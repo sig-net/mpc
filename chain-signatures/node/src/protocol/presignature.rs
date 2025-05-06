@@ -3,9 +3,7 @@ use super::state::RunningState;
 use super::triple::TripleId;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::error::GenerationError;
-use crate::storage::presignature_storage::{
-    PresignatureSlot, PresignatureStorage, PresignatureTaken,
-};
+use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
 use crate::storage::triple_storage::{TriplesTaken, TriplesTakenDropper};
 use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
@@ -189,17 +187,11 @@ impl PresignatureManager {
 
     /// Returns true if the mine presignature with the given id is already generated
     pub async fn contains_mine(&self, id: PresignatureId) -> bool {
-        self.presignatures.contains_mine(id, self.me).await
+        self.presignatures.contains_by_owner(id, self.me).await
     }
 
     pub async fn contains_used(&self, id: PresignatureId) -> bool {
         self.presignatures.contains_used(id).await
-    }
-
-    pub async fn take_mine(&mut self) -> Option<PresignatureTaken> {
-        let taken = self.presignatures.take_mine(self.me).await?;
-        tracing::debug!(id = ?taken.presignature.id, "took presignature of mine");
-        Some(taken)
     }
 
     /// Returns the number of unspent presignatures available in the manager.

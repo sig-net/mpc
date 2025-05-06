@@ -4,7 +4,9 @@ use self::error::Error;
 use crate::indexer::NearIndexer;
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::NodeState;
+use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::error::Result;
+
 use anyhow::Context;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -22,6 +24,8 @@ struct AxumState {
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
     indexer: Option<NearIndexer>,
+    triple_storage: TripleStorage,
+    presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
 }
 
@@ -30,6 +34,8 @@ pub async fn run(
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
     indexer: Option<NearIndexer>,
+    triple_storage: TripleStorage,
+    presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
 ) {
     tracing::info!("starting web server");
@@ -37,6 +43,8 @@ pub async fn run(
         sender,
         protocol_state,
         indexer,
+        triple_storage,
+        presignature_storage,
         sync_channel,
     };
 
@@ -112,26 +120,26 @@ pub enum StateView {
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
-async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
+async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
     tracing::debug!("fetching state");
 
     // TODO: remove once we have integration tests built using other chains
-    let latest_block_height = if let Some(indexer) = &state.indexer {
+    let latest_block_height = if let Some(indexer) = &web.indexer {
         indexer.last_processed_block().await.unwrap_or(0)
     } else {
         0
     };
 
-    let protocol_state = state.protocol_state.read().await;
+    let protocol_state = web.protocol_state.read().await;
 
     match &*protocol_state {
         NodeState::Running(state) => {
             let triple_potential_count = state.triple_manager.len_potential().await;
-            let triple_count = state.triple_storage.len_generated().await;
-            let triple_mine_count = state.triple_storage.len_by_owner(state.me).await;
+            let triple_count = web.triple_storage.len_generated().await;
+            let triple_mine_count = web.triple_storage.len_by_owner(state.me).await;
             let presignature_read = state.presignature_manager.read().await;
-            let presignature_count = presignature_read.len_generated().await;
-            let presignature_mine_count = presignature_read.len_mine().await;
+            let presignature_count = web.presignature_storage.len_generated().await;
+            let presignature_mine_count = web.presignature_storage.len_by_owner(state.me).await;
             let presignature_potential_count = presignature_read.len_potential().await;
             let participants = state.participants.keys_vec();
 

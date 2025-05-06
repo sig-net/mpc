@@ -108,7 +108,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_manager.len_potential().await, 2);
 
     // Take mine triple and check that it is removed from the storage and added to used set
-    triple_manager.take_two_mine().await.unwrap();
+    triple_storage.take_two_mine(node0).await.unwrap();
     assert!(!triple_manager.contains(id3).await);
     assert!(!triple_manager.contains(id4).await);
     assert!(!triple_manager.contains_mine(id3).await);
@@ -173,7 +173,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node0_id);
     let presignature_storage = redis.presignature_storage(&node0_id);
-    let mut presignature_manager = PresignatureManager::new(
+    let presignature_manager = PresignatureManager::new(
         Participant::from(0),
         5,
         123,
@@ -250,7 +250,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_potential().await, 1);
 
     // Take mine presignature and check that it is removed from the storage and added to used set
-    presignature_manager.take_mine().await.unwrap();
+    presignature_storage.take_mine(node0).await.unwrap();
     assert!(!presignature_manager.contains(id2).await);
     assert!(!presignature_manager.contains_mine(id2).await);
     assert_eq!(presignature_manager.len_generated().await, 0);
