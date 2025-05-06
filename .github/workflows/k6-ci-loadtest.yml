@@ -75,7 +75,7 @@ jobs:
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
           LT_CHAIN: ${{ steps.normalized.outputs.lt_chain }}
           LT_CHAIN_ENV: ${{ steps.normalized.outputs.lt_env }}
-          LT_CHECK_SIGNATURE: ${{ steps.normalized.outputs.lt_check_signature }}
+          LT_CHECK_SIGNATURE: ${{ steps.normalized.outputs.lt_check_signature == 'true' }}
           LT_STRATEGY: ${{ steps.normalized.outputs.lt_strategy }}
         with:
           path: ./infra/loadtests/k6-load-test.js
