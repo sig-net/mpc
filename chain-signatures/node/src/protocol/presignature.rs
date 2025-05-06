@@ -252,53 +252,52 @@ impl PresignatureManager {
         // For now, this validation is done in the `generate` function, so the protocol
         // does not advance until the triples are available.
 
-        let internal_actions = if !id.validate() {
+        let internal_action = if !id.validate() {
             tracing::error!(?id, "presignature id does not match the expected hash");
-            vec![PositInternalAction::Reply(PositAction::Reject)]
+            PositInternalAction::Reply(PositAction::Reject)
         } else if self.contains(id.id).await {
             tracing::warn!(?id, "presignature already generated");
-            Vec::new()
+            PositInternalAction::None
         } else {
             self.posits.act(id.id, from, self.threshold, &action)
         };
 
         let mut start = None;
-        for action in internal_actions {
-            match action {
-                PositInternalAction::Reply(action) => {
-                    self.msg
-                        .send(
-                            self.me,
-                            from,
-                            PositMessage {
-                                id: PositProtocolId::Presignature(id),
-                                from: self.me,
-                                action,
-                            },
-                        )
-                        .await;
-                }
-                PositInternalAction::StartProtocol(participants, positor) => {
-                    if positor.is_proposer() {
-                        for &p in &participants {
-                            if p == self.me {
-                                continue;
-                            }
-                            self.msg
-                                .send(
-                                    self.me,
-                                    p,
-                                    PositMessage {
-                                        id: PositProtocolId::Presignature(id),
-                                        from: self.me,
-                                        action: PositAction::Start(participants.clone()),
-                                    },
-                                )
-                                .await;
+        match internal_action {
+            PositInternalAction::None => {}
+            PositInternalAction::Reply(action) => {
+                self.msg
+                    .send(
+                        self.me,
+                        from,
+                        PositMessage {
+                            id: PositProtocolId::Presignature(id),
+                            from: self.me,
+                            action,
+                        },
+                    )
+                    .await;
+            }
+            PositInternalAction::StartProtocol(participants, positor) => {
+                if positor.is_proposer() {
+                    for &p in &participants {
+                        if p == self.me {
+                            continue;
                         }
+                        self.msg
+                            .send(
+                                self.me,
+                                p,
+                                PositMessage {
+                                    id: PositProtocolId::Presignature(id),
+                                    from: self.me,
+                                    action: PositAction::Start(participants.clone()),
+                                },
+                            )
+                            .await;
                     }
-                    start = Some((participants, positor));
                 }
+                start = Some((participants, positor));
             }
         }
 

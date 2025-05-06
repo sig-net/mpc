@@ -38,6 +38,7 @@ impl PositAction {
 pub enum PositInternalAction<Store> {
     StartProtocol(Vec<Participant>, Positor<Store>),
     Reply(PositAction),
+    None,
 }
 
 /// A counter for a posit. This is used to track the participants that have
@@ -53,12 +54,12 @@ pub struct PositCounter<Store> {
 /// A collection of posits that are being proposed. This is used to track
 /// the posits that are being proposed and the participants that have
 /// accepted them.
-pub struct Posits<Id, Store> {
+pub struct Posits<Id, S> {
     me: Participant,
-    posits: HashMap<Id, PositCounter<Store>>,
+    posits: HashMap<Id, PositCounter<S>>,
 }
 
-impl<T: Copy + Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
+impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
     pub fn new(me: Participant) -> Self {
         Self {
             me,
@@ -70,7 +71,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
         &mut self,
         me: Participant,
         id: T,
-        store: Store,
+        store: S,
         participants: &[Participant],
     ) -> PositAction {
         let mut accepts = HashSet::new();
@@ -100,7 +101,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
         from: Participant,
         threshold: usize,
         action: &PositAction,
-    ) -> Vec<PositInternalAction<Store>> {
+    ) -> PositInternalAction<S> {
         match action {
             PositAction::Propose => {
                 if self.posits.contains_key(&id) {
@@ -108,22 +109,22 @@ impl<T: Copy + Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
                         ?id,
                         "received a protocol posit for an id that we already proposed"
                     );
-                    return vec![PositInternalAction::Reply(PositAction::Reject)];
+                    return PositInternalAction::Reply(PositAction::Reject);
                 }
 
                 // No further checks necessary, we can just accept the posit.
-                vec![PositInternalAction::Reply(PositAction::Accept)]
+                PositInternalAction::Reply(PositAction::Accept)
             }
             PositAction::Start(participants) => {
                 if self.posits.contains_key(&id) {
                     tracing::warn!(?id, "received an invalid Start for a protocol we proposed");
-                    return vec![PositInternalAction::Reply(PositAction::Reject)];
+                    return PositInternalAction::Reply(PositAction::Reject);
                 }
 
-                vec![PositInternalAction::StartProtocol(
+                PositInternalAction::StartProtocol(
                     participants.to_vec(),
                     Positor::Deliberator(from),
-                )]
+                )
             }
             PositAction::Accept | PositAction::Reject => {
                 let mut entry = match self.posits.entry(id) {
@@ -134,7 +135,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
                             ?action,
                             "received an action for a protocol we did NOT propose"
                         );
-                        return Vec::new();
+                        return PositInternalAction::None;
                     }
                 };
 
@@ -148,16 +149,16 @@ impl<T: Copy + Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
                 let enough_votes = counter.accepts.len() >= threshold
                     && counter.accepts.len() + counter.rejects.len() == counter.participants.len();
                 if !enough_votes {
-                    return Vec::new();
+                    return PositInternalAction::None;
                 }
 
                 tracing::info!(?id, "received all Accepts, starting protocol");
                 let counter = entry.remove();
                 let participants = counter.accepts.iter().copied().collect();
-                vec![PositInternalAction::StartProtocol(
+                PositInternalAction::StartProtocol(
                     participants,
                     Positor::Proposer(self.me, counter.store),
-                )]
+                )
             }
         }
     }
@@ -170,7 +171,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, Store> Posits<T, Store> {
         self.posits.is_empty()
     }
 
-    pub fn remove(&mut self, id: &T) -> Option<PositCounter<Store>> {
+    pub fn remove(&mut self, id: &T) -> Option<PositCounter<S>> {
         self.posits.remove(id)
     }
 }
