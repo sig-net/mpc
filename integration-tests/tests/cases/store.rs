@@ -195,14 +195,14 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_potential().await, 0);
 
     // check that reserve then dropping unreserves the slot:
-    let slot = presignature_manager.reserve(presignature.id).await.unwrap();
+    let slot = presignature_storage.reserve(presignature.id).await.unwrap();
     if let Some(task) = slot.unreserve() {
         task.await.unwrap();
     }
 
     // Insert presignature owned by node1, with our node0 view being that it is a foreign presignature
     assert!(
-        presignature_manager
+        presignature_storage
             .reserve(presignature.id)
             .await
             .unwrap()
@@ -218,7 +218,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_potential().await, 1);
 
     // Take presignature and check that it is removed from the storage and added to used set
-    presignature_manager.take(id, node1).await.unwrap();
+    presignature_storage.take(id, node1, node0).await.unwrap();
     assert!(!presignature_manager.contains(id).await);
     assert!(!presignature_manager.contains_mine(id).await);
     assert_eq!(presignature_manager.len_generated().await, 0);
@@ -227,7 +227,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert!(presignature_storage.contains_used(id).await);
 
     // Attempt to re-insert used presignature and check that it fails
-    assert!(presignature_manager.reserve(id).await.is_none());
+    assert!(presignature_storage.reserve(id).await.is_none());
     assert!(!presignature_manager.contains(id).await);
 
     let id2 = 2;
@@ -235,7 +235,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
 
     // Add a presignature to our own node0
     assert!(
-        presignature_manager
+        presignature_storage
             .reserve(id2)
             .await
             .unwrap()
@@ -260,13 +260,13 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert!(presignature_storage.contains_used(id2).await);
 
     // Attempt to re-insert used mine presignature and check that it fails
-    assert!(presignature_manager.reserve(id2).await.is_none());
+    assert!(presignature_storage.reserve(id2).await.is_none());
     assert!(!presignature_manager.contains(id2).await);
 
     presignature_storage.clear().await;
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
-        presignature_manager
+        presignature_storage
             .reserve(id)
             .await
             .unwrap()
@@ -276,7 +276,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
 
     // Have our node0 own 16 to 20
     for id in 16..=20 {
-        presignature_manager
+        presignature_storage
             .reserve(id)
             .await
             .unwrap()

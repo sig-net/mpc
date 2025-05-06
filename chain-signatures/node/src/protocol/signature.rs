@@ -4,7 +4,7 @@ use super::MpcSignProtocol;
 use crate::kdf::derive_delta;
 use crate::protocol::error::GenerationError;
 use crate::protocol::message::{MessageChannel, SignatureMessage};
-use crate::protocol::presignature::{PresignatureId, PresignatureManager};
+use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::RpcChannel;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
@@ -440,7 +440,6 @@ impl SignatureManager {
         proposer: Participant,
         presignature_id: PresignatureId,
         cfg: &ProtocolConfig,
-        presignature_manager: &mut PresignatureManager,
     ) -> Result<&mut SignatureProtocol, GenerationError> {
         let entry = match self.generators.entry(sign_id.clone()) {
             Entry::Vacant(entry) => entry,
@@ -457,19 +456,16 @@ impl SignatureManager {
         }
 
         tracing::info!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
-        let presignature = match presignature_manager.take(presignature_id, proposer).await {
-            Ok(presignature) => presignature,
-            Err(err @ GenerationError::PresignatureIsGenerating(_)) => {
-                tracing::warn!(me = ?self.me, presignature_id, "presignature is generating, can't join signature generation protocol");
-                self.sign_queue.push_failed(request);
-                return Err(err);
-            }
-            Err(err @ GenerationError::PresignatureIsMissing(_)) => {
-                tracing::warn!(me = ?self.me, presignature_id, "presignature is missing, can't join signature generation protocol");
-                self.sign_queue.push_failed(request);
-                return Err(err);
-            }
-            Err(err) => return Err(err),
+        let Some(presignature) = self
+            .presignatures
+            .take(presignature_id, proposer, self.me)
+            .await
+        else {
+            tracing::warn!(me = ?self.me, presignature_id, "cannot join signature generation: presignature is either missing or generating");
+            self.sign_queue.push_failed(request);
+            return Err(GenerationError::PresignatureGeneratingOrMissing(
+                presignature_id,
+            ));
         };
         tracing::info!(me = ?self.me, presignature_id, "found presignature: ready to start signature generation");
         let generator = match Self::generate_internal(

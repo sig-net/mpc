@@ -196,26 +196,6 @@ impl PresignatureManager {
         self.presignatures.contains_used(id).await
     }
 
-    pub async fn take(
-        &mut self,
-        id: PresignatureId,
-        owner: Participant,
-    ) -> Result<PresignatureTaken, GenerationError> {
-        if self.generators.contains_key(&id) {
-            tracing::warn!(id, "presignature is still generating");
-            return Err(GenerationError::PresignatureIsGenerating(id));
-        }
-
-        let presignature = self
-            .presignatures
-            .take(id, owner, self.me)
-            .await
-            .ok_or(GenerationError::PresignatureIsMissing(id))?;
-
-        tracing::debug!(id, "took presignature");
-        Ok(presignature)
-    }
-
     pub async fn take_mine(&mut self) -> Option<PresignatureTaken> {
         let taken = self.presignatures.take_mine(self.me).await?;
         tracing::debug!(id = ?taken.presignature.id, "took presignature of mine");
@@ -224,12 +204,12 @@ impl PresignatureManager {
 
     /// Returns the number of unspent presignatures available in the manager.
     pub async fn len_generated(&self) -> usize {
-        self.presignatures.len_generated().await.unwrap_or(0)
+        self.presignatures.len_generated().await
     }
 
     /// Returns the number of unspent presignatures assigned to this node.
     pub async fn len_mine(&self) -> usize {
-        self.presignatures.len_mine(self.me).await.unwrap_or(0)
+        self.presignatures.len_by_owner(self.me).await
     }
 
     /// Returns if there are unspent presignatures available in the manager.
@@ -451,9 +431,9 @@ impl PresignatureManager {
                             id,
                             triple0,
                             triple1,
-                            "could not initiate non-introduced presignature: one or more triple are missing",
+                            "cannot join presignature generation: triple(s) are either missing or generating",
                         );
-                        return Err(GenerationError::TripleIsGenerating(triple0));
+                        return Err(GenerationError::TripleGeneratingOrMissing(triple0));
                     };
 
                     let generator = Self::generate_internal(
