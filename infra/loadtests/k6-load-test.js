@@ -135,9 +135,20 @@ const strategies = {
   },
 };
 
-export const options = strategies[__ENV.LT_STRATEGY] || (() => {
+let selected_strategy = strategies[__ENV.LT_STRATEGY] || (() => {
   throw new Error(`Invalid or missing LT_STRATEGY environment variable: ${__ENV.LT_STRATEGY}`);
 })();
+
+// Extend the selected strategy with tags for easer filtering in K6 UI
+export const options = {
+  ...selected_strategy,
+  tags: {
+    name: __ENV.LT_CHAIN,
+    env: __ENV.LT_CHAIN_ENV,
+    check: __ENV.LT_CHECK_SIGNATURE,
+  },
+};
+
 
 export default function () {
   let chain = __ENV.LT_CHAIN;
