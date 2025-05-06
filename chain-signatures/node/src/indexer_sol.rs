@@ -225,8 +225,8 @@ pub async fn run(
     let client =
         Client::new_with_options(cluster, Arc::new(keypair), CommitmentConfig::confirmed());
     tracing::info!("rpc url: {}, program id: {}", sol.rpc_url, program_id);
-    let program = client.program(program_id)?;
     loop {
+        let program = client.program(program_id)?;
         let unsub =
             subscribe_to_program_events(&program, sign_tx.clone(), node_near_account_id.clone())
                 .await;
@@ -236,7 +236,7 @@ pub async fn run(
             unsub.unwrap().unsubscribe().await;
             tracing::info!("unsubscribing to solana events");
         }
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
