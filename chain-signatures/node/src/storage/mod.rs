@@ -52,33 +52,6 @@ impl Options {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum StoreError {
-    #[error("protocol is generating: {0}")]
-    ProtocolIsGenerating(String),
-    #[error("protocol is missing: {0}")]
-    ProtocolIsMissing(String),
-    #[error("protocol trying to be used by other owner: {0}")]
-    ProtocolForeignUsage(String),
-    #[error("protocol trying to be used by incorrect owner: {0}")]
-    ProtocolIncorrectOwner(String),
-    #[error("redis: {0}")]
-    RedisError(redis::RedisError),
-}
-
-impl From<redis::RedisError> for StoreError {
-    fn from(err: redis::RedisError) -> Self {
-        let msg = err.to_string();
-        if msg.contains("generating or taken") {
-            StoreError::ProtocolIsGenerating(msg)
-        } else if msg.contains("taken as foreign owned") {
-            StoreError::ProtocolForeignUsage(msg)
-        } else {
-            StoreError::RedisError(err)
-        }
-    }
-}
-
 fn owner_key(base: &str, owner: Participant) -> String {
     format!("{base}:p{}", Into::<u32>::into(owner))
 }
