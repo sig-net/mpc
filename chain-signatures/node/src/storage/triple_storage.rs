@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::protocol::triple::{Triple, TripleId};
 
@@ -8,12 +10,16 @@ use deadpool_redis::{Connection, Pool};
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
 use near_account_id::AccountId;
+use tokio::sync::RwLock;
 
 use super::{owner_key, STORAGE_VERSION};
 
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 /// A pre-reserved slot for a triple that will eventually be inserted.
+// TODO: the slot should not be cloned after we move TripleManager being its own task.
+// Currently triple generators are cloned so this is required for now. Which also means
+// we cannot implement drop for it either.
 #[derive(Clone)]
 pub struct TripleSlot {
     id: TripleId,
@@ -22,6 +28,15 @@ pub struct TripleSlot {
 }
 
 impl TripleSlot {
+    async fn new(id: TripleId, storage: TripleStorage) -> Self {
+        storage.generating.write().await.insert(id);
+        Self {
+            id,
+            storage,
+            stored: false,
+        }
+    }
+
     /// Inserts the triple into the storage, associating it with the given owner.
     /// Returns true if the insertion was successful, false otherwise.
     // TODO: put inside a tokio task:
@@ -31,9 +46,7 @@ impl TripleSlot {
     }
 
     pub async fn unreserve(&self) {
-        if !self.stored {
-            self.storage.unreserve([self.id]).await;
-        }
+        self.storage.generating.write().await.remove(&self.id);
     }
 }
 
@@ -123,6 +136,7 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
         used_key,
         reserved_key,
         owner_keys,
+        generating: Default::default(),
     }
 }
 
@@ -133,6 +147,11 @@ pub struct TripleStorage {
     used_key: String,
     reserved_key: String,
     owner_keys: String,
+
+    /// The currently generating triples. This is not persisted in Redis due to potential node
+    /// crashes and restarts. If it does crash, we will not be able to recover the currently
+    /// generating triples so this will be cleared on restart.
+    generating: Arc<RwLock<HashSet<TripleId>>>,
 }
 
 impl TripleStorage {
@@ -150,13 +169,7 @@ impl TripleStorage {
         const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local used_key = KEYS[2]
-            local reserved_key = KEYS[3]
             local triple_id = ARGV[1]
-
-            -- cannot reserve this triple if it already exists.
-            if redis.call("SADD", reserved_key, triple_id) == 0 then
-                return {err = "WARN triple " .. triple_id .. " has already been reserved"}
-            end
 
             -- cannot reserve this triple if its already in storage.
             if redis.call("HEXISTS", triple_key, triple_id) == 1 then
@@ -169,21 +182,24 @@ impl TripleStorage {
             end
         "#;
 
+        if {
+            let gen = self.generating.read().await;
+            gen.contains(&id)
+        } {
+            tracing::warn!(id, "triple reserve, already generating");
+            return None;
+        }
+
         let mut conn = self.connect().await?;
         let result: Result<(), _> = redis::Script::new(SCRIPT)
             .key(&self.triple_key)
             .key(&self.used_key)
-            .key(&self.reserved_key)
             .arg(id)
             .invoke_async(&mut conn)
             .await;
 
         match result {
-            Ok(_) => Some(TripleSlot {
-                id,
-                storage: self.clone(),
-                stored: false,
-            }),
+            Ok(_) => Some(TripleSlot::new(id, self.clone()).await),
             Err(err) => {
                 tracing::warn!(?err, "failed to reserve triple");
                 None
@@ -263,34 +279,33 @@ impl TripleStorage {
     }
 
     // TODO: me can potentially be integrated into storage if we eventually can wait for our own participant info to be determined.
-    pub async fn fetch_owned(&self, me: Participant) -> Vec<TripleId> {
+    pub async fn fetch_owned(&self, owner: Participant) -> Vec<TripleId> {
         let Some(mut conn) = self.connect().await else {
             return Vec::new();
         };
 
-        conn.sunion((&self.reserved_key, owner_key(&self.owner_keys, me)))
+        let shares: HashSet<TripleId> = conn
+            .sunion((&self.reserved_key, owner_key(&self.owner_keys, owner)))
             .await
             .inspect_err(|err| {
                 tracing::warn!(?err, "failed to fetch (mine | reserved) triples");
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        shares
+            .union(&*self.generating.read().await)
+            .copied()
+            .collect()
     }
 
     async fn insert(&self, triple: Triple, owner: Participant) -> bool {
         const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local used_key = KEYS[2]
-            local reserved_key = KEYS[3]
-            local owner_keys = KEYS[4]
-            local owner_key = KEYS[5]
+            local owner_keys = KEYS[3]
+            local owner_key = KEYS[4]
             local triple_id = ARGV[1]
             local triple = ARGV[2]
-
-            -- if the triple has not been reserved, then something went wrong when acquiring the
-            -- reservation for it via triple slot.
-            if redis.call("SREM", reserved_key, triple_id) == 0 then
-                return {err = "WARN triple " .. triple_id .. " has NOT been reserved"}
-            end
 
             if redis.call("HEXISTS", used_key, triple_id) == 1 then
                 return {err = "WARN triple " .. triple_id .. " has already been used"}
@@ -301,6 +316,14 @@ impl TripleStorage {
             redis.call("HSET", triple_key, triple_id, triple)
         "#;
 
+        if {
+            let mut gen = self.generating.write().await;
+            !gen.remove(&triple.id)
+        } {
+            tracing::warn!(id = %triple.id, "unexpected, triple was not generating");
+            return false;
+        }
+
         let id = triple.id;
         let Some(mut conn) = self.connect().await else {
             tracing::warn!(id, "failed to insert triple: connection failed");
@@ -309,7 +332,6 @@ impl TripleStorage {
         let result: Result<(), _> = redis::Script::new(SCRIPT)
             .key(&self.triple_key)
             .key(&self.used_key)
-            .key(&self.reserved_key)
             .key(&self.owner_keys)
             .key(owner_key(&self.owner_keys, owner))
             .arg(id)
@@ -365,19 +387,6 @@ impl TripleStorage {
         }
     }
 
-    pub async fn contains_reserved(&self, id: TripleId) -> bool {
-        let Some(mut conn) = self.connect().await else {
-            return false;
-        };
-        match conn.sismember(&self.reserved_key, id).await {
-            Ok(exists) => exists,
-            Err(err) => {
-                tracing::warn!(id, ?err, "failed to check if triple in reserved set");
-                false
-            }
-        }
-    }
-
     /// Take two unspent triple by theirs id with no way to return it. Only takes
     /// if both of them are present.
     /// It is very important to NOT reuse the same triple twice for two different
@@ -394,14 +403,8 @@ impl TripleStorage {
             local used_key = KEYS[2]
             local owner_key = KEYS[3]
             local mine_key = KEYS[4]
-            local reserved_key = KEYS[5]
             local id1 = ARGV[1]
             local id2 = ARGV[2]
-
-            local reserved = redis.call("SMISMEMBER", reserved_key, id1, id2)
-            if reserved[1] == 1 or reserved[2] == 1 then
-                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " is generating or taken"}
-            end
 
             -- check if the given triple id belong to us, if so then we cannot take it as foreign
             local check = redis.call("SMISMEMBER", mine_key, id1, id2)
@@ -434,13 +437,20 @@ impl TripleStorage {
             return triples
         "#;
 
+        {
+            let gen = self.generating.read().await;
+            if gen.contains(&id1) || gen.contains(&id2) {
+                tracing::debug!(id1, id2, "cannot take triple(s), currently generating");
+                return None;
+            }
+        }
+
         let mut conn = self.connect().await?;
         match redis::Script::new(SCRIPT)
             .key(&self.triple_key)
             .key(&self.used_key)
             .key(owner_key(&self.owner_keys, owner))
             .key(owner_key(&self.owner_keys, me))
-            .key(&self.reserved_key)
             .arg(id1)
             .arg(id2)
             .arg(USED_EXPIRE_TIME.num_seconds())
@@ -533,6 +543,14 @@ impl TripleStorage {
         self.len_generated().await == 0
     }
 
+    pub async fn len_potential(&self) -> usize {
+        self.len_generated().await + self.len_generating().await
+    }
+
+    pub async fn len_generating(&self) -> usize {
+        self.generating.read().await.len()
+    }
+
     /// Get the number of unspent triples that were generated by this node.
     pub async fn len_generated(&self) -> usize {
         let Some(mut conn) = self.connect().await else {
@@ -590,6 +608,7 @@ impl TripleStorage {
             })
             .ok();
 
+        self.generating.write().await.clear();
         // if the outcome is None, it means the script failed or there was an error.
         outcome.is_some()
     }

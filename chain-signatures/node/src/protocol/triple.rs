@@ -611,7 +611,7 @@ impl TripleManager {
     /// Returns the number of unspent triples we will have in the manager once
     /// all ongoing generation protocols complete.
     pub async fn len_potential(&self) -> usize {
-        self.triple_storage.len_generated().await + self.tasks.read().await.generators.len()
+        self.triple_storage.len_potential().await
     }
 
     /// Starts a new Beaver triple generation protocol.
