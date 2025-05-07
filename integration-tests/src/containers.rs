@@ -54,7 +54,6 @@ impl Node {
     const CONTAINER_PORT: u16 = 3000;
 
     pub async fn run(
-        node_id: usize,
         ctx: &super::Context,
         cfg: &NodeConfig,
         account: &Account,
@@ -80,7 +79,6 @@ impl Node {
             .unwrap();
 
         Self::spawn(
-            node_id,
             ctx,
             NodeEnvConfig {
                 web_port: Self::CONTAINER_PORT,
@@ -106,11 +104,7 @@ impl Node {
         }
     }
 
-    pub async fn spawn(
-        node_id: usize,
-        ctx: &super::Context,
-        config: NodeEnvConfig,
-    ) -> anyhow::Result<Self> {
+    pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
             s3_region: ctx.localstack.s3_region.clone(),
@@ -131,8 +125,8 @@ impl Node {
             eth: eth_args,
             sol: sol_args,
             my_address: None,
-            debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
+            log_options: ctx.log_options.clone(),
             sign_sk: Some(config.sign_sk.clone()),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),

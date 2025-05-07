@@ -7,6 +7,7 @@ use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
 
 use crate::containers::{self, DockerClient};
+use crate::utils::dev_gen_indexed;
 use crate::{execute, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
@@ -133,8 +134,8 @@ impl ClusterSpawner {
     /// Create accounts for the nodes
     pub async fn create_accounts(&mut self, worker: &Worker<Sandbox>) {
         let mut accounts = Vec::with_capacity(self.cfg.nodes);
-        for _ in 0..self.cfg.nodes {
-            accounts.push(worker.dev_create_account().await.unwrap());
+        for i in 0..self.cfg.nodes {
+            accounts.push(dev_gen_indexed(worker, i).await.unwrap());
         }
         self.participants
             .extend((0..accounts.len() as u32).map(Participant::from));
