@@ -31,6 +31,7 @@ use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
 use serde_json::json;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,6 +44,10 @@ const MAX_PUBLISH_RETRY: usize = 6;
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract state and config
 const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
+/// The interval to batch send Ethereum responses
+const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
+/// The batch size for Ethereum responses
+const ETH_RESPOND_BATCH_SIZE: usize = 10;
 
 type EthHttp = Http<ReqwestClient>;
 
@@ -70,6 +75,7 @@ type EthContractFillProvider = FillProvider<
 
 type EthContractInstance = ContractInstance<EthHttp, EthContractFillProvider>;
 
+#[derive(Clone)]
 struct PublishAction {
     public_key: mpc_crypto::PublicKey,
     request: SignRequest,
@@ -216,7 +222,6 @@ impl RpcExecutor {
         config: Arc<RwLock<Config>>,
     ) {
         // spin up update task for updating contract state and config
-        let near_account_id = self.near.my_account_id.clone();
         let near = self.near.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
@@ -227,20 +232,44 @@ impl RpcExecutor {
             }
         });
 
+        let eth_client = self.client(&Chain::Ethereum);
+        let near_account_id_clone = self.near.my_account_id.clone();
+        let (eth_rpc_tx, eth_rpc_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
+        // spin up update task for batch sending eth responses
+        tokio::spawn({
+            run_batch_respond(
+                eth_client,
+                eth_rpc_rx,
+                ETH_RESPOND_BATCH_INTERVAL,
+                ETH_RESPOND_BATCH_SIZE,
+                near_account_id_clone.clone(),
+            )
+        });
+
         // process incoming actions related to RPC
         loop {
-            let Some(action) = self.action_rx.recv().await else {
+            let Some(RpcAction::Publish(action)) = self.action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
                 return;
             };
-            let task = match action {
-                RpcAction::Publish(action) => execute_publish(
-                    self.client(&action.request.indexed.chain),
-                    action,
-                    near_account_id.clone(),
-                ),
-            };
-            tokio::spawn(task);
+
+            let chain = action.request.indexed.chain;
+            let client = self.client(&chain);
+            let near_account_id = self.near.my_account_id.clone();
+            let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
+
+            tokio::spawn(async move {
+                match chain {
+                    Chain::NEAR | Chain::Solana => {
+                        execute_publish(client, action, near_account_id).await;
+                    }
+                    Chain::Ethereum => {
+                        if let Err(err) = eth_rpc_tx.send(action).await {
+                            tracing::error!(%err, "eth: failed to send publish action");
+                        }
+                    }
+                }
+            });
         }
     }
 
@@ -588,6 +617,40 @@ async fn execute_publish(
     }
 }
 
+async fn run_batch_respond(
+    client: ChainClient,
+    mut actions_rx: mpsc::Receiver<PublishAction>,
+    batch_interval: Duration,
+    batch_size: usize,
+    near_account_id: AccountId,
+) {
+    let mut start = Instant::now();
+    let mut actions_batch: Vec<PublishAction> = vec![];
+    let mut interval = tokio::time::interval(Duration::from_millis(100));
+    loop {
+        interval.tick().await;
+        if (start.elapsed() > batch_interval || actions_batch.len() >= batch_size)
+            && !actions_batch.is_empty()
+        {
+            tracing::info!(
+                num_requests = actions_batch.len(),
+                "publishing batch of signatures",
+            );
+            execute_batch_publish(
+                &client,
+                &mut actions_batch,
+                &near_account_id,
+                Instant::now(),
+            )
+            .await;
+            start = Instant::now();
+        }
+        if let Ok(action) = actions_rx.try_recv() {
+            actions_batch.push(action);
+        }
+    }
+}
+
 async fn try_publish_near(
     near: &NearClient,
     action: &PublishAction,
@@ -726,6 +789,166 @@ async fn try_publish_eth(
                 .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                 .inc();
             Err(())
+        }
+    }
+}
+
+async fn try_batch_publish_eth(
+    eth: &EthClient,
+    actions: &Vec<PublishAction>,
+    signatures: &HashMap<SignId, Signature>,
+    near_account_id: &AccountId,
+    start: Instant,
+) -> Result<(), ()> {
+    let chain = Chain::Ethereum;
+    let mut params_vec = vec![];
+    let num_requests = actions.len();
+    let sign_ids = actions
+        .iter()
+        .map(|action| action.request.indexed.id.clone())
+        .collect::<Vec<_>>();
+    for action in actions {
+        let signature = signatures
+            .get(&action.request.indexed.id)
+            .expect("signature not found in map");
+        params_vec.push(DynSolValue::Tuple(vec![
+            DynSolValue::FixedBytes(action.request.indexed.id.request_id.into(), 32),
+            DynSolValue::Tuple(vec![
+                DynSolValue::Tuple(vec![
+                    DynSolValue::from(U256::from_be_slice(&signature.big_r.x())),
+                    DynSolValue::from(U256::from_be_slice(
+                        signature.big_r.to_encoded_point(false).y().unwrap(),
+                    )),
+                ]),
+                DynSolValue::from(U256::from_be_slice(&signature.s.to_bytes())),
+                DynSolValue::from(signature.recovery_id),
+            ]),
+        ]));
+    }
+
+    let params = [DynSolValue::Array(params_vec.clone())];
+
+    // The gas limit for the transaction.
+    // Experimented on Sepolia, sending a batch of 2 cost 35,000, and a batch of 3 cost 50,000+.
+    let gas = std::cmp::max(40000, 20000 * num_requests as u64);
+
+    let result = eth
+        .contract
+        .function("respond", &params)
+        .unwrap()
+        .gas(gas)
+        .send()
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                ?sign_ids,
+                error = ?err,
+                "failed to publish ethereum signature"
+            );
+            crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
+                .inc();
+        })?
+        .watch()
+        .await;
+
+    match result {
+        Ok(tx_hash) => {
+            tracing::info!(
+                ?tx_hash,
+                num_requests,
+                "published ethereum signatures successfully"
+            );
+            crate::metrics::NUM_SIGN_SUCCESS
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .inc_by(num_requests as f64);
+            for action in actions {
+                crate::metrics::SIGN_TOTAL_LATENCY
+                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                    .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
+                if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
+                    crate::metrics::NUM_SIGN_SUCCESS_30S
+                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                        .inc();
+                }
+            }
+            crate::metrics::SIGN_RESPOND_LATENCY
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .observe(start.elapsed().as_secs_f64());
+
+            Ok(())
+        }
+        Err(err) => {
+            tracing::error!(
+                error = ?err,
+                "failed to publish ethereum signature"
+            );
+            crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .inc_by(num_requests as f64);
+            Err(())
+        }
+    }
+}
+
+async fn execute_batch_publish(
+    client: &ChainClient,
+    actions: &mut Vec<PublishAction>,
+    near_account_id: &AccountId,
+    start: Instant,
+) {
+    let mut signatures: HashMap<SignId, Signature> = HashMap::new();
+
+    for action in actions.iter() {
+        let expected_public_key =
+            mpc_crypto::derive_key(action.public_key, action.request.indexed.args.epsilon);
+
+        let Ok(signature) = crate::kdf::into_eth_sig(
+            &expected_public_key,
+            &action.output.big_r,
+            &action.output.s,
+            action.request.indexed.args.payload,
+        ) else {
+            tracing::error!(
+                sign_id = ?action.request.indexed.id,
+                "failed to generate a recovery id; trashing publish request",
+            );
+            return;
+        };
+        signatures.insert(action.request.indexed.id.clone(), signature);
+    }
+
+    let mut retry_count = 0;
+    loop {
+        let publish = match client {
+            ChainClient::Near(_) => {
+                tracing::error!("near has no batch publish");
+                Ok(())
+            }
+            ChainClient::Solana(_) => {
+                tracing::error!("Solana has no batch publish");
+                Ok(())
+            }
+            ChainClient::Ethereum(eth) => {
+                try_batch_publish_eth(eth, actions, &signatures, near_account_id, start).await
+            }
+            ChainClient::Err(msg) => {
+                tracing::warn!(msg, "no client for chain");
+                Ok(())
+            }
+        };
+        if publish.is_ok() {
+            actions.clear();
+            break;
+        }
+
+        retry_count += 1;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if retry_count >= MAX_PUBLISH_RETRY {
+            tracing::info!("exceeded max retries, trashing publish request",);
+            break;
+        } else {
+            tracing::info!("failed to publish, retrying");
         }
     }
 }
