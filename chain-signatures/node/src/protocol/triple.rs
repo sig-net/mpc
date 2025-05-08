@@ -609,10 +609,8 @@ impl TripleManager {
         {
             let tasks = self.tasks.read().await;
             if tasks.generators.contains_key(&id0) {
-                tracing::warn!(id0, "triple is generating");
                 return Err(GenerationError::TripleIsGenerating(id0));
             } else if tasks.generators.contains_key(&id1) {
-                tracing::warn!(id1, "triple is generating");
                 return Err(GenerationError::TripleIsGenerating(id1));
             }
         }
