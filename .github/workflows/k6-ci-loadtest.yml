@@ -49,6 +49,10 @@ jobs:
     if: ${{ github.event_name == 'push' || github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
+      - name: Wait for 5 minutes due to new version deployment
+        if: ${{ github.event.pull_request.merged == true }}
+        run: sleep 300
+
       - name: Checkout
         uses: actions/checkout@v4
 
