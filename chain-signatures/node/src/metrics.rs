@@ -496,15 +496,6 @@ pub(crate) static PRESIGNATURE_BEFORE_POKE_DELAY: LazyLock<HistogramVec> = LazyL
     .unwrap()
 });
 
-pub(crate) static NUM_UNIQUE_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
-        "multichain_sign_requests_count_unique",
-        "number of multichain sign requests, marked by sign requests indexed and deduped",
-        &["chain", "node_account_id"],
-    )
-    .unwrap()
-});
-
 pub(crate) static PRESIGNATURE_ACCRUED_WAIT_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_presignature_accrued_wait_delay_ms",
