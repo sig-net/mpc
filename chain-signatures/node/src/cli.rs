@@ -292,8 +292,8 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     msg_channel,
                     sign_rx: Arc::new(RwLock::new(sign_rx)),
                     secret_storage: key_storage,
-                    triple_storage,
-                    presignature_storage,
+                    triple_storage: triple_storage.clone(),
+                    presignature_storage: presignature_storage.clone(),
                 };
 
                 tracing::info!("protocol initialized");
@@ -304,8 +304,15 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 let protocol_handle =
                     tokio::spawn(protocol.run(contract_state, config, mesh_state));
                 tracing::info!("protocol thread spawned");
-                let web_handle =
-                    tokio::spawn(web::run(web_port, sender, state, indexer, sync_channel));
+                let web_handle = tokio::spawn(web::run(
+                    web_port,
+                    sender,
+                    state,
+                    indexer,
+                    triple_storage,
+                    presignature_storage,
+                    sync_channel,
+                ));
                 tokio::spawn(indexer_eth::run(eth, sign_tx.clone(), account_id.clone()));
                 tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
                 tracing::info!("protocol http server spawned");

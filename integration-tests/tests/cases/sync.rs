@@ -159,14 +159,14 @@ async fn validate_triples(
 ) {
     for id in valid {
         assert!(
-            triples.contains_foreign(*id, owner).await,
+            triples.contains_by_owner(*id, owner).await,
             "triple={id} should be valid"
         );
     }
 
     for id in invalid {
         assert!(
-            !triples.contains_foreign(*id, owner).await,
+            !triples.contains_by_owner(*id, owner).await,
             "triple={id} should be invalid"
         );
     }
@@ -195,14 +195,14 @@ async fn validate_presignatures(
 ) {
     for id in valid {
         assert!(
-            presignatures.contains_foreign(*id, owner).await,
+            presignatures.contains_by_owner(*id, owner).await,
             "presignature={id} should be valid"
         );
     }
 
     for id in invalid {
         assert!(
-            !presignatures.contains_foreign(*id, owner).await,
+            !presignatures.contains_by_owner(*id, owner).await,
             "presignature={id} should be invalid"
         );
     }
