@@ -165,7 +165,7 @@ must be persisted before they are applied. These can be replayed on boot for
 recovery after a crash. After a protocol finishes, events can be discarded.
 
 Note: Unlike fully event-driven architectures, the MPC network does not need to
-have a separate even store component. The Event-Sourcing pattern is only applied
+have a separate event store component. The Event-Sourcing pattern is only applied
 locally within one node.
 
 ### Owner Transitions
@@ -188,7 +188,8 @@ The owner of the protocol invocation progresses the protocol:
     - Start poking own generator and sending out the corresponding messages
 
 Owners must also handle the following error case:
-- Not enough participants answered the INIT message with an HTTP success response
+- Not enough participants answered the INIT message with an (HTTP success response
+      or explicit OK message back)
     - Retry, maybe some more participants are online now
     - After a threshold of retries, switch to a different P or T input that has
       more active participants.
