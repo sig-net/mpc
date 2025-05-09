@@ -491,7 +491,7 @@ impl SolanaClient {
         let keypair = Keypair::from_base58_string(&sol.account_sk);
         let payer = Arc::new(keypair);
         let cluster =
-            anchor_client::Cluster::Custom(sol.rpc_url.clone(), sol.rpc_url.replace("http", "ws"));
+            anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
         let client = anchor_client::Client::new_with_options(
             cluster,
             payer.clone(),
