@@ -1,9 +1,11 @@
+use std::{collections::HashSet, sync::Arc};
+
 use cait_sith::protocol::Participant;
 use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
-use tokio::task::JoinHandle;
+use tokio::{sync::RwLock, task::JoinHandle};
 
 use crate::protocol::presignature::{Presignature, PresignatureId};
 
@@ -105,6 +107,7 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> PresignatureStorage {
         used_key,
         reserved_key,
         owner_keys,
+        generating: Default::default(),
     }
 }
 
@@ -115,6 +118,11 @@ pub struct PresignatureStorage {
     used_key: String,
     reserved_key: String,
     owner_keys: String,
+
+    /// The currently generating presignatures. This is not persisted in Redis due to potential node
+    /// crashes and restarts. If it does crash, we will not be able to recover the currently
+    /// generating triples so this will be cleared on restart.
+    generating: Arc<RwLock<HashSet<PresignatureId>>>,
 }
 
 impl PresignatureStorage {
@@ -163,6 +171,14 @@ impl PresignatureStorage {
                 return {err = "WARN presignature " .. presig_id .. " has already been used"}
             end
         "#;
+
+        if {
+            let gen = self.generating.read().await;
+            gen.contains(&id)
+        } {
+            tracing::warn!(id, "presignature reserve, already generating");
+            return None;
+        }
 
         let mut conn = self.connect().await?;
         let result: Result<(), _> = redis::Script::new(SCRIPT)
