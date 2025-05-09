@@ -64,6 +64,7 @@ impl fmt::Debug for WaitingForConsensusState {
 #[derive(Clone)]
 pub struct RunningState {
     pub epoch: u64,
+    pub me: Participant,
     pub participants: Participants,
     pub threshold: usize,
     pub private_share: SecretKeyShare,

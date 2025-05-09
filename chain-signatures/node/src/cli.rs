@@ -277,6 +277,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 over: override_config.unwrap_or_else(Default::default),
                 network,
             })));
+
             let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
             let (sender, msg_channel) =
                 MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
@@ -288,8 +289,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 msg_channel,
                 sign_rx: Arc::new(RwLock::new(sign_rx)),
                 secret_storage: key_storage,
-                triple_storage,
-                presignature_storage,
+                triple_storage: triple_storage.clone(),
+                presignature_storage: presignature_storage.clone(),
             };
 
             tracing::info!("protocol initialized");
@@ -299,11 +300,18 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
             let protocol_handle = tokio::spawn(protocol.run(contract_state, config, mesh_state));
             tracing::info!("protocol thread spawned");
-            let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer, sync_channel));
+            let web_handle = tokio::spawn(web::run(
+                web_port,
+                sender,
+                state,
+                indexer,
+                triple_storage,
+                presignature_storage,
+                sync_channel,
+            ));
             tokio::spawn(indexer_eth::run(eth, sign_tx.clone(), account_id.clone()));
             tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
             tracing::info!("protocol http server spawned");
-
             protocol_handle.await?;
             web_handle.await?;
             system_handle.abort();
