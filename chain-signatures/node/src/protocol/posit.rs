@@ -8,8 +8,8 @@ use std::hash::Hash;
 
 pub type ProposerId = Participant;
 
-pub enum Positor<S> {
-    Proposer(ProposerId, S),
+pub enum Positor<T> {
+    Proposer(ProposerId, T),
     Deliberator(ProposerId),
 }
 
@@ -35,8 +35,8 @@ impl PositAction {
     }
 }
 
-pub enum PositInternalAction<Store> {
-    StartProtocol(Vec<Participant>, Positor<Store>),
+pub enum PositInternalAction<S> {
+    StartProtocol(Vec<Participant>, Positor<S>),
     Reply(PositAction),
     None,
 }
@@ -44,11 +44,11 @@ pub enum PositInternalAction<Store> {
 /// A counter for a posit. This is used to track the participants that have
 /// accepted the posit alongside storing an intermediary state for the protocol
 /// that the proposer needs to keep track of.
-pub struct PositCounter<Store> {
+pub struct PositCounter<S> {
     pub participants: HashSet<Participant>,
     accepts: HashSet<Participant>,
     rejects: HashSet<Participant>,
-    store: Store,
+    store: S,
 }
 
 /// A collection of posits that are being proposed. This is used to track
@@ -56,7 +56,15 @@ pub struct PositCounter<Store> {
 /// accepted them.
 pub struct Posits<Id, S> {
     me: Participant,
+
+    /// The posits that our node has proposed.
     posits: HashMap<Id, PositCounter<S>>,
+
+    /// The posits that are pending in the system. These are posits from other proposers
+    /// that we have not yet started the protocol for. Useful for keeping track of who
+    /// proposed what, such that other nodes cannot override or start the protocol for
+    /// a posit that they did not propose.
+    pending_posits: HashMap<Id, ProposerId>,
 }
 
 impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
@@ -64,6 +72,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
         Self {
             me,
             posits: HashMap::new(),
+            pending_posits: HashMap::new(),
         }
     }
 
@@ -89,9 +98,6 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
         PositAction::Propose
     }
 
-    // TODO: make the resp of this synchronous when each of the protocol managers
-    // are their own individual tasks such that they can respond without the need
-    // of the main consensus loop.
     /// Act on the posit action. This will map the action received to a corresponding
     /// action to be sent back to the proposer. This will return a series of internal
     /// actions the node should take.
@@ -105,11 +111,22 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
         match action {
             PositAction::Propose => {
                 if self.posits.contains_key(&id) {
-                    tracing::warn!(
-                        ?id,
-                        "received a protocol posit for an id that we already proposed"
-                    );
+                    tracing::warn!(?id, ?from, "received INIT on protocol we already proposed");
                     return PositInternalAction::Reply(PositAction::Reject);
+                }
+
+                if let Some(proposer) = self.pending_posits.get(&id) {
+                    if *proposer != from {
+                        tracing::warn!(
+                            ?id,
+                            ?from,
+                            ?proposer,
+                            "received INIT on conflicting proposer",
+                        );
+                        return PositInternalAction::Reply(PositAction::Reject);
+                    }
+                } else {
+                    self.pending_posits.insert(id, from);
                 }
 
                 // No further checks necessary, we can just accept the posit.
@@ -117,7 +134,18 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
             }
             PositAction::Start(participants) => {
                 if self.posits.contains_key(&id) {
-                    tracing::warn!(?id, "received an invalid Start for a protocol we proposed");
+                    tracing::warn!(?id, ?from, "received START on protocol we already proposed");
+                    return PositInternalAction::Reply(PositAction::Reject);
+                }
+
+                if let Some(proposer) = self.pending_posits.remove(&id) {
+                    if proposer != from {
+                        tracing::warn!(?id, ?from, ?proposer, "received START from wrong proposer");
+                        self.pending_posits.insert(id, proposer);
+                        return PositInternalAction::Reply(PositAction::Reject);
+                    }
+                } else {
+                    tracing::warn!(?id, ?from, "received START on protocol we have no info for");
                     return PositInternalAction::Reply(PositAction::Reject);
                 }
 
@@ -132,8 +160,9 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                     Entry::Vacant(_) => {
                         tracing::warn!(
                             ?id,
+                            ?from,
                             ?action,
-                            "received an action for a protocol we did NOT propose"
+                            "receive ACCEPT/REJECT on protocol we have no info for",
                         );
                         return PositInternalAction::None;
                     }
@@ -152,7 +181,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                     return PositInternalAction::None;
                 }
 
-                tracing::info!(?id, "received all Accepts, starting protocol");
+                tracing::info!(?id, "received enough ACCEPTs, starting protocol");
                 let counter = entry.remove();
                 let participants = counter.accepts.iter().copied().collect();
                 PositInternalAction::StartProtocol(
