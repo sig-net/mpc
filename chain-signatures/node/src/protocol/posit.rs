@@ -136,6 +136,15 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                 PositInternalAction::Reply(PositAction::Accept)
             }
             PositAction::Start(participants) => {
+                if !participants.contains(&self.me) {
+                    tracing::warn!(
+                        ?id,
+                        ?from,
+                        "received START on protocol we are not a part of"
+                    );
+                    return PositInternalAction::Reply(PositAction::Reject);
+                }
+
                 if let Some(positor) = self.posits.remove(&id) {
                     let proposer = positor.id();
                     if positor.is_proposer() {
@@ -189,6 +198,16 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                     );
                     return PositInternalAction::None;
                 };
+
+                if !counter.participants.contains(&from) {
+                    tracing::warn!(
+                        ?id,
+                        ?from,
+                        ?action,
+                        "received ACCEPT/REJECT from participant not in protocol",
+                    );
+                    return PositInternalAction::None;
+                }
 
                 if action.is_accept() {
                     counter.accepts.insert(from);
