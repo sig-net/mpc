@@ -2904,14 +2904,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chain-signatures-project"
-version = "0.1.0"
-dependencies = [
- "anchor-lang",
- "anchor-spl",
-]
-
-[[package]]
 name = "chrono"
 version = "0.4.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7359,7 +7351,6 @@ dependencies = [
  "borsh 0.10.4",
  "borsh 1.5.7",
  "cait-sith",
- "chain-signatures-project",
  "chrono",
  "ciborium",
  "clap",
@@ -7396,6 +7387,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha3",
+ "signet-program",
  "solana-sdk",
  "solana-transaction-status",
  "sysinfo",
@@ -11391,6 +11383,14 @@ checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "digest 0.10.7",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "signet-program"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
 ]
 
 [[package]]
