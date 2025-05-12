@@ -35,6 +35,9 @@ pub struct Options {
         default_value = "http://localhost:4318"
     )]
     pub otlp_endpoint: String,
+
+    #[clap(long, env("MPC_DISABLE_GCP_LOGS"), default_value = "false")]
+    pub disable_gcp_logs: bool,
 }
 
 impl Default for Options {
@@ -42,18 +45,22 @@ impl Default for Options {
         Self {
             opentelemetry_level: OpenTelemetryLevel::DEBUG,
             otlp_endpoint: "http://localhost:4318".to_string(),
+            disable_gcp_logs: false,
         }
     }
 }
 
 impl Options {
     pub fn into_str_args(self) -> Vec<String> {
-        let opts = vec![
+        let mut opts = vec![
             "--opentelemetry-level".to_string(),
             self.opentelemetry_level.to_string(),
             "--otlp-endpoint".to_string(),
             self.otlp_endpoint,
         ];
+        if self.disable_gcp_logs {
+            opts.push("--disable-gcp-logs".to_string());
+        }
         opts
     }
 }
@@ -207,7 +214,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
     let tracer_otlp_provider = init_otlp_traces(env, node_id, options.otlp_endpoint.as_str()).await;
     let tracer_otlp = tracer_otlp_provider.tracer("mpc");
 
-    if is_running_on_gcp().await {
+    if is_running_on_gcp().await && !options.disable_gcp_logs {
         let log_stackdriver_layer = stackdriver_layer()
             .with_writer(std::io::stderr)
             .with_filter(EnvFilter::from_default_env());
