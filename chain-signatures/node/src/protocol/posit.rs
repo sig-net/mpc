@@ -215,6 +215,17 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                     counter.rejects.insert(from);
                 }
 
+                // TODO: broadcast aborting the protocol if we have enough rejections
+                let enough_rejections =
+                    counter.rejects.len() > counter.participants.len() - threshold;
+                if enough_rejections {
+                    tracing::info!(?id, rejects = ?counter.rejects, "received enough REJECTs, aborting protocol");
+                    entry.remove();
+                    return PositInternalAction::None;
+                }
+
+                // TODO: have a timeout on waiting for votes. The moment we have enough threshold accepts,
+                // we can start the protocol after a timeout, such that we don't wait for slow responders.
                 let enough_votes = counter.accepts.len() >= threshold
                     && counter.accepts.len() + counter.rejects.len() == counter.participants.len();
                 if !enough_votes {
