@@ -17,6 +17,13 @@ impl<T> Positor<T> {
     pub fn is_proposer(&self) -> bool {
         matches!(self, Positor::Proposer(_, _))
     }
+
+    pub fn id(&self) -> ProposerId {
+        match self {
+            Positor::Proposer(id, _) => *id,
+            Positor::Deliberator(id) => *id,
+        }
+    }
 }
 
 /// All actions that can be taken when a new posit is introduced for a protocol.
@@ -57,14 +64,9 @@ pub struct PositCounter<S> {
 pub struct Posits<Id, S> {
     me: Participant,
 
+    // TODO: probably should be a LruCache to expire items
     /// The posits that our node has proposed.
-    posits: HashMap<Id, PositCounter<S>>,
-
-    /// The posits that are pending in the system. These are posits from other proposers
-    /// that we have not yet started the protocol for. Useful for keeping track of who
-    /// proposed what, such that other nodes cannot override or start the protocol for
-    /// a posit that they did not propose.
-    pending_posits: HashMap<Id, ProposerId>,
+    posits: HashMap<Id, Positor<PositCounter<S>>>,
 }
 
 impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
@@ -72,7 +74,6 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
         Self {
             me,
             posits: HashMap::new(),
-            pending_posits: HashMap::new(),
         }
     }
 
@@ -87,12 +88,15 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
         accepts.insert(me);
         self.posits.insert(
             id,
-            PositCounter {
-                participants: participants.iter().copied().collect(),
-                accepts,
-                rejects: HashSet::new(),
-                store,
-            },
+            Positor::Proposer(
+                me,
+                PositCounter {
+                    participants: participants.iter().copied().collect(),
+                    accepts,
+                    rejects: HashSet::new(),
+                    store,
+                },
+            ),
         );
 
         PositAction::Propose
@@ -110,38 +114,46 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
     ) -> PositInternalAction<S> {
         match action {
             PositAction::Propose => {
-                if self.posits.contains_key(&id) {
-                    tracing::warn!(?id, ?from, "received INIT on protocol we already proposed");
-                    return PositInternalAction::Reply(PositAction::Reject);
-                }
-
-                if let Some(proposer) = self.pending_posits.get(&id) {
-                    if *proposer != from {
+                if let Some(positor) = self.posits.get(&id) {
+                    let proposer = positor.id();
+                    if positor.is_proposer() {
+                        tracing::warn!(?id, ?from, "received INIT on protocol we already proposed");
+                        return PositInternalAction::Reply(PositAction::Reject);
+                    } else if proposer != from {
                         tracing::warn!(
                             ?id,
                             ?from,
                             ?proposer,
-                            "received INIT on conflicting proposer",
+                            "received INIT on conflicting proposer"
                         );
                         return PositInternalAction::Reply(PositAction::Reject);
                     }
                 } else {
-                    self.pending_posits.insert(id, from);
+                    self.posits.insert(id, Positor::Deliberator(from));
                 }
 
                 // No further checks necessary, we can just accept the posit.
                 PositInternalAction::Reply(PositAction::Accept)
             }
             PositAction::Start(participants) => {
-                if self.posits.contains_key(&id) {
-                    tracing::warn!(?id, ?from, "received START on protocol we already proposed");
-                    return PositInternalAction::Reply(PositAction::Reject);
-                }
-
-                if let Some(proposer) = self.pending_posits.remove(&id) {
-                    if proposer != from {
-                        tracing::warn!(?id, ?from, ?proposer, "received START from wrong proposer");
-                        self.pending_posits.insert(id, proposer);
+                if let Some(positor) = self.posits.remove(&id) {
+                    let proposer = positor.id();
+                    if positor.is_proposer() {
+                        tracing::warn!(
+                            ?id,
+                            ?from,
+                            "received START on protocol we already proposed"
+                        );
+                        self.posits.insert(id, positor);
+                        return PositInternalAction::Reply(PositAction::Reject);
+                    } else if proposer != from {
+                        tracing::warn!(
+                            ?id,
+                            ?from,
+                            ?proposer,
+                            "received START on conflicting proposer"
+                        );
+                        self.posits.insert(id, positor);
                         return PositInternalAction::Reply(PositAction::Reject);
                     }
                 } else {
@@ -156,19 +168,28 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
             }
             PositAction::Accept | PositAction::Reject => {
                 let mut entry = match self.posits.entry(id) {
-                    Entry::Occupied(counter) => counter,
+                    Entry::Occupied(entry) => entry,
                     Entry::Vacant(_) => {
                         tracing::warn!(
                             ?id,
                             ?from,
                             ?action,
-                            "receive ACCEPT/REJECT on protocol we have no info for",
+                            "received ACCEPT/REJECT on protocol we have no info for",
                         );
                         return PositInternalAction::None;
                     }
                 };
 
-                let counter = entry.get_mut();
+                let Positor::Proposer(_, counter) = entry.get_mut() else {
+                    tracing::warn!(
+                        ?id,
+                        ?from,
+                        ?action,
+                        "received ACCEPT/REJECT on protocol we are not proposer for",
+                    );
+                    return PositInternalAction::None;
+                };
+
                 if action.is_accept() {
                     counter.accepts.insert(from);
                 } else {
@@ -182,8 +203,10 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                 }
 
                 tracing::info!(?id, "received enough ACCEPTs, starting protocol");
-                let counter = entry.remove();
-                let participants = counter.accepts.iter().copied().collect();
+                let Positor::Proposer(_, counter) = entry.remove() else {
+                    unreachable!("proposer should have already been checked");
+                };
+                let participants = counter.accepts.into_iter().collect();
                 PositInternalAction::StartProtocol(
                     participants,
                     Positor::Proposer(self.me, counter.store),
@@ -198,9 +221,5 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
 
     pub fn is_empty(&self) -> bool {
         self.posits.is_empty()
-    }
-
-    pub fn remove(&mut self, id: &T) -> Option<PositCounter<S>> {
-        self.posits.remove(id)
     }
 }
