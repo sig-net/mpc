@@ -5,6 +5,7 @@ use near_workspaces::{
     types::{KeyType, SecretKey},
     Account, AccountId, Worker,
 };
+use rand::Rng;
 
 pub async fn vote_join(
     accounts: &[&Account],
@@ -148,7 +149,13 @@ pub async fn ping_until_ok(addr: &str, timeout: u64) -> anyhow::Result<()> {
 
 // Account with short name for testing
 pub async fn dev_gen_indexed(worker: &Worker<Sandbox>, index: usize) -> anyhow::Result<Account> {
-    let account_id = format!("{}.test.near", index);
+    let random_chars: String = (0..5)
+        .map(|_| {
+            let c = rand::thread_rng().gen_range(b'a'..=b'z');
+            c as char
+        })
+        .collect();
+    let account_id = format!("{}-{}.test.near", index, random_chars);
     let account_id: AccountId = account_id.try_into().expect("Failed to create Acc ID");
     let sk = SecretKey::from_seed(KeyType::ED25519, "seed");
     let account = worker

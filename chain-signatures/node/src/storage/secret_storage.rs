@@ -123,7 +123,10 @@ impl SecretNodeStorage for DiskNodeStorage {
 
                 Ok(Some(data))
             }
-            _ => Ok(None),
+            _ => {
+                tracing::info!("loading PersistentNodeData using DiskNodeStorage: no file");
+                Ok(None)
+            }
         }
     }
 }
