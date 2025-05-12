@@ -482,7 +482,6 @@ impl MessageReceiver for RunningState {
                                 id,
                                 positor,
                                 &participants,
-                                &self.triple_manager,
                                 &self.public_key,
                                 &self.private_share,
                                 protocol_cfg,
@@ -574,6 +573,7 @@ impl MessageReceiver for RunningState {
                 protocol.message(message.from, message.data);
             }
         }
+        drop(presignature_manager);
 
         let mut signature_manager = self.signature_manager.write().await;
         let signature_messages = inbox.signature.entry(self.epoch).or_default();
@@ -620,18 +620,13 @@ impl MessageReceiver for RunningState {
             }
 
             let protocol = match signature_manager
-                .get_or_start_protocol(
-                    sign_id,
-                    *proposer,
-                    *presignature_id,
-                    protocol_cfg,
-                    &mut presignature_manager,
-                )
+                .get_or_start_protocol(sign_id, *proposer, *presignature_id, protocol_cfg)
                 .await
             {
                 Ok(protocol) => protocol,
-                Err(GenerationError::PresignatureIsGenerating(_)) => {
+                Err(GenerationError::PresignatureGeneratingOrMissing(_)) => {
                     // We will revisit this this signature request later when the presignature has been generated.
+                    // If it's missing, we will just rely on the message expiration mechanism to remove it.
                     continue;
                 }
                 Err(err @ GenerationError::WaitingForIndexer(_)) => {
@@ -651,10 +646,7 @@ impl MessageReceiver for RunningState {
                     queue.clear();
                     continue;
                 }
-                Err(
-                    err @ (GenerationError::AlreadyGenerated
-                    | GenerationError::PresignatureIsMissing(_)),
-                ) => {
+                Err(err @ GenerationError::AlreadyGenerated) => {
                     // We will have to remove the entirety of the messages we received for this signature request,
                     // and have the other nodes timeout in the following cases:
                     // - If a presignature is in GC, then it was used already or failed to be produced.

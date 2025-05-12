@@ -1,7 +1,7 @@
 use super::message::{MessageChannel, PositMessage, PositProtocolId, PresignatureMessage};
 use super::posit::{PositAction, Positor, Posits};
 use super::state::RunningState;
-use super::triple::{TripleId, TripleManager};
+use super::triple::TripleId;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::error::GenerationError;
 use crate::protocol::posit::PositInternalAction;
@@ -215,31 +215,11 @@ impl PresignatureManager {
 
     /// Returns true if the mine presignature with the given id is already generated
     pub async fn contains_mine(&self, id: PresignatureId) -> bool {
-        self.presignatures.contains_mine(id, self.me).await
+        self.presignatures.contains_by_owner(id, self.me).await
     }
 
     pub async fn contains_used(&self, id: PresignatureId) -> bool {
         self.presignatures.contains_used(id).await
-    }
-
-    pub async fn take(
-        &mut self,
-        id: PresignatureId,
-        owner: Participant,
-    ) -> Result<PresignatureTaken, GenerationError> {
-        if self.generators.contains_key(&id) {
-            tracing::warn!(id, "presignature is still generating");
-            return Err(GenerationError::PresignatureIsGenerating(id));
-        }
-
-        let presignature = self
-            .presignatures
-            .take(id, owner, self.me)
-            .await
-            .ok_or(GenerationError::PresignatureIsMissing(id))?;
-
-        tracing::debug!(id, "took presignature");
-        Ok(presignature)
     }
 
     pub async fn process_posit(
@@ -312,12 +292,12 @@ impl PresignatureManager {
 
     /// Returns the number of unspent presignatures available in the manager.
     pub async fn len_generated(&self) -> usize {
-        self.presignatures.len_generated().await.unwrap_or(0)
+        self.presignatures.len_generated().await
     }
 
     /// Returns the number of unspent presignatures assigned to this node.
     pub async fn len_mine(&self) -> usize {
-        self.presignatures.len_mine(self.me).await.unwrap_or(0)
+        self.presignatures.len_by_owner(self.me).await
     }
 
     /// Returns if there are unspent presignatures available in the manager.
@@ -415,14 +395,11 @@ impl PresignatureManager {
         self.generators.get_mut(&id).map(|gen| &mut gen.protocol)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn generate(
         &mut self,
         id: FullPresignatureId,
         positor: Positor<TriplesTaken>,
         participants: &[Participant],
-        // TODO: we should just rely on triple storage
-        triple_manager: &TripleManager,
         public_key: &PublicKey,
         private_share: &SecretKeyShare,
         cfg: &ProtocolConfig,
@@ -454,22 +431,10 @@ impl PresignatureManager {
         let triples = if let Some(triples) = triples {
             triples
         } else {
-            triple_manager
-                .take_two(id.t0, id.t1, proposer)
+            self.triples
+                .take_two(id.t0, id.t1, proposer, self.me)
                 .await
-                .inspect_err(|err| match err {
-                    GenerationError::TripleIsGenerating(_)
-                    | GenerationError::TripleIsMissing(_, _) => {
-                        tracing::warn!(
-                            ?id,
-                            ?err,
-                            "could not initiate presignature: unexpected generating or missing"
-                        );
-                    }
-                    _ => {
-                        tracing::error!(?err, "unexpected error while starting presignature");
-                    }
-                })?
+                .ok_or(GenerationError::TripleMissing(id.t0, id.t1))?
         };
 
         let (triple0, triple1, dropper) = triples.take();

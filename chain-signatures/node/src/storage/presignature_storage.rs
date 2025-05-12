@@ -321,20 +321,7 @@ impl PresignatureStorage {
         }
     }
 
-    pub async fn contains_mine(&self, id: PresignatureId, me: Participant) -> bool {
-        let Some(mut conn) = self.connect().await else {
-            return false;
-        };
-        match conn.sismember(owner_key(&self.owner_keys, me), id).await {
-            Ok(exists) => exists,
-            Err(err) => {
-                tracing::warn!(id, ?err, "failed to check if presignature is owned by us");
-                false
-            }
-        }
-    }
-
-    pub async fn contains_foreign(&self, id: PresignatureId, owner: Participant) -> bool {
+    pub async fn contains_by_owner(&self, id: PresignatureId, owner: Participant) -> bool {
         let Some(mut conn) = self.connect().await else {
             return false;
         };
@@ -376,7 +363,12 @@ impl PresignatureStorage {
             local used_key = KEYS[2]
             local owner_key = KEYS[3]
             local mine_key = KEYS[4]
+            local reserved_key = KEYS[5]
             local presig_id = ARGV[1]
+
+            if redis.call("SMISMEMBER", reserved_key, presig_id) == 1 then
+                return {err = 'WARN presignature ' .. presig_id .. ' is generating or taken'}
+            end
 
             if redis.call("SISMEMBER", mine_key, presig_id) == 1 then
                 return {err = 'WARN presignature ' .. presig_id ..' cannot be taken as foreign owned'}
@@ -404,6 +396,7 @@ impl PresignatureStorage {
             .key(&self.used_key)
             .key(owner_key(&self.owner_keys, owner))
             .key(owner_key(&self.owner_keys, me))
+            .key(&self.reserved_key)
             .arg(id)
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
@@ -461,24 +454,33 @@ impl PresignatureStorage {
         }
     }
 
-    pub async fn len_generated(&self) -> Option<usize> {
-        let mut conn = self.connect().await?;
+    pub async fn len_generated(&self) -> usize {
+        let Some(mut conn) = self.connect().await else {
+            return 0;
+        };
         conn.hlen(&self.presig_key)
             .await
             .inspect_err(|err| {
                 tracing::warn!(?err, "failed to get length of generated presignatures");
             })
-            .ok()
+            .unwrap_or(0)
     }
 
-    pub async fn len_mine(&self, me: Participant) -> Option<usize> {
-        let mut conn = self.connect().await?;
+    pub async fn len_by_owner(&self, me: Participant) -> usize {
+        let Some(mut conn) = self.connect().await else {
+            return 0;
+        };
         conn.scard(owner_key(&self.owner_keys, me))
             .await
             .inspect_err(|err| {
                 tracing::warn!(?err, "failed to get length of my presignatures");
             })
-            .ok()
+            .unwrap_or(0)
+    }
+
+    /// Returns if there are unspent presignatures available in the manager.
+    pub async fn is_empty(&self) -> bool {
+        self.len_generated().await == 0
     }
 
     /// Clear all presignature storage, including used, reserved, and owned keys.
