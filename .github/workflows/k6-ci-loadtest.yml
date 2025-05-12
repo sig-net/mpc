@@ -84,7 +84,7 @@ jobs:
         with:
           path: ./infra/loadtests/k6-load-test.js
           cloud-run-locally: false
-          cloud-comment-on-pr: true
+          cloud-comment-on-pr: false
           flags: >
             --exit-on-running
             --include-system-env-vars
