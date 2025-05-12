@@ -38,8 +38,13 @@ serde_json = "1"
 sha3 = "0.10.8"
 thiserror = "1"
 tokio = { version = "1.28", features = ["full"] }
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing = "0.1.35"
+tracing-subscriber = { version = "0.3.0", default-features = false, features = [
+    "env-filter",
+    "registry",
+    "std",
+    "fmt",
+] }
 url = { version = "2.4.0", features = ["serde"] }
 web3 = "0.19.0"
 anchor-client = { version = "0.31.0", features = ["async"] }

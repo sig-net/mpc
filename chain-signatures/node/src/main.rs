@@ -1,6 +1,7 @@
 use clap::Parser;
 use mpc_node::cli::Cli;
 
-fn main() -> anyhow::Result<()> {
-    mpc_node::cli::run(Cli::parse())
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    mpc_node::cli::run(Cli::parse()).await
 }

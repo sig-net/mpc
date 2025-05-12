@@ -61,12 +61,12 @@ pub enum Cli {
         /// Local address that other peers can use to message this node.
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
-        /// Debuggable id for each MPC node for logging purposes
-        #[arg(long, env("MPC_DEBUG_NODE_ID"))]
-        debug_id: Option<usize>,
         /// Storage options
         #[clap(flatten)]
         storage_options: storage::Options,
+        /// Logging options
+        #[clap(flatten)]
+        log_options: logs::Options,
         /// The set of configurations that we will use to override contract configurations.
         #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
         override_config: Option<OverrideConfig>,
@@ -95,8 +95,8 @@ impl Cli {
                 sol,
                 indexer_options,
                 my_address,
-                debug_id,
                 storage_options,
+                log_options,
                 override_config,
                 client_header_referer,
                 mesh_options,
@@ -125,9 +125,6 @@ impl Cli {
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
                 }
-                if let Some(debug_id) = debug_id {
-                    args.extend(["--debug-id".to_string(), debug_id.to_string()]);
-                }
                 if let Some(override_config) = override_config {
                     args.extend([
                         "--override-config".to_string(),
@@ -143,6 +140,7 @@ impl Cli {
                 args.extend(sol.into_str_args());
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
+                args.extend(log_options.into_str_args());
                 args.extend(mesh_options.into_str_args());
                 args.extend(message_options.into_str_args());
                 args
@@ -151,7 +149,7 @@ impl Cli {
     }
 }
 
-pub fn run(cmd: Cli) -> anyhow::Result<()> {
+pub async fn run(cmd: Cli) -> anyhow::Result<()> {
     match cmd {
         Cli::Start {
             near_rpc,
@@ -165,14 +163,15 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             sol,
             indexer_options,
             my_address,
-            debug_id,
             storage_options,
+            log_options,
             override_config,
             client_header_referer,
             mesh_options,
             message_options,
         } => {
-            logs::install_global(debug_id);
+            let _guard = logs::setup(&storage_options.env, account_id.as_str(), &log_options).await;
+
             let _span = tracing::trace_span!("cli").entered();
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
@@ -189,12 +188,10 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             crate::metrics::CONFIGURATION_DIGEST
                 .with_label_values(&[account_id.as_str()])
                 .set(digest);
+
             let (sign_tx, sign_rx) = SignQueue::channel();
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            let gcp_service =
-                rt.block_on(async { GcpService::init(&account_id, &storage_options).await })?;
+
+            let gcp_service = GcpService::init(&account_id, &storage_options).await?;
 
             let key_storage =
                 storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
@@ -280,52 +277,47 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 over: override_config.unwrap_or_else(Default::default),
                 network,
             })));
-            rt.block_on(async {
-                let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
-                let (sender, msg_channel) =
-                    MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
-                let protocol = MpcSignProtocol {
-                    my_account_id: account_id.clone(),
-                    state: state.clone(),
-                    near: near_client,
-                    rpc_channel,
-                    msg_channel,
-                    sign_rx: Arc::new(RwLock::new(sign_rx)),
-                    secret_storage: key_storage,
-                    triple_storage: triple_storage.clone(),
-                    presignature_storage: presignature_storage.clone(),
-                };
 
-                tracing::info!("protocol initialized");
-                tokio::spawn(sync.run());
-                tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
-                tokio::spawn(mesh.run(contract_state.clone()));
-                let system_handle = spawn_system_metrics(account_id.as_str()).await;
-                let protocol_handle =
-                    tokio::spawn(protocol.run(contract_state, config, mesh_state));
-                tracing::info!("protocol thread spawned");
-                let web_handle = tokio::spawn(web::run(
-                    web_port,
-                    sender,
-                    state,
-                    indexer,
-                    triple_storage,
-                    presignature_storage,
-                    sync_channel,
-                ));
-                tokio::spawn(indexer_eth::run(eth, sign_tx.clone(), account_id.clone()));
-                tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
-                tracing::info!("protocol http server spawned");
+            let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
+            let (sender, msg_channel) =
+                MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
+            let protocol = MpcSignProtocol {
+                my_account_id: account_id.clone(),
+                state: state.clone(),
+                near: near_client,
+                rpc_channel,
+                msg_channel,
+                sign_rx: Arc::new(RwLock::new(sign_rx)),
+                secret_storage: key_storage,
+                triple_storage: triple_storage.clone(),
+                presignature_storage: presignature_storage.clone(),
+            };
 
-                protocol_handle.await?;
-                web_handle.await?;
-                system_handle.abort();
-                tracing::info!("spinning down");
-
-                anyhow::Ok(())
-            })?;
+            tracing::info!("protocol initialized");
+            tokio::spawn(sync.run());
+            tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
+            tokio::spawn(mesh.run(contract_state.clone()));
+            let system_handle = spawn_system_metrics(account_id.as_str()).await;
+            let protocol_handle = tokio::spawn(protocol.run(contract_state, config, mesh_state));
+            tracing::info!("protocol thread spawned");
+            let web_handle = tokio::spawn(web::run(
+                web_port,
+                sender,
+                state,
+                indexer,
+                triple_storage,
+                presignature_storage,
+                sync_channel,
+            ));
+            tokio::spawn(indexer_eth::run(eth, sign_tx.clone(), account_id.clone()));
+            tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
+            tracing::info!("protocol http server spawned");
+            protocol_handle.await?;
+            web_handle.await?;
+            system_handle.abort();
+            tracing::info!("spinning down");
         }
-    }
+    };
 
     Ok(())
 }
