@@ -116,8 +116,17 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
         threshold: usize,
         action: &PositAction,
     ) -> PositInternalAction<S> {
+        // Before getting to this point, we should have already checked storage for the related protocols.
+        // All information passed to this function should be valid. The only information that still needs
+        // to be checked is the information about the posit itself and whether we're in the right state for
+        // it to proceed and be acted upon.
+
         match action {
             PositAction::Propose => {
+                // Checks:
+                // 1. We are not the proposer.
+                // 2. Somebody else hasn't also proposed the protocol.
+
                 if let Some(positor) = self.posits.get(&id) {
                     let proposer = positor.id();
                     if positor.is_proposer() {
@@ -140,6 +149,11 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                 PositInternalAction::Reply(PositAction::Accept)
             }
             PositAction::Start(participants) => {
+                // Checks:
+                // 1. We are a participant in the protocol.
+                // 2. We are not the proposer.
+                // 3. The proposer is the one that started the protocol.
+
                 if !participants.contains(&self.me) {
                     tracing::warn!(
                         ?id,
