@@ -111,24 +111,9 @@ impl fmt::Debug for TriplesTakenDropper {
     }
 }
 
-pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
-    let triple_key = format!("triples:{STORAGE_VERSION}:{account_id}");
-    let used_key = format!("triples_used:{STORAGE_VERSION}:{account_id}");
-    let reserved_key = format!("triples_reserved:{STORAGE_VERSION}:{account_id}");
-    let owner_keys = format!("triples_owners:{STORAGE_VERSION}:{account_id}");
-
-    TripleStorage {
-        redis_pool: pool.clone(),
-        triple_key,
-        used_key,
-        reserved_key,
-        owner_keys,
-    }
-}
-
 #[derive(Clone)]
 pub struct TripleStorage {
-    redis_pool: Pool,
+    redis: Pool,
     triple_key: String,
     used_key: String,
     reserved_key: String,
@@ -136,8 +121,18 @@ pub struct TripleStorage {
 }
 
 impl TripleStorage {
+    pub fn new(redis: Pool, account_id: &AccountId) -> Self {
+        TripleStorage {
+            redis,
+            triple_key: format!("triples:{STORAGE_VERSION}:{account_id}"),
+            used_key: format!("triples_used:{STORAGE_VERSION}:{account_id}"),
+            reserved_key: format!("triples_reserved:{STORAGE_VERSION}:{account_id}"),
+            owner_keys: format!("triples_owners:{STORAGE_VERSION}:{account_id}"),
+        }
+    }
+
     async fn connect(&self) -> Option<Connection> {
-        self.redis_pool
+        self.redis
             .get()
             .await
             .inspect_err(|err| {
