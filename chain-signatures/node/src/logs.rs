@@ -63,6 +63,13 @@ impl Options {
         }
         opts
     }
+
+    pub fn test() -> Self {
+        Self {
+            disable_gcp_logs: true,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, clap::ValueEnum, serde::Serialize, serde::Deserialize)]

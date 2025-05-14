@@ -305,7 +305,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         redis_url: redis.internal_address.clone(),
     };
 
-    let log_options = logs::Options::default();
+    let log_options = logs::Options::test();
 
     let mesh_options = mpc_node::mesh::Options {
         ping_interval: 1000,
