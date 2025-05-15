@@ -198,11 +198,11 @@ impl TripleStorage {
         }
     }
 
-    pub async fn remove_outdated(
+    pub async fn remove_outdated<R: FromRedisValue + Default>(
         &self,
         owner: Participant,
-        owner_shares: &[TripleId],
-    ) -> Vec<TripleId> {
+        owner_shares: impl IntoIterator<Item = &TripleId>,
+    ) -> R {
         const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local reserved_key = KEYS[2]
@@ -234,27 +234,22 @@ impl TripleStorage {
         "#;
 
         let Some(mut conn) = self.connect().await else {
-            return Vec::new();
+            return R::default();
         };
-        let result: Result<Vec<TripleId>, _> = redis::Script::new(SCRIPT)
+        let result: Result<R, _> = redis::Script::new(SCRIPT)
             .key(&self.triple_key)
             .key(&self.reserved_key)
             .key(owner_key(&self.owner_keys, owner))
             // NOTE: this encodes each entry of owner_shares as a separate ARGV[index] entry.
-            .arg(owner_shares)
+            .arg(owner_shares.into_iter().copied().collect::<Vec<_>>())
             .invoke_async(&mut conn)
             .await;
 
         match result {
-            Ok(outdated) => {
-                if !outdated.is_empty() {
-                    tracing::info!(?outdated, "removed outdated triples");
-                }
-                outdated
-            }
+            Ok(outdated) => outdated,
             Err(err) => {
                 tracing::warn!(?err, "failed to remove outdated triples");
-                Vec::new()
+                R::default()
             }
         }
     }
@@ -279,9 +274,9 @@ impl TripleStorage {
     }
 
     // TODO: me can potentially be integrated into storage if we eventually can wait for our own participant info to be determined.
-    pub async fn fetch_owned(&self, me: Participant) -> Vec<TripleId> {
+    pub async fn fetch_owned<R: FromRedisValue + Default>(&self, me: Participant) -> R {
         let Some(mut conn) = self.connect().await else {
-            return Vec::new();
+            return R::default();
         };
 
         conn.sunion((&self.reserved_key, owner_key(&self.owner_keys, me)))

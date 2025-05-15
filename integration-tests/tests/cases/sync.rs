@@ -80,8 +80,8 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
 
     let update = SyncUpdate {
         from: node1,
-        triples: valid.clone(),
-        presignatures: valid.clone(),
+        triples: valid.iter().copied().collect(),
+        presignatures: valid.iter().copied().collect(),
     };
     sync_channel.request_update(update).await;
     // Give it some time for sync to process the update

@@ -5,8 +5,8 @@ use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
 use k256::Secp256k1;
-use mpc_node::protocol::presignature::{Presignature, PresignatureManager};
-use mpc_node::protocol::triple::{Triple, TripleManager};
+use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
+use mpc_node::protocol::triple::{Triple, TripleId, TripleManager};
 use mpc_node::protocol::MessageChannel;
 use test_log::test;
 
@@ -162,7 +162,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     }
 
     // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
-    let mut outdated = triple_storage.remove_outdated(node1, &[13, 14, 15]).await;
+    let mut outdated: Vec<TripleId> = triple_storage.remove_outdated(node1, &[13, 14, 15]).await;
     outdated.sort();
     assert_eq!(outdated, vec![10, 11, 12]);
 
@@ -299,7 +299,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     }
 
     // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
-    let mut outdated = presignature_storage
+    let mut outdated: Vec<PresignatureId> = presignature_storage
         .remove_outdated(node1, &[13, 14, 15])
         .await;
     outdated.sort();

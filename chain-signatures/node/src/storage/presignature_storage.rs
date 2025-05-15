@@ -128,9 +128,9 @@ impl PresignatureStorage {
             .ok()
     }
 
-    pub async fn fetch_owned(&self, me: Participant) -> Vec<PresignatureId> {
+    pub async fn fetch_owned<R: FromRedisValue + Default>(&self, me: Participant) -> R {
         let Some(mut conn) = self.connect().await else {
-            return Vec::new();
+            return R::default();
         };
 
         conn.sunion((&self.reserved_key, owner_key(&self.owner_keys, me)))
@@ -195,11 +195,11 @@ impl PresignatureStorage {
         }
     }
 
-    pub async fn remove_outdated(
+    pub async fn remove_outdated<R: FromRedisValue + Default>(
         &self,
         owner: Participant,
-        owner_shares: &[PresignatureId],
-    ) -> Vec<PresignatureId> {
+        owner_shares: impl IntoIterator<Item = &PresignatureId>,
+    ) -> R {
         const SCRIPT: &str = r#"
             local presig_key = KEYS[1]
             local reserved_key = KEYS[2]
@@ -231,27 +231,22 @@ impl PresignatureStorage {
         "#;
 
         let Some(mut conn) = self.connect().await else {
-            return Vec::new();
+            return R::default();
         };
-        let result: Result<Vec<PresignatureId>, _> = redis::Script::new(SCRIPT)
+        let result: Result<R, _> = redis::Script::new(SCRIPT)
             .key(&self.presig_key)
             .key(&self.reserved_key)
             .key(owner_key(&self.owner_keys, owner))
             // NOTE: this encodes each entry of owner_shares as a separate ARGV[index] entry.
-            .arg(owner_shares)
+            .arg(owner_shares.into_iter().copied().collect::<Vec<_>>())
             .invoke_async(&mut conn)
             .await;
 
         match result {
-            Ok(outdated) => {
-                if !outdated.is_empty() {
-                    tracing::info!(?outdated, "removed outdated presignatures");
-                }
-                outdated
-            }
+            Ok(outdated) => outdated,
             Err(err) => {
                 tracing::warn!(?err, "failed to remove outdated presignatures");
-                Vec::new()
+                R::default()
             }
         }
     }

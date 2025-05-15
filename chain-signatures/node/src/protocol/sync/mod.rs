@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::mesh::MeshState;
@@ -23,16 +24,16 @@ const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
     pub from: Participant,
-    pub triples: Vec<TripleId>,
-    pub presignatures: Vec<PresignatureId>,
+    pub triples: HashSet<TripleId>,
+    pub presignatures: HashSet<PresignatureId>,
 }
 
 impl SyncUpdate {
     pub fn empty() -> Self {
         Self {
             from: Participant::from(u32::MAX),
-            triples: Vec::new(),
-            presignatures: Vec::new(),
+            triples: Default::default(),
+            presignatures: Default::default(),
         }
     }
 
@@ -41,8 +42,14 @@ impl SyncUpdate {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SyncView {
+    pub triples: HashSet<TripleId>,
+    pub presignatures: HashSet<PresignatureId>,
+}
+
 pub struct SyncRequestReceiver {
-    updates: mpsc::Receiver<SyncUpdate>,
+    updates: mpsc::Receiver<SyncInternalUpdate>,
 }
 
 pub struct SyncTask {
@@ -140,13 +147,10 @@ impl SyncTask {
 
     // TODO: use reserved values instead. Note that we cannot fetch our own triples via reserved
     async fn new_update(&self, me: Participant) -> SyncUpdate {
-        let triples = self.triples.fetch_owned(me).await;
-        let presignatures = self.presignatures.fetch_owned(me).await;
-
         SyncUpdate {
             from: me,
-            triples,
-            presignatures,
+            triples: self.triples.fetch_owned(me).await,
+            presignatures: self.presignatures.fetch_owned(me).await,
         }
     }
 }
@@ -190,13 +194,19 @@ async fn broadcast_sync(
     update
 }
 
-impl SyncUpdate {
-    async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
-        let start = Instant::now();
+pub struct SyncInternalUpdate {
+    update: SyncUpdate,
+    resp: oneshot::Sender<SyncView>,
+}
 
-        let outdated_triples = triples.remove_outdated(self.from, &self.triples).await;
-        let outdated_presignatures = presignatures
-            .remove_outdated(self.from, &self.presignatures)
+impl SyncInternalUpdate {
+    async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
+        let SyncInternalUpdate { update, resp } = self;
+        let start = Instant::now();
+        let outdated_triples: HashSet<TripleId> =
+            triples.remove_outdated(update.from, &update.triples).await;
+        let outdated_presignatures: HashSet<PresignatureId> = presignatures
+            .remove_outdated(update.from, &update.presignatures)
             .await;
 
         if !outdated_triples.is_empty() || !outdated_presignatures.is_empty() {
@@ -207,12 +217,30 @@ impl SyncUpdate {
                 "removed outdated",
             );
         }
+
+        if resp
+            .send(SyncView {
+                triples: update
+                    .triples
+                    .difference(&outdated_triples)
+                    .copied()
+                    .collect(),
+                presignatures: update
+                    .presignatures
+                    .difference(&outdated_presignatures)
+                    .copied()
+                    .collect(),
+            })
+            .is_err()
+        {
+            tracing::warn!("failed to send sync view due channel closure");
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct SyncChannel {
-    request_update: mpsc::Sender<SyncUpdate>,
+    request_update: mpsc::Sender<SyncInternalUpdate>,
 }
 
 impl SyncChannel {
@@ -229,9 +257,21 @@ impl SyncChannel {
         (requests, channel)
     }
 
-    pub async fn request_update(&self, update: SyncUpdate) {
+    pub async fn request_update(&self, update: SyncUpdate) -> Option<SyncView> {
+        let (tx, rx) = oneshot::channel();
+        let update = SyncInternalUpdate {
+            update: update,
+            resp: tx,
+        };
+
         if let Err(err) = self.request_update.send(update).await {
             tracing::warn!(?err, "failed to request update");
         }
+
+        rx.await
+            .inspect_err(|_err| {
+                tracing::warn!("failed to receive sync view due to channel closure");
+            })
+            .ok()
     }
 }
