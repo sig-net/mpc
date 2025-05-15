@@ -2,8 +2,8 @@ mod filter;
 mod types;
 
 pub use crate::protocol::message::types::{
-    GeneratingMessage, Message, MessageError, MessageFilterId, PresignatureMessage, Protocols,
-    ResharingMessage, SignatureMessage, TripleMessage,
+    GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
+    PresignatureMessage, Protocols, ResharingMessage, SignatureMessage, TripleMessage,
 };
 
 use super::contract::primitives::{ParticipantMap, Participants};
@@ -53,6 +53,8 @@ pub struct MessageInbox {
     /// Incoming messages that are pending to be processed. These are encrypted and signed.
     inbox_rx: mpsc::Receiver<Ciphered>,
 
+    // TODO: need to expire messages that never get processed
+    posit: VecDeque<PositMessage>,
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
@@ -70,6 +72,7 @@ impl MessageInbox {
             idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
             filter: MessageFilter::new(filter_rx),
             inbox_rx,
+            posit: VecDeque::new(),
             generating: VecDeque::new(),
             resharing: HashMap::new(),
             triple: HashMap::new(),
@@ -80,6 +83,7 @@ impl MessageInbox {
 
     pub fn push(&mut self, message: Message) {
         match message {
+            Message::Posit(message) => self.posit.push_back(message),
             Message::Generating(message) => self.generating.push_back(message),
             Message::Resharing(message) => self
                 .resharing
@@ -232,6 +236,7 @@ impl MessageInbox {
 
     pub fn clear(&mut self) {
         self.try_decrypt.clear();
+        self.posit.clear();
         self.generating.clear();
         self.resharing.clear();
         self.triple.clear();
@@ -463,6 +468,34 @@ impl MessageReceiver for RunningState {
         let active = mesh_state.active.keys_vec();
         let mut inbox = channel.inbox().write().await;
 
+        for posit in inbox.posit.drain(..) {
+            match posit.id {
+                PositProtocolId::Triple(_) => {}
+                PositProtocolId::Presignature(id) => {
+                    let mut presignature_manager = self.presignature_manager.write().await;
+                    let start_protocol = presignature_manager
+                        .process_posit(id, posit.from, posit.action)
+                        .await;
+                    if let Some((participants, positor)) = start_protocol {
+                        if let Err(err) = presignature_manager
+                            .generate(
+                                id,
+                                positor,
+                                &participants,
+                                &self.public_key,
+                                &self.private_share,
+                                protocol_cfg,
+                            )
+                            .await
+                        {
+                            tracing::warn!(?id, ?err, "unable to start presignature protocol");
+                        }
+                    }
+                }
+                PositProtocolId::Signature(_, _) => {}
+            }
+        }
+
         // remove the triple_id that has already failed or taken from the triple_bins
         // and refresh the timestamp of failed and taken
         let triple_messages = inbox.triple.remove(&self.epoch).unwrap_or_default();
@@ -519,10 +552,7 @@ impl MessageReceiver for RunningState {
         for (id, queue) in presignature_messages {
             // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
             let PresignatureMessage {
-                triple0,
-                triple1,
-                from,
-                ..
+                triple0, triple1, ..
             } = queue.front().unwrap();
 
             if !queue
@@ -535,52 +565,8 @@ impl MessageReceiver for RunningState {
                 continue;
             }
 
-            let protocol = match presignature_manager
-                .get_or_start_generation(
-                    *from,
-                    &active,
-                    *id,
-                    *triple0,
-                    *triple1,
-                    &self.public_key,
-                    &self.private_share,
-                    protocol_cfg,
-                )
-                .await
-            {
-                Ok(protocol) => protocol,
-                Err(GenerationError::TripleGeneratingOrMissing(_)) => {
-                    // We will go back to this presignature bin later when the triple is generated.
-                    // If it's missing, we will just rely on the message expiration mechanism to remove it.
-                    continue;
-                }
-                Err(err @ GenerationError::AlreadyGenerated) => {
-                    // This triple has already been generated so we will have to bin the entirety of the messages
-                    // we received for this presignature id, and have the other nodes timeout
-                    tracing::warn!(id, ?err, "presignature cannot be generated");
-                    queue.clear();
-                    continue;
-                }
-                Err(GenerationError::CaitSithInitializationError(error)) => {
-                    // ignore these messages since the generation had bad parameters. Also have the other node who
-                    // initiated the protocol resend the message or have it timeout on their side.
-                    tracing::warn!(
-                        presignature_id = id,
-                        ?error,
-                        "unable to initialize incoming presignature protocol"
-                    );
-                    queue.clear();
-                    continue;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        presignature_id = id,
-                        ?err,
-                        "Unexpected error encounted while generating presignature"
-                    );
-                    queue.clear();
-                    continue;
-                }
+            let Some(protocol) = presignature_manager.generator(*id) else {
+                continue;
             };
 
             while let Some(message) = queue.pop_front() {
@@ -1117,6 +1103,7 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
 
 fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {
     match msg {
+        Message::Posit(_) => Duration::from_millis(cfg.message_timeout),
         Message::Generating(_) => Duration::from_millis(cfg.message_timeout),
         Message::Resharing(_) => Duration::from_millis(cfg.message_timeout),
         Message::Triple(_) => Duration::from_millis(cfg.triple.generation_timeout),
