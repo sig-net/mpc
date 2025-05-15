@@ -49,6 +49,20 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
         .insert(dummy_triple(triple_id2), node1)
         .await;
 
+    assert_eq!(
+        triple_storage.fetch_participants(triple_id1).await,
+        dummy_participants(1..=2),
+    );
+
+    // Remove participant 1, so only participant 2 is left
+    triple_storage
+        .remove_participants(triple_id1, &[Participant::from(1)])
+        .await;
+    assert_eq!(
+        triple_storage.fetch_participants(triple_id1).await,
+        vec![Participant::from(2)],
+    );
+
     // Check that the storage contains the foreign triple
     assert!(triple_manager.contains(triple_id1).await);
     assert!(triple_manager.contains(triple_id2).await);
@@ -306,7 +320,7 @@ fn dummy_presignature(id: u64) -> Presignature {
             k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
             sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
         },
-        participants: vec![Participant::from(1), Participant::from(2)],
+        participants: dummy_participants(1..=2),
     }
 }
 
@@ -322,8 +336,12 @@ fn dummy_triple(id: u64) -> Triple {
             big_a: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
             big_b: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
             big_c: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            participants: vec![Participant::from(1), Participant::from(2)],
+            participants: dummy_participants(1..=2),
             threshold: 5,
         },
     }
+}
+
+fn dummy_participants(participants: impl IntoIterator<Item = u32>) -> Vec<Participant> {
+    participants.into_iter().map(Participant::from).collect()
 }
