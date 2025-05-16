@@ -1,0 +1,9 @@
+[package]
+name = "mpc-store"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+deadpool-redis.workspace = true
+serde.workspace = true
