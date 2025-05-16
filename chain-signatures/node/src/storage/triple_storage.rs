@@ -118,7 +118,7 @@ pub struct TripleStorage {
     used_key: String,
     reserved_key: String,
     owner_keys: String,
-    participant_key: String,
+    participant_keys: String,
 }
 
 impl TripleStorage {
@@ -129,7 +129,7 @@ impl TripleStorage {
             used_key: format!("triples_used:{STORAGE_VERSION}:{account_id}"),
             reserved_key: format!("triples_reserved:{STORAGE_VERSION}:{account_id}"),
             owner_keys: format!("triples_owners:{STORAGE_VERSION}:{account_id}"),
-            participant_key: format!("triples_participants:{STORAGE_VERSION}:{account_id}"),
+            participant_keys: format!("triples_participants:{STORAGE_VERSION}:{account_id}"),
         }
     }
 
@@ -141,6 +141,33 @@ impl TripleStorage {
                 tracing::warn!(?err, "failed to connect to redis");
             })
             .ok()
+    }
+
+    // TODO: me can potentially be integrated into storage if we eventually can wait for our own participant info to be determined.
+    pub async fn fetch_owned<R: FromRedisValue + Default>(&self, me: Participant) -> R {
+        let Some(mut conn) = self.connect().await else {
+            return R::default();
+        };
+
+        conn.sunion((&self.reserved_key, owner_key(&self.owner_keys, me)))
+            .await
+            .inspect_err(|err| {
+                tracing::warn!(?err, "failed to fetch (mine | reserved) triples");
+            })
+            .unwrap_or_default()
+    }
+
+    pub async fn fetch_participants(&self, id: TripleId) -> Vec<Participant> {
+        let Some(mut conn) = self.connect().await else {
+            return Vec::new();
+        };
+        conn.smembers(&format!("{}:{}", self.participant_keys, id))
+            .await
+            .inspect_err(|err| {
+                tracing::warn!(id, ?err, "failed to fetch participants for triple");
+            })
+            .map(|v: Vec<u32>| v.into_iter().map(Participant::from).collect::<Vec<_>>())
+            .unwrap_or_default()
     }
 
     pub async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
@@ -265,7 +292,7 @@ impl TripleStorage {
         let mut pipe = redis::pipe();
         pipe.atomic();
         for (id, participants) in kick {
-            let key = format!("{}:{}", self.participant_key, id);
+            let key = format!("{}:{}", self.participant_keys, id);
             pipe.srem(
                 key,
                 participants
@@ -281,33 +308,6 @@ impl TripleStorage {
         }
     }
 
-    // TODO: me can potentially be integrated into storage if we eventually can wait for our own participant info to be determined.
-    pub async fn fetch_owned<R: FromRedisValue + Default>(&self, me: Participant) -> R {
-        let Some(mut conn) = self.connect().await else {
-            return R::default();
-        };
-
-        conn.sunion((&self.reserved_key, owner_key(&self.owner_keys, me)))
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(?err, "failed to fetch (mine | reserved) triples");
-            })
-            .unwrap_or_default()
-    }
-
-    pub async fn fetch_participants(&self, id: TripleId) -> Vec<Participant> {
-        let Some(mut conn) = self.connect().await else {
-            return Vec::new();
-        };
-        conn.smembers(&format!("{}:{}", self.participant_key, id))
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(id, ?err, "failed to fetch participants for triple");
-            })
-            .map(|v: Vec<u32>| v.into_iter().map(Participant::from).collect::<Vec<_>>())
-            .unwrap_or_default()
-    }
-
     async fn insert(&self, triple: Triple, owner: Participant) -> bool {
         const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
@@ -315,7 +315,7 @@ impl TripleStorage {
             local reserved_key = KEYS[3]
             local owner_keys = KEYS[4]
             local owner_key = KEYS[5]
-            local participant_key = KEYS[6]
+            local participant_keys = KEYS[6]
             local triple_id = ARGV[1]
             local triple = ARGV[2]
             local participant_beg = 3
@@ -331,7 +331,7 @@ impl TripleStorage {
                 return {err = "WARN triple " .. triple_id .. " has already been used"}
             end
 
-            redis.call("SADD", participant_key ..  ":" .. triple_id, unpack(ARGV, participant_beg, participant_end))
+            redis.call("SADD", participant_keys ..  ":" .. triple_id, unpack(ARGV, participant_beg, participant_end))
             redis.call("SADD", owner_key, triple_id)
             redis.call("SADD", owner_keys, owner_key)
             redis.call("HSET", triple_key, triple_id, triple)
@@ -348,7 +348,7 @@ impl TripleStorage {
             .key(&self.reserved_key)
             .key(&self.owner_keys)
             .key(owner_key(&self.owner_keys, owner))
-            .key(&self.participant_key)
+            .key(&self.participant_keys)
             .arg(id)
             .arg(&triple)
             .arg(
@@ -440,7 +440,7 @@ impl TripleStorage {
             local owner_key = KEYS[3]
             local mine_key = KEYS[4]
             local reserved_key = KEYS[5]
-            local participant_key = KEYS[6]
+            local participant_keys = KEYS[6]
             local id1 = ARGV[1]
             local id2 = ARGV[2]
 
@@ -471,7 +471,7 @@ impl TripleStorage {
             end
             redis.call("HDEL", triple_key, id1, id2)
             redis.call("SREM", owner_key, id1, id2)
-            redis.call("DEL", participant_key .. ":" .. id1, participant_key .. ":" .. id2)
+            redis.call("DEL", participant_keys .. ":" .. id1, participant_keys .. ":" .. id2)
 
             -- Add the triples to the used set and set expiration time. Note, HSET is used so
             -- we can expire on each field instead of the whole hash set.
@@ -488,7 +488,7 @@ impl TripleStorage {
             .key(owner_key(&self.owner_keys, owner))
             .key(owner_key(&self.owner_keys, me))
             .key(&self.reserved_key)
-            .key(&self.participant_key)
+            .key(&self.participant_keys)
             .arg(id1)
             .arg(id2)
             .arg(USED_EXPIRE_TIME.num_seconds())
@@ -515,7 +515,7 @@ impl TripleStorage {
             local used_key = KEYS[2]
             local mine_key = KEYS[3]
             local reserved_key = KEYS[4]
-            local participant_key = KEYS[5]
+            local participant_keys = KEYS[5]
             local expire_time = ARGV[1]
 
             if redis.call("SCARD", mine_key) < 2 then
@@ -541,7 +541,7 @@ impl TripleStorage {
             -- delete the triples from our self owner set
             redis.call("SREM", mine_key, unpack(triple_ids))
             -- delete participant set associated with these triples
-            redis.call("DEL", participant_key .. ":" .. triple_ids[1], participant_key .. ":" .. triple_ids[2])
+            redis.call("DEL", participant_keys .. ":" .. triple_ids[1], participant_keys .. ":" .. triple_ids[2])
 
             -- Add the triples to the used set and set expiration time. Note, HSET is used so
             -- we can expire on each field instead of the whole hash set.
@@ -558,7 +558,7 @@ impl TripleStorage {
             .key(&self.used_key)
             .key(owner_key(&self.owner_keys, me))
             .key(&self.reserved_key)
-            .key(&self.participant_key)
+            .key(&self.participant_keys)
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await
@@ -618,9 +618,6 @@ impl TripleStorage {
             local owner_keys = redis.call("SMEMBERS", KEYS[1])
             local participant_keys = redis.call("KEYS", KEYS[2] .. ":*")
             local del = {}
-            for _, key in ipairs(participant_keys) do
-                table.insert(del, key)
-            end
             for _, key in ipairs(KEYS) do
                 table.insert(del, key)
             end
@@ -629,6 +626,9 @@ impl TripleStorage {
             end
 
             redis.call("DEL", unpack(del))
+            if #participant_keys > 0 then
+                redis.call("DEL", unpack(participant_keys))
+            end
         "#;
 
         let Some(mut conn) = self.connect().await else {
@@ -636,7 +636,7 @@ impl TripleStorage {
         };
         let outcome: Option<()> = redis::Script::new(SCRIPT)
             .key(&self.owner_keys)
-            .key(&self.participant_key)
+            .key(&self.participant_keys)
             .key(&self.triple_key)
             .key(&self.used_key)
             .key(&self.reserved_key)

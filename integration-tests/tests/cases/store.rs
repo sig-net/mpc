@@ -56,7 +56,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
         dummy_participants(1..=2),
     );
 
-    // Remove participant 1, so only participant 2 is left
+    // Try kicking the participants if to check they don't have the shares:
     let mut kick = HashMap::new();
     kick.insert(triple_id1, vec![Participant::from(1)]);
     kick.insert(triple_id2, vec![Participant::from(1), Participant::from(2)]);
@@ -65,7 +65,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
         triple_storage.fetch_participants(triple_id1).await,
         vec![Participant::from(2)],
     );
-    assert_eq!(triple_storage.fetch_participants(triple_id2).await, vec![],);
+    assert_eq!(triple_storage.fetch_participants(triple_id2).await, vec![]);
 
     // Check that the storage contains the foreign triple
     assert!(triple_manager.contains(triple_id1).await);
@@ -281,7 +281,31 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert!(presignature_storage.reserve(id2).await.is_none());
     assert!(!presignature_manager.contains(id2).await);
 
-    presignature_storage.clear().await;
+    presignature_storage
+        .reserve(10)
+        .await
+        .unwrap()
+        .insert(dummy_presignature(10), node1)
+        .await;
+    presignature_storage
+        .reserve(11)
+        .await
+        .unwrap()
+        .insert(dummy_presignature(11), node1)
+        .await;
+
+    // Try kicking the participants if to check they don't have the shares:
+    let mut kick = HashMap::new();
+    kick.insert(10, vec![Participant::from(1)]);
+    kick.insert(11, vec![Participant::from(1), Participant::from(2)]);
+    presignature_storage.kick_participants(kick).await;
+    assert_eq!(
+        presignature_storage.fetch_participants(10).await,
+        vec![Participant::from(2)],
+    );
+    assert_eq!(presignature_storage.fetch_participants(11).await, vec![]);
+
+    assert!(presignature_storage.clear().await);
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
         presignature_storage

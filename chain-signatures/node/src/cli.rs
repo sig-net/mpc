@@ -6,7 +6,7 @@ use crate::protocol::message::MessageChannel;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
 use crate::rpc::{NearClient, NodeStateWatcher, RpcExecutor};
-use crate::storage::{app_data_storage, TripleStorage};
+use crate::storage::{app_data_storage, PresignatureStorage, TripleStorage};
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -201,8 +201,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let redis_cfg = deadpool_redis::Config::from_url(redis_url);
             let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
             let triple_storage = TripleStorage::new(redis_pool.clone(), &account_id);
-            let presignature_storage =
-                storage::presignature_storage::init(&redis_pool, &account_id);
+            let presignature_storage = PresignatureStorage::new(redis_pool.clone(), &account_id);
             let app_data_storage = app_data_storage::init(&redis_pool, &account_id);
 
             let mut rpc_client = near_fetch::Client::new(&near_rpc);
