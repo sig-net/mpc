@@ -1,9 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::mesh::MeshState;
@@ -23,16 +24,16 @@ const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
     pub from: Participant,
-    pub triples: Vec<TripleId>,
-    pub presignatures: Vec<PresignatureId>,
+    pub triples: HashSet<TripleId>,
+    pub presignatures: HashSet<PresignatureId>,
 }
 
 impl SyncUpdate {
     pub fn empty() -> Self {
         Self {
             from: Participant::from(u32::MAX),
-            triples: Vec::new(),
-            presignatures: Vec::new(),
+            triples: Default::default(),
+            presignatures: Default::default(),
         }
     }
 
@@ -41,8 +42,14 @@ impl SyncUpdate {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SyncView {
+    pub triples: HashSet<TripleId>,
+    pub presignatures: HashSet<PresignatureId>,
+}
+
 pub struct SyncRequestReceiver {
-    updates: mpsc::Receiver<SyncUpdate>,
+    updates: mpsc::Receiver<SyncInternalUpdate>,
 }
 
 pub struct SyncTask {
@@ -111,7 +118,7 @@ impl SyncTask {
                     };
 
                     let start = Instant::now();
-                    let task = tokio::spawn(broadcast_sync(self.client.clone(), update, active));
+                    let task = tokio::spawn(broadcast_sync(self.client.clone(), update, active, self.triples.clone(), self.presignatures.clone()));
                     broadcast = Some((start, task));
                 }
                 // check that our broadcast has completed, and if so process the result.
@@ -140,13 +147,10 @@ impl SyncTask {
 
     // TODO: use reserved values instead. Note that we cannot fetch our own triples via reserved
     async fn new_update(&self, me: Participant) -> SyncUpdate {
-        let triples = self.triples.fetch_owned(me).await;
-        let presignatures = self.presignatures.fetch_owned(me).await;
-
         SyncUpdate {
             from: me,
-            triples,
-            presignatures,
+            triples: self.triples.fetch_owned(me).await,
+            presignatures: self.presignatures.fetch_owned(me).await,
         }
     }
 }
@@ -156,6 +160,8 @@ async fn broadcast_sync(
     client: NodeClient,
     update: SyncUpdate,
     active: Participants,
+    triples: TripleStorage,
+    presignatures: PresignatureStorage,
 ) -> SyncUpdate {
     if update.is_empty() {
         return update;
@@ -178,25 +184,59 @@ async fn broadcast_sync(
         .join_all()
         .await
         .into_iter()
-        .filter_map(|(p, view)| if let Ok(()) = view { Some(p) } else { None })
+        .filter_map(|(p, view)| {
+            if let Ok(view) = view {
+                Some((p, view))
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>();
 
     tracing::info!(
         elapsed = ?start.elapsed(),
-        responded = ?resps,
+        responded = ?resps.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
         "broadcast completed",
     );
+
+    let mut triple_kick = HashMap::new();
+    for &id in &update.triples {
+        let entry = triple_kick.entry(id).or_insert_with(Vec::new);
+        for (p, view) in &resps {
+            if !view.triples.contains(&id) {
+                entry.push(*p);
+            }
+        }
+    }
+    triples.kick_participants(triple_kick).await;
+
+    let mut presignature_kick = HashMap::new();
+    for &id in &update.presignatures {
+        let entry = presignature_kick.entry(id).or_insert_with(Vec::new);
+        for (p, view) in &resps {
+            if !view.presignatures.contains(&id) {
+                entry.push(*p);
+            }
+        }
+    }
+    presignatures.kick_participants(presignature_kick).await;
 
     update
 }
 
-impl SyncUpdate {
-    async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
-        let start = Instant::now();
+pub struct SyncInternalUpdate {
+    update: SyncUpdate,
+    resp: oneshot::Sender<SyncView>,
+}
 
-        let outdated_triples = triples.remove_outdated(self.from, &self.triples).await;
-        let outdated_presignatures = presignatures
-            .remove_outdated(self.from, &self.presignatures)
+impl SyncInternalUpdate {
+    async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
+        let SyncInternalUpdate { update, resp } = self;
+        let start = Instant::now();
+        let outdated_triples: HashSet<TripleId> =
+            triples.remove_outdated(update.from, &update.triples).await;
+        let outdated_presignatures: HashSet<PresignatureId> = presignatures
+            .remove_outdated(update.from, &update.presignatures)
             .await;
 
         if !outdated_triples.is_empty() || !outdated_presignatures.is_empty() {
@@ -207,12 +247,22 @@ impl SyncUpdate {
                 "removed outdated",
             );
         }
+
+        if resp
+            .send(SyncView {
+                triples: triples.fetch_owned(update.from).await,
+                presignatures: presignatures.fetch_owned(update.from).await,
+            })
+            .is_err()
+        {
+            tracing::warn!("failed to send sync view due channel closure");
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct SyncChannel {
-    request_update: mpsc::Sender<SyncUpdate>,
+    request_update: mpsc::Sender<SyncInternalUpdate>,
 }
 
 impl SyncChannel {
@@ -229,9 +279,18 @@ impl SyncChannel {
         (requests, channel)
     }
 
-    pub async fn request_update(&self, update: SyncUpdate) {
+    pub async fn request_update(&self, update: SyncUpdate) -> Option<SyncView> {
+        let (tx, rx) = oneshot::channel();
+        let update = SyncInternalUpdate { update, resp: tx };
+
         if let Err(err) = self.request_update.send(update).await {
             tracing::warn!(?err, "failed to request update");
         }
+
+        rx.await
+            .inspect_err(|_err| {
+                tracing::warn!("failed to receive sync view due to channel closure");
+            })
+            .ok()
     }
 }
