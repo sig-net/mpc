@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 use crate::protocol::triple::{Triple, TripleId};
 
@@ -254,23 +254,31 @@ impl TripleStorage {
         }
     }
 
-    pub async fn remove_participants(
-        &self,
-        id: TripleId,
-        participants: &[Participant],
-    ) -> Vec<Participant> {
+    /// Kicks participants from the given triples.
+    pub async fn kick_participants(&self, kick: HashMap<TripleId, Vec<Participant>>) {
+        if kick.is_empty() {
+            return;
+        }
         let Some(mut conn) = self.connect().await else {
-            return Vec::new();
+            return;
         };
-        let remove_members = participants
-            .iter()
-            .map(|&p| Into::<u32>::into(p).to_string())
-            .collect::<Vec<_>>();
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        for (id, participants) in kick {
+            let key = format!("{}:{}", self.participant_key, id);
+            pipe.srem(
+                key,
+                participants
+                    .into_iter()
+                    .map(|p| Into::<u32>::into(p).to_string())
+                    .collect::<Vec<_>>(),
+            );
+        }
 
-        conn.srem(&format!("{}:{}", self.participant_key, id), remove_members)
-            .await
-            .map(|v: Vec<u32>| v.into_iter().map(Participant::from).collect::<Vec<_>>())
-            .unwrap_or_default()
+        let outcome: Result<(), _> = pipe.query_async(&mut conn).await;
+        if let Err(err) = outcome {
+            tracing::warn!(?err, "failed to kick participants from triples");
+        }
     }
 
     // TODO: me can potentially be integrated into storage if we eventually can wait for our own participant info to be determined.

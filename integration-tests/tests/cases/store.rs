@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
@@ -55,13 +57,15 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     );
 
     // Remove participant 1, so only participant 2 is left
-    triple_storage
-        .remove_participants(triple_id1, &[Participant::from(1)])
-        .await;
+    let mut kick = HashMap::new();
+    kick.insert(triple_id1, vec![Participant::from(1)]);
+    kick.insert(triple_id2, vec![Participant::from(1), Participant::from(2)]);
+    triple_storage.kick_participants(kick).await;
     assert_eq!(
         triple_storage.fetch_participants(triple_id1).await,
         vec![Participant::from(2)],
     );
+    assert_eq!(triple_storage.fetch_participants(triple_id2).await, vec![],);
 
     // Check that the storage contains the foreign triple
     assert!(triple_manager.contains(triple_id1).await);

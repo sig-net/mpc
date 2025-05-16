@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -118,7 +118,7 @@ impl SyncTask {
                     };
 
                     let start = Instant::now();
-                    let task = tokio::spawn(broadcast_sync(self.client.clone(), update, active));
+                    let task = tokio::spawn(broadcast_sync(self.client.clone(), update, active, self.triples.clone(), self.presignatures.clone()));
                     broadcast = Some((start, task));
                 }
                 // check that our broadcast has completed, and if so process the result.
@@ -160,6 +160,8 @@ async fn broadcast_sync(
     client: NodeClient,
     update: SyncUpdate,
     active: Participants,
+    triples: TripleStorage,
+    presignatures: PresignatureStorage,
 ) -> SyncUpdate {
     if update.is_empty() {
         return update;
@@ -182,14 +184,42 @@ async fn broadcast_sync(
         .join_all()
         .await
         .into_iter()
-        .filter_map(|(p, view)| if let Ok(()) = view { Some(p) } else { None })
+        .filter_map(|(p, view)| {
+            if let Ok(view) = view {
+                Some((p, view))
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>();
 
     tracing::info!(
         elapsed = ?start.elapsed(),
-        responded = ?resps,
+        responded = ?resps.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
         "broadcast completed",
     );
+
+    let mut triple_kick = HashMap::new();
+    for &id in &update.triples {
+        let entry = triple_kick.entry(id).or_insert_with(Vec::new);
+        for (p, view) in &resps {
+            if !view.triples.contains(&id) {
+                entry.push(*p);
+            }
+        }
+    }
+    triples.kick_participants(triple_kick).await;
+
+    // let mut presignature_kick = HashMap::new();
+    // for &id in &update.presignatures {
+    //     let entry = presignature_kick.entry(id).or_insert_with(Vec::new);
+    //     for (p, view) in &resps {
+    //         if !view.presignatures.contains(&id) {
+    //             entry.push(*p);
+    //         }
+    //     }
+    // }
+    // presignatures.kick_participants(presignature_kick).await;
 
     update
 }
@@ -220,16 +250,8 @@ impl SyncInternalUpdate {
 
         if resp
             .send(SyncView {
-                triples: update
-                    .triples
-                    .difference(&outdated_triples)
-                    .copied()
-                    .collect(),
-                presignatures: update
-                    .presignatures
-                    .difference(&outdated_presignatures)
-                    .copied()
-                    .collect(),
+                triples: triples.fetch_owned(update.from).await,
+                presignatures: presignatures.fetch_owned(update.from).await,
             })
             .is_err()
         {
