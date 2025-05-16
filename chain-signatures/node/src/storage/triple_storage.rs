@@ -161,7 +161,7 @@ impl TripleStorage {
         let Some(mut conn) = self.connect().await else {
             return Vec::new();
         };
-        conn.smembers(&format!("{}:{}", self.participant_keys, id))
+        conn.smembers(format!("{}:{}", self.participant_keys, id))
             .await
             .inspect_err(|err| {
                 tracing::warn!(id, ?err, "failed to fetch participants for triple");
@@ -356,7 +356,7 @@ impl TripleStorage {
                     .public
                     .participants
                     .into_iter()
-                    .map(|p| Into::<u32>::into(p))
+                    .map(Into::<u32>::into)
                     .collect::<Vec<_>>(),
             )
             .invoke_async(&mut conn)

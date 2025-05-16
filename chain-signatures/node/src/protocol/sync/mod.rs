@@ -210,16 +210,16 @@ async fn broadcast_sync(
     }
     triples.kick_participants(triple_kick).await;
 
-    // let mut presignature_kick = HashMap::new();
-    // for &id in &update.presignatures {
-    //     let entry = presignature_kick.entry(id).or_insert_with(Vec::new);
-    //     for (p, view) in &resps {
-    //         if !view.presignatures.contains(&id) {
-    //             entry.push(*p);
-    //         }
-    //     }
-    // }
-    // presignatures.kick_participants(presignature_kick).await;
+    let mut presignature_kick = HashMap::new();
+    for &id in &update.presignatures {
+        let entry = presignature_kick.entry(id).or_insert_with(Vec::new);
+        for (p, view) in &resps {
+            if !view.presignatures.contains(&id) {
+                entry.push(*p);
+            }
+        }
+    }
+    presignatures.kick_participants(presignature_kick).await;
 
     update
 }
@@ -281,10 +281,7 @@ impl SyncChannel {
 
     pub async fn request_update(&self, update: SyncUpdate) -> Option<SyncView> {
         let (tx, rx) = oneshot::channel();
-        let update = SyncInternalUpdate {
-            update: update,
-            resp: tx,
-        };
+        let update = SyncInternalUpdate { update, resp: tx };
 
         if let Err(err) = self.request_update.send(update).await {
             tracing::warn!(?err, "failed to request update");

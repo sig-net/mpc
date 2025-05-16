@@ -129,7 +129,7 @@ async fn test_state_sync_e2e() {
     validate_triples(&node0_triples, node1, &[4, 5], &[0, 1, 2, 3]).await;
     validate_triples(&node1_triples, node1, &[4, 5], &[0, 1, 2, 3]).await;
     validate_presignatures(&node0_presignatures, node1, &[4, 5], &[0, 1, 2, 3]).await;
-    validate_presignatures(&node0_presignatures, node1, &[4, 5], &[0, 1, 2, 3]).await;
+    validate_presignatures(&node1_presignatures, node1, &[4, 5], &[0, 1, 2, 3]).await;
 
     // Check that signing works as normal.
     nodes.wait().signable().await.unwrap();
