@@ -7432,6 +7432,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-sign-queue"
+version = "1.1.4"
+dependencies = [
+ "deadpool-redis",
+ "mpc-primitives",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "multiaddr"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

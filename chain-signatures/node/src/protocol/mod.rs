@@ -245,29 +245,6 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
     })
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy, Hash)]
-pub enum Chain {
-    NEAR,
-    Ethereum,
-    Solana,
-}
-
-impl Chain {
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Chain::NEAR => "NEAR",
-            Chain::Ethereum => "Ethereum",
-            Chain::Solana => "Solana",
-        }
-    }
-}
-
-impl fmt::Display for Chain {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,10 @@
+[package]
+name = "mpc-sign-queue"
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+deadpool-redis.workspace = true
+mpc-primitives.workspace = true
+serde.workspace = true
+tracing.workspace = true

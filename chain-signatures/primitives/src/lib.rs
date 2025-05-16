@@ -1,5 +1,7 @@
 pub mod bytes;
 
+use std::fmt;
+
 use k256::{AffinePoint, Scalar};
 use near_account_id::AccountId;
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
@@ -97,5 +99,28 @@ impl Signature {
             s,
             recovery_id,
         }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Copy, Hash)]
+pub enum Chain {
+    NEAR,
+    Ethereum,
+    Solana,
+}
+
+impl Chain {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Chain::NEAR => "NEAR",
+            Chain::Ethereum => "Ethereum",
+            Chain::Solana => "Solana",
+        }
+    }
+}
+
+impl fmt::Display for Chain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }

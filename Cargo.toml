@@ -5,6 +5,7 @@ members = [
     "chain-signatures/keys",
     "chain-signatures/node",
     "chain-signatures/primitives",
+    "chain-signatures/sign-queue",
 
     "integration-tests",
 ]
@@ -61,6 +62,7 @@ mpc-crypto = { path = "./chain-signatures/crypto" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-node = { path = "./chain-signatures/node" }
 mpc-primitives = { path = "./chain-signatures/primitives" }
+mpc-sign-queue = { path = "./chain-signatures/sign-queue" }
 signet-program = { path = "./chain-signatures/contract-sol/programs/signet-program" }
 
 [patch.crates-io]
