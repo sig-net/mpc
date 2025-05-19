@@ -99,15 +99,14 @@ pub fn is_url_host_ip(url: &Url) -> bool {
 pub fn process_url(url_str: String) -> String {
     url::Url::parse(&url_str)
         .map(|mut url| {
-            let url_str = url.to_string();
             if !is_url_host_ip(&url) {
                 if let Err(err) = url.set_port(None) {
                     tracing::warn!("Error setting participant's url {url} port to None: {err:?}");
                     return url.to_string();
                 }
-                url_str
+                url.to_string()
             } else {
-                url_str
+                url.to_string()
             }
         })
         .unwrap_or_else(|_| url_str)
