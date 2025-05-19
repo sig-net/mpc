@@ -19,7 +19,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use url::Url;
 
-use crate::util;
 use mpc_keys::hpke;
 
 #[derive(Parser, Debug)]
@@ -232,9 +231,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
                 .map(|mut addr| {
-                    if util::is_url_host_ip(&addr) {
-                        addr.set_port(Some(web_port)).unwrap();
-                    }
+                    addr.set_port(Some(web_port)).unwrap();
                     addr
                 })
                 .unwrap_or_else(|| {
