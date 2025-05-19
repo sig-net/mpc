@@ -27,7 +27,7 @@ use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{hash_map, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -35,6 +35,35 @@ use tokio::sync::{mpsc, RwLock};
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
+
+/// This should be enough to hold a few messages in the inbox.
+pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
+
+enum MessageSubscription<T> {
+    Subscribed(mpsc::Sender<T>),
+    Unsubscribed(mpsc::Sender<T>, mpsc::Receiver<T>),
+}
+
+impl<T> MessageSubscription<T> {
+    pub fn subscribe() -> (Self, mpsc::Receiver<T>) {
+        let (tx, rx) = mpsc::channel(MAX_MESSAGE_SUB_CHANNEL_SIZE);
+        (Self::Subscribed(tx), rx)
+    }
+
+    pub async fn send(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
+        match self {
+            Self::Subscribed(tx) => tx.send(msg).await,
+            Self::Unsubscribed(tx, _) => tx.send(msg).await,
+        }
+    }
+}
+
+impl<T> Default for MessageSubscription<T> {
+    fn default() -> Self {
+        let (tx, rx) = mpsc::channel(MAX_MESSAGE_SUB_CHANNEL_SIZE);
+        Self::Unsubscribed(tx, rx)
+    }
+}
 
 pub struct MessageInbox {
     /// encrypted messages that are pending to be decrypted. These are messages that we received
@@ -55,7 +84,8 @@ pub struct MessageInbox {
 
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
-    triple: HashMap<Epoch, HashMap<TripleId, VecDeque<TripleMessage>>>,
+    triple: HashMap<Epoch, HashMap<TripleId, MessageSubscription<TripleMessage>>>,
+    triple_init: Option<mpsc::Sender<TripleId>>,
     presignature: HashMap<Epoch, HashMap<PresignatureId, VecDeque<PresignatureMessage>>>,
     signature: HashMap<Epoch, HashMap<SignId, VecDeque<SignatureMessage>>>,
 }
@@ -73,12 +103,13 @@ impl MessageInbox {
             generating: VecDeque::new(),
             resharing: HashMap::new(),
             triple: HashMap::new(),
+            triple_init: None,
             presignature: HashMap::new(),
             signature: HashMap::new(),
         }
     }
 
-    pub fn push(&mut self, message: Message) {
+    pub async fn send(&mut self, message: Message) {
         match message {
             Message::Generating(message) => self.generating.push_back(message),
             Message::Resharing(message) => self
@@ -86,13 +117,25 @@ impl MessageInbox {
                 .entry(message.epoch)
                 .or_default()
                 .push_back(message),
-            Message::Triple(message) => self
-                .triple
-                .entry(message.epoch)
-                .or_default()
-                .entry(message.id)
-                .or_default()
-                .push_back(message),
+            Message::Triple(message) => {
+                let triples = self.triple.entry(message.epoch).or_default();
+                match triples.entry(message.id) {
+                    hash_map::Entry::Occupied(entry) => {
+                        if let Err(err) = entry.get().send(message).await {
+                            tracing::warn!(?err, "failed to send message to subscriber");
+                        }
+                    }
+                    hash_map::Entry::Vacant(entry) => {
+                        if let Some(tx) = &self.triple_init {
+                            tx.send(message.id).await;
+                        }
+                        entry
+                            .insert(MessageSubscription::default())
+                            .send(message)
+                            .await;
+                    }
+                }
+            }
             Message::Presignature(message) => self
                 .presignature
                 .entry(message.epoch)
@@ -188,13 +231,13 @@ impl MessageInbox {
     }
 
     pub fn filter_internal(&mut self) {
-        self.triple.retain(|_epoch, messages| {
-            messages.retain(|_id, messages| {
-                messages.retain(|msg| !self.filter.contains(msg));
-                !messages.is_empty()
-            });
-            !messages.is_empty()
-        });
+        // self.triple.retain(|_epoch, messages| {
+        //     messages.retain(|_id, messages| {
+        //         messages.retain(|msg| !self.filter.contains(msg));
+        //         !messages.is_empty()
+        //     });
+        //     !messages.is_empty()
+        // });
         self.presignature.retain(|_epoch, messages| {
             messages.retain(|_id, messages| {
                 messages.retain(|msg| !self.filter.contains(msg));
@@ -211,13 +254,13 @@ impl MessageInbox {
         });
     }
 
-    pub fn recv(&mut self, messages: Vec<Message>) {
+    pub async fn recv(&mut self, messages: Vec<Message>) {
         for message in messages {
-            self.push(message);
+            self.send(message).await;
         }
     }
 
-    pub fn update(
+    pub async fn update(
         &mut self,
         expiration: Duration,
         cipher_sk: &hpke::SecretKey,
@@ -227,7 +270,7 @@ impl MessageInbox {
         self.recv_updates();
         let messages = self.decrypt(cipher_sk, participants);
         let messages = self.filter(messages);
-        self.recv(messages);
+        self.recv(messages).await;
     }
 
     pub fn clear(&mut self) {
@@ -278,7 +321,7 @@ impl MessageExecutor {
             {
                 let mut inbox = self.inbox.write().await;
                 let expiration = Duration::from_millis(protocol.message_timeout);
-                inbox.update(expiration, &cipher_sk, &participants);
+                inbox.update(expiration, &cipher_sk, &participants).await;
             }
 
             let active = {
@@ -379,6 +422,35 @@ impl MessageChannel {
     pub async fn filter_sign(&self, sign_id: SignId, presign_id: PresignatureId) {
         self.filter(&(sign_id, presign_id)).await;
     }
+
+    pub async fn subscribe_triple(
+        &self,
+        epoch: u64,
+        id: TripleId,
+    ) -> mpsc::Receiver<TripleMessage> {
+        let mut inbox = self.inbox.write().await;
+        let map = inbox.triple.entry(epoch).or_default();
+        match map.entry(id) {
+            hash_map::Entry::Occupied(mut entry) => {
+                // TODO: subscription already exists, but we override it here. Probably better way to handle this.
+                let (sub, rx) = MessageSubscription::subscribe();
+                *entry.get_mut() = sub;
+                rx
+            }
+            hash_map::Entry::Vacant(entry) => {
+                let (sub, rx) = MessageSubscription::subscribe();
+                entry.insert(sub);
+                rx
+            }
+        }
+    }
+
+    pub async fn subscribe_triple_start(&self) -> mpsc::Receiver<TripleId> {
+        let (tx, rx) = mpsc::channel(256);
+        let mut inbox = self.inbox.write().await;
+        inbox.triple_init = Some(tx);
+        rx
+    }
 }
 
 #[async_trait]
@@ -463,41 +535,41 @@ impl MessageReceiver for RunningState {
         let active = mesh_state.active.keys_vec();
         let mut inbox = channel.inbox().write().await;
 
-        // remove the triple_id that has already failed or taken from the triple_bins
-        // and refresh the timestamp of failed and taken
-        let triple_messages = inbox.triple.remove(&self.epoch).unwrap_or_default();
-        for (id, mut queue) in triple_messages {
-            if queue.is_empty()
-                || queue.iter().any(|msg| {
-                    util::is_elapsed_longer_than_timeout(
-                        msg.timestamp,
-                        protocol_cfg.triple.generation_timeout,
-                    )
-                })
-            {
-                continue;
-            }
+        // // remove the triple_id that has already failed or taken from the triple_bins
+        // // and refresh the timestamp of failed and taken
+        // let triple_messages = inbox.triple.remove(&self.epoch).unwrap_or_default();
+        // for (id, mut queue) in triple_messages {
+        //     if queue.is_empty()
+        //         || queue.iter().any(|msg| {
+        //             util::is_elapsed_longer_than_timeout(
+        //                 msg.timestamp,
+        //                 protocol_cfg.triple.generation_timeout,
+        //             )
+        //         })
+        //     {
+        //         continue;
+        //     }
 
-            let protocol = match self
-                .triple_manager
-                .get_or_start_generation(id, &active, protocol_cfg)
-                .await
-            {
-                Ok(protocol) => protocol,
-                Err(err) => {
-                    // ignore the message since the generation had bad parameters. Also have the other node who
-                    // initiated the protocol resend the message or have it timeout on their side.
-                    tracing::warn!(id, ?err, "unable to initialize incoming triple protocol");
-                    continue;
-                }
-            };
+        //     let protocol = match self
+        //         .triple_manager
+        //         .get_or_start_generation(id, &active, protocol_cfg)
+        //         .await
+        //     {
+        //         Ok(protocol) => protocol,
+        //         Err(err) => {
+        //             // ignore the message since the generation had bad parameters. Also have the other node who
+        //             // initiated the protocol resend the message or have it timeout on their side.
+        //             tracing::warn!(id, ?err, "unable to initialize incoming triple protocol");
+        //             continue;
+        //         }
+        //     };
 
-            if let Some(protocol) = protocol {
-                while let Some(message) = queue.pop_front() {
-                    protocol.message(message.from, message.data).await;
-                }
-            }
-        }
+        //     if let Some(protocol) = protocol {
+        //         while let Some(message) = queue.pop_front() {
+        //             protocol.message(message.from, message.data).await;
+        //         }
+        //     }
+        // }
 
         let mut presignature_manager = self.presignature_manager.write().await;
         let presignature_messages = inbox.presignature.entry(self.epoch).or_default();

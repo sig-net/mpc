@@ -74,6 +74,13 @@ pub struct RunningState {
     pub signature_manager: Arc<RwLock<SignatureManager>>,
 }
 
+// impl RunningState {
+//     pub fn cleanup(&self) {
+//         self.triple_handle.abort();
+//     }
+// }
+
+
 #[derive(Clone)]
 pub struct ResharingState {
     pub me: Participant,
