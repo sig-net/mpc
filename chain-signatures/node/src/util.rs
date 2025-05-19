@@ -2,7 +2,9 @@ use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::{AffinePoint, EncodedPoint};
 use mpc_crypto::{near_public_key_to_affine_point, PublicKey};
+use std::net::IpAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use url::Url;
 
 pub trait NearPublicKeyExt {
     fn into_affine_point(self) -> PublicKey;
@@ -86,4 +88,10 @@ pub fn current_unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs()
+}
+
+pub fn is_url_host_ip(url: &Url) -> bool {
+    url.host_str()
+        .map(|host| host.parse::<IpAddr>().is_ok())
+        .unwrap_or(false)
 }

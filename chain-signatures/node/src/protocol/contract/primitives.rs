@@ -1,3 +1,4 @@
+use crate::util;
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke;
 use near_primitives::{borsh::BorshDeserialize, types::AccountId};
@@ -7,6 +8,7 @@ use std::{
     hash::Hash,
     str::FromStr,
 };
+use url;
 
 type ParticipantId = u32;
 
@@ -57,7 +59,7 @@ impl From<mpc_contract::primitives::Participants> for Participants {
                                 contract_participant_info.account_id.as_ref(),
                             )
                             .unwrap(),
-                            url: contract_participant_info.url,
+                            url: Self::process_url(contract_participant_info.url),
                             cipher_pk: hpke::PublicKey::from_bytes(
                                 &contract_participant_info.cipher_pk,
                             ),
@@ -86,7 +88,7 @@ impl From<Candidates> for Participants {
                         ParticipantInfo {
                             id: participant_id as ParticipantId,
                             account_id,
-                            url: candidate_info.url,
+                            url: Self::process_url(candidate_info.url),
                             cipher_pk: candidate_info.cipher_pk,
                             sign_pk: candidate_info.sign_pk,
                         },
@@ -196,6 +198,28 @@ impl Participants {
         Participants {
             participants: intersect,
         }
+    }
+
+    /// Process the URL to remove the port if it is not an IP address.
+    /// This is needed because some mainnet partners joined with a port number included in their url
+    /// and we need to remove that port in order to connect to the node.
+    fn process_url(url_str: String) -> String {
+        let url_str = url_str.clone();
+        url::Url::parse(&url_str)
+            .map(|mut url| {
+                if !util::is_url_host_ip(&url) {
+                    if let Err(err) = url.set_port(None) {
+                        tracing::warn!(
+                            "Error setting participant's url {url} port to None: {err:?}"
+                        );
+                        return url_str.clone();
+                    }
+                    url.to_string()
+                } else {
+                    url_str.clone()
+                }
+            })
+            .unwrap_or_else(|_| url_str)
     }
 }
 
