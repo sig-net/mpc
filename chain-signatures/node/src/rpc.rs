@@ -507,6 +507,7 @@ impl SolanaClient {
 }
 
 /// Client related to a specific chain
+#[allow(clippy::large_enum_variant)]
 pub enum ChainClient {
     Err(&'static str),
     Near(NearClient),

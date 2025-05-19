@@ -97,17 +97,17 @@ pub fn is_url_host_ip(url: &Url) -> bool {
 }
 
 pub fn process_url(url_str: String) -> String {
-    let url_str = url_str.clone();
     url::Url::parse(&url_str)
         .map(|mut url| {
+            let url_str = url.to_string();
             if !is_url_host_ip(&url) {
                 if let Err(err) = url.set_port(None) {
                     tracing::warn!("Error setting participant's url {url} port to None: {err:?}");
-                    return url_str.clone();
+                    return url.to_string();
                 }
-                url.to_string()
+                url_str
             } else {
-                url_str.clone()
+                url_str
             }
         })
         .unwrap_or_else(|_| url_str)
