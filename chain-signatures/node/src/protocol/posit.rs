@@ -1,11 +1,10 @@
 use cait_sith::protocol::Participant;
-use lru::LruCache;
 use serde::{Deserialize, Serialize};
 
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
-use std::num::NonZeroUsize;
 
 pub type ProposerId = Participant;
 
@@ -65,19 +64,15 @@ pub struct PositCounter<S> {
 pub struct Posits<Id, S> {
     me: Participant,
 
-    // TODO: probably should be a LruCache to expire items
-    /// The posits that our node has proposed.
-    posits: LruCache<Id, Positor<PositCounter<S>>>,
+    /// The posits that either our node proposed or that we are a part of.
+    posits: HashMap<Id, Positor<PositCounter<S>>>,
 }
 
 impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
     pub fn new(me: Participant) -> Self {
         Self {
             me,
-            // 1024 is a good default size for the cache since we don't expect to be have more
-            // than 1024 concurring posits at any time. This should however be configurable in
-            // the future.
-            posits: LruCache::new(NonZeroUsize::new(1024).unwrap()),
+            posits: HashMap::new(),
         }
     }
 
@@ -90,7 +85,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
     ) -> PositAction {
         let mut accepts = HashSet::new();
         accepts.insert(me);
-        self.posits.put(
+        self.posits.insert(
             id,
             Positor::Proposer(
                 me,
@@ -142,7 +137,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                         return PositInternalAction::Reply(PositAction::Reject);
                     }
                 } else {
-                    self.posits.put(id, Positor::Deliberator(from));
+                    self.posits.insert(id, Positor::Deliberator(from));
                 }
 
                 // No further checks necessary, we can just accept the posit.
@@ -163,7 +158,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                     return PositInternalAction::Reply(PositAction::Reject);
                 }
 
-                if let Some(positor) = self.posits.pop(&id) {
+                if let Some(positor) = self.posits.remove(&id) {
                     let proposer = positor.id();
                     if positor.is_proposer() {
                         tracing::warn!(
@@ -171,7 +166,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                             ?from,
                             "received START on protocol we already proposed"
                         );
-                        self.posits.put(id, positor);
+                        self.posits.insert(id, positor);
                         return PositInternalAction::Reply(PositAction::Reject);
                     } else if proposer != from {
                         tracing::warn!(
@@ -180,7 +175,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                             ?proposer,
                             "received START on conflicting proposer"
                         );
-                        self.posits.put(id, positor);
+                        self.posits.insert(id, positor);
                         return PositInternalAction::Reply(PositAction::Reject);
                     }
                 } else {
@@ -194,17 +189,20 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                 )
             }
             PositAction::Accept | PositAction::Reject => {
-                let Some(positor) = self.posits.get_mut(&id) else {
-                    tracing::warn!(
-                        ?id,
-                        ?from,
-                        ?action,
-                        "received ACCEPT/REJECT on protocol we have no info for",
-                    );
-                    return PositInternalAction::None;
+                let mut entry = match self.posits.entry(id) {
+                    Entry::Occupied(entry) => entry,
+                    Entry::Vacant(_) => {
+                        tracing::warn!(
+                            ?id,
+                            ?from,
+                            ?action,
+                            "received ACCEPT/REJECT on protocol we have no info for",
+                        );
+                        return PositInternalAction::None;
+                    }
                 };
 
-                let Positor::Proposer(_, counter) = positor else {
+                let Positor::Proposer(_, counter) = entry.get_mut() else {
                     tracing::warn!(
                         ?id,
                         ?from,
@@ -235,12 +233,13 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                     counter.rejects.len() > counter.participants.len() - threshold;
                 if enough_rejections {
                     tracing::info!(?id, rejects = ?counter.rejects, "received enough REJECTs, aborting protocol");
-                    self.posits.pop(&id);
+                    entry.remove();
                     return PositInternalAction::None;
                 }
 
                 // TODO: have a timeout on waiting for votes. The moment we have enough threshold accepts,
                 // we can start the protocol after a timeout, such that we don't wait for slow responders.
+                // This will be our way to cleanup the posits that are nowhere to be found.
                 let enough_votes = counter.accepts.len() >= threshold
                     && counter.accepts.len() + counter.rejects.len() == counter.participants.len();
                 if !enough_votes {
@@ -248,8 +247,8 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                 }
 
                 tracing::info!(?id, "received enough ACCEPTs, starting protocol");
-                let Some(Positor::Proposer(_, counter)) = self.posits.pop(&id) else {
-                    unreachable!("removing posit should have already been checked");
+                let Positor::Proposer(_, counter) = entry.remove() else {
+                    unreachable!("we already checked that we are the proposer");
                 };
                 let participants = counter.accepts.into_iter().collect();
                 PositInternalAction::StartProtocol(

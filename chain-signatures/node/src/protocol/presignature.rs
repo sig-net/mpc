@@ -174,7 +174,7 @@ pub struct PresignatureManager {
     generators: HashMap<PresignatureId, PresignatureGenerator>,
     /// The set of presignatures that were introduced to the system by the current node.
     introduced: HashSet<PresignatureId>,
-    /// The protocol posits that are currently being proposed by us.
+    /// The protocol posits that are currently in progress.
     posits: Posits<PresignatureId, TriplesTaken>,
 
     me: Participant,
