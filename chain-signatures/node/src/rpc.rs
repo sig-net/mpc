@@ -260,7 +260,7 @@ impl NearClient {
         self.client
             .call(&self.signer, &self.contract_id, "join")
             .args_json(json!({
-                "url": self.my_addr,
+                "url": crate::util::process_url(self.my_addr.to_string()),
                 "cipher_pk": self.cipher_pk.to_bytes(),
                 "sign_pk": self.sign_pk,
             }))
@@ -323,6 +323,7 @@ impl EthClient {
 }
 
 /// Client related to a specific chain
+#[allow(clippy::large_enum_variant)]
 pub enum ChainClient {
     Err(&'static str),
     Near(NearClient),

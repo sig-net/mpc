@@ -2,7 +2,9 @@ use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::{AffinePoint, EncodedPoint};
 use mpc_crypto::{near_public_key_to_affine_point, PublicKey};
+use std::net::IpAddr;
 use std::time::Duration;
+use url::Url;
 
 pub trait NearPublicKeyExt {
     fn into_affine_point(self) -> PublicKey;
@@ -75,4 +77,26 @@ pub fn is_elapsed_longer_than_timeout(timestamp_sec: u64, timeout: u64) -> bool 
     } else {
         false
     }
+}
+
+pub fn is_url_host_ip(url: &Url) -> bool {
+    url.host_str()
+        .map(|host| host.parse::<IpAddr>().is_ok())
+        .unwrap_or(false)
+}
+
+pub fn process_url(url_str: String) -> String {
+    url::Url::parse(&url_str)
+        .map(|mut url| {
+            if !is_url_host_ip(&url) {
+                if let Err(err) = url.set_port(None) {
+                    tracing::warn!("Error setting participant's url {url} port to None: {err:?}");
+                    return url.to_string();
+                }
+                url.to_string()
+            } else {
+                url.to_string()
+            }
+        })
+        .unwrap_or_else(|_| url_str)
 }
