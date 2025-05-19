@@ -6,7 +6,7 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "lib"]
 
-[dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 borsh.workspace = true
 hex.workspace = true
 hpke = { version = "0.11", features = ["serde_impls", "std"] }

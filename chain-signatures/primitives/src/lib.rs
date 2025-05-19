@@ -1,4 +1,7 @@
 pub mod bytes;
+pub mod participant;
+
+pub use participant::{CandidateInfo, Candidates, ParticipantId, Participants};
 
 use k256::{AffinePoint, Scalar};
 use near_account_id::AccountId;
@@ -7,6 +10,10 @@ use near_sdk::serde::{Deserialize, Serialize};
 use sha3::Digest;
 
 use crate::bytes::cbor_scalar;
+
+pub mod hpke {
+    pub type PublicKey = [u8; 32];
+}
 
 #[derive(
     Clone,
