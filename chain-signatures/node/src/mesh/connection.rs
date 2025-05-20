@@ -100,13 +100,13 @@ impl NodeConnection {
             match client.state(&url).await {
                 Ok(state) => {
                     let mut new_status = match state {
-                        StateView::Running { .. } | StateView::Resharing { .. } => {
-                            NodeStatus::Active
-                        }
-                        StateView::Joining { .. } | StateView::NotRunning => NodeStatus::Inactive,
+                        StateView::Running { .. } => NodeStatus::Active,
+                        StateView::Resharing { .. }
+                        | StateView::Joining { .. }
+                        | StateView::NotRunning => NodeStatus::Inactive,
                     };
                     let mut status = status.write().await;
-                    if *status != NodeStatus::Active && new_status == NodeStatus::Active {
+                    if *status == NodeStatus::Inactive && new_status == NodeStatus::Active {
                         // Sync when we want to enter an active state
                         //
                         // The peer is running. But before we can reliably
@@ -236,7 +236,7 @@ impl Pool {
     pub async fn status(&self) -> MeshState {
         let mut stable = Vec::new();
         let mut active = Participants::default();
-        let mut need_sync = Vec::new();
+        let mut need_sync = Participants::default();
         for (participant, conn) in self.connections.iter() {
             match conn.status().await {
                 NodeStatus::Active => {
@@ -244,8 +244,7 @@ impl Pool {
                     stable.push(*participant);
                 }
                 NodeStatus::Syncing => {
-                    active.insert(participant, conn.info.clone());
-                    need_sync.push(*participant);
+                    need_sync.insert(participant, conn.info.clone());
                 }
                 NodeStatus::Inactive => {
                     // TODO: Adding inactive nodes to the active connections
