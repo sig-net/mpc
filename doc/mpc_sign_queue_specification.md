@@ -8,7 +8,10 @@ In our multi-party computation network, the very basis of processing a request i
 
 Requests should be persisted and not deleted till they are completed (i.e. published to the corresponding chain/network).
 - If a request had to be modified (in the case of finalization), an update should be sent to the process/node processing it.
-- Duplicate requests should not be possible while the request has not been published yet (given that hash(request) equals the id for uniqueness of requests).
+- Duplicate requests should not be possible while the request has not been published yet.
+  - This means that no two request of equal IDs will be present in the system.
+  - If two duplicate requests are made by the user, they will be seen as one and only one.
+  - If a request has been published, and then the user requests it again, the same request will be processed in some manner either through cache or signing again.
 - Either the node or indexer cleans up requests if it stays in persistence for too long (by timeout or some configuration).
 
 
