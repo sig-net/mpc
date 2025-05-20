@@ -350,7 +350,7 @@ impl PresignatureManager {
         );
 
         self.introduced.insert(id.id);
-        self.posits.propose(self.me, id.id, triples, &participants);
+        self.posits.propose(id.id, triples, &participants);
         for &p in participants.iter() {
             if p == self.me {
                 continue;

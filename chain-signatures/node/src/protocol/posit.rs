@@ -76,27 +76,26 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
         }
     }
 
-    pub fn propose(
-        &mut self,
-        me: Participant,
-        id: T,
-        store: S,
-        participants: &[Participant],
-    ) -> PositAction {
+    pub fn propose(&mut self, id: T, store: S, participants: &[Participant]) -> PositAction {
+        let entry = match self.posits.entry(id) {
+            Entry::Vacant(entry) => entry,
+            Entry::Occupied(_) => {
+                tracing::warn!(?id, "PROPOSE protocol already in progress");
+                return PositAction::Reject;
+            }
+        };
+
         let mut accepts = HashSet::new();
-        accepts.insert(me);
-        self.posits.insert(
-            id,
-            Positor::Proposer(
-                me,
-                PositCounter {
-                    participants: participants.iter().copied().collect(),
-                    accepts,
-                    rejects: HashSet::new(),
-                    store,
-                },
-            ),
-        );
+        accepts.insert(self.me);
+        entry.insert(Positor::Proposer(
+            self.me,
+            PositCounter {
+                participants: participants.iter().copied().collect(),
+                accepts,
+                rejects: HashSet::new(),
+                store,
+            },
+        ));
 
         PositAction::Propose
     }
@@ -265,5 +264,119 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
 
     pub fn is_empty(&self) -> bool {
         self.posits.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cait_sith::protocol::Participant;
+
+    type Id = u64;
+
+    #[test]
+    fn test_posits_non_proposer() {
+        let threshold = 2;
+        let participants = vec![
+            Participant::from(0),
+            Participant::from(1),
+            Participant::from(2),
+        ];
+        let mut posits0 = Posits::<Id, ()>::new(Participant::from(0));
+        let mut posits1 = Posits::<Id, ()>::new(Participant::from(1));
+        let mut posits3 = Posits::<Id, ()>::new(Participant::from(3));
+
+        // Node0 propose a new posit 101
+        let id = 101;
+        let correct_proposer = Participant::from(0);
+        let incorrect_proposer = Participant::from(1);
+        let action = posits0.propose(id, (), &participants);
+        assert!(matches!(action, PositAction::Propose));
+
+        // propose: act on posit with correct proposer should be accepted
+        let action = posits1.act(id, correct_proposer, threshold, &PositAction::Propose);
+        assert!(matches!(
+            action,
+            PositInternalAction::Reply(PositAction::Accept)
+        ));
+        // propose(conflict): a second node claims this posit, but only the first is accepted. reject this one
+        let action = posits1.act(id, incorrect_proposer, threshold, &PositAction::Propose);
+        assert!(matches!(
+            action,
+            PositInternalAction::Reply(PositAction::Reject)
+        ));
+        // propose: act on posit again should be idempotent
+        let action = posits1.act(id, correct_proposer, threshold, &PositAction::Propose);
+        assert!(matches!(
+            action,
+            PositInternalAction::Reply(PositAction::Accept)
+        ));
+
+        // propose(conflict): proposing a posit that is already in progress should be rejected
+        let action = posits1.propose(id, (), &participants);
+        assert!(matches!(action, PositAction::Reject));
+
+        // start: incorrect proposer should reject
+        let start = PositAction::Start(participants);
+        let action = posits1.act(id, incorrect_proposer, threshold, &start);
+        assert!(matches!(
+            action,
+            PositInternalAction::Reply(PositAction::Reject)
+        ));
+        // start: correct proposer should start the protocol
+        let action = posits1.act(id, correct_proposer, threshold, &start);
+        assert!(matches!(
+            action,
+            PositInternalAction::StartProtocol(_, Positor::Deliberator(_))
+        ));
+
+        // start: the node is not a part of the participants so reject
+        let proposer = Participant::from(0);
+        let action = posits3.act(id, proposer, threshold, &start);
+        assert!(matches!(
+            action,
+            PositInternalAction::Reply(PositAction::Reject)
+        ));
+    }
+
+    #[test]
+    fn test_posits_proposer() {
+        let threshold = 2;
+        let participants = vec![
+            Participant::from(0),
+            Participant::from(1),
+            Participant::from(2),
+        ];
+        let mut posits0 = Posits::<Id, ()>::new(Participant::from(0));
+
+        let id = 101;
+
+        // start: on all accept, start the protocol
+        posits0.propose(id, (), &participants);
+        let action = posits0.act(id, Participant::from(1), threshold, &PositAction::Accept);
+        assert!(matches!(action, PositInternalAction::None));
+        // receiving an accept from the same participant will do nothing
+        let action = posits0.act(id, Participant::from(1), threshold, &PositAction::Accept);
+        assert!(matches!(action, PositInternalAction::None));
+        // everyone has voted, so we can start the protocol
+        let action = posits0.act(id, Participant::from(2), threshold, &PositAction::Accept);
+        assert!(matches!(action, PositInternalAction::StartProtocol(_, _)));
+        // receiving an accept after the protocol has started will do nothing
+        let action = posits0.act(id, Participant::from(1), threshold, &PositAction::Accept);
+        assert!(matches!(action, PositInternalAction::None));
+
+        // start: on threshold amount accept, start the protocol
+        posits0.propose(id, (), &participants);
+        let action = posits0.act(id, Participant::from(1), threshold, &PositAction::Accept);
+        assert!(matches!(action, PositInternalAction::None));
+        let action = posits0.act(id, Participant::from(2), threshold, &PositAction::Reject);
+        assert!(matches!(action, PositInternalAction::StartProtocol(_, _)));
+
+        // start: on threshold amount reject, abort the protocol
+        posits0.propose(id, (), &participants);
+        let action = posits0.act(id, Participant::from(1), threshold, &PositAction::Reject);
+        assert!(matches!(action, PositInternalAction::None));
+        let action = posits0.act(id, Participant::from(2), threshold, &PositAction::Reject);
+        assert!(matches!(action, PositInternalAction::None));
     }
 }
