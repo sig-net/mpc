@@ -1,4 +1,3 @@
-use crate::util;
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke;
 use near_primitives::{borsh::BorshDeserialize, types::AccountId};
@@ -58,7 +57,7 @@ impl From<mpc_contract::primitives::Participants> for Participants {
                                 contract_participant_info.account_id.as_ref(),
                             )
                             .unwrap(),
-                            url: util::process_url(contract_participant_info.url),
+                            url: contract_participant_info.url,
                             cipher_pk: hpke::PublicKey::from_bytes(
                                 &contract_participant_info.cipher_pk,
                             ),
@@ -87,7 +86,7 @@ impl From<Candidates> for Participants {
                         ParticipantInfo {
                             id: participant_id as ParticipantId,
                             account_id,
-                            url: util::process_url(candidate_info.url),
+                            url: candidate_info.url,
                             cipher_pk: candidate_info.cipher_pk,
                             sign_pk: candidate_info.sign_pk,
                         },
