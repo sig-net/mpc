@@ -10,7 +10,8 @@ use solana_sdk::signer::keypair::Keypair;
 
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
-use alloy::providers::RootProvider;
+use alloy::providers::{Provider, RootProvider};
+use alloy::rpc::types::TransactionReceipt;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
@@ -710,6 +711,123 @@ async fn try_publish_near(
     Ok(())
 }
 
+async fn handle_retry(
+    attempt: &mut usize,
+    max_attempts: usize,
+    sign_ids: &[SignId],
+    near_account_id: &AccountId,
+    error_msg: &str,
+) -> Result<(), ()> {
+    *attempt += 1;
+    tracing::error!(?sign_ids, attempt = *attempt, "{}", error_msg);
+    if *attempt >= max_attempts {
+        tracing::error!(
+            ?sign_ids,
+            "exceeded max attempts to get eth signature respond transaction receipt"
+        );
+        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+            .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
+            .inc();
+        return Err(());
+    }
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    Ok(())
+}
+
+async fn wait_for_transaction_receipt(
+    provider: &EthContractFillProvider,
+    tx_hash: alloy::primitives::B256,
+    near_account_id: &AccountId,
+    sign_ids: Vec<SignId>,
+) -> Result<TransactionReceipt, ()> {
+    let mut attempt = 0;
+    let max_attempts = 5;
+
+    loop {
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            provider.get_transaction_receipt(tx_hash),
+        )
+        .await
+        {
+            Ok(result) => match result {
+                Ok(Some(receipt)) => {
+                    tracing::info!(?sign_ids, "eth signature respond transaction receipt found");
+                    return Ok(receipt);
+                }
+                Ok(None) => {
+                    handle_retry(
+                        &mut attempt,
+                        max_attempts,
+                        &sign_ids,
+                        near_account_id,
+                        "eth signature respond transaction receipt not found, retrying",
+                    )
+                    .await?;
+                }
+                Err(err) => {
+                    handle_retry(
+                        &mut attempt,
+                        max_attempts,
+                        &sign_ids,
+                        near_account_id,
+                        &format!("failed to get eth signature respond transaction receipt, retrying: {:?}", err),
+                    ).await?;
+                }
+            },
+            Err(_) => {
+                handle_retry(
+                    &mut attempt,
+                    max_attempts,
+                    &sign_ids,
+                    near_account_id,
+                    "timeout while getting eth signature respond transaction receipt, retrying",
+                )
+                .await?;
+            }
+        }
+    }
+}
+
+async fn send_eth_transaction(
+    contract: &EthContractInstance,
+    params: &[DynSolValue],
+    gas: u64,
+    sign_ids: &[SignId],
+    near_account_id: &AccountId,
+) -> Result<alloy::primitives::B256, ()> {
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        contract
+            .function("respond", params)
+            .unwrap()
+            .gas(gas)
+            .send(),
+    )
+    .await
+    .map_err(|_| {
+        tracing::error!(
+            signids = ?sign_ids,
+            "timeout while sending ethereum signature transaction"
+        );
+        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+            .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
+            .inc();
+    })?
+    .map_err(|err| {
+        tracing::error!(
+            signids = ?sign_ids,
+            error = ?err,
+            "failed to send ethereum signature transaction"
+        );
+        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+            .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
+            .inc();
+    })?;
+
+    Ok(*result.tx_hash())
+}
+
 async fn try_publish_eth(
     eth: &EthClient,
     action: &PublishAction,
@@ -731,66 +849,64 @@ async fn try_publish_eth(
         ]),
     ])])];
 
-    let result = eth
-        .contract
-        .function("respond", &params)
-        .unwrap()
-        .gas(40000)
-        .send()
-        .await
-        .map_err(|err| {
-            tracing::error!(
-                sign_id = ?action.request.indexed.id,
-                error = ?err,
-                "failed to publish ethereum signature"
-            );
-            crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[
-                    action.request.indexed.chain.as_str(),
-                    near_account_id.as_str(),
-                ])
-                .inc();
-        })?
-        .watch()
-        .await;
+    let tx_hash = send_eth_transaction(
+        &eth.contract,
+        &params,
+        40000,
+        &[action.request.indexed.id.clone()],
+        near_account_id,
+    )
+    .await?;
+
+    let receipt = wait_for_transaction_receipt(
+        eth.contract.provider(),
+        tx_hash,
+        near_account_id,
+        vec![action.request.indexed.id.clone()],
+    )
+    .await?;
+
+    // Check if transaction was successful
+    if !receipt.status() {
+        tracing::error!(
+            sign_id = ?action.request.indexed.id,
+            tx_hash = ?receipt.transaction_hash,
+            "transaction failed"
+        );
+        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+            .with_label_values(&[
+                action.request.indexed.chain.as_str(),
+                near_account_id.as_str(),
+            ])
+            .inc();
+        return Err(());
+    }
 
     let chain = action.request.indexed.chain;
-    match result {
-        Ok(tx_hash) => {
-            tracing::info!(
-                sign_id = ?action.request.indexed.id,
-                tx_hash = ?tx_hash,
-                elapsed = ?timestamp.elapsed(),
-                "published ethereum signature successfully"
-            );
-            crate::metrics::NUM_SIGN_SUCCESS
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .inc();
-            crate::metrics::SIGN_TOTAL_LATENCY
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
-            crate::metrics::SIGN_RESPOND_LATENCY
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .observe(timestamp.elapsed().as_secs_f64());
-            if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
-                crate::metrics::NUM_SIGN_SUCCESS_30S
-                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                    .inc();
-            }
-            Ok(())
-        }
-        Err(err) => {
-            tracing::error!(
-                sign_id = ?action.request.indexed.id,
-                error = ?err,
-                "failed to publish ethereum signature"
-            );
-            crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .inc();
-            Err(())
-        }
+    let tx_hash = receipt.transaction_hash;
+    tracing::info!(
+        sign_id = ?action.request.indexed.id,
+        tx_hash = ?tx_hash,
+        elapsed = ?timestamp.elapsed(),
+        "published ethereum signature successfully"
+    );
+
+    crate::metrics::NUM_SIGN_SUCCESS
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .inc();
+    crate::metrics::SIGN_TOTAL_LATENCY
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
+    crate::metrics::SIGN_RESPOND_LATENCY
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .observe(timestamp.elapsed().as_secs_f64());
+    if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
+        crate::metrics::NUM_SIGN_SUCCESS_30S
+            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+            .inc();
     }
+
+    Ok(())
 }
 
 async fn try_batch_publish_eth(
@@ -827,68 +943,59 @@ async fn try_batch_publish_eth(
     }
 
     let params = [DynSolValue::Array(params_vec.clone())];
-
-    // The gas limit for the transaction.
-    // Experimented on Sepolia, sending a batch of 2 cost 35,000, and a batch of 3 cost 50,000+.
     let gas = std::cmp::max(40000, 20000 * num_requests as u64);
 
-    let result = eth
-        .contract
-        .function("respond", &params)
-        .unwrap()
-        .gas(gas)
-        .send()
-        .await
-        .map_err(|err| {
-            tracing::error!(
-                ?sign_ids,
-                error = ?err,
-                "failed to publish ethereum signature"
-            );
-            crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
+    let tx_hash =
+        send_eth_transaction(&eth.contract, &params, gas, &sign_ids, near_account_id).await?;
+
+    let receipt = wait_for_transaction_receipt(
+        eth.contract.provider(),
+        tx_hash,
+        near_account_id,
+        sign_ids.clone(),
+    )
+    .await?;
+
+    // Check if transaction was successful
+    if !receipt.status() {
+        tracing::error!(
+            ?sign_ids,
+            tx_hash = ?receipt.transaction_hash,
+            "eth batch transaction failed"
+        );
+        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+            .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
+            .inc();
+        return Err(());
+    }
+
+    let tx_hash = receipt.transaction_hash;
+    tracing::info!(
+        ?chain,
+        ?sign_ids,
+        ?tx_hash,
+        num_requests,
+        "eth batch published ethereum signatures successfully"
+    );
+
+    crate::metrics::NUM_SIGN_SUCCESS
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .inc_by(num_requests as f64);
+    for action in actions {
+        crate::metrics::SIGN_TOTAL_LATENCY
+            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+            .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
+        if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
+            crate::metrics::NUM_SIGN_SUCCESS_30S
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                 .inc();
-        })?
-        .watch()
-        .await;
-
-    match result {
-        Ok(tx_hash) => {
-            tracing::info!(
-                ?tx_hash,
-                num_requests,
-                "published ethereum signatures successfully"
-            );
-            crate::metrics::NUM_SIGN_SUCCESS
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .inc_by(num_requests as f64);
-            for action in actions {
-                crate::metrics::SIGN_TOTAL_LATENCY
-                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                    .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
-                if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
-                    crate::metrics::NUM_SIGN_SUCCESS_30S
-                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                        .inc();
-                }
-            }
-            crate::metrics::SIGN_RESPOND_LATENCY
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .observe(start.elapsed().as_secs_f64());
-
-            Ok(())
-        }
-        Err(err) => {
-            tracing::error!(
-                error = ?err,
-                "failed to publish ethereum signature"
-            );
-            crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .inc_by(num_requests as f64);
-            Err(())
         }
     }
+    crate::metrics::SIGN_RESPOND_LATENCY
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .observe(start.elapsed().as_secs_f64());
+
+    Ok(())
 }
 
 async fn execute_batch_publish(
@@ -946,6 +1053,7 @@ async fn execute_batch_publish(
         tokio::time::sleep(Duration::from_millis(100)).await;
         if retry_count >= MAX_PUBLISH_RETRY {
             tracing::info!("exceeded max retries, trashing publish request",);
+            actions.clear();
             break;
         } else {
             tracing::info!("failed to publish, retrying");
