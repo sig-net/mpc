@@ -27,6 +27,9 @@ use tokio::sync::{mpsc, RwLock};
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 
+pub const GENERATING_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
+pub const RESHARING_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
+
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct GeneratingMessage {
     pub from: Participant,
@@ -1088,8 +1091,8 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
 
 fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {
     match msg {
-        Message::Generating(_) => Duration::from_millis(cfg.message_timeout),
-        Message::Resharing(_) => Duration::from_millis(cfg.message_timeout),
+        Message::Generating(_) => GENERATING_TIMEOUT,
+        Message::Resharing(_) => RESHARING_TIMEOUT,
         Message::Triple(_) => Duration::from_millis(cfg.triple.generation_timeout),
         Message::Presignature(_) => Duration::from_millis(cfg.presignature.generation_timeout),
         Message::Signature(_) => Duration::from_millis(cfg.signature.generation_timeout),
