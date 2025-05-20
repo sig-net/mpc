@@ -2,14 +2,15 @@ use super::signature::SignatureManager;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::MpcSignProtocol;
 use crate::config::Config;
-use crate::gcp::error::SecretStorageError;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
+use crate::types::SecretKeyShare;
 
 use cait_sith::protocol::{Action, InitializationError, ProtocolError};
 use k256::elliptic_curve::group::GroupEncoding;
+use mpc_crypto::PublicKey;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CryptographicError {
@@ -17,8 +18,6 @@ pub enum CryptographicError {
     CaitSithInitializationError(#[from] InitializationError),
     #[error("cait-sith protocol error: {0}")]
     CaitSithProtocolError(#[from] ProtocolError),
-    #[error("secret storage error: {0}")]
-    SecretStorageError(#[from] SecretStorageError),
 }
 
 pub(crate) trait CryptographicProtocol {
@@ -27,7 +26,7 @@ pub(crate) trait CryptographicProtocol {
         ctx: &mut MpcSignProtocol,
         cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<NodeState, CryptographicError>;
+    ) -> NodeState;
 }
 
 impl CryptographicProtocol for GeneratingState {
@@ -36,7 +35,16 @@ impl CryptographicProtocol for GeneratingState {
         ctx: &mut MpcSignProtocol,
         _cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<NodeState, CryptographicError> {
+    ) -> NodeState {
+        {
+            // Previous save to secret storage failed, try again until successful.
+            let failed_store = self.failed_store.lock().await;
+            if let Some((pk, sk_share)) = *failed_store {
+                drop(failed_store);
+                return self.finalize(pk, sk_share, ctx).await;
+            }
+        }
+
         let participants = self.participants.keys_vec();
         tracing::info!(
             ?participants,
@@ -49,17 +57,18 @@ impl CryptographicProtocol for GeneratingState {
                 Ok(action) => action,
                 Err(err) => {
                     drop(protocol);
+                    tracing::error!(?err, "generating failed: refreshing...");
                     if let Err(refresh_err) = self.protocol.refresh().await {
                         tracing::warn!(?refresh_err, "unable to refresh keygen protocol");
                     }
-                    return Err(err)?;
+                    return NodeState::Generating(self);
                 }
             };
             match action {
                 Action::Wait => {
                     drop(protocol);
                     tracing::debug!("generating: waiting");
-                    return Ok(NodeState::Generating(self));
+                    return NodeState::Generating(self);
                 }
                 Action::SendMany(data) => {
                     tracing::debug!("generating: sending a message to many participants");
@@ -99,24 +108,45 @@ impl CryptographicProtocol for GeneratingState {
                         public_key = hex::encode(r.public_key.to_bytes()),
                         "generating: successfully completed key generation"
                     );
-                    // TODO: handle secret storage error
-                    ctx.secret_storage
-                        .store(&PersistentNodeData {
-                            epoch: 0,
-                            private_share: r.private_share,
-                            public_key: r.public_key,
-                        })
-                        .await?;
-                    return Ok(NodeState::WaitingForConsensus(WaitingForConsensusState {
-                        epoch: 0,
-                        participants: self.participants,
-                        threshold: self.threshold,
-                        private_share: r.private_share,
-                        public_key: r.public_key,
-                    }));
+                    drop(protocol);
+                    return self.finalize(r.public_key, r.private_share, ctx).await;
                 }
             }
         }
+    }
+}
+
+impl GeneratingState {
+    async fn finalize(
+        self,
+        public_key: PublicKey,
+        private_share: SecretKeyShare,
+        ctx: &mut MpcSignProtocol,
+    ) -> NodeState {
+        if let Err(err) = ctx
+            .secret_storage
+            .store(&PersistentNodeData {
+                epoch: 0,
+                private_share,
+                public_key,
+            })
+            .await
+        {
+            tracing::error!(?err, "generating: failed to store secret");
+            let mut failed_store = self.failed_store.lock().await;
+            failed_store.replace((public_key, private_share));
+            drop(failed_store);
+
+            return NodeState::Generating(self);
+        }
+
+        NodeState::WaitingForConsensus(WaitingForConsensusState {
+            epoch: 0,
+            participants: self.participants,
+            threshold: self.threshold,
+            private_share,
+            public_key,
+        })
     }
 }
 
@@ -126,9 +156,9 @@ impl CryptographicProtocol for WaitingForConsensusState {
         _ctx: &mut MpcSignProtocol,
         _cfg: Config,
         _mesh_state: MeshState,
-    ) -> Result<NodeState, CryptographicError> {
+    ) -> NodeState {
         // Wait for ConsensusProtocol step to advance state
-        Ok(NodeState::WaitingForConsensus(self))
+        NodeState::WaitingForConsensus(self)
     }
 }
 
@@ -138,7 +168,16 @@ impl CryptographicProtocol for ResharingState {
         ctx: &mut MpcSignProtocol,
         _cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<NodeState, CryptographicError> {
+    ) -> NodeState {
+        {
+            // Previous save to secret storage failed, try again until successful.
+            let failed_store = self.failed_store.lock().await;
+            if let Some(sk_share) = *failed_store {
+                drop(failed_store);
+                return self.finalize(sk_share, ctx).await;
+            }
+        }
+
         tracing::info!(active = ?mesh_state.active.keys_vec(), "progressing key reshare");
         let mut protocol = self.protocol.write().await;
         loop {
@@ -150,14 +189,14 @@ impl CryptographicProtocol for ResharingState {
                     if let Err(refresh_err) = self.protocol.refresh().await {
                         tracing::warn!(?refresh_err, "unable to refresh reshare protocol");
                     }
-                    return Err(err)?;
+                    return NodeState::Resharing(self);
                 }
             };
             match action {
                 Action::Wait => {
                     drop(protocol);
                     tracing::debug!("resharing: waiting");
-                    return Ok(NodeState::Resharing(self));
+                    return NodeState::Resharing(self);
                 }
                 Action::SendMany(data) => {
                     tracing::debug!("resharing: sending a message to all participants");
@@ -198,37 +237,51 @@ impl CryptographicProtocol for ResharingState {
                     }
                 }
                 Action::Return(private_share) => {
-                    tracing::debug!("resharing: successfully completed key reshare");
-                    ctx.secret_storage
-                        .store(&PersistentNodeData {
-                            epoch: self.old_epoch + 1,
-                            private_share,
-                            public_key: self.public_key,
-                        })
-                        .await?;
-
-                    // Clear triples from storage before starting the new epoch. This is necessary if the node has accumulated
-                    // triples from previous epochs. If it was not able to clear the previous triples, we'll leave them as-is
-                    if !ctx.triple_storage.clear().await {
-                        tracing::error!("failed to clear triples from storage on new epoch start");
-                    }
-
-                    if !ctx.presignature_storage.clear().await {
-                        tracing::error!(
-                            "failed to clear presignatures from storage on new epoch start"
-                        );
-                    }
-
-                    return Ok(NodeState::WaitingForConsensus(WaitingForConsensusState {
-                        epoch: self.old_epoch + 1,
-                        participants: self.new_participants,
-                        threshold: self.threshold,
-                        private_share,
-                        public_key: self.public_key,
-                    }));
+                    tracing::info!("resharing: successfully completed key reshare");
+                    drop(protocol);
+                    return self.finalize(private_share, ctx).await;
                 }
             }
         }
+    }
+}
+
+impl ResharingState {
+    async fn finalize(self, private_share: SecretKeyShare, ctx: &mut MpcSignProtocol) -> NodeState {
+        if let Err(err) = ctx
+            .secret_storage
+            .store(&PersistentNodeData {
+                epoch: self.old_epoch + 1,
+                private_share,
+                public_key: self.public_key,
+            })
+            .await
+        {
+            tracing::error!(?err, "resharing: failed to store secret");
+            let mut failed_stored = self.failed_store.lock().await;
+            failed_stored.replace(private_share);
+            drop(failed_stored);
+
+            return NodeState::Resharing(self);
+        }
+
+        // Clear triples from storage before starting the new epoch. This is necessary if the node has accumulated
+        // triples from previous epochs. If it was not able to clear the previous triples, we'll leave them as-is
+        if !ctx.triple_storage.clear().await {
+            tracing::error!("failed to clear triples from storage on new epoch start");
+        }
+
+        if !ctx.presignature_storage.clear().await {
+            tracing::error!("failed to clear presignatures from storage on new epoch start");
+        }
+
+        NodeState::WaitingForConsensus(WaitingForConsensusState {
+            epoch: self.old_epoch + 1,
+            participants: self.new_participants,
+            threshold: self.threshold,
+            private_share,
+            public_key: self.public_key,
+        })
     }
 }
 
@@ -238,11 +291,11 @@ impl CryptographicProtocol for RunningState {
         ctx: &mut MpcSignProtocol,
         cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<NodeState, CryptographicError> {
+    ) -> NodeState {
         let active = mesh_state.active.keys_vec();
         if active.len() < self.threshold {
             tracing::warn!(?active, "running: not enough participants to progress");
-            return Ok(NodeState::Running(self));
+            return NodeState::Running(self);
         }
 
         let triple_task = self.triple_manager.clone().execute(&active, &cfg.protocol);
@@ -259,7 +312,7 @@ impl CryptographicProtocol for RunningState {
             }
         }
 
-        Ok(NodeState::Running(self))
+        NodeState::Running(self)
     }
 }
 
@@ -269,13 +322,13 @@ impl CryptographicProtocol for NodeState {
         ctx: &mut MpcSignProtocol,
         cfg: Config,
         mesh_state: MeshState,
-    ) -> Result<NodeState, CryptographicError> {
+    ) -> NodeState {
         match self {
             NodeState::Generating(state) => state.progress(ctx, cfg, mesh_state).await,
             NodeState::Resharing(state) => state.progress(ctx, cfg, mesh_state).await,
             NodeState::Running(state) => state.progress(ctx, cfg, mesh_state).await,
             NodeState::WaitingForConsensus(state) => state.progress(ctx, cfg, mesh_state).await,
-            _ => Ok(self),
+            _ => self,
         }
     }
 }
