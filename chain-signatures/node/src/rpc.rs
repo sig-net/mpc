@@ -719,9 +719,9 @@ async fn send_and_watch_eth_transaction(
     gas: u64,
     sign_ids: &[SignId],
     near_account_id: &AccountId,
-    chain: &Chain,
     timeout: Duration,
 ) -> Result<alloy::primitives::B256, ()> {
+    let chain = Chain::Ethereum;
     let result = tokio::time::timeout(
         timeout,
         contract
@@ -804,7 +804,6 @@ async fn try_publish_eth(
         40000,
         sign_ids,
         near_account_id,
-        &chain,
         ETH_RESPOND_TIMEOUT,
     )
     .await?;
@@ -876,7 +875,6 @@ async fn try_batch_publish_eth(
         gas,
         &sign_ids,
         near_account_id,
-        &chain,
         ETH_RESPOND_TIMEOUT,
     )
     .await?;
