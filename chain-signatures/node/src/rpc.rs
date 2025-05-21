@@ -745,7 +745,7 @@ async fn wait_for_transaction_receipt(
 ) -> Result<TransactionReceipt, ()> {
     let mut attempt = 0;
     let max_attempts = 5;
-    let initial_delay = Duration::from_secs(3);
+    let initial_delay = Duration::from_secs(5);
 
     loop {
         match tokio::time::timeout(
