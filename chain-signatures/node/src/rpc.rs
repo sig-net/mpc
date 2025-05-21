@@ -10,8 +10,7 @@ use solana_sdk::signer::keypair::Keypair;
 
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
-use alloy::providers::{Provider, RootProvider};
-use alloy::rpc::types::TransactionReceipt;
+use alloy::providers::RootProvider;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
@@ -49,6 +48,8 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
 const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 /// The batch size for Ethereum responses
 const ETH_RESPOND_BATCH_SIZE: usize = 10;
+/// The timeout for eth respond() call
+const ETH_RESPOND_TIMEOUT: Duration = Duration::from_secs(60);
 
 type EthHttp = Http<ReqwestClient>;
 
@@ -712,102 +713,17 @@ async fn try_publish_near(
     Ok(())
 }
 
-/// Retry waiting for transaction receipt with exponential backoff starting at the specified `initial_delay`
-async fn handle_wait_for_receipt_retry(
-    attempt: &mut usize,
-    max_attempts: usize,
-    sign_ids: &[SignId],
-    near_account_id: &AccountId,
-    error_msg: &str,
-    initial_delay: Duration,
-) -> Result<(), ()> {
-    *attempt += 1;
-    tracing::error!(?sign_ids, attempt = *attempt, "{}", error_msg);
-    if *attempt >= max_attempts {
-        tracing::error!(
-            ?sign_ids,
-            "exceeded max attempts to get eth signature respond transaction receipt"
-        );
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
-            .inc();
-        return Err(());
-    }
-    let backoff = initial_delay * 2u64.pow((*attempt - 1) as u32) as u32;
-    tokio::time::sleep(backoff).await;
-    Ok(())
-}
-
-// wait for transaction receipt with 5 retries and exponential delay backoff starting at 5s
-async fn wait_for_transaction_receipt(
-    provider: &EthContractFillProvider,
-    tx_hash: alloy::primitives::B256,
-    near_account_id: &AccountId,
-    sign_ids: Vec<SignId>,
-) -> Result<TransactionReceipt, ()> {
-    let mut attempt = 0;
-    let max_attempts = 5;
-    let initial_delay = Duration::from_secs(5);
-
-    loop {
-        match tokio::time::timeout(
-            Duration::from_secs(10),
-            provider.get_transaction_receipt(tx_hash),
-        )
-        .await
-        {
-            Ok(result) => match result {
-                Ok(Some(receipt)) => {
-                    tracing::info!(?sign_ids, "eth signature respond transaction receipt found");
-                    return Ok(receipt);
-                }
-                Ok(None) => {
-                    handle_wait_for_receipt_retry(
-                        &mut attempt,
-                        max_attempts,
-                        &sign_ids,
-                        near_account_id,
-                        "eth signature respond transaction receipt not found, retrying",
-                        initial_delay,
-                    )
-                    .await?;
-                }
-                Err(err) => {
-                    handle_wait_for_receipt_retry(
-                        &mut attempt,
-                        max_attempts,
-                        &sign_ids,
-                        near_account_id,
-                        &format!("failed to get eth signature respond transaction receipt, retrying: {:?}", err),
-                        initial_delay,
-                    ).await?;
-                }
-            },
-            Err(_) => {
-                handle_wait_for_receipt_retry(
-                    &mut attempt,
-                    max_attempts,
-                    &sign_ids,
-                    near_account_id,
-                    "timeout while getting eth signature respond transaction receipt, retrying",
-                    initial_delay,
-                )
-                .await?;
-            }
-        }
-    }
-}
-
-async fn send_eth_transaction(
+async fn send_and_watch_eth_transaction(
     contract: &EthContractInstance,
     params: &[DynSolValue],
     gas: u64,
     sign_ids: &[SignId],
     near_account_id: &AccountId,
+    chain: &Chain,
+    timeout: Duration,
 ) -> Result<alloy::primitives::B256, ()> {
-    let chain = Chain::Ethereum;
     let result = tokio::time::timeout(
-        Duration::from_secs(30),
+        timeout,
         contract
             .function("respond", params)
             .unwrap()
@@ -828,14 +744,35 @@ async fn send_eth_transaction(
         tracing::error!(
             ?sign_ids,
             error = ?err,
-            "failed to send ethereum signature transaction"
+            "failed to send the ethereum signature respond tx"
         );
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .inc();
-    })?;
+    })?
+    .watch();
 
-    Ok(*result.tx_hash())
+    tokio::time::timeout(timeout, result)
+        .await
+        .map_err(|_| {
+            tracing::error!(
+                ?sign_ids,
+                "timeout while waiting for ethereum signature transaction receipt"
+            );
+            crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .inc();
+        })?
+        .map_err(|err| {
+            tracing::error!(
+                ?sign_ids,
+                error = ?err,
+                "failed to get ethereum signature transaction receipt"
+            );
+            crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .inc();
+        })
 }
 
 async fn try_publish_eth(
@@ -845,6 +782,7 @@ async fn try_publish_eth(
     signature: &Signature,
     near_account_id: &AccountId,
 ) -> Result<(), ()> {
+    let chain = Chain::Ethereum;
     let params = [DynSolValue::Array(vec![DynSolValue::Tuple(vec![
         DynSolValue::FixedBytes(action.request.indexed.id.request_id.into(), 32),
         DynSolValue::Tuple(vec![
@@ -859,43 +797,20 @@ async fn try_publish_eth(
         ]),
     ])])];
 
-    let tx_hash = send_eth_transaction(
+    let sign_ids = &[action.request.indexed.id.clone()];
+    let tx_hash = send_and_watch_eth_transaction(
         &eth.contract,
         &params,
         40000,
-        &[action.request.indexed.id.clone()],
+        sign_ids,
         near_account_id,
+        &chain,
+        ETH_RESPOND_TIMEOUT,
     )
     .await?;
 
-    let receipt = wait_for_transaction_receipt(
-        eth.contract.provider(),
-        tx_hash,
-        near_account_id,
-        vec![action.request.indexed.id.clone()],
-    )
-    .await?;
-
-    // Check if transaction was successful
-    if !receipt.status() {
-        tracing::error!(
-            sign_id = ?action.request.indexed.id,
-            tx_hash = ?receipt.transaction_hash,
-            "transaction failed"
-        );
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[
-                action.request.indexed.chain.as_str(),
-                near_account_id.as_str(),
-            ])
-            .inc();
-        return Err(());
-    }
-
-    let chain = action.request.indexed.chain;
-    let tx_hash = receipt.transaction_hash;
     tracing::info!(
-        sign_id = ?action.request.indexed.id,
+        ?sign_ids,
         tx_hash = ?tx_hash,
         elapsed = ?timestamp.elapsed(),
         "published ethereum signature successfully"
@@ -955,31 +870,17 @@ async fn try_batch_publish_eth(
     let params = [DynSolValue::Array(params_vec.clone())];
     let gas = std::cmp::max(40000, 20000 * num_requests as u64);
 
-    let tx_hash =
-        send_eth_transaction(&eth.contract, &params, gas, &sign_ids, near_account_id).await?;
-
-    let receipt = wait_for_transaction_receipt(
-        eth.contract.provider(),
-        tx_hash,
+    let tx_hash = send_and_watch_eth_transaction(
+        &eth.contract,
+        &params,
+        gas,
+        &sign_ids,
         near_account_id,
-        sign_ids.clone(),
+        &chain,
+        ETH_RESPOND_TIMEOUT,
     )
     .await?;
 
-    // Check if transaction was successful
-    if !receipt.status() {
-        tracing::error!(
-            ?sign_ids,
-            tx_hash = ?receipt.transaction_hash,
-            "eth batch transaction failed"
-        );
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
-        return Err(());
-    }
-
-    let tx_hash = receipt.transaction_hash;
     tracing::info!(
         ?chain,
         ?sign_ids,
