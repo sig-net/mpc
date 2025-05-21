@@ -737,6 +737,7 @@ async fn handle_wait_for_receipt_retry(
     Ok(())
 }
 
+// wait for transaction receipt with 5 retries and exponential delay backoff starting at 5s
 async fn wait_for_transaction_receipt(
     provider: &EthContractFillProvider,
     tx_hash: alloy::primitives::B256,
