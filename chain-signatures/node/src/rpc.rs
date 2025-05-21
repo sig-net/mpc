@@ -712,7 +712,7 @@ async fn try_publish_near(
     Ok(())
 }
 
-/// retry waiting for transaction receipt with exponential backoff starting at 3s
+/// Retry waiting for transaction receipt with exponential backoff starting at the specified `initial_delay`
 async fn handle_wait_for_receipt_retry(
     attempt: &mut usize,
     max_attempts: usize,
@@ -805,6 +805,7 @@ async fn send_eth_transaction(
     sign_ids: &[SignId],
     near_account_id: &AccountId,
 ) -> Result<alloy::primitives::B256, ()> {
+    let chain = Chain::Ethereum;
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         contract
@@ -820,7 +821,7 @@ async fn send_eth_transaction(
             "timeout while sending ethereum signature transaction"
         );
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
+            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .inc();
     })?
     .map_err(|err| {
@@ -830,7 +831,7 @@ async fn send_eth_transaction(
             "failed to send ethereum signature transaction"
         );
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
+            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .inc();
     })?;
 
@@ -973,7 +974,7 @@ async fn try_batch_publish_eth(
             "eth batch transaction failed"
         );
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
+            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .inc();
         return Err(());
     }
