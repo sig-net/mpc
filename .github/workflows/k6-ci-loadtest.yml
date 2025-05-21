@@ -47,7 +47,7 @@ on:
 jobs:
   load-test:
     if: ${{ github.event_name == 'push' || github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: arc-runners-arc-runner-set
     steps:
       - name: Wait for 5 minutes due to new version deployment
         if: ${{ github.event.pull_request.merged == true }}
@@ -83,7 +83,7 @@ jobs:
           LT_STRATEGY: ${{ steps.normalized.outputs.lt_strategy }}
         with:
           path: ./infra/loadtests/k6-load-test.js
-          cloud-run-locally: false
+          cloud-run-locally: true
           cloud-comment-on-pr: false
           flags: >
             --exit-on-running
