@@ -711,7 +711,7 @@ async fn try_publish_near(
     Ok(())
 }
 
-async fn handle_retry(
+async fn handle_wait_for_receipt_retry(
     attempt: &mut usize,
     max_attempts: usize,
     sign_ids: &[SignId],
@@ -758,7 +758,7 @@ async fn wait_for_transaction_receipt(
                     return Ok(receipt);
                 }
                 Ok(None) => {
-                    handle_retry(
+                    handle_wait_for_receipt_retry(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
@@ -768,7 +768,7 @@ async fn wait_for_transaction_receipt(
                     .await?;
                 }
                 Err(err) => {
-                    handle_retry(
+                    handle_wait_for_receipt_retry(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
@@ -778,7 +778,7 @@ async fn wait_for_transaction_receipt(
                 }
             },
             Err(_) => {
-                handle_retry(
+                handle_wait_for_receipt_retry(
                     &mut attempt,
                     max_attempts,
                     &sign_ids,
