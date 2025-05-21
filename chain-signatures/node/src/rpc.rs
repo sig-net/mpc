@@ -734,7 +734,7 @@ async fn send_and_watch_eth_transaction(
     .map_err(|_| {
         tracing::error!(
             ?sign_ids,
-            "timeout while sending ethereum signature transaction"
+            "timeout while sending ethereum respond() transaction"
         );
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
@@ -744,7 +744,7 @@ async fn send_and_watch_eth_transaction(
         tracing::error!(
             ?sign_ids,
             error = ?err,
-            "failed to send the ethereum signature respond tx"
+            "failed to send the ethereum respond() tx"
         );
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
@@ -757,7 +757,7 @@ async fn send_and_watch_eth_transaction(
         .map_err(|_| {
             tracing::error!(
                 ?sign_ids,
-                "timeout while waiting for ethereum signature transaction receipt"
+                "timeout while waiting for ethereum respond() transaction receipt"
             );
             crate::metrics::SIGNATURE_PUBLISH_FAILURES
                 .with_label_values(&[chain.as_str(), near_account_id.as_str()])
@@ -767,7 +767,7 @@ async fn send_and_watch_eth_transaction(
             tracing::error!(
                 ?sign_ids,
                 error = ?err,
-                "failed to get ethereum signature transaction receipt"
+                "failed to get ethereum respond() transaction receipt"
             );
             crate::metrics::SIGNATURE_PUBLISH_FAILURES
                 .with_label_values(&[chain.as_str(), near_account_id.as_str()])
