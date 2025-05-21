@@ -10,6 +10,8 @@ on:
       - chain-signatures/**
       - infra/loadtests/**
       - .github/workflows/k6-ci-loadtest.yml
+  schedule:
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       lt_strategy:
@@ -47,7 +49,7 @@ on:
 jobs:
   load-test:
     if: ${{ github.event_name == 'push' || github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch' }}
-    runs-on: arc-runners-arc-runner-set
+    runs-on: ubuntu-latest
     steps:
       - name: Wait for 5 minutes due to new version deployment
         if: ${{ github.event.pull_request.merged == true }}
@@ -83,10 +85,55 @@ jobs:
           LT_STRATEGY: ${{ steps.normalized.outputs.lt_strategy }}
         with:
           path: ./infra/loadtests/k6-load-test.js
-          cloud-run-locally: true
+          cloud-run-locally: false
           cloud-comment-on-pr: false
           flags: >
             --exit-on-running
+            --include-system-env-vars
+            --tag chain=${{ steps.normalized.outputs.lt_chain }}
+            --tag env=${{ steps.normalized.outputs.lt_env }}
+            --tag check_signature=${{ steps.normalized.outputs.lt_check_signature }}
+            --tag strategy=${{ steps.normalized.outputs.lt_strategy }}
+            --tag run_id=${{ github.run_id }}
+          inspect-flags: --include-system-env-vars
+
+  cron-test:
+    runs-on: arc-runners-arc-runner-set
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Normalize inputs
+        id: normalized
+        run: |
+          echo "lt_chain=${CHAIN:-Solana}" >> "$GITHUB_OUTPUT"
+          echo "lt_env=${ENV:-dev}" >> "$GITHUB_OUTPUT"
+          echo "lt_strategy=${STRATEGY:-constant_low_rate_1h}" >> "$GITHUB_OUTPUT"
+          echo "lt_check_signature=${CHECK_SIGNATURE:-true}" >> "$GITHUB_OUTPUT"
+        env:
+          CHAIN: ${{ github.event.inputs.chain }}
+          ENV: ${{ github.event.inputs.environment }}
+          STRATEGY: ${{ github.event.inputs.lt_strategy }}
+          CHECK_SIGNATURE: ${{ github.event.inputs.check_signature }}
+
+      - name: Setup K6
+        uses: grafana/setup-k6-action@v1
+      - name: Run k6 test
+        uses: grafana/run-k6-action@v1
+        env:
+          K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
+          K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
+          LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
+          LT_CHAIN: ${{ steps.normalized.outputs.lt_chain }}
+          LT_CHAIN_ENV: ${{ steps.normalized.outputs.lt_env }}
+          LT_CHECK_SIGNATURE: ${{ steps.normalized.outputs.lt_check_signature == 'true' }}
+          LT_STRATEGY: ${{ steps.normalized.outputs.lt_strategy }}
+        with:
+          path: ./infra/loadtests/k6-load-test.js
+          cloud-run-locally: true
+          cloud-comment-on-pr: false
+          flags: >
             --include-system-env-vars
             --tag chain=${{ steps.normalized.outputs.lt_chain }}
             --tag env=${{ steps.normalized.outputs.lt_env }}
