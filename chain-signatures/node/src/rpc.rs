@@ -711,12 +711,14 @@ async fn try_publish_near(
     Ok(())
 }
 
+/// retry waiting for transaction receipt with exponential backoff starting at 3s
 async fn handle_wait_for_receipt_retry(
     attempt: &mut usize,
     max_attempts: usize,
     sign_ids: &[SignId],
     near_account_id: &AccountId,
     error_msg: &str,
+    initial_delay: Duration,
 ) -> Result<(), ()> {
     *attempt += 1;
     tracing::error!(?sign_ids, attempt = *attempt, "{}", error_msg);
@@ -730,8 +732,7 @@ async fn handle_wait_for_receipt_retry(
             .inc();
         return Err(());
     }
-    // Exponential backoff: 3s, 6s, 12s, 24s, 48s
-    let backoff = Duration::from_secs(3 * 2u64.pow((*attempt - 1) as u32));
+    let backoff = initial_delay * 2u64.pow((*attempt - 1) as u32) as u32;
     tokio::time::sleep(backoff).await;
     Ok(())
 }
@@ -744,6 +745,7 @@ async fn wait_for_transaction_receipt(
 ) -> Result<TransactionReceipt, ()> {
     let mut attempt = 0;
     let max_attempts = 5;
+    let initial_delay = Duration::from_secs(3);
 
     loop {
         match tokio::time::timeout(
@@ -764,6 +766,7 @@ async fn wait_for_transaction_receipt(
                         &sign_ids,
                         near_account_id,
                         "eth signature respond transaction receipt not found, retrying",
+                        initial_delay,
                     )
                     .await?;
                 }
@@ -774,6 +777,7 @@ async fn wait_for_transaction_receipt(
                         &sign_ids,
                         near_account_id,
                         &format!("failed to get eth signature respond transaction receipt, retrying: {:?}", err),
+                        initial_delay,
                     ).await?;
                 }
             },
@@ -784,6 +788,7 @@ async fn wait_for_transaction_receipt(
                     &sign_ids,
                     near_account_id,
                     "timeout while getting eth signature respond transaction receipt, retrying",
+                    initial_delay,
                 )
                 .await?;
             }
@@ -1055,6 +1060,7 @@ async fn execute_batch_publish(
         tokio::time::sleep(Duration::from_millis(100)).await;
         if retry_count >= MAX_PUBLISH_RETRY {
             tracing::info!("exceeded max retries, trashing publish request",);
+            // clearing actions to avoid retrying
             actions.clear();
             break;
         } else {
