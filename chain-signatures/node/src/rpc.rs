@@ -730,7 +730,9 @@ async fn handle_retry(
             .inc();
         return Err(());
     }
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Exponential backoff: 3s, 6s, 12s, 24s, 48s
+    let backoff = Duration::from_secs(3 * 2u64.pow((*attempt - 1) as u32));
+    tokio::time::sleep(backoff).await;
     Ok(())
 }
 
@@ -807,7 +809,7 @@ async fn send_eth_transaction(
     .await
     .map_err(|_| {
         tracing::error!(
-            signids = ?sign_ids,
+            ?sign_ids,
             "timeout while sending ethereum signature transaction"
         );
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
@@ -816,7 +818,7 @@ async fn send_eth_transaction(
     })?
     .map_err(|err| {
         tracing::error!(
-            signids = ?sign_ids,
+            ?sign_ids,
             error = ?err,
             "failed to send ethereum signature transaction"
         );
