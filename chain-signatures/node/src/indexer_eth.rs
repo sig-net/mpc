@@ -18,7 +18,6 @@ use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::{fmt, path::PathBuf, str::FromStr, sync::LazyLock, time::Instant};
 use tokio::sync::mpsc;
@@ -450,11 +449,8 @@ pub async fn run(
 
     let (finalized_blocks_send, finalized_blocks_recv) = finalized_blocks_channel();
 
-    let indexed_block = Arc::new(AtomicU64::new(0));
-
     let client = Arc::new(client);
     let client_clone = Arc::clone(&client);
-    let indexed_block_clone = Arc::clone(&indexed_block);
     tokio::spawn(async move {
         tracing::info!("Spawned task to refresh finalized epoch's blocks");
         refresh_finalized_epoch(
@@ -462,7 +458,6 @@ pub async fn run(
             &untrusted_rpc_client,
             finalized_blocks_send.clone(),
             eth.refresh_finalized_interval,
-            indexed_block_clone,
         )
         .await
         .unwrap_or_else(|err| {
@@ -485,7 +480,6 @@ pub async fn run(
         });
     });
 
-    let indexed_block_clone = Arc::clone(&indexed_block);
     let near_account_id_clone = node_near_account_id.clone();
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let blocks_failed_send_clone = blocks_failed_send.clone();
@@ -497,9 +491,8 @@ pub async fn run(
             blocks_failed_send_clone,
             &client_clone,
             eth_contract_addr,
-            near_account_id_clone.clone(),
+            near_account_id_clone,
             requests_indexed_send_clone,
-            indexed_block_clone,
         )
         .await;
     });
@@ -538,7 +531,6 @@ pub async fn run(
             eth_contract_addr,
             node_near_account_id.clone(),
             requests_indexed_send_clone.clone(),
-            Arc::clone(&indexed_block),
         )
         .await
         {
@@ -564,7 +556,6 @@ async fn retry_failed_blocks(
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
-    indexed_block: Arc<AtomicU64>,
 ) {
     loop {
         let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
@@ -578,7 +569,6 @@ async fn retry_failed_blocks(
             eth_contract_addr,
             node_near_account_id.clone(),
             requests_indexed.clone(),
-            indexed_block.clone(),
         )
         .await
         {
@@ -613,7 +603,6 @@ async fn refresh_finalized_epoch(
     untrusted_rpc_client: &RootProvider<Http<AlloyClient>>,
     finalized_epoch_send: mpsc::Sender<HashMap<u64, alloy::primitives::B256>>,
     refresh_finalized_interval: u64,
-    indexed_block: Arc<AtomicU64>,
 ) -> anyhow::Result<()> {
     let mut interval = tokio::time::interval(Duration::from_millis(refresh_finalized_interval));
     let mut finalized_epoch: BlockNumberToHashMap = BlockNumberToHashMap::new();
@@ -644,11 +633,6 @@ async fn refresh_finalized_epoch(
             final_block_number.replace(new_final_block_number);
             continue;
         };
-
-        // if indexed block has not caught up to the finalized block, wait to continue until it has caught up
-        while new_final_block_number > indexed_block.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
 
         if new_final_block_number < last_final_block_number {
             let err_msg =
@@ -729,7 +713,6 @@ async fn process_block(
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
-    indexed_block: Arc<AtomicU64>,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -799,10 +782,6 @@ async fn process_block(
                     .as_secs() as f64,
                 );
         }
-    }
-
-    if block_number > indexed_block.load(Ordering::Acquire) {
-        indexed_block.store(block_number, Ordering::Release);
     }
     Ok(())
 }
