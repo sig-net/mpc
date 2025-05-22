@@ -186,6 +186,7 @@ impl ConsensusProtocol for StartedState {
                                 participants,
                                 threshold: contract_state.threshold,
                                 protocol,
+                                failed_store: Default::default(),
                             }))
                         }
                         None => {
@@ -657,7 +658,7 @@ async fn start_resharing(
     ctx: &MpcSignProtocol,
     contract_state: ResharingContractState,
 ) -> Result<NodeState, ConsensusError> {
-    let me = contract_state
+    let &me = contract_state
         .new_participants
         .find_participant(&ctx.my_account_id)
         .or_else(|| {
@@ -666,14 +667,15 @@ async fn start_resharing(
                 .find_participant(&ctx.my_account_id)
         })
         .expect("unexpected: cannot find us in the participant set while starting resharing");
-    let protocol = ReshareProtocol::new(private_share, *me, &contract_state)?;
+    let protocol = ReshareProtocol::new(private_share, me, &contract_state)?;
     Ok(NodeState::Resharing(ResharingState {
-        me: *me,
+        me,
         old_epoch: contract_state.old_epoch,
         old_participants: contract_state.old_participants,
         new_participants: contract_state.new_participants,
         threshold: contract_state.threshold,
         public_key: contract_state.public_key,
         protocol,
+        failed_store: Default::default(),
     }))
 }
