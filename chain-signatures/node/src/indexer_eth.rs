@@ -189,7 +189,6 @@ impl EthArgs {
     }
 }
 
-// this struct groups together the block number, block hash and the requests that were indexed in that block
 #[derive(Clone)]
 pub struct BlockAndRequests {
     block_number: u64,
@@ -393,6 +392,13 @@ pub fn failed_blocks_channel() -> (
 }
 
 type BlockNumberToHashMap = HashMap<u64, alloy::primitives::B256>;
+const MAX_FINALIZED_BLOCKS: usize = 1024;
+pub fn finalized_blocks_channel() -> (
+    mpsc::Sender<BlockNumberToHashMap>,
+    mpsc::Receiver<BlockNumberToHashMap>,
+) {
+    mpsc::channel(MAX_FINALIZED_BLOCKS)
+}
 
 pub async fn run(
     eth: Option<EthConfig>,
