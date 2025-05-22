@@ -48,8 +48,10 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
 const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 /// The batch size for Ethereum responses
 const ETH_RESPOND_BATCH_SIZE: usize = 10;
-/// The timeout for eth respond() call
-const ETH_RESPOND_TIMEOUT: Duration = Duration::from_secs(60);
+/// The timeout for sending eth respond() call tx
+const ETH_SEND_RESPOND_TIMEOUT: Duration = Duration::from_secs(10);
+/// The timeout for waiting for eth respond() call tx receipt
+const ETH_WAIT_FOR_RESPOND_TIMEOUT: Duration = Duration::from_secs(5);
 
 type EthHttp = Http<ReqwestClient>;
 
@@ -719,11 +721,12 @@ async fn send_and_watch_eth_transaction(
     gas: u64,
     sign_ids: &[SignId],
     near_account_id: &AccountId,
-    timeout: Duration,
+    send_tx_timeout: Duration,
+    wait_for_receipt_timeout: Duration,
 ) -> Result<alloy::primitives::B256, ()> {
     let chain = Chain::Ethereum;
-    let result = tokio::time::timeout(
-        timeout,
+    let send_result = tokio::time::timeout(
+        send_tx_timeout,
         contract
             .function("respond", params)
             .unwrap()
@@ -749,10 +752,9 @@ async fn send_and_watch_eth_transaction(
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .inc();
-    })?
-    .watch();
+    })?;
 
-    tokio::time::timeout(timeout, result)
+    tokio::time::timeout(wait_for_receipt_timeout, send_result.watch())
         .await
         .map_err(|_| {
             tracing::error!(
@@ -804,7 +806,8 @@ async fn try_publish_eth(
         40000,
         sign_ids,
         near_account_id,
-        ETH_RESPOND_TIMEOUT,
+        ETH_SEND_RESPOND_TIMEOUT,
+        ETH_WAIT_FOR_RESPOND_TIMEOUT,
     )
     .await?;
 
@@ -875,7 +878,8 @@ async fn try_batch_publish_eth(
         gas,
         &sign_ids,
         near_account_id,
-        ETH_RESPOND_TIMEOUT,
+        ETH_SEND_RESPOND_TIMEOUT,
+        ETH_WAIT_FOR_RESPOND_TIMEOUT,
     )
     .await?;
 
