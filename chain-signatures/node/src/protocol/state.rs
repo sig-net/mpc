@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -82,6 +83,7 @@ pub struct ResharingState {
     pub threshold: usize,
     pub public_key: PublicKey,
     pub protocol: ReshareProtocol,
+    pub timestamp: Instant,
 }
 
 #[derive(Clone)]

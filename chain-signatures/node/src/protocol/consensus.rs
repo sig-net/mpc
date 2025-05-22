@@ -702,5 +702,6 @@ async fn start_resharing<C: ConsensusCtx>(
         threshold: contract_state.threshold,
         public_key: contract_state.public_key,
         protocol,
+        timestamp: std::time::Instant::now(),
     }))
 }

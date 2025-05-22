@@ -1,9 +1,11 @@
+use std::time::Duration;
+
 use super::message::MessageChannel;
 use super::signature::SignatureManager;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
-use crate::protocol::message::{GeneratingMessage, ResharingMessage};
+use crate::protocol::message::{GeneratingMessage, ResharingMessage, RESHARING_TIMEOUT};
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
@@ -13,6 +15,7 @@ use crate::storage::{PresignatureStorage, TripleStorage};
 
 use async_trait::async_trait;
 use cait_sith::protocol::{Action, InitializationError, ProtocolError};
+use chrono::{Timelike as _, Utc};
 use k256::elliptic_curve::group::GroupEncoding;
 use near_account_id::AccountId;
 
@@ -150,6 +153,25 @@ impl CryptographicProtocol for WaitingForConsensusState {
     }
 }
 
+async fn sleep_till_next_minute_mark(min_mark: u32) {
+    let now = Utc::now();
+    let instant_now = tokio::time::Instant::now();
+    let minutes = now.minute();
+    let seconds = now.second();
+    let nanos = now.nanosecond();
+
+    let minutes_to_next = min_mark - (minutes % min_mark);
+    let wait_secs = minutes_to_next * 60 - seconds;
+    let wait_nanos = 1_000_000_000 - nanos;
+
+    let wait_duration =
+        Duration::from_secs(wait_secs.into()) + Duration::from_nanos(wait_nanos.into());
+
+    tracing::info!("sleeping for {wait_duration:?} until next {min_mark} minute mark");
+    tokio::time::sleep_until(instant_now + wait_duration).await;
+    tracing::info!("woken up from sleep");
+}
+
 #[async_trait]
 impl CryptographicProtocol for ResharingState {
     async fn progress<C: CryptographicCtx + Send + Sync>(
@@ -165,15 +187,29 @@ impl CryptographicProtocol for ResharingState {
         tracing::info!(active = ?active.keys_vec(), "progressing key reshare");
         let mut protocol = self.protocol.write().await;
         loop {
+            if self.timestamp.elapsed() > RESHARING_TIMEOUT {
+                tracing::debug!("resharing: timeout, waiting on the next 20 minute mark");
+                drop(protocol);
+                sleep_till_next_minute_mark(20).await;
+                if let Err(refresh_err) = self.protocol.refresh().await {
+                    tracing::warn!(?refresh_err, "unable to refresh reshare protocol");
+                }
+                protocol = self.protocol.write().await;
+                self.timestamp = std::time::Instant::now();
+            }
+
             let action = match protocol.poke() {
                 Ok(action) => action,
                 Err(err) => {
+                    tracing::error!("got action fail, {}", err);
                     drop(protocol);
-                    tracing::debug!("got action fail, {}", err);
+                    sleep_till_next_minute_mark(20).await;
                     if let Err(refresh_err) = self.protocol.refresh().await {
                         tracing::warn!(?refresh_err, "unable to refresh reshare protocol");
-                    }
-                    return Err(err)?;
+                    };
+                    protocol = self.protocol.write().await;
+                    self.timestamp = std::time::Instant::now();
+                    continue;
                 }
             };
             match action {

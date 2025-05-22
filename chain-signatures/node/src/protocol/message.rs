@@ -28,7 +28,7 @@ pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 
 pub const GENERATING_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
-pub const RESHARING_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
+pub const RESHARING_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct GeneratingMessage {
