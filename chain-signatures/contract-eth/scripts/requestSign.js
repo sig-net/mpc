@@ -9,8 +9,9 @@ async function main() {
     contractAddress = deployments[Object.keys(deployments).pop()];
     console.log(contractAddress)
   } else if (network === 'sepolia') {
-    const deployments = require('../ignition/deployments/chain-11155111/deployed_addresses.json'); 
-    contractAddress = deployments[Object.keys(deployments).pop()];
+    // const deployments = require('../ignition/deployments/chain-11155111/deployed_addresses.json'); 
+    // contractAddress = deployments[Object.keys(deployments).pop()];
+    contractAddress = "0x127e11636c3bDe79EDCcAF90756F8A33c96d87eB";
   } else {
     throw new Error('Unsupported network specified. Use "localhost" or "sepolia"');
   }
@@ -32,7 +33,7 @@ async function main() {
   // Request to ign a test message
   try {
     const testMessage = "0xB94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9";
-    const testPath = "test5";
+    const testPath = "test9";
     const signatureDeposit = await chainSignatures.getSignatureDeposit();
     const signer = (await hre.ethers.getSigners())[0];
     
