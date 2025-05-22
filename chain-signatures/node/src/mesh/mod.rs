@@ -34,7 +34,7 @@ pub struct MeshState {
 
     /// Participants that are currently out-of-sync, they will become active
     /// once we finished synchronization.
-    pub need_sync: Vec<Participant>,
+    pub need_sync: Participants,
 
     /// Participants that can be selected for a new protocol invocation.
     pub stable: Vec<Participant>,
@@ -86,8 +86,8 @@ impl Mesh {
                     self.connections.report_node_synced(participant).await;
                     let mut state = self.state.write().await;
 
-                    if let Some(pos) = state.need_sync.iter().position(|p| *p == participant) {
-                        state.need_sync.remove(pos);
+                    if let Some(info) = state.need_sync.remove(&participant) {
+                        state.active.insert(&participant, info);
                         state.stable.push(participant);
                     }
                 }

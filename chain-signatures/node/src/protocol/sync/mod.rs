@@ -115,17 +115,10 @@ impl SyncTask {
 
                     let update = self.new_update(me).await;
                     let start = Instant::now();
-                    let receivers: Vec<(Participant, ParticipantInfo)> = need_sync
+                    let receivers = need_sync
                         .iter()
-                        .map(|p| {
-                            let info = state
-                                .active
-                                .participants
-                                .get(p)
-                                .expect("active set must contain all need_sync participants");
-                            (*p, info.clone())
-                        })
-                        .collect();
+                        .map(|(p, info)|(*p, info.clone()))
+                        .collect::<Vec<_>>();
                     let task = tokio::spawn(broadcast_sync(
                         self.client.clone(),
                         update,
