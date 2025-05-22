@@ -143,7 +143,8 @@ impl Node {
 
         let mut cfg = cfg.clone();
         if let Some(ref mut eth_config) = cfg.eth {
-            eth_config.helios_data_path = format!("{}_{}", eth_config.helios_data_path, node_id);
+            eth_config.helios_data_path =
+                format!("{}_{}", eth_config.helios_data_path, account.id());
         }
 
         Self::spawn(

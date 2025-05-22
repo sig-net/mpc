@@ -6,7 +6,7 @@ use std::vec;
 use clap::Parser;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::NodeConfig;
-// use mpc_node::indexer_eth::EthConfig;
+use mpc_node::indexer_eth::EthConfig;
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;

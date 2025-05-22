@@ -196,8 +196,8 @@ fn sign_request_from_event(
             key_version: 0,
         },
         chain: Chain::Solana,
-        timestamp: Instant::now(),
-        unix_timestamp: crate::util::current_unix_timestamp(),
+        timestamp_sign_queue: Some(Instant::now()),
+        unix_timestamp_indexed: crate::util::current_unix_timestamp(),
     })
 }
 

@@ -480,6 +480,7 @@ pub async fn run(
 
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let requests_indexed_send_clone = requests_indexed_send.clone();
+    let mut receiver_state_update_timestamp = Instant::now();
     loop {
         interval.tick().await;
         if block_heads_rx.is_empty() {

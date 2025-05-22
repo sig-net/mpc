@@ -252,12 +252,16 @@ impl SignQueue {
 
     pub fn expire(&mut self, cfg: &ProtocolConfig) {
         self.my_requests.retain(|request| {
-            request.indexed.timestamp.elapsed()
-                < Duration::from_millis(cfg.signature.generation_timeout_total)
+            crate::util::duration_between_unix(
+                request.indexed.unix_timestamp_indexed,
+                crate::util::current_unix_timestamp(),
+            ) < Duration::from_millis(cfg.signature.generation_timeout_total)
         });
         self.failed_requests.retain(|request| {
-            request.indexed.timestamp.elapsed()
-                < Duration::from_millis(cfg.signature.generation_timeout_total)
+            crate::util::duration_between_unix(
+                request.indexed.unix_timestamp_indexed,
+                crate::util::current_unix_timestamp(),
+            ) < Duration::from_millis(cfg.signature.generation_timeout_total)
         });
         self.other_requests.retain(|_, request| {
             request.indexed.timestamp_sign_queue.is_none_or(|t| {
