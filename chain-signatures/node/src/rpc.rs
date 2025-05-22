@@ -51,7 +51,7 @@ const ETH_RESPOND_BATCH_SIZE: usize = 10;
 /// The timeout for sending eth respond() call tx
 const ETH_SEND_RESPOND_TIMEOUT: Duration = Duration::from_secs(10);
 /// The timeout for waiting for eth respond() call tx receipt
-const ETH_WAIT_FOR_RESPOND_TIMEOUT: Duration = Duration::from_secs(60);
+const ETH_WAIT_FOR_RESPOND_TIMEOUT: Duration = Duration::from_secs(5);
 
 type EthHttp = Http<ReqwestClient>;
 
