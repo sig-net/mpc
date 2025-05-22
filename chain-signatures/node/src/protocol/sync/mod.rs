@@ -22,9 +22,9 @@ const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
-    from: Participant,
-    triples: Vec<TripleId>,
-    presignatures: Vec<PresignatureId>,
+    pub from: Participant,
+    pub triples: Vec<TripleId>,
+    pub presignatures: Vec<PresignatureId>,
 }
 
 impl SyncUpdate {

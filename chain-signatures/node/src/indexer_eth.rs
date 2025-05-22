@@ -483,6 +483,10 @@ pub async fn run(
     loop {
         interval.tick().await;
         if block_heads_rx.is_empty() {
+            if receiver_state_update_timestamp.elapsed() > Duration::from_secs(60) {
+                tracing::warn!("No new block heads received for 60 seconds, waiting...");
+                receiver_state_update_timestamp = Instant::now();
+            }
             continue;
         }
         let Ok(new_block_head) = block_heads_rx.recv().await.inspect_err(|err| {
@@ -493,9 +497,13 @@ pub async fn run(
         }) else {
             break;
         };
+        receiver_state_update_timestamp = Instant::now();
         let SubscriptionEvent::NewHeads(new_block) = new_block_head;
         let block_number = new_block.header.number;
         let block_hash = new_block.header.hash;
+        if block_number % 10 == 0 {
+            tracing::info!("Received new block head: {block_number}");
+        }
         if let Err(err) = process_block(
             block_number,
             block_hash,

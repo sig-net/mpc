@@ -6,18 +6,14 @@ use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 use tokio::task::JoinHandle;
 
 use crate::protocol::presignature::{Presignature, PresignatureId};
-use crate::storage::error::{StoreError, StoreResult};
 
-use super::owner_key;
+use super::{owner_key, STORAGE_VERSION};
 
-// Can be used to "clear" redis storage in case of a breaking change
-const PRESIGNATURE_STORAGE_VERSION: &str = "v7";
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 /// A pre-reserved slot for a presignature that will eventually be inserted.
 pub struct PresignatureSlot {
     id: PresignatureId,
-    me: Participant,
     storage: PresignatureStorage,
     stored: bool,
 }
@@ -25,17 +21,8 @@ pub struct PresignatureSlot {
 impl PresignatureSlot {
     // TODO: put inside a tokio task:
     pub async fn insert(&mut self, presignature: Presignature, owner: Participant) -> bool {
-        if let Err(err) = self
-            .storage
-            .insert(presignature, owner, owner == self.me)
-            .await
-        {
-            tracing::warn!(id = self.id, ?err, "failed to insert presignature");
-            false
-        } else {
-            self.stored = true;
-            true
-        }
+        self.stored = self.storage.insert(presignature, owner).await;
+        self.stored
     }
 
     pub fn unreserve(&self) -> Option<JoinHandle<()>> {
@@ -106,32 +93,15 @@ impl PresignatureTaken {
     }
 }
 
-pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureStorage {
-    let presig_key = format!(
-        "presignatures:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
-    let mine_key = format!(
-        "presignatures_mine:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
-    let used_key = format!(
-        "presignatures_used:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
-    let reserved_key = format!(
-        "presingatures_reserved:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
-    let owner_keys = format!(
-        "presignatures_owners:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
+pub fn init(pool: &Pool, account_id: &AccountId) -> PresignatureStorage {
+    let presig_key = format!("presignatures:{STORAGE_VERSION}:{account_id}",);
+    let used_key = format!("presignatures_used:{STORAGE_VERSION}:{account_id}",);
+    let reserved_key = format!("presingatures_reserved:{STORAGE_VERSION}:{account_id}",);
+    let owner_keys = format!("presignatures_owners:{STORAGE_VERSION}:{account_id}",);
 
     PresignatureStorage {
         redis_pool: pool.clone(),
         presig_key,
-        mine_key,
         used_key,
         reserved_key,
         owner_keys,
@@ -142,28 +112,25 @@ pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureStorage {
 pub struct PresignatureStorage {
     redis_pool: Pool,
     presig_key: String,
-    mine_key: String,
     used_key: String,
     reserved_key: String,
     owner_keys: String,
 }
 
 impl PresignatureStorage {
-    async fn connect(&self) -> StoreResult<Connection> {
+    async fn connect(&self) -> Option<Connection> {
         self.redis_pool
             .get()
             .await
-            .map_err(anyhow::Error::new)
-            .map_err(StoreError::Connect)
+            .inspect_err(|err| {
+                tracing::warn!(?err, "failed to connect to redis");
+            })
+            .ok()
     }
 
     pub async fn fetch_owned(&self, me: Participant) -> Vec<PresignatureId> {
-        let mut conn = match self.connect().await {
-            Ok(conn) => conn,
-            Err(err) => {
-                tracing::warn!(?err, "failed to connect to redis");
-                return Vec::new();
-            }
+        let Some(mut conn) = self.connect().await else {
+            return Vec::new();
         };
 
         conn.sunion((&self.reserved_key, owner_key(&self.owner_keys, me)))
@@ -174,15 +141,8 @@ impl PresignatureStorage {
             .unwrap_or_default()
     }
 
-    pub async fn reserve(&self, id: PresignatureId, me: Participant) -> Option<PresignatureSlot> {
-        let mut conn = match self.connect().await {
-            Ok(conn) => conn,
-            Err(err) => {
-                tracing::warn!(?err, "failed to connect to redis");
-                return None;
-            }
-        };
-        let script = r#"
+    pub async fn reserve(&self, id: PresignatureId) -> Option<PresignatureSlot> {
+        const SCRIPT: &str = r#"
             local presig_key = KEYS[1]
             local used_key = KEYS[2]
             local reserved_key = KEYS[3]
@@ -204,7 +164,8 @@ impl PresignatureStorage {
             end
         "#;
 
-        let result: Result<(), _> = redis::Script::new(script)
+        let mut conn = self.connect().await?;
+        let result: Result<(), _> = redis::Script::new(SCRIPT)
             .key(&self.presig_key)
             .key(&self.used_key)
             .key(&self.reserved_key)
@@ -215,7 +176,6 @@ impl PresignatureStorage {
         match result {
             Ok(_) => Some(PresignatureSlot {
                 id,
-                me,
                 storage: self.clone(),
                 stored: false,
             }),
@@ -227,15 +187,10 @@ impl PresignatureStorage {
     }
 
     async fn unreserve(self, id: PresignatureId) {
-        let mut conn = match self.connect().await {
-            Ok(conn) => conn,
-            Err(err) => {
-                tracing::warn!(?err, "failed to connect to redis");
-                return;
-            }
+        let Some(mut conn) = self.connect().await else {
+            return;
         };
-        let result: Result<(), _> = conn.srem(&self.reserved_key, id).await;
-        if let Err(err) = result {
+        if let Err(err) = conn.srem::<'_, _, _, ()>(&self.reserved_key, id).await {
             tracing::warn!(id, ?err, "failed to unreserve presignature");
         }
     }
@@ -245,15 +200,7 @@ impl PresignatureStorage {
         owner: Participant,
         owner_shares: &[PresignatureId],
     ) -> Vec<PresignatureId> {
-        let mut conn = match self.connect().await {
-            Ok(conn) => conn,
-            Err(err) => {
-                tracing::warn!(?err, "failed to connect to redis");
-                return Vec::new();
-            }
-        };
-
-        let script = r#"
+        const SCRIPT: &str = r#"
             local presig_key = KEYS[1]
             local reserved_key = KEYS[2]
             local owner_key = KEYS[3]
@@ -283,7 +230,10 @@ impl PresignatureStorage {
             return outdated
         "#;
 
-        let result: Result<Vec<PresignatureId>, _> = redis::Script::new(script)
+        let Some(mut conn) = self.connect().await else {
+            return Vec::new();
+        };
+        let result: Result<Vec<PresignatureId>, _> = redis::Script::new(SCRIPT)
             .key(&self.presig_key)
             .key(&self.reserved_key)
             .key(owner_key(&self.owner_keys, owner))
@@ -308,24 +258,15 @@ impl PresignatureStorage {
 
     /// Insert a presignature into the storage. If `mine` is true, the presignature will be
     /// owned by the current node. If `back` is true, the presignature will be marked as unused.
-    pub async fn insert(
-        &self,
-        presignature: Presignature,
-        owner: Participant,
-        mine: bool,
-    ) -> StoreResult<()> {
-        let mut conn = self.connect().await?;
-
-        let script = r#"
-            local mine_key = KEYS[1]
-            local presig_key = KEYS[2]
-            local used_key = KEYS[3]
-            local reserved_key = KEYS[4]
-            local owner_keys = KEYS[5]
-            local owner_key = KEYS[6]
+    pub async fn insert(&self, presignature: Presignature, owner: Participant) -> bool {
+        const SCRIPT: &str = r#"
+            local presig_key = KEYS[1]
+            local used_key = KEYS[2]
+            local reserved_key = KEYS[3]
+            local owner_keys = KEYS[4]
+            local owner_key = KEYS[5]
             local presig_id = ARGV[1]
-            local presig_value = ARGV[2]
-            local mine = ARGV[3]
+            local presig = ARGV[2]
 
             -- if the presignature has NOT been reserved, then something went wrong when acquiring the
             -- reservation for it via presignature slot.
@@ -339,106 +280,151 @@ impl PresignatureStorage {
 
             redis.call("SADD", owner_key, presig_id)
             redis.call("SADD", owner_keys, owner_key)
-            if mine == "true" then
-                redis.call("SADD", mine_key, presig_id)
-            end
-
-            redis.call("HSET", presig_key, presig_id, presig_value)
-
-            return "OK"
+            redis.call("HSET", presig_key, presig_id, presig)
         "#;
 
-        let _: String = redis::Script::new(script)
-            .key(&self.mine_key)
+        let id = presignature.id;
+        let Some(mut conn) = self.connect().await else {
+            tracing::warn!(id, "failed to insert presignature: connection failed");
+            return false;
+        };
+        let outcome = redis::Script::new(SCRIPT)
             .key(&self.presig_key)
             .key(&self.used_key)
             .key(&self.reserved_key)
             .key(&self.owner_keys)
             .key(owner_key(&self.owner_keys, owner))
-            .arg(presignature.id)
+            .arg(id)
             .arg(presignature)
-            .arg(mine.to_string())
             .invoke_async(&mut conn)
-            .await?;
+            .await;
 
-        Ok(())
+        match outcome {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(id, ?err, "failed to insert presignature");
+                false
+            }
+        }
     }
 
-    pub async fn contains(&self, id: PresignatureId) -> StoreResult<bool> {
-        let mut conn = self.connect().await?;
-        let result: bool = conn.hexists(&self.presig_key, id).await?;
-        Ok(result)
+    pub async fn contains(&self, id: PresignatureId) -> bool {
+        let Some(mut conn) = self.connect().await else {
+            return false;
+        };
+        match conn.hexists(&self.presig_key, id).await {
+            Ok(exists) => exists,
+            Err(err) => {
+                tracing::warn!(id, ?err, "failed to check if presignature is stored");
+                false
+            }
+        }
     }
 
-    pub async fn contains_mine(&self, id: PresignatureId) -> StoreResult<bool> {
-        let mut connection = self.connect().await?;
-        let result: bool = connection.sismember(&self.mine_key, id).await?;
-        Ok(result)
+    pub async fn contains_by_owner(&self, id: PresignatureId, owner: Participant) -> bool {
+        let Some(mut conn) = self.connect().await else {
+            return false;
+        };
+        match conn.sismember(owner_key(&self.owner_keys, owner), id).await {
+            Ok(exists) => exists,
+            Err(err) => {
+                tracing::warn!(
+                    id,
+                    ?owner,
+                    ?err,
+                    "failed to check if presignature is stored by foreign owner"
+                );
+                false
+            }
+        }
     }
 
-    pub async fn contains_used(&self, id: PresignatureId) -> StoreResult<bool> {
-        let mut conn = self.connect().await?;
-        let result: bool = conn.hexists(&self.used_key, id).await?;
-        Ok(result)
+    pub async fn contains_used(&self, id: PresignatureId) -> bool {
+        let Some(mut conn) = self.connect().await else {
+            return false;
+        };
+        match conn.hexists(&self.used_key, id).await {
+            Ok(exists) => exists,
+            Err(err) => {
+                tracing::warn!(id, ?err, "failed to check if presignature is used");
+                false
+            }
+        }
     }
 
-    // TODO: need to pass in owner to delete the triple from the owner set, but we can have sync just do this
-    //       for now for us.
-    pub async fn take(&self, id: PresignatureId) -> StoreResult<PresignatureTaken> {
-        let mut conn = self.connect().await?;
-
-        let script = r#"
-            local mine_key = KEYS[1]
-            local presig_key = KEYS[2]
-            local used_key = KEYS[3]
+    pub async fn take(
+        &self,
+        id: PresignatureId,
+        owner: Participant,
+        me: Participant,
+    ) -> Option<PresignatureTaken> {
+        const SCRIPT: &str = r#"
+            local presig_key = KEYS[1]
+            local used_key = KEYS[2]
+            local owner_key = KEYS[3]
+            local mine_key = KEYS[4]
+            local reserved_key = KEYS[5]
             local presig_id = ARGV[1]
 
-            if redis.call('SISMEMBER', mine_key, presig_id) == 1 then
-                return {err = 'Cannot take mine presignature as foreign owned'}
+            if redis.call("SMISMEMBER", reserved_key, presig_id) == 1 then
+                return {err = 'WARN presignature ' .. presig_id .. ' is generating or taken'}
             end
 
-            local presig_value = redis.call("HGET", presig_key, presig_id)
-
-            if not presig_value then
-                return {err = "Presignature " .. presig_id .. " is missing"}
+            if redis.call("SISMEMBER", mine_key, presig_id) == 1 then
+                return {err = 'WARN presignature ' .. presig_id ..' cannot be taken as foreign owned'}
+            end
+            if redis.call("SISMEMBER", owner_key, presig_id) == 0 then
+                return {err = 'WARN presignature ' .. presig_id .. ' cannot be taken by incorrect owner ' .. owner_key }
             end
 
+            local presig = redis.call("HGET", presig_key, presig_id)
+            if not presig then
+                return {err = "WARN presignature " .. presig_id .. " is missing"}
+            end
+
+            redis.call("SREM", owner_key, presig_id)
             redis.call("HDEL", presig_key, presig_id)
             redis.call("HSET", used_key, presig_id, "1")
             redis.call("HEXPIRE", used_key, ARGV[2], "FIELDS", "1", presig_id)
 
-            return presig_value
+            return presig
         "#;
 
-        let presignature: Presignature = redis::Script::new(script)
-            .key(&self.mine_key)
+        let mut conn = self.connect().await?;
+        match redis::Script::new(SCRIPT)
             .key(&self.presig_key)
             .key(&self.used_key)
+            .key(owner_key(&self.owner_keys, owner))
+            .key(owner_key(&self.owner_keys, me))
+            .key(&self.reserved_key)
             .arg(id)
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await
-            .map_err(StoreError::from)?;
-        Ok(PresignatureTaken::foreigner(presignature))
+        {
+            Ok(presignature) => Some(PresignatureTaken::foreigner(presignature)),
+            Err(err) => {
+                tracing::warn!(id, ?owner, ?me, ?err, "failed to take presignature");
+                None
+            }
+        }
     }
 
-    pub async fn take_mine(&self, me: Participant) -> StoreResult<Option<PresignatureTaken>> {
-        let mut conn = self.connect().await?;
-
-        let script = r#"
-            local mine_key = KEYS[1]
-            local presig_key = KEYS[2]
-            local used_key = KEYS[3]
-            local reserved_key = KEYS[4]
+    pub async fn take_mine(&self, me: Participant) -> Option<PresignatureTaken> {
+        const SCRIPT: &str = r#"
+            local presig_key = KEYS[1]
+            local used_key = KEYS[2]
+            local reserved_key = KEYS[3]
+            local mine_key = KEYS[4]
 
             local presig_id = redis.call("SPOP", mine_key)
             if not presig_id then
                 return nil
             end
 
-            local presig_value = redis.call("HGET", presig_key, presig_id)
-            if not presig_value then
-                return {err = "Unexpected behavior. Presignature " .. presig_id .. " is missing"}
+            local presig = redis.call("HGET", presig_key, presig_id)
+            if not presig then
+                return {err = "WARN unexpected, presignature " .. presig_id .. " is missing"}
             end
 
             redis.call("SADD", reserved_key, presig_id)
@@ -446,55 +432,88 @@ impl PresignatureStorage {
             redis.call("HSET", used_key, presig_id, "1")
             redis.call("HEXPIRE", used_key, ARGV[1], "FIELDS", "1", presig_id)
 
-            return presig_value
+            return presig
         "#;
 
-        let presignature: Option<Presignature> = redis::Script::new(script)
-            .key(&self.mine_key)
+        let mut conn = self.connect().await?;
+        match redis::Script::new(SCRIPT)
             .key(&self.presig_key)
             .key(&self.used_key)
+            .key(&self.reserved_key)
             .key(owner_key(&self.owner_keys, me))
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await
-            .map_err(StoreError::from)?;
+        {
+            Ok(Some(presignature)) => Some(PresignatureTaken::owner(presignature, self.clone())),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(?me, ?err, "failed to take my presignature");
+                None
+            }
+        }
+    }
 
-        let Some(presignature) = presignature else {
-            return Ok(None);
+    pub async fn len_generated(&self) -> usize {
+        let Some(mut conn) = self.connect().await else {
+            return 0;
         };
-        Ok(Some(PresignatureTaken::owner(presignature, self.clone())))
+        conn.hlen(&self.presig_key)
+            .await
+            .inspect_err(|err| {
+                tracing::warn!(?err, "failed to get length of generated presignatures");
+            })
+            .unwrap_or(0)
     }
 
-    pub async fn len_generated(&self) -> StoreResult<usize> {
-        let mut conn = self.connect().await?;
-        let result: usize = conn.hlen(&self.presig_key).await?;
-        Ok(result)
+    pub async fn len_by_owner(&self, me: Participant) -> usize {
+        let Some(mut conn) = self.connect().await else {
+            return 0;
+        };
+        conn.scard(owner_key(&self.owner_keys, me))
+            .await
+            .inspect_err(|err| {
+                tracing::warn!(?err, "failed to get length of my presignatures");
+            })
+            .unwrap_or(0)
     }
 
-    pub async fn len_mine(&self) -> StoreResult<usize> {
-        let mut conn = self.connect().await?;
-        let result: usize = conn.scard(&self.mine_key).await?;
-        Ok(result)
+    /// Returns if there are unspent presignatures available in the manager.
+    pub async fn is_empty(&self) -> bool {
+        self.len_generated().await == 0
     }
 
-    pub async fn clear(&self) -> StoreResult<()> {
-        let mut conn = self.connect().await?;
-        let script = r#"
+    /// Clear all presignature storage, including used, reserved, and owned keys.
+    /// Return true if successful, false otherwise.
+    pub async fn clear(&self) -> bool {
+        const SCRIPT: &str = r#"
             local owner_keys = redis.call("SMEMBERS", KEYS[1])
-            redis.call("DEL", unpack(KEYS), unpack(owner_keys))
+            local del = {}
+            for _, key in ipairs(KEYS) do
+                table.insert(del, key)
+            end
+            for _, key in ipairs(owner_keys) do
+                table.insert(del, key)
+            end
+
+            redis.call("DEL", unpack(del))
         "#;
 
-        let _: () = redis::Script::new(script)
+        let Some(mut conn) = self.connect().await else {
+            return false;
+        };
+        let outcome: Option<()> = redis::Script::new(SCRIPT)
             .key(&self.owner_keys)
             .key(&self.presig_key)
-            .key(&self.mine_key)
             .key(&self.used_key)
             .key(&self.reserved_key)
             .invoke_async(&mut conn)
             .await
-            .map_err(StoreError::from)?;
-
-        Ok(())
+            .inspect_err(|err| {
+                tracing::warn!(?err, "failed to clear presignature storage");
+            })
+            .ok();
+        outcome.is_some()
     }
 }
 

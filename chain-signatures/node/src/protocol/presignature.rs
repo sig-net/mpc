@@ -1,11 +1,9 @@
 use super::message::{MessageChannel, PresignatureMessage};
 use super::state::RunningState;
-use super::triple::{TripleId, TripleManager};
+use super::triple::TripleId;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::error::GenerationError;
-use crate::storage::presignature_storage::{
-    PresignatureSlot, PresignatureStorage, PresignatureTaken,
-};
+use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
 use crate::storage::triple_storage::{TriplesTaken, TriplesTakenDropper};
 use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
@@ -184,82 +182,26 @@ impl PresignatureManager {
 
     /// Returns true if the presignature with the given id is already generated
     pub async fn contains(&self, id: PresignatureId) -> bool {
-        self.presignatures
-            .contains(id)
-            .await
-            .map_err(|e| {
-                tracing::warn!(?e, "failed to check if presignature exist");
-            })
-            .unwrap_or(false)
+        self.presignatures.contains(id).await
     }
 
     /// Returns true if the mine presignature with the given id is already generated
     pub async fn contains_mine(&self, id: PresignatureId) -> bool {
-        self.presignatures
-            .contains_mine(id)
-            .await
-            .map_err(|e| {
-                tracing::warn!(?e, "failed to check if mine presignature exist");
-            })
-            .unwrap_or(false)
+        self.presignatures.contains_by_owner(id, self.me).await
     }
 
     pub async fn contains_used(&self, id: PresignatureId) -> bool {
-        self.presignatures
-            .contains_used(id)
-            .await
-            .map_err(|e| tracing::warn!(?e, "failed to check if presignature is used"))
-            .unwrap_or(false)
-    }
-
-    pub async fn take(&mut self, id: PresignatureId) -> Result<PresignatureTaken, GenerationError> {
-        let presignature = self.presignatures.take(id).await.map_err(|store_err| {
-            if self.generators.contains_key(&id) {
-                tracing::warn!(id, ?store_err, "presignature is still generating");
-                GenerationError::PresignatureIsGenerating(id)
-            } else {
-                tracing::warn!(id, ?store_err, "presignature is missing");
-                GenerationError::PresignatureIsMissing(id)
-            }
-        })?;
-
-        tracing::debug!(id, "took presignature");
-        Ok(presignature)
-    }
-
-    pub async fn take_mine(&mut self) -> Option<PresignatureTaken> {
-        let taken = self
-            .presignatures
-            .take_mine(self.me)
-            .await
-            .map_err(|store_error| {
-                tracing::error!(?store_error, "failed to look for mine presignature");
-            })
-            .ok()??;
-        tracing::debug!(id = ?taken.presignature.id, "took presignature of mine");
-        Some(taken)
+        self.presignatures.contains_used(id).await
     }
 
     /// Returns the number of unspent presignatures available in the manager.
     pub async fn len_generated(&self) -> usize {
-        self.presignatures
-            .len_generated()
-            .await
-            .map_err(|e| {
-                tracing::error!(?e, "failed to count all presignatures");
-            })
-            .unwrap_or(0)
+        self.presignatures.len_generated().await
     }
 
     /// Returns the number of unspent presignatures assigned to this node.
     pub async fn len_mine(&self) -> usize {
-        self.presignatures
-            .len_mine()
-            .await
-            .map_err(|e| {
-                tracing::error!(?e, "failed to count mine presignatures");
-            })
-            .unwrap_or(0)
+        self.presignatures.len_by_owner(self.me).await
     }
 
     /// Returns if there are unspent presignatures available in the manager.
@@ -388,15 +330,8 @@ impl PresignatureManager {
 
             // TODO: have all this part be a separate task such that finding a pair of triples is done in parallel instead
             // of waiting for storage to respond here.
-            let triples = match self.triples.take_two_mine(self.me).await {
-                Ok(Some(pair)) => pair,
-                Ok(None) => {
-                    return;
-                }
-                Err(err) => {
-                    tracing::warn!(?err, "failed to take two triples");
-                    return;
-                }
+            let Some(triples) = self.triples.take_two_mine(self.me).await else {
+                return;
             };
 
             let t0_id = triples.triple0.id;
@@ -456,7 +391,6 @@ impl PresignatureManager {
         id: PresignatureId,
         triple0: TripleId,
         triple1: TripleId,
-        triple_manager: &TripleManager,
         public_key: &PublicKey,
         private_share: &SecretKeyShare,
         cfg: &ProtocolConfig,
@@ -471,44 +405,28 @@ impl PresignatureManager {
             match self.generators.entry(id) {
                 Entry::Vacant(entry) => {
                     tracing::info!(id, "joining protocol to generate a new presignature");
-                    let Some(slot) = self.presignatures.reserve(id, self.me).await else {
+                    let Some(slot) = self.presignatures.reserve(id).await else {
                         return Err(GenerationError::PresignatureReserveError);
-                    };
-
-                    let triples = match triple_manager.take_two(triple0, triple1).await {
-                        Ok(result) => result,
-                        Err(error) => match error {
-                            GenerationError::TripleIsGenerating(_) => {
-                                tracing::warn!(
-                                    ?error,
-                                    id,
-                                    triple0,
-                                    triple1,
-                                    "could not initiate non-introduced presignature: one triple is generating"
-                                );
-                                return Err(error);
-                            }
-                            GenerationError::TripleStoreError(_) => {
-                                tracing::warn!(
-                                    ?error,
-                                    id,
-                                    triple0,
-                                    triple1,
-                                    "could not initiate non-introduced presignature: triple store error"
-                                );
-                                return Err(error);
-                            }
-                            _ => {
-                                tracing::error!(?error, "Unexpected Generation Error");
-                                return Err(error);
-                            }
-                        },
                     };
 
                     // Owner is the node that initiated the presignature generation.
                     // TODO: we need to validate that is the case but right now, our node just assumes so. Should be
                     // mitigated via the initing the protocol.
                     let owner = from;
+
+                    let Some(triples) = self
+                        .triples
+                        .take_two(triple0, triple1, owner, self.me)
+                        .await
+                    else {
+                        tracing::warn!(
+                            id,
+                            triple0,
+                            triple1,
+                            "cannot join presignature generation: triple(s) are either missing or generating",
+                        );
+                        return Err(GenerationError::TripleGeneratingOrMissing(triple0));
+                    };
 
                     let generator = Self::generate_internal(
                         owner,
@@ -703,7 +621,7 @@ impl PresignatureManager {
     }
 
     pub async fn reserve(&self, id: PresignatureId) -> Option<PresignatureSlot> {
-        self.presignatures.reserve(id, self.me).await
+        self.presignatures.reserve(id).await
     }
 
     pub fn execute(

@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"
+atty = "0.2"
 aws-config = "1.4"
 aws-sdk-s3 = "1.29"
 axum = "0.6.19"
@@ -27,7 +28,18 @@ redis = "0.27.2"
 semver = "1.0.23"
 sysinfo = "0.32.0"
 tokio-retry = "0.3"
+tracing-appender = "0.2.2"
 tracing-stackdriver = "0.10.0"
+tracing-opentelemetry = "0.30.0"
+opentelemetry = { version = "0.29.0", default-features = false, features = [
+    "trace",
+] }
+opentelemetry-otlp = { version = "0.29.0" }
+opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
+    "trace",
+    "rt-tokio",
+] }
+opentelemetry-appender-tracing = "0.29.1"
 alloy-signer-local = "0.9.1"
 alloy-sol-types = "0.8.24"
 helios = { git = "https://github.com/sig-net/helios", rev = "7c8018157cf5adc176ba2de8c769c1a7cc6f6106" }
@@ -36,6 +48,7 @@ helios = { git = "https://github.com/sig-net/helios", rev = "7c8018157cf5adc176b
 alloy.workspace = true
 anyhow.workspace = true
 borsh.workspace = true
+borsh_sol = { package = "borsh", version = "0.10.4" } # solana anchor requires borsh 0.10
 cait-sith.workspace = true
 ciborium.workspace = true
 clap.workspace = true
@@ -54,6 +67,11 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
+web3.workspace = true
+anchor-client.workspace = true
+anchor-lang.workspace = true
+solana-sdk.workspace = true
+solana-transaction-status.workspace = true
 
 near-account-id.workspace = true
 near-crypto = "0.26.0"
@@ -67,6 +85,7 @@ mpc-contract.workspace = true
 mpc-crypto.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
+signet-program.workspace = true
 
 [features]
 default = []

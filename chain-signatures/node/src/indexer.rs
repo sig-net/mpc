@@ -86,7 +86,6 @@ pub struct NearIndexer {
     last_updated_timestamp: Arc<RwLock<Instant>>,
     latest_block_timestamp_nanosec: Arc<RwLock<Option<u64>>>,
     running_threshold: Duration,
-    behind_threshold: Duration,
 }
 
 impl NearIndexer {
@@ -96,7 +95,6 @@ impl NearIndexer {
             last_updated_timestamp: Arc::new(RwLock::new(Instant::now())),
             latest_block_timestamp_nanosec: Arc::new(RwLock::new(None)),
             running_threshold: Duration::from_secs(options.running_threshold),
-            behind_threshold: Duration::from_secs(options.behind_threshold),
         }
     }
 
@@ -127,25 +125,6 @@ impl NearIndexer {
     /// Check whether the indexer is on track with the latest block height from the chain.
     pub async fn is_running(&self) -> bool {
         self.last_updated_timestamp.read().await.elapsed() <= self.running_threshold
-    }
-
-    /// Check whether the indexer is behind with the latest block height from the chain.
-    pub async fn is_behind(&self) -> bool {
-        if let Some(latest_block_timestamp_nanosec) =
-            *self.latest_block_timestamp_nanosec.read().await
-        {
-            crate::util::is_elapsed_longer_than_timeout(
-                latest_block_timestamp_nanosec / 1_000_000_000,
-                self.behind_threshold.as_millis() as u64,
-            )
-        } else {
-            true
-        }
-    }
-
-    pub async fn is_stable(&self) -> bool {
-        //!self.is_behind().await && self.is_running().await
-        true
     }
 
     async fn update_block_height_and_timestamp(

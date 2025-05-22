@@ -1,9 +1,10 @@
 use super::contract::primitives::intersect_vec;
 use super::state::RunningState;
+use super::MpcSignProtocol;
 use crate::kdf::derive_delta;
 use crate::protocol::error::GenerationError;
 use crate::protocol::message::{MessageChannel, SignatureMessage};
-use crate::protocol::presignature::{PresignatureId, PresignatureManager};
+use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::RpcChannel;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
@@ -51,13 +52,19 @@ pub struct SignRequest {
     pub indexed: IndexedSignRequest,
     pub proposer: Participant,
     pub participants: Vec<Participant>,
+    pub stable: Vec<Participant>,
 }
 
 pub struct SignQueue {
     me: Participant,
     sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+    /// The requests that belong to us where we will the propose the signature to the chain.
     my_requests: VecDeque<SignRequest>,
+    /// All other requests. Can be requests that we are not the proposer, or one where
+    /// we do not belong to the signature generating subset.
     other_requests: HashMap<SignId, SignRequest>,
+    /// Set of request that failed to be processed during signature generation
+    failed_requests: VecDeque<SignRequest>,
 }
 
 impl SignQueue {
@@ -74,6 +81,7 @@ impl SignQueue {
             sign_rx,
             my_requests: VecDeque::new(),
             other_requests: HashMap::new(),
+            failed_requests: VecDeque::new(),
         }
     }
 
@@ -93,6 +101,65 @@ impl SignQueue {
         self.len() == 0
     }
 
+    fn contains(&self, sign_id: &SignId) -> bool {
+        self.my_requests
+            .iter()
+            .any(|req| req.indexed.id == *sign_id)
+            || self.other_requests.contains_key(sign_id)
+    }
+
+    fn organize_request(
+        &self,
+        threshold: usize,
+        stable: &[Participant],
+        indexed: IndexedSignRequest,
+        reorganize: bool,
+    ) -> SignRequest {
+        let sign_id = indexed.id.clone();
+        // NOTE: reorganize, will use the same entropy for reorganizing the participants. The only
+        // thing that would be different is the passed in stable participants.
+        let mut rng = StdRng::from_seed(indexed.args.entropy);
+        let subset = stable.iter().copied().choose_multiple(&mut rng, threshold);
+        let in_subset = subset.contains(&self.me);
+        let proposer = *subset.choose(&mut rng).unwrap();
+        let is_mine = proposer == self.me;
+
+        tracing::info!(
+            ?stable,
+            ?sign_id,
+            ?subset,
+            ?proposer,
+            me = ?self.me,
+            in_subset,
+            is_mine,
+            "sign queue: {}organizing request",
+            if reorganize { "re" } else { "" },
+        );
+
+        let request = SignRequest {
+            indexed,
+            proposer,
+            participants: subset,
+            stable: stable.to_vec(),
+        };
+
+        if in_subset {
+            tracing::info!(
+                ?sign_id,
+                "saving sign request: node is in the {}signer subset",
+                if reorganize { "reorganized " } else { "" },
+            );
+        } else {
+            tracing::info!(
+                ?sign_id,
+                "skipping sign request: node is NOT in the {}signer subset",
+                if reorganize { "reorganized " } else { "" },
+            );
+        }
+
+        request
+    }
+
     pub async fn organize(
         &mut self,
         threshold: usize,
@@ -102,6 +169,10 @@ impl SignQueue {
         let mut stable = stable.to_vec();
         stable.sort();
 
+        // Reorganize the failed requests with a potentially newer list of stable participants.
+        self.organize_failed(threshold, &stable, my_account_id);
+
+        // try and organize the new incoming requests.
         let mut sign_rx = self.sign_rx.write().await;
         while let Ok(indexed) = {
             match sign_rx.try_recv() {
@@ -112,72 +183,63 @@ impl SignQueue {
                 other => other,
             }
         } {
-            let sign_id = indexed.id.clone();
-            if self.my_requests.iter().any(|req| req.indexed.id == sign_id)
-                || self.other_requests.contains_key(&sign_id)
-            {
-                tracing::info!(?sign_id, "skipping sign request: already in the sign queue");
+            if self.contains(&indexed.id) {
+                tracing::info!(sign_id = ?indexed.id, "skipping sign request: already in the sign queue");
                 continue;
             }
             crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
                 .with_label_values(&[indexed.chain.as_str(), my_account_id.as_str()])
                 .inc();
-            let mut rng = StdRng::from_seed(indexed.args.entropy);
-            let subset = stable.iter().copied().choose_multiple(&mut rng, threshold);
-            let in_subset = subset.contains(&self.me);
-            let proposer = *subset.choose(&mut rng).unwrap();
-            let is_mine = proposer == self.me;
 
-            tracing::info!(
-                ?stable,
-                ?sign_id,
-                ?subset,
-                ?proposer,
-                me = ?self.me,
-                in_subset,
-                is_mine,
-                "sign queue: organizing request"
-            );
+            let request = self.organize_request(threshold, &stable, indexed, false);
+            let is_mine = request.proposer == self.me;
+            if is_mine {
+                self.my_requests.push_back(request);
+                crate::metrics::NUM_SIGN_REQUESTS_MINE
+                    .with_label_values(&[my_account_id.as_str()])
+                    .inc();
+            } else {
+                self.other_requests
+                    .insert(request.indexed.id.clone(), request);
+            }
+        }
+    }
 
-            if in_subset {
-                tracing::info!(
-                    ?sign_id,
-                    "saving sign request: node is in the signer subset"
-                );
+    fn organize_failed(
+        &mut self,
+        threshold: usize,
+        stable: &[Participant],
+        my_account_id: &AccountId,
+    ) {
+        while let Some(request) = self.failed_requests.pop_front() {
+            let (reorganized, request) = if request.stable == stable {
+                // just use the same request if the participants are the same
+                (false, request)
+            } else {
+                let request = self.organize_request(threshold, stable, request.indexed, true);
+                (true, request)
+            };
 
-                let request = SignRequest {
-                    indexed,
-                    proposer,
-                    participants: subset,
-                };
-                if is_mine {
+            // NOTE: this prioritizes old requests first then tries to do new ones if there's enough presignatures.
+            // TODO: we need to decide how to prioritize certain requests over others such as with gas or time of
+            // when the request made it into the NEAR network.
+            // issue: https://github.com/near/mpc-recovery/issues/596
+            if request.proposer == self.me {
+                self.my_requests.push_front(request);
+                if reorganized {
                     crate::metrics::NUM_SIGN_REQUESTS_MINE
                         .with_label_values(&[my_account_id.as_str()])
                         .inc();
-                    self.my_requests.push_back(request);
-                } else {
-                    self.other_requests.insert(sign_id, request);
                 }
             } else {
-                tracing::info!(
-                    ?sign_id,
-                    "skipping sign request: node is NOT in the signer subset"
-                );
+                self.other_requests
+                    .insert(request.indexed.id.clone(), request);
             }
         }
     }
 
     pub fn push_failed(&mut self, request: SignRequest) {
-        // NOTE: this prioritizes old requests first then tries to do new ones if there's enough presignatures.
-        // TODO: we need to decide how to prioritize certain requests over others such as with gas or time of
-        // when the request made it into the NEAR network.
-        // issue: https://github.com/near/mpc-recovery/issues/596
-        if request.proposer == self.me {
-            self.my_requests.push_front(request);
-        } else {
-            self.other_requests
-                .insert(request.indexed.id.clone(), request);
-        }
+        self.failed_requests.push_back(request);
     }
 
     pub fn take_mine(&mut self) -> Option<SignRequest> {
@@ -189,6 +251,14 @@ impl SignQueue {
     }
 
     pub fn expire(&mut self, cfg: &ProtocolConfig) {
+        self.my_requests.retain(|request| {
+            request.indexed.timestamp.elapsed()
+                < Duration::from_millis(cfg.signature.generation_timeout_total)
+        });
+        self.failed_requests.retain(|request| {
+            request.indexed.timestamp.elapsed()
+                < Duration::from_millis(cfg.signature.generation_timeout_total)
+        });
         self.other_requests.retain(|_, request| {
             request.indexed.timestamp_sign_queue.is_none_or(|t| {
                 t.elapsed() < Duration::from_millis(cfg.signature.generation_timeout_total)
@@ -260,6 +330,7 @@ pub struct SignatureManager {
     generators: HashMap<SignId, SignatureGenerator>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
+    /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
 
     me: Participant,
@@ -372,7 +443,6 @@ impl SignatureManager {
         proposer: Participant,
         presignature_id: PresignatureId,
         cfg: &ProtocolConfig,
-        presignature_manager: &mut PresignatureManager,
     ) -> Result<&mut SignatureProtocol, GenerationError> {
         let entry = match self.generators.entry(sign_id.clone()) {
             Entry::Vacant(entry) => entry,
@@ -389,19 +459,16 @@ impl SignatureManager {
         }
 
         tracing::info!(?sign_id, me = ?self.me, presignature_id, "joining protocol to generate a new signature");
-        let presignature = match presignature_manager.take(presignature_id).await {
-            Ok(presignature) => presignature,
-            Err(err @ GenerationError::PresignatureIsGenerating(_)) => {
-                tracing::warn!(me = ?self.me, presignature_id, "presignature is generating, can't join signature generation protocol");
-                self.sign_queue.push_failed(request);
-                return Err(err);
-            }
-            Err(err @ GenerationError::PresignatureIsMissing(_)) => {
-                tracing::warn!(me = ?self.me, presignature_id, "presignature is missing, can't join signature generation protocol");
-                self.sign_queue.push_failed(request);
-                return Err(err);
-            }
-            Err(err) => return Err(err),
+        let Some(presignature) = self
+            .presignatures
+            .take(presignature_id, proposer, self.me)
+            .await
+        else {
+            tracing::warn!(me = ?self.me, presignature_id, "cannot join signature generation: presignature is either missing or generating");
+            self.sign_queue.push_failed(request);
+            return Err(GenerationError::PresignatureGeneratingOrMissing(
+                presignature_id,
+            ));
         };
         tracing::info!(me = ?self.me, presignature_id, "found presignature: ready to start signature generation");
         let generator = match Self::generate_internal(
@@ -643,9 +710,9 @@ impl SignatureManager {
             .set(self.sign_queue.len_mine() as i64);
 
         let mut retry = Vec::new();
-        while let Ok(Some(taken)) = {
+        while let Some(taken) = {
             if self.sign_queue.is_empty_mine() {
-                Ok(None)
+                None
             } else {
                 self.presignatures.take_mine(self.me).await
             }
@@ -699,13 +766,13 @@ impl SignatureManager {
         state: &RunningState,
         stable: &[Participant],
         protocol_cfg: &ProtocolConfig,
-        ctx: &impl super::cryptography::CryptographicCtx,
+        ctx: &MpcSignProtocol,
     ) -> tokio::task::JoinHandle<()> {
         let signature_manager = state.signature_manager.clone();
         let stable = stable.to_vec();
         let protocol_cfg = protocol_cfg.clone();
-        let rpc_channel = ctx.rpc_channel().clone();
-        let channel = ctx.channel().clone();
+        let rpc_channel = ctx.rpc_channel.clone();
+        let channel = ctx.msg_channel.clone();
 
         // NOTE: signatures should only use stable and not active participants. The difference here is that
         // stable participants utilizes more than the online status of a node, such as whether or not their

@@ -1,30 +1,15 @@
-use super::message::MessageChannel;
 use super::signature::SignatureManager;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
+use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::gcp::error::SecretStorageError;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
-use crate::rpc::RpcChannel;
-use crate::storage::secret_storage::SecretNodeStorageBox;
-use crate::storage::{PresignatureStorage, TripleStorage};
 
-use async_trait::async_trait;
 use cait_sith::protocol::{Action, InitializationError, ProtocolError};
 use k256::elliptic_curve::group::GroupEncoding;
-use near_account_id::AccountId;
-
-pub trait CryptographicCtx {
-    fn mpc_contract_id(&self) -> &AccountId;
-    fn secret_storage(&mut self) -> &mut SecretNodeStorageBox;
-    fn triple_storage(&self) -> &TripleStorage;
-    fn presignature_storage(&self) -> &PresignatureStorage;
-    fn my_account_id(&self) -> &AccountId;
-    fn channel(&self) -> &MessageChannel;
-    fn rpc_channel(&self) -> &RpcChannel;
-}
 
 #[derive(thiserror::Error, Debug)]
 pub enum CryptographicError {
@@ -36,21 +21,19 @@ pub enum CryptographicError {
     SecretStorageError(#[from] SecretStorageError),
 }
 
-#[async_trait]
-pub trait CryptographicProtocol {
-    async fn progress<C: CryptographicCtx + Send + Sync>(
+pub(crate) trait CryptographicProtocol {
+    async fn progress(
         self,
-        ctx: C,
+        ctx: &mut MpcSignProtocol,
         cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError>;
 }
 
-#[async_trait]
 impl CryptographicProtocol for GeneratingState {
-    async fn progress<C: CryptographicCtx + Send + Sync>(
+    async fn progress(
         mut self,
-        mut ctx: C,
+        ctx: &mut MpcSignProtocol,
         _cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
@@ -86,7 +69,7 @@ impl CryptographicProtocol for GeneratingState {
                             continue;
                         }
 
-                        ctx.channel()
+                        ctx.msg_channel
                             .send(
                                 self.me,
                                 *p,
@@ -100,7 +83,7 @@ impl CryptographicProtocol for GeneratingState {
                 }
                 Action::SendPrivate(to, data) => {
                     tracing::debug!("generating: sending a private message to {to:?}");
-                    ctx.channel()
+                    ctx.msg_channel
                         .send(
                             self.me,
                             to,
@@ -117,7 +100,7 @@ impl CryptographicProtocol for GeneratingState {
                         "generating: successfully completed key generation"
                     );
                     // TODO: handle secret storage error
-                    ctx.secret_storage()
+                    ctx.secret_storage
                         .store(&PersistentNodeData {
                             epoch: 0,
                             private_share: r.private_share,
@@ -137,11 +120,10 @@ impl CryptographicProtocol for GeneratingState {
     }
 }
 
-#[async_trait]
 impl CryptographicProtocol for WaitingForConsensusState {
-    async fn progress<C: CryptographicCtx + Send + Sync>(
-        mut self,
-        _ctx: C,
+    async fn progress(
+        self,
+        _ctx: &mut MpcSignProtocol,
         _cfg: Config,
         _mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
@@ -150,11 +132,10 @@ impl CryptographicProtocol for WaitingForConsensusState {
     }
 }
 
-#[async_trait]
 impl CryptographicProtocol for ResharingState {
-    async fn progress<C: CryptographicCtx + Send + Sync>(
+    async fn progress(
         mut self,
-        mut ctx: C,
+        ctx: &mut MpcSignProtocol,
         _cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
@@ -185,7 +166,7 @@ impl CryptographicProtocol for ResharingState {
                             // Skip yourself, cait-sith never sends messages to oneself
                             continue;
                         }
-                        ctx.channel()
+                        ctx.msg_channel
                             .send(
                                 self.me,
                                 *p,
@@ -203,7 +184,7 @@ impl CryptographicProtocol for ResharingState {
                     if self.new_participants.get(&to).is_none() {
                         tracing::error!("resharing: send_private unknown participant {to:?}");
                     } else {
-                        ctx.channel()
+                        ctx.msg_channel
                             .send(
                                 self.me,
                                 to,
@@ -218,7 +199,7 @@ impl CryptographicProtocol for ResharingState {
                 }
                 Action::Return(private_share) => {
                     tracing::debug!("resharing: successfully completed key reshare");
-                    ctx.secret_storage()
+                    ctx.secret_storage
                         .store(&PersistentNodeData {
                             epoch: self.old_epoch + 1,
                             private_share,
@@ -228,16 +209,12 @@ impl CryptographicProtocol for ResharingState {
 
                     // Clear triples from storage before starting the new epoch. This is necessary if the node has accumulated
                     // triples from previous epochs. If it was not able to clear the previous triples, we'll leave them as-is
-                    if let Err(err) = ctx.triple_storage().clear().await {
-                        tracing::error!(
-                            ?err,
-                            "failed to clear triples from storage on new epoch start"
-                        );
+                    if !ctx.triple_storage.clear().await {
+                        tracing::error!("failed to clear triples from storage on new epoch start");
                     }
 
-                    if let Err(err) = ctx.presignature_storage().clear().await {
+                    if !ctx.presignature_storage.clear().await {
                         tracing::error!(
-                            ?err,
                             "failed to clear presignatures from storage on new epoch start"
                         );
                     }
@@ -255,11 +232,10 @@ impl CryptographicProtocol for ResharingState {
     }
 }
 
-#[async_trait]
 impl CryptographicProtocol for RunningState {
-    async fn progress<C: CryptographicCtx + Send + Sync>(
-        mut self,
-        ctx: C,
+    async fn progress(
+        self,
+        ctx: &mut MpcSignProtocol,
         cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {
@@ -274,7 +250,7 @@ impl CryptographicProtocol for RunningState {
 
         let stable = mesh_state.stable;
         tracing::debug!(?stable, "stable participants");
-        let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol, &ctx);
+        let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol, ctx);
 
         match tokio::try_join!(triple_task, presig_task, sig_task) {
             Ok(_result) => (),
@@ -287,11 +263,10 @@ impl CryptographicProtocol for RunningState {
     }
 }
 
-#[async_trait]
 impl CryptographicProtocol for NodeState {
-    async fn progress<C: CryptographicCtx + Send + Sync>(
+    async fn progress(
         self,
-        ctx: C,
+        ctx: &mut MpcSignProtocol,
         cfg: Config,
         mesh_state: MeshState,
     ) -> Result<NodeState, CryptographicError> {

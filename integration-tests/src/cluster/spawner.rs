@@ -7,6 +7,7 @@ use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
 
 use crate::containers::{self, DockerClient};
+use crate::utils::dev_gen_indexed;
 use crate::{execute, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
@@ -15,10 +16,10 @@ const DOCKER_NETWORK: &str = "mpc_it_network";
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
 
-struct Prestockpile {
+pub struct Prestockpile {
     /// Multiplier to increase the stockpile such that stockpiling presignatures does not trigger
     /// the number of triples to be lower than the stockpile limit.
-    multiplier: u32,
+    pub multiplier: u32,
 }
 
 pub struct ClusterSpawner {
@@ -133,8 +134,8 @@ impl ClusterSpawner {
     /// Create accounts for the nodes
     pub async fn create_accounts(&mut self, worker: &Worker<Sandbox>) {
         let mut accounts = Vec::with_capacity(self.cfg.nodes);
-        for _ in 0..self.cfg.nodes {
-            accounts.push(worker.dev_create_account().await.unwrap());
+        for i in 0..self.cfg.nodes {
+            accounts.push(dev_gen_indexed(worker, i).await.unwrap());
         }
         self.participants
             .extend((0..accounts.len() as u32).map(Participant::from));
@@ -167,7 +168,6 @@ impl IntoFuture for ClusterSpawner {
             let jsonrpc_client = connector.connect(&nodes.ctx().lake_indexer.rpc_host_address);
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
 
-            let cfg = self.cfg.clone();
             let cluster = Cluster {
                 cfg: self.cfg,
                 rpc_client,
@@ -178,22 +178,10 @@ impl IntoFuture for ClusterSpawner {
 
             if self.wait_for_running {
                 cluster.wait().running().nodes_running().await?;
-            }
 
-            if let Some(prestockpile) = self.prestockpile {
-                let participants = cluster.participants().await.unwrap();
-                cluster
-                    .nodes
-                    .ctx()
-                    .redis
-                    .stockpile_triples(&cfg, &participants, prestockpile.multiplier)
-                    .await;
-
-                cluster
-                    .wait()
-                    .min_mine_presignatures(cfg.protocol.presignature.min_presignatures as usize)
-                    .await
-                    .unwrap();
+                if let Some(prestockpile) = self.prestockpile {
+                    cluster.prestockpile(prestockpile).await;
+                }
             }
 
             Ok(cluster)

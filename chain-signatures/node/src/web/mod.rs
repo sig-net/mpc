@@ -4,7 +4,9 @@ use self::error::Error;
 use crate::indexer::NearIndexer;
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::NodeState;
+use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::error::Result;
+
 use anyhow::Context;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -22,6 +24,8 @@ struct AxumState {
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
     indexer: Option<NearIndexer>,
+    triple_storage: TripleStorage,
+    presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
 }
 
@@ -30,6 +34,8 @@ pub async fn run(
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
     indexer: Option<NearIndexer>,
+    triple_storage: TripleStorage,
+    presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
 ) {
     tracing::info!("starting web server");
@@ -37,6 +43,8 @@ pub async fn run(
         sender,
         protocol_state,
         indexer,
+        triple_storage,
+        presignature_storage,
         sync_channel,
     };
 
@@ -98,13 +106,11 @@ pub enum StateView {
         presignature_mine_count: usize,
         presignature_potential_count: usize,
         latest_block_height: BlockHeight,
-        is_stable: bool,
     },
     Resharing {
         old_participants: Vec<Participant>,
         new_participants: Vec<Participant>,
         latest_block_height: BlockHeight,
-        is_stable: bool,
     },
     Joining {
         participants: Vec<Participant>,
@@ -114,28 +120,26 @@ pub enum StateView {
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
-async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
+async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
     tracing::debug!("fetching state");
 
     // TODO: remove once we have integration tests built using other chains
-    let (latest_block_height, is_stable) = if let Some(indexer) = &state.indexer {
-        let latest_block_height = indexer.last_processed_block().await.unwrap_or(0);
-        let is_stable = indexer.is_stable().await;
-        (latest_block_height, is_stable)
+    let latest_block_height = if let Some(indexer) = &web.indexer {
+        indexer.last_processed_block().await.unwrap_or(0)
     } else {
-        (0, true)
+        0
     };
 
-    let protocol_state = state.protocol_state.read().await;
+    let protocol_state = web.protocol_state.read().await;
 
     match &*protocol_state {
         NodeState::Running(state) => {
             let triple_potential_count = state.triple_manager.len_potential().await;
-            let triple_count = state.triple_manager.len_generated().await;
-            let triple_mine_count = state.triple_manager.len_mine().await;
+            let triple_count = web.triple_storage.len_generated().await;
+            let triple_mine_count = web.triple_storage.len_by_owner(state.me).await;
             let presignature_read = state.presignature_manager.read().await;
-            let presignature_count = presignature_read.len_generated().await;
-            let presignature_mine_count = presignature_read.len_mine().await;
+            let presignature_count = web.presignature_storage.len_generated().await;
+            let presignature_mine_count = web.presignature_storage.len_by_owner(state.me).await;
             let presignature_potential_count = presignature_read.len_potential().await;
             let participants = state.participants.keys_vec();
 
@@ -148,7 +152,6 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<State
                 presignature_mine_count,
                 presignature_potential_count,
                 latest_block_height,
-                is_stable,
             }))
         }
         NodeState::Resharing(state) => {
@@ -158,7 +161,6 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<State
                 old_participants,
                 new_participants,
                 latest_block_height,
-                is_stable,
             }))
         }
         NodeState::Joining(state) => {
@@ -222,7 +224,7 @@ async fn bench_metrics() -> Json<BenchMetrics> {
 async fn sync(
     Extension(state): Extension<Arc<AxumState>>,
     WithRejection(Json(update), _): WithRejection<Json<SyncUpdate>, Error>,
-) -> Result<()> {
+) -> Result<Json<()>> {
     state.sync_channel.request_update(update).await;
-    Ok(())
+    Ok(Json(()))
 }

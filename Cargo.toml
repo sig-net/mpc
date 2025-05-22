@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.1.2"
+version = "1.2.0"
 
 [workspace.dependencies]
 alloy = { version = "0.9.1", features = ["contract", "json"] }
@@ -38,10 +38,19 @@ serde_json = "1"
 sha3 = "0.10.8"
 thiserror = "1"
 tokio = { version = "1.28", features = ["full"] }
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing = "0.1.35"
+tracing-subscriber = { version = "0.3.0", default-features = false, features = [
+    "env-filter",
+    "registry",
+    "std",
+    "fmt",
+] }
 url = { version = "2.4.0", features = ["serde"] }
 web3 = "0.19.0"
+anchor-client = { version = "0.31.0", features = ["async"] }
+anchor-lang = "0.31.0"
+solana-sdk = "2.2.2"
+solana-transaction-status = "2.2.6"
 
 near-account-id = "1.0.0"
 near-primitives = "0.26.0"
@@ -52,6 +61,7 @@ mpc-crypto = { path = "./chain-signatures/crypto" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-node = { path = "./chain-signatures/node" }
 mpc-primitives = { path = "./chain-signatures/primitives" }
+signet-program = { path = "./chain-signatures/contract-sol/programs/signet-program" }
 
 [patch.crates-io]
 # TODO: trigger Cargo.lock update for x25519-dalek once they release.
