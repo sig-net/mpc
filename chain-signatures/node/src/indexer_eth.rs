@@ -461,7 +461,6 @@ pub async fn run(
         });
     });
 
-    //let near_account_id_clone = node_near_account_id.clone();
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let blocks_failed_send_clone = blocks_failed_send.clone();
     let client_clone = Arc::clone(&client);
