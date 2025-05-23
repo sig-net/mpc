@@ -908,17 +908,20 @@ async fn try_publish_eth(
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc();
-    crate::metrics::SIGN_TOTAL_LATENCY
-        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
+    if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
+        crate::metrics::SIGN_TOTAL_LATENCY
+            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+            .observe(timestamp_sign_queue.elapsed().as_secs_f64());
+        if timestamp_sign_queue.elapsed().as_secs() <= 30 {
+            crate::metrics::NUM_SIGN_SUCCESS_30S
+                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                .inc();
+        }
+    }
+
     crate::metrics::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
-    if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
-        crate::metrics::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
-    }
 
     Ok(())
 }
@@ -996,13 +999,15 @@ async fn try_batch_publish_eth(
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc_by(num_requests as f64);
     for action in actions {
-        crate::metrics::SIGN_TOTAL_LATENCY
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
-        if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
-            crate::metrics::NUM_SIGN_SUCCESS_30S
+        if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
+            crate::metrics::SIGN_TOTAL_LATENCY
                 .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .inc();
+                .observe(timestamp_sign_queue.elapsed().as_secs_f64());
+            if timestamp_sign_queue.elapsed().as_secs() <= 30 {
+                crate::metrics::NUM_SIGN_SUCCESS_30S
+                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                    .inc();
+            }
         }
     }
     crate::metrics::SIGN_RESPOND_LATENCY
