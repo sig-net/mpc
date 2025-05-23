@@ -646,10 +646,7 @@ async fn refresh_finalized_epoch(
             continue;
         }
 
-        finalized_epoch.insert(
-            new_final_block_number,
-            new_finalized_bock.header.inner.parent_hash,
-        );
+        finalized_epoch.insert(new_final_block_number, new_finalized_bock.header.hash);
 
         let mut parent_hash = new_finalized_bock.header.inner.parent_hash;
 
