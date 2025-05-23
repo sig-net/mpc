@@ -1,12 +1,10 @@
-use std::sync::Arc;
-
-use cait_sith::protocol::{InitializationError, Participant};
+use cait_sith::protocol::{Action, InitializationError, MessageData, Participant, ProtocolError};
 use cait_sith::triples::TripleGenerationOutput;
 use cait_sith::{protocol::Protocol, KeygenOutput};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
 use mpc_crypto::PublicKey;
-use tokio::sync::{RwLock, RwLockWriteGuard};
+use tokio::sync::RwLock;
 
 use crate::protocol::contract::ResharingContractState;
 
@@ -18,12 +16,11 @@ pub type SignatureProtocol = Box<dyn Protocol<Output = FullSignature<Secp256k1>>
 
 pub type Epoch = u64;
 
-#[derive(Clone)]
 pub struct KeygenProtocol {
     me: Participant,
     threshold: usize,
     participants: Vec<Participant>,
-    protocol: Arc<RwLock<Box<dyn Protocol<Output = KeygenOutput<Secp256k1>> + Send + Sync>>>,
+    protocol: Box<dyn Protocol<Output = KeygenOutput<Secp256k1>> + Send + Sync>,
 }
 
 impl KeygenProtocol {
@@ -36,16 +33,12 @@ impl KeygenProtocol {
             threshold,
             me,
             participants: participants.into(),
-            protocol: Arc::new(RwLock::new(Box::new(cait_sith::keygen::<Secp256k1>(
-                participants,
-                me,
-                threshold,
-            )?))),
+            protocol: Box::new(cait_sith::keygen::<Secp256k1>(participants, me, threshold)?),
         })
     }
 
     pub async fn refresh(&mut self) -> Result<(), InitializationError> {
-        *self.write().await = Box::new(cait_sith::keygen::<Secp256k1>(
+        self.protocol = Box::new(cait_sith::keygen::<Secp256k1>(
             &self.participants,
             self.me,
             self.threshold,
@@ -53,22 +46,22 @@ impl KeygenProtocol {
         Ok(())
     }
 
-    pub async fn write(
-        &self,
-    ) -> RwLockWriteGuard<'_, Box<dyn Protocol<Output = KeygenOutput<Secp256k1>> + Send + Sync>>
-    {
-        self.protocol.write().await
+    pub fn poke(&mut self) -> Result<Action<KeygenOutput<Secp256k1>>, ProtocolError> {
+        self.protocol.poke()
+    }
+
+    pub fn message(&mut self, from: Participant, data: MessageData) {
+        self.protocol.message(from, data);
     }
 }
 
-#[derive(Clone)]
 pub struct ReshareProtocol {
     old_participants: Vec<Participant>,
     new_participants: Vec<Participant>,
     me: Participant,
     threshold: usize,
     private_share: Option<SecretKeyShare>,
-    protocol: Arc<RwLock<Box<dyn Protocol<Output = SecretKeyShare> + Send + Sync>>>,
+    protocol: Box<dyn Protocol<Output = SecretKeyShare> + Send + Sync>,
     root_pk: PublicKey,
 }
 
@@ -87,7 +80,7 @@ impl ReshareProtocol {
             me
         );
         Ok(Self {
-            protocol: Arc::new(RwLock::new(Box::new(cait_sith::reshare::<Secp256k1>(
+            protocol: Box::new(cait_sith::reshare::<Secp256k1>(
                 &old_participants,
                 contract_state.threshold,
                 &new_participants,
@@ -95,7 +88,7 @@ impl ReshareProtocol {
                 me,
                 private_share,
                 contract_state.public_key,
-            )?))),
+            )?),
             private_share,
             me,
             threshold: contract_state.threshold,
@@ -112,7 +105,7 @@ impl ReshareProtocol {
             self.new_participants,
             self.me
         );
-        *self.write().await = Box::new(cait_sith::reshare::<Secp256k1>(
+        self.protocol = Box::new(cait_sith::reshare::<Secp256k1>(
             &self.old_participants,
             self.threshold,
             &self.new_participants,
@@ -124,9 +117,11 @@ impl ReshareProtocol {
         Ok(())
     }
 
-    pub async fn write(
-        &self,
-    ) -> RwLockWriteGuard<'_, Box<dyn Protocol<Output = SecretKeyShare> + Send + Sync>> {
-        self.protocol.write().await
+    pub fn poke(&mut self) -> Result<Action<SecretKeyShare>, ProtocolError> {
+        self.protocol.poke()
+    }
+
+    pub fn message(&mut self, from: Participant, data: MessageData) {
+        self.protocol.message(from, data);
     }
 }

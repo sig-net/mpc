@@ -8,7 +8,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::rpc::NodeStateWatcher;
+use crate::rpc::ContractStateWatcher;
 use crate::storage::{PresignatureStorage, TripleStorage};
 
 use super::contract::primitives::ParticipantInfo;
@@ -50,7 +50,7 @@ pub struct SyncTask {
     triples: TripleStorage,
     presignatures: PresignatureStorage,
     mesh_state: Arc<RwLock<MeshState>>,
-    watcher: NodeStateWatcher,
+    watcher: ContractStateWatcher,
     requests: SyncRequestReceiver,
     synced_peer_tx: mpsc::Sender<Participant>,
 }
@@ -62,7 +62,7 @@ impl SyncTask {
         triples: TripleStorage,
         presignatures: PresignatureStorage,
         mesh_state: Arc<RwLock<MeshState>>,
-        watcher: NodeStateWatcher,
+        watcher: ContractStateWatcher,
         synced_peer_tx: mpsc::Sender<Participant>,
     ) -> (SyncChannel, Self) {
         let (requests, channel) = SyncChannel::new();
