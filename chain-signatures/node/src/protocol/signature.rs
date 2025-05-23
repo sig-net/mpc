@@ -40,8 +40,8 @@ pub struct IndexedSignRequest {
     pub id: SignId,
     pub args: SignArgs,
     pub chain: Chain,
-    pub timestamp: Instant,
-    pub unix_timestamp: u64,
+    pub unix_timestamp_indexed: u64,
+    pub timestamp_sign_queue: Option<Instant>,
 }
 
 /// The sign request for the node to process. This contains relevant info for the node
@@ -252,16 +252,21 @@ impl SignQueue {
 
     pub fn expire(&mut self, cfg: &ProtocolConfig) {
         self.my_requests.retain(|request| {
-            request.indexed.timestamp.elapsed()
-                < Duration::from_millis(cfg.signature.generation_timeout_total)
+            crate::util::duration_between_unix(
+                request.indexed.unix_timestamp_indexed,
+                crate::util::current_unix_timestamp(),
+            ) < Duration::from_millis(cfg.signature.generation_timeout_total)
         });
         self.failed_requests.retain(|request| {
-            request.indexed.timestamp.elapsed()
-                < Duration::from_millis(cfg.signature.generation_timeout_total)
+            crate::util::duration_between_unix(
+                request.indexed.unix_timestamp_indexed,
+                crate::util::current_unix_timestamp(),
+            ) < Duration::from_millis(cfg.signature.generation_timeout_total)
         });
         self.other_requests.retain(|_, request| {
-            request.indexed.timestamp.elapsed()
-                < Duration::from_millis(cfg.signature.generation_timeout_total)
+            request.indexed.timestamp_sign_queue.is_none_or(|t| {
+                t.elapsed() < Duration::from_millis(cfg.signature.generation_timeout_total)
+            })
         });
     }
 }
@@ -297,12 +302,13 @@ impl SignatureGenerator {
     }
 
     pub fn poke(&mut self) -> Result<Action<FullSignature<Secp256k1>>, ProtocolError> {
-        if self.request.indexed.timestamp.elapsed() > self.timeout_total {
-            tracing::warn!(
-                sign_id = ?self.request.indexed.id,
-                presignature_id = ?self.dropper.id,
-                "signature protocol timed out completely",
-            );
+        if self
+            .request
+            .indexed
+            .timestamp_sign_queue
+            .is_some_and(|t| t.elapsed() > self.timeout_total)
+        {
+            tracing::warn!("signature protocol timed out completely");
             return Err(ProtocolError::Other(
                 anyhow::anyhow!("signature protocol timed out completely").into(),
             ));
@@ -523,28 +529,37 @@ impl SignatureManager {
                             .filter_sign(sign_id.clone(), generator.dropper.id)
                             .await;
 
-                        if generator.request.indexed.timestamp.elapsed() < generator.timeout_total {
-                            failed.push(sign_id.clone());
-                            tracing::error!(
-                                ?sign_id,
-                                presignature_id = generator.dropper.id,
-                                ?err,
-                                "signature failed to be produced; pushing request back into failed queue",
-                            );
-                            if generator.request.proposer == self.me {
-                                signature_generator_failures_metric.inc();
+                        if let Some(timestamp) = generator.request.indexed.timestamp_sign_queue {
+                            if timestamp.elapsed() < generator.timeout_total {
+                                failed.push(sign_id.clone());
+                                tracing::error!(
+                                    ?sign_id,
+                                    presignature_id = generator.dropper.id,
+                                    ?err,
+                                    "signature failed to be produced; pushing request back into failed queue",
+                                );
+                                if generator.request.proposer == self.me {
+                                    signature_generator_failures_metric.inc();
+                                }
+                            } else {
+                                tracing::error!(
+                                    ?sign_id,
+                                    presignature_id = generator.dropper.id,
+                                    ?err,
+                                    "signature failed to be produced; full timeout, trashing request",
+                                );
+                                if generator.request.proposer == self.me {
+                                    signature_generator_failures_metric.inc();
+                                    signature_failures_metric.inc();
+                                }
                             }
                         } else {
                             tracing::error!(
                                 ?sign_id,
                                 presignature_id = generator.dropper.id,
                                 ?err,
-                                "signature failed to be produced; full timeout, trashing request",
+                                "no logged sign queue time",
                             );
-                            if generator.request.proposer == self.me {
-                                signature_generator_failures_metric.inc();
-                                signature_failures_metric.inc();
-                            }
                         }
                         break;
                     }

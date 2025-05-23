@@ -162,7 +162,7 @@ impl SyncTask {
                     if let Err(err) = handle.await {
                         tracing::warn!(?err, "broadcast task failed");
                     } else {
-                        tracing::info!(elapsed = ?start.elapsed(), "processed broadcast");
+                        tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
                     }
                 }
                 Some(req) = self.requests.updates.recv() => {
@@ -244,7 +244,7 @@ async fn broadcast_sync(
         })
         .collect::<Vec<_>>();
 
-    tracing::info!(
+    tracing::debug!(
         elapsed = ?start.elapsed(),
         responded = ?resps,
         "broadcast completed",
