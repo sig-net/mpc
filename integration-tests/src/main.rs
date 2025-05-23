@@ -38,6 +38,8 @@ enum Cli {
         eth_network: String,
         #[arg(long, default_value = "/tmp/data")]
         eth_helios_data_path: String,
+        #[arg(long, default_value = "10000")]
+        eth_refresh_finalized_interval: u64,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
@@ -62,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
             eth_account_sk,
             eth_network,
             eth_helios_data_path,
-            ..
+            eth_refresh_finalized_interval,
         } => {
             println!(
                 "Setting up an environment with {} nodes, {} threshold ...",
@@ -78,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
                     contract_address: eth_contract_address,
                     network: eth_network,
                     helios_data_path: eth_helios_data_path,
+                    refresh_finalized_interval: eth_refresh_finalized_interval,
                 }),
                 ..Default::default()
             };

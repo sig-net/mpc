@@ -4,6 +4,7 @@ pub mod consensus;
 pub mod contract;
 pub mod error;
 pub mod message;
+pub mod posit;
 pub mod presignature;
 pub mod signature;
 pub mod state;
@@ -95,20 +96,9 @@ impl MpcSignProtocol {
             };
 
             let crypto_time = Instant::now();
-            let mut state = match state
+            let mut state = state
                 .progress(&mut self, cfg.clone(), mesh_state.clone())
-                .await
-            {
-                Ok(state) => {
-                    tracing::debug!("progress ok: {state}");
-                    state
-                }
-                Err(err) => {
-                    tracing::warn!("protocol unable to progress: {err:?}");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
+                .await;
             crate::metrics::PROTOCOL_LATENCY_ITER_CRYPTO
                 .with_label_values(&[my_account_id.as_str()])
                 .observe(crypto_time.elapsed().as_secs_f64());

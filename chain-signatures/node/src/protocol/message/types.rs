@@ -4,7 +4,8 @@ use std::hash::{DefaultHasher, Hash as _};
 use cait_sith::protocol::{MessageData, Participant};
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::presignature::PresignatureId;
+use crate::protocol::posit::PositAction;
+use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
 use crate::protocol::triple::TripleId;
 use crate::types::Epoch;
 use mpc_keys::hpke;
@@ -17,6 +18,40 @@ pub enum Protocols {
     Triple,
     Presignature,
     Signature,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub enum PositProtocolId {
+    Triple(TripleId),
+    Presignature(FullPresignatureId),
+    Signature(SignId, PresignatureId),
+}
+
+/// The message associated with positing a new protocol.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct PositMessage {
+    pub id: PositProtocolId,
+    pub from: Participant,
+    pub action: PositAction,
+}
+
+impl PositMessage {
+    pub fn data_len(&self) -> usize {
+        match &self.action {
+            PositAction::Propose => 0,
+            PositAction::Start(participants) => {
+                participants.len() * std::mem::size_of::<Participant>()
+            }
+            PositAction::Accept => 0,
+            PositAction::Reject => 0,
+        }
+    }
+}
+
+impl From<PositMessage> for Message {
+    fn from(msg: PositMessage) -> Self {
+        Message::Posit(msg)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -103,6 +138,7 @@ impl From<SignatureMessage> for Message {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Message {
+    Posit(PositMessage),
     Generating(GeneratingMessage),
     Resharing(ResharingMessage),
     Triple(TripleMessage),
@@ -118,6 +154,7 @@ pub enum Message {
 impl Message {
     pub const fn typename(&self) -> &'static str {
         match self {
+            Message::Posit(_) => "Proposal",
             Message::Generating(_) => "Generating",
             Message::Resharing(_) => "Resharing",
             Message::Triple(_) => "Triple",
@@ -130,6 +167,7 @@ impl Message {
     /// The size of the message in bytes.
     pub fn size(&self) -> usize {
         match self {
+            Message::Posit(proposal) => std::mem::size_of::<PositMessage>() + proposal.data_len(),
             Message::Generating(msg) => std::mem::size_of::<GeneratingMessage>() + msg.data.len(),
             Message::Resharing(msg) => std::mem::size_of::<ResharingMessage>() + msg.data.len(),
             Message::Triple(msg) => std::mem::size_of::<TripleMessage>() + msg.data.len(),
