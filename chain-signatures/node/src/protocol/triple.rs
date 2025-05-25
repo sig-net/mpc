@@ -1,33 +1,43 @@
-use super::cryptography::CryptographicError;
 use super::message::{MessageChannel, TripleMessage};
+use super::MpcSignProtocol;
+use crate::config::Config;
+use crate::mesh::MeshState;
 use crate::storage::triple_storage::{TripleSlot, TripleStorage};
 use crate::types::TripleProtocol;
-use crate::util::AffinePointExt;
+use crate::util::{AffinePointExt, JoinMap};
 
-use cait_sith::protocol::{Action, InitializationError, MessageData, Participant, ProtocolError};
+use mpc_contract::config::ProtocolConfig;
+
+use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use cait_sith::triples::{TripleGenerationOutput, TriplePub, TripleShare};
 use chrono::Utc;
 use highway::{HighwayHash, HighwayHasher};
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::Secp256k1;
-use mpc_contract::config::ProtocolConfig;
+use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet, VecDeque};
+use tokio::sync::{mpsc, RwLock};
+use tokio::task::JoinHandle;
+
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
-
-use near_account_id::AccountId;
 
 /// Unique number used to identify a specific ongoing triple generation protocol.
 /// Without `TripleId` it would be unclear where to route incoming cait-sith triple generation
 /// messages.
 pub type TripleId = u64;
 
-type GeneratorOutcome = (TripleId, Result<bool, ProtocolError>);
+#[derive(Debug, thiserror::Error)]
+pub enum TripleGeneratorError {
+    #[error("triple generation cancelled")]
+    Cancelled,
+    #[error("triple generation failed")]
+    Timeout,
+    #[error("triple generation failed with error")]
+    ProtocolError(#[from] ProtocolError),
+}
 
 /// A completed triple.
 #[derive(Serialize, Deserialize, Debug)]
@@ -37,16 +47,17 @@ pub struct Triple {
     pub public: TriplePub<Secp256k1>,
 }
 
-#[derive(Clone)]
-pub struct TripleGenerator {
-    pub id: TripleId,
-    pub participants: Vec<Participant>,
-    pub protocol: Arc<TripleProtocol>,
-    pub timestamp: Arc<RwLock<Option<Instant>>>,
-    pub timeout: Duration,
+struct TripleGenerator {
+    id: TripleId,
+    participants: Vec<Participant>,
+    protocol: TripleProtocol,
+    timestamp: Option<Instant>,
+    timeout: Duration,
     slot: TripleSlot,
-    poked_latest: Arc<RwLock<Option<(Instant, Duration, u64)>>>,
+    poked_latest: Option<(Instant, Duration, u64)>,
     generator_created: Instant,
+    inbox: mpsc::Receiver<TripleMessage>,
+    msg: MessageChannel,
 }
 
 impl TripleGenerator {
@@ -57,66 +68,41 @@ impl TripleGenerator {
         participants: &[Participant],
         timeout: u64,
         slot: TripleSlot,
+        msg: &MessageChannel,
     ) -> Result<Self, InitializationError> {
         let mut participants = participants.to_vec();
-
         // Participants can be out of order, so let's sort them before doing anything. Critical
         // for the triple_is_mine check:
         participants.sort();
+
         let protocol =
             match cait_sith::triples::generate_triple::<Secp256k1>(&participants, me, threshold) {
-                Ok(protocol) => protocol,
+                Ok(protocol) => Box::new(protocol),
                 Err(e) => {
                     slot.unreserve().await;
                     return Err(e);
                 }
             };
-        let protocol = Arc::new(RwLock::new(protocol));
+
+        let inbox = msg.subscribe_triple(id).await;
 
         Ok(Self {
             id,
             participants,
             protocol,
-            timestamp: Arc::new(RwLock::new(None)),
+            timestamp: None,
             timeout: Duration::from_millis(timeout),
             slot,
-            poked_latest: Arc::new(RwLock::new(None)),
+            poked_latest: None,
             generator_created: Instant::now(),
-        })
-    }
-
-    pub async fn message(&self, from: Participant, data: MessageData) {
-        let mut protocol = self.protocol.write().await;
-        protocol.message(from, data);
-    }
-
-    pub async fn messages(&self, from: Participant, data: Vec<MessageData>) {
-        let mut protocol = self.protocol.write().await;
-        for data in data {
-            protocol.message(from, data);
-        }
-    }
-
-    pub fn spawn_execution(
-        &self,
-        me: Participant,
-        my_account_id: &AccountId,
-        epoch: u64,
-        channel: MessageChannel,
-    ) -> JoinHandle<GeneratorOutcome> {
-        tokio::task::spawn({
-            let mut generator = self.clone();
-            let my_account_id = my_account_id.clone();
-            async move { generator.execute(me, &my_account_id, epoch, channel).await }
+            inbox,
+            msg: msg.clone(),
         })
     }
 
     async fn poke(&mut self) -> Result<Action<TripleGenerationOutput<Secp256k1>>, ProtocolError> {
-        let elapsed = {
-            let mut timestamp = self.timestamp.write().await;
-            let timestamp = timestamp.get_or_insert_with(Instant::now);
-            timestamp.elapsed()
-        };
+        let timestamp = self.timestamp.get_or_insert_with(Instant::now);
+        let elapsed = timestamp.elapsed();
         if elapsed > self.timeout {
             tracing::warn!(id = self.id, ?elapsed, "triple protocol timed out");
             return Err(ProtocolError::Other(
@@ -124,17 +110,15 @@ impl TripleGenerator {
             ));
         }
 
-        let mut protocol = self.protocol.write().await;
-        protocol.poke()
+        self.protocol.poke()
     }
 
-    async fn execute(
-        &mut self,
+    async fn run(
+        mut self,
         me: Participant,
-        my_account_id: &AccountId,
+        my_account_id: AccountId,
         epoch: u64,
-        msg: MessageChannel,
-    ) -> GeneratorOutcome {
+    ) -> Result<(), TripleGeneratorError> {
         let triple_generator_failures_metric =
             crate::metrics::TRIPLE_GENERATOR_FAILURES.with_label_values(&[my_account_id.as_str()]);
         let triple_before_poke_delay_metric =
@@ -155,34 +139,34 @@ impl TripleGenerator {
                 .with_label_values(&[my_account_id.as_str()]);
         let triple_poke_cpu_time_metric =
             crate::metrics::TRIPLE_POKE_CPU_TIME.with_label_values(&[my_account_id.as_str()]);
+
         loop {
             let generator_poke_time = Instant::now();
             let action = match self.poke().await {
                 Ok(action) => action,
                 Err(e) => {
                     triple_generator_failures_metric.inc();
-
-                    {
-                        let timestamp = self.timestamp.read().await;
-                        if let Some(start_time) = &*timestamp {
-                            tracing::warn!(
-                                id = self.id,
-                                err = ?e,
-                                elapsed = ?start_time.elapsed(),
-                                "triple failed"
-                            );
-                        }
+                    if let Some(start_time) = self.timestamp {
+                        tracing::warn!(
+                            id = self.id,
+                            err = ?e,
+                            elapsed = ?start_time.elapsed(),
+                            "triple failed"
+                        );
                     }
 
                     self.slot.unreserve().await;
-                    break (self.id, Err(e));
+                    break Err(TripleGeneratorError::ProtocolError(e));
                 }
             };
 
             match action {
                 Action::Wait => {
-                    // Retain protocol until we are finished
-                    break (self.id, Ok(false));
+                    // Wait for the next set of messages to arrive.
+                    let Some(msg) = self.inbox.recv().await else {
+                        break Err(TripleGeneratorError::Cancelled);
+                    };
+                    self.protocol.message(msg.from, msg.data);
                 }
                 Action::SendMany(data) => {
                     for to in &self.participants {
@@ -190,76 +174,60 @@ impl TripleGenerator {
                             continue;
                         }
 
-                        msg.send(
-                            me,
-                            *to,
-                            TripleMessage {
-                                id: self.id,
-                                epoch,
-                                from: me,
-                                data: data.clone(),
-                                timestamp: Utc::now().timestamp() as u64,
-                            },
-                        )
-                        .await;
-                    }
-                    {
-                        let mut poked_latest = self.poked_latest.write().await;
-                        let (total_wait, total_pokes) =
-                            if let Some((last_poked, total_wait, total_pokes)) = *poked_latest {
-                                (
-                                    total_wait + (generator_poke_time - last_poked),
-                                    total_pokes + 1,
-                                )
-                            } else {
-                                let start_time = self.generator_created;
-                                triple_before_poke_delay_metric
-                                    .observe((generator_poke_time - start_time).as_millis() as f64);
-                                (Duration::from_millis(0), 1)
-                            };
-                        *poked_latest = Some((Instant::now(), total_wait, total_pokes));
-                    }
-                    triple_poke_cpu_time_metric
-                        .observe(generator_poke_time.elapsed().as_millis() as f64);
-                }
-                Action::SendPrivate(to, data) => {
-                    msg.send(
-                        me,
-                        to,
-                        TripleMessage {
+                        let message = TripleMessage {
                             id: self.id,
                             epoch,
                             from: me,
                             data: data.clone(),
                             timestamp: Utc::now().timestamp() as u64,
-                        },
-                    )
-                    .await;
-                    {
-                        let mut poked_latest = self.poked_latest.write().await;
-                        let (total_wait, total_pokes) =
-                            if let Some((last_poked, total_wait, total_pokes)) = *poked_latest {
-                                (
-                                    total_wait + (generator_poke_time - last_poked),
-                                    total_pokes + 1,
-                                )
-                            } else {
-                                let start_time = self.generator_created;
-                                triple_before_poke_delay_metric
-                                    .observe((generator_poke_time - start_time).as_millis() as f64);
-                                (Duration::from_millis(0), 1)
-                            };
-                        *poked_latest = Some((Instant::now(), total_wait, total_pokes));
+                        };
+                        self.msg.send(me, *to, message).await;
                     }
+                    let (total_wait, total_pokes) =
+                        if let Some((last_poked, total_wait, total_pokes)) = self.poked_latest {
+                            (
+                                total_wait + (generator_poke_time - last_poked),
+                                total_pokes + 1,
+                            )
+                        } else {
+                            let start_time = self.generator_created;
+                            triple_before_poke_delay_metric
+                                .observe((generator_poke_time - start_time).as_millis() as f64);
+                            (Duration::from_millis(0), 1)
+                        };
+                    self.poked_latest = Some((Instant::now(), total_wait, total_pokes));
+                    triple_poke_cpu_time_metric
+                        .observe(generator_poke_time.elapsed().as_millis() as f64);
+                }
+                Action::SendPrivate(to, data) => {
+                    let message = TripleMessage {
+                        id: self.id,
+                        epoch,
+                        from: me,
+                        data: data.clone(),
+                        timestamp: Utc::now().timestamp() as u64,
+                    };
+                    self.msg.send(me, to, message).await;
+
+                    let (total_wait, total_pokes) =
+                        if let Some((last_poked, total_wait, total_pokes)) = self.poked_latest {
+                            (
+                                total_wait + (generator_poke_time - last_poked),
+                                total_pokes + 1,
+                            )
+                        } else {
+                            let start_time = self.generator_created;
+                            triple_before_poke_delay_metric
+                                .observe((generator_poke_time - start_time).as_millis() as f64);
+                            (Duration::from_millis(0), 1)
+                        };
+                    self.poked_latest = Some((Instant::now(), total_wait, total_pokes));
                     triple_poke_cpu_time_metric
                         .observe(generator_poke_time.elapsed().as_millis() as f64);
                 }
                 Action::Return(output) => {
                     let now = Instant::now();
-                    let elapsed = {
-                        let timestamp = self.timestamp.read().await;
-                        timestamp.map(|t| now - t).unwrap_or_default()
-                    };
+                    let elapsed = self.timestamp.map(|t| now - t).unwrap_or_default();
 
                     triple_latency_metric.observe(elapsed.as_secs_f64());
 
@@ -309,22 +277,19 @@ impl TripleGenerator {
                         triple_generator_success_mine_metric.inc();
                     }
 
-                    msg.filter_triple(self.id).await;
+                    self.msg.filter_triple(self.id).await;
                     self.slot.insert(triple, triple_owner).await;
-                    {
-                        let poked_latest = self.poked_latest.read().await;
-                        if let Some((last_poked, total_wait, total_pokes)) = *poked_latest {
-                            let elapsed = generator_poke_time - last_poked;
-                            let total_wait = total_wait + elapsed;
-                            let total_pokes = total_pokes + 1;
-                            triple_accrued_wait_delay_metric.observe(total_wait.as_millis() as f64);
-                            triple_pokes_cnt_metric.observe(total_pokes as f64);
-                        }
+                    if let Some((last_poked, total_wait, total_pokes)) = self.poked_latest {
+                        let elapsed = generator_poke_time - last_poked;
+                        let total_wait = total_wait + elapsed;
+                        let total_pokes = total_pokes + 1;
+                        triple_accrued_wait_delay_metric.observe(total_wait.as_millis() as f64);
+                        triple_pokes_cnt_metric.observe(total_pokes as f64);
                     }
                     triple_poke_cpu_time_metric
                         .observe(generator_poke_time.elapsed().as_millis() as f64);
 
-                    break (self.id, Ok(true));
+                    break Ok(());
                 }
             }
         }
@@ -332,208 +297,75 @@ impl TripleGenerator {
 }
 
 pub struct TripleTasks {
-    /// The maximum amount of time the whole of the triple tasks can take before yielding
-    /// back to the main loop.
-    protocol_budget: Duration,
-
     /// The threshold for the number of participants required to generate a triple. This is
     /// the same as the threshold for signing: we maintain a copy here for easy access.
     threshold: usize,
     msg: MessageChannel,
 
-    storage: TripleStorage,
-
-    /// The pool of triple protocols that have yet to be completed.
-    pub generators: HashMap<TripleId, TripleGenerator>,
-
-    /// Triples that are queued to be poked. If these generators sit for too long in
-    /// the queue, they will be removed due to triple generation timeout.
-    pub queued: VecDeque<TripleId>,
-
-    /// Ongoing triple generation protocols. Once added here, they will not be removed until
-    /// they are completed or timed out.
-    pub ongoing: HashSet<TripleId>,
-
-    /// The set of ongoing triple generation tasks.
-    pub ongoing_tasks: VecDeque<(TripleId, JoinHandle<GeneratorOutcome>)>,
+    me: Participant,
 
     /// The set of triples that were introduced to the system by the current node.
-    pub introduced: HashSet<TripleId>,
+    introduced: HashSet<TripleId>,
+
+    ongoing: JoinMap<TripleId, Result<(), TripleGeneratorError>>,
 }
 
 impl std::fmt::Debug for TripleTasks {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TripleTasks")
-            .field("generators", &self.generators.keys().collect::<Vec<_>>())
-            .field("queued", &self.queued)
-            .field("ongoing", &self.ongoing)
+            // .field("generators", &self.generators.keys().collect::<Vec<_>>())
+            // .field("queued", &self.queued)
+            // .field("ongoing", &self.ongoing)
             .field("introduced", &self.introduced)
             .finish()
     }
 }
 
 impl TripleTasks {
-    pub fn new(
-        threshold: usize,
-        protocol_budget: Duration,
-        msg: &MessageChannel,
-        storage: &TripleStorage,
-    ) -> Self {
+    pub fn new(me: Participant, threshold: usize, msg: &MessageChannel) -> Self {
         Self {
-            protocol_budget,
             threshold,
+            me,
             msg: msg.clone(),
-            storage: storage.clone(),
-            generators: HashMap::new(),
-            queued: VecDeque::new(),
-            ongoing: HashSet::new(),
-            ongoing_tasks: VecDeque::new(),
             introduced: HashSet::new(),
+            ongoing: JoinMap::new(),
         }
     }
 
-    fn remove(&mut self, id: TripleId) {
-        self.generators.remove(&id);
-        self.ongoing.remove(&id);
-        self.introduced.remove(&id);
-    }
-
-    pub async fn entry(
+    pub async fn spawn(
         &mut self,
-        me: Participant,
         id: TripleId,
-        potential_len: usize,
-        cfg: &ProtocolConfig,
         participants: &[Participant],
-        my_account_id: &AccountId,
-    ) -> Result<Option<TripleGenerator>, CryptographicError> {
-        match self.generators.entry(id) {
-            Entry::Vacant(e) => {
-                if potential_len >= cfg.triple.max_triples as usize {
-                    // We are at the maximum amount of triples, we cannot generate more. So just in case a node
-                    // sends more triple generation requests, reject them and have them tiemout.
-                    return Ok(None);
-                }
-
-                let Some(slot) = self.storage.reserve(id).await else {
-                    return Ok(None);
-                };
-
-                tracing::info!(id, "joining protocol to generate a new triple");
-                let generator = e.insert(
-                    TripleGenerator::new(
-                        id,
-                        me,
-                        self.threshold,
-                        participants,
-                        cfg.triple.generation_timeout,
-                        slot,
-                    )
-                    .await?,
-                );
-                self.queued.push_back(id);
-                crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
-                    .with_label_values(&[my_account_id.as_str()])
-                    .inc();
-                Ok(Some(generator.clone()))
-            }
-            Entry::Occupied(e) => Ok(Some(e.get().clone())),
-        }
-    }
-
-    pub async fn poke(
-        &mut self,
-        me: Participant,
+        timeout: u64,
+        slot: TripleSlot,
         my_account_id: &AccountId,
         epoch: u64,
-        cfg: &ProtocolConfig,
-    ) -> HashMap<TripleId, ProtocolError> {
-        // Add more protocols to the ongoing pool if there is space.
-        let to_generate_len = cfg.max_concurrent_generation as usize - self.ongoing.len();
-        if !self.queued.is_empty() && to_generate_len > 0 {
-            for _ in 0..to_generate_len {
-                if let Some(id) = self.queued.pop_front() {
-                    self.ongoing.insert(id);
-                    let generator = self.generators.get(&id).unwrap();
-                    self.ongoing_tasks.push_back((
-                        id,
-                        generator.spawn_execution(me, my_account_id, epoch, self.msg.clone()),
-                    ));
-                }
-            }
-        }
+    ) -> Result<(), InitializationError> {
+        let generator = TripleGenerator::new(
+            id,
+            self.me,
+            self.threshold,
+            participants,
+            timeout,
+            slot,
+            &self.msg,
+        )
+        .await?;
+        self.ongoing
+            .spawn(id, generator.run(self.me, my_account_id.clone(), epoch));
 
-        // spawn these tasks again if they already completed with Action::Wait:
-        for id in &self.ongoing {
-            if !self
-                .ongoing_tasks
-                .iter()
-                .any(|(running_id, _)| running_id == id)
-            {
-                let generator = self.generators.get(id).unwrap();
-                self.ongoing_tasks.push_back((
-                    *id,
-                    generator.spawn_execution(me, my_account_id, epoch, self.msg.clone()),
-                ));
-            }
-        }
-
-        let mut errors = HashMap::new();
-
-        let mut interval = tokio::time::interval(Duration::from_millis(5));
-        let started = Instant::now();
-
-        // Go through each running task and see if it's done. This will apply a protocol_budget which will
-        // yield back control to the main loop if the time is up. If it is done, remove it from the ongoing_tasks.
-        // If the TripleGenerator is not done after this, a new task will be spawned in the next iteration
-        // in the case that the TripleGenerator is waiting.
-        while let Some((id, task)) = self.ongoing_tasks.pop_front() {
-            interval.tick().await;
-            if started.elapsed() > self.protocol_budget {
-                self.ongoing_tasks.push_back((id, task));
-                break;
-            }
-            if !task.is_finished() {
-                self.ongoing_tasks.push_back((id, task));
-                continue;
-            }
-
-            let outcome = match task.await {
-                Ok((_, result)) => result,
-                Err(e) => {
-                    tracing::info!(id, ?e, "triple completed with cancellation");
-                    self.remove(id);
-                    errors.insert(id, ProtocolError::Other(e.into()));
-                    continue;
-                }
-            };
-            match outcome {
-                Ok(done) => {
-                    if done {
-                        self.remove(id);
-                    }
-                }
-                Err(e) => {
-                    tracing::info!(id, ?e, "triple completed with error");
-                    self.remove(id);
-                    errors.insert(id, e);
-                }
-            }
-        }
-
-        errors
+        Ok(())
     }
 }
 
 /// Abstracts how triples are generated by providing a way to request a new triple that will be
 /// complete some time in the future and a way to take an already generated triple.
-#[derive(Clone)]
 pub struct TripleManager {
     /// Triple Storage
     triple_storage: TripleStorage,
 
     /// The set of ongoing triple generation protocols.
-    tasks: Arc<RwLock<TripleTasks>>,
+    tasks: TripleTasks,
 
     me: Participant,
     threshold: usize,
@@ -564,12 +396,7 @@ impl TripleManager {
         msg: MessageChannel,
     ) -> Self {
         Self {
-            tasks: Arc::new(RwLock::new(TripleTasks::new(
-                threshold,
-                Duration::from_millis(100),
-                &msg,
-                storage,
-            ))),
+            tasks: TripleTasks::new(me, threshold, &msg),
             me,
             threshold,
             epoch,
@@ -579,7 +406,7 @@ impl TripleManager {
         }
     }
 
-    pub async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
+    async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
         self.triple_storage.reserve(id).await
     }
 
@@ -601,26 +428,35 @@ impl TripleManager {
     }
 
     pub async fn len_ongoing(&self) -> usize {
-        self.tasks.read().await.ongoing.len()
+        self.tasks.ongoing.len()
     }
 
     pub async fn len_introduced(&self) -> usize {
-        self.tasks.read().await.introduced.len()
+        self.tasks.introduced.len()
     }
 
     /// Returns the number of unspent triples we will have in the manager once
     /// all ongoing generation protocols complete.
     pub async fn len_potential(&self) -> usize {
-        self.triple_storage.len_generated().await + self.tasks.read().await.generators.len()
+        self.triple_storage.len_generated().await + self.tasks.ongoing.len()
     }
 
     /// Starts a new Beaver triple generation protocol.
-    pub async fn generate(
-        &self,
+    async fn generate(
+        &mut self,
         participants: &[Participant],
         timeout: u64,
     ) -> Result<(), InitializationError> {
         let id = rand::random();
+        self.generate_with_id(id, participants, timeout).await
+    }
+
+    async fn generate_with_id(
+        &mut self,
+        id: TripleId,
+        participants: &[Participant],
+        timeout: u64,
+    ) -> Result<(), InitializationError> {
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
         let Some(slot) = self.reserve(id).await else {
             tracing::warn!(id, "triple id collision");
@@ -630,31 +466,32 @@ impl TripleManager {
         };
 
         tracing::info!(id, "starting protocol to generate a new triple");
-        {
-            let mut tasks = self.tasks.write().await;
-            tasks.generators.insert(
+        self.tasks
+            .spawn(
                 id,
-                TripleGenerator::new(id, self.me, self.threshold, participants, timeout, slot)
-                    .await?,
-            );
-            tasks.queued.push_back(id);
-            tasks.introduced.insert(id);
-        }
+                participants,
+                timeout,
+                slot,
+                &self.my_account_id,
+                self.epoch,
+            )
+            .await?;
         crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
             .with_label_values(&[self.my_account_id.as_str()])
             .inc();
+
         Ok(())
     }
 
     /// Check if the triple id is present in the system. This includes ongoing generation protocols
     /// and the triple storage.
     pub async fn contains_id(&self, id: TripleId) -> bool {
-        self.tasks.read().await.generators.contains_key(&id) || self.contains(id).await
+        self.tasks.ongoing.contains_key(&id) || self.triple_storage.contains(id).await
     }
 
     /// Stockpile triples if the amount of unspent triples is below the minimum
     /// and the maximum number of all ongoing generation protocols is below the maximum.
-    pub async fn stockpile(&self, participants: &[Participant], cfg: &ProtocolConfig) {
+    async fn stockpile(&mut self, participants: &[Participant], cfg: &ProtocolConfig) {
         let not_enough_triples = {
             // Stopgap to prevent too many triples in the system. This should be around min_triple*nodes*2
             // for good measure so that we have enough triples to do presig generation while also maintain
@@ -662,11 +499,10 @@ impl TripleManager {
             if self.len_potential().await >= cfg.triple.max_triples as usize {
                 false
             } else {
-                let tasks = self.tasks.read().await;
                 // We will always try to generate a new triple if we have less than the minimum
                 self.len_mine().await < cfg.triple.min_triples as usize
-                    && tasks.introduced.len() < cfg.max_concurrent_introduction as usize
-                    && tasks.generators.len() < cfg.max_concurrent_generation as usize
+                    && self.tasks.introduced.len() < cfg.max_concurrent_introduction as usize
+                    && self.tasks.ongoing.len() < cfg.max_concurrent_generation as usize
             }
         };
 
@@ -680,69 +516,86 @@ impl TripleManager {
         }
     }
 
-    /// Ensures that the triple with the given id is either:
-    /// 1) Already generated in which case returns `None`, or
-    /// 2) Is currently being generated by `protocol` in which case returns `Some(protocol)`, or
-    /// 3) Has never been seen by the manager in which case start a new protocol and returns `Some(protocol)`
-    // TODO: What if the triple completed generation and is already spent?
-    pub async fn get_or_start_generation(
-        &self,
-        id: TripleId,
-        participants: &[Participant],
-        cfg: &ProtocolConfig,
-    ) -> Result<Option<TripleGenerator>, CryptographicError> {
-        if self.contains(id).await {
-            Ok(None)
-        } else {
-            let potential_len = self.len_potential().await;
-            let mut tasks = self.tasks.write().await;
-            tasks
-                .entry(
-                    self.me,
-                    id,
-                    potential_len,
-                    cfg,
-                    participants,
-                    &self.my_account_id,
-                )
-                .await
+    async fn execute(mut self, mesh_state: Arc<RwLock<MeshState>>, config: Arc<RwLock<Config>>) {
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        let mut start = self.msg.subscribe_triple_start().await;
+
+        loop {
+            tokio::select! {
+                Some(id) = start.recv() => {
+                    // TODO: with posits, this will also have the list of participants, but for now
+                    // will use the mesh state.
+                    tracing::info!(id, "received START message for triple generation");
+                    let active = mesh_state.read().await.active.keys_vec();
+                    let timeout = config.read().await.protocol.triple.generation_timeout;
+                    if let Err(err) = self.generate_with_id(id, &active, timeout).await {
+                        tracing::warn!(id, ?err, "unable to start triple generation on START");
+                    } else {
+                        self.tasks.introduced.insert(id);
+                    }
+                }
+                _ = interval.tick() => {
+                    let active = mesh_state.read().await.active.keys_vec();
+                    let protocol = config.read().await.protocol.clone();
+                    self.stockpile(&active, &protocol).await;
+
+                    crate::metrics::NUM_TRIPLES_MINE
+                        .with_label_values(&[self.my_account_id.as_str()])
+                        .set(self.len_mine().await as i64);
+                    crate::metrics::NUM_TRIPLES_TOTAL
+                        .with_label_values(&[self.my_account_id.as_str()])
+                        .set(self.triple_storage.len_generated().await as i64);
+                    crate::metrics::NUM_TRIPLE_GENERATORS_INTRODUCED
+                        .with_label_values(&[self.my_account_id.as_str()])
+                        .set(self.len_introduced().await as i64);
+                    crate::metrics::NUM_TRIPLE_GENERATORS_TOTAL
+                        .with_label_values(&[self.my_account_id.as_str()])
+                        .set(self.len_ongoing().await as i64);
+                }
+                // `join_next` returns None on the set being empty, so don't handle that case
+                Some(result) = self.tasks.ongoing.join_next(), if !self.tasks.ongoing.is_empty() => {
+                    let id = match result {
+                        Ok((id, result)) => {
+                            if let Err(err) = result {
+                                tracing::warn!(id, ?err, "triple generation task failed");
+                            }
+                            id
+                        }
+                        Err(id) => {
+                            tracing::warn!(id, "triple generation task failed");
+                            id
+                        }
+                    };
+                    self.tasks.introduced.remove(&id);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct TripleSpawnerTask {
+    handle: Arc<JoinHandle<()>>,
+}
+
+impl TripleSpawnerTask {
+    pub fn run(me: Participant, threshold: usize, epoch: u64, ctx: &MpcSignProtocol) -> Self {
+        let manager = TripleManager::new(
+            me,
+            threshold,
+            epoch,
+            &ctx.my_account_id,
+            &ctx.triple_storage,
+            ctx.msg_channel.clone(),
+        );
+        Self {
+            handle: Arc::new(tokio::spawn(
+                manager.execute(ctx.mesh_state.clone(), ctx.config.clone()),
+            )),
         }
     }
 
-    pub async fn poke(&self, cfg: &ProtocolConfig) {
-        let errors = {
-            let mut tasks = self.tasks.write().await;
-            tasks
-                .poke(self.me, &self.my_account_id, self.epoch, cfg)
-                .await
-        };
-
-        for (id, err) in errors.into_iter() {
-            tracing::warn!(id, ?err, "failed to generate triple");
-            self.msg.filter_triple(id).await;
-        }
-    }
-
-    pub fn execute(self, active: &[Participant], protocol_cfg: &ProtocolConfig) -> JoinHandle<()> {
-        let active = active.to_vec();
-        let protocol_cfg = protocol_cfg.clone();
-
-        tokio::task::spawn(async move {
-            self.stockpile(&active, &protocol_cfg).await;
-            self.poke(&protocol_cfg).await;
-
-            crate::metrics::NUM_TRIPLES_MINE
-                .with_label_values(&[self.my_account_id.as_str()])
-                .set(self.len_mine().await as i64);
-            crate::metrics::NUM_TRIPLES_TOTAL
-                .with_label_values(&[self.my_account_id.as_str()])
-                .set(self.triple_storage.len_generated().await as i64);
-            crate::metrics::NUM_TRIPLE_GENERATORS_INTRODUCED
-                .with_label_values(&[self.my_account_id.as_str()])
-                .set(self.len_introduced().await as i64);
-            crate::metrics::NUM_TRIPLE_GENERATORS_TOTAL
-                .with_label_values(&[self.my_account_id.as_str()])
-                .set(self.len_ongoing().await as i64);
-        })
+    pub fn abort(&self) {
+        self.handle.abort();
     }
 }

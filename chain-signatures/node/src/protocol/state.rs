@@ -1,7 +1,7 @@
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::PresignatureManager;
 use super::signature::SignatureManager;
-use super::triple::TripleManager;
+use super::triple::TripleSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 
 use cait_sith::protocol::Participant;
@@ -69,9 +69,15 @@ pub struct RunningState {
     pub threshold: usize,
     pub private_share: SecretKeyShare,
     pub public_key: PublicKey,
-    pub triple_manager: TripleManager,
+    pub triple_task: TripleSpawnerTask,
     pub presignature_manager: Arc<RwLock<PresignatureManager>>,
     pub signature_manager: Arc<RwLock<SignatureManager>>,
+}
+
+impl RunningState {
+    pub fn cleanup(&self) {
+        self.triple_task.abort();
+    }
 }
 
 #[derive(Clone)]

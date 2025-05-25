@@ -74,8 +74,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_storage.contains_used(triple_id2).await);
 
     // Attempt to re-reserve used triples and check that it cannot be reserved since it is used.
-    assert!(triple_manager.reserve(triple_id1).await.is_none());
-    assert!(triple_manager.reserve(triple_id2).await.is_none());
+    assert!(triple_storage.reserve(triple_id1).await.is_none());
+    assert!(triple_storage.reserve(triple_id2).await.is_none());
     assert!(!triple_manager.contains(triple_id1).await);
     assert!(!triple_manager.contains(triple_id2).await);
 
@@ -83,7 +83,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let id4: u64 = 4;
 
     // check that reserve and unreserve works:
-    let slot = triple_manager.reserve(id3).await.unwrap();
+    let slot = triple_storage.reserve(id3).await.unwrap();
     slot.unreserve().await;
 
     // Add mine triple and check that it is in the storage
@@ -121,8 +121,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_storage.contains_used(id4).await);
 
     // Attempt to re-insert used mine triples and check that it fails
-    assert!(triple_manager.reserve(id3).await.is_none());
-    assert!(triple_manager.reserve(id4).await.is_none());
+    assert!(triple_storage.reserve(id3).await.is_none());
+    assert!(triple_storage.reserve(id4).await.is_none());
     assert!(!triple_manager.contains(id3).await);
     assert!(!triple_manager.contains(id4).await);
 

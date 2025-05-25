@@ -48,6 +48,8 @@ pub struct MpcSignProtocol {
     pub(crate) state: Arc<RwLock<NodeState>>,
     pub(crate) msg_channel: MessageChannel,
     pub(crate) rpc_channel: RpcChannel,
+    pub(crate) config: Arc<RwLock<Config>>,
+    pub(crate) mesh_state: Arc<RwLock<MeshState>>,
 }
 
 impl MpcSignProtocol {

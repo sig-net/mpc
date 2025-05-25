@@ -1,7 +1,13 @@
+use mpc_crypto::{near_public_key_to_affine_point, PublicKey};
+
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::{AffinePoint, EncodedPoint};
-use mpc_crypto::{near_public_key_to_affine_point, PublicKey};
+use tokio::task::{AbortHandle, JoinSet};
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::hash::Hash;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub trait NearPublicKeyExt {
@@ -86,4 +92,58 @@ pub fn current_unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs()
+}
+
+pub struct JoinMap<T, U> {
+    mapping: HashMap<T, AbortHandle>,
+    mapping_id: HashMap<tokio::task::Id, T>,
+    tasks: JoinSet<U>,
+}
+
+impl<T, U> JoinMap<T, U>
+where
+    T: Copy + Hash + Eq,
+    U: Send + 'static,
+{
+    pub fn new() -> Self {
+        Self {
+            mapping: HashMap::new(),
+            mapping_id: HashMap::new(),
+            tasks: JoinSet::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.mapping.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.mapping.is_empty()
+    }
+
+    pub fn contains_key(&self, key: &T) -> bool {
+        self.mapping.contains_key(key)
+    }
+
+    pub fn spawn(&mut self, key: T, task: impl Future<Output = U> + Send + 'static) {
+        let handle = self.tasks.spawn(task);
+        let task_id = handle.id();
+        self.mapping.insert(key, handle);
+        self.mapping_id.insert(task_id, key);
+    }
+
+    pub async fn join_next(&mut self) -> Option<Result<(T, U), T>> {
+        let outcome = self.tasks.join_next_with_id().await?;
+        let (id, outcome) = match outcome {
+            Ok((id, outcome)) => (id, Some(outcome)),
+            Err(err) => (err.id(), None),
+        };
+
+        let key = self.mapping_id.remove(&id)?;
+        self.mapping.remove(&key);
+        match outcome {
+            Some(outcome) => Some(Ok((key, outcome))),
+            None => Some(Err(key)),
+        }
+    }
 }

@@ -245,14 +245,13 @@ impl CryptographicProtocol for RunningState {
             return Ok(NodeState::Running(self));
         }
 
-        let triple_task = self.triple_manager.clone().execute(&active, &cfg.protocol);
         let presig_task = PresignatureManager::execute(&self, &cfg.protocol, active);
 
         let stable = mesh_state.stable;
         tracing::debug!(?stable, "stable participants");
         let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol, ctx);
 
-        match tokio::try_join!(triple_task, presig_task, sig_task) {
+        match tokio::try_join!(presig_task, sig_task) {
             Ok(_result) => (),
             Err(err) => {
                 tracing::warn!(?err, "running: failed to progress cryptographic protocol");
