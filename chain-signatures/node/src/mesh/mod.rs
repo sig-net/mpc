@@ -5,7 +5,7 @@ use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ProtocolState;
 use cait_sith::protocol::Participant;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 
 pub mod connection;
 
@@ -32,6 +32,10 @@ pub struct MeshState {
     /// Participants that are active in the network; as in they respond when pinged.
     pub active: Participants,
 
+    /// Participants that are currently out-of-sync, they will become active
+    /// once we finished synchronization.
+    pub need_sync: Participants,
+
     /// Participants that can be selected for a new protocol invocation.
     pub stable: Vec<Participant>,
 }
@@ -43,15 +47,21 @@ pub struct Mesh {
     connections: connection::Pool,
     state: Arc<RwLock<MeshState>>,
     ping_interval: Duration,
+    synced_peer_rx: mpsc::Receiver<Participant>,
 }
 
 impl Mesh {
-    pub fn new(client: &NodeClient, options: Options) -> Self {
+    pub fn new(
+        client: &NodeClient,
+        options: Options,
+        synced_peer_rx: mpsc::Receiver<Participant>,
+    ) -> Self {
         let ping_interval = Duration::from_millis(options.ping_interval);
         Self {
             connections: connection::Pool::new(client, ping_interval),
             state: Arc::new(RwLock::new(MeshState::default())),
             ping_interval,
+            synced_peer_rx,
         }
     }
 
@@ -62,12 +72,25 @@ impl Mesh {
     pub async fn run(mut self, contract_state: Arc<RwLock<Option<ProtocolState>>>) {
         let mut interval = tokio::time::interval(self.ping_interval / 2);
         loop {
-            interval.tick().await;
-            if let Some(contract) = &*contract_state.read().await {
-                self.connections.connect(contract).await;
-                let new_state = self.connections.status().await;
-                let mut state = self.state.write().await;
-                *state = new_state;
+            tokio::select! {
+                _ = interval.tick() => {
+
+                    if let Some(contract) = &*contract_state.read().await {
+                        self.connections.connect(contract).await;
+                        let new_state = self.connections.status().await;
+                        let mut state = self.state.write().await;
+                        *state = new_state;
+                    }
+                }
+                Some(participant) = self.synced_peer_rx.recv() => {
+                    self.connections.report_node_synced(participant).await;
+                    let mut state = self.state.write().await;
+
+                    if let Some(info) = state.need_sync.remove(&participant) {
+                        state.active.insert(&participant, info);
+                        state.stable.push(participant);
+                    }
+                }
             }
         }
     }

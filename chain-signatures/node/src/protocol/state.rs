@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PersistentNodeData {
@@ -39,6 +39,10 @@ pub struct GeneratingState {
     pub participants: Participants,
     pub threshold: usize,
     pub protocol: KeygenProtocol,
+
+    /// If the generating state fails to store data after generating, it gets temporarily
+    /// stored here and retried later.
+    pub failed_store: Arc<Mutex<Option<(PublicKey, SecretKeyShare)>>>,
 }
 
 #[derive(Clone)]
@@ -89,6 +93,10 @@ pub struct ResharingState {
     pub threshold: usize,
     pub public_key: PublicKey,
     pub protocol: ReshareProtocol,
+
+    /// If the resharing state fails to store data after generating, it gets temporarily
+    /// stored here and retried later.
+    pub failed_store: Arc<Mutex<Option<SecretKeyShare>>>,
 }
 
 #[derive(Clone)]

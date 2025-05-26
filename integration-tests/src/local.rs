@@ -141,6 +141,12 @@ impl Node {
         );
         LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc).await?;
 
+        let mut cfg = cfg.clone();
+        if let Some(ref mut eth_config) = cfg.eth {
+            eth_config.helios_data_path =
+                format!("{}_{}", eth_config.helios_data_path, account.id());
+        }
+
         Self::spawn(
             ctx,
             NodeEnvConfig {

@@ -6,7 +6,7 @@ use std::vec;
 use clap::Parser;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::NodeConfig;
-// use mpc_node::indexer_eth::EthConfig;
+use mpc_node::indexer_eth::EthConfig;
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -38,6 +38,8 @@ enum Cli {
         eth_network: String,
         #[arg(long, default_value = "/tmp/data")]
         eth_helios_data_path: String,
+        #[arg(long, default_value = "10000")]
+        eth_refresh_finalized_interval: u64,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
@@ -56,13 +58,13 @@ async fn main() -> anyhow::Result<()> {
         Cli::SetupEnv {
             nodes,
             threshold,
-            ..
-            // eth_consensus_rpc_http_url,
-            // eth_execution_rpc_http_url,
-            // eth_contract_address,
-            // eth_account_sk,
-            // eth_network,
-            // eth_helios_data_path,
+            eth_consensus_rpc_http_url,
+            eth_execution_rpc_http_url,
+            eth_contract_address,
+            eth_account_sk,
+            eth_network,
+            eth_helios_data_path,
+            eth_refresh_finalized_interval,
         } => {
             println!(
                 "Setting up an environment with {} nodes, {} threshold ...",
@@ -71,14 +73,15 @@ async fn main() -> anyhow::Result<()> {
             let config = NodeConfig {
                 nodes,
                 threshold,
-                // eth: Some(EthConfig {
-                //     account_sk: eth_account_sk,
-                //     consensus_rpc_http_url: eth_consensus_rpc_http_url,
-                //     execution_rpc_http_url: eth_execution_rpc_http_url,
-                //     contract_address: eth_contract_address,
-                //     network: eth_network,
-                //     helios_data_path: eth_helios_data_path,
-                // }),
+                eth: Some(EthConfig {
+                    account_sk: eth_account_sk,
+                    consensus_rpc_http_url: eth_consensus_rpc_http_url,
+                    execution_rpc_http_url: eth_execution_rpc_http_url,
+                    contract_address: eth_contract_address,
+                    network: eth_network,
+                    helios_data_path: eth_helios_data_path,
+                    refresh_finalized_interval: eth_refresh_finalized_interval,
+                }),
                 ..Default::default()
             };
             println!("Full config: {:?}", config);

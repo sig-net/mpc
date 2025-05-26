@@ -507,6 +507,7 @@ impl SolanaClient {
 }
 
 /// Client related to a specific chain
+#[allow(clippy::large_enum_variant)]
 pub enum ChainClient {
     Err(&'static str),
     Near(NearClient),
@@ -695,16 +696,20 @@ async fn try_publish_near(
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .inc();
-    crate::metrics::SIGN_TOTAL_LATENCY
-        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
-        .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
+    if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
+        crate::metrics::SIGN_TOTAL_LATENCY
+            .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
+            .observe(timestamp_sign_queue.elapsed().as_secs_f64());
+    }
     crate::metrics::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
-    if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
-        crate::metrics::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
-            .inc();
+    if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
+        if timestamp_sign_queue.elapsed().as_secs() <= 30 {
+            crate::metrics::NUM_SIGN_SUCCESS_30S
+                .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
+                .inc();
+        }
     }
 
     Ok(())
@@ -766,16 +771,20 @@ async fn try_publish_eth(
             crate::metrics::NUM_SIGN_SUCCESS
                 .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                 .inc();
-            crate::metrics::SIGN_TOTAL_LATENCY
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
+            if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
+                crate::metrics::SIGN_TOTAL_LATENCY
+                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                    .observe(timestamp_sign_queue.elapsed().as_secs_f64());
+            }
             crate::metrics::SIGN_RESPOND_LATENCY
                 .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                 .observe(timestamp.elapsed().as_secs_f64());
-            if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
-                crate::metrics::NUM_SIGN_SUCCESS_30S
-                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                    .inc();
+            if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
+                if timestamp_sign_queue.elapsed().as_secs() <= 30 {
+                    crate::metrics::NUM_SIGN_SUCCESS_30S
+                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                        .inc();
+                }
             }
             Ok(())
         }
@@ -863,10 +872,15 @@ async fn try_batch_publish_eth(
                 .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                 .inc_by(num_requests as f64);
             for action in actions {
+                let sign_latency = crate::util::duration_between_unix(
+                    action.request.indexed.unix_timestamp_indexed,
+                    crate::util::current_unix_timestamp(),
+                )
+                .as_secs();
                 crate::metrics::SIGN_TOTAL_LATENCY
                     .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                    .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
-                if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
+                    .observe(sign_latency as f64);
+                if sign_latency <= 30 {
                     crate::metrics::NUM_SIGN_SUCCESS_30S
                         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                         .inc();
@@ -1015,13 +1029,18 @@ async fn try_publish_sol(
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc();
+    let sign_latency_in_secs = crate::util::duration_between_unix(
+        action.request.indexed.unix_timestamp_indexed,
+        crate::util::current_unix_timestamp(),
+    )
+    .as_secs();
     crate::metrics::SIGN_TOTAL_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .observe(action.request.indexed.timestamp.elapsed().as_secs_f64());
+        .observe(sign_latency_in_secs as f64);
     crate::metrics::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
-    if action.request.indexed.timestamp.elapsed().as_secs() <= 30 {
+    if sign_latency_in_secs <= 30 {
         crate::metrics::NUM_SIGN_SUCCESS_30S
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .inc();
