@@ -121,7 +121,7 @@ impl ConsensusProtocol for StartedState {
                                         epoch,
                                         me: *me,
                                         participants: contract_state.participants,
-                                        threshold: threshold,
+                                        threshold,
                                         private_share,
                                         public_key,
                                         triple_task,
@@ -310,7 +310,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         return Ok(NodeState::WaitingForConsensus(self));
                     };
 
-                    let triple_task = TripleSpawnerTask::run(*me, self.threshold, self.epoch, &ctx);
+                    let triple_task = TripleSpawnerTask::run(*me, self.threshold, self.epoch, ctx);
 
                     let presignature_manager = Arc::new(RwLock::new(PresignatureManager::new(
                         *me,

@@ -39,12 +39,12 @@ pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 /// This should be enough to hold a few messages in the inbox.
 pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
 
-enum MessageSubscription<T> {
+enum Subscriber<T> {
     Subscribed(mpsc::Sender<T>),
     Unsubscribed(mpsc::Sender<T>, mpsc::Receiver<T>),
 }
 
-impl<T> MessageSubscription<T> {
+impl<T> Subscriber<T> {
     pub fn subscribe() -> (Self, mpsc::Receiver<T>) {
         let (tx, rx) = mpsc::channel(MAX_MESSAGE_SUB_CHANNEL_SIZE);
         (Self::Subscribed(tx), rx)
@@ -63,7 +63,7 @@ impl<T> MessageSubscription<T> {
     }
 }
 
-impl<T> Default for MessageSubscription<T> {
+impl<T> Default for Subscriber<T> {
     fn default() -> Self {
         Self::unsubscribed()
     }
@@ -90,7 +90,7 @@ pub struct MessageInbox {
     posit: VecDeque<PositMessage>,
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
-    triple: HashMap<TripleId, MessageSubscription<TripleMessage>>,
+    triple: HashMap<TripleId, Subscriber<TripleMessage>>,
     triple_init: Option<mpsc::Sender<TripleId>>,
     presignature: HashMap<Epoch, HashMap<PresignatureId, VecDeque<PresignatureMessage>>>,
     signature: HashMap<Epoch, HashMap<SignId, VecDeque<SignatureMessage>>>,
@@ -128,24 +128,19 @@ impl MessageInbox {
             Message::Triple(message) => match self.triple.entry(message.id) {
                 // TODO: need to clean up the entries once done with triple.
                 hash_map::Entry::Occupied(entry) => {
-                    if entry.get().send(message).await.is_err() {
-                        tracing::warn!("failed to send message to subscriber");
-                    }
+                    // NOTE: not logging the error because this is simply just channel closure.
+                    // The error message should be reported on the generator side.
+                    let _ = entry.get().send(message).await;
                 }
                 hash_map::Entry::Vacant(entry) => {
                     if let Some(tx) = &self.triple_init {
                         if tx.send(message.id).await.is_err() {
-                            tracing::warn!("failed to send start to subscriber");
+                            tracing::warn!("unexpected, failed to send start to subscriber");
                         }
                     }
-                    if entry
-                        .insert(MessageSubscription::default())
-                        .send(message)
-                        .await
-                        .is_err()
-                    {
-                        tracing::warn!("failed to send message to subscriber");
-                    }
+                    // Send the message even if unsubscribed. The subscriber will grab the
+                    // receiver associated to this channel.
+                    let _ = entry.insert(Subscriber::unsubscribed()).send(message).await;
                 }
             },
             Message::Presignature(message) => self
@@ -243,13 +238,6 @@ impl MessageInbox {
     }
 
     pub fn filter_internal(&mut self) {
-        // self.triple.retain(|_epoch, messages| {
-        //     messages.retain(|_id, messages| {
-        //         messages.retain(|msg| !self.filter.contains(msg));
-        //         !messages.is_empty()
-        //     });
-        //     !messages.is_empty()
-        // });
         self.presignature.retain(|_epoch, messages| {
             messages.retain(|_id, messages| {
                 messages.retain(|msg| !self.filter.contains(msg));
@@ -441,21 +429,18 @@ impl MessageChannel {
         let sub = match inbox.triple.entry(id) {
             hash_map::Entry::Occupied(entry) => entry.remove(),
             hash_map::Entry::Vacant(entry) => {
-                let (sub, rx) = MessageSubscription::subscribe();
+                let (sub, rx) = Subscriber::subscribe();
                 entry.insert(sub);
                 return rx;
             }
         };
 
         let (sub, rx) = match sub {
-            MessageSubscription::Subscribed(_tx) => {
+            Subscriber::Subscribed(_tx) => {
                 tracing::warn!(id, "subscription already exists for triple, overriding");
-                MessageSubscription::subscribe()
+                Subscriber::subscribe()
             }
-            MessageSubscription::Unsubscribed(tx, rx) => {
-                tracing::info!(id, "subscribing to new triple");
-                (MessageSubscription::Subscribed(tx), rx)
-            }
+            Subscriber::Unsubscribed(tx, rx) => (Subscriber::Subscribed(tx), rx),
         };
 
         inbox.triple.insert(id, sub);

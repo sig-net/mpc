@@ -29,16 +29,6 @@ use std::time::{Duration, Instant};
 /// messages.
 pub type TripleId = u64;
 
-#[derive(Debug, thiserror::Error)]
-pub enum TripleGeneratorError {
-    #[error("triple generation cancelled")]
-    Cancelled,
-    #[error("triple generation failed")]
-    Timeout,
-    #[error("triple generation failed with error")]
-    ProtocolError(#[from] ProtocolError),
-}
-
 /// A completed triple.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Triple {
@@ -49,6 +39,7 @@ pub struct Triple {
 
 struct TripleGenerator {
     id: TripleId,
+    me: Participant,
     participants: Vec<Participant>,
     protocol: TripleProtocol,
     timestamp: Option<Instant>,
@@ -88,6 +79,7 @@ impl TripleGenerator {
 
         Ok(Self {
             id,
+            me,
             participants,
             protocol,
             timestamp: None,
@@ -113,12 +105,7 @@ impl TripleGenerator {
         self.protocol.poke()
     }
 
-    async fn run(
-        mut self,
-        me: Participant,
-        my_account_id: AccountId,
-        epoch: u64,
-    ) -> Result<(), TripleGeneratorError> {
+    async fn run(mut self, my_account_id: AccountId, epoch: u64) {
         let triple_generator_failures_metric =
             crate::metrics::TRIPLE_GENERATOR_FAILURES.with_label_values(&[my_account_id.as_str()]);
         let triple_before_poke_delay_metric =
@@ -151,12 +138,12 @@ impl TripleGenerator {
                             id = self.id,
                             err = ?e,
                             elapsed = ?start_time.elapsed(),
-                            "triple failed"
+                            "triple generation failed",
                         );
                     }
 
                     self.slot.unreserve().await;
-                    break Err(TripleGeneratorError::ProtocolError(e));
+                    break;
                 }
             };
 
@@ -164,24 +151,24 @@ impl TripleGenerator {
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
                     let Some(msg) = self.inbox.recv().await else {
-                        break Err(TripleGeneratorError::Cancelled);
+                        break;
                     };
                     self.protocol.message(msg.from, msg.data);
                 }
                 Action::SendMany(data) => {
                     for to in &self.participants {
-                        if *to == me {
+                        if *to == self.me {
                             continue;
                         }
 
                         let message = TripleMessage {
                             id: self.id,
                             epoch,
-                            from: me,
+                            from: self.me,
                             data: data.clone(),
                             timestamp: Utc::now().timestamp() as u64,
                         };
-                        self.msg.send(me, *to, message).await;
+                        self.msg.send(self.me, *to, message).await;
                     }
                     let (total_wait, total_pokes) =
                         if let Some((last_poked, total_wait, total_pokes)) = self.poked_latest {
@@ -203,11 +190,11 @@ impl TripleGenerator {
                     let message = TripleMessage {
                         id: self.id,
                         epoch,
-                        from: me,
+                        from: self.me,
                         data: data.clone(),
                         timestamp: Utc::now().timestamp() as u64,
                     };
-                    self.msg.send(me, to, message).await;
+                    self.msg.send(self.me, to, message).await;
 
                     let (total_wait, total_pokes) =
                         if let Some((last_poked, total_wait, total_pokes)) = self.poked_latest {
@@ -258,11 +245,11 @@ impl TripleGenerator {
                         // This is acceptably small that it will likely never result in a biased selection happening
                         self.participants[entropy % num_participants]
                     };
-                    let triple_is_mine = triple_owner == me;
+                    let triple_is_mine = triple_owner == self.me;
 
                     tracing::debug!(
                         id = self.id,
-                        ?me,
+                        me = ?self.me,
                         ?triple_owner,
                         triple_is_mine,
                         participants = ?self.participants,
@@ -289,83 +276,27 @@ impl TripleGenerator {
                     triple_poke_cpu_time_metric
                         .observe(generator_poke_time.elapsed().as_millis() as f64);
 
-                    break Ok(());
+                    break;
                 }
             }
         }
     }
 }
 
-pub struct TripleTasks {
-    /// The threshold for the number of participants required to generate a triple. This is
-    /// the same as the threshold for signing: we maintain a copy here for easy access.
-    threshold: usize,
-    msg: MessageChannel,
-
-    me: Participant,
+/// Abstracts how triples are generated by providing a way to request a new triple that will be
+/// complete some time in the future and a way to take an already generated triple.
+pub struct TripleSpawner {
+    /// Triple Storage that contains all triples that were generated by the us + others.
+    triple_storage: TripleStorage,
 
     /// The set of triples that were introduced to the system by the current node.
     introduced: HashSet<TripleId>,
 
-    ongoing: JoinMap<TripleId, Result<(), TripleGeneratorError>>,
-}
-
-impl std::fmt::Debug for TripleTasks {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TripleTasks")
-            // .field("generators", &self.generators.keys().collect::<Vec<_>>())
-            // .field("queued", &self.queued)
-            // .field("ongoing", &self.ongoing)
-            .field("introduced", &self.introduced)
-            .finish()
-    }
-}
-
-impl TripleTasks {
-    pub fn new(me: Participant, threshold: usize, msg: &MessageChannel) -> Self {
-        Self {
-            threshold,
-            me,
-            msg: msg.clone(),
-            introduced: HashSet::new(),
-            ongoing: JoinMap::new(),
-        }
-    }
-
-    pub async fn spawn(
-        &mut self,
-        id: TripleId,
-        participants: &[Participant],
-        timeout: u64,
-        slot: TripleSlot,
-        my_account_id: &AccountId,
-        epoch: u64,
-    ) -> Result<(), InitializationError> {
-        let generator = TripleGenerator::new(
-            id,
-            self.me,
-            self.threshold,
-            participants,
-            timeout,
-            slot,
-            &self.msg,
-        )
-        .await?;
-        self.ongoing
-            .spawn(id, generator.run(self.me, my_account_id.clone(), epoch));
-
-        Ok(())
-    }
-}
-
-/// Abstracts how triples are generated by providing a way to request a new triple that will be
-/// complete some time in the future and a way to take an already generated triple.
-pub struct TripleManager {
-    /// Triple Storage
-    triple_storage: TripleStorage,
-
-    /// The set of ongoing triple generation protocols.
-    tasks: TripleTasks,
+    /// The set of all ongoing triple generation protocols. This is a map of `TripleId` to
+    /// the `JoinHandle` of the triple generation task. Calling `join_next` will wait on
+    /// the next task to complete and return the result of the task. This is only restricted
+    /// through max introduction and concurrent generation in the system.
+    ongoing: JoinMap<TripleId, ()>,
 
     me: Participant,
     threshold: usize,
@@ -374,10 +305,10 @@ pub struct TripleManager {
     msg: MessageChannel,
 }
 
-impl fmt::Debug for TripleManager {
+impl fmt::Debug for TripleSpawner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TripleManager")
-            .field("tasks", &self.tasks)
+        f.debug_struct("TripleSpawner")
+            .field("introduced", &self.introduced)
             .field("me", &self.me)
             .field("threshold", &self.threshold)
             .field("epoch", &self.epoch)
@@ -386,7 +317,7 @@ impl fmt::Debug for TripleManager {
     }
 }
 
-impl TripleManager {
+impl TripleSpawner {
     pub fn new(
         me: Participant,
         threshold: usize,
@@ -396,11 +327,12 @@ impl TripleManager {
         msg: MessageChannel,
     ) -> Self {
         Self {
-            tasks: TripleTasks::new(me, threshold, &msg),
             me,
             threshold,
             epoch,
             triple_storage: storage.clone(),
+            introduced: HashSet::new(),
+            ongoing: JoinMap::new(),
             my_account_id: my_account_id.clone(),
             msg,
         }
@@ -428,17 +360,17 @@ impl TripleManager {
     }
 
     pub async fn len_ongoing(&self) -> usize {
-        self.tasks.ongoing.len()
+        self.ongoing.len()
     }
 
     pub async fn len_introduced(&self) -> usize {
-        self.tasks.introduced.len()
+        self.introduced.len()
     }
 
     /// Returns the number of unspent triples we will have in the manager once
     /// all ongoing generation protocols complete.
     pub async fn len_potential(&self) -> usize {
-        self.triple_storage.len_generated().await + self.tasks.ongoing.len()
+        self.triple_storage.len_generated().await + self.ongoing.len()
     }
 
     /// Starts a new Beaver triple generation protocol.
@@ -446,9 +378,10 @@ impl TripleManager {
         &mut self,
         participants: &[Participant],
         timeout: u64,
-    ) -> Result<(), InitializationError> {
+    ) -> Result<TripleId, InitializationError> {
         let id = rand::random();
-        self.generate_with_id(id, participants, timeout).await
+        self.generate_with_id(id, participants, timeout).await?;
+        Ok(id)
     }
 
     async fn generate_with_id(
@@ -466,16 +399,19 @@ impl TripleManager {
         };
 
         tracing::info!(id, "starting protocol to generate a new triple");
-        self.tasks
-            .spawn(
-                id,
-                participants,
-                timeout,
-                slot,
-                &self.my_account_id,
-                self.epoch,
-            )
-            .await?;
+        let generator = TripleGenerator::new(
+            id,
+            self.me,
+            self.threshold,
+            participants,
+            timeout,
+            slot,
+            &self.msg,
+        )
+        .await?;
+
+        self.ongoing
+            .spawn(id, generator.run(self.my_account_id.clone(), self.epoch));
         crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
             .with_label_values(&[self.my_account_id.as_str()])
             .inc();
@@ -486,7 +422,7 @@ impl TripleManager {
     /// Check if the triple id is present in the system. This includes ongoing generation protocols
     /// and the triple storage.
     pub async fn contains_id(&self, id: TripleId) -> bool {
-        self.tasks.ongoing.contains_key(&id) || self.triple_storage.contains(id).await
+        self.ongoing.contains_key(&id) || self.triple_storage.contains(id).await
     }
 
     /// Stockpile triples if the amount of unspent triples is below the minimum
@@ -501,23 +437,28 @@ impl TripleManager {
             } else {
                 // We will always try to generate a new triple if we have less than the minimum
                 self.len_mine().await < cfg.triple.min_triples as usize
-                    && self.tasks.introduced.len() < cfg.max_concurrent_introduction as usize
-                    && self.tasks.ongoing.len() < cfg.max_concurrent_generation as usize
+                    && self.introduced.len() < cfg.max_concurrent_introduction as usize
+                    && self.ongoing.len() < cfg.max_concurrent_generation as usize
             }
         };
 
         if not_enough_triples {
-            if let Err(err) = self
+            match self
                 .generate(participants, cfg.triple.generation_timeout)
                 .await
             {
-                tracing::warn!(?err, "failed to stockpile triple");
+                Ok(id) => {
+                    self.introduced.insert(id);
+                }
+                Err(err) => {
+                    tracing::warn!(?err, "failed to stockpile triple");
+                }
             }
         }
     }
 
-    async fn execute(mut self, mesh_state: Arc<RwLock<MeshState>>, config: Arc<RwLock<Config>>) {
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
+    async fn run(mut self, mesh_state: Arc<RwLock<MeshState>>, config: Arc<RwLock<Config>>) {
+        let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
         let mut start = self.msg.subscribe_triple_start().await;
 
         loop {
@@ -525,16 +466,24 @@ impl TripleManager {
                 Some(id) = start.recv() => {
                     // TODO: with posits, this will also have the list of participants, but for now
                     // will use the mesh state.
-                    tracing::info!(id, "received START message for triple generation");
                     let active = mesh_state.read().await.active.keys_vec();
                     let timeout = config.read().await.protocol.triple.generation_timeout;
                     if let Err(err) = self.generate_with_id(id, &active, timeout).await {
                         tracing::warn!(id, ?err, "unable to start triple generation on START");
-                    } else {
-                        self.tasks.introduced.insert(id);
                     }
                 }
-                _ = interval.tick() => {
+                // `join_next` returns None on the set being empty, so don't handle that case
+                Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
+                    let id = match result {
+                        Ok((id, ())) => id,
+                        Err(id) => {
+                            tracing::warn!(id, "triple generation task interrupted");
+                            id
+                        }
+                    };
+                    self.introduced.remove(&id);
+                }
+                _ = stockpile_interval.tick() => {
                     let active = mesh_state.read().await.active.keys_vec();
                     let protocol = config.read().await.protocol.clone();
                     self.stockpile(&active, &protocol).await;
@@ -552,22 +501,6 @@ impl TripleManager {
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.len_ongoing().await as i64);
                 }
-                // `join_next` returns None on the set being empty, so don't handle that case
-                Some(result) = self.tasks.ongoing.join_next(), if !self.tasks.ongoing.is_empty() => {
-                    let id = match result {
-                        Ok((id, result)) => {
-                            if let Err(err) = result {
-                                tracing::warn!(id, ?err, "triple generation task failed");
-                            }
-                            id
-                        }
-                        Err(id) => {
-                            tracing::warn!(id, "triple generation task failed");
-                            id
-                        }
-                    };
-                    self.tasks.introduced.remove(&id);
-                }
             }
         }
     }
@@ -580,7 +513,7 @@ pub struct TripleSpawnerTask {
 
 impl TripleSpawnerTask {
     pub fn run(me: Participant, threshold: usize, epoch: u64, ctx: &MpcSignProtocol) -> Self {
-        let manager = TripleManager::new(
+        let manager = TripleSpawner::new(
             me,
             threshold,
             epoch,
@@ -590,12 +523,16 @@ impl TripleSpawnerTask {
         );
         Self {
             handle: Arc::new(tokio::spawn(
-                manager.execute(ctx.mesh_state.clone(), ctx.config.clone()),
+                manager.run(ctx.mesh_state.clone(), ctx.config.clone()),
             )),
         }
     }
 
     pub fn abort(&self) {
+        // NOTE: since dropping the handle here, TripleSpawner will drop their JoinSet/JoinMap
+        // which will also abort all ongoing triple generation tasks. This is important to note
+        // since we do not want to leak any triple generation tasks when we are resharing, and
+        // potentially wasting compute.
         self.handle.abort();
     }
 }

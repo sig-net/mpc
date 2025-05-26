@@ -100,11 +100,13 @@ pub struct JoinMap<T, U> {
     tasks: JoinSet<U>,
 }
 
-impl<T, U> JoinMap<T, U>
-where
-    T: Copy + Hash + Eq,
-    U: Send + 'static,
-{
+impl<T, U> Default for JoinMap<T, U> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T, U> JoinMap<T, U> {
     pub fn new() -> Self {
         Self {
             mapping: HashMap::new(),
@@ -112,7 +114,13 @@ where
             tasks: JoinSet::new(),
         }
     }
+}
 
+impl<T, U> JoinMap<T, U>
+where
+    T: Copy + Hash + Eq,
+    U: Send + 'static,
+{
     pub fn len(&self) -> usize {
         self.mapping.len()
     }
