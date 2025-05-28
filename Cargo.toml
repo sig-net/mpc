@@ -5,10 +5,9 @@ members = [
     "chain-signatures/keys",
     "chain-signatures/node",
     "chain-signatures/primitives",
-
-    "integration-tests",
-    "infra/scripts/generate_keys"
+    "integration-tests"
 ]
+exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
 [workspace.package]
