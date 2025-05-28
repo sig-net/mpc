@@ -615,6 +615,7 @@ async fn refresh_finalized_epoch(
     loop {
         interval.tick().await;
         tracing::info!("Refreshing finalized epoch");
+        finalized_blocks.clear();
         let Ok(Some(new_finalized_bock)) = helios_client
             .get_block_by_number(BlockTag::Finalized, false)
             .await
