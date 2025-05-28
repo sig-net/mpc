@@ -616,7 +616,7 @@ async fn refresh_finalized_epoch(
         interval.tick().await;
         tracing::info!("Refreshing finalized epoch");
         finalized_blocks.clear();
-        let Ok(Some(new_finalized_bock)) = helios_client
+        let Ok(Some(new_finalized_block)) = helios_client
             .get_block_by_number(BlockTag::Finalized, false)
             .await
         else {
@@ -628,11 +628,11 @@ async fn refresh_finalized_epoch(
 
         tracing::info!(
             "New finalized block number: {}, last finalized block number: {:?}",
-            new_finalized_bock.header.number,
+            new_finalized_block.header.number,
             final_block_number
         );
 
-        let new_final_block_number = new_finalized_bock.header.number;
+        let new_final_block_number = new_finalized_block.header.number;
 
         let Some(last_final_block_number) = final_block_number else {
             tracing::info!("Last finalized block was None");
@@ -652,9 +652,9 @@ async fn refresh_finalized_epoch(
             continue;
         }
 
-        finalized_blocks.insert(new_final_block_number, new_finalized_bock.header.hash);
+        finalized_blocks.insert(new_final_block_number, new_finalized_block.header.hash);
 
-        let mut parent_hash = new_finalized_bock.header.inner.parent_hash;
+        let mut parent_hash = new_finalized_block.header.inner.parent_hash;
 
         let Some(start) = last_final_block_number.checked_add(1) else {
             let err_msg = "Last finalized block number + 1 overflowed range of u64!";
