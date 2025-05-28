@@ -7,6 +7,7 @@ members = [
     "chain-signatures/primitives",
 
     "integration-tests",
+    "infra/scripts/generate_keys"
 ]
 resolver = "2"
 
