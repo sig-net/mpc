@@ -16,7 +16,7 @@ use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::sync::{SyncTask, SyncUpdate};
 use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::{ParticipantInfo, ProtocolState};
-use mpc_node::rpc::NodeStateWatcher;
+use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 
 #[test_log::test(tokio::test)]
@@ -41,7 +41,7 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
     let node0_triples = redis.triple_storage(&node0_account_id);
     let node0_presignatures = redis.presignature_storage(&node0_account_id);
 
-    let watcher = NodeStateWatcher::mock(
+    let watcher = ContractStateWatcher::mock(
         &node0_account_id,
         ProtocolState::Running(RunningContractState {
             epoch: 0,

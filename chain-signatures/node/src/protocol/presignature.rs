@@ -300,6 +300,10 @@ impl PresignatureManager {
         self.presignatures.len_by_owner(self.me).await
     }
 
+    pub async fn len_ongoing(&self) -> usize {
+        self.generators.len()
+    }
+
     /// Returns if there are unspent presignatures available in the manager.
     pub async fn is_empty(&self) -> bool {
         self.len_generated().await == 0

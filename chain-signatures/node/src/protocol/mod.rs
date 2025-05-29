@@ -11,13 +11,12 @@ pub mod state;
 pub mod sync;
 pub mod triple;
 
-pub use consensus::ConsensusError;
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
 pub use signature::{IndexedSignRequest, SignQueue};
-pub use state::NodeState;
+pub use state::{Node, NodeState};
 
 use crate::config::Config;
 use crate::mesh::MeshState;
@@ -46,7 +45,6 @@ pub struct MpcSignProtocol {
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
     pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
-    pub(crate) state: Arc<RwLock<NodeState>>,
     pub(crate) msg_channel: MessageChannel,
     pub(crate) rpc_channel: RpcChannel,
 }
@@ -54,6 +52,7 @@ pub struct MpcSignProtocol {
 impl MpcSignProtocol {
     pub async fn run(
         mut self,
+        mut node: Node,
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
         config: Arc<RwLock<Config>>,
         mesh_state: Arc<RwLock<MeshState>>,
@@ -90,47 +89,34 @@ impl MpcSignProtocol {
                 state.clone()
             };
 
-            let state = {
-                let guard = self.state.read().await;
-                guard.clone()
-            };
-
             let crypto_time = Instant::now();
-            let mut state = state
+            node.state = node
+                .state
                 .progress(&mut self, cfg.clone(), mesh_state.clone())
                 .await;
+            node.update_watchers().await;
             crate::metrics::PROTOCOL_LATENCY_ITER_CRYPTO
                 .with_label_values(&[my_account_id.as_str()])
                 .observe(crypto_time.elapsed().as_secs_f64());
 
             if let Some(contract_state) = contract_state {
                 let consensus_time = Instant::now();
-                let from_state = format!("{state}");
-                state = match state.advance(&mut self, contract_state).await {
-                    Ok(state) => {
-                        tracing::debug!("advance ok: {from_state} => {state}");
-                        state
-                    }
-                    Err(err) => {
-                        tracing::warn!("protocol unable to advance: {err:?}");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-                };
+                node.state = node.state.advance(&mut self, contract_state).await;
                 crate::metrics::PROTOCOL_LATENCY_ITER_CONSENSUS
                     .with_label_values(&[my_account_id.as_str()])
                     .observe(consensus_time.elapsed().as_secs_f64());
+                node.update_watchers().await;
             }
 
             let message_time = Instant::now();
-            if let Err(err) = state.recv(&self.msg_channel, cfg, mesh_state).await {
+            if let Err(err) = node.state.recv(&self.msg_channel, cfg, mesh_state).await {
                 tracing::warn!("protocol unable to receive messages: {err:?}");
             }
             crate::metrics::PROTOCOL_LATENCY_ITER_MESSAGE
                 .with_label_values(&[my_account_id.as_str()])
                 .observe(message_time.elapsed().as_secs_f64());
 
-            let sleep_ms = match state {
+            let sleep_ms = match node.state {
                 NodeState::Generating(_) => 500,
                 NodeState::Resharing(_) => 500,
                 NodeState::Running(_) => 100,
@@ -140,10 +126,6 @@ impl MpcSignProtocol {
                 NodeState::WaitingForConsensus(_) => 1000,
                 NodeState::Joining(_) => 1000,
             };
-
-            let mut guard = self.state.write().await;
-            *guard = state;
-            drop(guard);
 
             crate::metrics::PROTOCOL_LATENCY_ITER_TOTAL
                 .with_label_values(&[my_account_id.as_str()])

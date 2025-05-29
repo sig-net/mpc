@@ -1,6 +1,7 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
+use crate::protocol::contract::primitives::ParticipantMap;
 use crate::protocol::signature::SignRequest;
 use crate::protocol::{Chain, ProtocolState};
 use crate::util::AffinePointExt as _;
@@ -120,13 +121,13 @@ impl RpcChannel {
 }
 
 #[derive(Clone)]
-pub struct NodeStateWatcher {
+pub struct ContractStateWatcher {
     account_id: AccountId,
     // TODO: use tokio::watch channel in the future.
     contract_state: Arc<RwLock<Option<ProtocolState>>>,
 }
 
-impl NodeStateWatcher {
+impl ContractStateWatcher {
     pub fn new(id: &AccountId) -> Self {
         Self {
             account_id: id.clone(),
@@ -185,6 +186,24 @@ impl NodeStateWatcher {
                 state.threshold,
                 *state.new_participants.find_participant(&self.account_id)?,
             )),
+        }
+    }
+
+    pub async fn participants(&self) -> ParticipantMap {
+        let contract_state = self.contract_state.read().await;
+        let Some(state) = contract_state.as_ref() else {
+            return ParticipantMap::Zero;
+        };
+
+        match state {
+            ProtocolState::Initializing(state) => {
+                ParticipantMap::One(state.candidates.clone().into())
+            }
+            ProtocolState::Running(state) => ParticipantMap::One(state.participants.clone()),
+            ProtocolState::Resharing(state) => ParticipantMap::Two(
+                state.new_participants.clone(),
+                state.old_participants.clone(),
+            ),
         }
     }
 }
