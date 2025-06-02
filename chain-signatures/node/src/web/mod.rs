@@ -20,20 +20,20 @@ use tokio::sync::{mpsc::Sender, RwLock};
 struct AxumState {
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
-    indexer: Indexer,
+    // indexer: Indexer,
 }
 
 pub async fn run(
     port: u16,
     sender: Sender<Ciphered>,
     protocol_state: Arc<RwLock<NodeState>>,
-    indexer: Indexer,
+    // indexer: Indexer,
 ) -> anyhow::Result<()> {
     tracing::info!("running a node");
     let axum_state = AxumState {
         sender,
         protocol_state,
-        indexer,
+        // indexer,
     };
 
     let app = Router::new()
@@ -115,8 +115,10 @@ pub enum StateView {
 async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
     tracing::debug!("fetching state");
     // TODO: rename to last_processed_block when making other breaking changes
-    let latest_block_height = state.indexer.last_processed_block().await.unwrap_or(0);
-    let is_stable = state.indexer.is_stable().await;
+    // let latest_block_height = state.indexer.last_processed_block().await.unwrap_or(0);
+    // let is_stable = state.indexer.is_stable().await;
+    let latest_block_height = 0;
+    let is_stable = true;
     let protocol_state = state.protocol_state.read().await;
 
     match &*protocol_state {

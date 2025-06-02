@@ -192,11 +192,11 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            // let gcp_service =
-            //     rt.block_on(async { GcpService::init(&account_id, &storage_options).await })?;
+            let gcp_service =
+                rt.block_on(async { GcpService::init(&account_id, &storage_options).await })?;
 
-            // let key_storage =
-            //     storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
+            let key_storage =
+                storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
 
             let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
 
@@ -207,12 +207,12 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 storage::presignature_storage::init(&redis_pool, &account_id);
             let app_data_storage = app_data_storage::init(&redis_pool, &account_id);
 
-            let mut rpc_client = near_fetch::Client::new(&near_rpc);
-            if let Some(referer_param) = client_header_referer {
-                let client_headers = rpc_client.inner_mut().headers_mut();
-                client_headers.insert(http::header::REFERER, referer_param.parse().unwrap());
-            }
-            tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
+            // let mut rpc_client = near_fetch::Client::new(&near_rpc);
+            // if let Some(referer_param) = client_header_referer {
+            //     let client_headers = rpc_client.inner_mut().headers_mut();
+            //     client_headers.insert(http::header::REFERER, referer_param.parse().unwrap());
+            // }
+            // tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
 
             // let (indexer_handle, indexer) = indexer::run(
             //     &indexer_options,
@@ -235,10 +235,10 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 });
 
             tracing::info!(%my_address, "address detected");
-            // let client = NodeClient::new(&message_options);
-            // let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
-            // let (mesh, mesh_state) = Mesh::init(&client, mesh_options);
-            // let contract_state = Arc::new(RwLock::new(None));
+            let client = NodeClient::new(&message_options);
+            let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
+            let (mesh, mesh_state) = Mesh::init(&client, mesh_options);
+            let contract_state = Arc::new(RwLock::new(None));
 
             let eth = eth.into_config();
             let network = NetworkConfig {
@@ -246,30 +246,30 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 cipher_pk: hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk)?)?,
                 sign_sk,
             };
-            // let near_client =
-            //     NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
-            // let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth);
+            let near_client =
+                NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
+            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth);
 
-            // tracing::info!(
-            //     %digest,
-            //     ?mpc_contract_id,
-            //     ?account_id,
-            //     ?my_address,
-            //     cipher_pk = ?network.cipher_pk,
-            //     sign_pk = ?network.sign_sk.public_key(),
-            //     near_rpc_url = ?near_client.rpc_addr(),
-            //     eth_contract_address = ?eth.as_ref().map(|eth| eth.contract_address.as_str()),
-            //     "starting node",
-            // );
+            tracing::info!(
+                %digest,
+                ?mpc_contract_id,
+                ?account_id,
+                ?my_address,
+                cipher_pk = ?network.cipher_pk,
+                sign_pk = ?network.sign_sk.public_key(),
+                // near_rpc_url = ?near_client.rpc_addr(),
+                eth_contract_address = ?eth.as_ref().map(|eth| eth.contract_address.as_str()),
+                "starting node",
+            );
 
             let config = Arc::new(RwLock::new(Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network,
             })));
             rt.block_on(async {
-                // let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
-                // let (sender, channel) =
-                //     MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
+                let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
+                let (sender, channel) =
+                    MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
                 // let protocol = MpcSignProtocol::init(
                 //     my_address,
                 //     mpc_contract_id,
@@ -284,22 +284,24 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 //     presignature_storage,
                 // );
 
-                // tracing::info!("protocol initialized");
+                tracing::info!("protocol initialized");
                 // let rpc_handle = tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
-                // let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
+                let mesh_handle = tokio::spawn(mesh.run(contract_state.clone()));
                 // let protocol_handle =
                 // tokio::spawn(protocol.run(contract_state, config, mesh_state));
-                // tracing::info!("protocol thread spawned");
+                tracing::info!("protocol thread spawned");
                 // let web_handle = tokio::spawn(web::run(web_port, sender, state, indexer));
+                let web_handle = tokio::spawn(web::run(web_port, sender, state));
+
                 // let eth_indexer_handle = tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
-                // tracing::info!("protocol http server spawned");
+                tracing::info!("protocol http server spawned");
 
                 // rpc_handle.await?;
-                // mesh_handle.await??;
+                mesh_handle.await??;
                 // protocol_handle.await??;
-                // web_handle.await??;
+                web_handle.await??;
                 // eth_indexer_handle.await??;
-                // tracing::info!("spinning down");
+                tracing::info!("spinning down");
 
                 // indexer_handle.join().unwrap()?;
 
