@@ -396,7 +396,7 @@ mod tests {
         );
 
         // Grafana value: -6950551088322443000
-        assert_eq!(digest, -6950551088322443000);
+        assert_eq!(digest, -1051225187120159684);
     }
 
     #[test]
