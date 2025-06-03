@@ -127,7 +127,6 @@ impl MessageInbox {
                 .or_default()
                 .push_back(message),
             Message::Triple(message) => match self.triple.entry(message.id) {
-                // TODO: need to clean up the entries once done with triple.
                 hash_map::Entry::Occupied(entry) => {
                     // NOTE: not logging the error because this is simply just channel closure.
                     // The error message should be reported on the generator side.
@@ -445,11 +444,23 @@ impl MessageChannel {
         rx
     }
 
+    pub async fn unsubscribe_triple(self, id: TripleId) {
+        let mut inbox = self.inbox.write().await;
+        if inbox.triple.remove(&id).is_none() {
+            tracing::warn!(id, "trying to unsub from an unknown triple subscription");
+        }
+    }
+
     pub async fn subscribe_triple_start(&self) -> mpsc::Receiver<TripleId> {
         let (tx, rx) = mpsc::channel(256);
         let mut inbox = self.inbox.write().await;
         inbox.triple_init = Some(tx);
         rx
+    }
+
+    pub async fn unsubscribe_triple_start(self) {
+        let mut inbox = self.inbox.write().await;
+        inbox.triple_init = None;
     }
 }
 
