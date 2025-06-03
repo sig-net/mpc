@@ -76,12 +76,6 @@ pub struct RunningState {
     pub signature_manager: Arc<RwLock<SignatureManager>>,
 }
 
-impl RunningState {
-    pub fn cleanup(&self) {
-        self.triple_task.abort();
-    }
-}
-
 pub struct ResharingState {
     pub me: Participant,
     pub old_epoch: u64,

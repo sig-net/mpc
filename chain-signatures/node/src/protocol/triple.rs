@@ -541,6 +541,13 @@ impl TripleSpawnerTask {
         }
     }
 
+    pub fn len_ongoing(&self) -> usize {
+        // NOTE: no need to call `chaned` or `borrow_and_update` here, since we only want to
+        // observe whatever is the latest value in the channel. This is not meant to wait for
+        // the next updated value.
+        *self.ongoing_gen_rx.borrow()
+    }
+
     pub fn abort(&self) {
         // NOTE: since dropping the handle here, TripleSpawner will drop their JoinSet/JoinMap
         // which will also abort all ongoing triple generation tasks. This is important to note
@@ -548,11 +555,10 @@ impl TripleSpawnerTask {
         // potentially wasting compute.
         self.handle.abort();
     }
+}
 
-    pub fn len_ongoing(&self) -> usize {
-        // NOTE: no need to call `chaned` or `borrow_and_update` here, since we only want to
-        // observe whatever is the latest value in the channel. This is not meant to wait for
-        // the next updated value.
-        *self.ongoing_gen_rx.borrow()
+impl Drop for TripleSpawnerTask {
+    fn drop(&mut self) {
+        self.abort();
     }
 }
