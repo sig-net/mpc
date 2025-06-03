@@ -5,13 +5,13 @@ members = [
     "chain-signatures/keys",
     "chain-signatures/node",
     "chain-signatures/primitives",
-
-    "integration-tests",
+    "integration-tests"
 ]
+exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
 [workspace.package]
-version = "1.2.0"
+version = "1.3.0"
 
 [workspace.dependencies]
 alloy = { version = "0.9.1", features = ["contract", "json"] }

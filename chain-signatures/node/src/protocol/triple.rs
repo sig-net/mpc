@@ -16,7 +16,7 @@ use k256::elliptic_curve::group::GroupEncoding;
 use k256::Secp256k1;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
 
 use std::collections::HashSet;
@@ -457,7 +457,12 @@ impl TripleSpawner {
         }
     }
 
-    async fn run(mut self, mesh_state: Arc<RwLock<MeshState>>, config: Arc<RwLock<Config>>) {
+    async fn run(
+        mut self,
+        mesh_state: Arc<RwLock<MeshState>>,
+        config: Arc<RwLock<Config>>,
+        ongoing_gen_tx: watch::Sender<usize>,
+    ) {
         let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
         let mut start = self.msg.subscribe_triple_start().await;
 
@@ -471,6 +476,7 @@ impl TripleSpawner {
                     if let Err(err) = self.generate_with_id(id, &active, timeout).await {
                         tracing::warn!(id, ?err, "unable to start triple generation on START");
                     }
+                    let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
@@ -482,11 +488,13 @@ impl TripleSpawner {
                         }
                     };
                     self.introduced.remove(&id);
+                    let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
                 _ = stockpile_interval.tick() => {
                     let active = mesh_state.read().await.active.keys_vec();
                     let protocol = config.read().await.protocol.clone();
                     self.stockpile(&active, &protocol).await;
+                    let _ = ongoing_gen_tx.send(self.ongoing.len());
 
                     crate::metrics::NUM_TRIPLES_MINE
                         .with_label_values(&[self.my_account_id.as_str()])
@@ -506,13 +514,14 @@ impl TripleSpawner {
     }
 }
 
-#[derive(Clone)]
 pub struct TripleSpawnerTask {
-    handle: Arc<JoinHandle<()>>,
+    ongoing_gen_rx: watch::Receiver<usize>,
+    handle: JoinHandle<()>,
 }
 
 impl TripleSpawnerTask {
     pub fn run(me: Participant, threshold: usize, epoch: u64, ctx: &MpcSignProtocol) -> Self {
+        let (ongoing_gen_tx, ongoing_gen_rx) = watch::channel(0);
         let manager = TripleSpawner::new(
             me,
             threshold,
@@ -521,9 +530,13 @@ impl TripleSpawnerTask {
             &ctx.triple_storage,
             ctx.msg_channel.clone(),
         );
+
         Self {
-            handle: Arc::new(tokio::spawn(
-                manager.run(ctx.mesh_state.clone(), ctx.config.clone()),
+            ongoing_gen_rx,
+            handle: tokio::spawn(manager.run(
+                ctx.mesh_state.clone(),
+                ctx.config.clone(),
+                ongoing_gen_tx,
             )),
         }
     }
@@ -534,5 +547,12 @@ impl TripleSpawnerTask {
         // since we do not want to leak any triple generation tasks when we are resharing, and
         // potentially wasting compute.
         self.handle.abort();
+    }
+
+    pub fn len_ongoing(&self) -> usize {
+        // NOTE: no need to call `chaned` or `borrow_and_update` here, since we only want to
+        // observe whatever is the latest value in the channel. This is not meant to wait for
+        // the next updated value.
+        *self.ongoing_gen_rx.borrow()
     }
 }

@@ -5,6 +5,7 @@ pub use crate::protocol::message::types::{
     GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
     PresignatureMessage, Protocols, ResharingMessage, SignatureMessage, TripleMessage,
 };
+use crate::rpc::ContractStateWatcher;
 
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::error::GenerationError;
@@ -297,7 +298,7 @@ struct MessageExecutor {
     outbox: MessageOutbox,
 
     config: Arc<RwLock<Config>>,
-    protocol_state: Arc<RwLock<NodeState>>,
+    contract_watcher: ContractStateWatcher,
     mesh_state: Arc<RwLock<MeshState>>,
 }
 
@@ -315,10 +316,7 @@ impl MessageExecutor {
                 )
             };
 
-            let participants = {
-                let state = self.protocol_state.read().await;
-                state.participants()
-            };
+            let participants = self.contract_watcher.participants().await;
             {
                 let mut inbox = self.inbox.write().await;
                 let expiration = Duration::from_millis(protocol.message_timeout);
@@ -367,7 +365,7 @@ impl MessageChannel {
         client: NodeClient,
         id: &AccountId,
         config: &Arc<RwLock<Config>>,
-        protocol_state: &Arc<RwLock<NodeState>>,
+        contract_watcher: ContractStateWatcher,
         mesh_state: &Arc<RwLock<MeshState>>,
     ) -> (mpsc::Sender<Ciphered>, Self) {
         let (inbox_tx, outbox_rx, mut channel) = Self::new();
@@ -376,7 +374,7 @@ impl MessageChannel {
             outbox: MessageOutbox::new(id, client, outbox_rx),
 
             config: config.clone(),
-            protocol_state: protocol_state.clone(),
+            contract_watcher,
             mesh_state: mesh_state.clone(),
         };
         channel.task = Some(Arc::new(tokio::spawn(runner.execute())));
@@ -474,7 +472,6 @@ impl MessageReceiver for GeneratingState {
         _mesh_state: MeshState,
     ) -> Result<(), MessageError> {
         let mut inbox = channel.inbox().write().await;
-        let mut protocol = self.protocol.write().await;
         if !inbox.generating.is_empty() {
             let message_counts: HashMap<Participant, usize> =
                 inbox
@@ -487,7 +484,7 @@ impl MessageReceiver for GeneratingState {
             tracing::info!(?message_counts, "generating: handling new messages");
         }
         while let Some(msg) = inbox.generating.pop_front() {
-            protocol.message(msg.from, msg.data);
+            self.protocol.message(msg.from, msg.data);
         }
         Ok(())
     }
@@ -517,9 +514,8 @@ impl MessageReceiver for ResharingState {
             tracing::info!(?message_counts, "resharing: handling new messages");
         }
         let q = inbox.resharing.entry(self.old_epoch).or_default();
-        let mut protocol = self.protocol.write().await;
         while let Some(msg) = q.pop_front() {
-            protocol.message(msg.from, msg.data);
+            self.protocol.message(msg.from, msg.data);
         }
         Ok(())
     }
