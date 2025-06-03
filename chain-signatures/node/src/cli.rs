@@ -395,8 +395,9 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value: -6950551088322443000
-        assert_eq!(digest, -1051225187120159684);
+        // Grafana was: -6950551088322443000
+        // Grafana now: -8312902466823593000
+        assert_eq!(digest, -6950551088322443092);
     }
 
     #[test]
