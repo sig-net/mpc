@@ -16,7 +16,7 @@ use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::sync::{SyncTask, SyncUpdate};
 use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::{ParticipantInfo, ProtocolState};
-use mpc_node::rpc::NodeStateWatcher;
+use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 
 #[test_log::test(tokio::test)]
@@ -41,7 +41,7 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
     let node0_triples = redis.triple_storage(&node0_account_id);
     let node0_presignatures = redis.presignature_storage(&node0_account_id);
 
-    let watcher = NodeStateWatcher::mock(
+    let watcher = ContractStateWatcher::mock(
         &node0_account_id,
         ProtocolState::Running(RunningContractState {
             epoch: 0,
@@ -54,11 +54,13 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
         }),
     );
 
+    let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
     let mesh = Mesh::new(
         &client,
         mpc_node::mesh::Options {
             ping_interval: ping_interval.as_millis() as u64,
         },
+        synced_peer_rx,
     );
     let (sync_channel, sync) = SyncTask::new(
         &client,
@@ -66,6 +68,7 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
         node0_presignatures.clone(),
         mesh.state().clone(),
         watcher,
+        synced_peer_tx,
     );
     tokio::spawn(sync.run());
 

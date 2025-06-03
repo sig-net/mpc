@@ -292,7 +292,7 @@ impl TripleGenerator {
                     };
                     let triple_is_mine = triple_owner == me;
 
-                    tracing::info!(
+                    tracing::debug!(
                         id = self.id,
                         ?me,
                         ?triple_owner,

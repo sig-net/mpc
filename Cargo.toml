@@ -7,11 +7,12 @@ members = [
     "chain-signatures/primitives",
 
     "integration-tests",
+    "infra/scripts/generate_keys"
 ]
 resolver = "2"
 
 [workspace.package]
-version = "1.1.4"
+version = "1.2.0"
 
 [workspace.dependencies]
 alloy = { version = "0.9.1", features = ["contract", "json"] }

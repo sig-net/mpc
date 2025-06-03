@@ -9,10 +9,10 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::rpc::NodeStateWatcher;
+use crate::rpc::ContractStateWatcher;
 use crate::storage::{PresignatureStorage, TripleStorage};
 
-use super::contract::primitives::Participants;
+use super::contract::primitives::ParticipantInfo;
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 
@@ -57,8 +57,9 @@ pub struct SyncTask {
     triples: TripleStorage,
     presignatures: PresignatureStorage,
     mesh_state: Arc<RwLock<MeshState>>,
-    watcher: NodeStateWatcher,
+    watcher: ContractStateWatcher,
     requests: SyncRequestReceiver,
+    synced_peer_tx: mpsc::Sender<Participant>,
 }
 
 // TODO: add a watch channel for mesh active participants.
@@ -68,7 +69,8 @@ impl SyncTask {
         triples: TripleStorage,
         presignatures: PresignatureStorage,
         mesh_state: Arc<RwLock<MeshState>>,
-        watcher: NodeStateWatcher,
+        watcher: ContractStateWatcher,
+        synced_peer_tx: mpsc::Sender<Participant>,
     ) -> (SyncChannel, Self) {
         let (requests, channel) = SyncChannel::new();
         let task = Self {
@@ -78,6 +80,7 @@ impl SyncTask {
             mesh_state,
             watcher,
             requests,
+            synced_peer_tx,
         };
         (channel, task)
     }
@@ -85,7 +88,9 @@ impl SyncTask {
     pub async fn run(mut self) {
         tracing::info!("task has been started");
         let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
-        let mut broadcast_interval = tokio::time::interval(Duration::from_millis(10000));
+        let mut sync_interval = tokio::time::interval(Duration::from_millis(100));
+        // Broadcast should generally not be necessary.
+        let mut broadcast_interval = tokio::time::interval(Duration::from_secs(3600 * 24));
         let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(100));
 
         // Do NOT start until we have our own participant info.
@@ -101,6 +106,37 @@ impl SyncTask {
         let mut broadcast = Option::<(Instant, JoinHandle<_>)>::None;
         loop {
             tokio::select! {
+                // find nodes that need syncing and initiate it
+                _ = sync_interval.tick() => {
+                    if broadcast.is_some() {
+                        // another broadcast task is still ongoing, skip.
+                        continue;
+                    }
+
+                    let state = self.mesh_state.read().await;
+                    let need_sync = &state.need_sync;
+
+                    if need_sync.is_empty() {
+                        continue;
+                    }
+
+                    let update = self.new_update(me).await;
+                    let start = Instant::now();
+                    let receivers = need_sync
+                        .iter()
+                        .map(|(p, info)|(*p, info.clone()))
+                        .collect::<Vec<_>>();
+                    let task = tokio::spawn(broadcast_sync(
+                        self.client.clone(),
+                        update,
+                        self.triples.clone(),
+                        self.presignatures.clone(),
+                        receivers.into_iter(),
+                        self.synced_peer_tx.clone(),
+                        me,
+                    ));
+                    broadcast = Some((start, task));
+                }
                 // do a new broadcast if there is no ongoing broadcast.
                 _ = broadcast_interval.tick() => {
                     if broadcast.is_some() {
@@ -109,16 +145,19 @@ impl SyncTask {
                     }
 
                     let update = self.new_update(me).await;
-                    let active = {
-                        let state = self.mesh_state.read().await;
-                        let mut active = state.active.clone();
-                        // do not broadcast to me
-                        active.remove(&me);
-                        active
-                    };
+                    let state = self.mesh_state.read().await.clone();
+                    let active = state.active;
 
                     let start = Instant::now();
-                    let task = tokio::spawn(broadcast_sync(self.client.clone(), update, active, self.triples.clone(), self.presignatures.clone()));
+                    let task = tokio::spawn(broadcast_sync(
+                        self.client.clone(),
+                        update,
+                        self.triples.clone(),
+                        self.presignatures.clone(),
+                        active.into_iter(),
+                        self.synced_peer_tx.clone(),
+                        me
+                    ));
                     broadcast = Some((start, task));
                 }
                 // check that our broadcast has completed, and if so process the result.
@@ -135,7 +174,7 @@ impl SyncTask {
                     if let Err(err) = handle.await {
                         tracing::warn!(?err, "broadcast task failed");
                     } else {
-                        tracing::info!(elapsed = ?start.elapsed(), "processed broadcast");
+                        tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
                     }
                 }
                 Some(req) = self.requests.updates.recv() => {
@@ -145,7 +184,6 @@ impl SyncTask {
         }
     }
 
-    // TODO: use reserved values instead. Note that we cannot fetch our own triples via reserved
     async fn new_update(&self, me: Participant) -> SyncUpdate {
         SyncUpdate {
             from: me,
@@ -153,15 +191,22 @@ impl SyncTask {
             presignatures: self.presignatures.fetch_owned(me).await,
         }
     }
+
+    /// Channel for communicating back from the sync task which nodes are now updated.
+    pub fn synced_nodes_channel() -> (mpsc::Sender<Participant>, mpsc::Receiver<Participant>) {
+        mpsc::channel(MAX_SYNC_UPDATE_REQUESTS)
+    }
 }
 
-/// Broadcast an update to all participants specified by `active`.
+/// Broadcast an update to all participants specified by `receivers`.
 async fn broadcast_sync(
     client: NodeClient,
     update: SyncUpdate,
-    active: Participants,
     triples: TripleStorage,
     presignatures: PresignatureStorage,
+    receivers: impl Iterator<Item = (Participant, ParticipantInfo)>,
+    synced_peer_tx: mpsc::Sender<Participant>,
+    me: Participant,
 ) -> SyncUpdate {
     if update.is_empty() {
         return update;
@@ -170,12 +215,32 @@ async fn broadcast_sync(
     let start = Instant::now();
     let mut tasks = JoinSet::new();
     let arc_update = Arc::new(update.clone());
-    for (&p, info) in active.iter() {
+    for (p, info) in receivers {
         let client = client.clone();
         let update = arc_update.clone();
-        let url = info.url.clone();
+        let url = info.url;
+        let synced_peer_tx_clone = synced_peer_tx.clone();
         tasks.spawn(async move {
-            let sync_view = client.sync(&url, &update).await;
+            // Only actually do the sync on other peers, not on self. (Hack) We
+            // still want to send the message to synced_peer_tx though, since
+            // the mesh does not currently understand which node is self, so it
+            // will trigger a sync to self.
+            let sync_view = if p != me {
+                let res = client.sync(&url, &update).await;
+                if let Err(err) = &res {
+                    tracing::warn!(?err, "failed to sync with peer {p:?}");
+                }
+                Some(res)
+            } else {
+                None
+            };
+            let result = synced_peer_tx_clone.send(p).await;
+            if result.is_err() {
+                tracing::error!(
+                    "synced_peer_tx failed, receiver is down. State sync will no longer work."
+                )
+            }
+
             (p, sync_view)
         });
     }
@@ -185,7 +250,7 @@ async fn broadcast_sync(
         .await
         .into_iter()
         .filter_map(|(p, view)| {
-            if let Ok(view) = view {
+            if let Some(Ok(view)) = view {
                 Some((p, view))
             } else {
                 None
@@ -193,7 +258,7 @@ async fn broadcast_sync(
         })
         .collect::<Vec<_>>();
 
-    tracing::info!(
+    tracing::debug!(
         elapsed = ?start.elapsed(),
         responded = ?resps.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
         "broadcast completed",
@@ -201,7 +266,7 @@ async fn broadcast_sync(
 
     let mut triple_kick = HashMap::new();
     for &id in &update.triples {
-        let entry = triple_kick.entry(id).or_insert_with(Vec::new);
+        let entry: &mut Vec<_> = triple_kick.entry(id).or_default();
         for (p, view) in &resps {
             if !view.triples.contains(&id) {
                 entry.push(*p);
@@ -212,7 +277,7 @@ async fn broadcast_sync(
 
     let mut presignature_kick = HashMap::new();
     for &id in &update.presignatures {
-        let entry = presignature_kick.entry(id).or_insert_with(Vec::new);
+        let entry: &mut Vec<_> = presignature_kick.entry(id).or_default();
         for (p, view) in &resps {
             if !view.presignatures.contains(&id) {
                 entry.push(*p);
