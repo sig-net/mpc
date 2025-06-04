@@ -1,0 +1,21 @@
+// Pre-signatures and Triple states
+digraph {
+    node [fontsize=32 shape=box]
+    edge [fontsize=16]
+
+    init [label=init shape=none]
+    generating [label=Generating]
+    available [label=Available]
+    using [label=Using]
+    done [label=done shape=none]
+
+
+    init -> generating [label="ON receive INIT(generate)"]
+
+    generating -> available [label="ON generating protocol success"]
+    generating -> done [label="ON generating protocol failed"]
+
+    available -> using [label="ON removal from DB\n= receive INIT(consume)\n(start of following protocol)"]
+
+    using -> done [label="ON consuming protocol finish"]
+}

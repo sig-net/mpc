@@ -42,8 +42,10 @@ pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
 pub struct SolConfig {
     /// The solana account secret key used to sign solana respond txn.
     pub account_sk: String,
-    /// Solana RPC URL
-    pub rpc_url: String,
+    /// Solana RPC http URL
+    pub rpc_http_url: String,
+    /// Solana RPC websocket URL
+    pub rpc_ws_url: String,
     /// The program address to watch
     pub program_address: String,
 }
@@ -52,7 +54,8 @@ impl fmt::Debug for SolConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SolConfig")
             .field("account_sk", &"<hidden>")
-            .field("rpc_url", &self.rpc_url)
+            .field("rpc_http_url", &self.rpc_http_url)
+            .field("rpc_ws_url", &self.rpc_ws_url)
             .field("program_address", &self.program_address)
             .finish()
     }
@@ -65,9 +68,12 @@ pub struct SolArgs {
     /// The solana account secret key used to sign solana respond txn.
     #[arg(long, env("MPC_SOL_ACCOUNT_SK"))]
     pub sol_account_sk: Option<String>,
-    /// Solana RPC URL
-    #[clap(long, env("MPC_SOL_RPC_URL"), requires = "sol_account_sk")]
-    pub sol_rpc_url: Option<String>,
+    /// Solana RPC HTTP URL
+    #[clap(long, env("MPC_SOL_RPC_HTTP_URL"), requires = "sol_account_sk")]
+    pub sol_rpc_http_url: Option<String>,
+    /// Solana RPC WS URL
+    #[clap(long, env("MPC_SOL_RPC_WS_URL"), requires = "sol_account_sk")]
+    pub sol_rpc_ws_url: Option<String>,
     /// The program address to watch
     #[clap(long, env("MPC_SOL_PROGRAM_ADDRESS"), requires = "sol_account_sk")]
     pub sol_program_address: Option<String>,
@@ -79,8 +85,11 @@ impl SolArgs {
         if let Some(sol_account_sk) = self.sol_account_sk {
             args.extend(["--sol-account-sk".to_string(), sol_account_sk]);
         }
-        if let Some(sol_rpc_url) = self.sol_rpc_url {
-            args.extend(["--sol-rpc-url".to_string(), sol_rpc_url]);
+        if let Some(sol_rpc_http_url) = self.sol_rpc_http_url {
+            args.extend(["--sol-rpc-http-url".to_string(), sol_rpc_http_url]);
+        }
+        if let Some(sol_rpc_ws_url) = self.sol_rpc_ws_url {
+            args.extend(["--sol-rpc-ws-url".to_string(), sol_rpc_ws_url]);
         }
         if let Some(sol_program_address) = self.sol_program_address {
             args.extend(["--sol-program-address".to_string(), sol_program_address]);
@@ -91,7 +100,8 @@ impl SolArgs {
     pub fn into_config(self) -> Option<SolConfig> {
         Some(SolConfig {
             account_sk: self.sol_account_sk?,
-            rpc_url: self.sol_rpc_url?,
+            rpc_http_url: self.sol_rpc_http_url?,
+            rpc_ws_url: self.sol_rpc_ws_url?,
             program_address: self.sol_program_address?,
         })
     }
@@ -100,12 +110,14 @@ impl SolArgs {
         match config {
             Some(config) => SolArgs {
                 sol_account_sk: Some(config.account_sk),
-                sol_rpc_url: Some(config.rpc_url),
+                sol_rpc_http_url: Some(config.rpc_http_url),
+                sol_rpc_ws_url: Some(config.rpc_ws_url),
                 sol_program_address: Some(config.program_address),
             },
             None => SolArgs {
                 sol_account_sk: None,
-                sol_rpc_url: None,
+                sol_rpc_http_url: None,
+                sol_rpc_ws_url: None,
                 sol_program_address: None,
             },
         }
@@ -184,8 +196,8 @@ fn sign_request_from_event(
             key_version: 0,
         },
         chain: Chain::Solana,
-        timestamp: Instant::now(),
-        unix_timestamp: crate::util::current_unix_timestamp(),
+        timestamp_sign_queue: Some(Instant::now()),
+        unix_timestamp_indexed: crate::util::current_unix_timestamp(),
     })
 }
 
@@ -221,10 +233,15 @@ pub async fn run(
     let program_id = Pubkey::from_str(&sol.program_address)?;
     let keypair = Keypair::from_base58_string(&sol.account_sk);
 
-    let cluster = Cluster::Custom(sol.rpc_url.clone(), sol.rpc_url.replace("http", "ws"));
+    let cluster = Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
     let client =
         Client::new_with_options(cluster, Arc::new(keypair), CommitmentConfig::confirmed());
-    tracing::info!("rpc url: {}, program id: {}", sol.rpc_url, program_id);
+    tracing::info!(
+        "rpc http url: {}, rpc websocket url: {}, program id: {}",
+        sol.rpc_http_url,
+        sol.rpc_ws_url,
+        program_id
+    );
     loop {
         let program = client.program(program_id)?;
         let unsub =

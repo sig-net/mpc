@@ -50,7 +50,6 @@ impl fmt::Debug for NodeEnvConfig {
 
 impl Node {
     pub async fn dry_run(
-        node_id: usize,
         ctx: &super::Context,
         account: &Account,
         cfg: &NodeConfig,
@@ -85,8 +84,8 @@ impl Node {
             sol,
             indexer_options,
             my_address: None,
-            debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
+            log_options: ctx.log_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 cfg.protocol.clone(),
             )?)),
@@ -120,7 +119,6 @@ impl Node {
     }
 
     pub async fn run(
-        node_id: usize,
         ctx: &super::Context,
         cfg: &NodeConfig,
         account: &Account,
@@ -143,8 +141,13 @@ impl Node {
         );
         LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc).await?;
 
+        let mut cfg = cfg.clone();
+        if let Some(ref mut eth_config) = cfg.eth {
+            eth_config.helios_data_path =
+                format!("{}_{}", eth_config.helios_data_path, account.id());
+        }
+
         Self::spawn(
-            node_id,
             ctx,
             NodeEnvConfig {
                 web_port,
@@ -158,11 +161,7 @@ impl Node {
         .await
     }
 
-    pub async fn spawn(
-        node_id: usize,
-        ctx: &super::Context,
-        config: NodeEnvConfig,
-    ) -> anyhow::Result<Self> {
+    pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
@@ -186,8 +185,8 @@ impl Node {
             sol,
             indexer_options,
             my_address: None,
-            debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
+            log_options: ctx.log_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),
             )?)),

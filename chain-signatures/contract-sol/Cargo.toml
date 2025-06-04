@@ -1,5 +1,5 @@
 [workspace]
-members = ["programs/chain-signatures-project"]
+members = ["programs/signet-program"]
 resolver = "2"
 
 [profile.release]

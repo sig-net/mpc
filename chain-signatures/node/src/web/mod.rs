@@ -2,9 +2,11 @@ mod error;
 
 use self::error::Error;
 use crate::indexer::NearIndexer;
+use crate::protocol::state::{NodeStateWatcher, NodeStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
-use crate::protocol::NodeState;
+use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::error::Result;
+
 use anyhow::Context;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -16,27 +18,33 @@ use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
-use tokio::sync::{mpsc::Sender, RwLock};
+use tokio::sync::mpsc::Sender;
 
 struct AxumState {
     sender: Sender<Ciphered>,
-    protocol_state: Arc<RwLock<NodeState>>,
+    node_watcher: NodeStateWatcher,
     indexer: Option<NearIndexer>,
+    triple_storage: TripleStorage,
+    presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
 }
 
 pub async fn run(
     port: u16,
     sender: Sender<Ciphered>,
-    protocol_state: Arc<RwLock<NodeState>>,
+    node_watcher: NodeStateWatcher,
     indexer: Option<NearIndexer>,
+    triple_storage: TripleStorage,
+    presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
 ) {
     tracing::info!("starting web server");
     let axum_state = AxumState {
         sender,
-        protocol_state,
+        node_watcher,
         indexer,
+        triple_storage,
+        presignature_storage,
         sync_channel,
     };
 
@@ -112,31 +120,32 @@ pub enum StateView {
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
-async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
+async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
     tracing::debug!("fetching state");
 
     // TODO: remove once we have integration tests built using other chains
-    let latest_block_height = if let Some(indexer) = &state.indexer {
+    let latest_block_height = if let Some(indexer) = &web.indexer {
         indexer.last_processed_block().await.unwrap_or(0)
     } else {
         0
     };
 
-    let protocol_state = state.protocol_state.read().await;
-
-    match &*protocol_state {
-        NodeState::Running(state) => {
-            let triple_potential_count = state.triple_manager.len_potential().await;
-            let triple_count = state.triple_manager.len_generated().await;
-            let triple_mine_count = state.triple_manager.len_mine().await;
-            let presignature_read = state.presignature_manager.read().await;
-            let presignature_count = presignature_read.len_generated().await;
-            let presignature_mine_count = presignature_read.len_mine().await;
-            let presignature_potential_count = presignature_read.len_potential().await;
-            let participants = state.participants.keys_vec();
+    match web.node_watcher.status() {
+        NodeStatus::Running {
+            me,
+            participants,
+            ongoing_triple_gen,
+            ongoing_presignature_gen,
+        } => {
+            let triple_count = web.triple_storage.len_generated().await;
+            let triple_mine_count = web.triple_storage.len_by_owner(me).await;
+            let triple_potential_count = triple_count + ongoing_triple_gen;
+            let presignature_count = web.presignature_storage.len_generated().await;
+            let presignature_mine_count = web.presignature_storage.len_by_owner(me).await;
+            let presignature_potential_count = presignature_count + ongoing_presignature_gen;
 
             Ok(Json(StateView::Running {
-                participants,
+                participants: participants.clone(),
                 triple_count,
                 triple_mine_count,
                 triple_potential_count,
@@ -146,22 +155,18 @@ async fn state(Extension(state): Extension<Arc<AxumState>>) -> Result<Json<State
                 latest_block_height,
             }))
         }
-        NodeState::Resharing(state) => {
-            let old_participants = state.old_participants.keys_vec();
-            let new_participants = state.new_participants.keys_vec();
-            Ok(Json(StateView::Resharing {
-                old_participants,
-                new_participants,
-                latest_block_height,
-            }))
-        }
-        NodeState::Joining(state) => {
-            let participants = state.participants.keys_vec();
-            Ok(Json(StateView::Joining {
-                participants,
-                latest_block_height,
-            }))
-        }
+        NodeStatus::Resharing {
+            old_participants,
+            new_participants,
+        } => Ok(Json(StateView::Resharing {
+            old_participants: old_participants.clone(),
+            new_participants: new_participants.clone(),
+            latest_block_height,
+        })),
+        NodeStatus::Joining { participants } => Ok(Json(StateView::Joining {
+            participants: participants.clone(),
+            latest_block_height,
+        })),
         _ => {
             tracing::debug!("not running, state unavailable");
             Ok(Json(StateView::NotRunning))

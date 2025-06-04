@@ -1,4 +1,4 @@
-use super::contract::primitives::{ParticipantMap, Participants};
+use super::contract::primitives::Participants;
 use super::presignature::PresignatureManager;
 use super::signature::SignatureManager;
 use super::triple::TripleManager;
@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+
+use tokio::sync::{watch, RwLock};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PersistentNodeData {
@@ -28,20 +29,22 @@ impl fmt::Debug for PersistentNodeData {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct StartedState {
     pub persistent_node_data: Option<PersistentNodeData>,
 }
 
-#[derive(Clone)]
 pub struct GeneratingState {
     pub me: Participant,
     pub participants: Participants,
     pub threshold: usize,
     pub protocol: KeygenProtocol,
+
+    /// If the generating state fails to store data after generating, it gets temporarily
+    /// stored here and retried later.
+    pub failed_store: Option<(PublicKey, SecretKeyShare)>,
 }
 
-#[derive(Clone)]
 pub struct WaitingForConsensusState {
     pub epoch: u64,
     pub participants: Participants,
@@ -61,9 +64,9 @@ impl fmt::Debug for WaitingForConsensusState {
     }
 }
 
-#[derive(Clone)]
 pub struct RunningState {
     pub epoch: u64,
+    pub me: Participant,
     pub participants: Participants,
     pub threshold: usize,
     pub private_share: SecretKeyShare,
@@ -73,7 +76,6 @@ pub struct RunningState {
     pub signature_manager: Arc<RwLock<SignatureManager>>,
 }
 
-#[derive(Clone)]
 pub struct ResharingState {
     pub me: Participant,
     pub old_epoch: u64,
@@ -82,15 +84,43 @@ pub struct ResharingState {
     pub threshold: usize,
     pub public_key: PublicKey,
     pub protocol: ReshareProtocol,
+
+    /// If the resharing state fails to store data after generating, it gets temporarily
+    /// stored here and retried later.
+    pub failed_store: Option<SecretKeyShare>,
 }
 
-#[derive(Clone)]
 pub struct JoiningState {
     pub participants: Participants,
     pub public_key: PublicKey,
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeStatus {
+    Starting,
+    Started,
+    Generating {
+        participants: Vec<Participant>,
+    },
+    WaitingForConsensus {
+        participants: Vec<Participant>,
+    },
+    Running {
+        me: Participant,
+        participants: Vec<Participant>,
+        ongoing_triple_gen: usize,
+        ongoing_presignature_gen: usize,
+    },
+    Resharing {
+        old_participants: Vec<Participant>,
+        new_participants: Vec<Participant>,
+    },
+    Joining {
+        participants: Vec<Participant>,
+    },
+}
+
+#[derive(Default)]
 #[allow(clippy::large_enum_variant)]
 pub enum NodeState {
     #[default]
@@ -117,20 +147,105 @@ impl Display for NodeState {
     }
 }
 
-impl NodeState {
-    pub fn participants(&self) -> ParticipantMap {
-        match self {
-            NodeState::Generating(state) => ParticipantMap::One(state.participants.clone()),
-            NodeState::WaitingForConsensus(state) => {
-                ParticipantMap::One(state.participants.clone())
+pub struct Node {
+    pub state: NodeState,
+    pub watcher_tx: watch::Sender<NodeStatus>,
+    pub watcher: NodeStateWatcher,
+}
+
+impl Default for Node {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Node {
+    pub fn new() -> Self {
+        let (watcher_tx, watcher_rx) = watch::channel(NodeStatus::Starting);
+        let watcher = NodeStateWatcher {
+            watcher: watcher_rx,
+        };
+        Self {
+            state: NodeState::Starting,
+            watcher_tx,
+            watcher,
+        }
+    }
+
+    pub async fn update_watchers(&mut self) {
+        match &self.state {
+            NodeState::Started(_) => {
+                let _ = self.watcher_tx.send(NodeStatus::Started);
             }
-            NodeState::Running(state) => ParticipantMap::One(state.participants.clone()),
-            NodeState::Resharing(state) => ParticipantMap::Two(
-                state.new_participants.clone(),
-                state.old_participants.clone(),
-            ),
-            NodeState::Joining(state) => ParticipantMap::One(state.participants.clone()),
-            _ => ParticipantMap::Zero,
+            NodeState::Starting => {
+                let _ = self.watcher_tx.send(NodeStatus::Starting);
+            }
+            NodeState::Generating(state) => {
+                let _ = self.watcher_tx.send(NodeStatus::Generating {
+                    participants: state.participants.keys_vec(),
+                });
+            }
+            NodeState::WaitingForConsensus(state) => {
+                let _ = self.watcher_tx.send(NodeStatus::WaitingForConsensus {
+                    participants: state.participants.keys_vec(),
+                });
+            }
+            NodeState::Running(state) => {
+                let _ = self.watcher_tx.send(NodeStatus::Running {
+                    me: state.me,
+                    participants: state.participants.keys_vec(),
+                    ongoing_triple_gen: state.triple_manager.len_ongoing().await,
+                    ongoing_presignature_gen: state
+                        .presignature_manager
+                        .read()
+                        .await
+                        .len_ongoing()
+                        .await,
+                });
+            }
+            NodeState::Resharing(state) => {
+                let _ = self.watcher_tx.send(NodeStatus::Resharing {
+                    old_participants: state.old_participants.keys_vec(),
+                    new_participants: state.new_participants.keys_vec(),
+                });
+            }
+            NodeState::Joining(state) => {
+                let _ = self.watcher_tx.send(NodeStatus::Joining {
+                    participants: state.participants.keys_vec(),
+                });
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct NodeStateWatcher {
+    watcher: watch::Receiver<NodeStatus>,
+}
+
+impl NodeStateWatcher {
+    pub async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+        self.watcher.changed().await
+    }
+
+    pub fn status(&self) -> NodeStatus {
+        self.watcher.borrow().clone()
+    }
+
+    pub fn status_mut(&mut self) -> NodeStatus {
+        self.watcher.borrow_and_update().clone()
+    }
+
+    pub fn participants(&self) -> Vec<Participant> {
+        match self.status() {
+            NodeStatus::Generating { participants } => participants,
+            NodeStatus::WaitingForConsensus { participants } => participants,
+            NodeStatus::Running { participants, .. } => participants,
+            NodeStatus::Resharing {
+                new_participants, ..
+            } => new_participants,
+            NodeStatus::Joining { participants } => participants,
+            _ => Vec::new(),
         }
     }
 }

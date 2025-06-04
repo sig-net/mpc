@@ -29,20 +29,20 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let triple_id2: u64 = 2;
 
     // Check that the storage is empty at the start
-    assert!(!triple_manager.contains(triple_id1).await);
+    assert!(!triple_storage.contains(triple_id1).await);
     assert!(!triple_manager.contains_mine(triple_id1).await);
-    assert_eq!(triple_manager.len_generated().await, 0);
-    assert_eq!(triple_manager.len_mine().await, 0);
-    assert!(triple_manager.is_empty().await);
+    assert_eq!(triple_storage.len_generated().await, 0);
+    assert_eq!(triple_storage.len_by_owner(node0).await, 0);
+    assert!(triple_storage.is_empty().await);
     assert_eq!(triple_manager.len_potential().await, 0);
 
-    triple_manager
+    triple_storage
         .reserve(triple_id1)
         .await
         .unwrap()
         .insert(dummy_triple(triple_id1), node1)
         .await;
-    triple_manager
+    triple_storage
         .reserve(triple_id2)
         .await
         .unwrap()
@@ -54,20 +54,20 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_manager.contains(triple_id2).await);
     assert!(!triple_manager.contains_mine(triple_id1).await);
     assert!(!triple_manager.contains_mine(triple_id2).await);
-    assert_eq!(triple_manager.len_generated().await, 2);
-    assert_eq!(triple_manager.len_mine().await, 0);
+    assert_eq!(triple_storage.len_generated().await, 2);
+    assert_eq!(triple_storage.len_by_owner(node0).await, 0);
     assert_eq!(triple_manager.len_potential().await, 2);
 
     // Take triple and check that it is removed from the storage and added to used set
-    triple_manager
-        .take_two(triple_id1, triple_id2, node1)
+    triple_storage
+        .take_two(triple_id1, triple_id2, node1, node0)
         .await
         .unwrap();
     assert!(!triple_manager.contains(triple_id1).await);
     assert!(!triple_manager.contains(triple_id2).await);
     assert!(!triple_manager.contains_mine(triple_id1).await);
     assert!(!triple_manager.contains_mine(triple_id2).await);
-    assert_eq!(triple_manager.len_generated().await, 0);
+    assert_eq!(triple_storage.len_generated().await, 0);
     assert_eq!(triple_manager.len_mine().await, 0);
     assert_eq!(triple_manager.len_potential().await, 0);
     assert!(triple_storage.contains_used(triple_id1).await);
@@ -87,13 +87,13 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     slot.unreserve().await;
 
     // Add mine triple and check that it is in the storage
-    triple_manager
+    triple_storage
         .reserve(id3)
         .await
         .unwrap()
         .insert(dummy_triple(id3), node0)
         .await;
-    triple_manager
+    triple_storage
         .reserve(id4)
         .await
         .unwrap()
@@ -103,19 +103,19 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_manager.contains(id4).await);
     assert!(triple_manager.contains_mine(id3).await);
     assert!(triple_manager.contains_mine(id4).await);
-    assert_eq!(triple_manager.len_generated().await, 2);
+    assert_eq!(triple_storage.len_generated().await, 2);
     assert_eq!(triple_manager.len_mine().await, 2);
     assert_eq!(triple_manager.len_potential().await, 2);
 
     // Take mine triple and check that it is removed from the storage and added to used set
-    triple_manager.take_two_mine().await.unwrap();
+    triple_storage.take_two_mine(node0).await.unwrap();
     assert!(!triple_manager.contains(id3).await);
     assert!(!triple_manager.contains(id4).await);
     assert!(!triple_manager.contains_mine(id3).await);
     assert!(!triple_manager.contains_mine(id4).await);
-    assert_eq!(triple_manager.len_generated().await, 0);
+    assert_eq!(triple_storage.len_generated().await, 0);
     assert_eq!(triple_manager.len_mine().await, 0);
-    assert!(triple_manager.is_empty().await);
+    assert!(triple_storage.is_empty().await);
     assert_eq!(triple_manager.len_potential().await, 0);
     assert!(triple_storage.contains_used(id3).await);
     assert!(triple_storage.contains_used(id4).await);
@@ -129,7 +129,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_storage.clear().await);
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
-        triple_manager
+        triple_storage
             .reserve(id)
             .await
             .unwrap()
@@ -139,7 +139,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
 
     // Have our node0 own 16 to 20
     for id in 16..=20 {
-        triple_manager
+        triple_storage
             .reserve(id)
             .await
             .unwrap()
@@ -152,7 +152,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     outdated.sort();
     assert_eq!(outdated, vec![10, 11, 12]);
 
-    assert_eq!(triple_manager.len_generated().await, 8);
+    assert_eq!(triple_storage.len_generated().await, 8);
     assert_eq!(triple_manager.len_mine().await, 5);
     assert_eq!(triple_manager.len_potential().await, 8);
 
@@ -173,7 +173,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node0_id);
     let presignature_storage = redis.presignature_storage(&node0_id);
-    let mut presignature_manager = PresignatureManager::new(
+    let presignature_manager = PresignatureManager::new(
         Participant::from(0),
         5,
         123,
@@ -195,14 +195,14 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_potential().await, 0);
 
     // check that reserve then dropping unreserves the slot:
-    let slot = presignature_manager.reserve(presignature.id).await.unwrap();
+    let slot = presignature_storage.reserve(presignature.id).await.unwrap();
     if let Some(task) = slot.unreserve() {
         task.await.unwrap();
     }
 
     // Insert presignature owned by node1, with our node0 view being that it is a foreign presignature
     assert!(
-        presignature_manager
+        presignature_storage
             .reserve(presignature.id)
             .await
             .unwrap()
@@ -218,7 +218,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_potential().await, 1);
 
     // Take presignature and check that it is removed from the storage and added to used set
-    presignature_manager.take(id, node1).await.unwrap();
+    presignature_storage.take(id, node1, node0).await.unwrap();
     assert!(!presignature_manager.contains(id).await);
     assert!(!presignature_manager.contains_mine(id).await);
     assert_eq!(presignature_manager.len_generated().await, 0);
@@ -227,7 +227,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert!(presignature_storage.contains_used(id).await);
 
     // Attempt to re-insert used presignature and check that it fails
-    assert!(presignature_manager.reserve(id).await.is_none());
+    assert!(presignature_storage.reserve(id).await.is_none());
     assert!(!presignature_manager.contains(id).await);
 
     let id2 = 2;
@@ -235,7 +235,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
 
     // Add a presignature to our own node0
     assert!(
-        presignature_manager
+        presignature_storage
             .reserve(id2)
             .await
             .unwrap()
@@ -250,7 +250,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_manager.len_potential().await, 1);
 
     // Take mine presignature and check that it is removed from the storage and added to used set
-    presignature_manager.take_mine().await.unwrap();
+    presignature_storage.take_mine(node0).await.unwrap();
     assert!(!presignature_manager.contains(id2).await);
     assert!(!presignature_manager.contains_mine(id2).await);
     assert_eq!(presignature_manager.len_generated().await, 0);
@@ -260,13 +260,13 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert!(presignature_storage.contains_used(id2).await);
 
     // Attempt to re-insert used mine presignature and check that it fails
-    assert!(presignature_manager.reserve(id2).await.is_none());
+    assert!(presignature_storage.reserve(id2).await.is_none());
     assert!(!presignature_manager.contains(id2).await);
 
     presignature_storage.clear().await;
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
-        presignature_manager
+        presignature_storage
             .reserve(id)
             .await
             .unwrap()
@@ -276,7 +276,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
 
     // Have our node0 own 16 to 20
     for id in 16..=20 {
-        presignature_manager
+        presignature_storage
             .reserve(id)
             .await
             .unwrap()

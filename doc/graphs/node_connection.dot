@@ -1,0 +1,22 @@
+// Node connectio status
+digraph {
+    node [fontsize=32 shape=box]
+    edge [fontsize=16]
+
+    offline [label=Offline]
+    inactive [label=Inactive]
+    syncing [label=Syncing]
+    active [label=Active]
+
+
+    offline -> syncing [label="ON ping answer with active node state"]
+    offline -> inactive [label="ON ping answer with inactive node state"]
+    inactive -> syncing [label="ON ping answer with active node state"]
+    syncing -> active [label="ON sync response handled"]
+
+    inactive -> offline [label="ON ping fail"]
+    syncing -> offline [label="ON ping fail"]
+    active -> offline [label="ON ping fail"]
+
+    {rank=same; inactive; offline}
+}
