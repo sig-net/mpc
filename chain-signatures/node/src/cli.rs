@@ -42,6 +42,8 @@ pub enum Cli {
         #[arg(long, env("MPC_ACCOUNT_SK"))]
         account_sk: SecretKey,
         /// The web port for this server
+        /// this is set to 3000 for all nodes now.
+        /// Partners can choose to change the port, but then they also need to make sure they change their load balancer config to match this
         #[arg(long, env("MPC_WEB_PORT"))]
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
@@ -60,6 +62,10 @@ pub enum Cli {
         #[clap(flatten)]
         indexer_options: indexer::Options,
         /// Local address that other peers can use to message this node.
+        /// mainnet nodes: this should be set to their domain name
+        /// testnet nodes: this should be set to their http://ip:web_port
+        /// dev nodes: this should be set to their local network domain name
+        /// integration test nodes: this should be set to None
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
         /// Storage options
@@ -230,15 +236,12 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             };
 
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
-            let my_address = my_address
-                .map(|mut addr| {
-                    addr.set_port(Some(web_port)).unwrap();
-                    addr
-                })
-                .unwrap_or_else(|| {
-                    let my_ip = local_ip().unwrap();
-                    Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
-                });
+            let my_address = my_address.unwrap_or_else(|| {
+                // this is only used for integration tests
+                // mainnet, testnet and dev nodes should have MPC_LOCAL_ADDRESS set in their env var
+                let my_ip = local_ip().unwrap();
+                Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
+            });
 
             tracing::info!(%my_address, "address detected");
 
