@@ -65,20 +65,14 @@ impl TripleGenerator {
         participants.sort();
 
         let protocol =
-            match cait_sith::triples::generate_triple::<Secp256k1>(&participants, me, threshold) {
-                Ok(protocol) => Box::new(protocol),
-                Err(e) => {
-                    slot.unreserve().await;
-                    return Err(e);
-                }
-            };
+            cait_sith::triples::generate_triple::<Secp256k1>(&participants, me, threshold)?;
 
         let inbox = msg.subscribe_triple(id).await;
         Ok(Self {
             id,
             me,
             participants,
-            protocol,
+            protocol: Box::new(protocol),
             timeout: Duration::from_millis(timeout),
             slot,
             generator_created: Instant::now(),
@@ -120,7 +114,6 @@ impl TripleGenerator {
             if elapsed > self.timeout {
                 failure_counts.inc();
                 tracing::warn!(id = self.id, ?elapsed, "triple protocol timed out");
-                self.slot.unreserve().await;
                 break;
             }
 
@@ -135,8 +128,6 @@ impl TripleGenerator {
                         elapsed = ?start_time.elapsed(),
                         "triple generation failed",
                     );
-
-                    self.slot.unreserve().await;
                     break;
                 }
             };
