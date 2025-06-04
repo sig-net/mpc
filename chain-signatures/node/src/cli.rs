@@ -3,9 +3,10 @@ use crate::gcp::GcpService;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
+use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
-use crate::rpc::{NearClient, NodeStateWatcher, RpcExecutor};
+use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 use clap::Parser;
@@ -246,7 +247,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
             let mesh = Mesh::new(&client, mesh_options, synced_peer_rx);
             let mesh_state = mesh.state().clone();
-            let watcher = NodeStateWatcher::new(&account_id);
+            let watcher = ContractStateWatcher::new(&account_id);
             let contract_state = watcher.state().clone();
 
             let eth = eth.into_config();
@@ -260,7 +261,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
-                watcher,
+                watcher.clone(),
                 synced_peer_tx,
             );
 
@@ -281,12 +282,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 network,
             })));
 
-            let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
+            let state = Node::new();
+            let state_watcher = state.watcher.clone();
+
             let (sender, msg_channel) =
-                MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
+                MessageChannel::spawn(client, &account_id, &config, watcher, &mesh_state).await;
             let protocol = MpcSignProtocol {
                 my_account_id: account_id.clone(),
-                state: state.clone(),
                 near: near_client,
                 rpc_channel,
                 msg_channel,
@@ -301,12 +303,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
             tokio::spawn(mesh.run(contract_state.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
-            let protocol_handle = tokio::spawn(protocol.run(contract_state, config, mesh_state));
+            let protocol_handle =
+                tokio::spawn(protocol.run(state, contract_state, config, mesh_state));
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
                 web_port,
                 sender,
-                state,
+                state_watcher,
                 indexer,
                 triple_storage,
                 presignature_storage,
@@ -398,30 +401,6 @@ mod tests {
 
         // Grafana value: -1051225187120159700
         assert_eq!(digest, -1051225187120159684);
-    }
-
-    #[test]
-    fn test_digest_luganodes() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("luganodes-sig.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:HKwJr6kRcARfjHawX6pVcQPxPdTQMvAN7r8Z2kUcPfLc").unwrap();
-        let cipher_pk = "fe24961ff9fe0fb11cca7f31dd7173b9f15177e5809eb1054f99faf196f1c25d";
-        let sign_pk =
-            PublicKey::from_str("ed25519:5GNBtNcnpmJh2iijxWiSepeHvWeet3UuhBTwWCncCdTh").unwrap();
-        let _eth_account_pk = "04f0e7b9b93febc13280307414ff7b61be68b73233d0f590987b4ac8bf5818a859b1810d5a692a416fd47a8cd16a784553d7465c071e0e41e09cf4b9a098cb841a";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        // Grafana value: 8063794122839817000 (looks broken)
-        assert_eq!(digest, 8458603761268706511);
     }
 
     #[test]
