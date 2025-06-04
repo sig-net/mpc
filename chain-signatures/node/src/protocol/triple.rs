@@ -132,6 +132,11 @@ impl TripleGenerator {
                 }
             };
 
+            total_wait += poke_start_time - poke_last_time;
+            total_pokes += 1;
+            poke_last_time = Instant::now();
+            poke_latency.observe(poke_start_time.elapsed().as_millis() as f64);
+
             match action {
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
@@ -155,11 +160,6 @@ impl TripleGenerator {
                         };
                         self.msg.send(self.me, *to, message).await;
                     }
-
-                    total_wait += poke_start_time - poke_last_time;
-                    total_pokes += 1;
-                    poke_last_time = Instant::now();
-                    poke_latency.observe(poke_start_time.elapsed().as_millis() as f64);
                 }
                 Action::SendPrivate(to, data) => {
                     let message = TripleMessage {
@@ -170,11 +170,6 @@ impl TripleGenerator {
                         timestamp: Utc::now().timestamp() as u64,
                     };
                     self.msg.send(self.me, to, message).await;
-
-                    total_wait += poke_start_time - poke_last_time;
-                    total_pokes += 1;
-                    poke_last_time = Instant::now();
-                    poke_latency.observe(poke_start_time.elapsed().as_millis() as f64);
                 }
                 Action::Return(output) => {
                     let now = Instant::now();
@@ -184,6 +179,8 @@ impl TripleGenerator {
                     runtime_latency.observe(elapsed.as_secs_f64());
                     // this measures from generator creation to finishing. TRIPLE_LATENCY instead starts from the first poke() on the generator
                     total_latency.observe((now - self.generator_created).as_secs_f64());
+                    accrued_wait_delay.observe(total_wait.as_millis() as f64);
+                    poke_counts.observe(total_pokes as f64);
 
                     let triple = Triple {
                         id: self.id,
@@ -227,12 +224,6 @@ impl TripleGenerator {
 
                     self.msg.filter_triple(self.id).await;
                     self.slot.insert(triple, triple_owner).await;
-
-                    total_wait += poke_start_time - poke_last_time;
-                    total_pokes += 1;
-                    accrued_wait_delay.observe(total_wait.as_millis() as f64);
-                    poke_counts.observe(total_pokes as f64);
-                    poke_latency.observe(poke_start_time.elapsed().as_millis() as f64);
 
                     break;
                 }

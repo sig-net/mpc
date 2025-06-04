@@ -158,7 +158,7 @@ where
 
 impl<T, U> Drop for JoinMap<T, U> {
     fn drop(&mut self) {
-        for (_, handle) in &self.mapping {
+        for handle in self.mapping.values() {
             handle.abort();
         }
     }
