@@ -593,6 +593,40 @@ async fn add_failed_block(
         });
 }
 
+async fn get_finalized_block_from_helios_with_retry(
+    helios_client: &Arc<EthereumClient<FileDB>>,
+    max_retries: u8,
+) -> anyhow::Result<alloy::rpc::types::Block> {
+    let mut retries = 0;
+    loop {
+        match helios_client
+            .get_block_by_number(BlockTag::Finalized, false)
+            .await
+        {
+            Ok(Some(block)) => return Ok(block),
+            Ok(None) => {
+                let err_msg = "Latest finalized block not found from Helios client";
+                return Err(anyhow::anyhow!(err_msg));
+            }
+            Err(e) => {
+                if retries < max_retries {
+                    retries += 1;
+                    tracing::warn!(
+                        "Failed to get latest finalized block from Helios client: {:?}, retrying",
+                        e
+                    );
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+                return Err(anyhow::anyhow!(
+                    "Failed to get finalized block from Helios client: {:?}, exceeded maximum retry",
+                    e
+                ));
+            }
+        }
+    }
+}
+
 /// Polls for the latest finalized block and update the latest finalized blocks.
 /// Once finalized block gets updated, we fetch the blocks in the epoch ending with the finalized block.
 /// To ensure the blocks we fetched are proven, we fetch the latest finalized block from Helios.
@@ -610,15 +644,15 @@ async fn refresh_finalized_epoch(
     loop {
         interval.tick().await;
         tracing::info!("Refreshing finalized epoch");
-        let Ok(Some(new_finalized_bock)) = helios_client
-            .get_block_by_number(BlockTag::Finalized, false)
-            .await
-        else {
-            tracing::warn!("Failed to get finalized block from Helios client");
-            return Err(anyhow::anyhow!(
-                "Failed to get finalized block from Helios client"
-            ));
-        };
+
+        let new_finalized_bock =
+            match get_finalized_block_from_helios_with_retry(helios_client, 5).await {
+                Ok(block) => block,
+                Err(e) => {
+                    tracing::warn!("Failed to get finalized block: {:?}", e);
+                    continue;
+                }
+            };
 
         tracing::info!(
             "New finalized block number: {}, last finalized block number: {:?}",
@@ -638,7 +672,7 @@ async fn refresh_finalized_epoch(
             let err_msg =
                 "New finalized block number overflowed range of u64 and has wrapped around!";
             tracing::warn!(err_msg);
-            return Err(anyhow::anyhow!(err_msg));
+            continue;
         }
 
         if last_final_block_number == new_final_block_number {
@@ -653,44 +687,40 @@ async fn refresh_finalized_epoch(
         let Some(start) = last_final_block_number.checked_add(1) else {
             let err_msg = "Last finalized block number + 1 overflowed range of u64!";
             tracing::warn!(err_msg);
-            return Err(anyhow::anyhow!(err_msg));
+            continue;
         };
         let Some(end) = new_final_block_number.checked_sub(1) else {
             let err_msg = "New finalized block number - 1 overflowed range of u64!";
             tracing::warn!(err_msg);
-            return Err(anyhow::anyhow!(err_msg));
+            continue;
         };
 
         // go backwards from latest_finalized_block_number - 1, and check that each block's hash == next block's parent hash
         for i in (start..=end).rev() {
             tracing::info!("Fetching block {i} from untrusted RPC client");
-            let cur_block = untrusted_rpc_client
-                .get_block_by_number(
-                    alloy::eips::BlockNumberOrTag::Number(i),
-                    alloy::rpc::types::BlockTransactionsKind::Hashes,
-                )
-                .await;
-            let Ok(Some(cur_block)) = cur_block else {
-                tracing::warn!("Failed to get block {i} from untrusted RPC client");
-                return Err(anyhow::anyhow!(
-                    "Failed to get block {i} from untrusted RPC client"
-                ));
-            };
+
+            let cur_block =
+                match get_block_from_untrusted_rpc_with_retry(untrusted_rpc_client, i, 5).await {
+                    Ok(block) => block,
+                    Err(e) => {
+                        tracing::warn!("Error fetching finalized block {i}: {:?}", e);
+                        break;
+                    }
+                };
+
             let cur_block_hash = cur_block.header.hash_slow();
+
+            finalized_epoch.insert(i, cur_block_hash);
             if cur_block_hash == parent_hash {
                 finalized_epoch.insert(i, cur_block_hash);
                 parent_hash = cur_block.header.inner.parent_hash;
             } else {
                 tracing::warn!(
-                    "Block {i} hash mismatch: expected {}, got {}",
+                    "Block {i} hash mismatch: expected {}, got {}, untrusted RPC returned invalid block",
                     parent_hash,
                     cur_block_hash
                 );
-                return Err(anyhow::anyhow!(
-                    "Block {i} hash mismatch: expected {}, got {}",
-                    parent_hash,
-                    cur_block_hash
-                ));
+                break;
             }
         }
         final_block_number.replace(new_final_block_number);
@@ -699,6 +729,44 @@ async fn refresh_finalized_epoch(
             .send(finalized_epoch.clone())
             .await
             .map_err(|err| anyhow!("Failed to send finalized block: {:?}", err))?;
+    }
+}
+
+async fn get_block_from_untrusted_rpc_with_retry(
+    untrusted_rpc_client: &RootProvider<Http<AlloyClient>>,
+    block_number: u64,
+    max_retries: u8,
+) -> anyhow::Result<alloy::rpc::types::Block> {
+    let mut retries = 0;
+    loop {
+        match untrusted_rpc_client
+            .get_block_by_number(
+                alloy::eips::BlockNumberOrTag::Number(block_number),
+                alloy::rpc::types::BlockTransactionsKind::Hashes,
+            )
+            .await
+        {
+            Ok(Some(block)) => return Ok(block),
+            Ok(None) => {
+                let err_msg = format!("Block {block_number} not found from untrusted RPC client");
+                return Err(anyhow::anyhow!(err_msg));
+            }
+            Err(e) => {
+                if retries < max_retries {
+                    retries += 1;
+                    tracing::warn!(
+                        "Failed to get block {block_number} from untrusted RPC client: {:?}, retrying",
+                        e
+                    );
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+                return Err(anyhow::anyhow!(
+                    "Failed to get block {block_number} from untrusted RPC client: {:?}, exceeded maximum retry",
+                    e
+                ));
+            }
+        }
     }
 }
 
