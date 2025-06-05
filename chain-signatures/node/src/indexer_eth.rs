@@ -695,6 +695,7 @@ async fn refresh_finalized_epoch(
             continue;
         };
 
+        let mut epoch_update_err = false;
         // go backwards from latest_finalized_block_number - 1, and check that each block's hash == next block's parent hash
         for i in (start..=end).rev() {
             tracing::info!("Fetching block {i} from untrusted RPC client");
@@ -710,7 +711,6 @@ async fn refresh_finalized_epoch(
 
             let cur_block_hash = cur_block.header.hash_slow();
 
-            finalized_epoch.insert(i, cur_block_hash);
             if cur_block_hash == parent_hash {
                 finalized_epoch.insert(i, cur_block_hash);
                 parent_hash = cur_block.header.inner.parent_hash;
@@ -720,8 +720,13 @@ async fn refresh_finalized_epoch(
                     parent_hash,
                     cur_block_hash
                 );
+                epoch_update_err = true;
                 break;
             }
+        }
+        if epoch_update_err {
+            tracing::warn!("Finalized epoch update failed on some blocks, retrying");
+            continue;
         }
         final_block_number.replace(new_final_block_number);
         tracing::info!("Sending finalized blocks to finalized epoch");
