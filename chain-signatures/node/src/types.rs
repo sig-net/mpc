@@ -4,13 +4,12 @@ use cait_sith::{protocol::Protocol, KeygenOutput};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
 use mpc_crypto::PublicKey;
-use tokio::sync::RwLock;
 
 use crate::protocol::contract::ResharingContractState;
 
 pub type SecretKeyShare = <Secp256k1 as CurveArithmetic>::Scalar;
 pub type TripleProtocol =
-    RwLock<dyn Protocol<Output = TripleGenerationOutput<Secp256k1>> + Send + Sync>;
+    Box<dyn Protocol<Output = TripleGenerationOutput<Secp256k1>> + Send + Sync>;
 pub type PresignatureProtocol = Box<dyn Protocol<Output = PresignOutput<Secp256k1>> + Send + Sync>;
 pub type SignatureProtocol = Box<dyn Protocol<Output = FullSignature<Secp256k1>> + Send + Sync>;
 

@@ -167,7 +167,10 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
             participants: participants.clone(),
             latest_block_height,
         })),
-        _ => {
+        NodeStatus::Generating { .. }
+        | NodeStatus::WaitingForConsensus { .. }
+        | NodeStatus::Started
+        | NodeStatus::Starting => {
             tracing::debug!("not running, state unavailable");
             Ok(Json(StateView::NotRunning))
         }
