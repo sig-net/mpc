@@ -804,7 +804,7 @@ async fn send_requests_when_final(
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     // We keep the last 2 finalized epochs to handle retried blocks that happen to be older
-    let mut finalized_epochs: Vec<FinalizedEpoch> = Vec::with_capacity(2);
+    let mut finalized_epochs: Vec<FinalizedEpoch> = Vec::new();
     loop {
         while let Some(BlockAndRequests {
             block_number,
