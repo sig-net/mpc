@@ -1,15 +1,13 @@
-use std::{collections::HashMap, fmt};
+use std::fmt;
 
 use crate::protocol::triple::{Triple, TripleId};
 
 use cait_sith::protocol::Participant;
 use chrono::Duration;
-use deadpool_redis::{Connection, Pool};
-use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
+use deadpool_redis::Pool;
+use redis::{FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
 use near_account_id::AccountId;
-
-use super::{owner_key, STORAGE_VERSION};
 
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
@@ -22,6 +20,14 @@ pub struct TripleSlot {
 }
 
 impl TripleSlot {
+    pub fn new(id: TripleId, storage: TripleStorage) -> Self {
+        Self {
+            id,
+            storage,
+            stored: false,
+        }
+    }
+
     /// Inserts the triple into the storage, associating it with the given owner.
     /// Returns true if the insertion was successful, false otherwise.
     // TODO: put inside a tokio task:
@@ -111,316 +117,11 @@ impl fmt::Debug for TriplesTakenDropper {
     }
 }
 
-#[derive(Clone)]
-pub struct TripleStorage {
-    redis: Pool,
-    triple_key: String,
-    used_key: String,
-    reserved_key: String,
-    owner_keys: String,
-    participant_keys: String,
-}
+pub type TripleStorage = super::ProtocolStorage<Triple>;
 
 impl TripleStorage {
     pub fn new(redis: Pool, account_id: &AccountId) -> Self {
-        TripleStorage {
-            redis,
-            triple_key: format!("triples:{STORAGE_VERSION}:{account_id}"),
-            used_key: format!("triples_used:{STORAGE_VERSION}:{account_id}"),
-            reserved_key: format!("triples_reserved:{STORAGE_VERSION}:{account_id}"),
-            owner_keys: format!("triples_owners:{STORAGE_VERSION}:{account_id}"),
-            participant_keys: format!("triples_participants:{STORAGE_VERSION}:{account_id}"),
-        }
-    }
-
-    async fn connect(&self) -> Option<Connection> {
-        self.redis
-            .get()
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(?err, "failed to connect to redis");
-            })
-            .ok()
-    }
-
-    // TODO: me can potentially be integrated into storage if we eventually can wait for our own participant info to be determined.
-    pub async fn fetch_owned<R: FromRedisValue + Default>(&self, me: Participant) -> R {
-        let Some(mut conn) = self.connect().await else {
-            return R::default();
-        };
-
-        conn.sunion((&self.reserved_key, owner_key(&self.owner_keys, me)))
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(?err, "failed to fetch (mine | reserved) triples");
-            })
-            .unwrap_or_default()
-    }
-
-    pub async fn fetch_participants(&self, id: TripleId) -> Vec<Participant> {
-        let Some(mut conn) = self.connect().await else {
-            return Vec::new();
-        };
-        conn.smembers(format!("{}:{}", self.participant_keys, id))
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(id, ?err, "failed to fetch participants for triple");
-            })
-            .map(|v: Vec<u32>| v.into_iter().map(Participant::from).collect::<Vec<_>>())
-            .unwrap_or_default()
-    }
-
-    pub async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
-        const SCRIPT: &str = r#"
-            local triple_key = KEYS[1]
-            local used_key = KEYS[2]
-            local reserved_key = KEYS[3]
-            local triple_id = ARGV[1]
-
-            -- cannot reserve this triple if it already exists.
-            if redis.call("SADD", reserved_key, triple_id) == 0 then
-                return {err = "WARN triple " .. triple_id .. " has already been reserved"}
-            end
-
-            -- cannot reserve this triple if its already in storage.
-            if redis.call("HEXISTS", triple_key, triple_id) == 1 then
-                return {err = "WARN triple " .. triple_id .. " has already been stored"}
-            end
-
-            -- cannot reserve this triple if it has already been used.
-            if redis.call("HEXISTS", used_key, triple_id) == 1 then
-                return {err = "WARN triple " .. triple_id .. " has already been used"}
-            end
-        "#;
-
-        let mut conn = self.connect().await?;
-        let result: Result<(), _> = redis::Script::new(SCRIPT)
-            .key(&self.triple_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
-            .arg(id)
-            .invoke_async(&mut conn)
-            .await;
-
-        match result {
-            Ok(_) => Some(TripleSlot {
-                id,
-                storage: self.clone(),
-                stored: false,
-            }),
-            Err(err) => {
-                tracing::warn!(?err, "failed to reserve triple");
-                None
-            }
-        }
-    }
-
-    async fn unreserve<const N: usize>(&self, triples: [TripleId; N]) {
-        let Some(mut conn) = self.connect().await else {
-            return;
-        };
-        let outcome: Result<(), _> = conn.srem(&self.reserved_key, &triples).await;
-        if let Err(err) = outcome {
-            tracing::warn!(?triples, ?err, "failed to unreserve triples");
-        }
-    }
-
-    pub async fn remove_outdated<R: FromRedisValue + Default>(
-        &self,
-        owner: Participant,
-        owner_shares: impl IntoIterator<Item = &TripleId>,
-    ) -> R {
-        const SCRIPT: &str = r#"
-            local triple_key = KEYS[1]
-            local reserved_key = KEYS[2]
-            local owner_key = KEYS[3]
-
-            -- convert the list of ids to a table for easy lookup
-            local owner_shares = {}
-            for _, value in ipairs(ARGV) do
-                owner_shares[value] = true
-            end
-
-            -- find all shares that the owner no longer tracks
-            local outdated = {}
-            local our_shares = redis.call("SMEMBERS", owner_key)
-            for _, id in ipairs(our_shares) do
-                if not owner_shares[id] then
-                    table.insert(outdated, id)
-                end
-            end
-
-            -- remove the outdated shares from our node
-            if #outdated > 0 then
-                redis.call("SREM", owner_key, unpack(outdated))
-                redis.call("SREM", reserved_key, unpack(outdated))
-                redis.call("HDEL", triple_key, unpack(outdated))
-            end
-
-            return outdated
-        "#;
-
-        let Some(mut conn) = self.connect().await else {
-            return R::default();
-        };
-        let result: Result<R, _> = redis::Script::new(SCRIPT)
-            .key(&self.triple_key)
-            .key(&self.reserved_key)
-            .key(owner_key(&self.owner_keys, owner))
-            // NOTE: this encodes each entry of owner_shares as a separate ARGV[index] entry.
-            .arg(owner_shares.into_iter().copied().collect::<Vec<_>>())
-            .invoke_async(&mut conn)
-            .await;
-
-        match result {
-            Ok(outdated) => outdated,
-            Err(err) => {
-                tracing::warn!(?err, "failed to remove outdated triples");
-                R::default()
-            }
-        }
-    }
-
-    /// Kicks participants from the given triples.
-    pub async fn kick_participants(&self, kick: HashMap<TripleId, Vec<Participant>>) {
-        if kick.is_empty() {
-            return;
-        }
-        let Some(mut conn) = self.connect().await else {
-            return;
-        };
-        let mut pipe = redis::pipe();
-        pipe.atomic();
-        for (id, participants) in kick {
-            let key = format!("{}:{}", self.participant_keys, id);
-            pipe.srem(
-                key,
-                participants
-                    .into_iter()
-                    .map(|p| Into::<u32>::into(p).to_string())
-                    .collect::<Vec<_>>(),
-            );
-        }
-
-        let outcome: Result<(), _> = pipe.query_async(&mut conn).await;
-        if let Err(err) = outcome {
-            tracing::warn!(?err, "failed to kick participants from triples");
-        }
-    }
-
-    async fn insert(&self, triple: Triple, owner: Participant) -> bool {
-        const SCRIPT: &str = r#"
-            local triple_key = KEYS[1]
-            local used_key = KEYS[2]
-            local reserved_key = KEYS[3]
-            local owner_keys = KEYS[4]
-            local owner_key = KEYS[5]
-            local participant_keys = KEYS[6]
-            local triple_id = ARGV[1]
-            local triple = ARGV[2]
-            local participant_beg = 3
-            local participant_end = #ARGV
-
-            -- if the triple has not been reserved, then something went wrong when acquiring the
-            -- reservation for it via triple slot.
-            if redis.call("SREM", reserved_key, triple_id) == 0 then
-                return {err = "WARN triple " .. triple_id .. " has NOT been reserved"}
-            end
-
-            if redis.call("HEXISTS", used_key, triple_id) == 1 then
-                return {err = "WARN triple " .. triple_id .. " has already been used"}
-            end
-
-            redis.call("SADD", participant_keys ..  ":" .. triple_id, unpack(ARGV, participant_beg, participant_end))
-            redis.call("SADD", owner_key, triple_id)
-            redis.call("SADD", owner_keys, owner_key)
-            redis.call("HSET", triple_key, triple_id, triple)
-        "#;
-
-        let id = triple.id;
-        let Some(mut conn) = self.connect().await else {
-            tracing::warn!(id, "failed to insert triple: connection failed");
-            return false;
-        };
-        let result: Result<(), _> = redis::Script::new(SCRIPT)
-            .key(&self.triple_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
-            .key(&self.owner_keys)
-            .key(owner_key(&self.owner_keys, owner))
-            .key(&self.participant_keys)
-            .arg(id)
-            .arg(&triple)
-            .arg(
-                triple
-                    .public
-                    .participants
-                    .into_iter()
-                    .map(Into::<u32>::into)
-                    .collect::<Vec<_>>(),
-            )
-            .invoke_async(&mut conn)
-            .await;
-
-        if let Err(err) = result {
-            tracing::warn!(id, ?err, "failed to insert triple into storage");
-            false
-        } else {
-            true
-        }
-    }
-
-    pub async fn contains(&self, id: TripleId) -> bool {
-        let Some(mut conn) = self.connect().await else {
-            return false;
-        };
-        match conn.hexists(&self.triple_key, id).await {
-            Ok(exists) => exists,
-            Err(err) => {
-                tracing::warn!(id, ?err, "failed to check if triple is stored");
-                false
-            }
-        }
-    }
-
-    pub async fn contains_by_owner(&self, id: TripleId, owner: Participant) -> bool {
-        let Some(mut conn) = self.connect().await else {
-            return false;
-        };
-
-        match conn.sismember(owner_key(&self.owner_keys, owner), id).await {
-            Ok(exists) => exists,
-            Err(err) => {
-                tracing::warn!(id, ?err, "failed to check if triple is owned by us");
-                false
-            }
-        }
-    }
-
-    pub async fn contains_used(&self, id: TripleId) -> bool {
-        let Some(mut conn) = self.connect().await else {
-            return false;
-        };
-        match conn.hexists(&self.used_key, id).await {
-            Ok(exists) => exists,
-            Err(err) => {
-                tracing::warn!(id, ?err, "failed to check if triple in used set");
-                false
-            }
-        }
-    }
-
-    pub async fn contains_reserved(&self, id: TripleId) -> bool {
-        let Some(mut conn) = self.connect().await else {
-            return false;
-        };
-        match conn.sismember(&self.reserved_key, id).await {
-            Ok(exists) => exists,
-            Err(err) => {
-                tracing::warn!(id, ?err, "failed to check if triple in reserved set");
-                false
-            }
-        }
+        Self::init("triple", redis, account_id)
     }
 
     /// Take two unspent triple by theirs id with no way to return it. Only takes
@@ -483,10 +184,10 @@ impl TripleStorage {
 
         let mut conn = self.connect().await?;
         match redis::Script::new(SCRIPT)
-            .key(&self.triple_key)
+            .key(&self.protocol_key)
             .key(&self.used_key)
-            .key(owner_key(&self.owner_keys, owner))
-            .key(owner_key(&self.owner_keys, me))
+            .key(self.owner_key(owner))
+            .key(self.owner_key(me))
             .key(&self.reserved_key)
             .key(&self.participant_keys)
             .arg(id1)
@@ -554,9 +255,9 @@ impl TripleStorage {
 
         let mut conn = self.connect().await?;
         match redis::Script::new(SCRIPT)
-            .key(&self.triple_key)
+            .key(&self.protocol_key)
             .key(&self.used_key)
-            .key(owner_key(&self.owner_keys, me))
+            .key(self.owner_key(me))
             .key(&self.reserved_key)
             .key(&self.participant_keys)
             .arg(USED_EXPIRE_TIME.num_seconds())
@@ -578,77 +279,6 @@ impl TripleStorage {
                 None
             }
         }
-    }
-
-    /// Checks if the storage is empty.
-    pub async fn is_empty(&self) -> bool {
-        self.len_generated().await == 0
-    }
-
-    /// Get the number of unspent triples that were generated by this node.
-    pub async fn len_generated(&self) -> usize {
-        let Some(mut conn) = self.connect().await else {
-            return 0;
-        };
-        conn.hlen(&self.triple_key)
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(?err, "failed to get length of generated triples");
-            })
-            .unwrap_or(0)
-    }
-
-    /// Get the number of unspent triples by a specific owner.
-    pub async fn len_by_owner(&self, owner: Participant) -> usize {
-        let Some(mut conn) = self.connect().await else {
-            return 0;
-        };
-        conn.scard(owner_key(&self.owner_keys, owner))
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(?err, "failed to get length of my triples");
-            })
-            .unwrap_or(0)
-    }
-
-    /// Clear all triple storage, including used, reserved, and owned keys.
-    /// Return true if successful, false otherwise.
-    pub async fn clear(&self) -> bool {
-        const SCRIPT: &str = r#"
-            local owner_keys = redis.call("SMEMBERS", KEYS[1])
-            local participant_keys = redis.call("KEYS", KEYS[2] .. ":*")
-            local del = {}
-            for _, key in ipairs(KEYS) do
-                table.insert(del, key)
-            end
-            for _, key in ipairs(owner_keys) do
-                table.insert(del, key)
-            end
-
-            redis.call("DEL", unpack(del))
-            if #participant_keys > 0 then
-                redis.call("DEL", unpack(participant_keys))
-            end
-        "#;
-
-        let Some(mut conn) = self.connect().await else {
-            return false;
-        };
-        let outcome: Option<()> = redis::Script::new(SCRIPT)
-            .key(&self.owner_keys)
-            .key(&self.participant_keys)
-            .key(&self.triple_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
-            .invoke_async(&mut conn)
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(?err, "failed to clear triple storage");
-            })
-            .ok();
-
-        // if the outcome is None, it means the script failed or there was an error.
-        outcome.is_some()
     }
 }
 
