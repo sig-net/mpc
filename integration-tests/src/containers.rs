@@ -127,7 +127,7 @@ impl Node {
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
-            sign_sk: Some(config.sign_sk.clone()),
+            sign_sk: config.sign_sk.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),
             )?)),

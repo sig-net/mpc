@@ -1,5 +1,7 @@
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
+use crate::indexer_eth::EthArgs;
+use crate::indexer_sol::SolArgs;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
@@ -48,7 +50,7 @@ pub enum Cli {
         cipher_sk: String,
         /// The secret key used to sign messages to be sent between nodes.
         #[arg(long, env("MPC_SIGN_SK"))]
-        sign_sk: Option<SecretKey>,
+        sign_sk: SecretKey,
         /// Ethereum Indexer options
         #[clap(flatten)]
         eth: indexer_eth::EthArgs,
@@ -119,9 +121,7 @@ impl Cli {
                     "--redis-url".to_string(),
                     storage_options.redis_url.to_string(),
                 ];
-                if let Some(sign_sk) = sign_sk {
-                    args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
-                }
+                args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
                 }
@@ -176,18 +176,42 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
 
-            let digest = configuration_digest(
+            let digest_mpc = digest_mpc(
                 mpc_contract_id.clone(),
                 account_id.clone(),
-                account_sk.clone(),
-                format!("{:?}", cipher_sk.public_key()),
-                sign_sk.clone(),
-                eth.clone(),
+                account_sk.public_key(),
+                cipher_sk.public_key(),
+                sign_sk.public_key(),
+            );
+            let digest_eth = digest_eth(&eth);
+            let digest_sol = digest_sol(&sol);
+            let digest_other = digest_other(
+                my_address.clone(),
+                web_port,
+                near_rpc.clone(),
+                indexer_options.clone(),
+                storage_options.clone(),
+                override_config.clone(),
+                client_header_referer.clone(),
+                message_options.clone(),
+                mesh_options.clone(),
             );
 
-            crate::metrics::CONFIGURATION_DIGEST
+            crate::metrics::CONFIGURATION_DIGEST_MPC
                 .with_label_values(&[account_id.as_str()])
-                .set(digest);
+                .set(digest_mpc);
+
+            crate::metrics::CONFIGURATION_DIGEST_ETH
+                .with_label_values(&[account_id.as_str()])
+                .set(digest_eth);
+
+            crate::metrics::CONFIGURATION_DIGEST_SOL
+                .with_label_values(&[account_id.as_str()])
+                .set(digest_sol);
+
+            crate::metrics::CONFIGURATION_DIGEST_OTHER
+                .with_label_values(&[account_id.as_str()])
+                .set(digest_other);
 
             let (sign_tx, sign_rx) = SignQueue::channel();
 
@@ -228,7 +252,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 None
             };
 
-            let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address
                 .map(|mut addr| {
                     addr.set_port(Some(web_port)).unwrap();
@@ -242,7 +265,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tracing::info!(%my_address, "address detected");
 
             let client = NodeClient::new(&message_options);
-            let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
+            let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk.clone());
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
             let mesh = Mesh::new(&client, mesh_options, synced_peer_rx);
             let mesh_state = mesh.state().clone();
@@ -265,14 +288,20 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             );
 
             tracing::info!(
-                %digest,
+                %digest_mpc,
+                %digest_eth,
+                %digest_sol,
+                %digest_other,
                 ?mpc_contract_id,
                 ?account_id,
-                ?my_address,
+                account_pk = ?account_sk.public_key(),
                 cipher_pk = ?network.cipher_sk.public_key(),
                 sign_pk = ?network.sign_sk.public_key(),
-                near_rpc_url = ?near_client.rpc_addr(),
                 eth_contract_address = ?eth.as_ref().map(|eth| eth.contract_address.as_str()),
+                sol_program_address = ?sol.as_ref().map(|sol| sol.program_address.as_str()),
+                ?my_address,
+                ?web_port,
+                near_rpc_url = ?near_client.rpc_addr(),
                 "starting node",
             );
 
@@ -325,47 +354,71 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn configuration_digest(
-    mpc_contrac_id: AccountId,
-    account_id: AccountId,
-    account_sk: SecretKey,
-    cipher_pk: String,
-    sign_sk: Option<SecretKey>,
-    eth: indexer_eth::EthArgs,
-) -> i64 {
-    let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
-    let eth_contract_address = eth.eth_contract_address.unwrap_or_default();
-    calculate_digest(
-        mpc_contrac_id,
-        account_id,
-        account_sk.public_key(),
-        cipher_pk,
-        sign_sk.public_key(),
-        eth_contract_address,
-    )
-}
-
-fn calculate_digest(
-    mpc_contract_id: AccountId,
-    account_id: AccountId,
-    account_pk: PublicKey,
-    cipher_pk: String,
-    sign_pk: PublicKey,
-    eth_contract_address: String,
-) -> i64 {
+fn hash_to_i64<F: FnOnce(&mut Sha256)>(f: F) -> i64 {
     let mut hasher = Sha256::new();
-    hasher.update(mpc_contract_id.to_string());
-    hasher.update(account_id.to_string());
-    hasher.update(account_pk.to_string());
-    hasher.update(cipher_pk);
-    hasher.update(sign_pk.to_string());
-    hasher.update(eth_contract_address);
-
+    f(&mut hasher);
     let result = hasher.finalize();
-    // Convert the first 8 bytes of the hash to an i64
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&result[..8]);
     i64::from_le_bytes(bytes)
+}
+
+fn digest_mpc(
+    mpc_contract_id: AccountId,
+    account_id: AccountId,
+    account_pk: PublicKey,
+    cipher_pk: hpke::PublicKey,
+    sign_pk: PublicKey,
+) -> i64 {
+    hash_to_i64(|hasher| {
+        hasher.update(mpc_contract_id.to_string());
+        hasher.update(account_id.to_string());
+        hasher.update(account_pk.to_string());
+        hasher.update(hex::encode(cipher_pk.to_bytes()).to_string());
+        hasher.update(sign_pk.to_string());
+    })
+}
+
+fn digest_eth(eth: &EthArgs) -> i64 {
+    hash_to_i64(|hasher| {
+        hasher.update(eth.clone().into_str_args().join(","));
+    })
+}
+
+fn digest_sol(sol: &SolArgs) -> i64 {
+    hash_to_i64(|hasher| {
+        hasher.update(sol.clone().into_str_args().join(","));
+    })
+}
+
+fn digest_other(
+    my_address: Option<Url>,
+    web_port: u16,
+    near_rpc: String,
+    indexer_options: indexer::Options,
+    storage_options: storage::Options,
+    override_config: Option<OverrideConfig>,
+    client_header_referer: Option<String>,
+    message_options: node_client::Options,
+    mesh_options: mesh::Options,
+) -> i64 {
+    hash_to_i64(|hasher| {
+        if let Some(my_address) = my_address {
+            hasher.update(my_address.to_string());
+        }
+        hasher.update(web_port.to_string());
+        hasher.update(near_rpc);
+        hasher.update(indexer_options.into_str_args().join(","));
+        hasher.update(storage_options.into_str_args().join(","));
+        if let Some(override_config) = override_config {
+            hasher.update(serde_json::to_string(&override_config).unwrap());
+        }
+        if let Some(client_header_referer) = client_header_referer {
+            hasher.update(client_header_referer);
+        }
+        hasher.update(message_options.into_str_args().join(","));
+        hasher.update(mesh_options.into_str_args().join(","));
+    })
 }
 
 #[cfg(test)]
@@ -374,8 +427,6 @@ mod tests {
 
     use super::*;
 
-    const ETH_CONTRACT_ADDRESS: &str = "f8bdC0612361a1E49a8E01423d4C0cFc5dF4791A";
-
     #[test]
     fn test_digest_blacksand() {
         let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
@@ -383,21 +434,14 @@ mod tests {
         let account_pk =
             PublicKey::from_str("ed25519:67w2feimgcV21ZgEegvGhHTxyd9DR4yRxguqP8MctyJE").unwrap();
         let cipher_pk = "231f6ddc22796c076dcc11a90b92c23e54071b1673abd2743fb84d5a1fc53f61";
+        let cipher_pk = hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk).unwrap()).unwrap();
+
         let sign_pk =
             PublicKey::from_str("ed25519:D5Pccv8i88AuDGXuXQoNSVGAZLfuHCZw2TQmoZxi2tEM").unwrap();
 
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
+        let digest = digest_mpc(mpc_contract_id, account_id, account_pk, cipher_pk, sign_pk);
 
-        // Grafana was: -6950551088322443000
-        // Grafana now: -8312902466823593000
-        assert_eq!(digest, -6950551088322443092);
+        assert_eq!(digest, -115043413094871997);
     }
 
     #[test]
@@ -407,21 +451,14 @@ mod tests {
         let account_pk =
             PublicKey::from_str("ed25519:B1vW5HddtmV526QjtwHwBDupKH9A7mgsVttYvE6sZP59").unwrap();
         let cipher_pk = "395418b55b73977f16dfa0fe8a1c488fb6935451deaaa20c51cb5f542ec9c118";
+        let cipher_pk = hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk).unwrap()).unwrap();
         let sign_pk =
             PublicKey::from_str("ed25519:7dqefRWCwt4XsxnMpgj4pBSXWuzoFjEVQadarZ7GydpU").unwrap();
         let _eth_account_pk = "04f92c9a55c73db4f916fa017b747a3b3bc14b100f4b40e1d67bbf913c6795563b101b8554db46f4206a3a8640e5baff935b7a4df30fe2719e59c1bb9cd7c97ba9";
 
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
+        let digest = digest_mpc(mpc_contract_id, account_id, account_pk, cipher_pk, sign_pk);
 
-        // Grafana value: -1051225187120159700
-        assert_eq!(digest, -1051225187120159684);
+        assert_eq!(digest, 1942589073259735075);
     }
 
     #[test]
@@ -431,21 +468,14 @@ mod tests {
         let account_pk =
             PublicKey::from_str("ed25519:5gEt9Aqo1hXwK3Ym6Fqw2zxgzHCEyMyZbJMH1C6irBam").unwrap();
         let cipher_pk = "472a3f1d0c34b89f45d589949e5f907cc10b1ffdced34012a9b0a7244ae01124";
+        let cipher_pk = hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk).unwrap()).unwrap();
         let sign_pk =
             PublicKey::from_str("ed25519:7LY7SA8g2HamrdBNnQwadrjb2wfVRy5cbVaY8wyurxk8").unwrap();
         let _eth_account_pk = "0452ef3e306b9aae7f8a9e5fe15824b367e34315e26be7bcafc676182a9c45d95714d3e7c8a29a2e3a12adcdc430ad56956e6fc0a8a0c1bd25a195dd2973d47714";
 
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
+        let digest = digest_mpc(mpc_contract_id, account_id, account_pk, cipher_pk, sign_pk);
 
-        // Grafana value: --4992003418219577000
-        assert_eq!(digest, -4992003418219576839);
+        assert_eq!(digest, -3868090999458698330);
     }
 
     #[test]
@@ -455,21 +485,14 @@ mod tests {
         let account_pk =
             PublicKey::from_str("ed25519:9FfqwhurgHnRqbfQoekYZbqWUSiPokS7vF5akysmbSmL").unwrap();
         let cipher_pk = "7983950637824082c17d45fb4d84111b872f537223bb26a54521b5ddf84b7417";
+        let cipher_pk = hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk).unwrap()).unwrap();
         let sign_pk =
             PublicKey::from_str("ed25519:2NxYvtbMRncbtEoX7963FweMUJ6TaWjyBeKxeCi1EMnd").unwrap();
         let _eth_account_pk = "046cb1cbe5bab2e5b0de7068bbcd976a8370c54f0583ca26e8308994690dedb8933e8729b39a31cf72bab122165cfaafc2daf12a55c9b6b2e6dd61a4667725fd35";
 
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
+        let digest = digest_mpc(mpc_contract_id, account_id, account_pk, cipher_pk, sign_pk);
 
-        // Grafana value --930268115875971800
-        assert_eq!(digest, -930268115875971858);
+        assert_eq!(digest, 4059200502479999198);
     }
 
     #[test]
@@ -479,21 +502,14 @@ mod tests {
         let account_pk =
             PublicKey::from_str("ed25519:Ds7DppCJ84399g7oskRRTNbBLsm61CJJn7j5837JikiT").unwrap();
         let cipher_pk = "196e53521c601145b5280c06468393ce41fd307276b574471401fad3d449480b";
+        let cipher_pk = hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk).unwrap()).unwrap();
         let sign_pk =
             PublicKey::from_str("ed25519:48AtaVmpT7r2Bo6AV6nRU27ioNe7NWwfYnZFgm8mU8T5").unwrap();
         let _eth_account_pk = "042c56cb509a7a1381155b25fc2bc2ce97930e0aad1508485189235e63838fcf01b0b0cc678d52ca6911bf24344e5ab223a07750c4bfd5f3cf8c3c8224eaece3fc";
 
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
+        let digest = digest_mpc(mpc_contract_id, account_id, account_pk, cipher_pk, sign_pk);
 
-        // Grafan value: -1056529302944347500
-        assert_eq!(digest, -1056529302944347488);
+        assert_eq!(digest, 6945125107406248869);
     }
 
     #[test]
@@ -503,21 +519,14 @@ mod tests {
         let account_pk =
             PublicKey::from_str("ed25519:4w4vtSWsRwCdRhnwDG6YqXM5SfYn4d8AcN5d3qnPnjQD").unwrap();
         let cipher_pk = "65171d682c0ed98eeb0797940c752ae8fafb9c9939533f42f0dbc9f7201ad409";
+        let cipher_pk = hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk).unwrap()).unwrap();
         let sign_pk =
             PublicKey::from_str("ed25519:nATG1EmJTTeEo9m7BGpcd49Zx3BxpaqazGohYSyQTt4").unwrap();
         let _eth_account_pk = "04f92c9a55c73db4f916fa017b747a3b3bc14b100f4b40e1d67bbf913c6795563b101b8554db46f4206a3a8640e5baff935b7a4df30fe2719e59c1bb9cd7c97ba9";
 
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
+        let digest = digest_mpc(mpc_contract_id, account_id, account_pk, cipher_pk, sign_pk);
 
-        // Grafana value: 695826193095166700
-        assert_eq!(digest, 695826193095166746);
+        assert_eq!(digest, -4767633741707259486);
     }
 
     #[test]
@@ -527,21 +536,14 @@ mod tests {
         let account_pk =
             PublicKey::from_str("ed25519:5eRSDpU4qyULkCsMVT2ghLhwR6VQb68K7pBAZFZDT9U6").unwrap();
         let cipher_pk = "f11d23a6dff8823853e1777041d1bf60d185b63564536e9a5a7c94110cc1563a";
+        let cipher_pk = hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk).unwrap()).unwrap();
         let sign_pk =
             PublicKey::from_str("ed25519:9v1215AcbHrWhC3muPvUu5EPY93o7AYcSvcxMUeRYDx6").unwrap();
         let _eth_account_pk = "04ced0dc6ededb6a19aaa42c46544ff81fbb984673ea4285b8b4e147a807292a43d82595588ae9c86382bac2921a8b5006c43bc993ce0f02a268dbda477b9f0b8c";
 
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
+        let digest = digest_mpc(mpc_contract_id, account_id, account_pk, cipher_pk, sign_pk);
 
-        // Grafana value: -8209029844787148000
-        assert_eq!(digest, -8209029844787147492);
+        assert_eq!(digest, 4863940026481445055);
     }
 
     #[test]
@@ -551,19 +553,13 @@ mod tests {
         let account_pk =
             PublicKey::from_str("ed25519:JQJSjyqF35rHsGrNLSEUVYNdeSANiZNDNNjheN2kszq").unwrap();
         let cipher_pk = "756111207e38f2518bfdcbda746eafa0ec3a340baeecc02084a75f2240f48651";
+        let cipher_pk = hpke::PublicKey::try_from_bytes(&hex::decode(cipher_pk).unwrap()).unwrap();
         let sign_pk =
             PublicKey::from_str("ed25519:6jGbVGEGPqz8QZD5qKJYYxGZCV56tgcRKD9pM55Uey7A").unwrap();
         let _eth_account_pk = "04ced0dc6ededb6a19aaa42c46544ff81fbb984673ea4285b8b4e147a807292a43d82595588ae9c86382bac2921a8b5006c43bc993ce0f02a268dbda477b9f0b8c";
 
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-        // Grafana value: -4889179067099200000
-        assert_eq!(digest, -4889179067099199685);
+        let digest = digest_mpc(mpc_contract_id, account_id, account_pk, cipher_pk, sign_pk);
+
+        assert_eq!(digest, 5032980246361164633);
     }
 }
