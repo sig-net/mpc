@@ -386,7 +386,7 @@ fn digest_mpc(
         hasher.update(mpc_contract_id.to_string());
         hasher.update(account_id.to_string());
         hasher.update(account_pk.to_string());
-        hasher.update(hex::encode(cipher_pk.to_bytes()).to_string());
+        hasher.update(hex::encode(cipher_pk.to_bytes()));
         hasher.update(sign_pk.to_string());
     })
 }
@@ -403,6 +403,7 @@ fn digest_sol(sol: &SolArgs) -> i64 {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn digest_other(
     my_address: Option<Url>,
     web_port: u16,
