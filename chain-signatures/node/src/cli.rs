@@ -304,6 +304,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 secret_storage: key_storage,
                 triple_storage: triple_storage.clone(),
                 presignature_storage: presignature_storage.clone(),
+                config: config.clone(),
+                mesh_state: mesh_state.clone(),
             };
 
             tracing::info!("protocol initialized");
