@@ -36,13 +36,9 @@ impl CryptographicProtocol for GeneratingState {
         _cfg: Config,
         mesh_state: MeshState,
     ) -> NodeState {
-        {
-            // Previous save to secret storage failed, try again until successful.
-            let failed_store = self.failed_store.lock().await;
-            if let Some((pk, sk_share)) = *failed_store {
-                drop(failed_store);
-                return self.finalize(pk, sk_share, ctx).await;
-            }
+        // Previous save to secret storage failed, try again until successful.
+        if let Some((pk, sk_share)) = self.failed_store.take() {
+            return self.finalize(pk, sk_share, ctx).await;
         }
 
         let participants = self.participants.keys_vec();
@@ -51,12 +47,10 @@ impl CryptographicProtocol for GeneratingState {
             active = ?mesh_state.active,
             "generating: progressing key generation",
         );
-        let mut protocol = self.protocol.write().await;
         loop {
-            let action = match protocol.poke() {
+            let action = match self.protocol.poke() {
                 Ok(action) => action,
                 Err(err) => {
-                    drop(protocol);
                     tracing::error!(?err, "generating failed: refreshing...");
                     if let Err(refresh_err) = self.protocol.refresh().await {
                         tracing::warn!(?refresh_err, "unable to refresh keygen protocol");
@@ -66,7 +60,6 @@ impl CryptographicProtocol for GeneratingState {
             };
             match action {
                 Action::Wait => {
-                    drop(protocol);
                     tracing::debug!("generating: waiting");
                     return NodeState::Generating(self);
                 }
@@ -108,7 +101,6 @@ impl CryptographicProtocol for GeneratingState {
                         public_key = hex::encode(r.public_key.to_bytes()),
                         "generating: successfully completed key generation"
                     );
-                    drop(protocol);
                     return self.finalize(r.public_key, r.private_share, ctx).await;
                 }
             }
@@ -118,7 +110,7 @@ impl CryptographicProtocol for GeneratingState {
 
 impl GeneratingState {
     async fn finalize(
-        self,
+        mut self,
         public_key: PublicKey,
         private_share: SecretKeyShare,
         ctx: &mut MpcSignProtocol,
@@ -133,10 +125,7 @@ impl GeneratingState {
             .await
         {
             tracing::error!(?err, "generating: failed to store secret");
-            let mut failed_store = self.failed_store.lock().await;
-            failed_store.replace((public_key, private_share));
-            drop(failed_store);
-
+            self.failed_store.replace((public_key, private_share));
             return NodeState::Generating(self);
         }
 
@@ -169,22 +158,16 @@ impl CryptographicProtocol for ResharingState {
         _cfg: Config,
         mesh_state: MeshState,
     ) -> NodeState {
-        {
-            // Previous save to secret storage failed, try again until successful.
-            let failed_store = self.failed_store.lock().await;
-            if let Some(sk_share) = *failed_store {
-                drop(failed_store);
-                return self.finalize(sk_share, ctx).await;
-            }
+        // Previous save to secret storage failed, try again until successful.
+        if let Some(sk_share) = self.failed_store.take() {
+            return self.finalize(sk_share, ctx).await;
         }
 
         tracing::info!(active = ?mesh_state.active.keys_vec(), "progressing key reshare");
-        let mut protocol = self.protocol.write().await;
         loop {
-            let action = match protocol.poke() {
+            let action = match self.protocol.poke() {
                 Ok(action) => action,
                 Err(err) => {
-                    drop(protocol);
                     tracing::warn!(?err, "resharing failed: refreshing...");
                     if let Err(refresh_err) = self.protocol.refresh().await {
                         tracing::warn!(?refresh_err, "unable to refresh reshare protocol");
@@ -194,7 +177,6 @@ impl CryptographicProtocol for ResharingState {
             };
             match action {
                 Action::Wait => {
-                    drop(protocol);
                     tracing::debug!("resharing: waiting");
                     return NodeState::Resharing(self);
                 }
@@ -238,7 +220,6 @@ impl CryptographicProtocol for ResharingState {
                 }
                 Action::Return(private_share) => {
                     tracing::info!("resharing: successfully completed key reshare");
-                    drop(protocol);
                     return self.finalize(private_share, ctx).await;
                 }
             }
@@ -247,7 +228,11 @@ impl CryptographicProtocol for ResharingState {
 }
 
 impl ResharingState {
-    async fn finalize(self, private_share: SecretKeyShare, ctx: &mut MpcSignProtocol) -> NodeState {
+    async fn finalize(
+        mut self,
+        private_share: SecretKeyShare,
+        ctx: &mut MpcSignProtocol,
+    ) -> NodeState {
         if let Err(err) = ctx
             .secret_storage
             .store(&PersistentNodeData {
@@ -258,10 +243,7 @@ impl ResharingState {
             .await
         {
             tracing::error!(?err, "resharing: failed to store secret");
-            let mut failed_stored = self.failed_store.lock().await;
-            failed_stored.replace(private_share);
-            drop(failed_stored);
-
+            self.failed_store.replace(private_share);
             return NodeState::Resharing(self);
         }
 
@@ -298,14 +280,13 @@ impl CryptographicProtocol for RunningState {
             return NodeState::Running(self);
         }
 
-        let triple_task = self.triple_manager.clone().execute(&active, &cfg.protocol);
         let presig_task = PresignatureManager::execute(&self, &cfg.protocol, active);
 
         let stable = mesh_state.stable;
         tracing::debug!(?stable, "stable participants");
         let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol, ctx);
 
-        match tokio::try_join!(triple_task, presig_task, sig_task) {
+        match tokio::try_join!(presig_task, sig_task) {
             Ok(_result) => (),
             Err(err) => {
                 tracing::warn!(?err, "running: failed to progress cryptographic protocol");

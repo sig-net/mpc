@@ -19,7 +19,6 @@ pub struct PresignatureSlot {
 }
 
 impl PresignatureSlot {
-    // TODO: put inside a tokio task:
     pub async fn insert(&mut self, presignature: Presignature, owner: Participant) -> bool {
         self.stored = self.storage.insert(presignature, owner).await;
         self.stored

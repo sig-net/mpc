@@ -5,9 +5,10 @@ use crate::indexer_sol::SolArgs;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
+use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
-use crate::rpc::{NearClient, NodeStateWatcher, RpcExecutor};
+use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 use clap::Parser;
@@ -22,6 +23,8 @@ use tokio::sync::RwLock;
 use url::Url;
 
 use mpc_keys::hpke;
+
+const DEFAULT_WEB_PORT: u16 = 3000;
 
 #[derive(Parser, Debug)]
 pub enum Cli {
@@ -43,8 +46,10 @@ pub enum Cli {
         #[arg(long, env("MPC_ACCOUNT_SK"))]
         account_sk: SecretKey,
         /// The web port for this server
-        #[arg(long, env("MPC_WEB_PORT"))]
-        web_port: u16,
+        /// this is default to 3000 for all nodes now.
+        /// Partners can choose to change the port, but then they also need to make sure they change their load balancer config to match this
+        #[arg(long, env("MPC_WEB_PORT"), default_value = "3000")]
+        web_port: Option<u16>,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"))]
         cipher_sk: String,
@@ -61,6 +66,10 @@ pub enum Cli {
         #[clap(flatten)]
         indexer_options: indexer::Options,
         /// Local address that other peers can use to message this node.
+        /// mainnet nodes: this should be set to their domain name
+        /// testnet nodes: this should be set to their http://ip:web_port
+        /// dev nodes: this should be set to their local network domain name
+        /// integration test nodes: this should be set to None
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
         /// Storage options
@@ -114,8 +123,6 @@ impl Cli {
                     account_id.to_string(),
                     "--account-sk".to_string(),
                     account_sk.to_string(),
-                    "--web-port".to_string(),
-                    web_port.to_string(),
                     "--cipher-sk".to_string(),
                     cipher_sk,
                     "--redis-url".to_string(),
@@ -134,6 +141,9 @@ impl Cli {
 
                 if let Some(client_header_referer) = client_header_referer {
                     args.extend(["--client-header-referer".to_string(), client_header_referer]);
+                }
+                if let Some(web_port) = web_port {
+                    args.extend(["--web-port".to_string(), web_port.to_string()]);
                 }
 
                 args.extend(eth.into_str_args());
@@ -175,6 +185,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let _span = tracing::trace_span!("cli").entered();
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
+            let web_port = web_port.unwrap_or(DEFAULT_WEB_PORT);
 
             let digest_mpc = digest_mpc(
                 mpc_contract_id.clone(),
@@ -252,15 +263,12 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 None
             };
 
-            let my_address = my_address
-                .map(|mut addr| {
-                    addr.set_port(Some(web_port)).unwrap();
-                    addr
-                })
-                .unwrap_or_else(|| {
-                    let my_ip = local_ip().unwrap();
-                    Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
-                });
+            let my_address = my_address.unwrap_or_else(|| {
+                // this is only used for integration tests
+                // mainnet, testnet and dev nodes should have MPC_LOCAL_ADDRESS set in their env var
+                let my_ip = local_ip().unwrap();
+                Url::parse(&format!("http://{my_ip}:{}", web_port)).unwrap()
+            });
 
             tracing::info!(%my_address, "address detected");
 
@@ -269,7 +277,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
             let mesh = Mesh::new(&client, mesh_options, synced_peer_rx);
             let mesh_state = mesh.state().clone();
-            let watcher = NodeStateWatcher::new(&account_id);
+            let watcher = ContractStateWatcher::new(&account_id);
             let contract_state = watcher.state().clone();
 
             let eth = eth.into_config();
@@ -283,7 +291,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
-                watcher,
+                watcher.clone(),
                 synced_peer_tx,
             );
 
@@ -310,12 +318,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 network,
             })));
 
-            let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
+            let state = Node::new();
+            let state_watcher = state.watcher.clone();
+
             let (sender, msg_channel) =
-                MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
+                MessageChannel::spawn(client, &account_id, &config, watcher, &mesh_state).await;
             let protocol = MpcSignProtocol {
                 my_account_id: account_id.clone(),
-                state: state.clone(),
                 near: near_client,
                 rpc_channel,
                 msg_channel,
@@ -323,6 +332,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 secret_storage: key_storage,
                 triple_storage: triple_storage.clone(),
                 presignature_storage: presignature_storage.clone(),
+                config: config.clone(),
+                mesh_state: mesh_state.clone(),
             };
 
             tracing::info!("protocol initialized");
@@ -330,12 +341,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
             tokio::spawn(mesh.run(contract_state.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
-            let protocol_handle = tokio::spawn(protocol.run(contract_state, config, mesh_state));
+            let protocol_handle =
+                tokio::spawn(protocol.run(state, contract_state, config, mesh_state));
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
                 web_port,
                 sender,
-                state,
+                state_watcher,
                 indexer,
                 triple_storage,
                 presignature_storage,
