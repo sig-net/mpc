@@ -22,6 +22,8 @@ use url::Url;
 
 use mpc_keys::hpke;
 
+const DEFAULT_WEB_PORT: u16 = 3000;
+
 #[derive(Parser, Debug)]
 pub enum Cli {
     Start {
@@ -42,10 +44,10 @@ pub enum Cli {
         #[arg(long, env("MPC_ACCOUNT_SK"))]
         account_sk: SecretKey,
         /// The web port for this server
-        /// this is set to 3000 for all nodes now.
+        /// this is default to 3000 for all nodes now.
         /// Partners can choose to change the port, but then they also need to make sure they change their load balancer config to match this
-        #[arg(long, env("MPC_WEB_PORT"))]
-        web_port: u16,
+        #[arg(long, env("MPC_WEB_PORT"), default_value = "3000")]
+        web_port: Option<u16>,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"))]
         cipher_sk: String,
@@ -119,8 +121,6 @@ impl Cli {
                     account_id.to_string(),
                     "--account-sk".to_string(),
                     account_sk.to_string(),
-                    "--web-port".to_string(),
-                    web_port.to_string(),
                     "--cipher-sk".to_string(),
                     cipher_sk,
                     "--redis-url".to_string(),
@@ -141,6 +141,9 @@ impl Cli {
 
                 if let Some(client_header_referer) = client_header_referer {
                     args.extend(["--client-header-referer".to_string(), client_header_referer]);
+                }
+                if let Some(web_port) = web_port {
+                    args.extend(["--web-port".to_string(), web_port.to_string()]);
                 }
 
                 args.extend(eth.into_str_args());
@@ -235,12 +238,14 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 None
             };
 
+            let web_port = web_port.unwrap_or(DEFAULT_WEB_PORT);
+
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address.unwrap_or_else(|| {
                 // this is only used for integration tests
                 // mainnet, testnet and dev nodes should have MPC_LOCAL_ADDRESS set in their env var
                 let my_ip = local_ip().unwrap();
-                Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
+                Url::parse(&format!("http://{my_ip}:{}", web_port)).unwrap()
             });
 
             tracing::info!(%my_address, "address detected");
