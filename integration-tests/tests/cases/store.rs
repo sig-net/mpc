@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
@@ -5,8 +7,8 @@ use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
 use k256::Secp256k1;
-use mpc_node::protocol::presignature::{Presignature, PresignatureManager};
-use mpc_node::protocol::triple::{Triple, TripleSpawner};
+use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
+use mpc_node::protocol::triple::{Triple, TripleId, TripleSpawner};
 use mpc_node::protocol::MessageChannel;
 use test_log::test;
 
@@ -48,6 +50,22 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
         .unwrap()
         .insert(dummy_triple(triple_id2), node1)
         .await;
+
+    assert_eq!(
+        triple_storage.fetch_participants(triple_id1).await,
+        dummy_participants(1..=2),
+    );
+
+    // Try kicking the participants if to check they don't have the shares:
+    let mut kick = HashMap::new();
+    kick.insert(triple_id1, vec![Participant::from(1)]);
+    kick.insert(triple_id2, vec![Participant::from(1), Participant::from(2)]);
+    triple_storage.kick_participants(kick).await;
+    assert_eq!(
+        triple_storage.fetch_participants(triple_id1).await,
+        vec![Participant::from(2)],
+    );
+    assert_eq!(triple_storage.fetch_participants(triple_id2).await, vec![]);
 
     // Check that the storage contains the foreign triple
     assert!(triple_spawner.contains(triple_id1).await);
@@ -148,7 +166,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     }
 
     // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
-    let mut outdated = triple_storage.remove_outdated(node1, &[13, 14, 15]).await;
+    let mut outdated: Vec<TripleId> = triple_storage.remove_outdated(node1, &[13, 14, 15]).await;
     outdated.sort();
     assert_eq!(outdated, vec![10, 11, 12]);
 
@@ -263,7 +281,31 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert!(presignature_storage.reserve(id2).await.is_none());
     assert!(!presignature_manager.contains(id2).await);
 
-    presignature_storage.clear().await;
+    presignature_storage
+        .reserve(10)
+        .await
+        .unwrap()
+        .insert(dummy_presignature(10), node1)
+        .await;
+    presignature_storage
+        .reserve(11)
+        .await
+        .unwrap()
+        .insert(dummy_presignature(11), node1)
+        .await;
+
+    // Try kicking the participants if to check they don't have the shares:
+    let mut kick = HashMap::new();
+    kick.insert(10, vec![Participant::from(1)]);
+    kick.insert(11, vec![Participant::from(1), Participant::from(2)]);
+    presignature_storage.kick_participants(kick).await;
+    assert_eq!(
+        presignature_storage.fetch_participants(10).await,
+        vec![Participant::from(2)],
+    );
+    assert_eq!(presignature_storage.fetch_participants(11).await, vec![]);
+
+    assert!(presignature_storage.clear().await);
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
         presignature_storage
@@ -285,7 +327,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     }
 
     // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
-    let mut outdated = presignature_storage
+    let mut outdated: Vec<PresignatureId> = presignature_storage
         .remove_outdated(node1, &[13, 14, 15])
         .await;
     outdated.sort();
@@ -306,7 +348,7 @@ fn dummy_presignature(id: u64) -> Presignature {
             k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
             sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
         },
-        participants: vec![Participant::from(1), Participant::from(2)],
+        participants: dummy_participants(1..=2),
     }
 }
 
@@ -322,8 +364,12 @@ fn dummy_triple(id: u64) -> Triple {
             big_a: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
             big_b: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
             big_c: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            participants: vec![Participant::from(1), Participant::from(2)],
+            participants: dummy_participants(1..=2),
             threshold: 5,
         },
     }
+}
+
+fn dummy_participants(participants: impl IntoIterator<Item = u32>) -> Vec<Participant> {
+    participants.into_iter().map(Participant::from).collect()
 }
