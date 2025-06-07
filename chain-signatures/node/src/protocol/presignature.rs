@@ -318,7 +318,7 @@ impl PresignatureManager {
     }
 
     /// Starts a new presignature generation protocol.
-    async fn propose(&mut self, active: &[Participant]) {
+    async fn propose_posit(&mut self, active: &[Participant]) {
         // To ensure there is no contention between different nodes we are only using triples
         // that we proposed. This way in a non-BFT environment we are guaranteed to never try
         // to use the same triple as any other node.
@@ -391,7 +391,7 @@ impl PresignatureManager {
 
         if not_enough_presignatures {
             tracing::debug!("not enough presignatures, generating");
-            self.propose(active).await;
+            self.propose_posit(active).await;
         }
     }
 
