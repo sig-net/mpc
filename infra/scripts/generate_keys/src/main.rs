@@ -1,8 +1,24 @@
+use bs58;
 use ethers::signers::LocalWallet;
 use ethers::signers::Signer;
 use mpc_keys::hpke;
+use solana_sdk::signature::{Keypair as SolKeyPair, Signer as SolSigner};
+use std::env;
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    let keypair = SolKeyPair::new();
+    println!("Solana account public key: {}", keypair.pubkey());
+    println!(
+        "Solana account secret key (base58): {}",
+        bs58::encode(keypair.to_bytes()).into_string()
+    );
+
+    if args.len() >= 3 && args[2] == "--only-solana" {
+        return;
+    }
+
     let (cipher_sk, cipher_pk) = hpke::generate();
     let cipher_pk = hex::encode(cipher_pk.to_bytes());
     let cipher_sk = hex::encode(cipher_sk.to_bytes());
