@@ -101,13 +101,6 @@ impl SignQueue {
         self.len() == 0
     }
 
-    fn contains(&self, sign_id: &SignId) -> bool {
-        self.my_requests
-            .iter()
-            .any(|req| req.indexed.id == *sign_id)
-            || self.other_requests.contains_key(sign_id)
-    }
-
     fn organize_request(
         &self,
         threshold: usize,
@@ -183,14 +176,6 @@ impl SignQueue {
                 other => other,
             }
         } {
-            if self.contains(&indexed.id) {
-                tracing::info!(sign_id = ?indexed.id, "skipping sign request: already in the sign queue");
-                continue;
-            }
-            crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
-                .with_label_values(&[indexed.chain.as_str(), my_account_id.as_str()])
-                .inc();
-
             let request = self.organize_request(threshold, &stable, indexed, false);
             let is_mine = request.proposer == self.me;
             if is_mine {
