@@ -598,9 +598,11 @@ async fn add_failed_block(
         });
 }
 
+// retry getting latest finalized block from helios with exponential backoff
 async fn get_finalized_block_from_helios_with_retry(
     helios_client: &Arc<EthereumClient<FileDB>>,
     max_retries: u8,
+    base_delay: Duration,
 ) -> anyhow::Result<alloy::rpc::types::Block> {
     let mut retries = 0;
     loop {
@@ -616,11 +618,12 @@ async fn get_finalized_block_from_helios_with_retry(
             Err(e) => {
                 if retries < max_retries {
                     retries += 1;
+                    let delay = base_delay * 2u32.pow((retries - 1) as u32);
                     tracing::warn!(
                         "Failed to get latest finalized block from Helios client: {:?}, retrying",
                         e
                     );
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(anyhow::anyhow!(
@@ -650,14 +653,19 @@ async fn refresh_finalized_epoch(
         interval.tick().await;
         tracing::info!("Refreshing finalized epoch");
 
-        let new_finalized_block =
-            match get_finalized_block_from_helios_with_retry(helios_client, 5).await {
-                Ok(block) => block,
-                Err(e) => {
-                    tracing::warn!("Failed to get finalized block: {:?}", e);
-                    continue;
-                }
-            };
+        let new_finalized_block = match get_finalized_block_from_helios_with_retry(
+            helios_client,
+            5,
+            Duration::from_millis(200),
+        )
+        .await
+        {
+            Ok(block) => block,
+            Err(e) => {
+                tracing::warn!("Failed to get finalized block: {:?}", e);
+                continue;
+            }
+        };
         tracing::info!(
             "New finalized block number: {}, last finalized block number: {:?}",
             new_finalized_block.header.number,
@@ -684,6 +692,8 @@ async fn refresh_finalized_epoch(
             continue;
         }
 
+        tracing::info!("Found new finalized block!");
+        finalized_blocks.clear();
         finalized_blocks.insert(new_final_block_number, new_finalized_block.header.hash);
 
         let mut parent_hash = new_finalized_block.header.inner.parent_hash;
@@ -704,14 +714,20 @@ async fn refresh_finalized_epoch(
         for i in (start..=end).rev() {
             tracing::info!("Fetching block {i} from untrusted RPC client");
 
-            let cur_block =
-                match get_block_from_untrusted_rpc_with_retry(untrusted_rpc_client, i, 5).await {
-                    Ok(block) => block,
-                    Err(e) => {
-                        tracing::warn!("Error fetching finalized block {i}: {:?}", e);
-                        break;
-                    }
-                };
+            let cur_block = match get_block_from_untrusted_rpc_with_retry(
+                untrusted_rpc_client,
+                i,
+                5,
+                Duration::from_millis(200),
+            )
+            .await
+            {
+                Ok(block) => block,
+                Err(e) => {
+                    tracing::warn!("Failed to fetch finalized block {i}: {:?}", e);
+                    break;
+                }
+            };
 
             let cur_block_hash = cur_block.header.hash_slow();
 
@@ -746,10 +762,12 @@ async fn refresh_finalized_epoch(
     }
 }
 
+// retry getting block by number from untrusted rpc with exponential backoff
 async fn get_block_from_untrusted_rpc_with_retry(
     untrusted_rpc_client: &RootProvider<Http<AlloyClient>>,
     block_number: u64,
     max_retries: u8,
+    base_delay: Duration,
 ) -> anyhow::Result<alloy::rpc::types::Block> {
     let mut retries = 0;
     loop {
@@ -768,11 +786,12 @@ async fn get_block_from_untrusted_rpc_with_retry(
             Err(e) => {
                 if retries < max_retries {
                     retries += 1;
+                    let delay = base_delay * 2u32.pow((retries - 1) as u32);
                     tracing::warn!(
                         "Failed to get block {block_number} from untrusted RPC client: {:?}, retrying",
                         e
                     );
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(anyhow::anyhow!(
