@@ -1,7 +1,7 @@
 use super::contract::primitives::Participants;
-use super::presignature::PresignatureManager;
 use super::signature::SignatureManager;
 use super::triple::TripleSpawnerTask;
+use crate::protocol::presignature::PresignatureSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 
 use cait_sith::protocol::Participant;
@@ -72,7 +72,7 @@ pub struct RunningState {
     pub private_share: SecretKeyShare,
     pub public_key: PublicKey,
     pub triple_task: TripleSpawnerTask,
-    pub presignature_manager: Arc<RwLock<PresignatureManager>>,
+    pub presign_task: PresignatureSpawnerTask,
     pub signature_manager: Arc<RwLock<SignatureManager>>,
 }
 
@@ -195,12 +195,7 @@ impl Node {
                     me: state.me,
                     participants: state.participants.keys_vec(),
                     ongoing_triple_gen: state.triple_task.len_ongoing(),
-                    ongoing_presignature_gen: state
-                        .presignature_manager
-                        .read()
-                        .await
-                        .len_ongoing()
-                        .await,
+                    ongoing_presignature_gen: state.presign_task.len_ongoing(),
                 });
             }
             NodeState::Resharing(state) => {
