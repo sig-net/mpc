@@ -19,6 +19,24 @@ enum NodeStatus {
     /// The connected node responds and is actively participating in the MPC
     /// network.
     Active,
+    /// State sync is running for node in this state.
+    ///
+    /// State sync needs to run once for every connection when a node starts.
+    /// Additionally, whenever we temporarily lose the connection, we have to
+    /// run it again before we can reliably use the peer node in a protocol.
+    ///
+    /// Note: There are two directions of "being in sync" between two nodes. But
+    /// each node only tracks it one directional.
+    ///
+    /// Example: Node A only cares about IDs it owns. Hence, a peer node B is
+    /// considered stable after A sent SyncUpdate and B responded with a
+    /// SyncView. This is all node A needs to know to make decisions about
+    /// protocols it initiates.
+    ///
+    /// The mirrored synchronization, with IDs owned by node B, should also
+    /// happen. But this is irrelevant for what node A does. Hence, only node B
+    /// tracks it.
+    Syncing,
     /// The node responds but is in an inactive NodeState, hence it is not ready
     /// for participating in any MPC protocols, yet.
     Inactive,
@@ -81,13 +99,22 @@ impl NodeConnection {
 
             match client.state(&url).await {
                 Ok(state) => {
-                    let new_status = match state {
-                        StateView::Running { .. } | StateView::Resharing { .. } => {
-                            NodeStatus::Active
-                        }
-                        StateView::Joining { .. } | StateView::NotRunning => NodeStatus::Inactive,
+                    let mut new_status = match state {
+                        StateView::Running { .. } => NodeStatus::Active,
+                        StateView::Resharing { .. }
+                        | StateView::Joining { .. }
+                        | StateView::NotRunning => NodeStatus::Inactive,
                     };
                     let mut status = status.write().await;
+                    if *status == NodeStatus::Inactive && new_status == NodeStatus::Active {
+                        // Sync when we want to enter an active state
+                        //
+                        // The peer is running. But before we can reliably
+                        // use the connected node in protocols we initiate,
+                        // we need to ensure the peer has the up-to-date
+                        // data about out owned IDs.
+                        new_status = NodeStatus::Syncing;
+                    }
                     if *status != new_status {
                         tracing::info!(?node, ?new_status, "updated with new status");
                         *status = new_status;
@@ -209,22 +236,40 @@ impl Pool {
     pub async fn status(&self) -> MeshState {
         let mut stable = Vec::new();
         let mut active = Participants::default();
+        let mut need_sync = Participants::default();
         for (participant, conn) in self.connections.iter() {
             match conn.status().await {
                 NodeStatus::Active => {
                     active.insert(participant, conn.info.clone());
                     stable.push(*participant);
                 }
+                NodeStatus::Syncing => {
+                    need_sync.insert(participant, conn.info.clone());
+                }
                 NodeStatus::Inactive => {
-                    // TODO: should we really insert inactive nodes to the active list here?
-                    // For now, in the refactoring PR, I just keep the exact same behavior.
-                    // We can delete this line when in the next PR.
+                    // TODO: Adding inactive nodes to the active connections
+                    // list is confusing. But the way keygen works now, it is
+                    // still required.
                     active.insert(participant, conn.info.clone());
                 }
                 NodeStatus::Offline => (),
             }
         }
 
-        MeshState { active, stable }
+        MeshState {
+            active,
+            need_sync,
+            stable,
+        }
+    }
+
+    /// Update the node state after synchronization was successful.
+    pub async fn report_node_synced(&self, participant: Participant) {
+        if let Some(conn) = self.connections.get(&participant) {
+            let mut state = conn.status.write().await;
+            if let NodeStatus::Syncing = *state {
+                *state = NodeStatus::Active;
+            }
+        }
     }
 }

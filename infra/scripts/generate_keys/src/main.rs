@@ -1,6 +1,5 @@
 use ethers::signers::LocalWallet;
 use ethers::signers::Signer;
-use hex;
 use mpc_keys::hpke;
 
 fn main() {

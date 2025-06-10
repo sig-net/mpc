@@ -11,6 +11,8 @@ pub enum GenerationError {
     CaitSithInitializationError(#[from] InitializationError),
     #[error("triple {0} is generating or missing")]
     TripleGeneratingOrMissing(TripleId),
+    #[error("triple {0} and {1} are missing")]
+    TripleMissing(TripleId, TripleId),
     #[error("presignature {0} is generating or missing")]
     PresignatureGeneratingOrMissing(PresignatureId),
     #[error("presignature bad parameters")]

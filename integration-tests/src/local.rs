@@ -77,7 +77,7 @@ impl Node {
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
             account_sk: account_sk.to_string().parse()?,
-            web_port,
+            web_port: Some(web_port),
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
             sign_sk: Some(sign_sk.clone()),
             eth,
@@ -141,6 +141,12 @@ impl Node {
         );
         LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc).await?;
 
+        let mut cfg = cfg.clone();
+        if let Some(ref mut eth_config) = cfg.eth {
+            eth_config.helios_data_path =
+                format!("{}_{}", eth_config.helios_data_path, account.id());
+        }
+
         Self::spawn(
             ctx,
             NodeEnvConfig {
@@ -172,7 +178,7 @@ impl Node {
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
-            web_port,
+            web_port: Some(web_port),
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             sign_sk: Some(config.sign_sk.clone()),
             eth,

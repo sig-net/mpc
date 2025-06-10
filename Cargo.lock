@@ -7294,7 +7294,7 @@ checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
 
 [[package]]
 name = "mpc-contract"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "borsh 1.5.7",
@@ -7316,7 +7316,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-crypto"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7329,7 +7329,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-keys"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "borsh 1.5.7",
  "hex",
@@ -7340,7 +7340,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-node"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "alloy",
  "alloy-signer-local",
@@ -7415,7 +7415,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-primitives"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "borsh 1.5.7",
  "ciborium",
@@ -14832,9 +14832,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.44.2"
+version = "1.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6b88822cbe49de4185e3a4cbf8321dd487cf5fe0c5c65695fef6346371e9c48"
+checksum = "75ef51a33ef1da925cea3e4eb122833cb377c61439ca401b770f54902b806779"
 dependencies = [
  "backtrace",
  "bytes",
