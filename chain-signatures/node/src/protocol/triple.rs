@@ -45,7 +45,7 @@ struct TripleGenerator {
     protocol: TripleProtocol,
     timeout: Duration,
     slot: TripleSlot,
-    generator_created: Instant,
+    created: Instant,
     inbox: mpsc::Receiver<TripleMessage>,
     msg: MessageChannel,
 }
@@ -76,7 +76,7 @@ impl TripleGenerator {
             protocol: Box::new(protocol),
             timeout,
             slot,
-            generator_created: Instant::now(),
+            created: Instant::now(),
             inbox,
             msg: msg.clone(),
         })
@@ -106,12 +106,11 @@ impl TripleGenerator {
         let start_time = Instant::now();
         let mut total_wait = Duration::from_millis(0);
         let mut total_pokes = 0;
-        let mut poke_last_time = self.generator_created;
-        before_first_poke_delay
-            .observe((Instant::now() - self.generator_created).as_millis() as f64);
+        let mut poke_last_time = self.created;
+        before_first_poke_delay.observe(self.created.elapsed().as_millis() as f64);
 
         loop {
-            let elapsed = start_time.elapsed();
+            let elapsed = self.created.elapsed();
             if elapsed > self.timeout {
                 failure_counts.inc();
                 tracing::warn!(id = self.id, ?elapsed, "triple protocol timed out");
@@ -173,13 +172,10 @@ impl TripleGenerator {
                     self.msg.send(self.me, to, message).await;
                 }
                 Action::Return(output) => {
-                    let now = Instant::now();
-                    let elapsed = now - start_time;
-
                     success_total_counts.inc();
-                    runtime_latency.observe(elapsed.as_secs_f64());
+                    runtime_latency.observe(start_time.elapsed().as_secs_f64());
                     // this measures from generator creation to finishing. TRIPLE_LATENCY instead starts from the first poke() on the generator
-                    total_latency.observe((now - self.generator_created).as_secs_f64());
+                    total_latency.observe(self.created.elapsed().as_secs_f64());
                     accrued_wait_delay.observe(total_wait.as_millis() as f64);
                     poke_counts.observe(total_pokes as f64);
 
@@ -428,7 +424,6 @@ impl TripleSpawner {
     ) -> Result<(), InitializationError> {
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
         let Some(slot) = self.reserve(id).await else {
-            tracing::warn!(id, "triple id collision");
             return Err(InitializationError::BadParameters(format!(
                 "id collision: triple_id={id}"
             )));

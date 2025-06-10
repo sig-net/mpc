@@ -94,6 +94,16 @@ pub fn current_unix_timestamp() -> u64 {
         .as_secs()
 }
 
+pub const fn first_8_bytes(input: [u8; 32]) -> [u8; 8] {
+    let mut output = [0u8; 8];
+    let mut i = 0;
+    while i < 8 {
+        output[i] = input[i];
+        i += 1;
+    }
+    output
+}
+
 pub struct JoinMap<T, U> {
     mapping: HashMap<T, AbortHandle>,
     mapping_id: HashMap<tokio::task::Id, T>,
