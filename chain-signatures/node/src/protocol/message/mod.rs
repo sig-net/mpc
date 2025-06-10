@@ -9,6 +9,7 @@ use crate::rpc::ContractStateWatcher;
 
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::error::GenerationError;
+use super::posit::PositAction;
 use super::presignature::PresignatureId;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
@@ -28,7 +29,7 @@ use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -41,12 +42,17 @@ pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
 
 enum Subscriber<T> {
+    /// Temporary/replaceable value, and will never be used. Only here so we can have a
+    /// way to convert from an Unsubscribed to a Subscribed subscription.
+    Unknown,
+    /// A subscribed channel where the subscriber has a handle to the receiver.
     Subscribed(mpsc::Sender<T>),
+    /// An unsubscribed channel where there's potentially messages that have yet to be sent.
     Unsubscribed(mpsc::Sender<T>, mpsc::Receiver<T>),
 }
 
 impl<T> Subscriber<T> {
-    pub fn subscribe() -> (Self, mpsc::Receiver<T>) {
+    pub fn subscribed() -> (Self, mpsc::Receiver<T>) {
         let (tx, rx) = mpsc::channel(MAX_MESSAGE_SUB_CHANNEL_SIZE);
         (Self::Subscribed(tx), rx)
     }
@@ -56,10 +62,35 @@ impl<T> Subscriber<T> {
         Self::Unsubscribed(tx, rx)
     }
 
+    /// Convert this subscriber into a subscribed one, returning the receiver.
+    /// If the subscriber is already subscribed, it overrides the existing subscription.
+    pub fn subscribe(&mut self) -> mpsc::Receiver<T> {
+        let sub = std::mem::replace(self, Self::Unknown);
+        let (sub, rx) = match sub {
+            Self::Subscribed(_) | Self::Unknown => Self::subscribed(),
+            Self::Unsubscribed(tx, rx) => (Self::Subscribed(tx), rx),
+        };
+        *self = sub;
+        rx
+    }
+
+    /// Unsubscribe from the subscriber, converting it into an unsubscribed one.
+    pub fn unsubscribe(&mut self) {
+        match std::mem::replace(self, Self::Unknown) {
+            Self::Subscribed(_) | Self::Unknown => {
+                *self = Self::unsubscribed();
+            }
+            Self::Unsubscribed(_, _) => {
+                // Already unsubscribed, nothing to do.
+            }
+        }
+    }
+
     pub async fn send(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
         match self {
             Self::Subscribed(tx) => tx.send(msg).await,
             Self::Unsubscribed(tx, _) => tx.send(msg).await,
+            Self::Unknown => Ok(()),
         }
     }
 }
@@ -92,7 +123,7 @@ pub struct MessageInbox {
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<TripleId, Subscriber<TripleMessage>>,
-    triple_init: Option<mpsc::Sender<TripleId>>,
+    triple_init: Subscriber<(TripleId, Participant, PositAction)>,
     presignature: HashMap<Epoch, HashMap<PresignatureId, VecDeque<PresignatureMessage>>>,
     signature: HashMap<Epoch, HashMap<SignId, VecDeque<SignatureMessage>>>,
 }
@@ -111,38 +142,39 @@ impl MessageInbox {
             generating: VecDeque::new(),
             resharing: HashMap::new(),
             triple: HashMap::new(),
-            triple_init: None,
+            triple_init: Subscriber::unsubscribed(),
             presignature: HashMap::new(),
             signature: HashMap::new(),
         }
     }
 
-    pub async fn send(&mut self, message: Message) {
+    async fn send(&mut self, message: Message) {
         match message {
-            Message::Posit(message) => self.posit.push_back(message),
+            Message::Posit(message) => match message.id {
+                PositProtocolId::Triple(id) => {
+                    let _ = self
+                        .triple_init
+                        .send((id, message.from, message.action))
+                        .await;
+                }
+                _ => self.posit.push_back(message),
+            },
             Message::Generating(message) => self.generating.push_back(message),
             Message::Resharing(message) => self
                 .resharing
                 .entry(message.epoch)
                 .or_default()
                 .push_back(message),
-            Message::Triple(message) => match self.triple.entry(message.id) {
-                hash_map::Entry::Occupied(entry) => {
-                    // NOTE: not logging the error because this is simply just channel closure.
-                    // The error message should be reported on the generator side.
-                    let _ = entry.get().send(message).await;
-                }
-                hash_map::Entry::Vacant(entry) => {
-                    if let Some(tx) = &self.triple_init {
-                        if tx.send(message.id).await.is_err() {
-                            tracing::warn!("unexpected, failed to send start to subscriber");
-                        }
-                    }
-                    // Send the message even if unsubscribed. The subscriber will grab the
-                    // receiver associated to this channel.
-                    let _ = entry.insert(Subscriber::unsubscribed()).send(message).await;
-                }
-            },
+            Message::Triple(message) => {
+                // NOTE: not logging the error because this is simply just channel closure.
+                // The error message should be reported on the generator side.
+                let _ = self
+                    .triple
+                    .entry(message.id)
+                    .or_default()
+                    .send(message)
+                    .await;
+            }
             Message::Presignature(message) => self
                 .presignature
                 .entry(message.epoch)
@@ -166,12 +198,12 @@ impl MessageInbox {
         }
     }
 
-    pub fn expire(&mut self, timeout: Duration) {
+    fn expire(&mut self, timeout: Duration) {
         self.try_decrypt
             .retain(|(_, timestamp)| timestamp.elapsed() < timeout);
     }
 
-    pub fn recv_updates(&mut self) {
+    fn recv_updates(&mut self) {
         self.filter.recv_updates();
         loop {
             let encrypted = match self.inbox_rx.try_recv() {
@@ -191,7 +223,7 @@ impl MessageInbox {
         }
     }
 
-    pub fn decrypt(
+    fn decrypt(
         &mut self,
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
@@ -238,6 +270,13 @@ impl MessageInbox {
     }
 
     pub fn filter_internal(&mut self) {
+        // NOTE: this might cause some warnings to pop up such as:
+        // "trying to unsub from an unknown triple subscription".
+        // This is fine since the filter made it here first before the
+        // subscription gets removed on TripleGenerator drop.
+        self.triple
+            .retain(|id, _| !self.filter.contains_id(*id, Protocols::Triple));
+
         self.presignature.retain(|_epoch, messages| {
             messages.retain(|_id, messages| {
                 messages.retain(|msg| !self.filter.contains(msg));
@@ -254,7 +293,7 @@ impl MessageInbox {
         });
     }
 
-    pub async fn recv(&mut self, messages: Vec<Message>) {
+    async fn recv(&mut self, messages: Vec<Message>) {
         for message in messages {
             self.send(message).await;
         }
@@ -423,24 +462,7 @@ impl MessageChannel {
 
     pub async fn subscribe_triple(&self, id: TripleId) -> mpsc::Receiver<TripleMessage> {
         let mut inbox = self.inbox.write().await;
-        let sub = match inbox.triple.entry(id) {
-            hash_map::Entry::Occupied(entry) => entry.remove(),
-            hash_map::Entry::Vacant(entry) => {
-                let (sub, rx) = Subscriber::subscribe();
-                entry.insert(sub);
-                return rx;
-            }
-        };
-
-        let (sub, rx) = match sub {
-            Subscriber::Subscribed(_tx) => {
-                tracing::warn!(id, "subscription already exists for triple, overriding");
-                Subscriber::subscribe()
-            }
-            Subscriber::Unsubscribed(tx, rx) => (Subscriber::Subscribed(tx), rx),
-        };
-
-        inbox.triple.insert(id, sub);
+        let rx = inbox.triple.entry(id).or_default().subscribe();
         rx
     }
 
@@ -451,16 +473,16 @@ impl MessageChannel {
         }
     }
 
-    pub async fn subscribe_triple_start(&self) -> mpsc::Receiver<TripleId> {
-        let (tx, rx) = mpsc::channel(256);
+    pub async fn subscribe_triple_posit(
+        &self,
+    ) -> mpsc::Receiver<(TripleId, Participant, PositAction)> {
         let mut inbox = self.inbox.write().await;
-        inbox.triple_init = Some(tx);
-        rx
+        inbox.triple_init.subscribe()
     }
 
-    pub async fn unsubscribe_triple_start(self) {
+    pub async fn unsubscribe_triple_posit(self) {
         let mut inbox = self.inbox.write().await;
-        inbox.triple_init = None;
+        inbox.triple_init.unsubscribe();
     }
 }
 
@@ -545,7 +567,7 @@ impl MessageReceiver for RunningState {
 
         for posit in inbox.posit.drain(..) {
             match posit.id {
-                PositProtocolId::Triple(_) => {}
+                PositProtocolId::Triple(_) | PositProtocolId::Signature(_, _) => {}
                 PositProtocolId::Presignature(id) => {
                     let mut presignature_manager = self.presignature_manager.write().await;
                     let start_protocol = presignature_manager
@@ -567,7 +589,6 @@ impl MessageReceiver for RunningState {
                         }
                     }
                 }
-                PositProtocolId::Signature(_, _) => {}
             }
         }
 
