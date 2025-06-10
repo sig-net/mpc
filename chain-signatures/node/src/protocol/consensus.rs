@@ -5,7 +5,7 @@ use super::state::{
 };
 use super::MpcSignProtocol;
 use crate::protocol::contract::primitives::Participants;
-use crate::protocol::presignature::PresignatureManager;
+use crate::protocol::presignature::PresignatureSpawnerTask;
 use crate::protocol::signature::SignatureManager;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleSpawnerTask;
@@ -88,17 +88,14 @@ impl ConsensusProtocol for StartedState {
 
                             let threshold = contract_state.threshold;
                             let triple_task = TripleSpawnerTask::run(me, threshold, epoch, ctx);
-
-                            let presignature_manager =
-                                Arc::new(RwLock::new(PresignatureManager::new(
-                                    me,
-                                    contract_state.threshold,
-                                    epoch,
-                                    &ctx.my_account_id,
-                                    &ctx.triple_storage,
-                                    &ctx.presignature_storage,
-                                    ctx.msg_channel.clone(),
-                                )));
+                            let presign_task = PresignatureSpawnerTask::run(
+                                me,
+                                threshold,
+                                epoch,
+                                ctx,
+                                &private_share,
+                                &public_key,
+                            );
 
                             let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
                                 me,
@@ -119,7 +116,7 @@ impl ConsensusProtocol for StartedState {
                                 private_share,
                                 public_key,
                                 triple_task,
-                                presignature_manager,
+                                presign_task,
                                 signature_manager,
                             })
                         }
@@ -386,16 +383,14 @@ impl ConsensusProtocol for WaitingForConsensusState {
                     };
 
                     let triple_task = TripleSpawnerTask::run(me, self.threshold, self.epoch, ctx);
-
-                    let presignature_manager = Arc::new(RwLock::new(PresignatureManager::new(
+                    let presign_task = PresignatureSpawnerTask::run(
                         me,
                         self.threshold,
                         self.epoch,
-                        &ctx.my_account_id,
-                        &ctx.triple_storage,
-                        &ctx.presignature_storage,
-                        ctx.msg_channel.clone(),
-                    )));
+                        ctx,
+                        &self.private_share,
+                        &self.public_key,
+                    );
 
                     let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
                         me,
@@ -416,7 +411,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         private_share: self.private_share,
                         public_key: self.public_key,
                         triple_task,
-                        presignature_manager,
+                        presign_task,
                         signature_manager,
                     })
                 }
