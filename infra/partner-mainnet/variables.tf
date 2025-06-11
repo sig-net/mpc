@@ -78,11 +78,12 @@ variable "node_configs" {
     sk_share_secret_id   = string
     domain               = string
     eth_account_sk_secret_id = string
-    eth_consensus_rpc_url_secret_id = string
+    eth_consensus_rpc_http_url = string
     eth_execution_rpc_url_secret_id = string
     eth_contract_address = string
     sol_account_sk_secret_id = string
-    sol_rpc_url_secret_id = string
+    sol_rpc_http_url_secret_id = string
+    sol_rpc_ws_url_secret_id = string
     sol_program_address = string
   }))
 }
