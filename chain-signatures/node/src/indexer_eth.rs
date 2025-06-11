@@ -599,7 +599,7 @@ async fn add_failed_block(
 }
 
 // retry getting latest finalized block from helios with exponential backoff
-async fn get_finalized_block_from_helios_with_retry(
+async fn fetch_finalized_block_from_helio(
     helios_client: &Arc<EthereumClient<FileDB>>,
     max_retries: u8,
     base_delay: Duration,
@@ -653,19 +653,16 @@ async fn refresh_finalized_epoch(
         interval.tick().await;
         tracing::info!("Refreshing finalized epoch");
 
-        let new_finalized_block = match get_finalized_block_from_helios_with_retry(
-            helios_client,
-            5,
-            Duration::from_millis(200),
-        )
-        .await
-        {
-            Ok(block) => block,
-            Err(e) => {
-                tracing::warn!("Failed to get finalized block: {:?}", e);
-                continue;
-            }
-        };
+        let new_finalized_block =
+            match fetch_finalized_block_from_helio(helios_client, 5, Duration::from_millis(200))
+                .await
+            {
+                Ok(block) => block,
+                Err(e) => {
+                    tracing::warn!("Failed to get finalized block: {:?}", e);
+                    continue;
+                }
+            };
         tracing::info!(
             "New finalized block number: {}, last finalized block number: {:?}",
             new_finalized_block.header.number,
@@ -681,9 +678,9 @@ async fn refresh_finalized_epoch(
         };
 
         if new_final_block_number < last_final_block_number {
-            let err_msg =
-                "New finalized block number overflowed range of u64 and has wrapped around!";
-            tracing::warn!(err_msg);
+            tracing::warn!(
+                "New finalized block number overflowed range of u64 and has wrapped around!"
+            );
             continue;
         }
 
@@ -699,13 +696,11 @@ async fn refresh_finalized_epoch(
         let mut parent_hash = new_finalized_block.header.inner.parent_hash;
 
         let Some(start) = last_final_block_number.checked_add(1) else {
-            let err_msg = "Last finalized block number + 1 overflowed range of u64!";
-            tracing::warn!(err_msg);
+            tracing::warn!("Last finalized block number + 1 overflowed range of u64!");
             continue;
         };
         let Some(end) = new_final_block_number.checked_sub(1) else {
-            let err_msg = "New finalized block number - 1 overflowed range of u64!";
-            tracing::warn!(err_msg);
+            tracing::warn!("New finalized block number - 1 overflowed range of u64!");
             continue;
         };
 
@@ -714,7 +709,7 @@ async fn refresh_finalized_epoch(
         for i in (start..=end).rev() {
             tracing::info!("Fetching block {i} from untrusted RPC client");
 
-            let cur_block = match get_block_from_untrusted_rpc_with_retry(
+            let cur_block = match fetch_block_from_untrusted_rpc(
                 untrusted_rpc_client,
                 i,
                 5,
@@ -763,7 +758,7 @@ async fn refresh_finalized_epoch(
 }
 
 // retry getting block by number from untrusted rpc with exponential backoff
-async fn get_block_from_untrusted_rpc_with_retry(
+async fn fetch_block_from_untrusted_rpc(
     untrusted_rpc_client: &RootProvider<Http<AlloyClient>>,
     block_number: u64,
     max_retries: u8,
