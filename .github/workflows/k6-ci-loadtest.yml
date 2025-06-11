@@ -96,8 +96,8 @@ jobs:
           path: ./infra/loadtests/k6-load-test.js
           cloud-run-locally: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
           cloud-comment-on-pr: false
-          flags: >
-            --exit-on-running
+          flags: >-
+            ${{ github.event_name != 'schedule' && '--exit-on-running' || '' }}
             --include-system-env-vars
             --tag chain=${{ steps.normalized.outputs.lt_chain }}
             --tag env=${{ steps.normalized.outputs.lt_env }}
