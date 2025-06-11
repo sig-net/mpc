@@ -10,6 +10,8 @@ on:
       - chain-signatures/**
       - infra/loadtests/**
       - .github/workflows/k6-ci-loadtest.yml
+  schedule:
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       lt_strategy:
@@ -46,8 +48,8 @@ on:
 
 jobs:
   load-test:
-    if: ${{ github.event_name == 'push' || github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' || github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+    runs-on: ${{ github.event_name == 'schedule' && 'arc-runners-arc-runner-set' || 'ubuntu-latest' }}
     steps:
       - name: Wait for 5 minutes due to new version deployment
         if: ${{ github.event.pull_request.merged == true }}
@@ -59,10 +61,18 @@ jobs:
       - name: Normalize inputs
         id: normalized
         run: |
-          echo "lt_chain=${CHAIN:-Solana}" >> "$GITHUB_OUTPUT"
-          echo "lt_env=${ENV:-dev}" >> "$GITHUB_OUTPUT"
-          echo "lt_strategy=${STRATEGY:-ramping_high_rate_1h}" >> "$GITHUB_OUTPUT"
-          echo "lt_check_signature=${CHECK_SIGNATURE:-true}" >> "$GITHUB_OUTPUT"
+          # Set defaults based on event type
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "lt_chain=${CHAIN:-Solana}" >> "$GITHUB_OUTPUT"
+            echo "lt_env=${ENV:-dev}" >> "$GITHUB_OUTPUT"
+            echo "lt_strategy=${STRATEGY:-constant_medium_rate_1h}" >> "$GITHUB_OUTPUT"
+            echo "lt_check_signature=${CHECK_SIGNATURE:-true}" >> "$GITHUB_OUTPUT"
+          else
+            echo "lt_chain=${CHAIN:-Solana}" >> "$GITHUB_OUTPUT"
+            echo "lt_env=${ENV:-dev}" >> "$GITHUB_OUTPUT"
+            echo "lt_strategy=${STRATEGY:-ramping_high_rate_1h}" >> "$GITHUB_OUTPUT"
+            echo "lt_check_signature=${CHECK_SIGNATURE:-true}" >> "$GITHUB_OUTPUT"
+          fi
         env:
           CHAIN: ${{ github.event.inputs.chain }}
           ENV: ${{ github.event.inputs.environment }}
@@ -71,6 +81,7 @@ jobs:
 
       - name: Setup K6
         uses: grafana/setup-k6-action@v1
+
       - name: Run k6 test
         uses: grafana/run-k6-action@v1
         env:
@@ -83,7 +94,7 @@ jobs:
           LT_STRATEGY: ${{ steps.normalized.outputs.lt_strategy }}
         with:
           path: ./infra/loadtests/k6-load-test.js
-          cloud-run-locally: false
+          cloud-run-locally: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
           cloud-comment-on-pr: false
           flags: >
             --exit-on-running
