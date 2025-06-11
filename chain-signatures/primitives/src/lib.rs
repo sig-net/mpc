@@ -9,6 +9,7 @@ use sha3::Digest;
 use crate::bytes::cbor_scalar;
 
 #[derive(
+    Copy,
     Clone,
     Eq,
     PartialEq,

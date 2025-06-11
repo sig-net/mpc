@@ -10,7 +10,6 @@ use crate::protocol::presignature::FullPresignatureId;
 use crate::rpc::ContractStateWatcher;
 
 use super::contract::primitives::{ParticipantMap, Participants};
-use super::error::GenerationError;
 use super::presignature::PresignatureId;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::triple::TripleId;
@@ -19,7 +18,6 @@ use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::Config;
 use crate::protocol::MeshState;
 use crate::types::Epoch;
-use crate::util;
 
 use async_trait::async_trait;
 use cait_sith::protocol::Participant;
@@ -127,7 +125,8 @@ pub struct MessageInbox {
     triple_init: Subscriber<(TripleId, Participant, PositAction)>,
     presignature: HashMap<PresignatureId, Subscriber<PresignatureMessage>>,
     presignature_init: Subscriber<(FullPresignatureId, Participant, PositAction)>,
-    signature: HashMap<Epoch, HashMap<SignId, VecDeque<SignatureMessage>>>,
+    signature: HashMap<SignId, Subscriber<SignatureMessage>>,
+    signature_init: Subscriber<(SignId, PresignatureId, Participant, PositAction)>,
 }
 
 impl MessageInbox {
@@ -148,6 +147,7 @@ impl MessageInbox {
             presignature: HashMap::new(),
             presignature_init: Subscriber::unsubscribed(),
             signature: HashMap::new(),
+            signature_init: Subscriber::unsubscribed(),
         }
     }
 
@@ -166,7 +166,12 @@ impl MessageInbox {
                         .send((id, message.from, message.action))
                         .await;
                 }
-                _ => self.posit.push_back(message),
+                PositProtocolId::Signature(sign_id, presignature_id) => {
+                    let _ = self
+                        .signature_init
+                        .send((sign_id, presignature_id, message.from, message.action))
+                        .await;
+                }
             },
             Message::Generating(message) => self.generating.push_back(message),
             Message::Resharing(message) => self
@@ -192,13 +197,14 @@ impl MessageInbox {
                     .send(message)
                     .await;
             }
-            Message::Signature(message) => self
-                .signature
-                .entry(message.epoch)
-                .or_default()
-                .entry(message.id.clone())
-                .or_default()
-                .push_back(message),
+            Message::Signature(message) => {
+                let _ = self
+                    .signature
+                    .entry(message.id.clone())
+                    .or_default()
+                    .send(message)
+                    .await;
+            }
             Message::Unknown(entries) => {
                 tracing::warn!(
                     entries = ?entries.iter().map(|(k, v)| (k, cbor_name(v))).collect::<Vec<_>>(),
@@ -288,13 +294,15 @@ impl MessageInbox {
             .retain(|id, _| !self.filter.contains_id(*id, Protocols::Triple));
         self.presignature
             .retain(|id, _| !self.filter.contains_id(*id, Protocols::Presignature));
-        self.signature.retain(|_epoch, messages| {
-            messages.retain(|_id, messages| {
-                messages.retain(|msg| !self.filter.contains(msg));
-                !messages.is_empty()
-            });
-            !messages.is_empty()
-        });
+        // self.signature
+        //     .retain(|id, _| !self.filter.contains_id(*id, Protocols::Signature));
+        // self.signature.retain(|_epoch, messages| {
+        //     messages.retain(|_id, messages| {
+        //         messages.retain(|msg| !self.filter.contains(msg));
+        //         !messages.is_empty()
+        //     });
+        //     !messages.is_empty()
+        // });
     }
 
     async fn recv(&mut self, messages: Vec<Message>) {
@@ -517,6 +525,33 @@ impl MessageChannel {
         let mut inbox = self.inbox.write().await;
         inbox.presignature_init.unsubscribe();
     }
+
+    pub async fn subscribe_signature(&self, id: SignId) -> mpsc::Receiver<SignatureMessage> {
+        let mut inbox = self.inbox.write().await;
+        inbox.signature.entry(id).or_default().subscribe()
+    }
+
+    pub async fn unsubscribe_signature(self, sign_id: SignId) {
+        let mut inbox = self.inbox.write().await;
+        if inbox.signature.remove(&sign_id).is_none() {
+            tracing::warn!(
+                ?sign_id,
+                "trying to unsub from an unknown signature subscription"
+            );
+        }
+    }
+
+    pub async fn subscribe_signature_posit(
+        &self,
+    ) -> mpsc::Receiver<(SignId, PresignatureId, Participant, PositAction)> {
+        let mut inbox = self.inbox.write().await;
+        inbox.signature_init.subscribe()
+    }
+
+    pub async fn unsubscribe_signature_posit(self) {
+        let mut inbox = self.inbox.write().await;
+        inbox.signature_init.unsubscribe();
+    }
 }
 
 #[async_trait]
@@ -591,119 +626,119 @@ impl MessageReceiver for ResharingState {
 impl MessageReceiver for RunningState {
     async fn recv(
         &mut self,
-        channel: &MessageChannel,
-        cfg: Config,
+        _channel: &MessageChannel,
+        _cfg: Config,
         _mesh_state: MeshState,
     ) -> Result<(), MessageError> {
-        let protocol_cfg = &cfg.protocol;
-        let mut inbox = channel.inbox().write().await;
-        let mut signature_manager = self.signature_manager.write().await;
-        let signature_messages = inbox.signature.entry(self.epoch).or_default();
-        signature_messages.retain(|_sign_id, queue| {
-            let mut expired = HashSet::new();
-            let mut active = HashSet::new();
+        // let protocol_cfg = &cfg.protocol;
+        // let mut inbox = channel.inbox().write().await;
+        // let mut signature_manager = self.sign_task.write().await;
+        // let signature_messages = inbox.signature.entry(self.epoch).or_default();
+        // signature_messages.retain(|_sign_id, queue| {
+        //     let mut expired = HashSet::new();
+        //     let mut active = HashSet::new();
 
-            for msg in queue.iter() {
-                if expired.contains(&msg.presignature_id) {
-                    continue;
-                }
+        //     for msg in queue.iter() {
+        //         if expired.contains(&msg.presignature_id) {
+        //             continue;
+        //         }
 
-                if util::is_elapsed_longer_than_timeout(
-                    msg.timestamp,
-                    protocol_cfg.signature.generation_timeout,
-                ) {
-                    expired.insert(msg.presignature_id);
-                } else {
-                    active.insert(msg.presignature_id);
-                }
-            }
+        //         if util::is_elapsed_longer_than_timeout(
+        //             msg.timestamp,
+        //             protocol_cfg.signature.generation_timeout,
+        //         ) {
+        //             expired.insert(msg.presignature_id);
+        //         } else {
+        //             active.insert(msg.presignature_id);
+        //         }
+        //     }
 
-            queue.retain(|msg| active.contains(&msg.presignature_id));
+        //     queue.retain(|msg| active.contains(&msg.presignature_id));
 
-            !queue.is_empty()
-        });
+        //     !queue.is_empty()
+        // });
 
-        for (sign_id, queue) in signature_messages {
-            // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
-            let SignatureMessage {
-                proposer,
-                presignature_id,
-                ..
-            } = queue.front().unwrap();
+        // for (sign_id, queue) in signature_messages {
+        //     // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
+        //     let SignatureMessage {
+        //         proposer,
+        //         presignature_id,
+        //         ..
+        //     } = queue.front().unwrap();
 
-            if !queue
-                .iter()
-                .all(|msg| presignature_id == &msg.presignature_id)
-            {
-                // Check that all messages in the queue have the same triple0 and triple1, otherwise this is an
-                // invalid message, so we should just bin the whole entire protocol and its message for this presignature id.
-                queue.clear();
-                continue;
-            }
+        //     if !queue
+        //         .iter()
+        //         .all(|msg| presignature_id == &msg.presignature_id)
+        //     {
+        //         // Check that all messages in the queue have the same triple0 and triple1, otherwise this is an
+        //         // invalid message, so we should just bin the whole entire protocol and its message for this presignature id.
+        //         queue.clear();
+        //         continue;
+        //     }
 
-            let protocol = match signature_manager
-                .get_or_start_protocol(sign_id, *proposer, *presignature_id, protocol_cfg)
-                .await
-            {
-                Ok(protocol) => protocol,
-                Err(GenerationError::PresignatureGeneratingOrMissing(_)) => {
-                    // We will revisit this this signature request later when the presignature has been generated.
-                    // If it's missing, we will just rely on the message expiration mechanism to remove it.
-                    continue;
-                }
-                Err(err @ GenerationError::WaitingForIndexer(_)) => {
-                    // We will revisit this this signature request later when we have the request indexed.
-                    tracing::warn!(
-                        ?sign_id,
-                        ?presignature_id,
-                        ?proposer,
-                        ?err,
-                        "waiting for indexer"
-                    );
-                    continue;
-                }
-                Err(err @ GenerationError::InvalidProposer(_, _)) => {
-                    // trash the whole of these messages since we got an invalid set of participants.
-                    tracing::warn!(?sign_id, ?err, "signature generation cannot be started");
-                    queue.clear();
-                    continue;
-                }
-                Err(err @ GenerationError::AlreadyGenerated) => {
-                    // We will have to remove the entirety of the messages we received for this signature request,
-                    // and have the other nodes timeout in the following cases:
-                    // - If a presignature is in GC, then it was used already or failed to be produced.
-                    // - If a presignature is missing, that means our system cannot process this signature.
-                    tracing::warn!(?sign_id, ?err, "signature cannot be generated");
-                    queue.clear();
-                    continue;
-                }
-                Err(GenerationError::CaitSithInitializationError(error)) => {
-                    // ignore the whole of the messages since the generation had bad parameters. Also have the other node who
-                    // initiated the protocol resend the message or have it timeout on their side.
-                    tracing::warn!(
-                        ?sign_id,
-                        presignature_id,
-                        ?error,
-                        "unable to initialize incoming signature protocol"
-                    );
-                    queue.clear();
-                    continue;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        ?sign_id,
-                        ?err,
-                        "Unexpected error encounted while generating signature"
-                    );
-                    queue.clear();
-                    continue;
-                }
-            };
+        //     let protocol = match signature_manager
+        //         .get_or_start_protocol(sign_id, *proposer, *presignature_id, protocol_cfg)
+        //         .await
+        //     {
+        //         Ok(protocol) => protocol,
+        //         Err(GenerationError::PresignatureGeneratingOrMissing(_)) => {
+        //             // We will revisit this this signature request later when the presignature has been generated.
+        //             // If it's missing, we will just rely on the message expiration mechanism to remove it.
+        //             continue;
+        //         }
+        //         Err(err @ GenerationError::WaitingForIndexer(_)) => {
+        //             // We will revisit this this signature request later when we have the request indexed.
+        //             tracing::warn!(
+        //                 ?sign_id,
+        //                 ?presignature_id,
+        //                 ?proposer,
+        //                 ?err,
+        //                 "waiting for indexer"
+        //             );
+        //             continue;
+        //         }
+        //         Err(err @ GenerationError::InvalidProposer(_, _)) => {
+        //             // trash the whole of these messages since we got an invalid set of participants.
+        //             tracing::warn!(?sign_id, ?err, "signature generation cannot be started");
+        //             queue.clear();
+        //             continue;
+        //         }
+        //         Err(err @ GenerationError::AlreadyGenerated) => {
+        //             // We will have to remove the entirety of the messages we received for this signature request,
+        //             // and have the other nodes timeout in the following cases:
+        //             // - If a presignature is in GC, then it was used already or failed to be produced.
+        //             // - If a presignature is missing, that means our system cannot process this signature.
+        //             tracing::warn!(?sign_id, ?err, "signature cannot be generated");
+        //             queue.clear();
+        //             continue;
+        //         }
+        //         Err(GenerationError::CaitSithInitializationError(error)) => {
+        //             // ignore the whole of the messages since the generation had bad parameters. Also have the other node who
+        //             // initiated the protocol resend the message or have it timeout on their side.
+        //             tracing::warn!(
+        //                 ?sign_id,
+        //                 presignature_id,
+        //                 ?error,
+        //                 "unable to initialize incoming signature protocol"
+        //             );
+        //             queue.clear();
+        //             continue;
+        //         }
+        //         Err(err) => {
+        //             tracing::warn!(
+        //                 ?sign_id,
+        //                 ?err,
+        //                 "Unexpected error encounted while generating signature"
+        //             );
+        //             queue.clear();
+        //             continue;
+        //         }
+        //     };
 
-            while let Some(message) = queue.pop_front() {
-                protocol.message(message.from, message.data);
-            }
-        }
+        //     while let Some(message) = queue.pop_front() {
+        //         protocol.message(message.from, message.data);
+        //     }
+        // }
         Ok(())
     }
 }

@@ -1,7 +1,7 @@
 use super::contract::primitives::Participants;
-use super::signature::SignatureManager;
 use super::triple::TripleSpawnerTask;
 use crate::protocol::presignature::PresignatureSpawnerTask;
+use crate::protocol::signature::SignatureSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 
 use cait_sith::protocol::Participant;
@@ -9,9 +9,8 @@ use mpc_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::sync::Arc;
 
-use tokio::sync::{watch, RwLock};
+use tokio::sync::watch;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PersistentNodeData {
@@ -73,7 +72,7 @@ pub struct RunningState {
     pub public_key: PublicKey,
     pub triple_task: TripleSpawnerTask,
     pub presign_task: PresignatureSpawnerTask,
-    pub signature_manager: Arc<RwLock<SignatureManager>>,
+    pub sign_task: SignatureSpawnerTask,
 }
 
 pub struct ResharingState {

@@ -1,4 +1,3 @@
-use super::signature::SignatureManager;
 use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
 use super::MpcSignProtocol;
 use crate::config::Config;
@@ -269,22 +268,10 @@ impl ResharingState {
 impl CryptographicProtocol for RunningState {
     async fn progress(
         self,
-        ctx: &mut MpcSignProtocol,
-        cfg: Config,
-        mesh_state: MeshState,
+        _ctx: &mut MpcSignProtocol,
+        _cfg: Config,
+        _mesh_state: MeshState,
     ) -> NodeState {
-        let stable = mesh_state.stable;
-        if stable.len() < self.threshold {
-            tracing::warn!(?stable, "running: not enough participants to sign");
-            return NodeState::Running(self);
-        }
-        let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol, ctx);
-        match tokio::try_join!(sig_task) {
-            Ok(_result) => (),
-            Err(err) => {
-                tracing::warn!(?err, "running: failed to produce signature");
-            }
-        }
         NodeState::Running(self)
     }
 }
