@@ -921,42 +921,44 @@ async fn send_requests_when_final(
                     }
                 }
 
-                if !block_found {
-                    tracing::warn!(
-                        "Block number {block_number} with hash: {block_hash:?} not in finalized epochs. "
-                    );
+                if block_found {
+                    break;
+                }
 
-                    // Check if block is in history (older than our oldest epoch)
-                    if !finalized_epochs.is_empty() {
-                        let oldest_epoch = &finalized_epochs[0];
-                        if block_number < oldest_epoch.start_block {
-                            tracing::error!("Block {block_number} is in history");
-                            //TODO: handle the block in history case which happens when a block is retried
-                            break;
-                        }
+                tracing::warn!(
+                    "Block number {block_number} with hash: {block_hash:?} not in finalized epochs. "
+                );
+
+                // Check if block is in history (older than our oldest epoch)
+                if !finalized_epochs.is_empty() {
+                    let oldest_epoch = &finalized_epochs[0];
+                    if block_number < oldest_epoch.start_block {
+                        tracing::error!("Block {block_number} is in history");
+                        //TODO: handle the block in history case which happens when a block is retried
+                        break;
                     }
+                }
 
-                    // Wait for new finalized epoch
-                    let Some(received_epoch) = finalized_epoch_rx.recv().await else {
-                        tracing::warn!("Failed to receive finalized blocks");
-                        return Err(anyhow::anyhow!("Failed to receive finalized blocks"));
-                    };
+                // Wait for new finalized epoch
+                let Some(received_epoch) = finalized_epoch_rx.recv().await else {
+                    tracing::warn!("Failed to receive finalized blocks");
+                    return Err(anyhow::anyhow!("Failed to receive finalized blocks"));
+                };
 
-                    let start_block = received_epoch.start_block;
-                    let end_block = received_epoch.end_block;
-                    let blocks = received_epoch.blocks;
+                let start_block = received_epoch.start_block;
+                let end_block = received_epoch.end_block;
+                let blocks = received_epoch.blocks;
 
-                    let new_epoch = FinalizedEpoch {
-                        start_block,
-                        end_block,
-                        blocks,
-                    };
+                let new_epoch = FinalizedEpoch {
+                    start_block,
+                    end_block,
+                    blocks,
+                };
 
-                    // Update epochs list, keeping only the last 2
-                    finalized_epochs.push(new_epoch);
-                    if finalized_epochs.len() > 2 {
-                        finalized_epochs.remove(0);
-                    }
+                // Update epochs list, keeping only the last 2
+                finalized_epochs.push(new_epoch);
+                if finalized_epochs.len() > 2 {
+                    finalized_epochs.remove(0);
                 }
             }
         }
