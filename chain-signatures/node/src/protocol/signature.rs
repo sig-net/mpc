@@ -20,7 +20,7 @@ use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::{derive_key, PublicKey};
 use mpc_primitives::{SignArgs, SignId};
 use rand::rngs::StdRng;
-use rand::seq::{IteratorRandom, SliceRandom};
+use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
@@ -111,18 +111,64 @@ impl SignQueue {
     fn organize_request(
         &self,
         threshold: usize,
+        participants: &[Participant],
         stable: &[Participant],
         indexed: IndexedSignRequest,
         reorganize: bool,
     ) -> SignRequest {
+        assert!(
+            !stable.is_empty(),
+            "precondition: organizing a proposer requires at least one stable participant"
+        );
+        assert!(
+            !participants.is_empty(),
+            "precondition: must have at least one participant"
+        );
+        assert!(
+            participants.is_sorted(),
+            "precondition: input array must be sorted"
+        );
+
         let sign_id = indexed.id.clone();
         // NOTE: reorganize, will use the same entropy for reorganizing the participants. The only
         // thing that would be different is the passed in stable participants.
-        let mut rng = StdRng::from_seed(indexed.args.entropy);
-        let subset = stable.iter().copied().choose_multiple(&mut rng, threshold);
-        let in_subset = subset.contains(&self.me);
-        let proposer = *subset.choose(&mut rng).unwrap();
+
+        // Simple round-robin selection of the proposer, using only inputs that
+        // are guaranteed to be the same on all nodes.
+        fn proposer_per_round(
+            round: u32,
+            participants: &[Participant],
+            entropy: &[u8; 32],
+        ) -> Participant {
+            // if entropy is random, using one byte is as good as using all
+            let index = entropy[0] as usize + round as usize;
+            participants[index % participants.len()]
+        }
+
+        // Note: We probably should increase the initial round based on previous
+        // timeouts. For now, just make sure everybody has the same priority of
+        // proposers. This means everybody who sees proposer(round = 0) as
+        // stable will agree on the proposer and if it is properly offline,
+        // everybody will pick proposer(round = 1) instead, and so on.
+        let initial_round = 0;
+        let max_rounds = 1000;
+        // Use the smallest round that selects a stable proposer.
+        let proposer = (initial_round..max_rounds)
+            .map(|round| proposer_per_round(round, participants, &indexed.args.entropy))
+            .find(|potential_proposer| stable.contains(potential_proposer))
+            .expect("should find a stable proposer in max_rounds");
+
         let is_mine = proposer == self.me;
+
+        let mut rng = StdRng::from_seed(indexed.args.entropy);
+        // TODO: This should only run on the proposer, everybody else gets this in a posit.
+        let mut subset = stable.iter().copied().choose_multiple(&mut rng, threshold);
+        if !subset.contains(&proposer) {
+            // replace the last randomly chosen participant with the proposer
+            subset.pop();
+            subset.push(proposer);
+        }
+        let in_subset = subset.contains(&self.me);
 
         tracing::info!(
             ?stable,
@@ -163,6 +209,7 @@ impl SignQueue {
     pub async fn organize(
         &mut self,
         threshold: usize,
+        participants: &[Participant],
         stable: &[Participant],
         my_account_id: &AccountId,
     ) {
@@ -170,7 +217,7 @@ impl SignQueue {
         stable.sort();
 
         // Reorganize the failed requests with a potentially newer list of stable participants.
-        self.organize_failed(threshold, &stable, my_account_id);
+        self.organize_failed(threshold, participants, &stable, my_account_id);
 
         // try and organize the new incoming requests.
         let mut sign_rx = self.sign_rx.write().await;
@@ -191,7 +238,7 @@ impl SignQueue {
                 .with_label_values(&[indexed.chain.as_str(), my_account_id.as_str()])
                 .inc();
 
-            let request = self.organize_request(threshold, &stable, indexed, false);
+            let request = self.organize_request(threshold, participants, &stable, indexed, false);
             let is_mine = request.proposer == self.me;
             if is_mine {
                 self.my_requests.push_back(request);
@@ -208,6 +255,7 @@ impl SignQueue {
     fn organize_failed(
         &mut self,
         threshold: usize,
+        participants: &[Participant],
         stable: &[Participant],
         my_account_id: &AccountId,
     ) {
@@ -216,7 +264,8 @@ impl SignQueue {
                 // just use the same request if the participants are the same
                 (false, request)
             } else {
-                let request = self.organize_request(threshold, stable, request.indexed, true);
+                let request =
+                    self.organize_request(threshold, participants, stable, request.indexed, true);
                 (true, request)
             };
 
@@ -691,7 +740,12 @@ impl SignatureManager {
         }
     }
 
-    pub async fn handle_requests(&mut self, stable: &[Participant], cfg: &ProtocolConfig) {
+    pub async fn handle_requests(
+        &mut self,
+        participants: &[Participant],
+        stable: &[Participant],
+        cfg: &ProtocolConfig,
+    ) {
         if stable.len() < self.threshold {
             tracing::warn!(
                 "require at least {} stable participants to handle_requests, got {}: {:?}",
@@ -704,7 +758,7 @@ impl SignatureManager {
 
         self.sign_queue.expire(cfg);
         self.sign_queue
-            .organize(self.threshold, stable, &self.my_account_id)
+            .organize(self.threshold, participants, stable, &self.my_account_id)
             .await;
         crate::metrics::SIGN_QUEUE_SIZE
             .with_label_values(&[self.my_account_id.as_str()])
@@ -777,6 +831,8 @@ impl SignatureManager {
         let protocol_cfg = protocol_cfg.clone();
         let rpc_channel = ctx.rpc_channel.clone();
         let channel = ctx.msg_channel.clone();
+        let mut participants = state.participants.keys_vec();
+        participants.sort();
 
         // NOTE: signatures should only use stable and not active participants. The difference here is that
         // stable participants utilizes more than the online status of a node, such as whether or not their
@@ -786,7 +842,7 @@ impl SignatureManager {
         tokio::task::spawn(tokio::task::unconstrained(async move {
             let mut signature_manager = signature_manager.write().await;
             signature_manager
-                .handle_requests(&stable, &protocol_cfg)
+                .handle_requests(&participants, &stable, &protocol_cfg)
                 .await;
             signature_manager.poke(channel, rpc_channel).await;
         }))
