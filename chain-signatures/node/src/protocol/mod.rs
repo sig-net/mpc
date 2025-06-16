@@ -121,7 +121,7 @@ impl MpcSignProtocol {
             let sleep_ms = match node.state {
                 NodeState::Generating(_) => 500,
                 NodeState::Resharing(_) => 500,
-                NodeState::Running(_) => 100,
+                NodeState::Running(_) => 500,
 
                 NodeState::Starting => 1000,
                 NodeState::Started(_) => 1000,
