@@ -79,7 +79,7 @@ impl Mesh {
                 _ = interval.tick() => {
                     if let Some(contract) = &*contract_state.read().await {
                         self.connections.connect(contract).await;
-                        let new_state = self.connections.status().await;
+                        let new_state = self.connections.status();
                         let _ = self.state_tx.send(new_state);
                     }
                 }

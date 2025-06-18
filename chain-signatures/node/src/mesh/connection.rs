@@ -1,10 +1,9 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
 
 use cait_sith::protocol::Participant;
-use tokio::sync::RwLock;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::node_client::NodeClient;
@@ -48,7 +47,8 @@ enum NodeStatus {
 /// active status.
 struct NodeConnection {
     info: ParticipantInfo,
-    status: Arc<RwLock<NodeStatus>>,
+    status_tx: watch::Sender<NodeStatus>,
+    status_rx: watch::Receiver<NodeStatus>,
     task: JoinHandle<()>,
 }
 
@@ -59,28 +59,29 @@ impl NodeConnection {
         info: &ParticipantInfo,
         ping_interval: Duration,
     ) -> Self {
-        let status = Arc::new(RwLock::new(NodeStatus::Offline));
+        let (status_tx, status_rx) = watch::channel(NodeStatus::Offline);
         let task = tokio::spawn(Self::run(
             client.clone(),
-            status.clone(),
+            status_tx.clone(),
             *participant,
             info.url.clone(),
             ping_interval,
         ));
         Self {
             info: info.clone(),
-            status,
+            status_tx,
+            status_rx,
             task,
         }
     }
 
-    async fn status(&self) -> NodeStatus {
-        *self.status.read().await
+    fn status(&self) -> NodeStatus {
+        *self.status_rx.borrow()
     }
 
     async fn run(
         client: NodeClient,
-        status: Arc<RwLock<NodeStatus>>,
+        status: watch::Sender<NodeStatus>,
         participant: Participant,
         url: String,
         ping_interval: Duration,
@@ -93,7 +94,7 @@ impl NodeConnection {
             interval.tick().await;
             if let Err(err) = client.msg_empty(&url).await {
                 tracing::warn!(?node, ?err, "checking /msg (empty) failed");
-                *status.write().await = NodeStatus::Offline;
+                let _ = status.send(NodeStatus::Offline);
                 continue;
             }
 
@@ -105,8 +106,8 @@ impl NodeConnection {
                         | StateView::Joining { .. }
                         | StateView::NotRunning => NodeStatus::Inactive,
                     };
-                    let mut status = status.write().await;
-                    if *status == NodeStatus::Inactive && new_status == NodeStatus::Active {
+                    let old_status = *status.borrow();
+                    if old_status == NodeStatus::Inactive && new_status == NodeStatus::Active {
                         // Sync when we want to enter an active state
                         //
                         // The peer is running. But before we can reliably
@@ -115,14 +116,14 @@ impl NodeConnection {
                         // data about out owned IDs.
                         new_status = NodeStatus::Syncing;
                     }
-                    if *status != new_status {
+                    if old_status != new_status {
                         tracing::info!(?node, ?new_status, "updated with new status");
-                        *status = new_status;
+                        let _ = status.send(new_status);
                     }
                 }
                 Err(err) => {
                     tracing::warn!(?node, ?err, "checking /state failed");
-                    *status.write().await = NodeStatus::Offline;
+                    let _ = status.send(NodeStatus::Offline);
                 }
             }
         }
@@ -233,12 +234,12 @@ impl Pool {
         }
     }
 
-    pub async fn status(&self) -> MeshState {
+    pub fn status(&self) -> MeshState {
         let mut stable = Vec::new();
         let mut active = Participants::default();
         let mut need_sync = Participants::default();
         for (participant, conn) in self.connections.iter() {
-            match conn.status().await {
+            match conn.status() {
                 NodeStatus::Active => {
                     active.insert(participant, conn.info.clone());
                     stable.push(*participant);
@@ -266,9 +267,8 @@ impl Pool {
     /// Update the node state after synchronization was successful.
     pub async fn report_node_synced(&self, participant: Participant) {
         if let Some(conn) = self.connections.get(&participant) {
-            let mut state = conn.status.write().await;
-            if let NodeStatus::Syncing = *state {
-                *state = NodeStatus::Active;
+            if let NodeStatus::Syncing = conn.status() {
+                let _ = conn.status_tx.send(NodeStatus::Active);
             }
         }
     }

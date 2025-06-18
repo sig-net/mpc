@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 
 use cait_sith::{
     protocol::Participant,
@@ -25,7 +25,7 @@ use mpc_node::{
 use near_account_id::AccountId;
 use tokio::{
     runtime::Runtime,
-    sync::{mpsc, RwLock},
+    sync::{mpsc, watch},
 };
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -60,7 +60,6 @@ struct SyncEnv {
     node_id: AccountId,
     me: Participant,
     participants: Participants,
-    mesh_state: Arc<RwLock<MeshState>>,
     client: NodeClient,
     redis: Redis,
     triples: TripleStorage,
@@ -96,11 +95,11 @@ fn env() -> (Runtime, SyncEnv) {
                 .await;
         }
         let client = NodeClient::new(&node_client::Options::default());
-        let mesh_state = Arc::new(RwLock::new(MeshState {
+        let (_, mesh_state_rx) = watch::channel(MeshState {
             stable: participants.keys_vec(),
             active: participants.clone(),
             need_sync: Participants::default(),
-        }));
+        });
 
         let sk = k256::SecretKey::random(&mut rand::thread_rng());
         let pk = sk.public_key();
@@ -122,7 +121,7 @@ fn env() -> (Runtime, SyncEnv) {
             &client,
             triples.clone(),
             presignatures.clone(),
-            mesh_state.clone(),
+            mesh_state_rx,
             watcher.clone(),
             synced_peer_tx,
         );
@@ -134,7 +133,6 @@ fn env() -> (Runtime, SyncEnv) {
             node_id,
             me,
             participants,
-            mesh_state,
             client,
             redis,
             triples,
