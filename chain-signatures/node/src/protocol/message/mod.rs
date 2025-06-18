@@ -341,7 +341,7 @@ struct MessageExecutor {
 
     config: watch::Receiver<Config>,
     contract_watcher: ContractStateWatcher,
-    mesh_state: Arc<RwLock<MeshState>>,
+    mesh_state: watch::Receiver<MeshState>,
 }
 
 impl MessageExecutor {
@@ -360,10 +360,7 @@ impl MessageExecutor {
                     .await;
             }
 
-            let active = {
-                let mesh_state = self.mesh_state.read().await;
-                mesh_state.active.clone()
-            };
+            let active = self.mesh_state.borrow().active.clone();
             self.outbox.expire(&config.protocol);
             self.outbox.recv_updates();
             let compacted = self.outbox.compact();
@@ -403,7 +400,7 @@ impl MessageChannel {
         id: &AccountId,
         config: watch::Receiver<Config>,
         contract_watcher: ContractStateWatcher,
-        mesh_state: &Arc<RwLock<MeshState>>,
+        mesh_state: watch::Receiver<MeshState>,
     ) -> (mpsc::Sender<Ciphered>, Self) {
         let (inbox_tx, outbox_rx, channel) = Self::new();
         let runner = MessageExecutor {
@@ -412,7 +409,7 @@ impl MessageChannel {
 
             config,
             contract_watcher,
-            mesh_state: mesh_state.clone(),
+            mesh_state,
         };
         tokio::spawn(runner.execute());
 

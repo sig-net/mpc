@@ -23,9 +23,8 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time;
 
@@ -606,7 +605,7 @@ impl PresignatureSpawner {
 
     async fn run(
         mut self,
-        mesh_state: Arc<RwLock<MeshState>>,
+        mesh_state: watch::Receiver<MeshState>,
         config: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
@@ -632,10 +631,7 @@ impl PresignatureSpawner {
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
                 _ = stockpile_interval.tick() => {
-                    let active = {
-                        let mesh_state = mesh_state.read().await;
-                        mesh_state.active.keys_vec()
-                    };
+                    let active = mesh_state.borrow().active.keys_vec();
                     let protocol_cfg = config.borrow().protocol.clone();
                     self.stockpile(&active, &protocol_cfg).await;
                     let _ = ongoing_gen_tx.send(self.ongoing.len());

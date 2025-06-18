@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::mesh::MeshState;
@@ -49,7 +49,7 @@ pub struct SyncTask {
     client: NodeClient,
     triples: TripleStorage,
     presignatures: PresignatureStorage,
-    mesh_state: Arc<RwLock<MeshState>>,
+    mesh_state: watch::Receiver<MeshState>,
     watcher: ContractStateWatcher,
     requests: SyncRequestReceiver,
     synced_peer_tx: mpsc::Sender<Participant>,
@@ -61,7 +61,7 @@ impl SyncTask {
         client: &NodeClient,
         triples: TripleStorage,
         presignatures: PresignatureStorage,
-        mesh_state: Arc<RwLock<MeshState>>,
+        mesh_state: watch::Receiver<MeshState>,
         watcher: ContractStateWatcher,
         synced_peer_tx: mpsc::Sender<Participant>,
     ) -> (SyncChannel, Self) {
@@ -106,9 +106,7 @@ impl SyncTask {
                         continue;
                     }
 
-                    let state = self.mesh_state.read().await;
-                    let need_sync = &state.need_sync;
-
+                    let need_sync = &self.mesh_state.borrow().need_sync.clone();
                     if need_sync.is_empty() {
                         continue;
                     }
@@ -136,13 +134,13 @@ impl SyncTask {
                     }
 
                     let update = self.new_update(me).await;
-                    let state = self.mesh_state.read().await.clone();
-                    let active = state.active;
+                    let active = self.mesh_state.borrow().active.clone();
 
                     let start = Instant::now();
                     let task = tokio::spawn(broadcast_sync(
                         self.client.clone(),
-                        update, active.into_iter(),
+                        update,
+                        active.into_iter(),
                         self.synced_peer_tx.clone(),
                         me
                     ));
