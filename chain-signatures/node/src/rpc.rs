@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 use url::Url;
 
 /// The maximum amount of times to retry publishing a signature.
@@ -239,7 +239,7 @@ impl RpcExecutor {
     pub async fn run(
         mut self,
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
-        config: Arc<RwLock<Config>>,
+        config: watch::Sender<Config>,
     ) {
         // spin up update task for updating contract state and config
         let near = self.near.clone();
@@ -369,21 +369,22 @@ impl NearClient {
         Ok(protocol_state)
     }
 
-    pub async fn fetch_config(&self, original: &Config) -> anyhow::Result<Config> {
-        let contract_config: ContractConfig = self
-            .client
+    pub async fn fetch_config(&self) -> Option<ContractConfig> {
+        self.client
             .view(&self.contract_id, "config")
             .await
             .inspect_err(|err| {
                 tracing::warn!(%err, "failed to fetch contract config");
-            })?
-            .json()?;
-        tracing::debug!(?contract_config, "contract config");
-        Config::try_from_contract(contract_config, original).ok_or_else(|| {
-            let msg = "failed to parse contract config";
-            tracing::error!(msg);
-            anyhow::anyhow!(msg)
-        })
+            })
+            .ok()?
+            .json()
+            .inspect(|configs| {
+                tracing::debug!(?configs, "contract config");
+            })
+            .inspect_err(|err| {
+                tracing::warn!(%err, "unable to parse config");
+            })
+            .ok()
     }
 
     pub async fn vote_public_key(
@@ -546,11 +547,12 @@ async fn update_contract(near: NearClient, contract_state: Arc<RwLock<Option<Pro
     }
 }
 
-async fn update_config(near: NearClient, config: Arc<RwLock<Config>>) {
-    let mut config = config.write().await;
-    if let Err(error) = config.fetch_inplace(&near).await {
-        tracing::error!(?error, "could not fetch contract config");
-    }
+async fn update_config(near: NearClient, config: watch::Sender<Config>) {
+    let Some(contract_config) = near.fetch_config().await else {
+        return;
+    };
+
+    config.send_if_modified(|config| config.update(contract_config));
 }
 
 /// Publish the signature and retry if it fails

@@ -607,7 +607,7 @@ impl PresignatureSpawner {
     async fn run(
         mut self,
         mesh_state: Arc<RwLock<MeshState>>,
-        config: Arc<RwLock<Config>>,
+        config: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = time::interval(Duration::from_millis(100));
@@ -616,7 +616,7 @@ impl PresignatureSpawner {
         loop {
             tokio::select! {
                 Some((id, from, action)) = posits.recv() => {
-                    let timeout = config.read().await.protocol.presignature.generation_timeout;
+                    let timeout = config.borrow().protocol.presignature.generation_timeout;
                     self.process_posit(id, from, action, Duration::from_millis(timeout)).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
@@ -636,10 +636,7 @@ impl PresignatureSpawner {
                         let mesh_state = mesh_state.read().await;
                         mesh_state.active.keys_vec()
                     };
-                    let protocol_cfg = {
-                        let config = config.read().await;
-                        config.protocol.clone()
-                    };
+                    let protocol_cfg = config.borrow().protocol.clone();
                     self.stockpile(&active, &protocol_cfg).await;
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 
