@@ -255,8 +255,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
             let mesh = Mesh::new(&client, mesh_options, synced_peer_rx);
             let mesh_state = mesh.state();
-            let watcher = ContractStateWatcher::new(&account_id);
-            let contract_state = watcher.state().clone();
+            let (contract_state_rx, contract_state_tx) = ContractStateWatcher::new(&account_id);
 
             let eth = eth.into_config();
             let sol = sol.into_config();
@@ -269,7 +268,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
-                watcher.clone(),
+                contract_state_rx.clone(),
                 synced_peer_tx,
             );
 
@@ -298,7 +297,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 client,
                 &account_id,
                 config_rx.clone(),
-                watcher,
+                contract_state_rx.clone(),
                 mesh_state.clone(),
             )
             .await;
@@ -317,11 +316,11 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync.run());
-            tokio::spawn(rpc.run(contract_state.clone(), config_tx.clone()));
-            tokio::spawn(mesh.run(contract_state.clone()));
+            tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
+            tokio::spawn(mesh.run(contract_state_rx.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
             let protocol_handle =
-                tokio::spawn(protocol.run(state, contract_state, config_rx, mesh_state));
+                tokio::spawn(protocol.run(state, contract_state_rx, config_rx, mesh_state));
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
                 web_port,

@@ -103,7 +103,7 @@ fn env() -> (Runtime, SyncEnv) {
 
         let sk = k256::SecretKey::random(&mut rand::thread_rng());
         let pk = sk.public_key();
-        let watcher = ContractStateWatcher::mock(
+        let (contract_watcher, _contract_tx) = ContractStateWatcher::with(
             &node_id,
             ProtocolState::Running(RunningContractState {
                 epoch: 0,
@@ -117,16 +117,14 @@ fn env() -> (Runtime, SyncEnv) {
         );
 
         let (synced_peer_tx, _synced_peer_rx) = mpsc::channel(1024);
-        let (sync_channel, sync) = SyncTask::new(
+        let (sync_channel, _sync) = SyncTask::new(
             &client,
             triples.clone(),
             presignatures.clone(),
             mesh_state_rx,
-            watcher.clone(),
+            contract_watcher,
             synced_peer_tx,
         );
-
-        // let sync_handle = tokio::spawn(sync.run());
 
         SyncEnv {
             threshold,

@@ -161,11 +161,11 @@ impl Pool {
         }
     }
 
-    pub async fn connect(&mut self, contract: &ProtocolState) {
+    pub async fn connect(&mut self, contract: ProtocolState) {
         let mut seen = HashSet::new();
         match contract {
             ProtocolState::Initializing(init) => {
-                let participants: Participants = init.candidates.clone().into();
+                let participants: Participants = init.candidates.into();
                 self.connect_nodes(&participants, &mut seen).await;
             }
             ProtocolState::Running(running) => {
