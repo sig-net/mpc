@@ -9,18 +9,12 @@ pub enum GenerationError {
     AlreadyGenerated,
     #[error("cait-sith initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
-    #[error("triple one of or both {0} and {1} are missing")]
-    TripleIsMissing(TripleId, TripleId),
-    #[error("triple {0} is generating")]
-    TripleIsGenerating(TripleId),
-    #[error("triple access denied: id={0}, {1}")]
-    TripleDenied(TripleId, &'static str),
-    #[error("presignature {0} is generating")]
-    PresignatureIsGenerating(PresignatureId),
-    #[error("presignature {0} is missing")]
-    PresignatureIsMissing(PresignatureId),
-    #[error("presignature access denied: id={0}, {1}")]
-    PresignatureDenied(PresignatureId, &'static str),
+    #[error("triple {0} is generating or missing")]
+    TripleGeneratingOrMissing(TripleId),
+    #[error("triple {0} and {1} are missing")]
+    TripleMissing(TripleId, TripleId),
+    #[error("presignature {0} is generating or missing")]
+    PresignatureGeneratingOrMissing(PresignatureId),
     #[error("presignature bad parameters")]
     PresignatureBadParameters,
     #[error("unable to reserve a slot for presignature")]

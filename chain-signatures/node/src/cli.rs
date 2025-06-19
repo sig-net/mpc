@@ -3,11 +3,12 @@ use crate::gcp::GcpService;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
+use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
-use crate::rpc::{NearClient, NodeStateWatcher, RpcExecutor};
+use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
-use crate::{indexer, indexer_eth, logs, mesh, storage, web};
+use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
 use k256::sha2::Sha256;
@@ -20,6 +21,8 @@ use tokio::sync::RwLock;
 use url::Url;
 
 use mpc_keys::hpke;
+
+const DEFAULT_WEB_PORT: u16 = 3000;
 
 #[derive(Parser, Debug)]
 pub enum Cli {
@@ -41,8 +44,10 @@ pub enum Cli {
         #[arg(long, env("MPC_ACCOUNT_SK"))]
         account_sk: SecretKey,
         /// The web port for this server
-        #[arg(long, env("MPC_WEB_PORT"))]
-        web_port: u16,
+        /// this is default to 3000 for all nodes now.
+        /// Partners can choose to change the port, but then they also need to make sure they change their load balancer config to match this
+        #[arg(long, env("MPC_WEB_PORT"), default_value = "3000")]
+        web_port: Option<u16>,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"))]
         cipher_sk: String,
@@ -52,18 +57,25 @@ pub enum Cli {
         /// Ethereum Indexer options
         #[clap(flatten)]
         eth: indexer_eth::EthArgs,
+        /// Solana Indexer options
+        #[clap(flatten)]
+        sol: indexer_sol::SolArgs,
         /// NEAR Lake Indexer options
         #[clap(flatten)]
         indexer_options: indexer::Options,
         /// Local address that other peers can use to message this node.
+        /// mainnet nodes: this should be set to their domain name
+        /// testnet nodes: this should be set to their http://ip:web_port
+        /// dev nodes: this should be set to their local network domain name
+        /// integration test nodes: this should be set to None
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
-        /// Debuggable id for each MPC node for logging purposes
-        #[arg(long, env("MPC_DEBUG_NODE_ID"))]
-        debug_id: Option<usize>,
         /// Storage options
         #[clap(flatten)]
         storage_options: storage::Options,
+        /// Logging options
+        #[clap(flatten)]
+        log_options: logs::Options,
         /// The set of configurations that we will use to override contract configurations.
         #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
         override_config: Option<OverrideConfig>,
@@ -89,10 +101,11 @@ impl Cli {
                 cipher_sk,
                 sign_sk,
                 eth,
+                sol,
                 indexer_options,
                 my_address,
-                debug_id,
                 storage_options,
+                log_options,
                 override_config,
                 client_header_referer,
                 mesh_options,
@@ -108,8 +121,6 @@ impl Cli {
                     account_id.to_string(),
                     "--account-sk".to_string(),
                     account_sk.to_string(),
-                    "--web-port".to_string(),
-                    web_port.to_string(),
                     "--cipher-sk".to_string(),
                     cipher_sk,
                     "--redis-url".to_string(),
@@ -121,9 +132,6 @@ impl Cli {
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
                 }
-                if let Some(debug_id) = debug_id {
-                    args.extend(["--debug-id".to_string(), debug_id.to_string()]);
-                }
                 if let Some(override_config) = override_config {
                     args.extend([
                         "--override-config".to_string(),
@@ -134,10 +142,15 @@ impl Cli {
                 if let Some(client_header_referer) = client_header_referer {
                     args.extend(["--client-header-referer".to_string(), client_header_referer]);
                 }
+                if let Some(web_port) = web_port {
+                    args.extend(["--web-port".to_string(), web_port.to_string()]);
+                }
 
                 args.extend(eth.into_str_args());
+                args.extend(sol.into_str_args());
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
+                args.extend(log_options.into_str_args());
                 args.extend(mesh_options.into_str_args());
                 args.extend(message_options.into_str_args());
                 args
@@ -146,7 +159,7 @@ impl Cli {
     }
 }
 
-pub fn run(cmd: Cli) -> anyhow::Result<()> {
+pub async fn run(cmd: Cli) -> anyhow::Result<()> {
     match cmd {
         Cli::Start {
             near_rpc,
@@ -157,16 +170,18 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             cipher_sk,
             sign_sk,
             eth,
+            sol,
             indexer_options,
             my_address,
-            debug_id,
             storage_options,
+            log_options,
             override_config,
             client_header_referer,
             mesh_options,
             message_options,
         } => {
-            logs::install_global(debug_id);
+            let _guard = logs::setup(&storage_options.env, account_id.as_str(), &log_options).await;
+
             let _span = tracing::trace_span!("cli").entered();
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
@@ -183,12 +198,10 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             crate::metrics::CONFIGURATION_DIGEST
                 .with_label_values(&[account_id.as_str()])
                 .set(digest);
+
             let (sign_tx, sign_rx) = SignQueue::channel();
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            let gcp_service =
-                rt.block_on(async { GcpService::init(&account_id, &storage_options).await })?;
+
+            let gcp_service = GcpService::init(&account_id, &storage_options).await?;
 
             let key_storage =
                 storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
@@ -212,7 +225,7 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
             let indexer = if storage_options.env == "integration-tests" {
-                let (_, idx) = indexer::run(
+                let (_handle, indexer) = indexer::run(
                     &indexer_options,
                     &mpc_contract_id,
                     &account_id,
@@ -220,41 +233,44 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                     app_data_storage.clone(),
                     rpc_client.clone(),
                 )?;
-                Some(idx)
+                Some(indexer)
             } else {
                 None
             };
 
+            let web_port = web_port.unwrap_or(DEFAULT_WEB_PORT);
+
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
-            let my_address = my_address
-                .map(|mut addr| {
-                    addr.set_port(Some(web_port)).unwrap();
-                    addr
-                })
-                .unwrap_or_else(|| {
-                    let my_ip = local_ip().unwrap();
-                    Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
-                });
+            let my_address = my_address.unwrap_or_else(|| {
+                // this is only used for integration tests
+                // mainnet, testnet and dev nodes should have MPC_LOCAL_ADDRESS set in their env var
+                let my_ip = local_ip().unwrap();
+                Url::parse(&format!("http://{my_ip}:{}", web_port)).unwrap()
+            });
 
             tracing::info!(%my_address, "address detected");
+
             let client = NodeClient::new(&message_options);
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
-            let mesh = Mesh::new(&client, mesh_options);
+            let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
+            let mesh = Mesh::new(&client, mesh_options, synced_peer_rx);
             let mesh_state = mesh.state().clone();
-            let watcher = NodeStateWatcher::new(&account_id);
+            let watcher = ContractStateWatcher::new(&account_id);
             let contract_state = watcher.state().clone();
 
             let eth = eth.into_config();
+            let sol = sol.into_config();
             let network = NetworkConfig { cipher_sk, sign_sk };
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
-            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth);
+            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol);
             let (sync_channel, sync) = SyncTask::new(
                 &client,
                 triple_storage.clone(),
                 presignature_storage.clone(),
                 &mesh,
-                watcher,
+                watcher.clone(),
+                synced_peer_tx,
             );
 
             tracing::info!(
@@ -273,46 +289,51 @@ pub fn run(cmd: Cli) -> anyhow::Result<()> {
                 over: override_config.unwrap_or_else(Default::default),
                 network,
             })));
-            rt.block_on(async {
-                let state = Arc::new(RwLock::new(crate::protocol::NodeState::Starting));
-                let (sender, channel) =
-                    MessageChannel::spawn(client, &account_id, &config, &state, &mesh_state).await;
-                let protocol = MpcSignProtocol::init(
-                    my_address,
-                    mpc_contract_id,
-                    account_id.clone(),
-                    state.clone(),
-                    near_client,
-                    rpc_channel,
-                    channel,
-                    sync_channel.clone(),
-                    sign_rx,
-                    key_storage,
-                    triple_storage,
-                    presignature_storage,
-                );
 
-                tracing::info!("protocol initialized");
-                tokio::spawn(sync.run());
-                tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
-                tokio::spawn(mesh.run(contract_state.clone()));
-                spawn_system_metrics(account_id.as_str()).await;
-                tokio::spawn(indexer_eth::run(eth, sign_tx, account_id));
-                let protocol_handle =
-                    tokio::spawn(protocol.run(contract_state, config, mesh_state));
-                tracing::info!("protocol thread spawned");
-                let web_handle =
-                    tokio::spawn(web::run(web_port, sender, state, indexer, sync_channel));
-                tracing::info!("protocol http server spawned");
+            let node = Node::new();
+            let node_watcher = node.watcher.clone();
 
-                protocol_handle.await?;
-                web_handle.await?;
-                tracing::info!("spinning down");
+            let (sender, msg_channel) =
+                MessageChannel::spawn(client, &account_id, &config, watcher, &mesh_state).await;
+            let protocol = MpcSignProtocol {
+                my_account_id: account_id.clone(),
+                near: near_client,
+                rpc_channel,
+                msg_channel,
+                sign_rx: Arc::new(RwLock::new(sign_rx)),
+                secret_storage: key_storage,
+                triple_storage: triple_storage.clone(),
+                presignature_storage: presignature_storage.clone(),
+                config: config.clone(),
+                mesh_state: mesh_state.clone(),
+            };
 
-                anyhow::Ok(())
-            })?;
+            tracing::info!("protocol initialized");
+            tokio::spawn(sync.run());
+            tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
+            tokio::spawn(mesh.run(contract_state.clone()));
+            let system_handle = spawn_system_metrics(account_id.as_str()).await;
+            let protocol_handle =
+                tokio::spawn(protocol.run(node, contract_state, config, mesh_state));
+            tracing::info!("protocol thread spawned");
+            let web_handle = tokio::spawn(web::run(
+                web_port,
+                sender,
+                node_watcher,
+                indexer,
+                triple_storage,
+                presignature_storage,
+                sync_channel,
+            ));
+            tokio::spawn(indexer_eth::run(eth, sign_tx.clone(), account_id.clone()));
+            tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
+            tracing::info!("protocol http server spawned");
+            protocol_handle.await?;
+            web_handle.await?;
+            system_handle.abort();
+            tracing::info!("spinning down");
         }
-    }
+    };
 
     Ok(())
 }
@@ -390,30 +411,6 @@ mod tests {
 
         // Grafana value: -1051225187120159700
         assert_eq!(digest, -1051225187120159684);
-    }
-
-    #[test]
-    fn test_digest_luganodes() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("luganodes-sig.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:HKwJr6kRcARfjHawX6pVcQPxPdTQMvAN7r8Z2kUcPfLc").unwrap();
-        let cipher_pk = "fe24961ff9fe0fb11cca7f31dd7173b9f15177e5809eb1054f99faf196f1c25d";
-        let sign_pk =
-            PublicKey::from_str("ed25519:5GNBtNcnpmJh2iijxWiSepeHvWeet3UuhBTwWCncCdTh").unwrap();
-        let _eth_account_pk = "04f0e7b9b93febc13280307414ff7b61be68b73233d0f590987b4ac8bf5818a859b1810d5a692a416fd47a8cd16a784553d7465c071e0e41e09cf4b9a098cb841a";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        // Grafana value: 8063794122839817000 (looks broken)
-        assert_eq!(digest, 8458603761268706511);
     }
 
     #[test]

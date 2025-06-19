@@ -7,10 +7,9 @@ use std::time::Duration;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ProtocolState;
-use connection::{ConnectionWatcher, NodeStatusUpdate};
-
 use cait_sith::protocol::Participant;
-use tokio::sync::RwLock;
+use connection::{ConnectionWatcher, NodeStatusUpdate};
+use tokio::sync::{mpsc, RwLock};
 
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "mesh_options")]
@@ -35,6 +34,10 @@ pub struct MeshState {
     /// Participants that are active in the network; as in they respond when pinged.
     pub active: Participants,
 
+    /// Participants that are currently out-of-sync, they will become active
+    /// once we finished synchronization.
+    pub need_sync: Participants,
+
     /// Participants that can be selected for a new protocol invocation.
     pub stable: BTreeSet<Participant>,
 }
@@ -49,6 +52,7 @@ impl MeshState {
             NodeStatusUpdate::Inactive(info) => {
                 self.active.insert(&participant, info);
             }
+            NodeStatusUpdate::Syncing(_info) => {}
             NodeStatusUpdate::Offline => {
                 self.active.remove(&participant);
                 self.stable.remove(&participant);
@@ -65,10 +69,15 @@ pub struct Mesh {
     state: Arc<RwLock<MeshState>>,
     ping_interval: Duration,
     conn_update: ConnectionWatcher,
+    synced_peer_rx: mpsc::Receiver<Participant>,
 }
 
 impl Mesh {
-    pub fn new(client: &NodeClient, options: Options) -> Self {
+    pub fn new(
+        client: &NodeClient,
+        options: Options,
+        synced_peer_rx: mpsc::Receiver<Participant>,
+    ) -> Self {
         let ping_interval = Duration::from_millis(options.ping_interval);
         let connections = connection::Pool::new(client, ping_interval);
         let conn_update = connections.watcher();
@@ -77,6 +86,7 @@ impl Mesh {
             state: Arc::new(RwLock::new(MeshState::default())),
             ping_interval,
             conn_update,
+            synced_peer_rx,
         }
     }
 
@@ -89,20 +99,31 @@ impl Mesh {
     }
 
     pub async fn run(mut self, contract_state: Arc<RwLock<Option<ProtocolState>>>) {
-        let mut contract_change_interval = tokio::time::interval(self.ping_interval / 2);
+        let mut interval = tokio::time::interval(self.ping_interval / 2);
+        let state = self.state.clone();
         tokio::spawn(async move {
             loop {
                 let (p, status) = self.conn_update.next().await;
                 tracing::info!(?p, ?status, "mesh connection status changed");
-                let mut state = self.state.write().await;
+                let mut state = state.write().await;
                 state.update(p, status);
             }
         });
 
         loop {
-            contract_change_interval.tick().await;
-            if let Some(contract) = &*contract_state.read().await {
-                self.connections.connect(contract).await;
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Some(contract) = &*contract_state.read().await {
+                        self.connections.connect(contract).await;
+                    }
+                }
+                Some(participant) = self.synced_peer_rx.recv() => {
+                    let mut state = self.state.write().await;
+                    if let Some(info) = state.need_sync.remove(&participant) {
+                        state.active.insert(&participant, info);
+                        state.stable.insert(participant);e
+                    }
+                }
             }
         }
     }
@@ -166,11 +187,13 @@ mod tests {
             },
         ))));
 
+        let (_sync_peer_tx, synced_peer_rx) = mpsc::channel(100);
         let mesh = Mesh::new(
             &servers.client(),
             Options {
                 ping_interval: ping_interval.as_millis() as u64,
             },
+            synced_peer_rx,
         );
 
         let state = mesh.state().clone();
@@ -231,11 +254,13 @@ mod tests {
             },
         ))));
 
+        let (_sync_peer_tx, synced_peer_rx) = mpsc::channel(100);
         let mesh = Mesh::new(
             &servers.client(),
             Options {
                 ping_interval: ping_interval.as_millis() as u64,
             },
+            synced_peer_rx,
         );
         let state = mesh.state().clone();
         let mesh_task = tokio::spawn(mesh.run(contract.clone()));

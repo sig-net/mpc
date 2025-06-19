@@ -17,6 +17,7 @@ use crate::web::StateView;
 pub enum NodeStatusUpdate {
     Active(ParticipantInfo),
     Inactive(ParticipantInfo),
+    Syncing(ParticipantInfo),
     Offline,
 }
 
@@ -27,6 +28,24 @@ enum NodeStatus {
     /// The connected node responds and is actively participating in the MPC
     /// network.
     Active,
+    /// State sync is running for node in this state.
+    ///
+    /// State sync needs to run once for every connection when a node starts.
+    /// Additionally, whenever we temporarily lose the connection, we have to
+    /// run it again before we can reliably use the peer node in a protocol.
+    ///
+    /// Note: There are two directions of "being in sync" between two nodes. But
+    /// each node only tracks it one directional.
+    ///
+    /// Example: Node A only cares about IDs it owns. Hence, a peer node B is
+    /// considered stable after A sent SyncUpdate and B responded with a
+    /// SyncView. This is all node A needs to know to make decisions about
+    /// protocols it initiates.
+    ///
+    /// The mirrored synchronization, with IDs owned by node B, should also
+    /// happen. But this is irrelevant for what node A does. Hence, only node B
+    /// tracks it.
+    Syncing,
     /// The node responds but is in an inactive NodeState, hence it is not ready
     /// for participating in any MPC protocols, yet.
     Inactive,
@@ -39,6 +58,7 @@ impl NodeStatus {
         match self {
             NodeStatus::Active => NodeStatusUpdate::Active(info.clone()),
             NodeStatus::Inactive => NodeStatusUpdate::Inactive(info.clone()),
+            NodeStatus::Syncing => NodeStatusUpdate::Syncing(info.clone()),
             NodeStatus::Offline => NodeStatusUpdate::Offline,
         }
     }
@@ -114,12 +134,21 @@ impl NodeConnection {
 
             match client.state(&info.url).await {
                 Ok(state) => {
-                    let new_status = match state {
-                        StateView::Running { .. } | StateView::Resharing { .. } => {
-                            NodeStatus::Active
-                        }
-                        StateView::Joining { .. } | StateView::NotRunning => NodeStatus::Inactive,
+                    let mut new_status = match state {
+                        StateView::Running { .. } => NodeStatus::Active,
+                        StateView::Resharing { .. }
+                        | StateView::Joining { .. }
+                        | StateView::NotRunning => NodeStatus::Inactive,
                     };
+                    if current_status == NodeStatus::Inactive && new_status == NodeStatus::Active {
+                        // Sync when we want to enter an active state
+                        //
+                        // The peer is running. But before we can reliably
+                        // use the connected node in protocols we initiate,
+                        // we need to ensure the peer has the up-to-date
+                        // data about out owned IDs.
+                        new_status = NodeStatus::Syncing;
+                    }
                     if current_status != new_status {
                         tracing::info!(?node, ?new_status, "updated with new status");
                         if let Err(err) = status.send(new_status.with_info(&info)) {

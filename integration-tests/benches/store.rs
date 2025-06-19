@@ -1,3 +1,4 @@
+use core::sync;
 use std::{sync::Arc, time::Instant};
 
 use cait_sith::{
@@ -15,10 +16,15 @@ use mpc_node::protocol::contract::{primitives::Participants, RunningContractStat
 use mpc_node::protocol::{
     presignature::Presignature, triple::Triple, ParticipantInfo, ProtocolState,
 };
+use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::NodeStateWatcher;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
+use mpc_node::sync::{SyncChannel, SyncTask};
 use near_account_id::AccountId;
-use tokio::{runtime::Runtime, sync::RwLock};
+use tokio::{
+    runtime::Runtime,
+    sync::{mpsc, RwLock},
+};
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -87,16 +93,18 @@ fn env() -> (Runtime, SyncEnv) {
                 .await;
         }
         let client = NodeClient::new(&node_client::Options::default());
+        let (synced_peer_tx, synced_peer_rx) = mpsc::channel(1024);
         let mesh = Mesh::new(
             &client,
             mpc_node::mesh::Options {
                 ping_interval: 1000,
             },
+            synced_peer_rx,
         );
 
         let sk = k256::SecretKey::random(&mut rand::thread_rng());
         let pk = sk.public_key();
-        let watcher = NodeStateWatcher::mock(
+        let watcher = ContractStateWatcher::mock(
             &node_id,
             ProtocolState::Running(RunningContractState {
                 epoch: 0,
@@ -108,6 +116,17 @@ fn env() -> (Runtime, SyncEnv) {
                 threshold,
             }),
         );
+
+        let (sync_channel, sync) = SyncTask::new(
+            &client,
+            triples.clone(),
+            presignatures.clone(),
+            mesh.state().clone(),
+            watcher.clone(),
+            synced_peer_tx,
+        );
+
+        // let sync_handle = tokio::spawn(sync.run());
 
         SyncEnv {
             threshold,

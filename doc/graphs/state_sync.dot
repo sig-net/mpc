@@ -1,0 +1,23 @@
+// State sync messages
+digraph {
+    rankdir=LR
+    node [fontsize=16 shape=box]
+    edge [fontsize=16]
+
+    subgraph response {
+        a2 [label="Node A\n(Owner)" rank=0]
+        b2 [label="Node B\n(Non-Owner)"]
+
+        b2 -> a2 [label="Sync Response\nList of P and T owned by Node A\nthat are not stored at Node B"]
+    }
+
+    subgraph request {
+        a [label="Node A\n(Owner)"]
+        b [label="Node B\n(Non-Owner)"]
+
+        a -> b [label="Sync Request\nList of P and T owned by Node A"]
+    }
+
+    {rank=same; a; a2}
+    {rank=same; b; b2}
+}

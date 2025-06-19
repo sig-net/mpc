@@ -54,7 +54,6 @@ impl Node {
     const CONTAINER_PORT: u16 = 3000;
 
     pub async fn run(
-        node_id: usize,
         ctx: &super::Context,
         cfg: &NodeConfig,
         account: &Account,
@@ -80,7 +79,6 @@ impl Node {
             .unwrap();
 
         Self::spawn(
-            node_id,
             ctx,
             NodeEnvConfig {
                 web_port: Self::CONTAINER_PORT,
@@ -106,11 +104,7 @@ impl Node {
         }
     }
 
-    pub async fn spawn(
-        node_id: usize,
-        ctx: &super::Context,
-        config: NodeEnvConfig,
-    ) -> anyhow::Result<Self> {
+    pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
             s3_region: ctx.localstack.s3_region.clone(),
@@ -119,18 +113,20 @@ impl Node {
             behind_threshold: 120,
         };
         let eth_args = EthArgs::from_config(config.cfg.eth.clone());
+        let sol_args = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
-            web_port: Self::CONTAINER_PORT,
+            web_port: Some(Self::CONTAINER_PORT),
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             indexer_options: indexer_options.clone(),
             eth: eth_args,
+            sol: sol_args,
             my_address: None,
-            debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
+            log_options: ctx.log_options.clone(),
             sign_sk: Some(config.sign_sk.clone()),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),

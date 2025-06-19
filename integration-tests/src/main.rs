@@ -27,7 +27,7 @@ enum Cli {
         eth_consensus_rpc_http_url: String,
         #[arg(long, default_value = "http://localhost:8545")]
         eth_execution_rpc_http_url: String,
-        #[arg(long, default_value = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512")]
+        #[arg(long, default_value = "e7f1725E7734CE288F8367e1Bb143E90bb3F0512")]
         eth_contract_address: String,
         #[arg(
             long,
@@ -38,6 +38,8 @@ enum Cli {
         eth_network: String,
         #[arg(long, default_value = "/tmp/data")]
         eth_helios_data_path: String,
+        #[arg(long, default_value = "10000")]
+        eth_refresh_finalized_interval: u64,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
@@ -62,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
             eth_account_sk,
             eth_network,
             eth_helios_data_path,
+            eth_refresh_finalized_interval,
         } => {
             println!(
                 "Setting up an environment with {} nodes, {} threshold ...",
@@ -77,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
                     contract_address: eth_contract_address,
                     network: eth_network,
                     helios_data_path: eth_helios_data_path,
+                    refresh_finalized_interval: eth_refresh_finalized_interval,
                 }),
                 ..Default::default()
             };

@@ -50,7 +50,6 @@ impl fmt::Debug for NodeEnvConfig {
 
 impl Node {
     pub async fn dry_run(
-        node_id: usize,
         ctx: &super::Context,
         account: &Account,
         cfg: &NodeConfig,
@@ -70,6 +69,7 @@ impl Node {
             behind_threshold: 120,
         };
         let eth = mpc_node::indexer_eth::EthArgs::from_config(cfg.eth.clone());
+        let sol = mpc_node::indexer_sol::SolArgs::from_config(cfg.sol.clone());
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = mpc_node::cli::Cli::Start {
@@ -77,14 +77,15 @@ impl Node {
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
             account_sk: account_sk.to_string().parse()?,
-            web_port,
+            web_port: Some(web_port),
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
             sign_sk: Some(sign_sk.clone()),
             eth,
+            sol,
             indexer_options,
             my_address: None,
-            debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
+            log_options: ctx.log_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 cfg.protocol.clone(),
             )?)),
@@ -118,7 +119,6 @@ impl Node {
     }
 
     pub async fn run(
-        node_id: usize,
         ctx: &super::Context,
         cfg: &NodeConfig,
         account: &Account,
@@ -141,8 +141,13 @@ impl Node {
         );
         LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc).await?;
 
+        let mut cfg = cfg.clone();
+        if let Some(ref mut eth_config) = cfg.eth {
+            eth_config.helios_data_path =
+                format!("{}_{}", eth_config.helios_data_path, account.id());
+        }
+
         Self::spawn(
-            node_id,
             ctx,
             NodeEnvConfig {
                 web_port,
@@ -156,11 +161,7 @@ impl Node {
         .await
     }
 
-    pub async fn spawn(
-        node_id: usize,
-        ctx: &super::Context,
-        config: NodeEnvConfig,
-    ) -> anyhow::Result<Self> {
+    pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
         let indexer_options = mpc_node::indexer::Options {
             s3_bucket: ctx.localstack.s3_bucket.clone(),
@@ -171,19 +172,21 @@ impl Node {
         };
 
         let eth = EthArgs::from_config(config.cfg.eth.clone());
+        let sol = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
-            web_port,
+            web_port: Some(web_port),
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             sign_sk: Some(config.sign_sk.clone()),
             eth,
+            sol,
             indexer_options,
             my_address: None,
-            debug_id: Some(node_id),
             storage_options: ctx.storage_options.clone(),
+            log_options: ctx.log_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),
             )?)),
