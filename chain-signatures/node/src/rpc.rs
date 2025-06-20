@@ -886,7 +886,7 @@ async fn try_publish_eth(
         &eth.contract,
         &params,
         40000,
-        &[action.request.indexed.id.clone()],
+        &[action.request.indexed.id],
         near_account_id,
     )
     .await?;
@@ -895,7 +895,7 @@ async fn try_publish_eth(
         eth.contract.provider(),
         tx_hash,
         near_account_id,
-        vec![action.request.indexed.id.clone()],
+        vec![action.request.indexed.id],
     )
     .await?;
 
@@ -957,7 +957,7 @@ async fn try_batch_publish_eth(
     let num_requests = actions.len();
     let sign_ids = actions
         .iter()
-        .map(|action| action.request.indexed.id.clone())
+        .map(|action| action.request.indexed.id)
         .collect::<Vec<_>>();
     for action in actions {
         let signature = signatures
@@ -1060,7 +1060,7 @@ async fn execute_batch_publish(
             );
             return;
         };
-        signatures.insert(action.request.indexed.id.clone(), signature);
+        signatures.insert(action.request.indexed.id, signature);
     }
 
     let mut retry_count = 0;
