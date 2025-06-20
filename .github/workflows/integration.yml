@@ -166,7 +166,7 @@ jobs:
           echo "duration=$duration" >> $GITHUB_OUTPUT
           echo "::endgroup::"
           
-      - name: Configure AWS
+      - name: Config AWS
         id: aws-config
         run: |
           echo "::group::Configure AWS"
