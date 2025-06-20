@@ -346,7 +346,7 @@ impl TripleSpawner {
 
         match internal_action {
             PositInternalAction::None => {}
-            PositInternalAction::Rejected => {}
+            PositInternalAction::Abort => {}
             PositInternalAction::Reply(action) => {
                 self.msg
                     .send(
