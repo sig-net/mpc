@@ -303,7 +303,7 @@ jobs:
             **OS:** \`${{ matrix.os }}\`  
             **Total Measured Time:** ${formatDuration(totalDuration)}  
             **Workflow Duration:** ${formatDuration(workflowDuration)}  
-            **Commit:** \`${{ github.sha }}\`.substring(0, 8)
+            **Commit:** \`${github.sha.substring(0, 8)}\`
             
             ### 📊 Step Performance
             
