@@ -286,10 +286,6 @@ jobs:
             const totalDuration = validSteps.reduce((sum, step) => sum + parseInt(step.duration || 0), 0);
             const workflowDuration = Date.now() - parseInt(process.env.WORKFLOW_START_TIME || Date.now());
             
-            // Find bottlenecks
-            const sortedSteps = validSteps.sort((a, b) => parseInt(b.duration) - parseInt(a.duration));
-            const slowestStep = sortedSteps[0];
-            
             // Format duration helper
             function formatDuration(ms) {
               if (ms > 60000) return `${(ms/60000).toFixed(1)}m`;
@@ -300,10 +296,8 @@ jobs:
             // Generate report
             let report = `## 🚀 Integration Test Performance Report
             
-            **OS:** \`${{ matrix.os }}\`  
             **Total Measured Time:** ${formatDuration(totalDuration)}  
             **Workflow Duration:** ${formatDuration(workflowDuration)}  
-            **Commit:** \`${github.sha.substring(0, 8)}\`
             
             ### 📊 Step Performance
             
@@ -321,11 +315,6 @@ jobs:
             // Add insights
             report += `\n\n### 🎯 Performance Insights\n`;
             
-            if (slowestStep) {
-              const slowestPercent = ((parseInt(slowestStep.duration) / totalDuration) * 100).toFixed(1);
-              report += `\n- **Bottleneck:** ${slowestStep.name} (${slowestPercent}% of total time)`;
-            }
-            
             // Build vs Test time analysis
             const buildSteps = validSteps.filter(s => s.name.toLowerCase().includes('build'));
             const testSteps = validSteps.filter(s => s.name.toLowerCase().includes('test') || s.name.toLowerCase().includes('run'));
@@ -338,15 +327,6 @@ jobs:
             report += `\n- **Setup Time:** ${formatDuration(setupTime)} (${((setupTime/totalDuration)*100).toFixed(1)}%)`;
             report += `\n- **Build Time:** ${formatDuration(buildTime)} (${((buildTime/totalDuration)*100).toFixed(1)}%)`;
             report += `\n- **Test Time:** ${formatDuration(testTime)} (${((testTime/totalDuration)*100).toFixed(1)}%)`;
-            
-            // Performance warnings
-            if (totalDuration > 1200000) { // 20 minutes
-              report += `\n- ⚠️ **Long workflow:** Consider parallelizing or optimizing slow steps`;
-            }
-            
-            if (buildTime > testTime * 2) {
-              report += `\n- 🔨 **Build-heavy:** Build time is significantly longer than test time`;
-            }
             
             console.log(report);
             
