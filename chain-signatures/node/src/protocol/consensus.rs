@@ -532,8 +532,8 @@ impl ConsensusProtocol for RunningState {
                                 self.participants = contract_state.participants;
                             } else {
                                 tracing::warn!(
-                                "running(running): ... but we are not a participant anymore, rejoining...",
-                            );
+                                    "running(running): ... but we are not a participant anymore, rejoining...",
+                                );
                                 return NodeState::Joining(JoiningState {
                                     participants: contract_state.participants,
                                     public_key: contract_state.public_key,
@@ -542,10 +542,10 @@ impl ConsensusProtocol for RunningState {
                         }
                         if contract_state.threshold != self.threshold {
                             tracing::warn!(
-                            node_threshold = self.threshold,
-                            contract_threshold = contract_state.threshold,
-                            "running(running): our threshold does not match contract, overriding",
-                        );
+                                node_threshold = self.threshold,
+                                contract_threshold = contract_state.threshold,
+                                "running(running): our threshold does not match contract, overriding",
+                            );
                             self.threshold = contract_state.threshold;
                         }
                         NodeState::Running(self)
