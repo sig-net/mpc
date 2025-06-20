@@ -61,13 +61,7 @@ impl Default for NodeConfig {
             },
             eth: None,
             // TODO solana: remove hardcoded values
-            sol: Some(SolConfig {
-                account_sk: "fS5jS6X5qvaquBV1bg2YWBdYeCiRSUwNAdNpgNkjS72oNxUJcZJZduaq2oCcXJb8erTbtqqq4wxriUmRJk7bMDw"
-                    .to_string(),
-                rpc_http_url: "https://api.devnet.solana.com".to_string(),
-                rpc_ws_url: "wss://api.devnet.solana.com/".to_string(),
-                program_address: "BtGZEs9ZJX3hAQuY5er8iyWrGsrPRZYupEtVSS129XKo".to_string(),
-            }),
+            sol: None,
         }
     }
 }

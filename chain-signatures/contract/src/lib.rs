@@ -177,7 +177,7 @@ impl VersionedMpcContract {
 
         // lock the request such that it can't be submitted again until released either by erroring out
         // or by finishing the request when the signature is submitted.
-        self.lock_request(sign_id.clone(), payload, epsilon);
+        self.lock_request(sign_id, payload, epsilon);
 
         let request = InternalSignRequest {
             id: sign_id,

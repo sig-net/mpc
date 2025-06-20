@@ -6,16 +6,13 @@ use super::state::{
 use super::MpcSignProtocol;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::presignature::PresignatureSpawnerTask;
-use crate::protocol::signature::SignatureManager;
+use crate::protocol::signature::SignatureSpawnerTask;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 
 use std::cmp::Ordering;
-use std::sync::Arc;
-
-use tokio::sync::RwLock;
 
 pub(crate) trait ConsensusProtocol {
     async fn advance(self, ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState;
@@ -97,16 +94,13 @@ impl ConsensusProtocol for StartedState {
                                 &public_key,
                             );
 
-                            let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
+                            let sign_task = SignatureSpawnerTask::run(
                                 me,
-                                &ctx.my_account_id,
                                 contract_state.threshold,
-                                public_key,
                                 epoch,
-                                ctx.sign_rx.clone(),
-                                &ctx.presignature_storage,
-                                ctx.msg_channel.clone(),
-                            )));
+                                ctx,
+                                public_key,
+                            );
 
                             NodeState::Running(RunningState {
                                 epoch,
@@ -117,7 +111,7 @@ impl ConsensusProtocol for StartedState {
                                 public_key,
                                 triple_task,
                                 presign_task,
-                                signature_manager,
+                                sign_task,
                             })
                         }
                     }
@@ -391,17 +385,13 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         &self.private_share,
                         &self.public_key,
                     );
-
-                    let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
+                    let sign_task = SignatureSpawnerTask::run(
                         me,
-                        &ctx.my_account_id,
                         self.threshold,
-                        self.public_key,
                         self.epoch,
-                        ctx.sign_rx.clone(),
-                        &ctx.presignature_storage,
-                        ctx.msg_channel.clone(),
-                    )));
+                        ctx,
+                        self.public_key,
+                    );
 
                     NodeState::Running(RunningState {
                         epoch: self.epoch,
@@ -412,7 +402,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         public_key: self.public_key,
                         triple_task,
                         presign_task,
-                        signature_manager,
+                        sign_task,
                     })
                 }
             },
@@ -542,8 +532,8 @@ impl ConsensusProtocol for RunningState {
                                 self.participants = contract_state.participants;
                             } else {
                                 tracing::warn!(
-                                "running(running): ... but we are not a participant anymore, rejoining...",
-                            );
+                                    "running(running): ... but we are not a participant anymore, rejoining...",
+                                );
                                 return NodeState::Joining(JoiningState {
                                     participants: contract_state.participants,
                                     public_key: contract_state.public_key,
@@ -552,10 +542,10 @@ impl ConsensusProtocol for RunningState {
                         }
                         if contract_state.threshold != self.threshold {
                             tracing::warn!(
-                            node_threshold = self.threshold,
-                            contract_threshold = contract_state.threshold,
-                            "running(running): our threshold does not match contract, overriding",
-                        );
+                                node_threshold = self.threshold,
+                                contract_threshold = contract_state.threshold,
+                                "running(running): our threshold does not match contract, overriding",
+                            );
                             self.threshold = contract_state.threshold;
                         }
                         NodeState::Running(self)

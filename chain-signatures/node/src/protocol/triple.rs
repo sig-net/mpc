@@ -219,9 +219,7 @@ impl TripleGenerator {
                         success_owned_counts.inc();
                     }
 
-                    self.msg.filter_triple(self.id).await;
                     self.slot.insert(triple, triple_owner).await;
-
                     break;
                 }
             }
@@ -233,7 +231,10 @@ impl Drop for TripleGenerator {
     fn drop(&mut self) {
         let id = self.id;
         let msg = self.msg.clone();
-        tokio::spawn(msg.unsubscribe_triple(id));
+        tokio::spawn(async move {
+            msg.unsubscribe_triple(id).await;
+            msg.filter_triple(id).await;
+        });
     }
 }
 
