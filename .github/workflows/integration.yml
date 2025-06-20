@@ -7,7 +7,7 @@ on:
     paths:
       - integration-tests/**
       - chain-signatures/**
-      - .github/workflows/**
+      - .github/workflows/integration.yml
 env:
   RUSTFLAGS: -D warnings
 jobs:
