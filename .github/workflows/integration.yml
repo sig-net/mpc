@@ -259,7 +259,7 @@ jobs:
         with:
           script: |
             const steps = [
-              { name: 'Docker Install', duration: '${{ steps.docker-install.outputs.duration }}', condition: '${{ matrix.os == "macos-latest-xl" }}' },
+              { name: 'Docker Install', duration: '${{ steps.docker-install.outputs.duration }}' },
               { name: 'Docker Login', duration: '${{ steps.docker-login.outputs.duration }}' },
               { name: 'Pull Docker Images', duration: '${{ steps.docker-pull.outputs.duration }}' },
               { name: 'Install Stable Toolchain', duration: '${{ steps.toolchain-stable.outputs.duration }}' },
@@ -279,8 +279,7 @@ jobs:
             const validSteps = steps.filter(step => 
               step.duration && 
               step.duration !== '' && 
-              step.duration !== 'undefined' &&
-              (!step.condition || step.condition === 'true')
+              step.duration !== 'undefined'
             );
             
             // Calculate total time
