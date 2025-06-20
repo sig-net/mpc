@@ -266,8 +266,8 @@ impl Drop for PresignatureGenerator {
         let id = self.id;
         let msg = self.msg.clone();
         tokio::spawn(async move {
-            msg.filter_presignature(id).await;
             msg.unsubscribe_presignature(id).await;
+            msg.filter_presignature(id).await;
         });
     }
 }
@@ -421,7 +421,7 @@ impl PresignatureSpawner {
                         ?participants,
                         is_proposer,
                         ?err,
-                        "unable to start triple generation on START"
+                        "unable to start presignature generation on START"
                     );
                 }
             }
@@ -514,12 +514,10 @@ impl PresignatureSpawner {
         timeout: Duration,
     ) -> Result<(), InitializationError> {
         let (owner, triples) = match positor {
-            Positor::Proposer(proposer, triples) => {
-                (proposer, PotentialTriples::Available(triples))
-            }
+            Positor::Proposer(proposer, triples) => (proposer, PendingTriples::Available(triples)),
             Positor::Deliberator(proposer) => (
                 proposer,
-                PotentialTriples::InStorage(id.t0, id.t1, self.triples.clone()),
+                PendingTriples::InStorage(id.t0, id.t1, self.triples.clone()),
             ),
         };
         tracing::info!(
@@ -737,12 +735,12 @@ impl Drop for PresignatureSpawnerTask {
 /// Represents two triples that are either available immediately or will eventually be available within
 /// the storage, in which case the `fetch` method will block until they are available alongside a timeout.
 #[allow(clippy::large_enum_variant)]
-enum PotentialTriples {
+enum PendingTriples {
     Available(TriplesTaken),
     InStorage(TripleId, TripleId, TripleStorage),
 }
 
-impl PotentialTriples {
+impl PendingTriples {
     async fn fetch(
         self,
         me: Participant,

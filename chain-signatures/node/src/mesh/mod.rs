@@ -121,7 +121,7 @@ impl Mesh {
                     let mut state = self.state.write().await;
                     if let Some(info) = state.need_sync.remove(&participant) {
                         state.active.insert(&participant, info);
-                        state.stable.insert(participant);e
+                        state.stable.insert(participant);
                     }
                 }
             }

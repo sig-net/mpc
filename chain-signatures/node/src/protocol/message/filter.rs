@@ -17,6 +17,7 @@ pub(crate) struct MessageFilter {
     filter: lru::LruCache<(Protocols, u64), ()>,
 }
 
+
 impl MessageFilter {
     pub fn new(filter_rx: mpsc::Receiver<(Protocols, u64)>) -> Self {
         Self {
