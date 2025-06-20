@@ -151,7 +151,7 @@ jobs:
           echo "duration=$duration" >> $GITHUB_OUTPUT
           echo "✅ Cache restored in ${duration}ms"
           
-      - name: Install toxiproxy-server
+      - name: Install toxiproxy
         id: toxiproxy-install
         run: |
           echo "::group::Install toxiproxy-server"
