@@ -1,5 +1,4 @@
 name: Integration
-
 on:
   push:
     branches:
@@ -8,7 +7,6 @@ on:
     paths:
       - integration-tests/**
       - chain-signatures/**
-
 env:
   RUSTFLAGS: -D warnings
 jobs:
@@ -19,51 +17,122 @@ jobs:
         # FIXME: macos-latest-xl is disabled since colima is erroring out right now
         os: [warp-ubuntu-latest-x64-4x]
     runs-on: ${{ matrix.os }}
-
     steps:
       - uses: actions/checkout@v3
-
+      
+      - name: Start timing
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('WORKFLOW_START_TIME', Date.now());
+      
       - name: Install Docker
         if: ${{ matrix.os == 'macos-latest-xl' }}
+        id: docker-install
         run: |
+          echo "::group::Install Docker"
+          start_time=$(date +%s%3N)
+          
           brew install docker
           colima start
           # Colima does not expose the Docker socket by default, we have to symlink it
           # https://github.com/abiosoft/colima/blob/main/docs/FAQ.md#cannot-connect-to-the-docker-daemon-at-unixvarrundockersock-is-the-docker-daemon-running
           sudo ln -sf $HOME/.colima/default/docker.sock /var/run/docker.sock
-
+          
+          end_time=$(date +%s%3N)
+          duration=$((end_time - start_time))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+          
+      - name: Start Docker Login Timer
+        run: echo "DOCKER_LOGIN_START=$(date +%s%3N)" >> $GITHUB_ENV
+        
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v1
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Pull Relayer, Sandbox, Redis Docker Images
+          
+      - name: End Docker Login Timer
+        id: docker-login
         run: |
+          end_time=$(date +%s%3N)
+          duration=$((end_time - DOCKER_LOGIN_START))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "✅ Docker Login completed in ${duration}ms"
+          
+      - name: Pull Docker Images
+        id: docker-pull
+        run: |
+          echo "::group::Pull Docker Images"
+          start_time=$(date +%s%3N)
+          
           docker pull ghcr.io/near/near-lake-indexer:node-2.3.0
           docker pull localstack/localstack:3.5.0
           docker pull redis:7.4.2
-
+          
+          end_time=$(date +%s%3N)
+          duration=$((end_time - start_time))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+          
+      - name: Start Stable Toolchain Timer
+        run: echo "TOOLCHAIN_STABLE_START=$(date +%s%3N)" >> $GITHUB_ENV
+        
       - name: Install stable toolchain
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: stable
-
+          
+      - name: End Stable Toolchain Timer
+        id: toolchain-stable
+        run: |
+          end_time=$(date +%s%3N)
+          duration=$((end_time - TOOLCHAIN_STABLE_START))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "✅ Stable Toolchain installed in ${duration}ms"
+          
+      - name: Start Rust Install Timer
+        run: echo "RUST_INSTALL_START=$(date +%s%3N)" >> $GITHUB_ENV
+        
       - name: Install Rust (1.81.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: 1.81.0
           target: wasm32-unknown-unknown
-
+          
+      - name: End Rust Install Timer
+        id: rust-install
+        run: |
+          end_time=$(date +%s%3N)
+          duration=$((end_time - RUST_INSTALL_START))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "✅ Rust 1.81.0 installed in ${duration}ms"
+          
+      - name: Start Node.js Install Timer
+        run: echo "NODE_INSTALL_START=$(date +%s%3N)" >> $GITHUB_ENV
+        
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-
-      - uses: WarpBuilds/cache@v1
+          
+      - name: End Node.js Install Timer
+        id: node-install
+        run: |
+          end_time=$(date +%s%3N)
+          duration=$((end_time - NODE_INSTALL_START))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "✅ Node.js installed in ${duration}ms"
+          
+      - name: Start Cache Restore Timer
+        run: echo "CACHE_RESTORE_START=$(date +%s%3N)" >> $GITHUB_ENV
+        
+      - name: Restore Cache
+        uses: WarpBuilds/cache@v1
         with:
           path: |
             ~/.cargo/bin/
@@ -73,36 +142,224 @@ jobs:
             target/
           key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Install toxiproxy-server
+          
+      - name: End Cache Restore Timer
+        id: cache-restore
         run: |
+          end_time=$(date +%s%3N)
+          duration=$((end_time - CACHE_RESTORE_START))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "✅ Cache restored in ${duration}ms"
+          
+      - name: Install toxiproxy-server
+        id: toxiproxy-install
+        run: |
+          echo "::group::Install toxiproxy-server"
+          start_time=$(date +%s%3N)
+          
           wget -O toxiproxy-2.9.0_linux_amd64.deb https://github.com/Shopify/toxiproxy/releases/download/v2.9.0/toxiproxy_2.9.0_linux_amd64.deb
           sudo dpkg -i toxiproxy-2.9.0_linux_amd64.deb
-
+          
+          end_time=$(date +%s%3N)
+          duration=$((end_time - start_time))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+          
       - name: Configure AWS
+        id: aws-config
         run: |
+          echo "::group::Configure AWS"
+          start_time=$(date +%s%3N)
+          
           # Fake AWS configuration for LocalStack
           aws configure set region us-east-1
           aws --profile default configure set aws_access_key_id "123"
           aws --profile default configure set aws_secret_access_key "456"
-
+          
+          end_time=$(date +%s%3N)
+          duration=$((end_time - start_time))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+          
       - name: Build Chain-Signatures Contract
-        run: ./build-contract.sh
-
+        id: contract-build
+        run: |
+          echo "::group::Build Chain-Signatures Contract"
+          start_time=$(date +%s%3N)
+          
+          ./build-contract.sh
+          
+          end_time=$(date +%s%3N)
+          duration=$((end_time - start_time))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+          
       - name: Build eth contract
+        id: eth-contract-build
         working-directory: ./chain-signatures/contract-eth
-        run: npm i && npx hardhat compile
-
+        run: |
+          echo "::group::Build eth contract"
+          start_time=$(date +%s%3N)
+          
+          npm i && npx hardhat compile
+          
+          end_time=$(date +%s%3N)
+          duration=$((end_time - start_time))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+          
       - name: Build Chain-Signatures Node
-        run: cargo build -p mpc-node --release
-
+        id: node-build
+        run: |
+          echo "::group::Build Chain-Signatures Node"
+          start_time=$(date +%s%3N)
+          
+          cargo build -p mpc-node --release
+          
+          end_time=$(date +%s%3N)
+          duration=$((end_time - start_time))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+          
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
-        run: cargo build -p integration-tests --tests
-
-      - name: Test
-        run: cargo test -p integration-tests --jobs 1 -- --test-threads 1
+        id: tests-build
+        run: |
+          echo "::group::Build Chain-Signatures Integration Tests"
+          start_time=$(date +%s%3N)
+          
+          cargo build -p integration-tests --tests
+          
+          end_time=$(date +%s%3N)
+          duration=$((end_time - start_time))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+          
+      - name: Run Integration Tests
+        id: tests-run
+        run: |
+          echo "::group::Run Integration Tests"
+          start_time=$(date +%s%3N)
+          
+          cargo test -p integration-tests --jobs 1 -- --test-threads 1
+          
+          end_time=$(date +%s%3N)
+          duration=$((end_time - start_time))
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
+          
+      - name: Generate Performance Report
+        uses: actions/github-script@v7
+        if: always()  # Run even if tests fail
+        with:
+          script: |
+            const steps = [
+              { name: 'Docker Install', duration: '${{ steps.docker-install.outputs.duration }}', condition: '${{ matrix.os == "macos-latest-xl" }}' },
+              { name: 'Docker Login', duration: '${{ steps.docker-login.outputs.duration }}' },
+              { name: 'Pull Docker Images', duration: '${{ steps.docker-pull.outputs.duration }}' },
+              { name: 'Install Stable Toolchain', duration: '${{ steps.toolchain-stable.outputs.duration }}' },
+              { name: 'Install Rust 1.81.0', duration: '${{ steps.rust-install.outputs.duration }}' },
+              { name: 'Install Node.js', duration: '${{ steps.node-install.outputs.duration }}' },
+              { name: 'Restore Cache', duration: '${{ steps.cache-restore.outputs.duration }}' },
+              { name: 'Install Toxiproxy', duration: '${{ steps.toxiproxy-install.outputs.duration }}' },
+              { name: 'Configure AWS', duration: '${{ steps.aws-config.outputs.duration }}' },
+              { name: 'Build Contract', duration: '${{ steps.contract-build.outputs.duration }}' },
+              { name: 'Build ETH Contract', duration: '${{ steps.eth-contract-build.outputs.duration }}' },
+              { name: 'Build Node', duration: '${{ steps.node-build.outputs.duration }}' },
+              { name: 'Build Tests', duration: '${{ steps.tests-build.outputs.duration }}' },
+              { name: 'Run Tests', duration: '${{ steps.tests-run.outputs.duration }}' }
+            ];
+            
+            // Filter out steps that didn't run or have no duration
+            const validSteps = steps.filter(step => 
+              step.duration && 
+              step.duration !== '' && 
+              step.duration !== 'undefined' &&
+              (!step.condition || step.condition === 'true')
+            );
+            
+            // Calculate total time
+            const totalDuration = validSteps.reduce((sum, step) => sum + parseInt(step.duration || 0), 0);
+            const workflowDuration = Date.now() - parseInt(process.env.WORKFLOW_START_TIME || Date.now());
+            
+            // Find bottlenecks
+            const sortedSteps = validSteps.sort((a, b) => parseInt(b.duration) - parseInt(a.duration));
+            const slowestStep = sortedSteps[0];
+            
+            // Format duration helper
+            function formatDuration(ms) {
+              if (ms > 60000) return `${(ms/60000).toFixed(1)}m`;
+              if (ms > 1000) return `${(ms/1000).toFixed(1)}s`;
+              return `${ms}ms`;
+            }
+            
+            // Generate report
+            let report = `## 🚀 Integration Test Performance Report
+            
+            **OS:** \`${{ matrix.os }}\`  
+            **Total Measured Time:** ${formatDuration(totalDuration)}  
+            **Workflow Duration:** ${formatDuration(workflowDuration)}  
+            **Commit:** \`${{ github.sha }}\`.substring(0, 8)
+            
+            ### 📊 Step Performance
+            
+            | Step | Duration | % of Total |
+            |------|----------|------------|`;
+            
+            validSteps.forEach(step => {
+              const duration = parseInt(step.duration);
+              const percentage = totalDuration > 0 ? ((duration / totalDuration) * 100).toFixed(1) : '0.0';
+              const emoji = duration > 120000 ? '🐌' : duration > 60000 ? '⚠️' : '✅';
+              
+              report += `\n| ${emoji} ${step.name} | ${formatDuration(duration)} | ${percentage}% |`;
+            });
+            
+            // Add insights
+            report += `\n\n### 🎯 Performance Insights\n`;
+            
+            if (slowestStep) {
+              const slowestPercent = ((parseInt(slowestStep.duration) / totalDuration) * 100).toFixed(1);
+              report += `\n- **Bottleneck:** ${slowestStep.name} (${slowestPercent}% of total time)`;
+            }
+            
+            // Build vs Test time analysis
+            const buildSteps = validSteps.filter(s => s.name.toLowerCase().includes('build'));
+            const testSteps = validSteps.filter(s => s.name.toLowerCase().includes('test') || s.name.toLowerCase().includes('run'));
+            const setupSteps = validSteps.filter(s => s.name.toLowerCase().includes('install') || s.name.toLowerCase().includes('pull') || s.name.toLowerCase().includes('cache'));
+            
+            const buildTime = buildSteps.reduce((sum, step) => sum + parseInt(step.duration || 0), 0);
+            const testTime = testSteps.reduce((sum, step) => sum + parseInt(step.duration || 0), 0);
+            const setupTime = setupSteps.reduce((sum, step) => sum + parseInt(step.duration || 0), 0);
+            
+            report += `\n- **Setup Time:** ${formatDuration(setupTime)} (${((setupTime/totalDuration)*100).toFixed(1)}%)`;
+            report += `\n- **Build Time:** ${formatDuration(buildTime)} (${((buildTime/totalDuration)*100).toFixed(1)}%)`;
+            report += `\n- **Test Time:** ${formatDuration(testTime)} (${((testTime/totalDuration)*100).toFixed(1)}%)`;
+            
+            // Performance warnings
+            if (totalDuration > 1200000) { // 20 minutes
+              report += `\n- ⚠️ **Long workflow:** Consider parallelizing or optimizing slow steps`;
+            }
+            
+            if (buildTime > testTime * 2) {
+              report += `\n- 🔨 **Build-heavy:** Build time is significantly longer than test time`;
+            }
+            
+            console.log(report);
+            
+            // Comment on PR if this is a pull request
+            if (context.eventName === 'pull_request') {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: report
+              });
+            }
+            
+            // Set step summary
+            core.summary.addRaw(report);
+            core.summary.write();
