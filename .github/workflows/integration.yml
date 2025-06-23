@@ -8,6 +8,9 @@ on:
       - integration-tests/**
       - chain-signatures/**
       - .github/workflows/integration.yml
+permissions:
+  issues: write
+  pull-requests: write
 env:
   RUSTFLAGS: -D warnings
 jobs:
