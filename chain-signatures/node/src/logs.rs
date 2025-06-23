@@ -227,7 +227,6 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
             .with_filter(EnvFilter::from_default_env());
 
         tracing_subscriber::registry()
-            .with(log_fmt_layer)
             .with(log_otlp_layer)
             .with(OpenTelemetryLayer::new(tracer_otlp))
             .with(log_stackdriver_layer)
