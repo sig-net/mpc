@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot, RwLock};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use near_account_id::AccountId;
 
@@ -619,11 +619,13 @@ pub struct SignatureSpawner {
     /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
     /// Ongoing signature generation protocols.
-    ongoing: JoinMap<SignId, Result<(), SignError>>,
+    ongoing: JoinMap<(SignId, PresignatureId), Result<(), SignError>>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
     /// The protocol posits that are currently in progress.
     posits: Posits<(SignId, PresignatureId), PresignatureTaken>,
+    /// The protocol posits that are currently pending to be processed.
+    pending_posits: JoinSet<Option<SignRequest>>,
 
     me: Participant,
     my_account_id: AccountId,
@@ -652,6 +654,7 @@ impl SignatureSpawner {
             ongoing: JoinMap::new(),
             sign_queue: SignQueue::new(me, sign_rx),
             posits: Posits::new(me),
+            pending_posits: JoinSet::new(),
             me,
             my_account_id: my_account_id.clone(),
             threshold,
@@ -706,13 +709,15 @@ impl SignatureSpawner {
         action: PositAction,
         cfg: ProtocolConfig,
     ) {
-        let internal_action = if self.ongoing.contains_key(&sign_id) {
+        // TODO: need to actually get the request here before proceeding to process the posit.
+
+        let internal_action = if self.ongoing.contains_key(&(sign_id, presignature_id)) {
             tracing::warn!(
                 ?sign_id,
                 presignature_id,
                 "signature is already in the ongoing generation"
             );
-            PositInternalAction::None
+            PositInternalAction::Reply(PositAction::Reject)
         } else {
             self.posits
                 .act((sign_id, presignature_id), from, self.threshold, &action)
@@ -816,7 +821,7 @@ impl SignatureSpawner {
             generator.run(me, epoch, my_account_id).await
         };
 
-        self.ongoing.spawn(sign_id, task);
+        self.ongoing.spawn((sign_id, presignature_id), task);
     }
 
     async fn handle_requests(&mut self, stable: &[Participant], cfg: &ProtocolConfig) {
@@ -892,19 +897,26 @@ impl SignatureSpawner {
         loop {
             tokio::select! {
                 Some((sign_id, presignature_id, from, action)) = posits.recv() => {
+
                     let cfg = {
                         let cfg = cfg.read().await;
                         cfg.protocol.clone()
                     };
+                    let request = self.sign_queue.get_or_pending(&sign_id);
+                    let timeout = Duration::from_millis(cfg.signature.generation_timeout);
+                    self.pending_posits.spawn(async move {
+                        let request = request.fetch(timeout).await;
+                        request
+                    });
+
                     self.process_posit(sign_id, presignature_id, from, action, cfg).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
-                    let (sign_id, result) = match result {
+                    let ((sign_id, _presignature_id), result) = match result {
                         Ok(outcome) => outcome,
-                        Err(sign_id) => {
-                            tracing::warn!(?sign_id, "signature generation task interrupted");
-                            self.sign_queue.remove(sign_id);
+                        Err((sign_id, presignature_id)) => {
+                            tracing::warn!(?sign_id, presignature_id, "signature generation task interrupted");
                             continue;
                         }
                     };
