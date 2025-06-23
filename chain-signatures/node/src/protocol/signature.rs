@@ -319,12 +319,11 @@ impl SignQueue {
         }
     }
 
-    pub fn expire(&mut self) {
+    pub fn expire(&mut self, cfg: &ProtocolConfig) {
         self.requests.retain(|_, request| {
-            request
-                .indexed
-                .timestamp_sign_queue
-                .is_none_or(|t| t.elapsed() < request.indexed.total_timeout)
+            request.indexed.timestamp_sign_queue.is_none_or(|t| {
+                t.elapsed() < Duration::from_millis(cfg.signature.generation_timeout_total)
+            })
         });
         self.my_requests.retain(|id| {
             let Some(request) = self.requests.get(id) else {
@@ -821,7 +820,7 @@ impl SignatureSpawner {
         self.ongoing.spawn(sign_id, task);
     }
 
-    async fn handle_requests(&mut self, stable: &[Participant]) {
+    async fn handle_requests(&mut self, stable: &[Participant], cfg: &ProtocolConfig) {
         if stable.len() < self.threshold {
             tracing::warn!(
                 ?stable,
@@ -831,7 +830,7 @@ impl SignatureSpawner {
             return;
         }
 
-        self.sign_queue.expire();
+        self.sign_queue.expire(cfg);
         self.sign_queue
             .organize(self.threshold, stable, &self.my_account_id)
             .await;
@@ -925,7 +924,11 @@ impl SignatureSpawner {
                         let state = mesh_state.read().await;
                         state.stable.clone()
                     };
-                    self.handle_requests(&stable).await;
+                    let protocol_cfg = {
+                        let config = cfg.read().await;
+                        config.protocol.clone()
+                    };
+                    self.handle_requests(&stable, &protocol_cfg).await;
                 }
             }
         }
