@@ -132,7 +132,7 @@ impl Node {
         let near_rpc = if ctx.toxiproxy {
             let proxy_name = format!("rpc_from_node_{}", account.id());
             let rpc_port_proxied = utils::pick_unused_port().await?;
-            let rpc_address_proxied = format!("{near_rpc}:{rpc_port_proxied}");
+            let rpc_address_proxied = format!("http://127.0.0.1:{rpc_port_proxied}");
             tracing::info!(
                 "Proxy RPC address {} accessed by node@{} to {}",
                 near_rpc,

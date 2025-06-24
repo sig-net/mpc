@@ -127,7 +127,7 @@ async fn test_state_sync_e2e() {
     // Wait for the nodes to be running and then check the nodes has the right triples/presignatures
     nodes.wait().running().await.unwrap();
     // Give some time for the first sync broadcast to finish.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     validate_triples(&node0_triples, node1, &[4, 5], &[0, 1, 2, 3]).await;
     validate_triples(&node1_triples, node1, &[4, 5], &[0, 1, 2, 3]).await;
