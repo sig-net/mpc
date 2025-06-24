@@ -735,7 +735,21 @@ impl SignatureSpawner {
 
         match internal_action {
             PositInternalAction::None => {}
+            PositInternalAction::Rejected => {
+                tracing::warn!(
+                    ?sign_id,
+                    presignature_id,
+                    from = ?from,
+                    "signature posit action was rejected"
+                );
+                self.sign_queue.push_failed(sign_id);
+            }
             PositInternalAction::Reply(action) => {
+                if matches!(action, PositAction::Reject) {
+                    // proposer can potentially be wrong, let's reorder our participants for this sign request:
+                    self.sign_queue.push_failed(sign_id);
+                }
+
                 self.msg
                     .send(
                         self.me,
