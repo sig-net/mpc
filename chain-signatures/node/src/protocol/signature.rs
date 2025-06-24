@@ -133,10 +133,7 @@ impl SignQueue {
     }
 
     pub fn len_mine(&self) -> usize {
-        self.requests
-            .values()
-            .filter(|r| r.proposer == self.me)
-            .count()
+        self.my_requests.len()
     }
 
     pub fn is_empty_mine(&self) -> bool {
