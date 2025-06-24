@@ -266,6 +266,7 @@ pub struct Context {
     pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
     pub message_options: node_client::Options,
+    pub toxiproxy: bool,
 }
 
 pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
@@ -322,6 +323,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         log_options,
         mesh_options,
         message_options,
+        toxiproxy: spawner.toxiproxy,
     })
 }
 
