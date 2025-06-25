@@ -48,6 +48,8 @@ pub struct SolConfig {
     pub rpc_ws_url: String,
     /// The program address to watch
     pub program_address: String,
+    /// total timeout for a sign request starting from indexed time in seconds
+    pub total_timeout: u64,
 }
 
 impl fmt::Debug for SolConfig {
@@ -57,6 +59,7 @@ impl fmt::Debug for SolConfig {
             .field("rpc_http_url", &self.rpc_http_url)
             .field("rpc_ws_url", &self.rpc_ws_url)
             .field("program_address", &self.program_address)
+            .field("total_timeout", &self.total_timeout)
             .finish()
     }
 }
@@ -77,6 +80,9 @@ pub struct SolArgs {
     /// The program address to watch
     #[clap(long, env("MPC_SOL_PROGRAM_ADDRESS"), requires = "sol_account_sk")]
     pub sol_program_address: Option<String>,
+    /// total timeout for a sign request starting from indexed time in seconds
+    #[clap(long, env("MPC_SOL_TOTAL_TIMEOUT"), default_value = "200")]
+    pub sol_total_timeout: Option<u64>,
 }
 
 impl SolArgs {
@@ -94,6 +100,12 @@ impl SolArgs {
         if let Some(sol_program_address) = self.sol_program_address {
             args.extend(["--sol-program-address".to_string(), sol_program_address]);
         }
+        if let Some(sol_total_timeout) = self.sol_total_timeout {
+            args.extend([
+                "--sol-total-timeout".to_string(),
+                sol_total_timeout.to_string(),
+            ]);
+        }
         args
     }
 
@@ -103,6 +115,7 @@ impl SolArgs {
             rpc_http_url: self.sol_rpc_http_url?,
             rpc_ws_url: self.sol_rpc_ws_url?,
             program_address: self.sol_program_address?,
+            total_timeout: self.sol_total_timeout?,
         })
     }
 
@@ -113,12 +126,14 @@ impl SolArgs {
                 sol_rpc_http_url: Some(config.rpc_http_url),
                 sol_rpc_ws_url: Some(config.rpc_ws_url),
                 sol_program_address: Some(config.program_address),
+                sol_total_timeout: Some(config.total_timeout),
             },
             None => SolArgs {
                 sol_account_sk: None,
                 sol_rpc_http_url: None,
                 sol_rpc_ws_url: None,
                 sol_program_address: None,
+                sol_total_timeout: None,
             },
         }
     }
@@ -148,6 +163,7 @@ pub struct SignatureRequestedEvent {
 fn sign_request_from_event(
     event: SignatureRequestedEvent,
     tx_sig: Vec<u8>,
+    total_timeout: Duration,
 ) -> anyhow::Result<IndexedSignRequest> {
     tracing::info!("found solana event: {:?}", event);
     if event.deposit == 0 {
@@ -198,6 +214,7 @@ fn sign_request_from_event(
         chain: Chain::Solana,
         timestamp_sign_queue: Some(Instant::now()),
         unix_timestamp_indexed: crate::util::current_unix_timestamp(),
+        total_timeout,
     })
 }
 
@@ -244,9 +261,14 @@ pub async fn run(
     );
     loop {
         let program = client.program(program_id)?;
-        let unsub =
-            subscribe_to_program_events(&program, sign_tx.clone(), node_near_account_id.clone())
-                .await;
+        let total_timeout = Duration::from_secs(sol.total_timeout);
+        let unsub = subscribe_to_program_events(
+            &program,
+            sign_tx.clone(),
+            node_near_account_id.clone(),
+            total_timeout,
+        )
+        .await;
         if let Err(err) = unsub {
             tracing::warn!("Failed to subscribe to solana events: {:?}", err);
         } else {
@@ -261,6 +283,7 @@ async fn subscribe_to_program_events<C: Deref<Target = Keypair> + Clone>(
     program: &Program<C>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
+    total_timeout: Duration,
 ) -> anyhow::Result<anchor_client::EventUnsubscriber> {
     tracing::info!("Subscribing to program events");
     let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -276,8 +299,14 @@ async fn subscribe_to_program_events<C: Deref<Target = Keypair> + Clone>(
 
     tracing::info!("Subscribed to program events");
     while let Some((event, tx_sig)) = receiver.recv().await {
-        if let Err(err) =
-            process_anchor_event(event, tx_sig, sign_tx.clone(), node_near_account_id.clone()).await
+        if let Err(err) = process_anchor_event(
+            event,
+            tx_sig,
+            sign_tx.clone(),
+            node_near_account_id.clone(),
+            total_timeout,
+        )
+        .await
         {
             tracing::warn!("Failed to process event: {:?}", err);
         }
@@ -291,8 +320,9 @@ async fn process_anchor_event(
     tx_sig: Vec<u8>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
+    total_timeout: Duration,
 ) -> anyhow::Result<()> {
-    let sign_request = sign_request_from_event(event, tx_sig)?;
+    let sign_request = sign_request_from_event(event, tx_sig, total_timeout)?;
 
     if let Err(err) = sign_tx.send(sign_request).await {
         tracing::error!(?err, "Failed to send Solana sign request into queue");

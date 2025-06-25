@@ -43,6 +43,7 @@ pub struct IndexedSignRequest {
     pub chain: Chain,
     pub unix_timestamp_indexed: u64,
     pub timestamp_sign_queue: Option<Instant>,
+    pub total_timeout: Duration,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -329,7 +330,7 @@ impl SignQueue {
             crate::util::duration_between_unix(
                 request.indexed.unix_timestamp_indexed,
                 crate::util::current_unix_timestamp(),
-            ) < Duration::from_millis(cfg.signature.generation_timeout_total)
+            ) < request.indexed.total_timeout
         });
         self.failed_requests.retain(|id| {
             let Some(request) = self.requests.get(id) else {
@@ -339,7 +340,7 @@ impl SignQueue {
             crate::util::duration_between_unix(
                 request.indexed.unix_timestamp_indexed,
                 crate::util::current_unix_timestamp(),
-            ) < Duration::from_millis(cfg.signature.generation_timeout_total)
+            ) < request.indexed.total_timeout
         });
     }
 

@@ -49,6 +49,8 @@ pub struct EthConfig {
     pub helios_data_path: String,
     /// refresh finalized block interval in milliseconds
     pub refresh_finalized_interval: u64,
+    /// total timeout for a sign request starting from indexed time in seconds
+    pub total_timeout: u64,
 }
 
 impl fmt::Debug for EthConfig {
@@ -64,6 +66,7 @@ impl fmt::Debug for EthConfig {
                 "refresh_finalized_interval",
                 &self.refresh_finalized_interval,
             )
+            .field("total_timeout", &self.total_timeout)
             .finish()
     }
 }
@@ -116,6 +119,9 @@ pub struct EthArgs {
         default_value = "10000"
     )]
     pub eth_refresh_finalized_interval: Option<u64>,
+    /// total timeout for a sign request starting from indexed time in seconds
+    #[clap(long, env("MPC_ETH_TOTAL_TIMEOUT"), default_value = "1500")]
+    pub eth_total_timeout: Option<u64>,
 }
 
 impl EthArgs {
@@ -151,6 +157,12 @@ impl EthArgs {
                 eth_refresh_finalized_interval.to_string(),
             ]);
         }
+        if let Some(eth_total_timeout) = self.eth_total_timeout {
+            args.extend([
+                "--eth-total-timeout".to_string(),
+                eth_total_timeout.to_string(),
+            ]);
+        }
         args
     }
 
@@ -163,6 +175,7 @@ impl EthArgs {
             network: self.eth_network?,
             helios_data_path: self.eth_helios_data_path?,
             refresh_finalized_interval: self.eth_refresh_finalized_interval?,
+            total_timeout: self.eth_total_timeout?,
         })
     }
 
@@ -176,6 +189,7 @@ impl EthArgs {
                 eth_network: Some(config.network),
                 eth_helios_data_path: Some(config.helios_data_path),
                 eth_refresh_finalized_interval: Some(config.refresh_finalized_interval),
+                eth_total_timeout: Some(config.total_timeout),
             },
             _ => Self {
                 eth_account_sk: None,
@@ -185,6 +199,7 @@ impl EthArgs {
                 eth_network: None,
                 eth_helios_data_path: None,
                 eth_refresh_finalized_interval: None,
+                eth_total_timeout: None,
             },
         }
     }
@@ -243,7 +258,10 @@ sol! {
     );
 }
 
-fn sign_request_from_filtered_log(log: Log) -> anyhow::Result<IndexedSignRequest> {
+fn sign_request_from_filtered_log(
+    log: Log,
+    total_timeout: Duration,
+) -> anyhow::Result<IndexedSignRequest> {
     let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
     if event.deposit == U256::ZERO {
@@ -292,6 +310,7 @@ fn sign_request_from_filtered_log(log: Log) -> anyhow::Result<IndexedSignRequest
         chain: Chain::Ethereum,
         unix_timestamp_indexed: crate::util::current_unix_timestamp(),
         timestamp_sign_queue: None,
+        total_timeout,
     })
 }
 
@@ -442,6 +461,7 @@ pub async fn run(
     tracing::info!("running ethereum indexer");
 
     let eth_contract_addr = Address::from_str(&format!("0x{}", eth.contract_address))?;
+    let total_timeout = Duration::from_secs(eth.total_timeout);
 
     let mut block_heads_rx = client
         .subscribe(SubscriptionType::NewHeads)
@@ -498,6 +518,7 @@ pub async fn run(
             eth_contract_addr,
             near_account_id_clone,
             requests_indexed_send_clone,
+            total_timeout,
         )
         .await;
     });
@@ -536,6 +557,7 @@ pub async fn run(
             eth_contract_addr,
             node_near_account_id.clone(),
             requests_indexed_send_clone.clone(),
+            total_timeout,
         )
         .await
         {
@@ -561,6 +583,7 @@ async fn retry_failed_blocks(
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
+    total_timeout: Duration,
 ) {
     loop {
         let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
@@ -574,6 +597,7 @@ async fn retry_failed_blocks(
             eth_contract_addr,
             node_near_account_id.clone(),
             requests_indexed.clone(),
+            total_timeout,
         )
         .await
         {
@@ -806,6 +830,7 @@ async fn process_block(
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
+    total_timeout: Duration,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -847,7 +872,7 @@ async fn process_block(
         return Ok(());
     }
 
-    let indexed_requests = parse_filtered_logs(filtered_logs);
+    let indexed_requests = parse_filtered_logs(filtered_logs, total_timeout);
     requests_indexed
         .send(BlockAndRequests::new(
             block_number,
@@ -965,11 +990,11 @@ async fn send_requests_when_final(
     }
 }
 
-fn parse_filtered_logs(logs: Vec<Log>) -> Vec<IndexedSignRequest> {
+fn parse_filtered_logs(logs: Vec<Log>, total_timeout: Duration) -> Vec<IndexedSignRequest> {
     let mut indexed_requests = Vec::new();
     for log in logs {
         tracing::debug!("Parsing Ethereum log: {:?}", log);
-        match sign_request_from_filtered_log(log.clone()) {
+        match sign_request_from_filtered_log(log.clone(), total_timeout) {
             Ok(request) => indexed_requests.push(request),
             Err(err) => {
                 tracing::warn!(?log, ?err, "Failed to parse Ethereum log");
@@ -997,6 +1022,7 @@ fn send_indexed_requests(
                 args: request.args,
                 unix_timestamp_indexed: request.unix_timestamp_indexed,
                 timestamp_sign_queue: Some(Instant::now()),
+                total_timeout: request.total_timeout,
             };
             match sign_tx.send(request).await {
                 Ok(_) => {
