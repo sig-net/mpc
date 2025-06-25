@@ -48,19 +48,18 @@ impl Default for NodeConfig {
                 max_concurrent_generation: 16,
                 max_concurrent_introduction: 2,
                 triple: TripleConfig {
-                    min_triples: 8,
-                    max_triples: 80,
+                    min_triples: 16,
+                    max_triples: 320,
                     ..Default::default()
                 },
                 presignature: PresignatureConfig {
-                    min_presignatures: 2,
-                    max_presignatures: 20,
+                    min_presignatures: 16,
+                    max_presignatures: 320,
                     ..Default::default()
                 },
                 ..Default::default()
             },
             eth: None,
-            // TODO solana: remove hardcoded values
             sol: None,
         }
     }
@@ -267,6 +266,7 @@ pub struct Context {
     pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
     pub message_options: node_client::Options,
+    pub toxiproxy: bool,
 }
 
 pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
@@ -323,6 +323,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         log_options,
         mesh_options,
         message_options,
+        toxiproxy: spawner.toxiproxy,
     })
 }
 
