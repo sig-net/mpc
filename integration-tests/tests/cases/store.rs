@@ -82,7 +82,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(!triple_spawner.contains(triple_id2).await);
 
     let id3 = 3;
-    let id4: u64 = 4;
+    let id4 = 4;
 
     // check that reserve and unreserve works:
     let slot = triple_storage.reserve(id3).await.unwrap();

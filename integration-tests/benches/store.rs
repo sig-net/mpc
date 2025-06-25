@@ -1,3 +1,4 @@
+use core::sync;
 use std::{sync::Arc, time::Instant};
 
 use cait_sith::{
@@ -9,19 +10,16 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use elliptic_curve::CurveArithmetic;
 use integration_tests::{cluster::spawner::ClusterSpawner, containers::Redis};
 use k256::Secp256k1;
-use mpc_node::{
-    mesh::MeshState,
-    node_client::{self, NodeClient},
-    protocol::{
-        contract::{primitives::Participants, RunningContractState},
-        presignature::Presignature,
-        sync::{SyncChannel, SyncTask},
-        triple::Triple,
-        ParticipantInfo, ProtocolState,
-    },
-    rpc::ContractStateWatcher,
-    storage::{PresignatureStorage, TripleStorage},
+use mpc_node::mesh::{Mesh, MeshState};
+use mpc_node::node_client::{self, NodeClient};
+use mpc_node::protocol::contract::{primitives::Participants, RunningContractState};
+use mpc_node::protocol::{
+    presignature::Presignature, triple::Triple, ParticipantInfo, ProtocolState,
 };
+use mpc_node::rpc::ContractStateWatcher;
+use mpc_node::rpc::NodeStateWatcher;
+use mpc_node::storage::{PresignatureStorage, TripleStorage};
+use mpc_node::sync::{SyncChannel, SyncTask};
 use near_account_id::AccountId;
 use tokio::{
     runtime::Runtime,
@@ -65,7 +63,6 @@ struct SyncEnv {
     redis: Redis,
     triples: TripleStorage,
     presignatures: PresignatureStorage,
-    sync_channel: SyncChannel,
 }
 
 fn env() -> (Runtime, SyncEnv) {
@@ -96,11 +93,14 @@ fn env() -> (Runtime, SyncEnv) {
                 .await;
         }
         let client = NodeClient::new(&node_client::Options::default());
-        let mesh_state = Arc::new(RwLock::new(MeshState {
-            stable: participants.keys_vec(),
-            active: participants.clone(),
-            need_sync: Participants::default(),
-        }));
+        let (synced_peer_tx, synced_peer_rx) = mpsc::channel(1024);
+        let mesh = Mesh::new(
+            &client,
+            mpc_node::mesh::Options {
+                ping_interval: 1000,
+            },
+            synced_peer_rx,
+        );
 
         let sk = k256::SecretKey::random(&mut rand::thread_rng());
         let pk = sk.public_key();
@@ -117,12 +117,11 @@ fn env() -> (Runtime, SyncEnv) {
             }),
         );
 
-        let (synced_peer_tx, _synced_peer_rx) = mpsc::channel(1024);
         let (sync_channel, sync) = SyncTask::new(
             &client,
             triples.clone(),
             presignatures.clone(),
-            mesh_state.clone(),
+            mesh.state().clone(),
             watcher.clone(),
             synced_peer_tx,
         );
@@ -134,12 +133,11 @@ fn env() -> (Runtime, SyncEnv) {
             node_id,
             me,
             participants,
-            mesh_state,
+            mesh_state: mesh.state().clone(),
             client,
             redis,
             triples,
             presignatures,
-            sync_channel,
         }
     });
 

@@ -23,7 +23,7 @@ use mpc_primitives::{SignArgs, SignId};
 use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -846,7 +846,7 @@ impl SignatureSpawner {
         self.ongoing.spawn((sign_id, presignature_id), task);
     }
 
-    async fn handle_requests(&mut self, stable: &[Participant], cfg: &ProtocolConfig) {
+    async fn handle_requests(&mut self, stable: BTreeSet<Participant>, cfg: &ProtocolConfig) {
         if stable.len() < self.threshold {
             tracing::warn!(
                 ?stable,
@@ -855,10 +855,11 @@ impl SignatureSpawner {
             );
             return;
         }
+        let stable = stable.into_iter().collect::<Vec<_>>();
 
         self.sign_queue.expire(cfg);
         self.sign_queue
-            .organize(self.threshold, stable, &self.my_account_id)
+            .organize(self.threshold, &stable, &self.my_account_id)
             .await;
         crate::metrics::SIGN_QUEUE_SIZE
             .with_label_values(&[self.my_account_id.as_str()])
@@ -884,14 +885,16 @@ impl SignatureSpawner {
             };
 
             let participants = intersect_vec(&[
-                stable,
+                &stable,
                 &taken.presignature.participants,
                 &my_request.participants,
             ]);
             if participants.len() < self.threshold {
                 tracing::warn!(
                     sign_id = ?my_request.indexed.id,
+                    sign_subset = ?my_request.participants,
                     presignature_id = ?taken.presignature.id,
+                    presignature_subset = ?taken.presignature.participants,
                     ?participants,
                     "intersection < threshold, trashing presignature"
                 );
@@ -975,7 +978,7 @@ impl SignatureSpawner {
                         let config = cfg.read().await;
                         config.protocol.clone()
                     };
-                    self.handle_requests(&stable, &protocol_cfg).await;
+                    self.handle_requests(stable, &protocol_cfg).await;
                 }
             }
         }

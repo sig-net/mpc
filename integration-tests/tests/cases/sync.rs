@@ -66,7 +66,7 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
         &client,
         node0_triples.clone(),
         node0_presignatures.clone(),
-        mesh.state().clone(),
+        &mesh,
         watcher,
         synced_peer_tx,
     );

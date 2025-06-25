@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::mesh::MeshState;
+use crate::mesh::connection::{ConnectionWatcher, NodeStatusUpdate};
+use crate::mesh::{Mesh, MeshState};
 use crate::node_client::NodeClient;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::{PresignatureStorage, TripleStorage};
@@ -50,6 +51,7 @@ pub struct SyncTask {
     triples: TripleStorage,
     presignatures: PresignatureStorage,
     mesh_state: Arc<RwLock<MeshState>>,
+    conn_watcher: ConnectionWatcher,
     watcher: ContractStateWatcher,
     requests: SyncRequestReceiver,
     synced_peer_tx: mpsc::Sender<Participant>,
@@ -61,7 +63,7 @@ impl SyncTask {
         client: &NodeClient,
         triples: TripleStorage,
         presignatures: PresignatureStorage,
-        mesh_state: Arc<RwLock<MeshState>>,
+        mesh: &Mesh,
         watcher: ContractStateWatcher,
         synced_peer_tx: mpsc::Sender<Participant>,
     ) -> (SyncChannel, Self) {
@@ -70,7 +72,8 @@ impl SyncTask {
             client: client.clone(),
             triples,
             presignatures,
-            mesh_state,
+            conn_watcher: mesh.watcher(),
+            mesh_state: mesh.state().clone(),
             watcher,
             requests,
             synced_peer_tx,
@@ -86,11 +89,14 @@ impl SyncTask {
         let mut broadcast_interval = tokio::time::interval(Duration::from_secs(3600 * 24));
         let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(100));
 
+        // skip the first immediate broadcast.
+        broadcast_interval.tick().await;
+
         // Do NOT start until we have our own participant info.
         // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
-        let (_threshold, me) = loop {
+        let me = loop {
             watcher_interval.tick().await;
-            if let Some(info) = self.watcher.info().await {
+            if let Some(info) = self.watcher.me().await {
                 break info;
             }
         };
@@ -129,6 +135,17 @@ impl SyncTask {
                     broadcast = Some((start, task));
                 }
                 // do a new broadcast if there is no ongoing broadcast.
+                (p, status) = self.conn_watcher.next() => {
+                    if p == me {
+                        // do not sync with ourselves.
+                        continue;
+                    }
+                    if let NodeStatusUpdate::Active(info) = status {
+                        tracing::info!(?p, "node has become active, sending sync request");
+                        let update = self.new_update(me).await;
+                        tokio::spawn(send_sync(self.client.clone(), info.url, update));
+                    }
+                }
                 _ = broadcast_interval.tick() => {
                     if broadcast.is_some() {
                         // task is still ongoing, skip.
@@ -190,6 +207,28 @@ impl SyncTask {
     }
 }
 
+async fn send_sync(client: NodeClient, url: String, update: SyncUpdate) {
+    if update.is_empty() {
+        return;
+    }
+
+    let start = Instant::now();
+
+    // try up to 100 times to send the sync update. If the node is not reachable within
+    // the retry amount, odds are that it will never reply back to us.
+    for _ in 0..100 {
+        let Err(err) = client.sync(&url, &update).await else {
+            tracing::info!(
+                elapsed = ?start.elapsed(),
+                "sync completed",
+            );
+            break;
+        };
+        tracing::warn!(?err, "failed to send sync update");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
 /// Broadcast an update to all participants specified by `receivers`.
 async fn broadcast_sync(
     client: NodeClient,
@@ -204,11 +243,11 @@ async fn broadcast_sync(
 
     let start = Instant::now();
     let mut tasks = JoinSet::new();
-    let arc_update = Arc::new(update.clone());
+    let update = Arc::new(update);
     for (p, info) in receivers {
         let client = client.clone();
-        let update = arc_update.clone();
-        let url = info.url;
+        let update = update.clone();
+        let url = info.url.clone();
         let synced_peer_tx_clone = synced_peer_tx.clone();
         tasks.spawn(async move {
             // Only actually do the sync on other peers, not on self. (Hack) We
