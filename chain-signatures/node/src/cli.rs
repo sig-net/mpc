@@ -17,7 +17,7 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use url::Url;
 
 use mpc_keys::hpke;
@@ -285,16 +285,18 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 "starting node",
             );
 
-            let config = Arc::new(RwLock::new(Config::new(LocalConfig {
+            let config = Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network,
-            })));
+            });
+            let (config_tx, config_rx) = watch::channel(config);
 
             let state = Node::new();
             let state_watcher = state.watcher.clone();
 
             let (sender, msg_channel) =
-                MessageChannel::spawn(client, &account_id, &config, watcher, &mesh_state).await;
+                MessageChannel::spawn(client, &account_id, config_rx.clone(), watcher, &mesh_state)
+                    .await;
             let protocol = MpcSignProtocol {
                 my_account_id: account_id.clone(),
                 near: near_client,
@@ -304,17 +306,17 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 secret_storage: key_storage,
                 triple_storage: triple_storage.clone(),
                 presignature_storage: presignature_storage.clone(),
-                config: config.clone(),
+                config: config_rx.clone(),
                 mesh_state: mesh_state.clone(),
             };
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync.run());
-            tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
+            tokio::spawn(rpc.run(contract_state.clone(), config_tx.clone()));
             tokio::spawn(mesh.run(contract_state.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
             let protocol_handle =
-                tokio::spawn(protocol.run(state, contract_state, config, mesh_state));
+                tokio::spawn(protocol.run(state, contract_state, config_rx, mesh_state));
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
                 web_port,

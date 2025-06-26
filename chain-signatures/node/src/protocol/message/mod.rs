@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
@@ -331,7 +331,7 @@ struct MessageExecutor {
     inbox: Arc<RwLock<MessageInbox>>,
     outbox: MessageOutbox,
 
-    config: Arc<RwLock<Config>>,
+    config: watch::Receiver<Config>,
     contract_watcher: ContractStateWatcher,
     mesh_state: Arc<RwLock<MeshState>>,
 }
@@ -341,30 +341,27 @@ impl MessageExecutor {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
             interval.tick().await;
-            let (sign_sk, cipher_sk, protocol) = {
-                let config = self.config.read().await;
-                (
-                    config.local.network.sign_sk.clone(),
-                    config.local.network.cipher_sk.clone(),
-                    config.protocol.clone(),
-                )
-            };
+            let config = self.config.borrow().clone();
 
             let participants = self.contract_watcher.participants().await;
             {
                 let mut inbox = self.inbox.write().await;
-                let expiration = Duration::from_millis(protocol.message_timeout);
-                inbox.update(expiration, &cipher_sk, &participants).await;
+                let expiration = Duration::from_millis(config.protocol.message_timeout);
+                inbox
+                    .update(expiration, &config.local.network.cipher_sk, &participants)
+                    .await;
             }
 
             let active = {
                 let mesh_state = self.mesh_state.read().await;
                 mesh_state.active.clone()
             };
-            self.outbox.expire(&protocol);
+            self.outbox.expire(&config.protocol);
             self.outbox.recv_updates();
             let compacted = self.outbox.compact();
-            let encrypted = self.outbox.encrypt(&sign_sk, &active, compacted);
+            let encrypted = self
+                .outbox
+                .encrypt(&config.local.network.sign_sk, &active, compacted);
             self.outbox.send(&active, encrypted).await;
         }
     }
@@ -375,7 +372,6 @@ pub struct MessageChannel {
     outgoing: mpsc::Sender<SendMessage>,
     inbox: Arc<RwLock<MessageInbox>>,
     filter: mpsc::Sender<(Protocols, u64)>,
-    task: Option<Arc<tokio::task::JoinHandle<()>>>,
 }
 
 impl MessageChannel {
@@ -389,7 +385,6 @@ impl MessageChannel {
             inbox,
             outgoing: outbox_tx,
             filter: filter_tx,
-            task: None,
         };
 
         (inbox_tx, outbox_rx, channel)
@@ -398,20 +393,20 @@ impl MessageChannel {
     pub async fn spawn(
         client: NodeClient,
         id: &AccountId,
-        config: &Arc<RwLock<Config>>,
+        config: watch::Receiver<Config>,
         contract_watcher: ContractStateWatcher,
         mesh_state: &Arc<RwLock<MeshState>>,
     ) -> (mpsc::Sender<Ciphered>, Self) {
-        let (inbox_tx, outbox_rx, mut channel) = Self::new();
+        let (inbox_tx, outbox_rx, channel) = Self::new();
         let runner = MessageExecutor {
             inbox: channel.inbox.clone(),
             outbox: MessageOutbox::new(id, client, outbox_rx),
 
-            config: config.clone(),
+            config,
             contract_watcher,
             mesh_state: mesh_state.clone(),
         };
-        channel.task = Some(Arc::new(tokio::spawn(runner.execute())));
+        tokio::spawn(runner.execute());
 
         (inbox_tx, channel)
     }

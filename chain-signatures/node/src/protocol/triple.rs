@@ -487,7 +487,7 @@ impl TripleSpawner {
     async fn run(
         mut self,
         mesh_state: Arc<RwLock<MeshState>>,
-        config: Arc<RwLock<Config>>,
+        config: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
@@ -496,7 +496,7 @@ impl TripleSpawner {
         loop {
             tokio::select! {
                 Some((id, from, action)) = posits.recv() => {
-                    let timeout = config.read().await.protocol.triple.generation_timeout;
+                    let timeout = config.borrow().protocol.triple.generation_timeout;
                     self.process_posit(id, from, action, Duration::from_millis(timeout)).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
@@ -516,7 +516,7 @@ impl TripleSpawner {
                     // accept/reject determine who is a participant. The messaging layer should
                     // rely more on active.
                     let active = mesh_state.read().await.active.keys_vec();
-                    let protocol = config.read().await.protocol.clone();
+                    let protocol = config.borrow().protocol.clone();
                     self.stockpile(&active, &protocol).await;
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 

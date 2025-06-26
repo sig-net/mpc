@@ -35,8 +35,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
-use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use tokio::sync::{mpsc, watch};
 
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
@@ -47,7 +47,7 @@ pub struct MpcSignProtocol {
     pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     pub(crate) msg_channel: MessageChannel,
     pub(crate) rpc_channel: RpcChannel,
-    pub(crate) config: Arc<RwLock<Config>>,
+    pub(crate) config: watch::Receiver<Config>,
     pub(crate) mesh_state: Arc<RwLock<MeshState>>,
 }
 
@@ -56,7 +56,7 @@ impl MpcSignProtocol {
         mut self,
         mut node: Node,
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
-        config: Arc<RwLock<Config>>,
+        config: watch::Receiver<Config>,
         mesh_state: Arc<RwLock<MeshState>>,
     ) {
         let my_account_id = self.my_account_id.as_str();
@@ -82,10 +82,7 @@ impl MpcSignProtocol {
                 let state = contract_state.read().await;
                 state.clone()
             };
-            let cfg = {
-                let config = config.read().await;
-                config.clone()
-            };
+            let cfg = config.borrow().clone();
             let mesh_state = {
                 let state = mesh_state.read().await;
                 state.clone()
