@@ -14,6 +14,9 @@ env:
 jobs:
   test:
     name: Integration Test
+    permissions:
+      actions: read
+      pull-requests: write
     strategy:
       matrix:
         # FIXME: macos-latest-xl is disabled since colima is erroring out right now
