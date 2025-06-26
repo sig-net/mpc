@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot, RwLock};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use near_account_id::AccountId;
 
@@ -43,6 +43,7 @@ pub struct IndexedSignRequest {
     pub chain: Chain,
     pub unix_timestamp_indexed: u64,
     pub timestamp_sign_queue: Option<Instant>,
+    pub total_timeout: Duration,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -133,10 +134,7 @@ impl SignQueue {
     }
 
     pub fn len_mine(&self) -> usize {
-        self.requests
-            .values()
-            .filter(|r| r.proposer == self.me)
-            .count()
+        self.my_requests.len()
     }
 
     pub fn is_empty_mine(&self) -> bool {
@@ -332,7 +330,7 @@ impl SignQueue {
             crate::util::duration_between_unix(
                 request.indexed.unix_timestamp_indexed,
                 crate::util::current_unix_timestamp(),
-            ) < Duration::from_millis(cfg.signature.generation_timeout_total)
+            ) < request.indexed.total_timeout
         });
         self.failed_requests.retain(|id| {
             let Some(request) = self.requests.get(id) else {
@@ -342,7 +340,7 @@ impl SignQueue {
             crate::util::duration_between_unix(
                 request.indexed.unix_timestamp_indexed,
                 crate::util::current_unix_timestamp(),
-            ) < Duration::from_millis(cfg.signature.generation_timeout_total)
+            ) < request.indexed.total_timeout
         });
     }
 
@@ -619,7 +617,7 @@ pub struct SignatureSpawner {
     /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
     /// Ongoing signature generation protocols.
-    ongoing: JoinMap<SignId, Result<(), SignError>>,
+    ongoing: JoinMap<(SignId, PresignatureId), Result<(), SignError>>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
     /// The protocol posits that are currently in progress.
@@ -698,21 +696,36 @@ impl SignatureSpawner {
         }
     }
 
+    // TODO: we really need to refactor how posits are handled since the dependencies are being waited upon
+    // in a different places vs the `process_posit` function. This will be hard to read and tract down where
+    // things are being handled.
     async fn process_posit(
         &mut self,
         sign_id: SignId,
         presignature_id: PresignatureId,
+        request: Option<SignRequest>,
         from: Participant,
         action: PositAction,
         cfg: ProtocolConfig,
     ) {
-        let internal_action = if self.ongoing.contains_key(&sign_id) {
+        let internal_action = if self.ongoing.contains_key(&(sign_id, presignature_id)) {
             tracing::warn!(
                 ?sign_id,
                 presignature_id,
                 "signature is already in the ongoing generation"
             );
-            PositInternalAction::None
+            PositInternalAction::Reply(PositAction::Reject)
+        } else if matches!(action, PositAction::Propose) {
+            if let Some(request) = request {
+                if request.proposer == from {
+                    self.posits
+                        .act((sign_id, presignature_id), from, self.threshold, &action)
+                } else {
+                    PositInternalAction::Reply(PositAction::Reject)
+                }
+            } else {
+                PositInternalAction::Reply(PositAction::Reject)
+            }
         } else {
             self.posits
                 .act((sign_id, presignature_id), from, self.threshold, &action)
@@ -720,7 +733,21 @@ impl SignatureSpawner {
 
         match internal_action {
             PositInternalAction::None => {}
+            PositInternalAction::Rejected => {
+                tracing::warn!(
+                    ?sign_id,
+                    presignature_id,
+                    from = ?from,
+                    "signature posit action was rejected"
+                );
+                self.sign_queue.push_failed(sign_id);
+            }
             PositInternalAction::Reply(action) => {
+                if matches!(action, PositAction::Reject) {
+                    // proposer can potentially be wrong, let's reorder our participants for this sign request:
+                    self.sign_queue.push_failed(sign_id);
+                }
+
                 self.msg
                     .send(
                         self.me,
@@ -816,7 +843,7 @@ impl SignatureSpawner {
             generator.run(me, epoch, my_account_id).await
         };
 
-        self.ongoing.spawn(sign_id, task);
+        self.ongoing.spawn((sign_id, presignature_id), task);
     }
 
     async fn handle_requests(&mut self, stable: &[Participant], cfg: &ProtocolConfig) {
@@ -888,6 +915,7 @@ impl SignatureSpawner {
 
         let mut check_requests_interval = tokio::time::interval(Duration::from_millis(100));
         let mut posits = self.msg.subscribe_signature_posit().await;
+        let mut pending_posits = JoinSet::new();
 
         loop {
             tokio::select! {
@@ -896,15 +924,35 @@ impl SignatureSpawner {
                         let cfg = cfg.read().await;
                         cfg.protocol.clone()
                     };
-                    self.process_posit(sign_id, presignature_id, from, action, cfg).await;
+
+                    let request = self.sign_queue.get_or_pending(&sign_id);
+                    let timeout = Duration::from_millis(cfg.signature.generation_timeout);
+                    pending_posits.spawn(async move {
+                        let request = request.fetch(timeout).await;
+                        (sign_id, presignature_id, request, from, action)
+                    });
+                }
+                Some(pending_posit) = pending_posits.join_next() => {
+                    let (sign_id, presignature_id, request, from, action) = match pending_posit {
+                        Ok(posit) => posit,
+                        Err(_) => {
+                            tracing::warn!("signature posit fetching request interrupted");
+                            continue;
+                        },
+                    };
+
+                    let cfg = {
+                        let cfg = cfg.read().await;
+                        cfg.protocol.clone()
+                    };
+                    self.process_posit(sign_id, presignature_id, request, from, action, cfg).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
-                    let (sign_id, result) = match result {
+                    let ((sign_id, _presignature_id), result) = match result {
                         Ok(outcome) => outcome,
-                        Err(sign_id) => {
-                            tracing::warn!(?sign_id, "signature generation task interrupted");
-                            self.sign_queue.remove(sign_id);
+                        Err((sign_id, presignature_id)) => {
+                            tracing::warn!(?sign_id, presignature_id, "signature generation task interrupted");
                             continue;
                         }
                     };
