@@ -23,7 +23,7 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::MessageReceiver as _;
-use crate::rpc::{NearClient, RpcChannel};
+use crate::rpc::{ContractStateWatcher, NearClient, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -55,7 +55,7 @@ impl MpcSignProtocol {
     pub async fn run(
         mut self,
         mut node: Node,
-        contract_state: Arc<RwLock<Option<ProtocolState>>>,
+        contract_state: ContractStateWatcher,
         config: watch::Receiver<Config>,
         mesh_state: watch::Receiver<MeshState>,
     ) {
@@ -78,10 +78,6 @@ impl MpcSignProtocol {
                 .with_label_values(&[my_account_id.as_str()])
                 .inc();
 
-            let contract_state = {
-                let state = contract_state.read().await;
-                state.clone()
-            };
             let cfg = config.borrow().clone();
             let mesh_state = mesh_state.borrow().clone();
 
@@ -95,7 +91,7 @@ impl MpcSignProtocol {
                 .with_label_values(&[my_account_id.as_str()])
                 .observe(crypto_time.elapsed().as_secs_f64());
 
-            if let Some(contract_state) = contract_state {
+            if let Some(contract_state) = contract_state.state() {
                 let consensus_time = Instant::now();
                 node.state = node.state.advance(&mut self, contract_state).await;
                 crate::metrics::PROTOCOL_LATENCY_ITER_CONSENSUS

@@ -1,11 +1,9 @@
 use std::time::Duration;
 
-use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
-use crate::protocol::ProtocolState;
+use crate::{node_client::NodeClient, rpc::ContractStateWatcher};
 use cait_sith::protocol::Participant;
-use std::sync::Arc;
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch};
 
 pub mod connection;
 
@@ -68,20 +66,26 @@ impl Mesh {
         }
     }
 
-    pub fn state(&self) -> watch::Receiver<MeshState> {
+    pub fn watch(&self) -> watch::Receiver<MeshState> {
         self.state_rx.clone()
     }
 
-    pub async fn run(mut self, contract_state: Arc<RwLock<Option<ProtocolState>>>) {
+    pub async fn run(mut self, mut contract: ContractStateWatcher) {
         let mut interval = tokio::time::interval(self.ping_interval / 2);
         loop {
             tokio::select! {
+                // TODO: this will be removed once we have reactive connection changes coming in:
+                // but for now, we will need to poll for changes in the connection pool when nodes
+                // go offline or come online again.
                 _ = interval.tick() => {
-                    if let Some(contract) = &*contract_state.read().await {
-                        self.connections.connect(contract).await;
-                        let new_state = self.connections.status().await;
-                        let _ = self.state_tx.send(new_state);
-                    }
+                    let new_state = self.connections.status().await;
+                    let _ = self.state_tx.send(new_state);
+                }
+                Some(contract) = contract.next_state() => {
+                    tracing::info!(?contract, "new contract state received");
+                    self.connections.connect(contract).await;
+                    let new_state = self.connections.status().await;
+                    let _ = self.state_tx.send(new_state);
                 }
                 Some(participant) = self.synced_peer_rx.recv() => {
                     self.connections.report_node_synced(participant).await;

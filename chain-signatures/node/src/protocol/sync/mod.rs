@@ -50,7 +50,7 @@ pub struct SyncTask {
     triples: TripleStorage,
     presignatures: PresignatureStorage,
     mesh_state: watch::Receiver<MeshState>,
-    watcher: ContractStateWatcher,
+    contract: ContractStateWatcher,
     requests: SyncRequestReceiver,
     synced_peer_tx: mpsc::Sender<Participant>,
 }
@@ -62,7 +62,7 @@ impl SyncTask {
         triples: TripleStorage,
         presignatures: PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
-        watcher: ContractStateWatcher,
+        contract: ContractStateWatcher,
         synced_peer_tx: mpsc::Sender<Participant>,
     ) -> (SyncChannel, Self) {
         let (requests, channel) = SyncChannel::new();
@@ -71,7 +71,7 @@ impl SyncTask {
             triples,
             presignatures,
             mesh_state,
-            watcher,
+            contract,
             requests,
             synced_peer_tx,
         };
@@ -90,7 +90,7 @@ impl SyncTask {
         // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
         let (_threshold, me) = loop {
             watcher_interval.tick().await;
-            if let Some(info) = self.watcher.info().await {
+            if let Some(info) = self.contract.info().await {
                 break info;
             }
         };

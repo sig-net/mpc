@@ -254,9 +254,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
             let mesh = Mesh::new(&client, mesh_options, synced_peer_rx);
-            let mesh_state = mesh.state();
-            let watcher = ContractStateWatcher::new(&account_id);
-            let contract_state = watcher.state().clone();
+            let mesh_state = mesh.watch();
+            let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(&account_id);
 
             let eth = eth.into_config();
             let sol = sol.into_config();
@@ -269,7 +268,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
-                watcher.clone(),
+                contract_watcher.clone(),
                 synced_peer_tx,
             );
 
@@ -291,14 +290,14 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             });
             let (config_tx, config_rx) = watch::channel(config);
 
-            let state = Node::new();
-            let state_watcher = state.watcher.clone();
+            let node = Node::new();
+            let node_watcher = node.watch();
 
             let (sender, msg_channel) = MessageChannel::spawn(
                 client,
                 &account_id,
                 config_rx.clone(),
-                watcher,
+                contract_watcher.clone(),
                 mesh_state.clone(),
             )
             .await;
@@ -317,16 +316,16 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync.run());
-            tokio::spawn(rpc.run(contract_state.clone(), config_tx.clone()));
-            tokio::spawn(mesh.run(contract_state.clone()));
+            tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
+            tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
             let protocol_handle =
-                tokio::spawn(protocol.run(state, contract_state, config_rx, mesh_state));
+                tokio::spawn(protocol.run(node, contract_watcher, config_rx, mesh_state));
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
                 web_port,
                 sender,
-                state_watcher,
+                node_watcher,
                 indexer,
                 triple_storage,
                 presignature_storage,

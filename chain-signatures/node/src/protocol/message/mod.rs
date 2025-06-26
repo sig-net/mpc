@@ -332,7 +332,7 @@ struct MessageExecutor {
     outbox: MessageOutbox,
 
     config: watch::Receiver<Config>,
-    contract_watcher: ContractStateWatcher,
+    contract: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
 }
 
@@ -343,7 +343,7 @@ impl MessageExecutor {
             interval.tick().await;
             let config = self.config.borrow().clone();
 
-            let participants = self.contract_watcher.participants().await;
+            let participants = self.contract.participants().await;
             {
                 let mut inbox = self.inbox.write().await;
                 let expiration = Duration::from_millis(config.protocol.message_timeout);
@@ -391,7 +391,7 @@ impl MessageChannel {
         client: NodeClient,
         id: &AccountId,
         config: watch::Receiver<Config>,
-        contract_watcher: ContractStateWatcher,
+        contract: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
     ) -> (mpsc::Sender<Ciphered>, Self) {
         let (inbox_tx, outbox_rx, channel) = Self::new();
@@ -400,7 +400,7 @@ impl MessageChannel {
             outbox: MessageOutbox::new(id, client, outbox_rx),
 
             config,
-            contract_watcher,
+            contract,
             mesh_state,
         };
         tokio::spawn(runner.execute());
