@@ -60,6 +60,10 @@ jobs:
         run: cargo clippy --tests -- -Dclippy::all
       - name: Unit tests
         run: cargo test --workspace --exclude signet-program --exclude integration-tests
+      - name: Time reporter
+        uses: DeviesDevelopment/workflow-timer@v0.1.0
+        with:
+          compareBranch: 'develop'
 
   audit:
     name: Audit

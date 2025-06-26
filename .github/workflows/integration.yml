@@ -106,3 +106,8 @@ jobs:
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
+
+      - name: Time reporter
+        uses: DeviesDevelopment/workflow-timer@v0.1.0
+        with:
+          compareBranch: 'develop'
