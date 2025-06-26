@@ -254,7 +254,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
             let mesh = Mesh::new(&client, mesh_options, synced_peer_rx);
-            let mesh_state = mesh.state().clone();
+            let mesh_state = mesh.state();
             let watcher = ContractStateWatcher::new(&account_id);
             let contract_state = watcher.state().clone();
 
@@ -294,9 +294,14 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let state = Node::new();
             let state_watcher = state.watcher.clone();
 
-            let (sender, msg_channel) =
-                MessageChannel::spawn(client, &account_id, config_rx.clone(), watcher, &mesh_state)
-                    .await;
+            let (sender, msg_channel) = MessageChannel::spawn(
+                client,
+                &account_id,
+                config_rx.clone(),
+                watcher,
+                mesh_state.clone(),
+            )
+            .await;
             let protocol = MpcSignProtocol {
                 my_account_id: account_id.clone(),
                 near: near_client,

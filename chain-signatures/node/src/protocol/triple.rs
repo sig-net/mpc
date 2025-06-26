@@ -17,12 +17,11 @@ use k256::elliptic_curve::group::GroupEncoding;
 use k256::Secp256k1;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Unique number used to identify a specific ongoing triple generation protocol.
@@ -486,7 +485,7 @@ impl TripleSpawner {
 
     async fn run(
         mut self,
-        mesh_state: Arc<RwLock<MeshState>>,
+        mesh_state: watch::Receiver<MeshState>,
         config: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
@@ -515,7 +514,7 @@ impl TripleSpawner {
                     // TODO: eventually we should use all participants, and let nodes replying with
                     // accept/reject determine who is a participant. The messaging layer should
                     // rely more on active.
-                    let active = mesh_state.read().await.active.keys_vec();
+                    let active = mesh_state.borrow().active.keys_vec();
                     let protocol = config.borrow().protocol.clone();
                     self.stockpile(&active, &protocol).await;
                     let _ = ongoing_gen_tx.send(self.ongoing.len());

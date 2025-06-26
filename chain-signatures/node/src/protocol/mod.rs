@@ -48,7 +48,7 @@ pub struct MpcSignProtocol {
     pub(crate) msg_channel: MessageChannel,
     pub(crate) rpc_channel: RpcChannel,
     pub(crate) config: watch::Receiver<Config>,
-    pub(crate) mesh_state: Arc<RwLock<MeshState>>,
+    pub(crate) mesh_state: watch::Receiver<MeshState>,
 }
 
 impl MpcSignProtocol {
@@ -57,7 +57,7 @@ impl MpcSignProtocol {
         mut node: Node,
         contract_state: Arc<RwLock<Option<ProtocolState>>>,
         config: watch::Receiver<Config>,
-        mesh_state: Arc<RwLock<MeshState>>,
+        mesh_state: watch::Receiver<MeshState>,
     ) {
         let my_account_id = self.my_account_id.as_str();
         let _span = tracing::info_span!("running", my_account_id);
@@ -83,10 +83,7 @@ impl MpcSignProtocol {
                 state.clone()
             };
             let cfg = config.borrow().clone();
-            let mesh_state = {
-                let state = mesh_state.read().await;
-                state.clone()
-            };
+            let mesh_state = mesh_state.borrow().clone();
 
             let crypto_time = Instant::now();
             node.state = node
