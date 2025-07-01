@@ -130,7 +130,7 @@ const strategies = {
     },
     thresholds: {
       http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<31000'],
+      http_req_duration: ['p(95)<5000'],
     },
   },
 };
