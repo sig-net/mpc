@@ -694,8 +694,7 @@ fn check_metric_multichain_prefix(name: &str) -> Result<()> {
         Ok(())
     } else {
         Err(prometheus::Error::Msg(format!(
-            "Metrics are expected to start with 'multichain_', got {}",
-            name
+            "Metrics are expected to start with 'multichain_', got {name}"
         )))
     }
 }

@@ -795,7 +795,7 @@ async fn wait_for_transaction_receipt(
                         max_attempts,
                         &sign_ids,
                         near_account_id,
-                        &format!("failed to get eth signature respond transaction receipt, retrying: {:?}", err),
+                        &format!("failed to get eth signature respond transaction receipt, retrying: {err:?}"),
                         initial_delay,
                     ).await?;
                 }

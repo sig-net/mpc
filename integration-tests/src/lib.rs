@@ -400,7 +400,7 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     println!("\nPlease call below to update localnet:\n");
     let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
-    println!("near config add-connection --network-name local --connection-name local --rpc-url {} --wallet-url http://127.0.0.1/ --explorer-transaction-url http://127.0.0.1:6666/", near_rpc);
+    println!("near config add-connection --network-name local --connection-name local --rpc-url {near_rpc} --wallet-url http://127.0.0.1/ --explorer-transaction-url http://127.0.0.1:6666/");
     println!("\nAfter run the nodes, please call the following command to init contract: ");
     let args = json!({
         "threshold": cfg.threshold,

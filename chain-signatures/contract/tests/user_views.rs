@@ -26,7 +26,7 @@ async fn test_public_key() -> anyhow::Result<()> {
     let (_, contract, _, _) = init_env().await;
 
     let key: String = contract.view("public_key").await.unwrap().json().unwrap();
-    println!("{:?}", key);
+    println!("{key:?}");
     let pk = PublicKey::from_str(&key)?;
     assert_eq!(pk.curve_type(), CurveType::SECP256K1);
     Ok(())
@@ -68,7 +68,7 @@ async fn test_experimental_signature_deposit() -> anyhow::Result<()> {
     let path = "test";
 
     for i in 1..8 {
-        let msg = format!("hello world {}", i);
+        let msg = format!("hello world {i}");
         println!("submitting: {msg}");
         let (payload_hash, _, _) = create_response(alice.id(), &msg, path, &sk).await;
         let request = SignRequest {
