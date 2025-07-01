@@ -1,17 +1,14 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::consensus::BlockHeader;
+use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::Log;
 use alloy::sol_types::{sol, SolEvent};
-use alloy::transports::http::Client as AlloyClient;
-use alloy::transports::http::Http;
 use anyhow::anyhow;
-use helios::common::types::{BlockTag, SubscriptionEvent, SubscriptionType};
-use helios::ethereum::{
-    config::networks::Network, database::FileDB, EthereumClient, EthereumClientBuilder,
-};
+use helios::common::types::{SubscriptionEvent, SubscriptionType};
+use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 use k256::Scalar;
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId};
@@ -425,6 +422,24 @@ fn finalized_blocks_channel() -> (mpsc::Sender<FinalizedEpoch>, mpsc::Receiver<F
     mpsc::channel(MAX_FINALIZED_BLOCKS)
 }
 
+// Type alias for the complex FillProvider type
+type UntrustedRpcClient = alloy::providers::fillers::FillProvider<
+    alloy::providers::fillers::JoinFill<
+        alloy::providers::Identity,
+        alloy::providers::fillers::JoinFill<
+            alloy::providers::fillers::GasFiller,
+            alloy::providers::fillers::JoinFill<
+                alloy::providers::fillers::BlobGasFiller,
+                alloy::providers::fillers::JoinFill<
+                    alloy::providers::fillers::NonceFiller,
+                    alloy::providers::fillers::ChainIdFiller,
+                >,
+            >,
+        >,
+    >,
+    RootProvider,
+>;
+
 pub async fn run(
     eth: Option<EthConfig>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
@@ -438,25 +453,25 @@ pub async fn run(
     let network = Network::from_str(eth.network.as_str())
         .map_err(|err| anyhow::anyhow!("Network input incorrect: {:?}", err))?;
 
-    let mut client: EthereumClient<FileDB> = EthereumClientBuilder::new()
+    let client: EthereumClient = EthereumClientBuilder::new()
         .network(network)
         .consensus_rpc(&eth.consensus_rpc_http_url)
+        .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?
         .execution_rpc(&eth.execution_rpc_http_url)
+        .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?
         .data_dir(PathBuf::from(&eth.helios_data_path))
+        .with_file_db()
         .build()
         .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?;
 
     tracing::info!("Built Helios client on network {}", network);
 
-    client
-        .start()
-        .await
-        .map_err(|err| anyhow::anyhow!("Failed to start Ethereum Helios client: {:?}", err))?;
-
     client.wait_synced().await;
 
-    let untrusted_rpc_client: RootProvider<alloy::transports::http::Http<AlloyClient>> =
-        ProviderBuilder::new().on_http(url::Url::parse(&eth.execution_rpc_http_url).unwrap());
+    let untrusted_rpc_client: UntrustedRpcClient = ProviderBuilder::new().connect_http(
+        url::Url::parse(&eth.execution_rpc_http_url)
+            .map_err(|err| anyhow::anyhow!("Failed to parse execution RPC URL: {:?}", err))?,
+    );
 
     tracing::info!("running ethereum indexer");
 
@@ -579,7 +594,7 @@ pub async fn run(
 async fn retry_failed_blocks(
     mut blocks_failed_rx: mpsc::Receiver<BlockNumberAndHash>,
     blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
-    client: &Arc<EthereumClient<FileDB>>,
+    client: &Arc<EthereumClient>,
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
@@ -624,14 +639,14 @@ async fn add_failed_block(
 
 // retry getting latest finalized block from helios with exponential backoff
 async fn fetch_finalized_block_from_helio(
-    helios_client: &Arc<EthereumClient<FileDB>>,
+    helios_client: &Arc<EthereumClient>,
     max_retries: u8,
     base_delay: Duration,
 ) -> anyhow::Result<alloy::rpc::types::Block> {
     let mut retries = 0;
     loop {
         match helios_client
-            .get_block_by_number(BlockTag::Finalized, false)
+            .get_block(BlockId::Number(BlockNumberOrTag::Finalized), false)
             .await
         {
             Ok(Some(block)) => return Ok(block),
@@ -665,8 +680,8 @@ async fn fetch_finalized_block_from_helio(
 /// Then using an unstrusted RPC client, we go backwards to fetch the blocks in the epoch and check that the hash of the block's header == its next block's parent_hash.
 /// This is proven because the finalized block is already proven by helios, and by checking current block hash == next block's parent hash, we prove that each block is indeed included in the chain.
 async fn refresh_finalized_epoch(
-    helios_client: &Arc<EthereumClient<FileDB>>,
-    untrusted_rpc_client: &RootProvider<Http<AlloyClient>>,
+    helios_client: &Arc<EthereumClient>,
+    untrusted_rpc_client: &UntrustedRpcClient,
     finalized_epoch_send: mpsc::Sender<FinalizedEpoch>,
     refresh_finalized_interval: u64,
 ) -> anyhow::Result<()> {
@@ -783,7 +798,7 @@ async fn refresh_finalized_epoch(
 
 // retry getting block by number from untrusted rpc with exponential backoff
 async fn fetch_block_from_untrusted_rpc(
-    untrusted_rpc_client: &RootProvider<Http<AlloyClient>>,
+    untrusted_rpc_client: &UntrustedRpcClient,
     block_number: u64,
     max_retries: u8,
     base_delay: Duration,
@@ -791,10 +806,7 @@ async fn fetch_block_from_untrusted_rpc(
     let mut retries = 0;
     loop {
         match untrusted_rpc_client
-            .get_block_by_number(
-                alloy::eips::BlockNumberOrTag::Number(block_number),
-                alloy::rpc::types::BlockTransactionsKind::Hashes,
-            )
+            .get_block_by_number(alloy::eips::BlockNumberOrTag::Number(block_number))
             .await
         {
             Ok(Some(block)) => return Ok(block),
@@ -826,7 +838,7 @@ async fn fetch_block_from_untrusted_rpc(
 async fn process_block(
     block_number: u64,
     block_hash: alloy::primitives::B256,
-    client: &Arc<EthereumClient<FileDB>>,
+    client: &Arc<EthereumClient>,
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
@@ -839,7 +851,7 @@ async fn process_block(
     );
     let start = Instant::now();
     let block_receipts_result = client
-        .get_block_receipts(BlockTag::Number(block_number))
+        .get_block_receipts(BlockId::Number(BlockNumberOrTag::Number(block_number)))
         .await;
     crate::metrics::ETH_BLOCK_RECEIPT_LATENCY
         .with_label_values(&[node_near_account_id.as_str()])
@@ -883,7 +895,10 @@ async fn process_block(
         .map_err(|err| anyhow::anyhow!("Failed to send indexed requests: {:?}", err))?;
 
     let block_timestamp = client
-        .get_block_by_number(BlockTag::Number(block_number), false)
+        .get_block(
+            BlockId::Number(BlockNumberOrTag::Number(block_number)),
+            false,
+        )
         .await
         .ok()
         .and_then(|block| block.map(|b| b.header.timestamp()));

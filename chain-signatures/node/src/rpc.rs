@@ -25,7 +25,6 @@ use alloy::dyn_abi::DynSolValue;
 use alloy::network::EthereumWallet;
 use alloy::primitives::U256;
 use alloy::providers::ProviderBuilder;
-use alloy::transports::http::{Client as ReqwestClient, Http};
 use alloy_signer_local::PrivateKeySigner;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
@@ -51,8 +50,6 @@ const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 /// The batch size for Ethereum responses
 const ETH_RESPOND_BATCH_SIZE: usize = 10;
 
-type EthHttp = Http<ReqwestClient>;
-
 type EthContractFillProvider = FillProvider<
     JoinFill<
         JoinFill<
@@ -70,12 +67,10 @@ type EthContractFillProvider = FillProvider<
         >,
         WalletFiller<EthereumWallet>,
     >,
-    RootProvider<Http<ReqwestClient>>,
-    Http<ReqwestClient>,
-    alloy::network::Ethereum,
+    RootProvider,
 >;
 
-type EthContractInstance = ContractInstance<EthHttp, EthContractFillProvider>;
+type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
 #[derive(Clone)]
 struct PublishAction {
@@ -477,9 +472,8 @@ impl EthClient {
             .expect("cannot parse Eth account sk into PrivateKeySigner");
         let wallet = EthereumWallet::from(signer.clone());
         let provider = ProviderBuilder::new()
-            .with_recommended_fillers()
             .wallet(wallet)
-            .on_http(eth.execution_rpc_http_url.parse().unwrap());
+            .connect_http(eth.execution_rpc_http_url.parse().unwrap());
         // Create a contract instance.
         let json: serde_json::Value = serde_json::from_slice(include_bytes!(
             "../../contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
