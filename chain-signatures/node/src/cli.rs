@@ -245,7 +245,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 // this is only used for integration tests
                 // mainnet, testnet and dev nodes should have MPC_LOCAL_ADDRESS set in their env var
                 let my_ip = local_ip().unwrap();
-                Url::parse(&format!("http://{my_ip}:{}", web_port)).unwrap()
+                Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
             });
 
             tracing::info!(%my_address, "address detected");

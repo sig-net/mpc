@@ -155,7 +155,7 @@ pub async fn dev_gen_indexed(worker: &Worker<Sandbox>, index: usize) -> anyhow::
             c as char
         })
         .collect();
-    let account_id = format!("{}-{}.test.near", index, random_chars);
+    let account_id = format!("{index}-{random_chars}.test.near");
     let account_id: AccountId = account_id.try_into().expect("Failed to create Acc ID");
     let sk = SecretKey::from_seed(KeyType::ED25519, "seed");
     let account = worker
