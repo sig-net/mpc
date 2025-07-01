@@ -22,10 +22,8 @@ pub fn derive_epsilon_near(predecessor_id: &AccountId, path: &str) -> Scalar {
     // indicate the end of the account id in derivation path.
     // Do not reuse this hash function on anything that isn't an account
     // ID or it'll be vunerable to Hash Melleability/extention attacks.
-    let derivation_path = format!(
-        "{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_NEAR},{},{}",
-        predecessor_id, path
-    );
+    let derivation_path =
+        format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_NEAR},{predecessor_id},{path}");
     let mut hasher = Sha3_256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
@@ -34,10 +32,8 @@ pub fn derive_epsilon_near(predecessor_id: &AccountId, path: &str) -> Scalar {
 
 const CHAIN_ID_ETHEREUM: &str = "0x1";
 pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
-    let derivation_path = format!(
-        "{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{},{}",
-        requester, path
-    );
+    let derivation_path =
+        format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{requester},{path}");
     let mut hasher = Keccak256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
@@ -46,10 +42,8 @@ pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
 
 const CHAIN_ID_SOLANA: &str = "0x800001f5";
 pub fn derive_epsilon_sol(requester: &str, path: &str) -> Scalar {
-    let derivation_path = format!(
-        "{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_SOLANA},{},{}",
-        requester, path
-    );
+    let derivation_path =
+        format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_SOLANA},{requester},{path}");
     let mut hasher = Keccak256::new();
     hasher.update(derivation_path.as_bytes());
     let hash: [u8; 32] = hasher.finalize().into();
@@ -137,10 +131,8 @@ mod tests {
         // Define epsilon
         let requester = "%admin#".to_string();
         let path = "signing_contract_control".to_string();
-        let derivation_path = format!(
-            "{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{},{}",
-            requester, path
-        );
+        let derivation_path =
+            format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{requester},{path}");
 
         let mut hasher = Keccak256::new();
         hasher.update(derivation_path);
@@ -161,7 +153,7 @@ mod tests {
         let hash: [u8; 32] = *alloy::primitives::keccak256(&admin_pk.as_bytes()[1..]);
         let address = alloy::primitives::Address::from_slice(&hash[12..]);
 
-        println!("Admin Ethereum address: {}", address);
+        println!("Admin Ethereum address: {address}");
 
         let expected_address =
             alloy::primitives::Address::from_str("0x3c0f802d66ac9fe56fa90afb0714dbc65b05a445")
