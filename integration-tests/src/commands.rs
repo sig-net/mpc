@@ -32,8 +32,7 @@ pub fn sign_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
     );
 
     Ok(format!(
-        "near call {} sign {} --accountId {} --gas 300000000000000 --deposit 1",
-        contract_id, request_json, caller_id
+        "near call {contract_id} sign {request_json} --accountId {caller_id} --gas 300000000000000 --deposit 1"
     ))
 }
 
@@ -62,8 +61,7 @@ pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow
     );
 
     Ok(format!(
-        "near call {} respond {} --accountId {} --gas 300000000000000",
-        contract_id, request_json, caller_id
+        "near call {contract_id} respond {request_json} --accountId {caller_id} --gas 300000000000000"
     ))
 }
 
@@ -78,8 +76,7 @@ pub fn join_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
     );
 
     Ok(format!(
-        "near call {} join {} --accountId {} --gas 300000000000000",
-        contract_id, join_json, caller_id
+        "near call {contract_id} join {join_json} --accountId {caller_id} --gas 300000000000000"
     ))
 }
 
@@ -97,8 +94,7 @@ pub fn proposed_updates_command(
     let base64_encoded = near_primitives::serialize::to_base64(borsh_args.as_slice());
 
     Ok(format!(
-        "near call {} propose_update --base64 {:?} --accountId {} --gas 300000000000000",
-        contract_id, base64_encoded, caller_id
+        "near call {contract_id} propose_update --base64 {base64_encoded:?} --accountId {caller_id} --gas 300000000000000"
     ))
 }
 
@@ -112,8 +108,7 @@ pub fn init_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
     );
 
     Ok(format!(
-        "near call {} init {} --accountId {} --gas 300000000000000",
-        contract_id, init_json, caller_id
+        "near call {contract_id} init {init_json} --accountId {caller_id} --gas 300000000000000"
     ))
 }
 
@@ -129,8 +124,7 @@ pub fn init_running_command(
     );
 
     Ok(format!(
-        "near call {} init_running {} --accountId {} --gas 300000000000000",
-        contract_id, init_running_json, caller_id
+        "near call {contract_id} init_running {init_running_json} --accountId {caller_id} --gas 300000000000000"
     ))
 }
 
