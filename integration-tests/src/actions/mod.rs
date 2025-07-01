@@ -131,7 +131,7 @@ pub async fn add_toxic(proxy: &str, host: bool, toxic: serde_json::Value) -> any
     };
     let toxiproxy_client = reqwest::Client::default();
     toxiproxy_client
-        .post(format!("{}/proxies/{}/toxics", toxi_server_address, proxy))
+        .post(format!("{toxi_server_address}/proxies/{proxy}/toxics"))
         .header("Content-Type", "application/json")
         .body(toxic.to_string())
         .send()
@@ -169,7 +169,7 @@ pub async fn clear_toxics() -> anyhow::Result<()> {
     let toxi_server_address = "http://127.0.0.1:8474";
     let toxiproxy_client = reqwest::Client::default();
     toxiproxy_client
-        .post(format!("{}/reset", toxi_server_address))
+        .post(format!("{toxi_server_address}/reset"))
         .send()
         .await?;
     Ok(())

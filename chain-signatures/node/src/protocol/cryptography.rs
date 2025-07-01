@@ -1,9 +1,7 @@
-use super::signature::SignatureManager;
-use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
+use super::state::{GeneratingState, NodeState, ResharingState};
 use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
-use crate::protocol::presignature::PresignatureManager;
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::types::SecretKeyShare;
@@ -267,37 +265,6 @@ impl ResharingState {
     }
 }
 
-impl CryptographicProtocol for RunningState {
-    async fn progress(
-        self,
-        ctx: &mut MpcSignProtocol,
-        cfg: Config,
-        mesh_state: MeshState,
-    ) -> NodeState {
-        let active = mesh_state.active.keys_vec();
-        if active.len() < self.threshold {
-            tracing::warn!(?active, "running: not enough participants to progress");
-            return NodeState::Running(self);
-        }
-
-        let triple_task = self.triple_manager.clone().execute(&active, &cfg.protocol);
-        let presig_task = PresignatureManager::execute(&self, &cfg.protocol, active);
-
-        let stable = mesh_state.stable;
-        tracing::debug!(?stable, "stable participants");
-        let sig_task = SignatureManager::execute(&self, &stable, &cfg.protocol, ctx);
-
-        match tokio::try_join!(triple_task, presig_task, sig_task) {
-            Ok(_result) => (),
-            Err(err) => {
-                tracing::warn!(?err, "running: failed to progress cryptographic protocol");
-            }
-        }
-
-        NodeState::Running(self)
-    }
-}
-
 impl CryptographicProtocol for NodeState {
     async fn progress(
         self,
@@ -308,7 +275,6 @@ impl CryptographicProtocol for NodeState {
         match self {
             NodeState::Generating(state) => state.progress(ctx, cfg, mesh_state).await,
             NodeState::Resharing(state) => state.progress(ctx, cfg, mesh_state).await,
-            NodeState::Running(state) => state.progress(ctx, cfg, mesh_state).await,
             NodeState::WaitingForConsensus(state) => state.progress(ctx, cfg, mesh_state).await,
             _ => self,
         }

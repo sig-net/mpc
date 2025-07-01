@@ -177,7 +177,7 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_lake_congestion() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().await?;
+    let nodes = cluster::spawn().enable_toxiproxy().await?;
     // Currently, with a 10+-1 latency it cannot generate enough tripplets in time
     // with a 5+-1 latency it fails to wait for signature response
     add_latency(&nodes.nodes.proxy_name_for_node(0), true, 1.0, 2_000, 200).await?;
@@ -197,7 +197,7 @@ async fn test_lake_congestion() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn().await?;
+    let mut nodes = cluster::spawn().enable_toxiproxy().await?;
 
     // add latency to node1->rpc, but not node0->rpc
     add_latency(&nodes.nodes.proxy_name_for_node(1), true, 1.0, 1_000, 100).await?;

@@ -77,7 +77,7 @@ impl Node {
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
             account_sk: account_sk.to_string().parse()?,
-            web_port,
+            web_port: Some(web_port),
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
             sign_sk: Some(sign_sk.clone()),
             eth,
@@ -129,17 +129,23 @@ impl Node {
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
 
-        let proxy_name = format!("rpc_from_node_{}", account.id());
-        let rpc_port_proxied = utils::pick_unused_port().await?;
-        let rpc_address_proxied = format!("http://127.0.0.1:{}", rpc_port_proxied);
-        let address = format!("http://127.0.0.1:{web_port}");
-        tracing::info!(
-            "Proxy RPC address {} accessed by node@{} to {}",
-            near_rpc,
-            address,
+        let near_rpc = if ctx.toxiproxy {
+            let proxy_name = format!("rpc_from_node_{}", account.id());
+            let rpc_port_proxied = utils::pick_unused_port().await?;
+            let rpc_address_proxied = format!("http://127.0.0.1:{rpc_port_proxied}");
+            tracing::info!(
+                "Proxy RPC address {} accessed by node@{} to {}",
+                near_rpc,
+                account.id(),
+                rpc_address_proxied
+            );
+            LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc)
+                .await
+                .unwrap();
             rpc_address_proxied
-        );
-        LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc).await?;
+        } else {
+            near_rpc
+        };
 
         let mut cfg = cfg.clone();
         if let Some(ref mut eth_config) = cfg.eth {
@@ -155,7 +161,7 @@ impl Node {
                 cipher_sk,
                 sign_sk,
                 cfg: cfg.clone(),
-                near_rpc: rpc_address_proxied,
+                near_rpc,
             },
         )
         .await
@@ -178,7 +184,7 @@ impl Node {
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
-            web_port,
+            web_port: Some(web_port),
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             sign_sk: Some(config.sign_sk.clone()),
             eth,

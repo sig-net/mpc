@@ -47,6 +47,8 @@ pub struct MpcSignProtocol {
     pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     pub(crate) msg_channel: MessageChannel,
     pub(crate) rpc_channel: RpcChannel,
+    pub(crate) config: Arc<RwLock<Config>>,
+    pub(crate) mesh_state: Arc<RwLock<MeshState>>,
 }
 
 impl MpcSignProtocol {

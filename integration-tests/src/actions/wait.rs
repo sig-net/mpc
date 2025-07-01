@@ -350,10 +350,7 @@ pub async fn require_presignatures(
         .with_max_times(expected * 100);
 
     let state_views = is_enough.retry(&strategy).await.with_context(|| {
-        format!(
-            "mpc nodes failed to generate {} presignatures before deadline",
-            expected
-        )
+        format!("mpc nodes failed to generate {expected} presignatures before deadline")
     })?;
 
     Ok(state_views)
@@ -398,10 +395,7 @@ pub async fn require_triples(
         .with_max_times(expected * 100);
 
     let state_views = is_enough.retry(&strategy).await.with_context(|| {
-        format!(
-            "mpc nodes failed to generate {} triples before deadline",
-            expected
-        )
+        format!("mpc nodes failed to generate {expected} triples before deadline")
     })?;
 
     Ok(state_views)
