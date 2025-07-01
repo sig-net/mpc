@@ -14,7 +14,6 @@ use super::{owner_key, STORAGE_VERSION};
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 /// A pre-reserved slot for a triple that will eventually be inserted.
-#[derive(Clone)]
 pub struct TripleSlot {
     id: TripleId,
     storage: TripleStorage,
@@ -33,6 +32,19 @@ impl TripleSlot {
     pub async fn unreserve(&self) {
         if !self.stored {
             self.storage.unreserve([self.id]).await;
+        }
+    }
+}
+
+impl Drop for TripleSlot {
+    fn drop(&mut self) {
+        if !self.stored {
+            let storage = self.storage.clone();
+            let id = self.id;
+            // If the slot was not stored, we need to unreserve it.
+            tokio::spawn(async move {
+                storage.unreserve([id]).await;
+            });
         }
     }
 }

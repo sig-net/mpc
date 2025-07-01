@@ -34,6 +34,7 @@ pub struct ClusterSpawner {
 
     pub cfg: NodeConfig,
     pub wait_for_running: bool,
+    pub toxiproxy: bool,
     prestockpile: Option<Prestockpile>,
 }
 
@@ -59,6 +60,7 @@ impl Default for ClusterSpawner {
 
             cfg,
             wait_for_running: true,
+            toxiproxy: false,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
         }
     }
@@ -92,6 +94,11 @@ impl ClusterSpawner {
 
     pub fn with_config(mut self, call: impl FnOnce(&mut NodeConfig)) -> Self {
         call(&mut self.cfg);
+        self
+    }
+
+    pub fn enable_toxiproxy(mut self) -> Self {
+        self.toxiproxy = true;
         self
     }
 
@@ -173,6 +180,7 @@ impl IntoFuture for ClusterSpawner {
                 rpc_client,
                 http_client: reqwest::Client::default(),
                 docker_client: self.docker,
+                account_idx: nodes.len(),
                 nodes,
             };
 

@@ -1,7 +1,7 @@
 use super::contract::primitives::Participants;
-use super::presignature::PresignatureManager;
-use super::signature::SignatureManager;
-use super::triple::TripleManager;
+use super::triple::TripleSpawnerTask;
+use crate::protocol::presignature::PresignatureSpawnerTask;
+use crate::protocol::signature::SignatureSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 
 use cait_sith::protocol::Participant;
@@ -9,9 +9,8 @@ use mpc_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::sync::Arc;
 
-use tokio::sync::{watch, RwLock};
+use tokio::sync::watch;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PersistentNodeData {
@@ -71,9 +70,9 @@ pub struct RunningState {
     pub threshold: usize,
     pub private_share: SecretKeyShare,
     pub public_key: PublicKey,
-    pub triple_manager: TripleManager,
-    pub presignature_manager: Arc<RwLock<PresignatureManager>>,
-    pub signature_manager: Arc<RwLock<SignatureManager>>,
+    pub triple_task: TripleSpawnerTask,
+    pub presign_task: PresignatureSpawnerTask,
+    pub sign_task: SignatureSpawnerTask,
 }
 
 pub struct ResharingState {
@@ -194,13 +193,8 @@ impl Node {
                 let _ = self.watcher_tx.send(NodeStatus::Running {
                     me: state.me,
                     participants: state.participants.keys_vec(),
-                    ongoing_triple_gen: state.triple_manager.len_ongoing().await,
-                    ongoing_presignature_gen: state
-                        .presignature_manager
-                        .read()
-                        .await
-                        .len_ongoing()
-                        .await,
+                    ongoing_triple_gen: state.triple_task.len_ongoing(),
+                    ongoing_presignature_gen: state.presign_task.len_ongoing(),
                 });
             }
             NodeState::Resharing(state) => {
