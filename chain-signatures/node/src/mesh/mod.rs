@@ -1,11 +1,9 @@
 use std::time::Duration;
 
-use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
-use crate::protocol::ProtocolState;
+use crate::{node_client::NodeClient, rpc::ContractStateWatcher};
 use cait_sith::protocol::Participant;
-use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch};
 
 pub mod connection;
 
@@ -45,7 +43,8 @@ pub struct MeshState {
 pub struct Mesh {
     /// Pool of connections to participants. Used to check who is alive in the network.
     connections: connection::Pool,
-    state: Arc<RwLock<MeshState>>,
+    state_tx: watch::Sender<MeshState>,
+    state_rx: watch::Receiver<MeshState>,
     ping_interval: Duration,
     synced_peer_rx: mpsc::Receiver<Participant>,
 }
@@ -57,39 +56,48 @@ impl Mesh {
         synced_peer_rx: mpsc::Receiver<Participant>,
     ) -> Self {
         let ping_interval = Duration::from_millis(options.ping_interval);
+        let (state_tx, state_rx) = watch::channel(MeshState::default());
         Self {
             connections: connection::Pool::new(client, ping_interval),
-            state: Arc::new(RwLock::new(MeshState::default())),
+            state_tx,
+            state_rx,
             ping_interval,
             synced_peer_rx,
         }
     }
 
-    pub fn state(&self) -> &Arc<RwLock<MeshState>> {
-        &self.state
+    pub fn watch(&self) -> watch::Receiver<MeshState> {
+        self.state_rx.clone()
     }
 
-    pub async fn run(mut self, contract_state: Arc<RwLock<Option<ProtocolState>>>) {
+    pub async fn run(mut self, mut contract: ContractStateWatcher) {
         let mut interval = tokio::time::interval(self.ping_interval / 2);
         loop {
             tokio::select! {
+                // TODO: this will be removed once we have reactive connection changes coming in:
+                // but for now, we will need to poll for changes in the connection pool when nodes
+                // go offline or come online again.
                 _ = interval.tick() => {
-
-                    if let Some(contract) = &*contract_state.read().await {
-                        self.connections.connect(contract).await;
-                        let new_state = self.connections.status().await;
-                        let mut state = self.state.write().await;
-                        *state = new_state;
-                    }
+                    let new_state = self.connections.status().await;
+                    let _ = self.state_tx.send(new_state);
+                }
+                Some(contract) = contract.next_state() => {
+                    tracing::info!(?contract, "new contract state received");
+                    self.connections.connect(contract).await;
+                    let new_state = self.connections.status().await;
+                    let _ = self.state_tx.send(new_state);
                 }
                 Some(participant) = self.synced_peer_rx.recv() => {
                     self.connections.report_node_synced(participant).await;
-                    let mut state = self.state.write().await;
-
-                    if let Some(info) = state.need_sync.remove(&participant) {
-                        state.active.insert(&participant, info);
-                        state.stable.push(participant);
-                    }
+                    self.state_tx.send_if_modified(|state| {
+                        if let Some(info) = state.need_sync.remove(&participant) {
+                            state.active.insert(&participant, info);
+                            state.stable.push(participant);
+                            true
+                        } else {
+                            false
+                        }
+                    });
                 }
             }
         }

@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch};
 use url::Url;
 
 /// The maximum amount of times to retry publishing a signature.
@@ -119,36 +119,58 @@ impl RpcChannel {
 #[derive(Clone)]
 pub struct ContractStateWatcher {
     account_id: AccountId,
-    // TODO: use tokio::watch channel in the future.
-    contract_state: Arc<RwLock<Option<ProtocolState>>>,
+    contract_state: watch::Receiver<Option<ProtocolState>>,
 }
 
 impl ContractStateWatcher {
-    pub fn new(id: &AccountId) -> Self {
-        Self {
-            account_id: id.clone(),
-            contract_state: Arc::new(RwLock::new(None)),
-        }
+    pub fn new(id: &AccountId) -> (Self, watch::Sender<Option<ProtocolState>>) {
+        let (tx, rx) = watch::channel(None);
+        (
+            Self {
+                account_id: id.clone(),
+                contract_state: rx,
+            },
+            tx,
+        )
     }
 
-    pub fn mock(id: &AccountId, state: ProtocolState) -> Self {
-        Self {
-            account_id: id.clone(),
-            contract_state: Arc::new(RwLock::new(Some(state))),
-        }
+    pub fn with(
+        id: &AccountId,
+        state: ProtocolState,
+    ) -> (Self, watch::Sender<Option<ProtocolState>>) {
+        let (tx, rx) = watch::channel(Some(state));
+        (
+            Self {
+                account_id: id.clone(),
+                contract_state: rx,
+            },
+            tx,
+        )
     }
 
     pub fn account_id(&self) -> &AccountId {
         &self.account_id
     }
 
-    pub fn state(&self) -> &Arc<RwLock<Option<ProtocolState>>> {
-        &self.contract_state
+    pub fn borrow_state(&self) -> watch::Ref<'_, Option<ProtocolState>> {
+        self.contract_state.borrow()
+    }
+
+    pub fn state(&self) -> Option<ProtocolState> {
+        self.borrow_state().clone()
+    }
+
+    pub async fn next_state(&mut self) -> Option<ProtocolState> {
+        let _ = self.contract_state.changed().await;
+        self.contract_state.borrow_and_update().clone()
+    }
+
+    pub fn mark_changed(&mut self) {
+        self.contract_state.mark_changed();
     }
 
     pub async fn me(&self) -> Option<Participant> {
-        let state = self.contract_state.read().await;
-        match state.as_ref()? {
+        match self.state().clone()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => state
                 .participants
@@ -162,8 +184,7 @@ impl ContractStateWatcher {
     }
 
     pub async fn threshold(&self) -> Option<usize> {
-        let state = self.contract_state.read().await;
-        match state.as_ref()? {
+        match self.state().clone()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => Some(state.threshold),
             ProtocolState::Resharing(state) => Some(state.threshold),
@@ -171,8 +192,7 @@ impl ContractStateWatcher {
     }
 
     pub async fn info(&self) -> Option<(usize, Participant)> {
-        let state = self.contract_state.read().await;
-        match state.as_ref()? {
+        match self.state().clone()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => Some((
                 state.threshold,
@@ -186,8 +206,7 @@ impl ContractStateWatcher {
     }
 
     pub async fn participants(&self) -> ParticipantMap {
-        let contract_state = self.contract_state.read().await;
-        let Some(state) = contract_state.as_ref() else {
+        let Some(state) = self.state().clone() else {
             return ParticipantMap::Zero;
         };
 
@@ -233,8 +252,8 @@ impl RpcExecutor {
 
     pub async fn run(
         mut self,
-        contract_state: Arc<RwLock<Option<ProtocolState>>>,
-        config: Arc<RwLock<Config>>,
+        contract: watch::Sender<Option<ProtocolState>>,
+        config: watch::Sender<Config>,
     ) {
         // spin up update task for updating contract state and config
         let near = self.near.clone();
@@ -242,7 +261,7 @@ impl RpcExecutor {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
             loop {
                 interval.tick().await;
-                tokio::spawn(update_contract(near.clone(), contract_state.clone()));
+                tokio::spawn(update_contract(near.clone(), contract.clone()));
                 tokio::spawn(update_config(near.clone(), config.clone()));
             }
         });
@@ -364,21 +383,22 @@ impl NearClient {
         Ok(protocol_state)
     }
 
-    pub async fn fetch_config(&self, original: &Config) -> anyhow::Result<Config> {
-        let contract_config: ContractConfig = self
-            .client
+    pub async fn fetch_config(&self) -> Option<ContractConfig> {
+        self.client
             .view(&self.contract_id, "config")
             .await
             .inspect_err(|err| {
                 tracing::warn!(%err, "failed to fetch contract config");
-            })?
-            .json()?;
-        tracing::debug!(?contract_config, "contract config");
-        Config::try_from_contract(contract_config, original).ok_or_else(|| {
-            let msg = "failed to parse contract config";
-            tracing::error!(msg);
-            anyhow::anyhow!(msg)
-        })
+            })
+            .ok()?
+            .json()
+            .inspect(|configs| {
+                tracing::debug!(?configs, "contract config");
+            })
+            .inspect_err(|err| {
+                tracing::warn!(%err, "unable to parse config");
+            })
+            .ok()
     }
 
     pub async fn vote_public_key(
@@ -529,22 +549,32 @@ pub enum ChainClient {
     Solana(SolanaClient),
 }
 
-async fn update_contract(near: NearClient, contract_state: Arc<RwLock<Option<ProtocolState>>>) {
-    match near.fetch_state().await {
-        Ok(state) => {
-            *contract_state.write().await = Some(state);
-        }
+async fn update_contract(near: NearClient, contract: watch::Sender<Option<ProtocolState>>) {
+    let new_state = match near.fetch_state().await {
+        Ok(state) => state,
         Err(error) => {
             tracing::error!(?error, "could not fetch contract state");
+            return;
         }
-    }
+    };
+
+    contract.send_if_modified(|old_state| {
+        if let Some(old_state) = old_state {
+            if *old_state == new_state {
+                return false;
+            }
+        }
+        *old_state = Some(new_state);
+        true
+    });
 }
 
-async fn update_config(near: NearClient, config: Arc<RwLock<Config>>) {
-    let mut config = config.write().await;
-    if let Err(error) = config.fetch_inplace(&near).await {
-        tracing::error!(?error, "could not fetch contract config");
-    }
+async fn update_config(near: NearClient, config: watch::Sender<Config>) {
+    let Some(contract_config) = near.fetch_config().await else {
+        return;
+    };
+
+    config.send_if_modified(|config| config.update(contract_config));
 }
 
 /// Publish the signature and retry if it fails
