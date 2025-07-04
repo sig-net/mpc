@@ -160,6 +160,13 @@ impl ClusterSpawner {
     pub async fn dry_run(&mut self) -> anyhow::Result<crate::Context> {
         crate::dry_run(self).await
     }
+
+    /// Integration tests rely on a fake AWS configuration for LocalStack
+    pub fn fake_aws_credentials(&self) {
+        std::env::set_var("AWS_ACCESS_KEY_ID", "123");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "456");
+        std::env::set_var("AWS_DEFAULT_REGION", "us-east-1");
+    }
 }
 
 impl IntoFuture for ClusterSpawner {
@@ -169,6 +176,7 @@ impl IntoFuture for ClusterSpawner {
     fn into_future(mut self) -> Self::IntoFuture {
         Box::pin(async move {
             self = self.init_network().await?;
+            self.fake_aws_credentials();
 
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
