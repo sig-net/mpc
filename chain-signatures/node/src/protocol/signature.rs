@@ -733,7 +733,7 @@ impl SignatureSpawner {
 
         match internal_action {
             PositInternalAction::None => {}
-            PositInternalAction::Rejected => {
+            PositInternalAction::Abort => {
                 tracing::warn!(
                     ?sign_id,
                     presignature_id,
