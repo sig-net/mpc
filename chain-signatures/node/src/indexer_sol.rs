@@ -260,7 +260,6 @@ where
         )
         .await?;
 
-    
     let Some(meta) = tx.transaction.meta else {
         return Ok(Vec::new());
     };
@@ -307,28 +306,21 @@ where
         _ => return Ok(Vec::new()),
     };
 
-    
     for (set_idx, inner_ix_set) in inner_ixs.iter().enumerate() {
         for (ix_idx, instruction) in inner_ix_set.instructions.iter().enumerate() {
-    
             // We only care about:
             // 1. Parsed instructions (not Compiled - only used for non-JsonParsed encodings)
             // 2. PartiallyDecoded instructions (not fully Parsed - only applies to well-known programs like System, Token, etc.)
             if let solana_transaction_status::UiInstruction::Parsed(
                 solana_transaction_status::UiParsedInstruction::PartiallyDecoded(
                     ui_partially_decoded_instruction,
-                )
-            ) = instruction {
-
+                ),
+            ) = instruction
+            {
                 // Check if inner instruction is from our target program
                 if ui_partially_decoded_instruction.program_id == target_program_str {
-
-                    match process_instruction_data(
-                        &ui_partially_decoded_instruction.data,
-                    ) {
-                        Ok(mut instruction_events) => {
-                            events.append(&mut instruction_events)
-                        }
+                    match process_instruction_data(&ui_partially_decoded_instruction.data) {
+                        Ok(mut instruction_events) => events.append(&mut instruction_events),
                         Err(e) => tracing::warn!(
                             "Error processing inner instruction {}.{}: {}",
                             set_idx,
@@ -431,7 +423,6 @@ where
     let (mut stream, _unsubscriber) = pubsub_client.logs_subscribe(filter, config).await?;
 
     while let Some(response) = stream.next().await {
-        
         // Skip failed transactions immediately
         // Anchor's emit_cpi! performs validation of event authority:
         // 1. Verifies event_authority is a transaction signer
