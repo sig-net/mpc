@@ -323,13 +323,6 @@ where
                 // Check if inner instruction is from our target program
                 if ui_partially_decoded_instruction.program_id == target_program_str {
 
-                    // SECURITY: Anchor's emit_cpi! performs validation of event authority:
-                    // 1. Verifies event_authority is a transaction signer
-                    // 2. Validates event_authority matches the expected PDA derived from program seeds
-                    // 3. Ensures only the programs itself can emit events via emit_cpi!
-                    // Transaction fails with ConstraintSigner/ConstraintSeeds errors if validation fails.
-                    // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/lang/syn/src/codegen/program/handlers.rs#L208
-
                     match process_instruction_data(
                         &ui_partially_decoded_instruction.data,
                     ) {
@@ -440,6 +433,12 @@ where
     while let Some(response) = stream.next().await {
         
         // Skip failed transactions immediately
+        // Anchor's emit_cpi! performs validation of event authority:
+        // 1. Verifies event_authority is a transaction signer
+        // 2. Validates event_authority matches the expected PDA derived from program seeds
+        // 3. Ensures only the program itself can emit events via emit_cpi!
+        // Transaction fails with ConstraintSigner/ConstraintSeeds errors if validation fails.
+        // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/lang/syn/src/codegen/program/handlers.rs#L208
         if response.value.err.is_some() {
             continue;
         }
