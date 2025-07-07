@@ -338,7 +338,7 @@ struct MessageExecutor {
 
 impl MessageExecutor {
     pub async fn execute(mut self) {
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        let mut interval = tokio::time::interval(Duration::from_millis(10));
         loop {
             interval.tick().await;
             let config = self.config.borrow().clone();
