@@ -885,7 +885,7 @@ async fn send_requests_when_final(
                         }
                     };
 
-                    let cur_block_hash = block.header.hash_slow();
+                    let cur_block_hash = block.header.hash;
                     if cur_block_hash == block_hash {
                         tracing::info!("Block {block_number} is finalized!");
                         send_indexed_requests(
