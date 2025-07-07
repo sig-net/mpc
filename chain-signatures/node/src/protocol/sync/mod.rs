@@ -20,6 +20,10 @@ use super::triple::TripleId;
 /// our issue will more than likely not be the channel size.
 const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
 
+/// The interval which we will try to sync with other nodes to see if they have lost track
+/// of anything.
+pub const RECURRING_SYNC_INTERVAL: Duration = Duration::from_secs(3600 * 24);
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
     pub from: Participant,
@@ -83,7 +87,7 @@ impl SyncTask {
         let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
         let mut sync_interval = tokio::time::interval(Duration::from_millis(100));
         // Broadcast should generally not be necessary.
-        let mut broadcast_interval = tokio::time::interval(Duration::from_secs(3600 * 24));
+        let mut broadcast_interval = tokio::time::interval(RECURRING_SYNC_INTERVAL);
         let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(100));
 
         // Do NOT start until we have our own participant info.
