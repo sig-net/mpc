@@ -711,40 +711,28 @@ async fn refresh_finalized_block(
             final_block_number
         );
 
-        let Some(last_final_block_number) = final_block_number else {
-            tracing::info!("Last finalized block was None");
+        if final_block_number.is_none() || new_final_block_number > final_block_number.unwrap() {
+            tracing::info!("Found new finalized block!");
             final_block_number.replace(new_final_block_number);
-            send_finalized_block(&finalized_block_send, new_final_block_number).await?;
+            finalized_block_send
+                .send(new_final_block_number)
+                .await
+                .map_err(|err| anyhow!("Failed to send finalized block: {:?}", err))?;
             continue;
-        };
+        }
+
+        let last_final_block_number = final_block_number.unwrap();
 
         if new_final_block_number < last_final_block_number {
             tracing::warn!(
                 "New finalized block number overflowed range of u64 and has wrapped around!"
             );
-            continue;
         }
 
         if last_final_block_number == new_final_block_number {
             tracing::info!("No new finalized block");
-            continue;
         }
-
-        tracing::info!("Found new finalized block!");
-        final_block_number.replace(new_final_block_number);
-        send_finalized_block(&finalized_block_send, new_final_block_number).await?;
     }
-}
-
-// Helper function to send finalized block and handle errors
-async fn send_finalized_block(
-    finalized_block_send: &mpsc::Sender<u64>,
-    block_number: u64,
-) -> anyhow::Result<()> {
-    finalized_block_send
-        .send(block_number)
-        .await
-        .map_err(|err| anyhow!("Failed to send finalized block: {:?}", err))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -841,70 +829,46 @@ async fn send_requests_when_final(
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     let mut finalized_block_number: Option<u64> = None;
+
     loop {
-        while let Some(BlockAndRequests {
+        let Some(BlockAndRequests {
             block_number,
             block_hash,
             indexed_requests,
         }) = requests_indexed.recv().await
-        {
-            loop {
-                // Check if block is in any of the finalized epochs
-                let Some(last_finalized_block_number) = finalized_block_number else {
-                    tracing::info!("Last finalized block was None");
-                    // Wait for new finalized block
-                    let Some(new_finalized_block) = finalized_block_rx.recv().await else {
-                        tracing::warn!("Failed to receive finalized blocks");
-                        return Err(anyhow::anyhow!("Failed to receive finalized blocks"));
-                    };
-                    finalized_block_number.replace(new_finalized_block);
-                    continue;
-                };
+        else {
+            return Err(anyhow::anyhow!("Failed to receive indexed requests"));
+        };
 
-                if block_number <= last_finalized_block_number {
-                    let block = match fetch_block_by_number(
-                        helios_client,
-                        block_number,
-                        5,
-                        Duration::from_millis(200),
-                    )
-                    .await
-                    {
-                        Ok(block) => block,
-                        Err(e) => {
-                            tracing::warn!("Failed to fetch block {block_number}: {:?}", e);
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                            continue;
-                        }
-                    };
+        // Wait for finalized block if needed
+        while finalized_block_number.is_none() || block_number > finalized_block_number.unwrap() {
+            let Some(new_finalized_block) = finalized_block_rx.recv().await else {
+                return Err(anyhow::anyhow!("Failed to receive finalized blocks"));
+            };
+            finalized_block_number.replace(new_finalized_block);
+        }
 
-                    let cur_block_hash = block.header.hash;
-                    if cur_block_hash == block_hash {
-                        tracing::info!("Block {block_number} is finalized!");
-                        send_indexed_requests(
-                            indexed_requests.clone(),
-                            sign_tx.clone(),
-                            node_near_account_id.clone(),
-                        );
-                    } else {
-                        tracing::error!(
-                            "Block {block_number} hash mismatch: expected {block_hash:?}, got {cur_block_hash:?}. Chain re-orged."
-                        );
-                    }
-                    break;
-                } else {
-                    tracing::warn!(
-                        "Block number {block_number} with hash: {block_hash:?} not finalized. "
-                    );
-                }
+        // Verify block hash and send requests
+        let block =
+            fetch_block_by_number(helios_client, block_number, 5, Duration::from_millis(200))
+                .await
+                .map_err(|e| {
+                    tracing::warn!("Failed to fetch block {block_number}: {e:?}");
+                    anyhow!("Failed to fetch block")
+                })?;
 
-                // Wait for new finalized block
-                let Some(new_finalized_block) = finalized_block_rx.recv().await else {
-                    tracing::warn!("Failed to receive finalized blocks");
-                    return Err(anyhow::anyhow!("Failed to receive finalized blocks"));
-                };
-                finalized_block_number.replace(new_finalized_block);
-            }
+        if block.header.hash == block_hash {
+            tracing::info!("Block {block_number} is finalized!");
+            send_indexed_requests(
+                indexed_requests,
+                sign_tx.clone(),
+                node_near_account_id.clone(),
+            );
+        } else {
+            tracing::error!(
+                "Block {block_number} hash mismatch: expected {block_hash:?}, got {:?}. Chain re-orged.",
+                block.header.hash
+            );
         }
     }
 }
