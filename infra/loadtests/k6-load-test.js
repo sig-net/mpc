@@ -53,9 +53,9 @@ const strategies = {
         preAllocatedVUs: 5,
         maxVUs: 20,
         stages: [
-          { duration: '1m', target: 1 },
-          { duration: '58m', target: 1 },
-          { duration: '1m', target: 0 },
+          { duration: '1m', target: 2 },
+          { duration: '58m', target: 8 },
+          { duration: '1m', target: 2 },
         ],
       },
     },
