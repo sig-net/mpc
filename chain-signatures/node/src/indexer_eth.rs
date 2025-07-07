@@ -646,7 +646,7 @@ async fn fetch_block_by_number(
 }
 
 // retry getting latest finalized block from helios with exponential backoff
-async fn fetch_finalized_block_from_helio(
+async fn fetch_finalized_block(
     helios_client: &Arc<EthereumClient>,
     max_retries: u8,
     base_delay: Duration,
@@ -696,9 +696,7 @@ async fn refresh_finalized_block(
         tracing::info!("Refreshing finalized epoch");
 
         let new_finalized_block =
-            match fetch_finalized_block_from_helio(helios_client, 5, Duration::from_millis(200))
-                .await
-            {
+            match fetch_finalized_block(helios_client, 5, Duration::from_millis(200)).await {
                 Ok(block) => block,
                 Err(e) => {
                     tracing::warn!("Failed to get finalized block: {:?}", e);
@@ -835,8 +833,6 @@ async fn process_block(
 }
 
 /// Sends a request to the sign queue when the block where the request is in is finalized.
-/// This assumes that the requests_indexed are mostly ordered by block number, with occasional retried blocks that can go farthest 2 finalized epochs back.
-/// Whenever there are requests in requests_indexed, function will keep polling if the block where the first request is in has finalized, if finalized, it will send this request to the sign queue.
 async fn send_requests_when_final(
     helios_client: &Arc<EthereumClient>,
     mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
@@ -844,10 +840,7 @@ async fn send_requests_when_final(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
-    // We keep the last 2 finalized epochs to handle retried blocks that happen to be older
-
     let mut finalized_block_number: Option<u64> = None;
-    // the logic with 8k blocks can be: for each received indexed block, check if it's <= current finalized block. If so, check that its block hash == the block hash from helios, if so, send;else, err.
     loop {
         while let Some(BlockAndRequests {
             block_number,
