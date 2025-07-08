@@ -1,4 +1,5 @@
 use crate::protocol::{Chain, IndexedSignRequest};
+use crate::storage::app_data_storage::AppDataStorage;
 use alloy::consensus::BlockHeader;
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::hex::{self, ToHexExt};
@@ -414,12 +415,15 @@ fn finalized_block_channel() -> (mpsc::Sender<u64>, mpsc::Receiver<u64>) {
 pub async fn run(
     eth: Option<EthConfig>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
+    app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
         return Ok(());
     };
+
+    let last_processed_block = app_data_storage.last_processed_block_eth().await?;
 
     let network = Network::from_str(eth.network.as_str())
         .map_err(|err| anyhow::anyhow!("Network input incorrect: {:?}", err))?;
