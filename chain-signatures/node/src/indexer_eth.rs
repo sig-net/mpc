@@ -891,6 +891,7 @@ async fn catch_up(
         return;
     }
     let start_block_number = start_block_number.unwrap();
+    tracing::info!("Catching up from block number: {start_block_number}");
     let latest_block = match fetch_block(
         helios_client,
         BlockId::Number(BlockNumberOrTag::Latest),
