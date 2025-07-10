@@ -462,6 +462,7 @@ pub async fn run(
     let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
 
     let client = Arc::new(client);
+
     let client_clone = Arc::clone(&client);
     tokio::spawn(async move {
         tracing::info!("Spawned task to refresh the latest finalized block");
@@ -516,19 +517,16 @@ pub async fn run(
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let blocks_failed_send_clone = blocks_failed_send.clone();
     let client_clone = Arc::clone(&client);
-    tokio::spawn(async move {
-        tracing::info!("Spawned task to catch up from last processed block");
-        catch_up(
-            &client_clone,
-            last_processed_block,
-            eth_contract_addr,
-            requests_indexed_send_clone,
-            blocks_failed_send_clone,
-            total_timeout,
-            near_account_id_clone,
-        )
-        .await;
-    });
+    catch_up(
+        &client_clone,
+        last_processed_block,
+        eth_contract_addr,
+        requests_indexed_send_clone,
+        blocks_failed_send_clone,
+        total_timeout,
+        near_account_id_clone,
+    )
+    .await;
 
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let requests_indexed_send_clone = requests_indexed_send.clone();
