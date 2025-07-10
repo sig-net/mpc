@@ -886,11 +886,10 @@ async fn catch_up(
     total_timeout: Duration,
     node_near_account_id: AccountId,
 ) {
-    if start_block_number.is_none() {
+    let Some(start_block_number) = start_block_number else {
         tracing::info!("No start block number provided, skipping catch up");
         return;
-    }
-    let start_block_number = start_block_number.unwrap();
+    };
     tracing::info!("Catching up from block number: {start_block_number}");
     let latest_block = match fetch_block(
         helios_client,

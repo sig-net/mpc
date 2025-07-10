@@ -1,5 +1,6 @@
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
+use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
 
@@ -8,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::containers::{self, DockerClient};
 use crate::utils::dev_gen_indexed;
-use crate::{execute, NodeConfig, Nodes};
+use crate::{execute, initialize_lake_indexer, LakeIndexerCtx, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
 
@@ -35,6 +36,8 @@ pub struct ClusterSpawner {
     pub cfg: NodeConfig,
     pub wait_for_running: bool,
     pub toxiproxy: bool,
+    pub redis: Option<containers::Redis>,
+    pub lake: Option<LakeIndexerCtx>,
     prestockpile: Option<Prestockpile>,
 }
 
@@ -61,6 +64,8 @@ impl Default for ClusterSpawner {
             cfg,
             wait_for_running: true,
             toxiproxy: false,
+            redis: None,
+            lake: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
         }
     }
@@ -138,19 +143,69 @@ impl ClusterSpawner {
         self
     }
 
+    pub fn account_id(&self, idx: usize) -> AccountId {
+        if idx >= self.accounts.len() {
+            panic!("Account index out of bounds: {idx}");
+        }
+        self.accounts[idx].id().clone()
+    }
+
     /// Create accounts for the nodes
     pub async fn create_accounts(&mut self, worker: &Worker<Sandbox>) {
-        let mut accounts = Vec::with_capacity(self.cfg.nodes);
+        if self.accounts.len() >= self.cfg.nodes {
+            // accounts already created, don't create anymore.
+            return;
+        }
+
         for i in 0..self.cfg.nodes {
-            accounts.push(dev_gen_indexed(worker, i).await.unwrap());
+            self.accounts
+                .push(dev_gen_indexed(worker, i).await.unwrap());
         }
         self.participants
-            .extend((0..accounts.len() as u32).map(Participant::from));
-        self.accounts.extend(accounts);
+            .extend((0..self.accounts.len() as u32).map(Participant::from));
+    }
+
+    pub async fn prespawn_lake(&mut self) -> anyhow::Result<&LakeIndexerCtx> {
+        let lake = initialize_lake_indexer(self).await?;
+        self.lake = Some(lake);
+        Ok(self.lake.as_ref().unwrap())
+    }
+
+    /// Grabs the underlying lake instance that was prespawned, or if not prespawned, create a
+    /// new one from start up.
+    pub async fn take_lake(&mut self) -> LakeIndexerCtx {
+        match self.lake.take() {
+            Some(lake) => lake,
+            None => initialize_lake_indexer(self).await.unwrap(),
+        }
     }
 
     pub async fn spawn_redis(&self) -> containers::Redis {
         containers::Redis::run(self).await
+    }
+
+    /// Prespawns a redis instance where we're able to make use of it before the nodes are spun
+    /// up and are in running phase. This redis instance will be reused when the whole environment
+    /// is setup.
+    pub async fn prespawn_redis(&mut self) -> &containers::Redis {
+        self.redis = Some(self.spawn_redis().await);
+        self.redis.as_ref().unwrap()
+    }
+
+    /// Grabs the underlying redis instance that was prespawned, or if not prespawned, create a
+    /// new one from start up.
+    pub async fn take_redis(&mut self) -> containers::Redis {
+        match self.redis.take() {
+            Some(redis) => redis,
+            None => self.spawn_redis().await,
+        }
+    }
+
+    pub async fn presetup(&mut self) -> anyhow::Result<&containers::Redis> {
+        let lake = self.prespawn_lake().await?;
+        let worker = lake.worker.clone();
+        self.create_accounts(&worker).await;
+        Ok(self.prespawn_redis().await)
     }
 
     pub async fn run(&mut self) -> anyhow::Result<Nodes> {
