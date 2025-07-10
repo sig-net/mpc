@@ -4,7 +4,7 @@ use crate::indexer_sol::SolConfig;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::signature::SignRequest;
-use crate::protocol::{Chain, ProtocolState};
+use crate::protocol::{Chain, Governance, ProtocolState};
 use crate::util::AffinePointExt as _;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
@@ -371,6 +371,20 @@ pub struct NearClient {
     signer: InMemorySigner,
     cipher_pk: hpke::PublicKey,
     sign_pk: near_crypto::PublicKey,
+}
+
+impl Governance for NearClient {
+    async fn propose_join(&self) -> anyhow::Result<()> {
+        self.propose_join().await
+    }
+
+    async fn vote_reshared(&self, epoch: u64) -> anyhow::Result<bool> {
+        self.vote_reshared(epoch).await
+    }
+
+    async fn vote_public_key(&self, public_key: &near_crypto::PublicKey) -> anyhow::Result<bool> {
+        self.vote_public_key(public_key).await
+    }
 }
 
 impl NearClient {
