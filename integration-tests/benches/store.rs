@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 
 use cait_sith::{
     protocol::Participant,
@@ -10,7 +10,7 @@ use elliptic_curve::CurveArithmetic;
 use integration_tests::{cluster::spawner::ClusterSpawner, containers::Redis};
 use k256::Secp256k1;
 use mpc_node::{
-    mesh::MeshState,
+    mesh::{Mesh, MeshState},
     node_client::{self, NodeClient},
     protocol::{
         contract::{primitives::Participants, RunningContractState},
@@ -25,7 +25,7 @@ use mpc_node::{
 use near_account_id::AccountId;
 use tokio::{
     runtime::Runtime,
-    sync::{mpsc, RwLock},
+    sync::{mpsc, watch},
 };
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -60,7 +60,7 @@ struct SyncEnv {
     node_id: AccountId,
     me: Participant,
     participants: Participants,
-    mesh_state: Arc<RwLock<MeshState>>,
+    mesh_state: watch::Receiver<MeshState>,
     client: NodeClient,
     redis: Redis,
     triples: TripleStorage,
@@ -96,15 +96,18 @@ fn env() -> (Runtime, SyncEnv) {
                 .await;
         }
         let client = NodeClient::new(&node_client::Options::default());
-        let mesh_state = Arc::new(RwLock::new(MeshState {
-            stable: participants.keys_vec(),
-            active: participants.clone(),
-            need_sync: Participants::default(),
-        }));
+        let (synced_peer_tx, synced_peer_rx) = mpsc::channel(1024);
+        let mesh = Mesh::new(
+            &client,
+            mpc_node::mesh::Options {
+                ping_interval: 1000,
+            },
+            synced_peer_rx,
+        );
 
         let sk = k256::SecretKey::random(&mut rand::thread_rng());
         let pk = sk.public_key();
-        let watcher = ContractStateWatcher::mock(
+        let (contract_watcher, _contract_tx) = ContractStateWatcher::with(
             &node_id,
             ProtocolState::Running(RunningContractState {
                 epoch: 0,
@@ -117,24 +120,21 @@ fn env() -> (Runtime, SyncEnv) {
             }),
         );
 
-        let (synced_peer_tx, _synced_peer_rx) = mpsc::channel(1024);
-        let (sync_channel, sync) = SyncTask::new(
+        let (sync_channel, _sync) = SyncTask::new(
             &client,
             triples.clone(),
             presignatures.clone(),
-            mesh_state.clone(),
-            watcher.clone(),
+            mesh.watch(),
+            contract_watcher,
             synced_peer_tx,
         );
-
-        // let sync_handle = tokio::spawn(sync.run());
 
         SyncEnv {
             threshold,
             node_id,
             me,
             participants,
-            mesh_state,
+            mesh_state: mesh.watch(),
             client,
             redis,
             triples,

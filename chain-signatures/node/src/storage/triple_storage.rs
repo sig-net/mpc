@@ -260,9 +260,19 @@ impl TripleStorage {
                 if not owner_shares[id] then
                     table.insert(outdated, id)
                 end
+
+                -- remove the outdated shares from our node if we have too many
+                -- already to be able to process them in one go.
+                if #outdated >= 4096 then
+                    redis.call("SREM", owner_key, unpack(outdated))
+                    redis.call("SREM", reserved_key, unpack(outdated))
+                    redis.call("HDEL", triple_key, unpack(outdated))
+                    -- clear the outdated list for the next batchw
+                    outdated = {}
+                end
             end
 
-            -- remove the outdated shares from our node
+            -- remove the remaining outdated shares from our node
             if #outdated > 0 then
                 redis.call("SREM", owner_key, unpack(outdated))
                 redis.call("SREM", reserved_key, unpack(outdated))

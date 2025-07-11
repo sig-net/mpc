@@ -66,19 +66,24 @@ impl Node {
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
         // Use proxied address to mock slow, congested or unstable rpc connection
-        let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
-        let proxy_name = format!("rpc_from_node_{}", account.id());
-        let rpc_port_proxied = utils::pick_unused_port().await?;
-        let rpc_address_proxied = format!("{near_rpc}:{rpc_port_proxied}");
-        tracing::info!(
-            "Proxy RPC address {} accessed by node@{} to {}",
-            near_rpc,
-            account.id(),
+        let near_rpc = &ctx.lake_indexer.rpc_host_address;
+        let near_rpc = if ctx.toxiproxy {
+            let proxy_name = format!("rpc_from_node_{}", account.id());
+            let rpc_port_proxied = utils::pick_unused_port().await?;
+            let rpc_address_proxied = format!("{near_rpc}:{rpc_port_proxied}");
+            tracing::info!(
+                "Proxy RPC address {} accessed by node@{} to {}",
+                near_rpc,
+                account.id(),
+                rpc_address_proxied
+            );
+            LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, near_rpc)
+                .await
+                .unwrap();
             rpc_address_proxied
-        );
-        LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc)
-            .await
-            .unwrap();
+        } else {
+            near_rpc.clone()
+        };
 
         Self::spawn(
             ctx,
@@ -88,7 +93,7 @@ impl Node {
                 cipher_sk,
                 sign_sk,
                 cfg: cfg.clone(),
-                near_rpc: rpc_address_proxied,
+                near_rpc,
             },
         )
         .await
@@ -285,9 +290,9 @@ pub struct LakeIndexer {
     // Toxi Server is only used in network traffic originated from Lake Indexer
     // to simulate high load and slowness etc. in Lake Indexer
     // Child process is used for proxy host (local node) to container
-    pub toxi_server_process: Child,
+    pub toxi_server_process: Option<Child>,
     // Container toxi server is used for proxy container to container
-    pub toxi_server_container: Container,
+    pub toxi_server_container: Option<Container>,
 }
 
 impl LakeIndexer {
@@ -386,33 +391,43 @@ impl LakeIndexer {
         bucket_name: &str,
         region: &str,
     ) -> LakeIndexer {
-        tracing::info!("initializing toxi proxy servers");
-        let toxi_server_process = Self::spin_up_toxi_server_process().await.unwrap();
-        let toxi_server_container = Self::spin_up_toxi_server_container(&spawner.network)
-            .await
-            .unwrap();
-        let toxi_server_container_address = spawner
-            .docker
-            .get_network_ip_address(&toxi_server_container, &spawner.network)
-            .await
-            .unwrap();
-        let s3_address_proxied = format!(
-            "{}:{}",
-            &toxi_server_container_address,
-            Self::S3_PORT_PROXIED
-        );
-        tracing::info!(
-            s3_address,
-            s3_address_proxied,
-            "Proxy S3 access from Lake Indexer"
-        );
-        Self::populate_proxy("lake-s3", false, &s3_address_proxied, s3_address)
-            .await
-            .unwrap();
+        let (s3_address, toxi_server_process, toxi_server_container) = if spawner.toxiproxy {
+            tracing::info!("initializing toxi proxy servers");
+            let toxi_server_process = Self::spin_up_toxi_server_process().await.unwrap();
+            let toxi_server_container = Self::spin_up_toxi_server_container(&spawner.network)
+                .await
+                .unwrap();
+            let toxi_server_container_address = spawner
+                .docker
+                .get_network_ip_address(&toxi_server_container, &spawner.network)
+                .await
+                .unwrap();
+            let s3_address_proxied = format!(
+                "{}:{}",
+                &toxi_server_container_address,
+                Self::S3_PORT_PROXIED
+            );
+            tracing::info!(
+                s3_address,
+                s3_address_proxied,
+                "Proxy S3 access from Lake Indexer"
+            );
+            Self::populate_proxy("lake-s3", false, &s3_address_proxied, s3_address)
+                .await
+                .unwrap();
+
+            (
+                format!("http://{s3_address_proxied}"),
+                Some(toxi_server_process),
+                Some(toxi_server_container),
+            )
+        } else {
+            (s3_address.to_string(), None, None)
+        };
 
         tracing::info!(
             network = %spawner.network,
-            s3_address_proxied,
+            s3_address,
             bucket_name,
             region,
             "running NEAR Lake Indexer container..."
@@ -426,7 +441,7 @@ impl LakeIndexer {
             .with_network(&spawner.network)
             .with_cmd(vec![
                 "--endpoint".to_string(),
-                format!("http://{}", s3_address_proxied),
+                s3_address,
                 "--bucket".to_string(),
                 bucket_name.to_string(),
                 "--region".to_string(),

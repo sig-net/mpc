@@ -11,7 +11,8 @@ use solana_sdk::signer::keypair::Keypair;
 
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
-use alloy::providers::RootProvider;
+use alloy::providers::{Provider, RootProvider};
+use alloy::rpc::types::TransactionReceipt;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
@@ -24,7 +25,6 @@ use alloy::dyn_abi::DynSolValue;
 use alloy::network::EthereumWallet;
 use alloy::primitives::U256;
 use alloy::providers::ProviderBuilder;
-use alloy::transports::http::{Client as ReqwestClient, Http};
 use alloy_signer_local::PrivateKeySigner;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch};
 use url::Url;
 
 /// The maximum amount of times to retry publishing a signature.
@@ -49,8 +49,6 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
 const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 /// The batch size for Ethereum responses
 const ETH_RESPOND_BATCH_SIZE: usize = 10;
-
-type EthHttp = Http<ReqwestClient>;
 
 type EthContractFillProvider = FillProvider<
     JoinFill<
@@ -69,12 +67,10 @@ type EthContractFillProvider = FillProvider<
         >,
         WalletFiller<EthereumWallet>,
     >,
-    RootProvider<Http<ReqwestClient>>,
-    Http<ReqwestClient>,
-    alloy::network::Ethereum,
+    RootProvider,
 >;
 
-type EthContractInstance = ContractInstance<EthHttp, EthContractFillProvider>;
+type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
 #[derive(Clone)]
 struct PublishAction {
@@ -123,36 +119,58 @@ impl RpcChannel {
 #[derive(Clone)]
 pub struct ContractStateWatcher {
     account_id: AccountId,
-    // TODO: use tokio::watch channel in the future.
-    contract_state: Arc<RwLock<Option<ProtocolState>>>,
+    contract_state: watch::Receiver<Option<ProtocolState>>,
 }
 
 impl ContractStateWatcher {
-    pub fn new(id: &AccountId) -> Self {
-        Self {
-            account_id: id.clone(),
-            contract_state: Arc::new(RwLock::new(None)),
-        }
+    pub fn new(id: &AccountId) -> (Self, watch::Sender<Option<ProtocolState>>) {
+        let (tx, rx) = watch::channel(None);
+        (
+            Self {
+                account_id: id.clone(),
+                contract_state: rx,
+            },
+            tx,
+        )
     }
 
-    pub fn mock(id: &AccountId, state: ProtocolState) -> Self {
-        Self {
-            account_id: id.clone(),
-            contract_state: Arc::new(RwLock::new(Some(state))),
-        }
+    pub fn with(
+        id: &AccountId,
+        state: ProtocolState,
+    ) -> (Self, watch::Sender<Option<ProtocolState>>) {
+        let (tx, rx) = watch::channel(Some(state));
+        (
+            Self {
+                account_id: id.clone(),
+                contract_state: rx,
+            },
+            tx,
+        )
     }
 
     pub fn account_id(&self) -> &AccountId {
         &self.account_id
     }
 
-    pub fn state(&self) -> &Arc<RwLock<Option<ProtocolState>>> {
-        &self.contract_state
+    pub fn borrow_state(&self) -> watch::Ref<'_, Option<ProtocolState>> {
+        self.contract_state.borrow()
+    }
+
+    pub fn state(&self) -> Option<ProtocolState> {
+        self.borrow_state().clone()
+    }
+
+    pub async fn next_state(&mut self) -> Option<ProtocolState> {
+        let _ = self.contract_state.changed().await;
+        self.contract_state.borrow_and_update().clone()
+    }
+
+    pub fn mark_changed(&mut self) {
+        self.contract_state.mark_changed();
     }
 
     pub async fn me(&self) -> Option<Participant> {
-        let state = self.contract_state.read().await;
-        match state.as_ref()? {
+        match self.state().clone()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => state
                 .participants
@@ -166,8 +184,7 @@ impl ContractStateWatcher {
     }
 
     pub async fn threshold(&self) -> Option<usize> {
-        let state = self.contract_state.read().await;
-        match state.as_ref()? {
+        match self.state().clone()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => Some(state.threshold),
             ProtocolState::Resharing(state) => Some(state.threshold),
@@ -175,8 +192,7 @@ impl ContractStateWatcher {
     }
 
     pub async fn info(&self) -> Option<(usize, Participant)> {
-        let state = self.contract_state.read().await;
-        match state.as_ref()? {
+        match self.state().clone()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => Some((
                 state.threshold,
@@ -190,8 +206,7 @@ impl ContractStateWatcher {
     }
 
     pub async fn participants(&self) -> ParticipantMap {
-        let contract_state = self.contract_state.read().await;
-        let Some(state) = contract_state.as_ref() else {
+        let Some(state) = self.state().clone() else {
             return ParticipantMap::Zero;
         };
 
@@ -237,8 +252,8 @@ impl RpcExecutor {
 
     pub async fn run(
         mut self,
-        contract_state: Arc<RwLock<Option<ProtocolState>>>,
-        config: Arc<RwLock<Config>>,
+        contract: watch::Sender<Option<ProtocolState>>,
+        config: watch::Sender<Config>,
     ) {
         // spin up update task for updating contract state and config
         let near = self.near.clone();
@@ -246,7 +261,7 @@ impl RpcExecutor {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
             loop {
                 interval.tick().await;
-                tokio::spawn(update_contract(near.clone(), contract_state.clone()));
+                tokio::spawn(update_contract(near.clone(), contract.clone()));
                 tokio::spawn(update_config(near.clone(), config.clone()));
             }
         });
@@ -368,21 +383,22 @@ impl NearClient {
         Ok(protocol_state)
     }
 
-    pub async fn fetch_config(&self, original: &Config) -> anyhow::Result<Config> {
-        let contract_config: ContractConfig = self
-            .client
+    pub async fn fetch_config(&self) -> Option<ContractConfig> {
+        self.client
             .view(&self.contract_id, "config")
             .await
             .inspect_err(|err| {
                 tracing::warn!(%err, "failed to fetch contract config");
-            })?
-            .json()?;
-        tracing::debug!(?contract_config, "contract config");
-        Config::try_from_contract(contract_config, original).ok_or_else(|| {
-            let msg = "failed to parse contract config";
-            tracing::error!(msg);
-            anyhow::anyhow!(msg)
-        })
+            })
+            .ok()?
+            .json()
+            .inspect(|configs| {
+                tracing::debug!(?configs, "contract config");
+            })
+            .inspect_err(|err| {
+                tracing::warn!(%err, "unable to parse config");
+            })
+            .ok()
     }
 
     pub async fn vote_public_key(
@@ -476,9 +492,8 @@ impl EthClient {
             .expect("cannot parse Eth account sk into PrivateKeySigner");
         let wallet = EthereumWallet::from(signer.clone());
         let provider = ProviderBuilder::new()
-            .with_recommended_fillers()
             .wallet(wallet)
-            .on_http(eth.execution_rpc_http_url.parse().unwrap());
+            .connect_http(eth.execution_rpc_http_url.parse().unwrap());
         // Create a contract instance.
         let json: serde_json::Value = serde_json::from_slice(include_bytes!(
             "../../contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
@@ -534,22 +549,32 @@ pub enum ChainClient {
     Solana(SolanaClient),
 }
 
-async fn update_contract(near: NearClient, contract_state: Arc<RwLock<Option<ProtocolState>>>) {
-    match near.fetch_state().await {
-        Ok(state) => {
-            *contract_state.write().await = Some(state);
-        }
+async fn update_contract(near: NearClient, contract: watch::Sender<Option<ProtocolState>>) {
+    let new_state = match near.fetch_state().await {
+        Ok(state) => state,
         Err(error) => {
             tracing::error!(?error, "could not fetch contract state");
+            return;
         }
-    }
+    };
+
+    contract.send_if_modified(|old_state| {
+        if let Some(old_state) = old_state {
+            if *old_state == new_state {
+                return false;
+            }
+        }
+        *old_state = Some(new_state);
+        true
+    });
 }
 
-async fn update_config(near: NearClient, config: Arc<RwLock<Config>>) {
-    let mut config = config.write().await;
-    if let Err(error) = config.fetch_inplace(&near).await {
-        tracing::error!(?error, "could not fetch contract config");
-    }
+async fn update_config(near: NearClient, config: watch::Sender<Config>) {
+    let Some(contract_config) = near.fetch_config().await else {
+        return;
+    };
+
+    config.send_if_modified(|config| config.update(contract_config));
 }
 
 /// Publish the signature and retry if it fails
@@ -734,6 +759,132 @@ async fn try_publish_near(
     Ok(())
 }
 
+/// Retry waiting for transaction receipt with exponential backoff starting at the specified `initial_delay`
+async fn handle_wait_for_receipt_retry(
+    attempt: &mut usize,
+    max_attempts: usize,
+    sign_ids: &[SignId],
+    near_account_id: &AccountId,
+    error_msg: &str,
+    initial_delay: Duration,
+) -> Result<(), ()> {
+    *attempt += 1;
+    tracing::error!(?sign_ids, attempt = *attempt, "{}", error_msg);
+    if *attempt >= max_attempts {
+        tracing::error!(
+            ?sign_ids,
+            "exceeded max attempts to get eth signature respond transaction receipt"
+        );
+        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+            .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
+            .inc();
+        return Err(());
+    }
+    let backoff = initial_delay * 2u64.pow((*attempt - 1) as u32) as u32;
+    tokio::time::sleep(backoff).await;
+    Ok(())
+}
+
+// wait for transaction receipt with 5 retries and exponential delay backoff starting at 5s
+async fn wait_for_transaction_receipt(
+    provider: &EthContractFillProvider,
+    tx_hash: alloy::primitives::B256,
+    near_account_id: &AccountId,
+    sign_ids: Vec<SignId>,
+) -> Result<TransactionReceipt, ()> {
+    let mut attempt = 0;
+    let max_attempts = 5;
+    let initial_delay = Duration::from_secs(5);
+
+    loop {
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            provider.get_transaction_receipt(tx_hash),
+        )
+        .await
+        {
+            Ok(result) => match result {
+                Ok(Some(receipt)) => {
+                    tracing::info!(?sign_ids, "eth signature respond transaction receipt found");
+                    return Ok(receipt);
+                }
+                Ok(None) => {
+                    handle_wait_for_receipt_retry(
+                        &mut attempt,
+                        max_attempts,
+                        &sign_ids,
+                        near_account_id,
+                        "eth signature respond transaction receipt not found, retrying",
+                        initial_delay,
+                    )
+                    .await?;
+                }
+                Err(err) => {
+                    handle_wait_for_receipt_retry(
+                        &mut attempt,
+                        max_attempts,
+                        &sign_ids,
+                        near_account_id,
+                        &format!("failed to get eth signature respond transaction receipt, retrying: {err:?}"),
+                        initial_delay,
+                    ).await?;
+                }
+            },
+            Err(_) => {
+                handle_wait_for_receipt_retry(
+                    &mut attempt,
+                    max_attempts,
+                    &sign_ids,
+                    near_account_id,
+                    "timeout while getting eth signature respond transaction receipt, retrying",
+                    initial_delay,
+                )
+                .await?;
+            }
+        }
+    }
+}
+
+async fn send_eth_transaction(
+    contract: &EthContractInstance,
+    params: &[DynSolValue],
+    gas: u64,
+    sign_ids: &[SignId],
+    near_account_id: &AccountId,
+) -> Result<alloy::primitives::B256, ()> {
+    let chain = Chain::Ethereum;
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        contract
+            .function("respond", params)
+            .unwrap()
+            .gas(gas)
+            .send(),
+    )
+    .await
+    .map_err(|_| {
+        tracing::error!(
+            ?sign_ids,
+            "timeout while sending ethereum signature transaction"
+        );
+        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+            .inc();
+    })?
+    .map_err(|err| {
+        tracing::error!(
+            ?sign_ids,
+            error = ?err,
+            "failed to send ethereum signature transaction"
+        );
+        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+            .inc();
+    })?;
+
+    Ok(*result.tx_hash())
+}
+
 async fn try_publish_eth(
     eth: &EthClient,
     action: &PublishAction,
@@ -755,70 +906,67 @@ async fn try_publish_eth(
         ]),
     ])])];
 
-    let result = eth
-        .contract
-        .function("respond", &params)
-        .unwrap()
-        .gas(40000)
-        .send()
-        .await
-        .map_err(|err| {
-            tracing::error!(
-                sign_id = ?action.request.indexed.id,
-                error = ?err,
-                "failed to publish ethereum signature"
-            );
-            crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[
-                    action.request.indexed.chain.as_str(),
-                    near_account_id.as_str(),
-                ])
-                .inc();
-        })?
-        .watch()
-        .await;
+    let tx_hash = send_eth_transaction(
+        &eth.contract,
+        &params,
+        40000,
+        &[action.request.indexed.id],
+        near_account_id,
+    )
+    .await?;
+
+    let receipt = wait_for_transaction_receipt(
+        eth.contract.provider(),
+        tx_hash,
+        near_account_id,
+        vec![action.request.indexed.id],
+    )
+    .await?;
+
+    // Check if transaction was successful
+    if !receipt.status() {
+        tracing::error!(
+            sign_id = ?action.request.indexed.id,
+            tx_hash = ?receipt.transaction_hash,
+            "transaction failed"
+        );
+        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+            .with_label_values(&[
+                action.request.indexed.chain.as_str(),
+                near_account_id.as_str(),
+            ])
+            .inc();
+        return Err(());
+    }
 
     let chain = action.request.indexed.chain;
-    match result {
-        Ok(tx_hash) => {
-            tracing::info!(
-                sign_id = ?action.request.indexed.id,
-                tx_hash = ?tx_hash,
-                elapsed = ?timestamp.elapsed(),
-                "published ethereum signature successfully"
-            );
-            crate::metrics::NUM_SIGN_SUCCESS
+    let tx_hash = receipt.transaction_hash;
+    tracing::info!(
+        sign_id = ?action.request.indexed.id,
+        tx_hash = ?tx_hash,
+        elapsed = ?timestamp.elapsed(),
+        "published ethereum signature successfully"
+    );
+
+    crate::metrics::NUM_SIGN_SUCCESS
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .inc();
+    if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
+        crate::metrics::SIGN_TOTAL_LATENCY
+            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+            .observe(timestamp_sign_queue.elapsed().as_secs_f64());
+        if timestamp_sign_queue.elapsed().as_secs() <= 30 {
+            crate::metrics::NUM_SIGN_SUCCESS_30S
                 .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                 .inc();
-            if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
-                crate::metrics::SIGN_TOTAL_LATENCY
-                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                    .observe(timestamp_sign_queue.elapsed().as_secs_f64());
-            }
-            crate::metrics::SIGN_RESPOND_LATENCY
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .observe(timestamp.elapsed().as_secs_f64());
-            if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
-                if timestamp_sign_queue.elapsed().as_secs() <= 30 {
-                    crate::metrics::NUM_SIGN_SUCCESS_30S
-                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                        .inc();
-                }
-            }
-            Ok(())
-        }
-        Err(err) => {
-            tracing::error!(
-                sign_id = ?action.request.indexed.id,
-                error = ?err,
-                "failed to publish ethereum signature"
-            );
-            crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .inc();
-            Err(())
         }
     }
+
+    crate::metrics::SIGN_RESPOND_LATENCY
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .observe(timestamp.elapsed().as_secs_f64());
+
+    Ok(())
 }
 
 async fn try_batch_publish_eth(
@@ -833,7 +981,7 @@ async fn try_batch_publish_eth(
     let num_requests = actions.len();
     let sign_ids = actions
         .iter()
-        .map(|action| action.request.indexed.id.clone())
+        .map(|action| action.request.indexed.id)
         .collect::<Vec<_>>();
     for action in actions {
         let signature = signatures
@@ -855,73 +1003,61 @@ async fn try_batch_publish_eth(
     }
 
     let params = [DynSolValue::Array(params_vec.clone())];
-
-    // The gas limit for the transaction.
-    // Experimented on Sepolia, sending a batch of 2 cost 35,000, and a batch of 3 cost 50,000+.
     let gas = std::cmp::max(40000, 20000 * num_requests as u64);
 
-    let result = eth
-        .contract
-        .function("respond", &params)
-        .unwrap()
-        .gas(gas)
-        .send()
-        .await
-        .map_err(|err| {
-            tracing::error!(
-                ?sign_ids,
-                error = ?err,
-                "failed to publish ethereum signature"
-            );
-            crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
-                .inc();
-        })?
-        .watch()
-        .await;
+    let tx_hash =
+        send_eth_transaction(&eth.contract, &params, gas, &sign_ids, near_account_id).await?;
 
-    match result {
-        Ok(tx_hash) => {
-            tracing::info!(
-                ?tx_hash,
-                num_requests,
-                "published ethereum signatures successfully"
-            );
-            crate::metrics::NUM_SIGN_SUCCESS
+    let receipt = wait_for_transaction_receipt(
+        eth.contract.provider(),
+        tx_hash,
+        near_account_id,
+        sign_ids.clone(),
+    )
+    .await?;
+
+    // Check if transaction was successful
+    if !receipt.status() {
+        tracing::error!(
+            ?sign_ids,
+            tx_hash = ?receipt.transaction_hash,
+            "eth batch transaction failed"
+        );
+        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+            .inc();
+        return Err(());
+    }
+
+    let tx_hash = receipt.transaction_hash;
+    tracing::info!(
+        ?chain,
+        ?sign_ids,
+        ?tx_hash,
+        num_requests,
+        "eth batch published ethereum signatures successfully"
+    );
+
+    crate::metrics::NUM_SIGN_SUCCESS
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .inc_by(num_requests as f64);
+    for action in actions {
+        if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
+            crate::metrics::SIGN_TOTAL_LATENCY
                 .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .inc_by(num_requests as f64);
-            for action in actions {
-                let sign_latency = crate::util::duration_between_unix(
-                    action.request.indexed.unix_timestamp_indexed,
-                    crate::util::current_unix_timestamp(),
-                )
-                .as_secs();
-                crate::metrics::SIGN_TOTAL_LATENCY
+                .observe(timestamp_sign_queue.elapsed().as_secs_f64());
+            if timestamp_sign_queue.elapsed().as_secs() <= 30 {
+                crate::metrics::NUM_SIGN_SUCCESS_30S
                     .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                    .observe(sign_latency as f64);
-                if sign_latency <= 30 {
-                    crate::metrics::NUM_SIGN_SUCCESS_30S
-                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                        .inc();
-                }
+                    .inc();
             }
-            crate::metrics::SIGN_RESPOND_LATENCY
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .observe(start.elapsed().as_secs_f64());
-
-            Ok(())
-        }
-        Err(err) => {
-            tracing::error!(
-                error = ?err,
-                "failed to publish ethereum signature"
-            );
-            crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .inc_by(num_requests as f64);
-            Err(())
         }
     }
+    crate::metrics::SIGN_RESPOND_LATENCY
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .observe(start.elapsed().as_secs_f64());
+
+    Ok(())
 }
 
 async fn execute_batch_publish(
@@ -948,7 +1084,7 @@ async fn execute_batch_publish(
             );
             return;
         };
-        signatures.insert(action.request.indexed.id.clone(), signature);
+        signatures.insert(action.request.indexed.id, signature);
     }
 
     let mut retry_count = 0;
@@ -979,6 +1115,8 @@ async fn execute_batch_publish(
         tokio::time::sleep(Duration::from_millis(100)).await;
         if retry_count >= MAX_PUBLISH_RETRY {
             tracing::info!("exceeded max retries, trashing publish request",);
+            // clearing actions to avoid retrying
+            actions.clear();
             break;
         } else {
             tracing::info!("failed to publish, retrying");

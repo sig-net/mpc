@@ -7,9 +7,11 @@ use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
 use k256::Secp256k1;
-use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
+use mpc_crypto::PublicKey;
+use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureSpawner};
 use mpc_node::protocol::triple::{Triple, TripleId, TripleSpawner};
 use mpc_node::protocol::MessageChannel;
+use mpc_node::types::SecretKeyShare;
 use test_log::test;
 
 #[test(tokio::test)]
@@ -191,10 +193,12 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node0_id);
     let presignature_storage = redis.presignature_storage(&node0_id);
-    let presignature_manager = PresignatureManager::new(
+    let presignature_spawner = PresignatureSpawner::new(
         Participant::from(0),
         5,
         123,
+        &SecretKeyShare::default(),
+        &PublicKey::default(),
         &node0_id,
         &triple_storage,
         &presignature_storage,
@@ -205,12 +209,12 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let presignature = dummy_presignature(id);
 
     // Check that the storage is empty at the start
-    assert!(!presignature_manager.contains(id).await);
-    assert!(!presignature_manager.contains_mine(id).await);
-    assert_eq!(presignature_manager.len_generated().await, 0);
-    assert_eq!(presignature_manager.len_mine().await, 0);
-    assert!(presignature_manager.is_empty().await);
-    assert_eq!(presignature_manager.len_potential().await, 0);
+    assert!(!presignature_storage.contains(id).await);
+    assert!(!presignature_spawner.contains_mine(id).await);
+    assert_eq!(presignature_storage.len_generated().await, 0);
+    assert_eq!(presignature_spawner.len_mine().await, 0);
+    assert!(presignature_storage.is_empty().await);
+    assert_eq!(presignature_spawner.len_potential().await, 0);
 
     // check that reserve then dropping unreserves the slot:
     let slot = presignature_storage.reserve(presignature.id).await.unwrap();
@@ -229,24 +233,24 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     );
 
     // Check that the storage contains the foreign presignature
-    assert!(presignature_manager.contains(id).await);
-    assert!(!presignature_manager.contains_mine(id).await);
-    assert_eq!(presignature_manager.len_generated().await, 1);
-    assert_eq!(presignature_manager.len_mine().await, 0);
-    assert_eq!(presignature_manager.len_potential().await, 1);
+    assert!(presignature_storage.contains(id).await);
+    assert!(!presignature_spawner.contains_mine(id).await);
+    assert_eq!(presignature_storage.len_generated().await, 1);
+    assert_eq!(presignature_spawner.len_mine().await, 0);
+    assert_eq!(presignature_spawner.len_potential().await, 1);
 
     // Take presignature and check that it is removed from the storage and added to used set
     presignature_storage.take(id, node1, node0).await.unwrap();
-    assert!(!presignature_manager.contains(id).await);
-    assert!(!presignature_manager.contains_mine(id).await);
-    assert_eq!(presignature_manager.len_generated().await, 0);
-    assert_eq!(presignature_manager.len_mine().await, 0);
-    assert_eq!(presignature_manager.len_potential().await, 0);
+    assert!(!presignature_storage.contains(id).await);
+    assert!(!presignature_spawner.contains_mine(id).await);
+    assert_eq!(presignature_storage.len_generated().await, 0);
+    assert_eq!(presignature_spawner.len_mine().await, 0);
+    assert_eq!(presignature_spawner.len_potential().await, 0);
     assert!(presignature_storage.contains_used(id).await);
 
     // Attempt to re-insert used presignature and check that it fails
     assert!(presignature_storage.reserve(id).await.is_none());
-    assert!(!presignature_manager.contains(id).await);
+    assert!(!presignature_spawner.contains(id).await);
 
     let id2 = 2;
     let mine_presignature = dummy_presignature(id2);
@@ -261,25 +265,25 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
             .await
     );
 
-    assert!(presignature_manager.contains(id2).await);
-    assert!(presignature_manager.contains_mine(id2).await);
-    assert_eq!(presignature_manager.len_generated().await, 1);
-    assert_eq!(presignature_manager.len_mine().await, 1);
-    assert_eq!(presignature_manager.len_potential().await, 1);
+    assert!(presignature_storage.contains(id2).await);
+    assert!(presignature_spawner.contains_mine(id2).await);
+    assert_eq!(presignature_storage.len_generated().await, 1);
+    assert_eq!(presignature_spawner.len_mine().await, 1);
+    assert_eq!(presignature_spawner.len_potential().await, 1);
 
     // Take mine presignature and check that it is removed from the storage and added to used set
     presignature_storage.take_mine(node0).await.unwrap();
-    assert!(!presignature_manager.contains(id2).await);
-    assert!(!presignature_manager.contains_mine(id2).await);
-    assert_eq!(presignature_manager.len_generated().await, 0);
-    assert_eq!(presignature_manager.len_mine().await, 0);
-    assert!(presignature_manager.is_empty().await);
-    assert_eq!(presignature_manager.len_potential().await, 0);
+    assert!(!presignature_storage.contains(id2).await);
+    assert!(!presignature_spawner.contains_mine(id2).await);
+    assert_eq!(presignature_storage.len_generated().await, 0);
+    assert_eq!(presignature_spawner.len_mine().await, 0);
+    assert!(presignature_storage.is_empty().await);
+    assert_eq!(presignature_spawner.len_potential().await, 0);
     assert!(presignature_storage.contains_used(id2).await);
 
     // Attempt to re-insert used mine presignature and check that it fails
     assert!(presignature_storage.reserve(id2).await.is_none());
-    assert!(!presignature_manager.contains(id2).await);
+    assert!(!presignature_spawner.contains(id2).await);
 
     presignature_storage
         .reserve(10)
@@ -333,9 +337,9 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     outdated.sort();
     assert_eq!(outdated, vec![10, 11, 12]);
 
-    assert_eq!(presignature_manager.len_generated().await, 8);
-    assert_eq!(presignature_manager.len_mine().await, 5);
-    assert_eq!(presignature_manager.len_potential().await, 8);
+    assert_eq!(presignature_storage.len_generated().await, 8);
+    assert_eq!(presignature_spawner.len_mine().await, 5);
+    assert_eq!(presignature_spawner.len_potential().await, 8);
 
     Ok(())
 }

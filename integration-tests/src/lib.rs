@@ -46,26 +46,19 @@ impl Default for NodeConfig {
                 max_concurrent_generation: 16,
                 max_concurrent_introduction: 2,
                 triple: TripleConfig {
-                    min_triples: 8,
-                    max_triples: 80,
+                    min_triples: 16,
+                    max_triples: 320,
                     ..Default::default()
                 },
                 presignature: PresignatureConfig {
-                    min_presignatures: 2,
-                    max_presignatures: 20,
+                    min_presignatures: 16,
+                    max_presignatures: 320,
                     ..Default::default()
                 },
                 ..Default::default()
             },
             eth: None,
-            // TODO solana: remove hardcoded values
-            sol: Some(SolConfig {
-                account_sk: "fS5jS6X5qvaquBV1bg2YWBdYeCiRSUwNAdNpgNkjS72oNxUJcZJZduaq2oCcXJb8erTbtqqq4wxriUmRJk7bMDw"
-                    .to_string(),
-                rpc_http_url: "https://api.devnet.solana.com".to_string(),
-                rpc_ws_url: "wss://api.devnet.solana.com/".to_string(),
-                program_address: "BtGZEs9ZJX3hAQuY5er8iyWrGsrPRZYupEtVSS129XKo".to_string(),
-            }),
+            sol: None,
         }
     }
 }
@@ -271,6 +264,7 @@ pub struct Context {
     pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
     pub message_options: node_client::Options,
+    pub toxiproxy: bool,
 }
 
 pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
@@ -278,7 +272,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         localstack,
         lake_indexer,
         worker,
-    } = initialize_lake_indexer(spawner).await?;
+    } = spawner.take_lake().await;
     spawner.create_accounts(&worker).await;
 
     let mpc_contract = worker
@@ -290,7 +284,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         .await?;
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
 
-    let redis = containers::Redis::run(spawner).await;
+    let redis = spawner.take_redis().await;
     let sk_share_local_path = spawner.tmp_dir.join("secrets");
     std::fs::create_dir_all(&sk_share_local_path).expect("could not create secrets dir");
     let sk_share_local_path = sk_share_local_path.to_string_lossy().to_string();
@@ -327,6 +321,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         log_options,
         mesh_options,
         message_options,
+        toxiproxy: spawner.toxiproxy,
     })
 }
 
@@ -403,7 +398,7 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     println!("\nPlease call below to update localnet:\n");
     let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
-    println!("near config add-connection --network-name local --connection-name local --rpc-url {} --wallet-url http://127.0.0.1/ --explorer-transaction-url http://127.0.0.1:6666/", near_rpc);
+    println!("near config add-connection --network-name local --connection-name local --rpc-url {near_rpc} --wallet-url http://127.0.0.1/ --explorer-transaction-url http://127.0.0.1:6666/");
     println!("\nAfter run the nodes, please call the following command to init contract: ");
     let args = json!({
         "threshold": cfg.threshold,
