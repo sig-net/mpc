@@ -5,23 +5,21 @@ pub mod execute;
 pub mod local;
 pub mod utils;
 
-use cluster::spawner::ClusterSpawner;
-use containers::Container;
-use deadpool_redis::Pool;
-use mpc_node::indexer_eth::EthConfig;
-use mpc_node::indexer_sol::SolConfig;
-use std::collections::HashMap;
+use crate::cluster::spawner::ClusterSpawner;
+use crate::containers::{Container, DockerClient, LocalStack};
+use crate::local::NodeEnvConfig;
 
-use self::local::NodeEnvConfig;
-use crate::containers::DockerClient;
-use crate::containers::LocalStack;
+use std::collections::HashMap;
 
 use anyhow::Context as _;
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use deadpool_redis::Pool;
 use futures::StreamExt;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
+use mpc_node::indexer_eth::EthConfig;
+use mpc_node::indexer_sol::SolConfig;
 use mpc_node::storage::triple_storage::TripleStorage;
 use mpc_node::{logs, mesh, node_client, storage};
 use near_crypto::KeyFile;
@@ -211,8 +209,8 @@ impl Nodes {
         Ok(())
     }
 
-    pub async fn triple_storage(&self, redis_pool: &Pool, account_id: &AccountId) -> TripleStorage {
-        storage::triple_storage::init(redis_pool, account_id)
+    pub async fn triple_storage(&self, redis: Pool, account_id: &AccountId) -> TripleStorage {
+        TripleStorage::new(redis, account_id)
     }
 
     pub async fn gcp_services(&self) -> anyhow::Result<Vec<GcpService>> {
