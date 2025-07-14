@@ -175,7 +175,7 @@ impl SyncTask {
                     if let Err(err) = handle.await {
                         tracing::warn!(?err, "broadcast task failed");
                     } else {
-                        tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
+                        tracing::info!(elapsed = ?start.elapsed(), "processed broadcast");
                     }
                 }
                 Some(req) = self.requests.updates.recv() => {
@@ -272,6 +272,10 @@ async fn broadcast_sync(
             if !view.triples.contains(&id) {
                 entry.push(*p);
             }
+        }
+
+        if entry.is_empty() {
+            triple_kick.remove(&id);
         }
     }
     triples.kick_participants(triple_kick).await;

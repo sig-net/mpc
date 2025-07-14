@@ -127,6 +127,7 @@ async fn test_state_sync_large_outdated_stockpile() {
     insert_presignatures(&node1_presignatures, node1, 0..=5).await;
 
     let _nodes = spawner
+        .nodes(8)
         .disable_prestockpile()
         .with_config(|cfg| {
             // Need these to be set otherwise we will be constantly taking our mock triples:
