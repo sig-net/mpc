@@ -2,7 +2,6 @@ use std::fmt;
 
 use crate::{execute, utils, NodeConfig};
 
-use crate::containers::LakeIndexer;
 use crate::execute::executable;
 use anyhow::Context;
 use async_process::Child;
@@ -22,7 +21,6 @@ pub struct Node {
 
     // process held so it's not dropped. Once dropped, process will be killed.
     process: Child,
-    // near rpc address, after proxy
     pub near_rpc: String,
 }
 
@@ -32,7 +30,6 @@ pub struct NodeEnvConfig {
     pub cipher_sk: hpke::SecretKey,
     pub sign_sk: near_crypto::SecretKey,
     pub cfg: NodeConfig,
-    // near rpc address, after proxy
     pub near_rpc: String,
 }
 
@@ -128,24 +125,6 @@ impl Node {
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
         let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
-
-        let near_rpc = if ctx.toxiproxy {
-            let proxy_name = format!("rpc_from_node_{}", account.id());
-            let rpc_port_proxied = utils::pick_unused_port().await?;
-            let rpc_address_proxied = format!("http://127.0.0.1:{rpc_port_proxied}");
-            tracing::info!(
-                "Proxy RPC address {} accessed by node@{} to {}",
-                near_rpc,
-                account.id(),
-                rpc_address_proxied
-            );
-            LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc)
-                .await
-                .unwrap();
-            rpc_address_proxied
-        } else {
-            near_rpc
-        };
 
         let mut cfg = cfg.clone();
         if let Some(ref mut eth_config) = cfg.eth {

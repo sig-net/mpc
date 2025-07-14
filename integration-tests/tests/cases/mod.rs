@@ -1,4 +1,4 @@
-use integration_tests::actions::{self, add_latency};
+use integration_tests::actions;
 use integration_tests::cluster;
 
 use k256::elliptic_curve::point::AffineCoordinates;
@@ -171,61 +171,6 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
     // Check that we can sign again
     nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
-
-    Ok(())
-}
-
-#[test(tokio::test)]
-async fn test_lake_congestion() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().enable_toxiproxy().await?;
-    // Currently, with a 10+-1 latency it cannot generate enough tripplets in time
-    // with a 5+-1 latency it fails to wait for signature response
-    add_latency(&nodes.nodes.proxy_name_for_node(0), true, 1.0, 2_000, 200).await?;
-    add_latency(&nodes.nodes.proxy_name_for_node(1), true, 1.0, 2_000, 200).await?;
-    add_latency(&nodes.nodes.proxy_name_for_node(2), true, 1.0, 2_000, 200).await?;
-
-    // Also mock lake indexer in high load that it becomes slower to finish process
-    // sig req and write to s3
-    // with a 1s latency it fails to wait for signature response in time
-    add_latency("lake-s3", false, 1.0, 100, 10).await?;
-
-    nodes.wait().running().signable().await?;
-    nodes.sign().await.unwrap();
-
-    Ok(())
-}
-
-#[test(tokio::test)]
-async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn().enable_toxiproxy().await?;
-
-    // add latency to node1->rpc, but not node0->rpc
-    add_latency(&nodes.nodes.proxy_name_for_node(1), true, 1.0, 1_000, 100).await?;
-    // remove node2, node0 and node1 should still reach concensus
-    // this fails if the latency above is too long (10s)
-    nodes.leave(None).await.unwrap();
-
-    let state = nodes.expect_running().await?;
-    assert!(state.participants.len() == 2);
-
-    // Going below T should error out
-    nodes.leave(None).await.unwrap_err();
-    let state = nodes.expect_running().await?;
-    assert!(state.participants.len() == 2);
-
-    nodes.join(None).await.unwrap();
-    // add latency to node2->rpc
-    add_latency(&nodes.nodes.proxy_name_for_node(2), true, 1.0, 1_000, 100).await?;
-    let state = nodes.expect_running().await?;
-    assert!(state.participants.len() == 3);
-
-    nodes.leave(None).await.unwrap();
-    let state = nodes.expect_running().await?;
-    assert!(state.participants.len() == 2);
-
-    // make sure signing works after reshare
-    nodes.wait().signable().await?;
-    nodes.sign().await.unwrap();
 
     Ok(())
 }

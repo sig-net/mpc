@@ -236,11 +236,6 @@ impl Nodes {
         Ok(gcp_services)
     }
 
-    pub fn proxy_name_for_node(&self, id: usize) -> String {
-        let account_id = self.near_accounts();
-        format!("rpc_from_node_{}", account_id[id].id())
-    }
-
     pub fn contract(&self) -> &Contract {
         &self.ctx().mpc_contract
     }
@@ -266,7 +261,6 @@ pub struct Context {
     pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
     pub message_options: node_client::Options,
-    pub toxiproxy: bool,
 }
 
 pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
@@ -323,7 +317,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         log_options,
         mesh_options,
         message_options,
-        toxiproxy: spawner.toxiproxy,
     })
 }
 
@@ -548,8 +541,6 @@ pub async fn initialize_lake_indexer(spawner: &ClusterSpawner) -> anyhow::Result
 
     tracing::info!("initializing sandbox worker");
     let worker = near_workspaces::sandbox()
-        // use not proxied rpc address because workspace is used in setup (create dev account, deploy
-        // contract which we can assume succeed
         .rpc_addr(&lake_indexer.rpc_host_address)
         .validator_key(ValidatorKey::Known(
             validator_key.account_id.to_string().parse()?,

@@ -85,11 +85,6 @@ jobs:
           key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Install toxiproxy-server
-        run: |
-          wget -O toxiproxy-2.9.0_linux_amd64.deb https://github.com/Shopify/toxiproxy/releases/download/v2.9.0/toxiproxy_2.9.0_linux_amd64.deb
-          sudo dpkg -i toxiproxy-2.9.0_linux_amd64.deb
-
       - name: Configure AWS
         run: |
           # Fake AWS configuration for LocalStack
