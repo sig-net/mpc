@@ -1,4 +1,5 @@
 use crate::protocol::{Chain, IndexedSignRequest};
+use crate::storage::app_data_storage::AppDataStorage;
 use alloy::consensus::BlockHeader;
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::hex::{self, ToHexExt};
@@ -416,12 +417,15 @@ fn finalized_block_channel() -> (mpsc::Sender<BlockNumber>, mpsc::Receiver<Block
 pub async fn run(
     eth: Option<EthConfig>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
+    app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
         return Ok(());
     };
+
+    let last_processed_block = app_data_storage.last_processed_block_eth().await?;
 
     let network = Network::from_str(eth.network.as_str())
         .map_err(|err| anyhow::anyhow!("Network input incorrect: {:?}", err))?;
@@ -458,6 +462,7 @@ pub async fn run(
     let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
 
     let client = Arc::new(client);
+
     let client_clone = Arc::clone(&client);
     tokio::spawn(async move {
         tracing::info!("Spawned task to refresh the latest finalized block");
@@ -481,6 +486,7 @@ pub async fn run(
             requests_indexed_recv,
             finalized_block_recv,
             sign_tx.clone(),
+            app_data_storage.clone(),
             near_account_id_clone.clone(),
         )
         .await
@@ -506,6 +512,21 @@ pub async fn run(
         )
         .await;
     });
+
+    let near_account_id_clone = node_near_account_id.clone();
+    let requests_indexed_send_clone = requests_indexed_send.clone();
+    let blocks_failed_send_clone = blocks_failed_send.clone();
+    let client_clone = Arc::clone(&client);
+    catch_up(
+        &client_clone,
+        last_processed_block,
+        eth_contract_addr,
+        requests_indexed_send_clone,
+        blocks_failed_send_clone,
+        total_timeout,
+        near_account_id_clone,
+    )
+    .await;
 
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let requests_indexed_send_clone = requests_indexed_send.clone();
@@ -606,25 +627,19 @@ async fn add_failed_block(
         });
 }
 
-// retry getting latest finalized block from helios with exponential backoff
-async fn fetch_block_by_number(
+// retry getting block from helios with exponential backoff
+async fn fetch_block(
     helios_client: &Arc<EthereumClient>,
-    block_number: u64,
+    block_id: BlockId,
     max_retries: u8,
     base_delay: Duration,
 ) -> Option<alloy::rpc::types::Block> {
     let mut retries = 0;
     loop {
-        match helios_client
-            .get_block(
-                BlockId::Number(BlockNumberOrTag::Number(block_number)),
-                false,
-            )
-            .await
-        {
+        match helios_client.get_block(block_id, false).await {
             Ok(Some(block)) => return Some(block),
             Ok(None) => {
-                tracing::warn!("Block number {block_number} not found from Helios client");
+                tracing::warn!("Block {block_id} not found from Helios client");
                 return None;
             }
             Err(e) => {
@@ -632,54 +647,17 @@ async fn fetch_block_by_number(
                     retries += 1;
                     let delay = base_delay * 2u32.pow((retries - 1) as u32);
                     tracing::warn!(
-                        "Failed to fetch block number {block_number} from Helios client: {:?}, retrying",
+                        "Failed to fetch block number {block_id} from Helios client: {:?}, retrying",
                         e
                     );
                     tokio::time::sleep(delay).await;
                     continue;
                 }
                 tracing::warn!(
-                    "Failed to fetch block number {block_number} from Helios client: {:?}, exceeded maximum retry",
+                    "Failed to fetch block number {block_id} from Helios client: {:?}, exceeded maximum retry",
                     e
                 );
                 return None;
-            }
-        }
-    }
-}
-
-// retry getting latest finalized block from helios with exponential backoff
-async fn fetch_finalized_block(
-    helios_client: &Arc<EthereumClient>,
-    max_retries: u8,
-    base_delay: Duration,
-) -> anyhow::Result<alloy::rpc::types::Block> {
-    let mut retries = 0;
-    loop {
-        match helios_client
-            .get_block(BlockId::Number(BlockNumberOrTag::Finalized), false)
-            .await
-        {
-            Ok(Some(block)) => return Ok(block),
-            Ok(None) => {
-                let err_msg = "Latest finalized block not found from Helios client";
-                return Err(anyhow::anyhow!(err_msg));
-            }
-            Err(e) => {
-                if retries < max_retries {
-                    retries += 1;
-                    let delay = base_delay * 2u32.pow((retries - 1) as u32);
-                    tracing::warn!(
-                        "Failed to get latest finalized block from Helios client: {:?}, retrying",
-                        e
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-                return Err(anyhow::anyhow!(
-                    "Failed to get finalized block from Helios client: {:?}, exceeded maximum retry",
-                    e
-                ));
             }
         }
     }
@@ -698,14 +676,19 @@ async fn refresh_finalized_block(
         interval.tick().await;
         tracing::info!("Refreshing finalized epoch");
 
-        let new_finalized_block =
-            match fetch_finalized_block(helios_client, 5, Duration::from_millis(200)).await {
-                Ok(block) => block,
-                Err(e) => {
-                    tracing::warn!("Failed to get finalized block: {:?}", e);
-                    continue;
-                }
-            };
+        let new_finalized_block = match fetch_block(
+            helios_client,
+            BlockId::Number(BlockNumberOrTag::Finalized),
+            5,
+            Duration::from_millis(200),
+        )
+        .await
+        {
+            Some(block) => block,
+            None => {
+                continue;
+            }
+        };
 
         let new_final_block_number = new_finalized_block.header.number;
         tracing::info!(
@@ -829,9 +812,12 @@ async fn send_requests_when_final(
     mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
     mut finalized_block_rx: mpsc::Receiver<BlockNumber>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
+    app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     let mut finalized_block_number: Option<BlockNumber> = None;
+    let mut last_processed_block: Option<BlockNumber> =
+        app_data_storage.last_processed_block_eth().await?;
 
     loop {
         let Some(BlockAndRequests {
@@ -852,8 +838,13 @@ async fn send_requests_when_final(
         }
 
         // Verify block hash and send requests
-        let block =
-            fetch_block_by_number(helios_client, block_number, 5, Duration::from_millis(200)).await;
+        let block = fetch_block(
+            helios_client,
+            block_number.into(),
+            5,
+            Duration::from_millis(200),
+        )
+        .await;
 
         let Some(block) = block else {
             tracing::warn!("Block {block_number} not found from Helios client, skipping this block and its requests");
@@ -867,6 +858,12 @@ async fn send_requests_when_final(
                 sign_tx.clone(),
                 node_near_account_id.clone(),
             );
+            if last_processed_block.is_none_or(|n| n < block_number) {
+                app_data_storage
+                    .set_last_processed_block_eth(block_number)
+                    .await?;
+                last_processed_block.replace(block_number);
+            }
         } else {
             // no special handling for chain reorg, just log the error
             // This is because when such chain reorg happens, the new canonical chain will have already been emitted by helios's block header stream, and we can safely skip this block here.
@@ -874,6 +871,71 @@ async fn send_requests_when_final(
                 "Block {block_number} hash mismatch: expected {block_hash:?}, got {:?}. Chain re-orged.",
                 block.header.hash
             );
+        }
+    }
+}
+
+async fn catch_up(
+    helios_client: &Arc<EthereumClient>,
+    start_block_number: Option<BlockNumber>,
+    eth_contract_addr: Address,
+    requests_indexed: mpsc::Sender<BlockAndRequests>,
+    blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
+    total_timeout: Duration,
+    node_near_account_id: AccountId,
+) {
+    let Some(start_block_number) = start_block_number else {
+        tracing::info!("No start block number provided, skipping catch up");
+        return;
+    };
+    tracing::info!("Catching up from block number: {start_block_number}");
+    let latest_block = match fetch_block(
+        helios_client,
+        BlockId::Number(BlockNumberOrTag::Latest),
+        10,
+        Duration::from_millis(200),
+    )
+    .await
+    {
+        Some(block) => block,
+        None => {
+            tracing::warn!("Failed to get latest block");
+            return;
+        }
+    };
+    let end_block_number = latest_block.header.number;
+    for block_number in start_block_number..end_block_number {
+        let block = fetch_block(
+            helios_client,
+            block_number.into(),
+            5,
+            Duration::from_millis(200),
+        )
+        .await;
+        let Some(block) = block else {
+            tracing::warn!("When catching up, block {block_number} not found from Helios client, skipping this block and its requests");
+            continue;
+        };
+        let block_number = block.header.number;
+        let block_hash = block.header.hash;
+        if let Err(err) = process_block(
+            block_number,
+            block_hash,
+            helios_client,
+            eth_contract_addr,
+            node_near_account_id.clone(),
+            requests_indexed.clone(),
+            total_timeout,
+        )
+        .await
+        {
+            tracing::warn!(
+                "Eth indexer failed to process block number {}: {:?}",
+                block_number,
+                err
+            );
+            add_failed_block(blocks_failed_tx.clone(), block_number, block_hash).await;
+            continue;
         }
     }
 }
