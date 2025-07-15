@@ -1,5 +1,10 @@
 FROM redis:7.4.2 AS redis-bin
 
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive \
+    apt-get install --no-install-recommends --assume-yes gdb heaptrack
+RUN heaptrack --version --verbose
+
 FROM node:20 AS eth-builder
 WORKDIR /usr/src/app/contract-eth
 COPY chain-signatures/contract-eth/package.json chain-signatures/contract-eth/package-lock.json ./
@@ -9,6 +14,7 @@ RUN npx hardhat compile
 
 FROM rust:latest AS node-builder
 RUN rustc --version --verbose
+RUN rustup update stable && rustup default stable
 WORKDIR /usr/src/app
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive \
