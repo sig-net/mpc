@@ -11,7 +11,7 @@ exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
 [workspace.package]
-version = "1.4.0"
+version = "1.5.0"
 
 [workspace.dependencies]
 alloy = { version = "=1.0.9", features = ["contract", "json"] }
