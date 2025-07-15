@@ -23,9 +23,8 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time;
 
@@ -381,7 +380,7 @@ impl PresignatureSpawner {
 
         match internal_action {
             PositInternalAction::None => {}
-            PositInternalAction::Rejected => {}
+            PositInternalAction::Abort => {}
             PositInternalAction::Reply(action) => {
                 self.msg
                     .send(
@@ -605,8 +604,8 @@ impl PresignatureSpawner {
 
     async fn run(
         mut self,
-        mesh_state: Arc<RwLock<MeshState>>,
-        config: Arc<RwLock<Config>>,
+        mesh_state: watch::Receiver<MeshState>,
+        config: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = time::interval(Duration::from_millis(100));
@@ -615,7 +614,7 @@ impl PresignatureSpawner {
         loop {
             tokio::select! {
                 Some((id, from, action)) = posits.recv() => {
-                    let timeout = config.read().await.protocol.presignature.generation_timeout;
+                    let timeout = config.borrow().protocol.presignature.generation_timeout;
                     self.process_posit(id, from, action, Duration::from_millis(timeout)).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
@@ -631,14 +630,8 @@ impl PresignatureSpawner {
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
                 _ = stockpile_interval.tick() => {
-                    let active = {
-                        let mesh_state = mesh_state.read().await;
-                        mesh_state.active.keys_vec()
-                    };
-                    let protocol_cfg = {
-                        let config = config.read().await;
-                        config.protocol.clone()
-                    };
+                    let active = mesh_state.borrow().active.keys_vec();
+                    let protocol_cfg = config.borrow().protocol.clone();
                     self.stockpile(&active, &protocol_cfg).await;
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 

@@ -22,7 +22,7 @@ use tokio::sync::mpsc::Sender;
 
 struct AxumState {
     sender: Sender<Ciphered>,
-    node_watcher: NodeStateWatcher,
+    node: NodeStateWatcher,
     indexer: Option<NearIndexer>,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
@@ -32,7 +32,7 @@ struct AxumState {
 pub async fn run(
     port: u16,
     sender: Sender<Ciphered>,
-    node_watcher: NodeStateWatcher,
+    node: NodeStateWatcher,
     indexer: Option<NearIndexer>,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
@@ -41,7 +41,7 @@ pub async fn run(
     tracing::info!("starting web server");
     let axum_state = AxumState {
         sender,
-        node_watcher,
+        node,
         indexer,
         triple_storage,
         presignature_storage,
@@ -130,7 +130,7 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
         0
     };
 
-    match web.node_watcher.status() {
+    match web.node.status() {
         NodeStatus::Running {
             me,
             participants,
