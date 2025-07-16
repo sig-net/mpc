@@ -3,7 +3,6 @@ pub mod wait;
 pub mod wait_for;
 
 use crate::cluster::Cluster;
-use crate::containers::LakeIndexer;
 
 use anyhow::Context as _;
 use cait_sith::FullSignature;
@@ -31,7 +30,6 @@ use k256::{
     ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
     PublicKey as K256PublicKey,
 };
-use serde_json::json;
 
 pub async fn request_batch_random_sign(
     nodes: &Cluster,
@@ -119,60 +117,6 @@ pub async fn validate_signature(
         )
         .then(|| Ok(()))
         .ok_or_else(|| anyhow::anyhow!("failed to validate signature"))?
-}
-
-// add one of toxic to the toxiproxy-server to make indexer rpc slow down, congested, or unstable
-// available toxics and params: https://github.com/Shopify/toxiproxy?tab=readme-ov-file#toxic-fields
-pub async fn add_toxic(proxy: &str, host: bool, toxic: serde_json::Value) -> anyhow::Result<()> {
-    let toxi_server_address = if host {
-        LakeIndexer::TOXI_SERVER_PROCESS_ADDRESS
-    } else {
-        LakeIndexer::TOXI_SERVER_EXPOSE_ADDRESS
-    };
-    let toxiproxy_client = reqwest::Client::default();
-    toxiproxy_client
-        .post(format!("{toxi_server_address}/proxies/{proxy}/toxics"))
-        .header("Content-Type", "application/json")
-        .body(toxic.to_string())
-        .send()
-        .await?;
-    Ok(())
-}
-
-// Add a delay to all data going through the proxy. The delay is equal to latency +/- jitter.
-pub async fn add_latency(
-    proxy: &str,
-    host: bool,
-    probability: f32,
-    latency: u32,
-    jitter: u32,
-) -> anyhow::Result<()> {
-    add_toxic(
-        proxy,
-        host,
-        json!({
-            "type": "latency",
-            "toxicity": probability,
-            "attributes": {
-                "latency": latency,
-                "jitter": jitter
-            }
-        }),
-    )
-    .await
-}
-
-// clear all toxics. Does not need to be called between tests since each test will drop toxiproxy-server
-// Only need if you want to clear all toxics in middle of a test
-#[allow(dead_code)]
-pub async fn clear_toxics() -> anyhow::Result<()> {
-    let toxi_server_address = "http://127.0.0.1:8474";
-    let toxiproxy_client = reqwest::Client::default();
-    toxiproxy_client
-        .post(format!("{toxi_server_address}/reset"))
-        .send()
-        .await?;
-    Ok(())
 }
 
 pub async fn batch_random_signature_production(nodes: &Cluster) -> anyhow::Result<()> {
