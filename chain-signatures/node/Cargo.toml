@@ -96,3 +96,5 @@ test-log = { version = "0.2.12", features = ["log", "trace"] }
 default = []
 # utilized for benchmarking the node:
 bench = []
+# utilized by "integration-tests" package:
+test-feature = []
