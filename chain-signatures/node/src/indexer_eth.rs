@@ -16,6 +16,7 @@ use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::{fmt, path::PathBuf, str::FromStr, sync::LazyLock, time::Instant};
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
@@ -419,27 +420,38 @@ pub async fn run(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
-) -> anyhow::Result<()> {
+) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
-        return Ok(());
+        return;
     };
 
-    let last_processed_block = app_data_storage.last_processed_block_eth().await?;
+    let last_processed_block = app_data_storage
+        .last_processed_block_eth()
+        .await
+        .unwrap_or_else(|err| {
+            tracing::error!("Failed to get last processed block: {err:?}");
+            None
+        });
 
-    let network = Network::from_str(eth.network.as_str())
-        .map_err(|err| anyhow::anyhow!("Network input incorrect: {:?}", err))?;
+    let Ok(network) = Network::from_str(eth.network.as_str()) else {
+        tracing::error!("Network input incorrect");
+        return;
+    };
 
     let client: EthereumClient = EthereumClientBuilder::new()
         .network(network)
         .consensus_rpc(&eth.consensus_rpc_http_url)
-        .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?
+        .map_err(|err| tracing::error!("Failed to build Ethereum Helios client: {err:?}"))
+        .unwrap()
         .execution_rpc(&eth.execution_rpc_http_url)
-        .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?
+        .map_err(|err| tracing::error!("Failed to build Ethereum Helios client: {err:?}"))
+        .unwrap()
         .data_dir(PathBuf::from(&eth.helios_data_path))
         .with_file_db()
         .build()
-        .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?;
+        .map_err(|err| tracing::error!("Failed to build Ethereum Helios client: {err:?}"))
+        .unwrap();
 
     tracing::info!("Built Helios client on network {}", network);
 
@@ -447,7 +459,10 @@ pub async fn run(
 
     tracing::info!("running ethereum indexer");
 
-    let eth_contract_addr = Address::from_str(&format!("0x{}", eth.contract_address))?;
+    let Ok(eth_contract_addr) = Address::from_str(&format!("0x{}", eth.contract_address)) else {
+        tracing::error!("Failed to parse contract address");
+        return;
+    };
     let total_timeout = Duration::from_secs(eth.total_timeout);
 
     let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
@@ -468,7 +483,7 @@ pub async fn run(
         )
         .await
         .unwrap_or_else(|err| {
-            tracing::warn!("Failed to refresh latest finalized block: {:?}", err);
+            tracing::warn!("Failed to refresh latest finalized block: {err:?}");
         });
     });
 
@@ -486,7 +501,7 @@ pub async fn run(
         )
         .await
         .unwrap_or_else(|err| {
-            tracing::warn!("Failed to send requests when final: {:?}", err);
+            tracing::warn!("Failed to send requests when final: {err:?}");
         });
     });
 
@@ -529,7 +544,8 @@ pub async fn run(
     let mut block_heads_rx = client
         .subscribe(SubscriptionType::NewHeads)
         .await
-        .map_err(|err| anyhow::anyhow!("Failed to subscribe to new block heads: {:?}", err))?;
+        .map_err(|err| tracing::error!("Failed to subscribe to new block heads: {err:?}"))
+        .unwrap();
 
     loop {
         interval.tick().await;
@@ -540,14 +556,22 @@ pub async fn run(
             }
             continue;
         }
-        let Ok(new_block_head) = block_heads_rx.recv().await.inspect_err(|err| {
-            tracing::warn!(
-                "Eth indexer failed to receive latest block header: {:?}",
-                err
-            );
-        }) else {
-            break;
+        let new_block_head = match block_heads_rx.recv().await {
+            Ok(new_block_head) => new_block_head,
+            Err(RecvError::Lagged(lagged_count)) => {
+                tracing::warn!(
+                    "Eth indexer failed to receive latest block header: block heads stream lagged too far behind, lagged count: {lagged_count}"
+                );
+                continue;
+            }
+            Err(RecvError::Closed) => {
+                tracing::warn!(
+                    "Eth indexer failed to receive latest block header: block heads stream closed"
+                );
+                break;
+            }
         };
+
         receiver_state_update_timestamp = Instant::now();
         let SubscriptionEvent::NewHeads(new_block) = new_block_head;
         let block_number = new_block.header.number;
@@ -566,11 +590,7 @@ pub async fn run(
         )
         .await
         {
-            tracing::warn!(
-                "Eth indexer failed to process block number {}: {:?}",
-                block_number,
-                err
-            );
+            tracing::warn!("Eth indexer failed to process block number {block_number}: {err:?}");
             add_failed_block(blocks_failed_send.clone(), block_number, block_hash).await;
             continue;
         }
@@ -578,7 +598,6 @@ pub async fn run(
             .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
             .set(block_number as i64);
     }
-    Ok(())
 }
 
 async fn retry_failed_blocks(
@@ -606,10 +625,10 @@ async fn retry_failed_blocks(
         )
         .await
         {
-            tracing::warn!("Retry failed for block {block_number}: {:?}", err);
+            tracing::warn!("Retry failed for block {block_number}: {err:?}");
             add_failed_block(blocks_failed_tx.clone(), block_number, block_hash).await;
         } else {
-            tracing::info!("Successfully retried block: {}", block_number);
+            tracing::info!("Successfully retried block: {block_number}");
         }
     }
 }
@@ -929,11 +948,7 @@ async fn catch_up(
         )
         .await
         {
-            tracing::warn!(
-                "Eth indexer failed to process block number {}: {:?}",
-                block_number,
-                err
-            );
+            tracing::warn!("Eth indexer failed to process block number {block_number}: {err:?}");
             add_failed_block(blocks_failed_tx.clone(), block_number, block_hash).await;
             continue;
         }
