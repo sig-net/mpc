@@ -144,6 +144,34 @@ impl MpcSignProtocol {
             tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
         }
     }
+
+    pub fn new_test(
+        my_account_id: AccountId,
+        secret_storage: SecretNodeStorageBox,
+        triple_storage: TripleStorage,
+        presignature_storage: PresignatureStorage,
+        sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+        msg_channel: MessageChannel,
+        rpc_channel: RpcChannel,
+        config: watch::Receiver<Config>,
+        mesh_state: watch::Receiver<MeshState>,
+    ) -> Self {
+        Self {
+            my_account_id,
+            secret_storage,
+            triple_storage,
+            presignature_storage,
+            sign_rx,
+            msg_channel,
+            rpc_channel,
+            config,
+            mesh_state,
+        }
+    }
+
+    pub fn my_account_id(&self) -> &AccountId {
+        &self.my_account_id
+    }
 }
 
 /// our release versions take the form of "1.0.0-rc.2"

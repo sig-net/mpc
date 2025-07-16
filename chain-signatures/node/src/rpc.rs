@@ -73,21 +73,21 @@ type EthContractFillProvider = FillProvider<
 type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
 #[derive(Clone)]
-struct PublishAction {
+pub struct PublishAction {
     public_key: mpc_crypto::PublicKey,
-    request: SignRequest,
+    pub request: SignRequest,
     output: FullSignature<Secp256k1>,
     timestamp: Instant,
     retry_count: usize,
 }
 
-enum RpcAction {
+pub enum RpcAction {
     Publish(PublishAction),
 }
 
 #[derive(Clone)]
 pub struct RpcChannel {
-    tx: mpsc::Sender<RpcAction>,
+    pub tx: mpsc::Sender<RpcAction>,
 }
 
 impl RpcChannel {
