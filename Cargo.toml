@@ -71,3 +71,4 @@ x25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek",
 
 [profile.release]
 debug = true
+strip = false

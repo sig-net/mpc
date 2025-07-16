@@ -2,6 +2,10 @@ FROM redis:7.4.2 AS redis-bin
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive \
+    apt-get install --no-install-recommends --assume-yes binutils
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive \
     apt-get install --no-install-recommends --assume-yes gdb heaptrack
 RUN heaptrack --version --verbose
 
