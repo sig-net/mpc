@@ -9,17 +9,28 @@ use crate::protocol::presignature::PresignatureSpawnerTask;
 use crate::protocol::signature::SignatureSpawnerTask;
 use crate::protocol::state::{GeneratingState, ResharingState};
 use crate::protocol::triple::TripleSpawnerTask;
+use crate::protocol::Governance;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 
 use std::cmp::Ordering;
 
-pub(crate) trait ConsensusProtocol {
-    async fn advance(self, ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState;
+pub(crate) trait ConsensusProtocol<G> {
+    async fn advance(
+        self,
+        ctx: &mut MpcSignProtocol,
+        gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState;
 }
 
-impl ConsensusProtocol for StartedState {
-    async fn advance(self, ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+impl<G: Governance> ConsensusProtocol<G> for StartedState {
+    async fn advance(
+        self,
+        ctx: &mut MpcSignProtocol,
+        _gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState {
         match self.persistent_node_data {
             Some(PersistentNodeData {
                 epoch,
@@ -206,8 +217,13 @@ impl ConsensusProtocol for StartedState {
     }
 }
 
-impl ConsensusProtocol for GeneratingState {
-    async fn advance(self, _ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+impl<G: Governance> ConsensusProtocol<G> for GeneratingState {
+    async fn advance(
+        self,
+        _ctx: &mut MpcSignProtocol,
+        _gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState {
         match contract_state {
             ProtocolState::Initializing(_) => {
                 tracing::info!("generating(initializing): continuing generation, contract state has not been finalized yet");
@@ -287,8 +303,13 @@ impl ConsensusProtocol for GeneratingState {
     }
 }
 
-impl ConsensusProtocol for WaitingForConsensusState {
-    async fn advance(self, ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
+    async fn advance(
+        self,
+        ctx: &mut MpcSignProtocol,
+        gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState {
         match contract_state {
             ProtocolState::Initializing(contract_state) => {
                 tracing::info!("waiting(initializing): waiting for consensus, contract state has not been finalized yet");
@@ -300,7 +321,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                     .unwrap_or_default();
                 if !has_voted {
                     tracing::info!("waiting(initializing): we haven't voted yet, voting for the generated public key");
-                    if let Err(err) = ctx.near.vote_public_key(&public_key).await {
+                    if let Err(err) = gov.vote_public_key(&public_key).await {
                         tracing::error!(
                             ?err,
                             "waiting(initializing): failed to vote for the generated public key, retrying..."
@@ -450,7 +471,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                                 epoch = self.epoch,
                                 "waiting(resharing): we haven't voted yet, voting for resharing to complete"
                             );
-                            if let Err(err) = ctx.near.vote_reshared(self.epoch).await {
+                            if let Err(err) = gov.vote_reshared(self.epoch).await {
                                 tracing::error!(
                                     ?err,
                                     "waiting(resharing): failed to vote for resharing to complete, retrying..."
@@ -470,10 +491,11 @@ impl ConsensusProtocol for WaitingForConsensusState {
     }
 }
 
-impl ConsensusProtocol for RunningState {
+impl<G: Governance> ConsensusProtocol<G> for RunningState {
     async fn advance(
         mut self,
         ctx: &mut MpcSignProtocol,
+        _gov: &mut G,
         contract_state: ProtocolState,
     ) -> NodeState {
         match contract_state {
@@ -612,8 +634,13 @@ impl ConsensusProtocol for RunningState {
     }
 }
 
-impl ConsensusProtocol for ResharingState {
-    async fn advance(self, _ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+impl<G: Governance> ConsensusProtocol<G> for ResharingState {
+    async fn advance(
+        self,
+        _ctx: &mut MpcSignProtocol,
+        _gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState {
         match contract_state {
             ProtocolState::Initializing(_) => {
                 tracing::info!(
@@ -762,8 +789,13 @@ impl ConsensusProtocol for ResharingState {
     }
 }
 
-impl ConsensusProtocol for JoiningState {
-    async fn advance(self, ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+impl<G: Governance> ConsensusProtocol<G> for JoiningState {
+    async fn advance(
+        self,
+        ctx: &mut MpcSignProtocol,
+        gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState {
         match contract_state {
             ProtocolState::Initializing(contract_state) => {
                 let participants: Participants = contract_state.candidates.clone().into();
@@ -799,7 +831,7 @@ impl ConsensusProtocol for JoiningState {
                     tracing::info!(
                         "joining(running): sending a transaction to join the participant set"
                     );
-                    if let Err(err) = ctx.near.propose_join().await {
+                    if let Err(err) = gov.propose_join().await {
                         tracing::error!(?err, "failed to propose to join the participant set");
                     }
                     return NodeState::Joining(self);
@@ -839,8 +871,13 @@ impl ConsensusProtocol for JoiningState {
     }
 }
 
-impl ConsensusProtocol for NodeState {
-    async fn advance(self, ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+impl<G: Governance> ConsensusProtocol<G> for NodeState {
+    async fn advance(
+        self,
+        ctx: &mut MpcSignProtocol,
+        gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState {
         match self {
             NodeState::Starting => {
                 let persistent_node_data = match ctx.secret_storage.load().await {
@@ -854,12 +891,12 @@ impl ConsensusProtocol for NodeState {
                     persistent_node_data,
                 })
             }
-            NodeState::Started(state) => state.advance(ctx, contract_state).await,
-            NodeState::Generating(state) => state.advance(ctx, contract_state).await,
-            NodeState::WaitingForConsensus(state) => state.advance(ctx, contract_state).await,
-            NodeState::Running(state) => state.advance(ctx, contract_state).await,
-            NodeState::Resharing(state) => state.advance(ctx, contract_state).await,
-            NodeState::Joining(state) => state.advance(ctx, contract_state).await,
+            NodeState::Started(state) => state.advance(ctx, gov, contract_state).await,
+            NodeState::Generating(state) => state.advance(ctx, gov, contract_state).await,
+            NodeState::WaitingForConsensus(state) => state.advance(ctx, gov, contract_state).await,
+            NodeState::Running(state) => state.advance(ctx, gov, contract_state).await,
+            NodeState::Resharing(state) => state.advance(ctx, gov, contract_state).await,
+            NodeState::Joining(state) => state.advance(ctx, gov, contract_state).await,
         }
     }
 }
