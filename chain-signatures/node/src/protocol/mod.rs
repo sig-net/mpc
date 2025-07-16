@@ -11,6 +11,9 @@ pub mod state;
 pub mod sync;
 pub mod triple;
 
+#[cfg(feature = "test-feature")]
+pub mod test_setup;
+
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
@@ -138,6 +141,10 @@ impl MpcSignProtocol {
                 .observe(protocol_time.elapsed().as_secs_f64());
             tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
         }
+    }
+
+    pub fn my_account_id(&self) -> &AccountId {
+        &self.my_account_id
     }
 }
 
