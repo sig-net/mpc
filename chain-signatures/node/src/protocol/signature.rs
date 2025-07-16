@@ -27,7 +27,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
 use near_account_id::AccountId;
@@ -733,7 +733,7 @@ impl SignatureSpawner {
 
         match internal_action {
             PositInternalAction::None => {}
-            PositInternalAction::Rejected => {
+            PositInternalAction::Abort => {
                 tracing::warn!(
                     ?sign_id,
                     presignature_id,
@@ -907,7 +907,7 @@ impl SignatureSpawner {
         }
     }
 
-    async fn run(mut self, mesh_state: Arc<RwLock<MeshState>>, cfg: Arc<RwLock<Config>>) {
+    async fn run(mut self, mesh_state: watch::Receiver<MeshState>, cfg: watch::Receiver<Config>) {
         // NOTE: signatures should only use stable and not active participants. The difference here is that
         // stable participants utilizes more than the online status of a node, such as whether or not their
         // block height is up to date, such that they too can process signature requests. If they cannot
@@ -920,13 +920,8 @@ impl SignatureSpawner {
         loop {
             tokio::select! {
                 Some((sign_id, presignature_id, from, action)) = posits.recv() => {
-                    let cfg = {
-                        let cfg = cfg.read().await;
-                        cfg.protocol.clone()
-                    };
-
                     let request = self.sign_queue.get_or_pending(&sign_id);
-                    let timeout = Duration::from_millis(cfg.signature.generation_timeout);
+                    let timeout = Duration::from_millis(cfg.borrow().protocol.signature.generation_timeout);
                     pending_posits.spawn(async move {
                         let request = request.fetch(timeout).await;
                         (sign_id, presignature_id, request, from, action)
@@ -941,11 +936,8 @@ impl SignatureSpawner {
                         },
                     };
 
-                    let cfg = {
-                        let cfg = cfg.read().await;
-                        cfg.protocol.clone()
-                    };
-                    self.process_posit(sign_id, presignature_id, request, from, action, cfg).await;
+                    let protocol = cfg.borrow().protocol.clone();
+                    self.process_posit(sign_id, presignature_id, request, from, action, protocol).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
@@ -967,15 +959,9 @@ impl SignatureSpawner {
                     }
                 }
                 _ = check_requests_interval.tick() => {
-                    let stable = {
-                        let state = mesh_state.read().await;
-                        state.stable.clone()
-                    };
-                    let protocol_cfg = {
-                        let config = cfg.read().await;
-                        config.protocol.clone()
-                    };
-                    self.handle_requests(&stable, &protocol_cfg).await;
+                    let stable = mesh_state.borrow().stable.clone();
+                    let protocol = cfg.borrow().protocol.clone();
+                    self.handle_requests(&stable, &protocol).await;
                 }
             }
         }

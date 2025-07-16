@@ -1,23 +1,19 @@
 use crate::protocol::{Chain, IndexedSignRequest};
+use crate::storage::app_data_storage::AppDataStorage;
 use alloy::consensus::BlockHeader;
+use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
-use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::Log;
 use alloy::sol_types::{sol, SolEvent};
-use alloy::transports::http::Client as AlloyClient;
-use alloy::transports::http::Http;
 use anyhow::anyhow;
-use helios::common::types::{BlockTag, SubscriptionEvent, SubscriptionType};
-use helios::ethereum::{
-    config::networks::Network, database::FileDB, EthereumClient, EthereumClientBuilder,
-};
+use helios::common::types::{SubscriptionEvent, SubscriptionType};
+use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 use k256::Scalar;
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::{fmt, path::PathBuf, str::FromStr, sync::LazyLock, time::Instant};
 use tokio::sync::mpsc;
@@ -32,6 +28,8 @@ pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     )
     .unwrap()
 });
+
+type BlockNumber = u64;
 
 #[derive(Clone)]
 pub struct EthConfig {
@@ -411,23 +409,15 @@ fn failed_blocks_channel() -> (
     mpsc::channel(MAX_FAILED_BLOCKS)
 }
 
-type BlockNumberToHashMap = HashMap<u64, alloy::primitives::B256>;
-
-#[derive(Debug, Clone)]
-struct FinalizedEpoch {
-    pub start_block: u64,
-    pub end_block: u64,
-    pub blocks: BlockNumberToHashMap,
-}
-
 const MAX_FINALIZED_BLOCKS: usize = 1024;
-fn finalized_blocks_channel() -> (mpsc::Sender<FinalizedEpoch>, mpsc::Receiver<FinalizedEpoch>) {
+fn finalized_block_channel() -> (mpsc::Sender<BlockNumber>, mpsc::Receiver<BlockNumber>) {
     mpsc::channel(MAX_FINALIZED_BLOCKS)
 }
 
 pub async fn run(
     eth: Option<EthConfig>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
+    app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
     let Some(eth) = eth else {
@@ -435,28 +425,25 @@ pub async fn run(
         return Ok(());
     };
 
+    let last_processed_block = app_data_storage.last_processed_block_eth().await?;
+
     let network = Network::from_str(eth.network.as_str())
         .map_err(|err| anyhow::anyhow!("Network input incorrect: {:?}", err))?;
 
-    let mut client: EthereumClient<FileDB> = EthereumClientBuilder::new()
+    let client: EthereumClient = EthereumClientBuilder::new()
         .network(network)
         .consensus_rpc(&eth.consensus_rpc_http_url)
+        .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?
         .execution_rpc(&eth.execution_rpc_http_url)
+        .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?
         .data_dir(PathBuf::from(&eth.helios_data_path))
+        .with_file_db()
         .build()
         .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?;
 
     tracing::info!("Built Helios client on network {}", network);
 
-    client
-        .start()
-        .await
-        .map_err(|err| anyhow::anyhow!("Failed to start Ethereum Helios client: {:?}", err))?;
-
     client.wait_synced().await;
-
-    let untrusted_rpc_client: RootProvider<alloy::transports::http::Http<AlloyClient>> =
-        ProviderBuilder::new().on_http(url::Url::parse(&eth.execution_rpc_http_url).unwrap());
 
     tracing::info!("running ethereum indexer");
 
@@ -472,31 +459,34 @@ pub async fn run(
 
     let (requests_indexed_send, requests_indexed_recv) = indexed_channel();
 
-    let (finalized_epoch_send, finalized_epoch_recv) = finalized_blocks_channel();
+    let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
 
     let client = Arc::new(client);
+
     let client_clone = Arc::clone(&client);
     tokio::spawn(async move {
-        tracing::info!("Spawned task to refresh finalized epoch's blocks");
-        refresh_finalized_epoch(
+        tracing::info!("Spawned task to refresh the latest finalized block");
+        refresh_finalized_block(
             &client_clone,
-            &untrusted_rpc_client,
-            finalized_epoch_send.clone(),
+            finalized_block_send.clone(),
             eth.refresh_finalized_interval,
         )
         .await
         .unwrap_or_else(|err| {
-            tracing::warn!("Failed to refresh finalized epoch: {:?}", err);
+            tracing::warn!("Failed to refresh latest finalized block: {:?}", err);
         });
     });
 
     let near_account_id_clone = node_near_account_id.clone();
+    let client_clone = Arc::clone(&client);
     tokio::spawn(async move {
         tracing::info!("Spawned task to send indexed requests to send queue");
         send_requests_when_final(
+            &client_clone,
             requests_indexed_recv,
-            finalized_epoch_recv,
+            finalized_block_recv,
             sign_tx.clone(),
+            app_data_storage.clone(),
             near_account_id_clone.clone(),
         )
         .await
@@ -522,6 +512,21 @@ pub async fn run(
         )
         .await;
     });
+
+    let near_account_id_clone = node_near_account_id.clone();
+    let requests_indexed_send_clone = requests_indexed_send.clone();
+    let blocks_failed_send_clone = blocks_failed_send.clone();
+    let client_clone = Arc::clone(&client);
+    catch_up(
+        &client_clone,
+        last_processed_block,
+        eth_contract_addr,
+        requests_indexed_send_clone,
+        blocks_failed_send_clone,
+        total_timeout,
+        near_account_id_clone,
+    )
+    .await;
 
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let requests_indexed_send_clone = requests_indexed_send.clone();
@@ -579,7 +584,7 @@ pub async fn run(
 async fn retry_failed_blocks(
     mut blocks_failed_rx: mpsc::Receiver<BlockNumberAndHash>,
     blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
-    client: &Arc<EthereumClient<FileDB>>,
+    client: &Arc<EthereumClient>,
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
@@ -622,202 +627,96 @@ async fn add_failed_block(
         });
 }
 
-// retry getting latest finalized block from helios with exponential backoff
-async fn fetch_finalized_block_from_helio(
-    helios_client: &Arc<EthereumClient<FileDB>>,
+// retry getting block from helios with exponential backoff
+async fn fetch_block(
+    helios_client: &Arc<EthereumClient>,
+    block_id: BlockId,
     max_retries: u8,
     base_delay: Duration,
-) -> anyhow::Result<alloy::rpc::types::Block> {
+) -> Option<alloy::rpc::types::Block> {
     let mut retries = 0;
     loop {
-        match helios_client
-            .get_block_by_number(BlockTag::Finalized, false)
-            .await
-        {
-            Ok(Some(block)) => return Ok(block),
+        match helios_client.get_block(block_id, false).await {
+            Ok(Some(block)) => return Some(block),
             Ok(None) => {
-                let err_msg = "Latest finalized block not found from Helios client";
-                return Err(anyhow::anyhow!(err_msg));
+                tracing::warn!("Block {block_id} not found from Helios client");
+                return None;
             }
             Err(e) => {
                 if retries < max_retries {
                     retries += 1;
                     let delay = base_delay * 2u32.pow((retries - 1) as u32);
                     tracing::warn!(
-                        "Failed to get latest finalized block from Helios client: {:?}, retrying",
+                        "Failed to fetch block number {block_id} from Helios client: {:?}, retrying",
                         e
                     );
                     tokio::time::sleep(delay).await;
                     continue;
                 }
-                return Err(anyhow::anyhow!(
-                    "Failed to get finalized block from Helios client: {:?}, exceeded maximum retry",
+                tracing::warn!(
+                    "Failed to fetch block number {block_id} from Helios client: {:?}, exceeded maximum retry",
                     e
-                ));
+                );
+                return None;
             }
         }
     }
 }
 
-/// Polls for the latest finalized block and update the latest finalized blocks.
-/// Once finalized block gets updated, we fetch the blocks in the epoch ending with the finalized block.
-/// To ensure the blocks we fetched are proven, we fetch the latest finalized block from Helios.
-/// Then using an unstrusted RPC client, we go backwards to fetch the blocks in the epoch and check that the hash of the block's header == its next block's parent_hash.
-/// This is proven because the finalized block is already proven by helios, and by checking current block hash == next block's parent hash, we prove that each block is indeed included in the chain.
-async fn refresh_finalized_epoch(
-    helios_client: &Arc<EthereumClient<FileDB>>,
-    untrusted_rpc_client: &RootProvider<Http<AlloyClient>>,
-    finalized_epoch_send: mpsc::Sender<FinalizedEpoch>,
+/// Polls for the latest finalized block and update finalized block channel.
+async fn refresh_finalized_block(
+    helios_client: &Arc<EthereumClient>,
+    finalized_block_send: mpsc::Sender<BlockNumber>,
     refresh_finalized_interval: u64,
 ) -> anyhow::Result<()> {
     let mut interval = tokio::time::interval(Duration::from_millis(refresh_finalized_interval));
-    let mut finalized_blocks: BlockNumberToHashMap = BlockNumberToHashMap::new();
-    let mut final_block_number: Option<u64> = None;
+    let mut final_block_number: Option<BlockNumber> = None;
+
     loop {
         interval.tick().await;
         tracing::info!("Refreshing finalized epoch");
 
-        let new_finalized_block =
-            match fetch_finalized_block_from_helio(helios_client, 5, Duration::from_millis(200))
-                .await
-            {
-                Ok(block) => block,
-                Err(e) => {
-                    tracing::warn!("Failed to get finalized block: {:?}", e);
-                    continue;
-                }
-            };
+        let new_finalized_block = match fetch_block(
+            helios_client,
+            BlockId::Number(BlockNumberOrTag::Finalized),
+            5,
+            Duration::from_millis(200),
+        )
+        .await
+        {
+            Some(block) => block,
+            None => {
+                continue;
+            }
+        };
+
+        let new_final_block_number = new_finalized_block.header.number;
         tracing::info!(
             "New finalized block number: {}, last finalized block number: {:?}",
-            new_finalized_block.header.number,
+            new_final_block_number,
             final_block_number
         );
 
-        let new_final_block_number = new_finalized_block.header.number;
-
-        let Some(last_final_block_number) = final_block_number else {
-            tracing::info!("Last finalized block was None");
+        if final_block_number.is_none_or(|n| new_final_block_number > n) {
+            tracing::info!("Found new finalized block!");
             final_block_number.replace(new_final_block_number);
+            finalized_block_send
+                .send(new_final_block_number)
+                .await
+                .map_err(|err| anyhow!("Failed to send finalized block: {:?}", err))?;
             continue;
-        };
+        }
+
+        let last_final_block_number = final_block_number.unwrap();
 
         if new_final_block_number < last_final_block_number {
             tracing::warn!(
                 "New finalized block number overflowed range of u64 and has wrapped around!"
             );
-            continue;
         }
 
         if last_final_block_number == new_final_block_number {
             tracing::info!("No new finalized block");
-            continue;
-        }
-
-        tracing::info!("Found new finalized block!");
-        finalized_blocks.clear();
-        finalized_blocks.insert(new_final_block_number, new_finalized_block.header.hash);
-
-        let mut parent_hash = new_finalized_block.header.inner.parent_hash;
-
-        let Some(start) = last_final_block_number.checked_add(1) else {
-            tracing::warn!("Last finalized block number + 1 overflowed range of u64!");
-            continue;
-        };
-        let Some(end) = new_final_block_number.checked_sub(1) else {
-            tracing::warn!("New finalized block number - 1 overflowed range of u64!");
-            continue;
-        };
-
-        let mut epoch_update_err = false;
-        // go backwards from latest_finalized_block_number - 1, and check that each block's hash == next block's parent hash
-        for i in (start..=end).rev() {
-            tracing::info!("Fetching block {i} from untrusted RPC client");
-
-            let cur_block = match fetch_block_from_untrusted_rpc(
-                untrusted_rpc_client,
-                i,
-                5,
-                Duration::from_millis(200),
-            )
-            .await
-            {
-                Ok(block) => block,
-                Err(e) => {
-                    tracing::warn!("Failed to fetch finalized block {i}: {:?}", e);
-                    break;
-                }
-            };
-
-            let cur_block_hash = cur_block.header.hash_slow();
-
-            if cur_block_hash == parent_hash {
-                finalized_blocks.insert(i, cur_block_hash);
-                parent_hash = cur_block.header.inner.parent_hash;
-            } else {
-                tracing::warn!(
-                    "Block {i} hash mismatch: expected {}, got {}, untrusted RPC returned invalid block",
-                    parent_hash,
-                    cur_block_hash
-                );
-                epoch_update_err = true;
-                break;
-            }
-        }
-        if epoch_update_err {
-            tracing::warn!("Finalized epoch update failed on some blocks, retrying");
-            continue;
-        }
-        final_block_number.replace(new_final_block_number);
-        tracing::info!("Sending finalized blocks to finalized epoch");
-        let finalized_epoch = FinalizedEpoch {
-            start_block: start,
-            end_block: end,
-            blocks: finalized_blocks.clone(),
-        };
-        finalized_epoch_send
-            .send(finalized_epoch)
-            .await
-            .map_err(|err| anyhow!("Failed to send finalized block: {:?}", err))?;
-    }
-}
-
-// retry getting block by number from untrusted rpc with exponential backoff
-async fn fetch_block_from_untrusted_rpc(
-    untrusted_rpc_client: &RootProvider<Http<AlloyClient>>,
-    block_number: u64,
-    max_retries: u8,
-    base_delay: Duration,
-) -> anyhow::Result<alloy::rpc::types::Block> {
-    let mut retries = 0;
-    loop {
-        match untrusted_rpc_client
-            .get_block_by_number(
-                alloy::eips::BlockNumberOrTag::Number(block_number),
-                alloy::rpc::types::BlockTransactionsKind::Hashes,
-            )
-            .await
-        {
-            Ok(Some(block)) => return Ok(block),
-            Ok(None) => {
-                let err_msg = format!("Block {block_number} not found from untrusted RPC client");
-                return Err(anyhow::anyhow!(err_msg));
-            }
-            Err(e) => {
-                if retries < max_retries {
-                    retries += 1;
-                    let delay = base_delay * 2u32.pow((retries - 1) as u32);
-                    tracing::warn!(
-                        "Failed to get block {block_number} from untrusted RPC client: {:?}, retrying",
-                        e
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-                return Err(anyhow::anyhow!(
-                    "Failed to get block {block_number} from untrusted RPC client: {:?}, exceeded maximum retry",
-                    e
-                ));
-            }
         }
     }
 }
@@ -826,7 +725,7 @@ async fn fetch_block_from_untrusted_rpc(
 async fn process_block(
     block_number: u64,
     block_hash: alloy::primitives::B256,
-    client: &Arc<EthereumClient<FileDB>>,
+    client: &Arc<EthereumClient>,
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
@@ -839,7 +738,7 @@ async fn process_block(
     );
     let start = Instant::now();
     let block_receipts_result = client
-        .get_block_receipts(BlockTag::Number(block_number))
+        .get_block_receipts(BlockId::Number(BlockNumberOrTag::Number(block_number)))
         .await;
     crate::metrics::ETH_BLOCK_RECEIPT_LATENCY
         .with_label_values(&[node_near_account_id.as_str()])
@@ -883,7 +782,10 @@ async fn process_block(
         .map_err(|err| anyhow::anyhow!("Failed to send indexed requests: {:?}", err))?;
 
     let block_timestamp = client
-        .get_block_by_number(BlockTag::Number(block_number), false)
+        .get_block(
+            BlockId::Number(BlockNumberOrTag::Number(block_number)),
+            false,
+        )
         .await
         .ok()
         .and_then(|block| block.map(|b| b.header.timestamp()));
@@ -905,87 +807,135 @@ async fn process_block(
 }
 
 /// Sends a request to the sign queue when the block where the request is in is finalized.
-/// This assumes that the requests_indexed are mostly ordered by block number, with occasional retried blocks that can go farthest 2 finalized epochs back.
-/// Whenever there are requests in requests_indexed, function will keep polling if the block where the first request is in has finalized, if finalized, it will send this request to the sign queue.
 async fn send_requests_when_final(
+    helios_client: &Arc<EthereumClient>,
     mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
-    mut finalized_epoch_rx: mpsc::Receiver<FinalizedEpoch>,
+    mut finalized_block_rx: mpsc::Receiver<BlockNumber>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
+    app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
 ) -> anyhow::Result<()> {
-    // We keep the last 2 finalized epochs to handle retried blocks that happen to be older
-    let mut finalized_epochs: Vec<FinalizedEpoch> = Vec::new();
+    let mut finalized_block_number: Option<BlockNumber> = None;
+    let mut last_processed_block: Option<BlockNumber> =
+        app_data_storage.last_processed_block_eth().await?;
+
     loop {
-        while let Some(BlockAndRequests {
+        let Some(BlockAndRequests {
             block_number,
             block_hash,
             indexed_requests,
         }) = requests_indexed.recv().await
-        {
-            loop {
-                // Check if block is in any of the finalized epochs
-                let mut block_found = false;
-                for epoch in &finalized_epochs {
-                    if let Some(finalized_block_hash) = epoch.blocks.get(&block_number) {
-                        block_found = true;
-                        if *finalized_block_hash == block_hash {
-                            tracing::info!("Block {block_number} is finalized!");
-                            send_indexed_requests(
-                                indexed_requests.clone(),
-                                sign_tx.clone(),
-                                node_near_account_id.clone(),
-                            );
-                            break;
-                        } else {
-                            tracing::error!(
-                                "Block {block_number} hash mismatch: expected {block_hash:?}, got {finalized_block_hash:?}. Chain re-orged."
-                            );
-                            //TODO: handle the block reorg case
-                            break;
-                        }
-                    }
-                }
+        else {
+            return Err(anyhow::anyhow!("Failed to receive indexed requests"));
+        };
 
-                if block_found {
-                    break;
-                }
+        // Wait for finalized block if needed
+        while finalized_block_number.is_none_or(|n| block_number > n) {
+            let Some(new_finalized_block) = finalized_block_rx.recv().await else {
+                return Err(anyhow::anyhow!("Failed to receive finalized blocks"));
+            };
+            finalized_block_number.replace(new_finalized_block);
+        }
 
-                tracing::warn!(
-                    "Block number {block_number} with hash: {block_hash:?} not in finalized epochs. "
-                );
+        // Verify block hash and send requests
+        let block = fetch_block(
+            helios_client,
+            block_number.into(),
+            5,
+            Duration::from_millis(200),
+        )
+        .await;
 
-                // Check if block is in history (older than our oldest epoch)
-                if !finalized_epochs.is_empty() {
-                    let oldest_epoch = &finalized_epochs[0];
-                    if block_number < oldest_epoch.start_block {
-                        tracing::error!("Block {block_number} is in history");
-                        //TODO: handle the block in history case which happens when a block is retried
-                        break;
-                    }
-                }
+        let Some(block) = block else {
+            tracing::warn!("Block {block_number} not found from Helios client, skipping this block and its requests");
+            continue;
+        };
 
-                // Wait for new finalized epoch
-                let Some(received_epoch) = finalized_epoch_rx.recv().await else {
-                    tracing::warn!("Failed to receive finalized blocks");
-                    return Err(anyhow::anyhow!("Failed to receive finalized blocks"));
-                };
-
-                let start_block = received_epoch.start_block;
-                let end_block = received_epoch.end_block;
-                let blocks = received_epoch.blocks;
-
-                let new_epoch = FinalizedEpoch {
-                    start_block,
-                    end_block,
-                    blocks,
-                };
-
-                // Update epochs list, keeping only the last 2
-                finalized_epochs.push(new_epoch);
-                if finalized_epochs.len() > 2 {
-                    finalized_epochs.remove(0);
-                }
+        if block.header.hash == block_hash {
+            tracing::info!("Block {block_number} is finalized!");
+            send_indexed_requests(
+                indexed_requests,
+                sign_tx.clone(),
+                node_near_account_id.clone(),
+            );
+            if last_processed_block.is_none_or(|n| n < block_number) {
+                app_data_storage
+                    .set_last_processed_block_eth(block_number)
+                    .await?;
+                last_processed_block.replace(block_number);
             }
+        } else {
+            // no special handling for chain reorg, just log the error
+            // This is because when such chain reorg happens, the new canonical chain will have already been emitted by helios's block header stream, and we can safely skip this block here.
+            tracing::error!(
+                "Block {block_number} hash mismatch: expected {block_hash:?}, got {:?}. Chain re-orged.",
+                block.header.hash
+            );
+        }
+    }
+}
+
+async fn catch_up(
+    helios_client: &Arc<EthereumClient>,
+    start_block_number: Option<BlockNumber>,
+    eth_contract_addr: Address,
+    requests_indexed: mpsc::Sender<BlockAndRequests>,
+    blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
+    total_timeout: Duration,
+    node_near_account_id: AccountId,
+) {
+    let Some(start_block_number) = start_block_number else {
+        tracing::info!("No start block number provided, skipping catch up");
+        return;
+    };
+    tracing::info!("Catching up from block number: {start_block_number}");
+    let latest_block = match fetch_block(
+        helios_client,
+        BlockId::Number(BlockNumberOrTag::Latest),
+        10,
+        Duration::from_millis(200),
+    )
+    .await
+    {
+        Some(block) => block,
+        None => {
+            tracing::warn!("Failed to get latest block");
+            return;
+        }
+    };
+    let end_block_number = latest_block.header.number;
+    for block_number in start_block_number..end_block_number {
+        let block = fetch_block(
+            helios_client,
+            block_number.into(),
+            5,
+            Duration::from_millis(200),
+        )
+        .await;
+        let Some(block) = block else {
+            tracing::warn!("When catching up, block {block_number} not found from Helios client, skipping this block and its requests");
+            continue;
+        };
+        let block_number = block.header.number;
+        let block_hash = block.header.hash;
+        if let Err(err) = process_block(
+            block_number,
+            block_hash,
+            helios_client,
+            eth_contract_addr,
+            node_near_account_id.clone(),
+            requests_indexed.clone(),
+            total_timeout,
+        )
+        .await
+        {
+            tracing::warn!(
+                "Eth indexer failed to process block number {}: {:?}",
+                block_number,
+                err
+            );
+            add_failed_block(blocks_failed_tx.clone(), block_number, block_hash).await;
+            continue;
         }
     }
 }

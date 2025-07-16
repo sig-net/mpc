@@ -17,12 +17,11 @@ use k256::elliptic_curve::group::GroupEncoding;
 use k256::Secp256k1;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Unique number used to identify a specific ongoing triple generation protocol.
@@ -347,7 +346,7 @@ impl TripleSpawner {
 
         match internal_action {
             PositInternalAction::None => {}
-            PositInternalAction::Rejected => {}
+            PositInternalAction::Abort => {}
             PositInternalAction::Reply(action) => {
                 self.msg
                     .send(
@@ -486,8 +485,8 @@ impl TripleSpawner {
 
     async fn run(
         mut self,
-        mesh_state: Arc<RwLock<MeshState>>,
-        config: Arc<RwLock<Config>>,
+        mesh_state: watch::Receiver<MeshState>,
+        config: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
@@ -496,7 +495,7 @@ impl TripleSpawner {
         loop {
             tokio::select! {
                 Some((id, from, action)) = posits.recv() => {
-                    let timeout = config.read().await.protocol.triple.generation_timeout;
+                    let timeout = config.borrow().protocol.triple.generation_timeout;
                     self.process_posit(id, from, action, Duration::from_millis(timeout)).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
@@ -515,8 +514,8 @@ impl TripleSpawner {
                     // TODO: eventually we should use all participants, and let nodes replying with
                     // accept/reject determine who is a participant. The messaging layer should
                     // rely more on active.
-                    let active = mesh_state.read().await.active.keys_vec();
-                    let protocol = config.read().await.protocol.clone();
+                    let active = mesh_state.borrow().active.keys_vec();
+                    let protocol = config.borrow().protocol.clone();
                     self.stockpile(&active, &protocol).await;
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 
