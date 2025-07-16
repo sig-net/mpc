@@ -450,11 +450,6 @@ pub async fn run(
     let eth_contract_addr = Address::from_str(&format!("0x{}", eth.contract_address))?;
     let total_timeout = Duration::from_secs(eth.total_timeout);
 
-    let mut block_heads_rx = client
-        .subscribe(SubscriptionType::NewHeads)
-        .await
-        .map_err(|err| anyhow::anyhow!("Failed to subscribe to new block heads: {:?}", err))?;
-
     let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
 
     let (requests_indexed_send, requests_indexed_recv) = indexed_channel();
@@ -531,6 +526,11 @@ pub async fn run(
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let mut receiver_state_update_timestamp = Instant::now();
+    let mut block_heads_rx = client
+        .subscribe(SubscriptionType::NewHeads)
+        .await
+        .map_err(|err| anyhow::anyhow!("Failed to subscribe to new block heads: {:?}", err))?;
+
     loop {
         interval.tick().await;
         if block_heads_rx.is_empty() {
