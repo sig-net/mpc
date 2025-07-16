@@ -240,14 +240,17 @@ pub async fn run(
     sol: Option<SolConfig>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
-) -> anyhow::Result<()> {
+) {
     let Some(sol) = sol else {
         tracing::warn!("solana indexer is disabled");
-        return Ok(());
+        return;
     };
 
     tracing::info!("running solana indexer");
-    let program_id = Pubkey::from_str(&sol.program_address)?;
+    let Ok(program_id) = Pubkey::from_str(&sol.program_address) else {
+        tracing::error!("Failed to parse program address");
+        return;
+    };
     let keypair = Keypair::from_base58_string(&sol.account_sk);
 
     let cluster = Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
@@ -260,7 +263,10 @@ pub async fn run(
         program_id
     );
     loop {
-        let program = client.program(program_id)?;
+        let Ok(program) = client.program(program_id) else {
+            tracing::error!("Failed to get program");
+            return;
+        };
         let total_timeout = Duration::from_secs(sol.total_timeout);
         let unsub = subscribe_to_program_events(
             &program,
