@@ -331,12 +331,12 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 presignature_storage,
                 sync_channel,
             ));
-            tokio::spawn(indexer_eth::run(
-                eth,
-                sign_tx.clone(),
-                app_data_storage.clone(),
-                account_id.clone(),
-            ));
+            // tokio::spawn(indexer_eth::run(
+            //     eth,
+            //     sign_tx.clone(),
+            //     app_data_storage.clone(),
+            //     account_id.clone(),
+            // ));
             tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
