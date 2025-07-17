@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::{ParticipantInfo, ProtocolState};
-use crate::web::StateView;
+use crate::web::StateStatus;
 
 use super::MeshState;
 
@@ -97,13 +97,15 @@ impl NodeConnection {
                 continue;
             }
 
-            match client.state(&url).await {
+            match client.status(&url).await {
                 Ok(state) => {
                     let mut new_status = match state {
-                        StateView::Running { .. } => NodeStatus::Active,
-                        StateView::Resharing { .. }
-                        | StateView::Joining { .. }
-                        | StateView::NotRunning => NodeStatus::Inactive,
+                        StateStatus::Running => NodeStatus::Active,
+                        StateStatus::Generating
+                        | StateStatus::Resharing
+                        | StateStatus::Joining
+                        | StateStatus::WaitingForConsensus
+                        | StateStatus::NotRunning => NodeStatus::Inactive,
                     };
                     let mut status = status.write().await;
                     if *status == NodeStatus::Inactive && new_status == NodeStatus::Active {

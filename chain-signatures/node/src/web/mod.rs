@@ -59,6 +59,7 @@ pub async fn run(
         )
         .route("/msg", post(msg))
         .route("/state", get(state))
+        .route("/status", get(status))
         .route("/metrics", get(metrics))
         .route("/sync", post(sync));
 
@@ -175,6 +176,32 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
             Ok(Json(StateView::NotRunning))
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StateStatus {
+    NotRunning,
+    Generating,
+    Resharing,
+    WaitingForConsensus,
+    Running,
+    Joining,
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn status(Extension(web): Extension<Arc<AxumState>>) -> Json<StateStatus> {
+    let status = match web.node.status() {
+        NodeStatus::Started | NodeStatus::Starting => StateStatus::NotRunning,
+        NodeStatus::Generating { .. } => StateStatus::Generating,
+        NodeStatus::WaitingForConsensus { .. } => StateStatus::WaitingForConsensus,
+        NodeStatus::Running { .. } => StateStatus::Running,
+        NodeStatus::Resharing { .. } => StateStatus::Resharing,
+        NodeStatus::Joining { .. } => StateStatus::Joining,
+    };
+    Json(status)
 }
 
 #[tracing::instrument(level = "debug", skip_all)]

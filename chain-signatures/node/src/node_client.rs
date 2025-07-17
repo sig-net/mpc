@@ -1,5 +1,5 @@
 use crate::protocol::sync::SyncUpdate;
-use crate::web::StateView;
+use crate::web::{StateStatus, StateView};
 use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
 use reqwest::IntoUrl;
@@ -142,6 +142,20 @@ impl NodeClient {
             .await?;
 
         Ok(resp.json::<StateView>().await?)
+    }
+
+    pub async fn status(&self, base: impl IntoUrl) -> Result<StateStatus, RequestError> {
+        let mut url = base.into_url()?;
+        url.set_path("status");
+
+        let resp = self
+            .http
+            .get(url)
+            .timeout(Duration::from_millis(self.options.state_timeout))
+            .send()
+            .await?;
+
+        Ok(resp.json().await?)
     }
 
     pub async fn sync(&self, base: impl IntoUrl, update: &SyncUpdate) -> Result<(), RequestError> {
