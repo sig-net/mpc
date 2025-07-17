@@ -1,19 +1,5 @@
 FROM redis:7.4.2 AS redis-bin
 
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive \
-    apt-get install --no-install-recommends --assume-yes binutils
-
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive \
-    apt-get install --no-install-recommends --assume-yes gdb heaptrack
-RUN heaptrack --version --verbose
-
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive \
-    apt-get install --no-install-recommends --assume-yes procps
-RUN ps
-
 FROM node:20 AS eth-builder
 WORKDIR /usr/src/app/contract-eth
 COPY chain-signatures/contract-eth/package.json chain-signatures/contract-eth/package-lock.json ./
