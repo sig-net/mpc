@@ -82,7 +82,7 @@ async fn msg(
     WithRejection(Json(encrypted), _): WithRejection<Json<Vec<Ciphered>>, Error>,
 ) -> Result<()> {
     for encrypted in encrypted.into_iter() {
-        if let Err(err) = state.msg_channel.inbox_tx.send(encrypted).await {
+        if let Err(err) = state.msg_channel.inbox.send(encrypted).await {
             tracing::error!(?err, "failed to forward an encrypted protocol message");
             return Err(Error::Internal(
                 "failed to forward an encrypted protocol message",

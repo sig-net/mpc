@@ -31,12 +31,6 @@ impl MessageFilter {
         self.filter.get(&(M::PROTOCOL, msg.id())).is_some()
     }
 
-    pub fn contains_id(&mut self, id: u64, protocol: Protocols) -> bool {
-        // Check if the message is already in the filter. Doing `get` here will also
-        // update the LRU cache and promote the rank of this id to be most recent.
-        self.filter.get(&(protocol, id)).is_some()
-    }
-
     pub async fn update(&mut self) {
         let Some((msg_type, id)) = self.filter_rx.recv().await else {
             return;

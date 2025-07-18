@@ -297,16 +297,6 @@ pub(crate) static PROTOCOL_LATENCY_ITER_CONSENSUS: LazyLock<HistogramVec> = Lazy
     .unwrap()
 });
 
-pub(crate) static PROTOCOL_LATENCY_ITER_MESSAGE: LazyLock<HistogramVec> = LazyLock::new(|| {
-    try_create_histogram_vec(
-        "multichain_protocol_iter_message",
-        "Latency of multichain protocol iter, start of message iter till end",
-        &["node_account_id"],
-        Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
-    )
-    .unwrap()
-});
-
 pub(crate) static NUM_SEND_ENCRYPTED_FAILURE: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
         "multichain_send_encrypted_failure",

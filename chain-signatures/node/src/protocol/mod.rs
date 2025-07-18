@@ -22,7 +22,7 @@ use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
-use crate::protocol::message::{GeneratingMessage, MessageReceiver as _, ResharingMessage};
+use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
@@ -45,8 +45,8 @@ pub struct MpcSignProtocol {
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
     pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
-    // pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
-    // pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
+    pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
+    pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
     pub(crate) msg_channel: MessageChannel,
     pub(crate) rpc_channel: RpcChannel,
     pub(crate) config: watch::Receiver<Config>,
@@ -101,14 +101,6 @@ impl MpcSignProtocol {
                     .observe(consensus_time.elapsed().as_secs_f64());
                 node.update_watchers().await;
             }
-
-            let message_time = Instant::now();
-            if let Err(err) = node.state.recv(&self.msg_channel, cfg, mesh_state).await {
-                tracing::warn!("protocol unable to receive messages: {err:?}");
-            }
-            crate::metrics::PROTOCOL_LATENCY_ITER_MESSAGE
-                .with_label_values(&[my_account_id.as_str()])
-                .observe(message_time.elapsed().as_secs_f64());
 
             let sleep_ms = match node.state {
                 NodeState::Generating(_) => 500,

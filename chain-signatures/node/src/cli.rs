@@ -306,6 +306,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 near: near_client,
                 rpc_channel,
                 msg_channel: msg_channel.clone(),
+                generating: msg_channel.subscribe_generation().await,
+                resharing: msg_channel.subscribe_resharing().await,
                 sign_rx: Arc::new(RwLock::new(sign_rx)),
                 secret_storage: key_storage,
                 triple_storage: triple_storage.clone(),
