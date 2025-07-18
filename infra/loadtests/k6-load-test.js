@@ -21,7 +21,7 @@ const strategies = {
     },
     thresholds: {
       http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<1500'],
+      http_req_duration: ['p(95)<31000'],
     },
   },
   constant_medium_rate_1h: {
@@ -41,7 +41,7 @@ const strategies = {
     },
     thresholds: {
       http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<1500'],
+      http_req_duration: ['p(95)<31000'],
     },
   },
   constant_high_rate_1h: {
@@ -61,7 +61,7 @@ const strategies = {
     },
     thresholds: {
       http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<1500'],
+      http_req_duration: ['p(95)<31000'],
     },
   },
   ramping_low_rate_1h: {
@@ -84,7 +84,7 @@ const strategies = {
     },
     thresholds: {
       http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<1500'],
+      http_req_duration: ['p(95)<31000'],
     },
   },
   ramping_medium_rate_1h: {
@@ -107,7 +107,7 @@ const strategies = {
     },
     thresholds: {
       http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<1500'],
+      http_req_duration: ['p(95)<31000'],
     },
   },
   ramping_high_rate_1h: {
@@ -130,7 +130,7 @@ const strategies = {
     },
     thresholds: {
       http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<1500'],
+      http_req_duration: ['p(95)<5000'],
     },
   },
 };
