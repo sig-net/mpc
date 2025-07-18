@@ -44,7 +44,7 @@ const MAX_PUBLISH_RETRY: usize = 6;
 /// The maximum number of concurrent RPC requests the system can make
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract state and config
-const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
+const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 /// The interval to batch send Ethereum responses
 const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 /// The batch size for Ethereum responses
@@ -364,19 +364,11 @@ impl NearClient {
     }
 
     pub async fn fetch_state(&self) -> anyhow::Result<ProtocolState> {
-        let contract_state: mpc_contract::ProtocolContractState = self
-            .client
-            .view(&self.contract_id, "state")
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(%err, "failed to fetch protocol state");
-            })?
-            .json()?;
+        let contract_state: mpc_contract::ProtocolContractState =
+            self.client.view(&self.contract_id, "state").await?.json()?;
 
         let protocol_state: ProtocolState = contract_state.try_into().map_err(|_| {
-            let msg = "failed to parse protocol state, has it been initialized?".to_string();
-            tracing::error!(msg);
-            anyhow::anyhow!(msg)
+            anyhow::anyhow!("failed to parse protocol state, has it been initialized?")
         })?;
 
         tracing::debug!(?protocol_state, "protocol state");
