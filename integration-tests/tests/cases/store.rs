@@ -21,7 +21,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
 
     let node0 = Participant::from(0);
     let node1 = Participant::from(1);
-    let (_, msg, _inbox) = MessageChannel::new();
+    let (_, _, msg) = MessageChannel::new();
     let node0_id = "party0.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node0_id);
@@ -170,7 +170,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
 
     let node0 = Participant::from(0);
     let node1 = Participant::from(1);
-    let (_, msg, _inbox) = MessageChannel::new();
+    let (_, _, msg) = MessageChannel::new();
     let node0_id = "party0.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node0_id);

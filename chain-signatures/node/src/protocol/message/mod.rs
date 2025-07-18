@@ -31,11 +31,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, watch};
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
+pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
 
 pub struct MessageInbox {
     /// encrypted messages that are pending to be decrypted. These are messages that we received
@@ -341,30 +341,6 @@ impl MessageInbox {
     }
 }
 
-struct MessageExecutor {
-    outbox: MessageOutbox,
-    config: watch::Receiver<Config>,
-    mesh_state: watch::Receiver<MeshState>,
-}
-
-impl MessageExecutor {
-    pub async fn execute(mut self) {
-        let mut interval = tokio::time::interval(Duration::from_millis(10));
-        loop {
-            interval.tick().await;
-            let config = self.config.borrow().clone();
-            let active = self.mesh_state.borrow().active.clone();
-            self.outbox.expire(&config.protocol);
-            self.outbox.recv_updates();
-            let compacted = self.outbox.compact();
-            let encrypted = self
-                .outbox
-                .encrypt(&config.local.network.sign_sk, &active, compacted);
-            self.outbox.send(&active, encrypted).await;
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct MessageChannel {
     outgoing: mpsc::Sender<SendMessage>,
@@ -374,12 +350,13 @@ pub struct MessageChannel {
 }
 
 impl MessageChannel {
-    pub fn new() -> (mpsc::Receiver<SendMessage>, Self, MessageInbox) {
+    pub fn new() -> (MessageInbox, MessageOutbox, Self) {
         let (inbox_tx, inbox_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
         let (outbox_tx, outbox_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
         let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
         let (subscribe_tx, subscribe_rx) = mpsc::channel(16384);
         let inbox = MessageInbox::new(inbox_rx, filter_rx, subscribe_rx);
+        let outbox = MessageOutbox::new(outbox_rx);
 
         let channel = Self {
             inbox: inbox_tx,
@@ -388,7 +365,7 @@ impl MessageChannel {
             filter: filter_tx,
         };
 
-        (outbox_rx, channel, inbox)
+        (inbox, outbox, channel)
     }
 
     pub async fn spawn(
@@ -398,15 +375,9 @@ impl MessageChannel {
         contract: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
     ) -> Self {
-        let (outbox_rx, channel, inbox) = Self::new();
-
+        let (inbox, outbox, channel) = Self::new();
         tokio::spawn(inbox.run(config.clone(), contract));
-        let runner = MessageExecutor {
-            outbox: MessageOutbox::new(id, client, outbox_rx),
-            config,
-            mesh_state,
-        };
-        tokio::spawn(runner.execute());
+        tokio::spawn(outbox.run(id.clone(), client, config, mesh_state));
 
         channel
     }
@@ -759,9 +730,6 @@ pub struct Partition {
 /// Message outbox is the set of messages that are pending to be sent to other nodes.
 /// These messages will be signed and encrypted before being sent out.
 pub struct MessageOutbox {
-    account_id: AccountId,
-    client: NodeClient,
-
     /// The messages that are pending to be sent to other nodes.
     outbox_rx: mpsc::Receiver<SendMessage>,
 
@@ -774,38 +742,11 @@ pub struct MessageOutbox {
 }
 
 impl MessageOutbox {
-    pub fn new(id: &AccountId, client: NodeClient, outbox_rx: mpsc::Receiver<SendMessage>) -> Self {
+    pub fn new(outbox_rx: mpsc::Receiver<SendMessage>) -> Self {
         Self {
-            client,
-            account_id: id.clone(),
             outbox_rx,
             messages: HashMap::new(),
         }
-    }
-
-    pub fn recv_updates(&mut self) {
-        let mut message_count: i64 = 0;
-        loop {
-            let (msg, (from, to, timestamp)) = match self.outbox_rx.try_recv() {
-                Ok(msg) => msg,
-                Err(TryRecvError::Empty) => {
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    tracing::error!(
-                        "outbox: channel disconnected, no more messages will be received"
-                    );
-                    break;
-                }
-            };
-            // add it to the outbox and sort it by from and to participant
-            let entry = self.messages.entry((from, to)).or_default();
-            entry.push((msg, timestamp));
-            message_count += 1;
-        }
-        crate::metrics::MESSAGE_QUEUE_SIZE
-            .with_label_values(&[self.account_id.as_str()])
-            .set(message_count);
     }
 
     /// Expire messages that have been in the outbox for too long.
@@ -915,6 +856,8 @@ impl MessageOutbox {
     /// Send the encrypted messages to other participants.
     pub async fn send(
         &mut self,
+        account_id: &AccountId,
+        client: &NodeClient,
         active: &Participants,
         encrypted: HashMap<MessageRoute, Vec<(Ciphered, Partition)>>,
     ) {
@@ -922,13 +865,13 @@ impl MessageOutbox {
         let mut send_tasks = Vec::new();
 
         let msg_send_delay_metric =
-            crate::metrics::MSG_CLIENT_SEND_DELAY.with_label_values(&[self.account_id.as_str()]);
-        let num_send_encrypted_failure_metric = crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
-            .with_label_values(&[self.account_id.as_str()]);
+            crate::metrics::MSG_CLIENT_SEND_DELAY.with_label_values(&[account_id.as_str()]);
+        let num_send_encrypted_failure_metric =
+            crate::metrics::NUM_SEND_ENCRYPTED_FAILURE.with_label_values(&[account_id.as_str()]);
         let send_encrypted_latency_metric =
-            crate::metrics::SEND_ENCRYPTED_LATENCY.with_label_values(&[self.account_id.as_str()]);
-        let failed_send_encrypted_latency_metric = crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
-            .with_label_values(&[self.account_id.as_str()]);
+            crate::metrics::SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
+        let failed_send_encrypted_latency_metric =
+            crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
 
         for ((from, to), encrypted) in encrypted {
             for (encrypted_partition, partition) in encrypted {
@@ -947,7 +890,7 @@ impl MessageOutbox {
                 let failed_send_encrypted_latency_metric =
                     failed_send_encrypted_latency_metric.clone();
 
-                let client = self.client.clone();
+                let client = client.clone();
                 send_tasks.push(tokio::spawn(async move {
                     let start = Instant::now();
                     for msg_inbox_time in partition.timestamps.iter() {
@@ -1009,6 +952,44 @@ impl MessageOutbox {
                     .into_iter()
                     .zip(partition.timestamps.into_iter()),
             );
+        }
+    }
+
+    /// Publish messages to other nodes
+    async fn publish(
+        &mut self,
+        id: &AccountId,
+        client: &NodeClient,
+        config: &watch::Receiver<Config>,
+        mesh_state: &watch::Receiver<MeshState>,
+    ) {
+        let config = config.borrow().clone();
+        let active = mesh_state.borrow().active.clone();
+        self.expire(&config.protocol);
+        let compacted = self.compact();
+        let encrypted = self.encrypt(&config.local.network.sign_sk, &active, compacted);
+        self.send(id, client, &active, encrypted).await;
+    }
+
+    pub async fn run(
+        mut self,
+        id: AccountId,
+        client: NodeClient,
+        config: watch::Receiver<Config>,
+        mesh_state: watch::Receiver<MeshState>,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            tokio::select! {
+                Some((msg, (from, to, timestamp))) = self.outbox_rx.recv() => {
+                    // add it to the outbox and sort it by from and to participant
+                    let entry = self.messages.entry((from, to)).or_default();
+                    entry.push((msg, timestamp));
+                }
+                _ = interval.tick() => {
+                    self.publish(&id, &client, &config, &mesh_state).await;
+                }
+            }
         }
     }
 }
@@ -1414,7 +1395,7 @@ mod tests {
             2,
             participants,
         );
-        let (_outbox_rx, channel, inbox) = MessageChannel::new();
+        let (inbox, _outbox, channel) = MessageChannel::new();
         let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
 
         // Case 1:

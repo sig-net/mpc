@@ -170,15 +170,6 @@ pub(crate) static NUM_PRESIGNATURE_GENERATORS_TOTAL: LazyLock<IntGaugeVec> = Laz
     .unwrap()
 });
 
-pub(crate) static MESSAGE_QUEUE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
-    try_create_int_gauge_vec(
-        "multichain_message_queue_size",
-        "size of message queue of the node",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
-
 pub(crate) static NODE_VERSION: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec(
         "multichain_node_version",
