@@ -1,7 +1,8 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
-use crate::protocol::contract::primitives::ParticipantMap;
+use crate::protocol::contract::primitives::{ParticipantMap, Participants};
+use crate::protocol::contract::RunningContractState;
 use crate::protocol::signature::SignRequest;
 use crate::protocol::{Chain, ProtocolState};
 use crate::util::AffinePointExt as _;
@@ -15,7 +16,7 @@ use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::types::TransactionReceipt;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
-use k256::Secp256k1;
+use k256::{AffinePoint, Secp256k1};
 use mpc_keys::hpke;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
@@ -145,6 +146,26 @@ impl ContractStateWatcher {
                 contract_state: rx,
             },
             tx,
+        )
+    }
+
+    pub fn with_running(
+        node_id: &AccountId,
+        public_key: AffinePoint,
+        threshold: usize,
+        participants: Participants,
+    ) -> (Self, watch::Sender<Option<ProtocolState>>) {
+        Self::with(
+            node_id,
+            ProtocolState::Running(RunningContractState {
+                epoch: 0,
+                public_key,
+                participants,
+                candidates: Default::default(),
+                join_votes: Default::default(),
+                leave_votes: Default::default(),
+                threshold,
+            }),
         )
     }
 

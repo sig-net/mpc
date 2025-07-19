@@ -31,25 +31,20 @@ impl MessageFilter {
         self.filter.get(&(M::PROTOCOL, msg.id())).is_some()
     }
 
-    pub fn contains_id(&mut self, id: u64, protocol: Protocols) -> bool {
-        // Check if the message is already in the filter. Doing `get` here will also
-        // update the LRU cache and promote the rank of this id to be most recent.
-        self.filter.get(&(protocol, id)).is_some()
+    pub async fn update(&mut self) {
+        let Some((msg_type, id)) = self.filter_rx.recv().await else {
+            return;
+        };
+
+        self.filter.put((msg_type, id), ());
     }
 
-    pub fn recv_updates(&mut self) {
+    pub fn try_update(&mut self) {
         loop {
             let (msg_type, id) = match self.filter_rx.try_recv() {
-                Ok(msg) => msg,
-                Err(TryRecvError::Empty) => {
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    tracing::warn!("channel disconnected, no more messages will be received");
-                    break;
-                }
+                Ok(filter) => filter,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
             };
-
             self.filter.put((msg_type, id), ());
         }
     }
