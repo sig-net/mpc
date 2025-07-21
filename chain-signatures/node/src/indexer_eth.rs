@@ -489,6 +489,14 @@ pub async fn run(
 
     let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
 
+    let mut block_heads_rx = match client.subscribe(SubscriptionType::NewHeads).await {
+        Ok(block_heads_rx) => block_heads_rx,
+        Err(err) => {
+            tracing::error!("Failed to subscribe to new block heads: {err:?}");
+            return;
+        }
+    };
+
     let client = Arc::new(client);
 
     let client_clone = Arc::clone(&client);
@@ -539,28 +547,23 @@ pub async fn run(
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let blocks_failed_send_clone = blocks_failed_send.clone();
     let client_clone = Arc::clone(&client);
-    catch_up(
-        &client_clone,
-        last_processed_block,
-        eth_contract_addr,
-        requests_indexed_send_clone,
-        blocks_failed_send_clone,
-        total_timeout,
-        near_account_id_clone,
-    )
-    .await;
+    tokio::spawn(async move {
+        let end_block_result = catch_up(
+            &client_clone,
+            last_processed_block,
+            eth_contract_addr,
+            requests_indexed_send_clone,
+            blocks_failed_send_clone,
+            total_timeout,
+            near_account_id_clone,
+        )
+        .await;
+        tracing::info!("Catchup finished with result: {end_block_result:?}");
+    });
 
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let mut receiver_state_update_timestamp = Instant::now();
-    let mut block_heads_rx = match client.subscribe(SubscriptionType::NewHeads).await {
-        Ok(block_heads_rx) => block_heads_rx,
-        Err(err) => {
-            tracing::error!("Failed to subscribe to new block heads: {err:?}");
-            return;
-        }
-    };
-
     loop {
         interval.tick().await;
         if block_heads_rx.is_empty() {
@@ -927,10 +930,9 @@ async fn catch_up(
     blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
     total_timeout: Duration,
     node_near_account_id: AccountId,
-) {
+) -> anyhow::Result<BlockNumber> {
     let Some(start_block_number) = start_block_number else {
-        tracing::info!("No start block number provided, skipping catch up");
-        return;
+        return Err(anyhow::anyhow!("No start block number provided"));
     };
     tracing::info!("Catching up from block number: {start_block_number}");
     let latest_block = match fetch_block(
@@ -943,11 +945,20 @@ async fn catch_up(
     {
         Some(block) => block,
         None => {
-            tracing::warn!("Failed to get latest block");
-            return;
+            return Err(anyhow::anyhow!("Failed to get latest block"));
         }
     };
     let end_block_number = latest_block.header.number;
+    // helios can only go back maximum 8191 blocks, so we need to adjust the start block number if it's too far behind
+    let helios_oldest_block_number = latest_block.header.number - 8191;
+    let start_block_number = if start_block_number < helios_oldest_block_number {
+        tracing::warn!(
+            "Start block number {start_block_number} is too far behind the latest block {end_block_number}, adjusting to {helios_oldest_block_number}"
+        );
+        helios_oldest_block_number
+    } else {
+        start_block_number
+    };
     for block_number in start_block_number..end_block_number {
         let block = fetch_block(
             helios_client,
@@ -977,10 +988,11 @@ async fn catch_up(
             add_failed_block(blocks_failed_tx.clone(), block_number, block_hash).await;
             continue;
         }
-        crate::metrics::LATEST_BLOCK_NUMBER
-            .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
-            .set(block_number as i64);
+        if block_number % 10 == 0 {
+            tracing::info!("Catchup progress: processed block number {block_number}, end block number {end_block_number}");
+        }
     }
+    Ok(end_block_number)
 }
 
 fn parse_filtered_logs(logs: Vec<Log>, total_timeout: Duration) -> Vec<IndexedSignRequest> {
