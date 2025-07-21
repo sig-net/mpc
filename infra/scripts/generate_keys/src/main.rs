@@ -1,8 +1,26 @@
 use ethers::signers::LocalWallet;
 use ethers::signers::Signer;
 use mpc_keys::hpke;
+use std::env;
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    let solana_sk = near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);
+    let solana_pk = solana_sk.public_key();
+    println!(
+        "Solana public key: {}",
+        solana_pk.to_string().trim_start_matches("ed25519:")
+    );
+    println!(
+        "Solana private key: {}",
+        solana_sk.to_string().trim_start_matches("ed25519:")
+    );
+
+    if args.len() >= 3 && args[2] == "--only-solana" {
+        return;
+    }
+
     let (cipher_sk, cipher_pk) = hpke::generate();
     let cipher_pk = hex::encode(cipher_pk.to_bytes());
     let cipher_sk = hex::encode(cipher_sk.to_bytes());
