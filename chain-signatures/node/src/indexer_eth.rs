@@ -438,19 +438,38 @@ pub async fn run(
         return;
     };
 
-    let client: EthereumClient = EthereumClientBuilder::new()
-        .network(network)
-        .consensus_rpc(&eth.consensus_rpc_http_url)
-        .map_err(|err| tracing::error!("Failed to build Ethereum Helios client: {err:?}"))
-        .unwrap()
-        .execution_rpc(&eth.execution_rpc_http_url)
-        .map_err(|err| tracing::error!("Failed to build Ethereum Helios client: {err:?}"))
-        .unwrap()
-        .data_dir(PathBuf::from(&eth.helios_data_path))
-        .with_file_db()
-        .build()
-        .map_err(|err| tracing::error!("Failed to build Ethereum Helios client: {err:?}"))
-        .unwrap();
+    let client: EthereumClient = {
+        let builder = match EthereumClientBuilder::new()
+            .network(network)
+            .consensus_rpc(&eth.consensus_rpc_http_url)
+        {
+            Ok(builder) => builder,
+            Err(err) => {
+                tracing::error!("Failed to build consensus RPC: {err:?}");
+                return;
+            }
+        };
+
+        let builder = match builder.execution_rpc(&eth.execution_rpc_http_url) {
+            Ok(builder) => builder,
+            Err(err) => {
+                tracing::error!("Failed to build execution RPC: {err:?}");
+                return;
+            }
+        };
+
+        match builder
+            .data_dir(PathBuf::from(&eth.helios_data_path))
+            .with_file_db()
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::error!("Failed to build Helios client: {err:?}");
+                return;
+            }
+        }
+    };
 
     tracing::info!("Built Helios client on network {}", network);
 
@@ -534,11 +553,10 @@ pub async fn run(
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let mut receiver_state_update_timestamp = Instant::now();
-    let mut block_heads_rx = client
-        .subscribe(SubscriptionType::NewHeads)
-        .await
-        .map_err(|err| tracing::error!("Failed to subscribe to new block heads: {err:?}"))
-        .unwrap();
+    let Ok(mut block_heads_rx) = client.subscribe(SubscriptionType::NewHeads).await else {
+        tracing::error!("Failed to subscribe to new block heads");
+        return;
+    };
 
     loop {
         interval.tick().await;
@@ -718,7 +736,9 @@ async fn refresh_finalized_block(
             continue;
         }
 
-        let last_final_block_number = final_block_number.unwrap();
+        let Some(last_final_block_number) = final_block_number else {
+            continue;
+        };
 
         if new_final_block_number < last_final_block_number {
             tracing::warn!(
