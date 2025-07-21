@@ -248,7 +248,7 @@ pub async fn run(
 
     tracing::info!("running solana indexer");
     let Ok(program_id) = Pubkey::from_str(&sol.program_address) else {
-        tracing::error!("Failed to parse program address");
+        tracing::error!("Failed to parse program address: {}", sol.program_address);
         return;
     };
     let keypair = Keypair::from_base58_string(&sol.account_sk);

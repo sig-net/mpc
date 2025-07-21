@@ -434,7 +434,7 @@ pub async fn run(
         });
 
     let Ok(network) = Network::from_str(eth.network.as_str()) else {
-        tracing::error!("Network input incorrect");
+        tracing::error!("Network input incorrect: {}", eth.network);
         return;
     };
 
@@ -478,7 +478,7 @@ pub async fn run(
     tracing::info!("running ethereum indexer");
 
     let Ok(eth_contract_addr) = Address::from_str(&format!("0x{}", eth.contract_address)) else {
-        tracing::error!("Failed to parse contract address");
+        tracing::error!("Failed to parse contract address: {}", eth.contract_address);
         return;
     };
     let total_timeout = Duration::from_secs(eth.total_timeout);
