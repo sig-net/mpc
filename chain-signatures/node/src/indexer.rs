@@ -435,10 +435,9 @@ async fn update_last_processed_block(
 
     if last_processed_block > latest_block {
         let error_message = format!(
-            "last processed block is greater than latest block: last_processed_block={}, latest_block={}",
-            last_processed_block, latest_block
+            "last processed block is greater than latest block: last_processed_block={last_processed_block}, latest_block={latest_block}"
         );
-        tracing::error!("{}", error_message);
+        tracing::error!("{error_message}");
         Err(anyhow::anyhow!(error_message))?;
     }
 

@@ -11,10 +11,10 @@ exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
 [workspace.package]
-version = "1.3.0"
+version = "1.5.0"
 
 [workspace.dependencies]
-alloy = { version = "0.9.1", features = ["contract", "json"] }
+alloy = { version = "=1.0.9", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 borsh = "1.5.3"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }

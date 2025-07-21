@@ -4,7 +4,6 @@ on:
     branches:
       - main
       - develop
-  pull_request:
     paths:
       - ".github/workflows/unit.yml"
       - "chain-signatures/**/*.rs"
@@ -12,6 +11,7 @@ on:
       - "integration-tests/**/*.rs"
       - "chain-signatures/contract-eth/**/*.sol"
       - "chain-signatures/contract-eth/**/*.js"
+  pull_request:
 
 env:
   RUSTFLAGS: -D warnings

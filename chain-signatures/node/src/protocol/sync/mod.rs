@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::mesh::MeshState;
@@ -19,6 +19,10 @@ use super::triple::TripleId;
 /// based on the number of participants in the network. If we have 1024 participants then
 /// our issue will more than likely not be the channel size.
 const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
+
+/// The interval which we will try to sync with other nodes to see if they have lost track
+/// of anything.
+pub const RECURRING_SYNC_INTERVAL: Duration = Duration::from_secs(3600 * 24);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
@@ -49,8 +53,8 @@ pub struct SyncTask {
     client: NodeClient,
     triples: TripleStorage,
     presignatures: PresignatureStorage,
-    mesh_state: Arc<RwLock<MeshState>>,
-    watcher: ContractStateWatcher,
+    mesh_state: watch::Receiver<MeshState>,
+    contract: ContractStateWatcher,
     requests: SyncRequestReceiver,
     synced_peer_tx: mpsc::Sender<Participant>,
 }
@@ -61,8 +65,8 @@ impl SyncTask {
         client: &NodeClient,
         triples: TripleStorage,
         presignatures: PresignatureStorage,
-        mesh_state: Arc<RwLock<MeshState>>,
-        watcher: ContractStateWatcher,
+        mesh_state: watch::Receiver<MeshState>,
+        contract: ContractStateWatcher,
         synced_peer_tx: mpsc::Sender<Participant>,
     ) -> (SyncChannel, Self) {
         let (requests, channel) = SyncChannel::new();
@@ -71,7 +75,7 @@ impl SyncTask {
             triples,
             presignatures,
             mesh_state,
-            watcher,
+            contract,
             requests,
             synced_peer_tx,
         };
@@ -83,14 +87,14 @@ impl SyncTask {
         let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
         let mut sync_interval = tokio::time::interval(Duration::from_millis(100));
         // Broadcast should generally not be necessary.
-        let mut broadcast_interval = tokio::time::interval(Duration::from_secs(3600 * 24));
+        let mut broadcast_interval = tokio::time::interval(RECURRING_SYNC_INTERVAL);
         let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(100));
 
         // Do NOT start until we have our own participant info.
         // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
         let (_threshold, me) = loop {
             watcher_interval.tick().await;
-            if let Some(info) = self.watcher.info().await {
+            if let Some(info) = self.contract.info().await {
                 break info;
             }
         };
@@ -106,9 +110,7 @@ impl SyncTask {
                         continue;
                     }
 
-                    let state = self.mesh_state.read().await;
-                    let need_sync = &state.need_sync;
-
+                    let need_sync = &self.mesh_state.borrow().need_sync.clone();
                     if need_sync.is_empty() {
                         continue;
                     }
@@ -136,13 +138,13 @@ impl SyncTask {
                     }
 
                     let update = self.new_update(me).await;
-                    let state = self.mesh_state.read().await.clone();
-                    let active = state.active;
+                    let active = self.mesh_state.borrow().active.clone();
 
                     let start = Instant::now();
                     let task = tokio::spawn(broadcast_sync(
                         self.client.clone(),
-                        update, active.into_iter(),
+                        update,
+                        active.into_iter(),
                         self.synced_peer_tx.clone(),
                         me
                     ));

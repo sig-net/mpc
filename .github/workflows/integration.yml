@@ -4,10 +4,10 @@ on:
   push:
     branches:
       - develop
-  pull_request:
     paths:
       - integration-tests/**
       - chain-signatures/**
+  pull_request:
 
 env:
   RUSTFLAGS: -D warnings

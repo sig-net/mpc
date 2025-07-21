@@ -41,7 +41,7 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
     let node0_triples = redis.triple_storage(&node0_account_id);
     let node0_presignatures = redis.presignature_storage(&node0_account_id);
 
-    let watcher = ContractStateWatcher::mock(
+    let (contract_watcher, _contract_tx) = ContractStateWatcher::with(
         &node0_account_id,
         ProtocolState::Running(RunningContractState {
             epoch: 0,
@@ -66,8 +66,8 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
         &client,
         node0_triples.clone(),
         node0_presignatures.clone(),
-        mesh.state().clone(),
-        watcher,
+        mesh.watch(),
+        contract_watcher,
         synced_peer_tx,
     );
     tokio::spawn(sync.run());
@@ -94,6 +94,81 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
     validate_presignatures(&node0_presignatures, node1, &valid, &invalid).await;
 
     Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_state_sync_large_outdated_stockpile() {
+    // start the cluster of nodes immediately without waiting for them to be running.
+    let mut spawner = cluster::spawn();
+    {
+        let lake = spawner.prespawn_lake().await.unwrap();
+        let worker = lake.worker.clone();
+        spawner.create_accounts(&worker).await;
+    }
+    // NOTE: cannot reliably get the first participant until running state is reached, so
+    // this assumes that 0 and 1 is the first and second participants.
+    let node0 = Participant::from(0);
+    let node0_account_id = spawner.account_id(Into::<u32>::into(node0) as usize);
+    let node1 = Participant::from(1);
+    let node1_account_id = spawner.account_id(Into::<u32>::into(node1) as usize);
+    let redis = spawner.prespawn_redis().await;
+
+    // immediately add to triples/presignatures storage the triples/presignatures we want to invalidate.
+    let node0_triples = redis.triple_storage(&node0_account_id);
+    let node0_presignatures = redis.presignature_storage(&node0_account_id);
+    let node1_triples = redis.triple_storage(&node1_account_id);
+    let node1_presignatures = redis.presignature_storage(&node1_account_id);
+
+    // insert triples that will be invalidated after a sync, since nobody else has them.
+    // node0 is saying that they have 0 to 5, but node1 will sync and say they have 4 and 5 only.
+    insert_triples(&node0_triples, node1, 0..=10000).await;
+    insert_triples(&node1_triples, node1, 0..=5).await;
+    insert_presignatures(&node0_presignatures, node1, 0..=10000).await;
+    insert_presignatures(&node1_presignatures, node1, 0..=5).await;
+
+    let _nodes = spawner
+        .disable_prestockpile()
+        .with_config(|cfg| {
+            // Need these to be set otherwise we will be constantly taking our mock triples:
+            cfg.protocol.triple.min_triples = 1;
+            cfg.protocol.triple.max_triples = 1;
+            cfg.protocol.presignature.min_presignatures = 1;
+            cfg.protocol.presignature.max_presignatures = 1;
+        })
+        .await
+        .unwrap();
+
+    // Give some time for the first sync broadcast to finish.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    validate_triples(
+        &node0_triples,
+        node1,
+        &[0, 1, 2, 3, 4, 5],
+        &[6, 100, 500, 2030, 1337, 10000],
+    )
+    .await;
+    validate_triples(
+        &node1_triples,
+        node1,
+        &[0, 1, 2, 3, 4, 5],
+        &[6, 100, 500, 2030, 1337, 10000],
+    )
+    .await;
+    validate_presignatures(
+        &node0_presignatures,
+        node1,
+        &[0, 1, 2, 3, 4, 5],
+        &[6, 100, 500, 2030, 1337, 10000],
+    )
+    .await;
+    validate_presignatures(
+        &node0_presignatures,
+        node1,
+        &[0, 1, 2, 3, 4, 5],
+        &[6, 100, 500, 2030, 1337, 10000],
+    )
+    .await;
 }
 
 #[test_log::test(tokio::test)]

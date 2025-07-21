@@ -171,6 +171,10 @@ impl Node {
         }
     }
 
+    pub fn watch(&self) -> NodeStateWatcher {
+        self.watcher.clone()
+    }
+
     pub async fn update_watchers(&mut self) {
         match &self.state {
             NodeState::Started(_) => {

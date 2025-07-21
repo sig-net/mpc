@@ -274,7 +274,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         localstack,
         lake_indexer,
         worker,
-    } = initialize_lake_indexer(spawner).await?;
+    } = spawner.take_lake().await;
     spawner.create_accounts(&worker).await;
 
     let mpc_contract = worker
@@ -286,7 +286,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         .await?;
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
 
-    let redis = containers::Redis::run(spawner).await;
+    let redis = spawner.take_redis().await;
     let sk_share_local_path = spawner.tmp_dir.join("secrets");
     std::fs::create_dir_all(&sk_share_local_path).expect("could not create secrets dir");
     let sk_share_local_path = sk_share_local_path.to_string_lossy().to_string();
@@ -400,7 +400,7 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     println!("\nPlease call below to update localnet:\n");
     let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
-    println!("near config add-connection --network-name local --connection-name local --rpc-url {} --wallet-url http://127.0.0.1/ --explorer-transaction-url http://127.0.0.1:6666/", near_rpc);
+    println!("near config add-connection --network-name local --connection-name local --rpc-url {near_rpc} --wallet-url http://127.0.0.1/ --explorer-transaction-url http://127.0.0.1:6666/");
     println!("\nAfter run the nodes, please call the following command to init contract: ");
     let args = json!({
         "threshold": cfg.threshold,
