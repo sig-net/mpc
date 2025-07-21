@@ -553,9 +553,12 @@ pub async fn run(
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let mut receiver_state_update_timestamp = Instant::now();
-    let Ok(mut block_heads_rx) = client.subscribe(SubscriptionType::NewHeads).await else {
-        tracing::error!("Failed to subscribe to new block heads");
-        return;
+    let mut block_heads_rx = match client.subscribe(SubscriptionType::NewHeads).await {
+        Ok(block_heads_rx) => block_heads_rx,
+        Err(err) => {
+            tracing::error!("Failed to subscribe to new block heads: {err:?}");
+            return;
+        }
     };
 
     loop {
