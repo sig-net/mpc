@@ -5,19 +5,19 @@ pub use crate::protocol::message::types::{
     GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
     PresignatureMessage, Protocols, ResharingMessage, SignatureMessage, TripleMessage,
 };
+use crate::protocol::posit::PositAction;
+use crate::protocol::presignature::FullPresignatureId;
 use crate::rpc::ContractStateWatcher;
 
 use super::contract::primitives::{ParticipantMap, Participants};
-use super::error::GenerationError;
 use super::presignature::PresignatureId;
-use super::state::{GeneratingState, NodeState, ResharingState, RunningState};
+use super::state::{GeneratingState, NodeState, ResharingState};
 use super::triple::TripleId;
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::Config;
 use crate::protocol::MeshState;
 use crate::types::Epoch;
-use crate::util;
 
 use async_trait::async_trait;
 use cait_sith::protocol::Participant;
@@ -28,11 +28,11 @@ use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
@@ -41,12 +41,17 @@ pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
 
 enum Subscriber<T> {
+    /// Temporary/replaceable value, and will never be used. Only here so we can have a
+    /// way to convert from an Unsubscribed to a Subscribed subscription.
+    Unknown,
+    /// A subscribed channel where the subscriber has a handle to the receiver.
     Subscribed(mpsc::Sender<T>),
+    /// An unsubscribed channel where there's potentially messages that have yet to be sent.
     Unsubscribed(mpsc::Sender<T>, mpsc::Receiver<T>),
 }
 
 impl<T> Subscriber<T> {
-    pub fn subscribe() -> (Self, mpsc::Receiver<T>) {
+    pub fn subscribed() -> (Self, mpsc::Receiver<T>) {
         let (tx, rx) = mpsc::channel(MAX_MESSAGE_SUB_CHANNEL_SIZE);
         (Self::Subscribed(tx), rx)
     }
@@ -56,10 +61,30 @@ impl<T> Subscriber<T> {
         Self::Unsubscribed(tx, rx)
     }
 
+    /// Convert this subscriber into a subscribed one, returning the receiver.
+    /// If the subscriber is already subscribed, it overrides the existing subscription.
+    pub fn subscribe(&mut self) -> mpsc::Receiver<T> {
+        let sub = std::mem::replace(self, Self::Unknown);
+        let (sub, rx) = match sub {
+            Self::Subscribed(_) | Self::Unknown => Self::subscribed(),
+            Self::Unsubscribed(tx, rx) => (Self::Subscribed(tx), rx),
+        };
+        *self = sub;
+        rx
+    }
+
+    /// Unsubscribe from the subscriber, converting it into an unsubscribed one.
+    pub fn unsubscribe(&mut self) {
+        if matches!(self, Self::Subscribed(_) | Self::Unknown) {
+            *self = Self::unsubscribed();
+        }
+    }
+
     pub async fn send(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
         match self {
             Self::Subscribed(tx) => tx.send(msg).await,
             Self::Unsubscribed(tx, _) => tx.send(msg).await,
+            Self::Unknown => Ok(()),
         }
     }
 }
@@ -87,14 +112,14 @@ pub struct MessageInbox {
     /// Incoming messages that are pending to be processed. These are encrypted and signed.
     inbox_rx: mpsc::Receiver<Ciphered>,
 
-    // TODO: need to expire messages that never get processed
-    posit: VecDeque<PositMessage>,
     generating: VecDeque<GeneratingMessage>,
     resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
     triple: HashMap<TripleId, Subscriber<TripleMessage>>,
-    triple_init: Option<mpsc::Sender<TripleId>>,
-    presignature: HashMap<Epoch, HashMap<PresignatureId, VecDeque<PresignatureMessage>>>,
-    signature: HashMap<Epoch, HashMap<SignId, VecDeque<SignatureMessage>>>,
+    triple_init: Subscriber<(TripleId, Participant, PositAction)>,
+    presignature: HashMap<PresignatureId, Subscriber<PresignatureMessage>>,
+    presignature_init: Subscriber<(FullPresignatureId, Participant, PositAction)>,
+    signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
+    signature_init: Subscriber<(SignId, PresignatureId, Participant, PositAction)>,
 }
 
 impl MessageInbox {
@@ -107,56 +132,71 @@ impl MessageInbox {
             idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
             filter: MessageFilter::new(filter_rx),
             inbox_rx,
-            posit: VecDeque::new(),
             generating: VecDeque::new(),
             resharing: HashMap::new(),
             triple: HashMap::new(),
-            triple_init: None,
+            triple_init: Subscriber::unsubscribed(),
             presignature: HashMap::new(),
+            presignature_init: Subscriber::unsubscribed(),
             signature: HashMap::new(),
+            signature_init: Subscriber::unsubscribed(),
         }
     }
 
-    pub async fn send(&mut self, message: Message) {
+    async fn send(&mut self, message: Message) {
         match message {
-            Message::Posit(message) => self.posit.push_back(message),
+            Message::Posit(message) => match message.id {
+                PositProtocolId::Triple(id) => {
+                    let _ = self
+                        .triple_init
+                        .send((id, message.from, message.action))
+                        .await;
+                }
+                PositProtocolId::Presignature(id) => {
+                    let _ = self
+                        .presignature_init
+                        .send((id, message.from, message.action))
+                        .await;
+                }
+                PositProtocolId::Signature(sign_id, presignature_id) => {
+                    let _ = self
+                        .signature_init
+                        .send((sign_id, presignature_id, message.from, message.action))
+                        .await;
+                }
+            },
             Message::Generating(message) => self.generating.push_back(message),
             Message::Resharing(message) => self
                 .resharing
                 .entry(message.epoch)
                 .or_default()
                 .push_back(message),
-            Message::Triple(message) => match self.triple.entry(message.id) {
-                hash_map::Entry::Occupied(entry) => {
-                    // NOTE: not logging the error because this is simply just channel closure.
-                    // The error message should be reported on the generator side.
-                    let _ = entry.get().send(message).await;
-                }
-                hash_map::Entry::Vacant(entry) => {
-                    if let Some(tx) = &self.triple_init {
-                        if tx.send(message.id).await.is_err() {
-                            tracing::warn!("unexpected, failed to send start to subscriber");
-                        }
-                    }
-                    // Send the message even if unsubscribed. The subscriber will grab the
-                    // receiver associated to this channel.
-                    let _ = entry.insert(Subscriber::unsubscribed()).send(message).await;
-                }
-            },
-            Message::Presignature(message) => self
-                .presignature
-                .entry(message.epoch)
-                .or_default()
-                .entry(message.id)
-                .or_default()
-                .push_back(message),
-            Message::Signature(message) => self
-                .signature
-                .entry(message.epoch)
-                .or_default()
-                .entry(message.id.clone())
-                .or_default()
-                .push_back(message),
+            Message::Triple(message) => {
+                // NOTE: not logging the error because this is simply just channel closure.
+                // The error message should be reported on the generator side.
+                let _ = self
+                    .triple
+                    .entry(message.id)
+                    .or_default()
+                    .send(message)
+                    .await;
+            }
+            Message::Presignature(message) => {
+                let _ = self
+                    .presignature
+                    .entry(message.id)
+                    .or_default()
+                    .send(message)
+                    .await;
+            }
+            Message::Signature(message) => {
+                let _ = self
+                    .signature
+                    .entry((message.id, message.presignature_id))
+                    .or_default()
+                    .send(message)
+                    .await;
+            }
             Message::Unknown(entries) => {
                 tracing::warn!(
                     entries = ?entries.iter().map(|(k, v)| (k, cbor_name(v))).collect::<Vec<_>>(),
@@ -166,12 +206,12 @@ impl MessageInbox {
         }
     }
 
-    pub fn expire(&mut self, timeout: Duration) {
+    fn expire(&mut self, timeout: Duration) {
         self.try_decrypt
             .retain(|(_, timestamp)| timestamp.elapsed() < timeout);
     }
 
-    pub fn recv_updates(&mut self) {
+    fn recv_updates(&mut self) {
         self.filter.recv_updates();
         loop {
             let encrypted = match self.inbox_rx.try_recv() {
@@ -191,7 +231,7 @@ impl MessageInbox {
         }
     }
 
-    pub fn decrypt(
+    fn decrypt(
         &mut self,
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
@@ -238,23 +278,19 @@ impl MessageInbox {
     }
 
     pub fn filter_internal(&mut self) {
-        self.presignature.retain(|_epoch, messages| {
-            messages.retain(|_id, messages| {
-                messages.retain(|msg| !self.filter.contains(msg));
-                !messages.is_empty()
-            });
-            !messages.is_empty()
-        });
-        self.signature.retain(|_epoch, messages| {
-            messages.retain(|_id, messages| {
-                messages.retain(|msg| !self.filter.contains(msg));
-                !messages.is_empty()
-            });
-            !messages.is_empty()
-        });
+        // NOTE: this might cause some warnings to pop up such as:
+        // "trying to unsub from an unknown triple subscription".
+        // This is fine since the filter made it here first before the
+        // subscription gets removed on TripleGenerator drop.
+        self.triple
+            .retain(|id, _| !self.filter.contains_id(*id, Protocols::Triple));
+        self.presignature
+            .retain(|id, _| !self.filter.contains_id(*id, Protocols::Presignature));
+        self.signature
+            .retain(|id, _| !self.filter.contains_id(id.id(), Protocols::Signature));
     }
 
-    pub async fn recv(&mut self, messages: Vec<Message>) {
+    async fn recv(&mut self, messages: Vec<Message>) {
         for message in messages {
             self.send(message).await;
         }
@@ -275,7 +311,6 @@ impl MessageInbox {
 
     pub fn clear(&mut self) {
         self.try_decrypt.clear();
-        self.posit.clear();
         self.generating.clear();
         self.resharing.clear();
         self.triple.clear();
@@ -296,40 +331,34 @@ struct MessageExecutor {
     inbox: Arc<RwLock<MessageInbox>>,
     outbox: MessageOutbox,
 
-    config: Arc<RwLock<Config>>,
-    contract_watcher: ContractStateWatcher,
-    mesh_state: Arc<RwLock<MeshState>>,
+    config: watch::Receiver<Config>,
+    contract: ContractStateWatcher,
+    mesh_state: watch::Receiver<MeshState>,
 }
 
 impl MessageExecutor {
     pub async fn execute(mut self) {
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        let mut interval = tokio::time::interval(Duration::from_millis(10));
         loop {
             interval.tick().await;
-            let (sign_sk, cipher_sk, protocol) = {
-                let config = self.config.read().await;
-                (
-                    config.local.network.sign_sk.clone(),
-                    config.local.network.cipher_sk.clone(),
-                    config.protocol.clone(),
-                )
-            };
+            let config = self.config.borrow().clone();
 
-            let participants = self.contract_watcher.participants().await;
+            let participants = self.contract.participants().await;
             {
                 let mut inbox = self.inbox.write().await;
-                let expiration = Duration::from_millis(protocol.message_timeout);
-                inbox.update(expiration, &cipher_sk, &participants).await;
+                let expiration = Duration::from_millis(config.protocol.message_timeout);
+                inbox
+                    .update(expiration, &config.local.network.cipher_sk, &participants)
+                    .await;
             }
 
-            let active = {
-                let mesh_state = self.mesh_state.read().await;
-                mesh_state.active.clone()
-            };
-            self.outbox.expire(&protocol);
+            let active = self.mesh_state.borrow().active.clone();
+            self.outbox.expire(&config.protocol);
             self.outbox.recv_updates();
             let compacted = self.outbox.compact();
-            let encrypted = self.outbox.encrypt(&sign_sk, &active, compacted);
+            let encrypted = self
+                .outbox
+                .encrypt(&config.local.network.sign_sk, &active, compacted);
             self.outbox.send(&active, encrypted).await;
         }
     }
@@ -340,7 +369,6 @@ pub struct MessageChannel {
     outgoing: mpsc::Sender<SendMessage>,
     inbox: Arc<RwLock<MessageInbox>>,
     filter: mpsc::Sender<(Protocols, u64)>,
-    task: Option<Arc<tokio::task::JoinHandle<()>>>,
 }
 
 impl MessageChannel {
@@ -354,7 +382,6 @@ impl MessageChannel {
             inbox,
             outgoing: outbox_tx,
             filter: filter_tx,
-            task: None,
         };
 
         (inbox_tx, outbox_rx, channel)
@@ -363,20 +390,20 @@ impl MessageChannel {
     pub async fn spawn(
         client: NodeClient,
         id: &AccountId,
-        config: &Arc<RwLock<Config>>,
-        contract_watcher: ContractStateWatcher,
-        mesh_state: &Arc<RwLock<MeshState>>,
+        config: watch::Receiver<Config>,
+        contract: ContractStateWatcher,
+        mesh_state: watch::Receiver<MeshState>,
     ) -> (mpsc::Sender<Ciphered>, Self) {
-        let (inbox_tx, outbox_rx, mut channel) = Self::new();
+        let (inbox_tx, outbox_rx, channel) = Self::new();
         let runner = MessageExecutor {
             inbox: channel.inbox.clone(),
             outbox: MessageOutbox::new(id, client, outbox_rx),
 
-            config: config.clone(),
-            contract_watcher,
-            mesh_state: mesh_state.clone(),
+            config,
+            contract,
+            mesh_state,
         };
-        channel.task = Some(Arc::new(tokio::spawn(runner.execute())));
+        tokio::spawn(runner.execute());
 
         (inbox_tx, channel)
     }
@@ -417,50 +444,102 @@ impl MessageChannel {
         }
     }
 
-    pub async fn filter_sign(&self, sign_id: SignId, presign_id: PresignatureId) {
-        self.filter(&(sign_id, presign_id)).await;
+    pub async fn filter_sign(&self, sign_id: SignId, presignature_id: PresignatureId) {
+        self.filter(&(sign_id, presignature_id)).await;
     }
 
     pub async fn subscribe_triple(&self, id: TripleId) -> mpsc::Receiver<TripleMessage> {
         let mut inbox = self.inbox.write().await;
-        let sub = match inbox.triple.entry(id) {
-            hash_map::Entry::Occupied(entry) => entry.remove(),
-            hash_map::Entry::Vacant(entry) => {
-                let (sub, rx) = Subscriber::subscribe();
-                entry.insert(sub);
-                return rx;
-            }
-        };
-
-        let (sub, rx) = match sub {
-            Subscriber::Subscribed(_tx) => {
-                tracing::warn!(id, "subscription already exists for triple, overriding");
-                Subscriber::subscribe()
-            }
-            Subscriber::Unsubscribed(tx, rx) => (Subscriber::Subscribed(tx), rx),
-        };
-
-        inbox.triple.insert(id, sub);
-        rx
+        inbox.triple.entry(id).or_default().subscribe()
     }
 
-    pub async fn unsubscribe_triple(self, id: TripleId) {
+    pub async fn unsubscribe_triple(&self, id: TripleId) {
         let mut inbox = self.inbox.write().await;
         if inbox.triple.remove(&id).is_none() {
             tracing::warn!(id, "trying to unsub from an unknown triple subscription");
         }
     }
 
-    pub async fn subscribe_triple_start(&self) -> mpsc::Receiver<TripleId> {
-        let (tx, rx) = mpsc::channel(256);
+    pub async fn subscribe_triple_posit(
+        &self,
+    ) -> mpsc::Receiver<(TripleId, Participant, PositAction)> {
         let mut inbox = self.inbox.write().await;
-        inbox.triple_init = Some(tx);
-        rx
+        inbox.triple_init.subscribe()
     }
 
-    pub async fn unsubscribe_triple_start(self) {
+    pub async fn unsubscribe_triple_posit(self) {
         let mut inbox = self.inbox.write().await;
-        inbox.triple_init = None;
+        inbox.triple_init.unsubscribe();
+    }
+
+    pub async fn subscribe_presignature(
+        &self,
+        id: PresignatureId,
+    ) -> mpsc::Receiver<PresignatureMessage> {
+        let mut inbox = self.inbox.write().await;
+        inbox.presignature.entry(id).or_default().subscribe()
+    }
+
+    pub async fn unsubscribe_presignature(&self, id: PresignatureId) {
+        let mut inbox = self.inbox.write().await;
+        if inbox.presignature.remove(&id).is_none() {
+            tracing::warn!(
+                id,
+                "trying to unsub from an unknown presignature subscription"
+            );
+        }
+    }
+
+    pub async fn subscribe_presignature_posit(
+        &self,
+    ) -> mpsc::Receiver<(FullPresignatureId, Participant, PositAction)> {
+        let mut inbox = self.inbox.write().await;
+        inbox.presignature_init.subscribe()
+    }
+
+    pub async fn unsubscribe_presignature_posit(self) {
+        let mut inbox = self.inbox.write().await;
+        inbox.presignature_init.unsubscribe();
+    }
+
+    pub async fn subscribe_signature(
+        &self,
+        sign_id: SignId,
+        presignature_id: PresignatureId,
+    ) -> mpsc::Receiver<SignatureMessage> {
+        let mut inbox = self.inbox.write().await;
+        inbox
+            .signature
+            .entry((sign_id, presignature_id))
+            .or_default()
+            .subscribe()
+    }
+
+    pub async fn unsubscribe_signature(&self, sign_id: SignId, presignature_id: PresignatureId) {
+        let mut inbox = self.inbox.write().await;
+        if inbox
+            .signature
+            .remove(&(sign_id, presignature_id))
+            .is_none()
+        {
+            tracing::warn!(
+                ?sign_id,
+                presignature_id,
+                "trying to unsub from an unknown signature subscription"
+            );
+        }
+    }
+
+    pub async fn subscribe_signature_posit(
+        &self,
+    ) -> mpsc::Receiver<(SignId, PresignatureId, Participant, PositAction)> {
+        let mut inbox = self.inbox.write().await;
+        inbox.signature_init.subscribe()
+    }
+
+    pub async fn unsubscribe_signature_posit(self) {
+        let mut inbox = self.inbox.write().await;
+        inbox.signature_init.unsubscribe();
     }
 }
 
@@ -533,199 +612,6 @@ impl MessageReceiver for ResharingState {
 }
 
 #[async_trait]
-impl MessageReceiver for RunningState {
-    async fn recv(
-        &mut self,
-        channel: &MessageChannel,
-        cfg: Config,
-        _mesh_state: MeshState,
-    ) -> Result<(), MessageError> {
-        let protocol_cfg = &cfg.protocol;
-        let mut inbox = channel.inbox().write().await;
-
-        for posit in inbox.posit.drain(..) {
-            match posit.id {
-                PositProtocolId::Triple(_) => {}
-                PositProtocolId::Presignature(id) => {
-                    let mut presignature_manager = self.presignature_manager.write().await;
-                    let start_protocol = presignature_manager
-                        .process_posit(id, posit.from, posit.action)
-                        .await;
-                    if let Some((participants, positor)) = start_protocol {
-                        if let Err(err) = presignature_manager
-                            .generate(
-                                id,
-                                positor,
-                                &participants,
-                                &self.public_key,
-                                &self.private_share,
-                                protocol_cfg,
-                            )
-                            .await
-                        {
-                            tracing::warn!(?id, ?err, "unable to start presignature protocol");
-                        }
-                    }
-                }
-                PositProtocolId::Signature(_, _) => {}
-            }
-        }
-
-        let mut presignature_manager = self.presignature_manager.write().await;
-        let presignature_messages = inbox.presignature.entry(self.epoch).or_default();
-        presignature_messages.retain(|_id, queue| {
-            // Skip message if it already timed out
-            if queue.is_empty()
-                || queue.iter().any(|msg| {
-                    util::is_elapsed_longer_than_timeout(
-                        msg.timestamp,
-                        protocol_cfg.presignature.generation_timeout,
-                    )
-                })
-            {
-                return false;
-            }
-
-            true
-        });
-        for (id, queue) in presignature_messages {
-            // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
-            let PresignatureMessage {
-                triple0, triple1, ..
-            } = queue.front().unwrap();
-
-            if !queue
-                .iter()
-                .all(|msg| triple0 == &msg.triple0 && triple1 == &msg.triple1)
-            {
-                // Check that all messages in the queue have the same triple0 and triple1, otherwise this is an
-                // invalid message, so we should just bin the whole entire protocol and its message for this presignature id.
-                queue.clear();
-                continue;
-            }
-
-            let Some(protocol) = presignature_manager.generator(*id) else {
-                continue;
-            };
-
-            while let Some(message) = queue.pop_front() {
-                protocol.message(message.from, message.data);
-            }
-        }
-        drop(presignature_manager);
-
-        let mut signature_manager = self.signature_manager.write().await;
-        let signature_messages = inbox.signature.entry(self.epoch).or_default();
-        signature_messages.retain(|_sign_id, queue| {
-            let mut expired = HashSet::new();
-            let mut active = HashSet::new();
-
-            for msg in queue.iter() {
-                if expired.contains(&msg.presignature_id) {
-                    continue;
-                }
-
-                if util::is_elapsed_longer_than_timeout(
-                    msg.timestamp,
-                    protocol_cfg.signature.generation_timeout,
-                ) {
-                    expired.insert(msg.presignature_id);
-                } else {
-                    active.insert(msg.presignature_id);
-                }
-            }
-
-            queue.retain(|msg| active.contains(&msg.presignature_id));
-
-            !queue.is_empty()
-        });
-
-        for (sign_id, queue) in signature_messages {
-            // SAFETY: this unwrap() is safe since we have already checked that the queue is not empty.
-            let SignatureMessage {
-                proposer,
-                presignature_id,
-                ..
-            } = queue.front().unwrap();
-
-            if !queue
-                .iter()
-                .all(|msg| presignature_id == &msg.presignature_id)
-            {
-                // Check that all messages in the queue have the same triple0 and triple1, otherwise this is an
-                // invalid message, so we should just bin the whole entire protocol and its message for this presignature id.
-                queue.clear();
-                continue;
-            }
-
-            let protocol = match signature_manager
-                .get_or_start_protocol(sign_id, *proposer, *presignature_id, protocol_cfg)
-                .await
-            {
-                Ok(protocol) => protocol,
-                Err(GenerationError::PresignatureGeneratingOrMissing(_)) => {
-                    // We will revisit this this signature request later when the presignature has been generated.
-                    // If it's missing, we will just rely on the message expiration mechanism to remove it.
-                    continue;
-                }
-                Err(err @ GenerationError::WaitingForIndexer(_)) => {
-                    // We will revisit this this signature request later when we have the request indexed.
-                    tracing::warn!(
-                        ?sign_id,
-                        ?presignature_id,
-                        ?proposer,
-                        ?err,
-                        "waiting for indexer"
-                    );
-                    continue;
-                }
-                Err(err @ GenerationError::InvalidProposer(_, _)) => {
-                    // trash the whole of these messages since we got an invalid set of participants.
-                    tracing::warn!(?sign_id, ?err, "signature generation cannot be started");
-                    queue.clear();
-                    continue;
-                }
-                Err(err @ GenerationError::AlreadyGenerated) => {
-                    // We will have to remove the entirety of the messages we received for this signature request,
-                    // and have the other nodes timeout in the following cases:
-                    // - If a presignature is in GC, then it was used already or failed to be produced.
-                    // - If a presignature is missing, that means our system cannot process this signature.
-                    tracing::warn!(?sign_id, ?err, "signature cannot be generated");
-                    queue.clear();
-                    continue;
-                }
-                Err(GenerationError::CaitSithInitializationError(error)) => {
-                    // ignore the whole of the messages since the generation had bad parameters. Also have the other node who
-                    // initiated the protocol resend the message or have it timeout on their side.
-                    tracing::warn!(
-                        ?sign_id,
-                        presignature_id,
-                        ?error,
-                        "unable to initialize incoming signature protocol"
-                    );
-                    queue.clear();
-                    continue;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        ?sign_id,
-                        ?err,
-                        "Unexpected error encounted while generating signature"
-                    );
-                    queue.clear();
-                    continue;
-                }
-            };
-
-            while let Some(message) = queue.pop_front() {
-                protocol.message(message.from, message.data);
-            }
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
 impl MessageReceiver for NodeState {
     async fn recv(
         &mut self,
@@ -745,11 +631,7 @@ impl MessageReceiver for NodeState {
         match self {
             NodeState::Generating(state) => state.recv(channel, cfg, mesh_state).await,
             NodeState::Resharing(state) => state.recv(channel, cfg, mesh_state).await,
-            NodeState::Running(state) => state.recv(channel, cfg, mesh_state).await,
-            _ => {
-                tracing::debug!("skipping message processing");
-                Ok(())
-            }
+            _ => Ok(()),
         }
     }
 }

@@ -89,7 +89,7 @@ impl Display for OpenTelemetryLevel {
             OpenTelemetryLevel::DEBUG => "debug",
             OpenTelemetryLevel::TRACE => "trace",
         };
-        write!(f, "{}", str)
+        write!(f, "{str}")
     }
 }
 
@@ -140,7 +140,7 @@ impl NodeIdFormatter {
     pub fn new(node_id: &str) -> Self {
         Self {
             fmt: Format::default(),
-            repr: format!("NodeId({})", node_id),
+            repr: format!("NodeId({node_id})"),
         }
     }
 }
@@ -167,7 +167,7 @@ fn get_resource(env: &str, node_id: &str) -> Resource {
     RESOURCE
         .get_or_init(|| {
             Resource::builder()
-                .with_service_name(format!("mpc:{}:{}", env, node_id))
+                .with_service_name(format!("mpc:{env}:{node_id}"))
                 .with_attributes(vec![
                     KeyValue::new("env", env.to_string()),
                     KeyValue::new("node_id", node_id.to_string()),
@@ -227,7 +227,6 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
             .with_filter(EnvFilter::from_default_env());
 
         tracing_subscriber::registry()
-            .with(log_fmt_layer)
             .with(log_otlp_layer)
             .with(OpenTelemetryLayer::new(tracer_otlp))
             .with(log_stackdriver_layer)

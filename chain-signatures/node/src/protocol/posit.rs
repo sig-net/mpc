@@ -45,6 +45,7 @@ impl PositAction {
 pub enum PositInternalAction<S> {
     StartProtocol(Vec<Participant>, Positor<S>),
     Reply(PositAction),
+    Abort,
     None,
 }
 
@@ -233,7 +234,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                 if enough_rejections {
                     tracing::info!(?id, rejects = ?counter.rejects, "received enough REJECTs, aborting protocol");
                     entry.remove();
-                    return PositInternalAction::None;
+                    return PositInternalAction::Abort;
                 }
 
                 // TODO: have a timeout on waiting for votes. The moment we have enough threshold accepts,
@@ -377,6 +378,6 @@ mod tests {
         let action = posits0.act(id, Participant::from(1), threshold, &PositAction::Reject);
         assert!(matches!(action, PositInternalAction::None));
         let action = posits0.act(id, Participant::from(2), threshold, &PositAction::Reject);
-        assert!(matches!(action, PositInternalAction::None));
+        assert!(matches!(action, PositInternalAction::Abort));
     }
 }
