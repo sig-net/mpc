@@ -425,7 +425,7 @@ pub async fn run(
         return Ok(());
     };
 
-    let last_processed_block = app_data_storage.last_processed_block_eth().await?;
+    // let last_processed_block = app_data_storage.last_processed_block_eth().await?;
 
     let network = Network::from_str(eth.network.as_str())
         .map_err(|err| anyhow::anyhow!("Network input incorrect: {:?}", err))?;
@@ -447,137 +447,137 @@ pub async fn run(
 
     tracing::info!("running ethereum indexer");
 
-    let eth_contract_addr = Address::from_str(&format!("0x{}", eth.contract_address))?;
-    let total_timeout = Duration::from_secs(eth.total_timeout);
+    // let eth_contract_addr = Address::from_str(&format!("0x{}", eth.contract_address))?;
+    // let total_timeout = Duration::from_secs(eth.total_timeout);
 
-    let mut block_heads_rx = client
-        .subscribe(SubscriptionType::NewHeads)
-        .await
-        .map_err(|err| anyhow::anyhow!("Failed to subscribe to new block heads: {:?}", err))?;
+    // let mut block_heads_rx = client
+    //     .subscribe(SubscriptionType::NewHeads)
+    //     .await
+    //     .map_err(|err| anyhow::anyhow!("Failed to subscribe to new block heads: {:?}", err))?;
 
-    let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
+    // let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
 
-    let (requests_indexed_send, requests_indexed_recv) = indexed_channel();
+    // let (requests_indexed_send, requests_indexed_recv) = indexed_channel();
 
-    let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
+    // let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
 
-    let client = Arc::new(client);
+    // let client = Arc::new(client);
 
-    let client_clone = Arc::clone(&client);
-    tokio::spawn(async move {
-        tracing::info!("Spawned task to refresh the latest finalized block");
-        refresh_finalized_block(
-            &client_clone,
-            finalized_block_send.clone(),
-            eth.refresh_finalized_interval,
-        )
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("Failed to refresh latest finalized block: {:?}", err);
-        });
-    });
+    // let client_clone = Arc::clone(&client);
+    // tokio::spawn(async move {
+    //     tracing::info!("Spawned task to refresh the latest finalized block");
+    //     refresh_finalized_block(
+    //         &client_clone,
+    //         finalized_block_send.clone(),
+    //         eth.refresh_finalized_interval,
+    //     )
+    //     .await
+    //     .unwrap_or_else(|err| {
+    //         tracing::warn!("Failed to refresh latest finalized block: {:?}", err);
+    //     });
+    // });
 
-    let near_account_id_clone = node_near_account_id.clone();
-    let client_clone = Arc::clone(&client);
-    tokio::spawn(async move {
-        tracing::info!("Spawned task to send indexed requests to send queue");
-        send_requests_when_final(
-            &client_clone,
-            requests_indexed_recv,
-            finalized_block_recv,
-            sign_tx.clone(),
-            app_data_storage.clone(),
-            near_account_id_clone.clone(),
-        )
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("Failed to send requests when final: {:?}", err);
-        });
-    });
+    // let near_account_id_clone = node_near_account_id.clone();
+    // let client_clone = Arc::clone(&client);
+    // tokio::spawn(async move {
+    //     tracing::info!("Spawned task to send indexed requests to send queue");
+    //     send_requests_when_final(
+    //         &client_clone,
+    //         requests_indexed_recv,
+    //         finalized_block_recv,
+    //         sign_tx.clone(),
+    //         app_data_storage.clone(),
+    //         near_account_id_clone.clone(),
+    //     )
+    //     .await
+    //     .unwrap_or_else(|err| {
+    //         tracing::warn!("Failed to send requests when final: {:?}", err);
+    //     });
+    // });
 
-    let near_account_id_clone = node_near_account_id.clone();
-    let requests_indexed_send_clone = requests_indexed_send.clone();
-    let blocks_failed_send_clone = blocks_failed_send.clone();
-    let client_clone = Arc::clone(&client);
-    tokio::spawn(async move {
-        tracing::info!("Spawned task to retry failed blocks");
-        retry_failed_blocks(
-            blocks_failed_recv,
-            blocks_failed_send_clone,
-            &client_clone,
-            eth_contract_addr,
-            near_account_id_clone,
-            requests_indexed_send_clone,
-            total_timeout,
-        )
-        .await;
-    });
+    // let near_account_id_clone = node_near_account_id.clone();
+    // let requests_indexed_send_clone = requests_indexed_send.clone();
+    // let blocks_failed_send_clone = blocks_failed_send.clone();
+    // let client_clone = Arc::clone(&client);
+    // tokio::spawn(async move {
+    //     tracing::info!("Spawned task to retry failed blocks");
+    //     retry_failed_blocks(
+    //         blocks_failed_recv,
+    //         blocks_failed_send_clone,
+    //         &client_clone,
+    //         eth_contract_addr,
+    //         near_account_id_clone,
+    //         requests_indexed_send_clone,
+    //         total_timeout,
+    //     )
+    //     .await;
+    // });
 
-    let near_account_id_clone = node_near_account_id.clone();
-    let requests_indexed_send_clone = requests_indexed_send.clone();
-    let blocks_failed_send_clone = blocks_failed_send.clone();
-    let client_clone = Arc::clone(&client);
-    catch_up(
-        &client_clone,
-        last_processed_block,
-        eth_contract_addr,
-        requests_indexed_send_clone,
-        blocks_failed_send_clone,
-        total_timeout,
-        near_account_id_clone,
-    )
-    .await;
+    // let near_account_id_clone = node_near_account_id.clone();
+    // let requests_indexed_send_clone = requests_indexed_send.clone();
+    // let blocks_failed_send_clone = blocks_failed_send.clone();
+    // let client_clone = Arc::clone(&client);
+    // catch_up(
+    //     &client_clone,
+    //     last_processed_block,
+    //     eth_contract_addr,
+    //     requests_indexed_send_clone,
+    //     blocks_failed_send_clone,
+    //     total_timeout,
+    //     near_account_id_clone,
+    // )
+    // .await;
 
-    let mut interval = tokio::time::interval(Duration::from_millis(200));
-    let requests_indexed_send_clone = requests_indexed_send.clone();
-    let mut receiver_state_update_timestamp = Instant::now();
-    loop {
-        interval.tick().await;
-        if block_heads_rx.is_empty() {
-            if receiver_state_update_timestamp.elapsed() > Duration::from_secs(60) {
-                tracing::warn!("No new block heads received for 60 seconds, waiting...");
-                receiver_state_update_timestamp = Instant::now();
-            }
-            continue;
-        }
-        let Ok(new_block_head) = block_heads_rx.recv().await.inspect_err(|err| {
-            tracing::warn!(
-                "Eth indexer failed to receive latest block header: {:?}",
-                err
-            );
-        }) else {
-            break;
-        };
-        receiver_state_update_timestamp = Instant::now();
-        let SubscriptionEvent::NewHeads(new_block) = new_block_head;
-        let block_number = new_block.header.number;
-        let block_hash = new_block.header.hash;
-        if block_number % 10 == 0 {
-            tracing::info!("Received new block head: {block_number}");
-        }
-        if let Err(err) = process_block(
-            block_number,
-            block_hash,
-            &client,
-            eth_contract_addr,
-            node_near_account_id.clone(),
-            requests_indexed_send_clone.clone(),
-            total_timeout,
-        )
-        .await
-        {
-            tracing::warn!(
-                "Eth indexer failed to process block number {}: {:?}",
-                block_number,
-                err
-            );
-            add_failed_block(blocks_failed_send.clone(), block_number, block_hash).await;
-            continue;
-        }
-        crate::metrics::LATEST_BLOCK_NUMBER
-            .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
-            .set(block_number as i64);
-    }
+    // let mut interval = tokio::time::interval(Duration::from_millis(200));
+    // let requests_indexed_send_clone = requests_indexed_send.clone();
+    // let mut receiver_state_update_timestamp = Instant::now();
+    // loop {
+    // // interval.tick().await;
+    // if block_heads_rx.is_empty() {
+    //     if receiver_state_update_timestamp.elapsed() > Duration::from_secs(60) {
+    //         tracing::warn!("No new block heads received for 60 seconds, waiting...");
+    //         receiver_state_update_timestamp = Instant::now();
+    //     }
+    //     continue;
+    // }
+    // let Ok(new_block_head) = block_heads_rx.recv().await.inspect_err(|err| {
+    //     tracing::warn!(
+    //         "Eth indexer failed to receive latest block header: {:?}",
+    //         err
+    //     );
+    // }) else {
+    //     break;
+    // };
+    // receiver_state_update_timestamp = Instant::now();
+    // let SubscriptionEvent::NewHeads(new_block) = new_block_head;
+    // let block_number = new_block.header.number;
+    // let block_hash = new_block.header.hash;
+    // if block_number % 10 == 0 {
+    //     tracing::info!("Received new block head: {block_number}");
+    // }
+    // if let Err(err) = process_block(
+    //     block_number,
+    //     block_hash,
+    //     &client,
+    //     eth_contract_addr,
+    //     node_near_account_id.clone(),
+    //     requests_indexed_send_clone.clone(),
+    //     total_timeout,
+    // )
+    // .await
+    // {
+    //     tracing::warn!(
+    //         "Eth indexer failed to process block number {}: {:?}",
+    //         block_number,
+    //         err
+    //     );
+    //     add_failed_block(blocks_failed_send.clone(), block_number, block_hash).await;
+    //     continue;
+    // }
+    // crate::metrics::LATEST_BLOCK_NUMBER
+    //     .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
+    //     .set(block_number as i64);
+    // }
     Ok(())
 }
 
