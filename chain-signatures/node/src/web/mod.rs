@@ -80,16 +80,15 @@ pub async fn run(
 async fn msg(
     Extension(state): Extension<Arc<AxumState>>,
     WithRejection(Json(encrypted), _): WithRejection<Json<Vec<Ciphered>>, Error>,
-) -> Result<()> {
+) {
     for encrypted in encrypted.into_iter() {
-        if let Err(err) = state.msg_channel.inbox.send(encrypted).await {
-            tracing::error!(?err, "failed to forward an encrypted protocol message");
-            return Err(Error::Internal(
-                "failed to forward an encrypted protocol message",
-            ));
-        }
+        let msg_channel = state.msg_channel.clone();
+        tokio::spawn(async move {
+            if let Err(err) = msg_channel.inbox.send(encrypted).await {
+                tracing::error!(?err, "failed to forward an encrypted protocol message");
+            }
+        });
     }
-    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
