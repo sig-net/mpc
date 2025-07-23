@@ -19,7 +19,6 @@ use super::triple::TripleId;
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::Config;
-use crate::protocol::MeshState;
 
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
@@ -29,9 +28,10 @@ use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
+
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
@@ -323,7 +323,7 @@ impl MessageInbox {
                 Some(encrypted) = self.inbox_rx.recv() => {
                     let config = config.borrow().clone();
                     let expiration = Duration::from_millis(config.protocol.message_timeout);
-                    let participants = contract.participants().await;
+                    let participants = contract.participant_map().await;
                     let cipher_sk = config.local.network.cipher_sk;
 
                     self.expire(expiration);
@@ -373,11 +373,10 @@ impl MessageChannel {
         id: &AccountId,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
-        mesh_state: watch::Receiver<MeshState>,
     ) -> Self {
         let (inbox, outbox, channel) = Self::new();
-        tokio::spawn(inbox.run(config.clone(), contract));
-        tokio::spawn(outbox.run(id.clone(), client, config, mesh_state));
+        tokio::spawn(inbox.run(config.clone(), contract.clone()));
+        tokio::spawn(outbox.run(id.clone(), client, config, contract));
 
         channel
     }
@@ -724,7 +723,8 @@ type SendMessage = (Message, (FromParticipant, ToParticipant, Instant));
 
 pub struct Partition {
     messages: Vec<Message>,
-    timestamps: Vec<Instant>,
+    /// The earliest timestamp from all the messages.
+    timestamp: Instant,
 }
 
 /// Message outbox is the set of messages that are pending to be sent to other nodes.
@@ -749,32 +749,6 @@ impl MessageOutbox {
         }
     }
 
-    /// Expire messages that have been in the outbox for too long.
-    pub fn expire(&mut self, cfg: &ProtocolConfig) {
-        // timeout errors are very common for a message expiring, so map them to counts here:
-        let mut timeouts = HashMap::<String, usize>::new();
-        for ((_from, to), messages) in self.messages.iter_mut() {
-            messages.retain(|(msg, timestamp)| {
-                if timestamp.elapsed() > timeout(msg, cfg) {
-                    let counter = timeouts
-                        .entry(format!(
-                            "timeout message={} for node={to:?}",
-                            msg.typename(),
-                        ))
-                        .or_insert(0);
-                    *counter += 1;
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-
-        if !timeouts.is_empty() {
-            tracing::warn!(?timeouts, "messages expired");
-        }
-    }
-
     /// Compact the messages in the outbox into partitions of at most 256kb.
     pub fn compact(&mut self) -> HashMap<MessageRoute, Vec<Partition>> {
         let mut compacted = HashMap::new();
@@ -789,24 +763,21 @@ impl MessageOutbox {
     pub fn encrypt(
         &mut self,
         sign_sk: &near_crypto::SecretKey,
-        active: &Participants,
+        participants: &Participants,
         compacted: HashMap<MessageRoute, Vec<Partition>>,
-    ) -> HashMap<MessageRoute, Vec<(Ciphered, Partition)>> {
+    ) -> HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>> {
         // failed for when a participant is not active, so keep this message for next round.
-        let mut retry = VecDeque::new();
         let mut errors = Vec::new();
-        let mut not_active = HashSet::new();
 
-        let mut encrypted_with_original = HashMap::new();
+        let mut encrypted = HashMap::new();
         for ((from, to), compacted) in compacted {
-            let Some(info) = active.get(&to) else {
-                not_active.insert(to);
-                retry.push_back(((from, to), compacted));
+            let Some(info) = participants.get(&to) else {
+                tracing::warn!(?to, "outbox: participant not found in all participants");
                 continue;
             };
 
             for partition in compacted {
-                let encrypted = match SignedMessage::encrypt(
+                let message = match SignedMessage::encrypt(
                     &partition.messages,
                     from,
                     sign_sk,
@@ -819,10 +790,11 @@ impl MessageOutbox {
                     }
                 };
 
-                encrypted_with_original
-                    .entry((from, to))
-                    .or_insert_with(Vec::new)
-                    .push((encrypted, partition));
+                encrypted.entry((from, to)).or_insert_with(Vec::new).push((
+                    message,
+                    partition.timestamp,
+                    partition.messages.len(),
+                ));
             }
         }
 
@@ -830,27 +802,7 @@ impl MessageOutbox {
             tracing::warn!(?errors, "outbox: encrypting messages failed on some");
         }
 
-        if !not_active.is_empty() {
-            tracing::warn!(
-                ?not_active,
-                "some participants are not active even though mesh says they are"
-            );
-        }
-
-        // Add back the failed attempts for next time.
-        for (route, partitions) in retry {
-            let entry = self.messages.entry(route).or_default();
-            for partition in partitions {
-                entry.extend(
-                    partition
-                        .messages
-                        .into_iter()
-                        .zip(partition.timestamps.into_iter()),
-                );
-            }
-        }
-
-        encrypted_with_original
+        encrypted
     }
 
     /// Send the encrypted messages to other participants.
@@ -858,11 +810,12 @@ impl MessageOutbox {
         &mut self,
         account_id: &AccountId,
         client: &NodeClient,
-        active: &Participants,
-        encrypted: HashMap<MessageRoute, Vec<(Ciphered, Partition)>>,
+        participants: &Participants,
+        cfg: &ProtocolConfig,
+        encrypted: HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>>,
     ) {
         let start = Instant::now();
-        let mut send_tasks = Vec::new();
+        let timeout = Duration::from_millis(cfg.message_timeout);
 
         let msg_send_delay_metric =
             crate::metrics::MSG_CLIENT_SEND_DELAY.with_label_values(&[account_id.as_str()]);
@@ -873,16 +826,15 @@ impl MessageOutbox {
         let failed_send_encrypted_latency_metric =
             crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
 
-        for ((from, to), encrypted) in encrypted {
-            for (encrypted_partition, partition) in encrypted {
+        for ((_from, to), encrypted) in encrypted {
+            for (encrypted_partition, timestamp, message_len) in encrypted {
                 // guaranteed to unwrap due to our previous loop check:
-                let info = active.get(&to).unwrap();
-                let account_id = info.account_id.clone();
+                let info = participants.get(&to).unwrap();
                 let url = info.url.clone();
 
                 crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
                     .with_label_values(&[account_id.as_str()])
-                    .inc_by(partition.messages.len() as f64);
+                    .inc_by(message_len as f64);
 
                 let msg_send_delay_metric = msg_send_delay_metric.clone();
                 let num_send_encrypted_failure_metric = num_send_encrypted_failure_metric.clone();
@@ -891,67 +843,43 @@ impl MessageOutbox {
                     failed_send_encrypted_latency_metric.clone();
 
                 let client = client.clone();
-                send_tasks.push(tokio::spawn(async move {
-                    let start = Instant::now();
-                    for msg_inbox_time in partition.timestamps.iter() {
-                        msg_send_delay_metric.observe((start - *msg_inbox_time).as_millis() as f64);
+                tokio::spawn(async move {
+                    let instant = Instant::now();
+                    msg_send_delay_metric.observe((instant - timestamp).as_millis() as f64);
+                    let payload = &[&encrypted_partition];
+                    let timeout = tokio::time::sleep(timeout);
+                    tokio::pin!(timeout);
+
+                    loop {
+                        let attempt_timestamp = Instant::now();
+                        tokio::select! {
+                            () = &mut timeout => {
+                                tracing::warn!(
+                                    ?to, ?url, elapsed = ?instant.elapsed(),
+                                    "outbox: failed to send messages, timeout reached",
+                                );
+                                break;
+                            }
+                            result = client.msg(&url, payload) => {
+                                let Err(err) = result else {
+                                    send_encrypted_latency_metric.observe(start.elapsed().as_millis() as f64);
+                                    tracing::debug!(?to, ?url, elapsed = ?instant.elapsed(), "finished sending messages");
+                                    break;
+                                };
+
+                                tracing::warn!(
+                                    ?to, ?url, elapsed = ?attempt_timestamp.elapsed(), ?err,
+                                    "outbox: failed to send messages, retrying...",
+                                );
+                                num_send_encrypted_failure_metric.inc_by(message_len as f64);
+                                failed_send_encrypted_latency_metric
+                                    .observe(attempt_timestamp.elapsed().as_millis() as f64);
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
-                    if let Err(err) = client.msg(url, &[&encrypted_partition]).await {
-                        num_send_encrypted_failure_metric.inc_by(partition.messages.len() as f64);
-                        failed_send_encrypted_latency_metric
-                            .observe(start.elapsed().as_millis() as f64);
-                        Err(((from, to), partition, err))
-                    } else {
-                        send_encrypted_latency_metric.observe(start.elapsed().as_millis() as f64);
-                        Ok(partition.messages.len())
-                    }
-                }));
+                });
             }
-        }
-
-        let mut errors = Vec::new();
-        let mut retry = VecDeque::new();
-        let mut uncompacted = 0;
-        let mut compacted = 0;
-        for task in send_tasks {
-            match task.await {
-                Ok(Ok(msgs_len)) => {
-                    uncompacted += msgs_len;
-                    compacted += 1;
-                }
-                Ok(Err((route, partition, err))) => {
-                    // since we failed, put back all the messages related to this
-                    retry.push_back((route, partition));
-                    errors.push(err);
-                }
-                Err(err) => {
-                    tracing::warn!(?err, "outbox: task failed to send message");
-                }
-            }
-        }
-
-        if uncompacted > 0 {
-            tracing::debug!(
-                uncompacted,
-                compacted,
-                "sent messages in {:?}",
-                start.elapsed()
-            );
-        }
-
-        if !errors.is_empty() {
-            tracing::warn!(?errors, "outbox: failed sending encrypted messages");
-        }
-
-        // Add back the failed attempts for next time.
-        for (route, partition) in retry {
-            let entry = self.messages.entry(route).or_default();
-            entry.extend(
-                partition
-                    .messages
-                    .into_iter()
-                    .zip(partition.timestamps.into_iter()),
-            );
         }
     }
 
@@ -961,14 +889,16 @@ impl MessageOutbox {
         id: &AccountId,
         client: &NodeClient,
         config: &watch::Receiver<Config>,
-        mesh_state: &watch::Receiver<MeshState>,
+        contract: &ContractStateWatcher,
     ) {
+        let Some(participants) = contract.participants() else {
+            return;
+        };
         let config = config.borrow().clone();
-        let active = mesh_state.borrow().active.clone();
-        self.expire(&config.protocol);
         let compacted = self.compact();
-        let encrypted = self.encrypt(&config.local.network.sign_sk, &active, compacted);
-        self.send(id, client, &active, encrypted).await;
+        let encrypted = self.encrypt(&config.local.network.sign_sk, &participants, compacted);
+        self.send(id, client, &participants, &config.protocol, encrypted)
+            .await;
     }
 
     pub async fn run(
@@ -976,7 +906,7 @@ impl MessageOutbox {
         id: AccountId,
         client: NodeClient,
         config: watch::Receiver<Config>,
-        mesh_state: watch::Receiver<MeshState>,
+        contract: ContractStateWatcher,
     ) {
         let mut interval = tokio::time::interval(Duration::from_millis(10));
         loop {
@@ -987,7 +917,7 @@ impl MessageOutbox {
                     entry.push((msg, timestamp));
                 }
                 _ = interval.tick() => {
-                    self.publish(&id, &client, &config, &mesh_state).await;
+                    self.publish(&id, &client, &config, &contract).await;
                 }
             }
         }
@@ -999,8 +929,8 @@ impl MessageOutbox {
 fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Vec<Partition> {
     let mut partitions = Vec::new();
     let mut current_messages = Vec::new();
-    let mut current_timestamps = Vec::new();
     let mut current_size: usize = 0;
+    let mut earliest = Instant::now();
 
     for (msg, timestamp) in outgoing {
         if matches!(msg, Message::Unknown(_)) {
@@ -1012,17 +942,17 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
             continue;
         }
 
+        earliest = earliest.min(timestamp);
         let bytesize = msg.size();
         if current_size + bytesize > 256 * 1024 {
             // If adding this byte vector exceeds 256kb, start a new partition
             partitions.push(Partition {
                 messages: std::mem::take(&mut current_messages),
-                timestamps: std::mem::take(&mut current_timestamps),
+                timestamp: earliest,
             });
             current_size = 0;
         }
         current_messages.push(msg);
-        current_timestamps.push(timestamp);
         current_size += bytesize;
     }
 
@@ -1030,25 +960,11 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
         // Add the last partition
         partitions.push(Partition {
             messages: current_messages,
-            timestamps: current_timestamps,
+            timestamp: earliest,
         });
     }
 
     partitions
-}
-
-fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {
-    match msg {
-        Message::Posit(_) => Duration::from_millis(cfg.message_timeout),
-        Message::Generating(_) => Duration::from_millis(cfg.message_timeout),
-        Message::Resharing(_) => Duration::from_millis(cfg.message_timeout),
-        Message::Triple(_) => Duration::from_millis(cfg.triple.generation_timeout),
-        Message::Presignature(_) => Duration::from_millis(cfg.presignature.generation_timeout),
-        Message::Signature(_) => Duration::from_millis(cfg.signature.generation_timeout),
-
-        // unknown message cannot be handled at all, so we just expire them immediately.
-        Message::Unknown(_) => Duration::from_millis(1),
-    }
 }
 
 fn cbor_to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, MessageError> {

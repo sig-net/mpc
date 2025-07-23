@@ -190,8 +190,16 @@ impl ContractStateWatcher {
         self.contract_state.mark_changed();
     }
 
+    pub fn participants(&self) -> Option<Participants> {
+        match self.borrow_state().as_ref()? {
+            ProtocolState::Initializing(state) => Some(state.candidates.clone().into()),
+            ProtocolState::Running(state) => Some(state.participants.clone()),
+            ProtocolState::Resharing(state) => Some(state.new_participants.clone()),
+        }
+    }
+
     pub async fn me(&self) -> Option<Participant> {
-        match self.state().clone()? {
+        match self.borrow_state().as_ref()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => state
                 .participants
@@ -226,7 +234,7 @@ impl ContractStateWatcher {
         }
     }
 
-    pub async fn participants(&self) -> ParticipantMap {
+    pub async fn participant_map(&self) -> ParticipantMap {
         let Some(state) = self.state().clone() else {
             return ParticipantMap::Zero;
         };
