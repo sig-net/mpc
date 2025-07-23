@@ -29,8 +29,8 @@ impl Default for ProtocolConfig {
         Self {
             message_timeout: min_to_ms(5),
             garbage_timeout: hours_to_ms(2),
-            max_concurrent_introduction: 16,
-            max_concurrent_generation: 16 * MAX_EXPECTED_PARTICIPANTS,
+            max_concurrent_introduction: 10,
+            max_concurrent_generation: 10 * MAX_EXPECTED_PARTICIPANTS,
             triple: TripleConfig::default(),
             presignature: PresignatureConfig::default(),
             signature: Default::default(),
@@ -43,8 +43,8 @@ impl Default for ProtocolConfig {
 impl Default for TripleConfig {
     fn default() -> Self {
         Self {
-            min_triples: 1024,
-            max_triples: 1024 * MAX_EXPECTED_PARTICIPANTS * NETWORK_MULTIPLIER,
+            min_triples: 4096,
+            max_triples: 4096 * MAX_EXPECTED_PARTICIPANTS * NETWORK_MULTIPLIER,
             generation_timeout: min_to_ms(10),
 
             other: Default::default(),
@@ -55,8 +55,8 @@ impl Default for TripleConfig {
 impl Default for PresignatureConfig {
     fn default() -> Self {
         Self {
-            min_presignatures: 512,
-            max_presignatures: 512 * MAX_EXPECTED_PARTICIPANTS * NETWORK_MULTIPLIER,
+            min_presignatures: 2048,
+            max_presignatures: 2048 * MAX_EXPECTED_PARTICIPANTS * NETWORK_MULTIPLIER,
             generation_timeout: secs_to_ms(45),
 
             other: Default::default(),
