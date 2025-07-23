@@ -468,10 +468,37 @@ pub(crate) static PROTOCOL_ITER_CNT: LazyLock<CounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub(crate) static CONFIGURATION_DIGEST: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+pub(crate) static CONFIGURATION_DIGEST_MPC: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec(
-        "multichain_configuration_digest",
-        "Configuration digest",
+        "multichain_configuration_digest_mpc",
+        "Configuration digest MPC",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static CONFIGURATION_DIGEST_ETH: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_configuration_digest_eth",
+        "Configuration digest ETH",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static CONFIGURATION_DIGEST_SOL: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_configuration_digest_sol",
+        "Configuration digest SOL",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static CONFIGURATION_DIGEST_OTHER: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_configuration_digest_other",
+        "Configuration digest of other parameters",
         &["node_account_id"],
     )
     .unwrap()
