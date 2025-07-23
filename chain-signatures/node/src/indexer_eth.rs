@@ -550,7 +550,7 @@ pub async fn run(
     tokio::spawn(async move {
         let end_block_result = catch_up(
             &client_clone,
-            last_processed_block,
+            Some(8826020),
             eth_contract_addr,
             requests_indexed_send_clone,
             blocks_failed_send_clone,
