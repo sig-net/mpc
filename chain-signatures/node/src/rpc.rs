@@ -866,24 +866,28 @@ async fn send_eth_transaction(
     near_account_id: &AccountId,
 ) -> Result<alloy::primitives::B256, ()> {
     let chain = Chain::Ethereum;
-    match contract
+    let nonce = match contract
         .provider()
         .get_transaction_count(contract.provider().default_signer_address())
         .await
     {
         Ok(nonce) => {
             tracing::info!(nonce, "will send eth tx with nonce");
+            nonce
         }
         Err(err) => {
             tracing::error!(?err, "failed to get nonce");
+            return Err(());
         }
-    }
+    };
+
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         contract
             .function("respond", params)
             .unwrap()
             .gas(gas)
+            .nonce(nonce)
             .send(),
     )
     .await
@@ -1009,6 +1013,7 @@ async fn try_batch_publish_eth(
         .iter()
         .map(|action| action.request.indexed.id)
         .collect::<Vec<_>>();
+    tracing::info!(?sign_ids, "will send eth batch tx");
     for action in actions {
         let signature = signatures
             .get(&action.request.indexed.id)
