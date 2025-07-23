@@ -203,6 +203,11 @@ impl EthArgs {
     }
 }
 
+pub enum BlockToProcess {
+    Catchup(BlockNumber),
+    NewBlock(BlockNumberAndHash),
+}
+
 #[derive(Clone)]
 pub struct BlockAndRequests {
     block_number: u64,
@@ -392,6 +397,11 @@ fn parse_string_args(data: &Bytes, offset_start: usize) -> String {
     String::from_utf8(bytes.to_vec()).unwrap_or_default()
 }
 
+const MAX_BLOCKS_TO_PROCESS: usize = 10000;
+fn blocks_to_process_channel() -> (mpsc::Sender<BlockToProcess>, mpsc::Receiver<BlockToProcess>) {
+    mpsc::channel(MAX_BLOCKS_TO_PROCESS)
+}
+
 const MAX_INDEXED_REQUESTS: usize = 1024;
 fn indexed_channel() -> (
     mpsc::Sender<BlockAndRequests>,
@@ -477,6 +487,14 @@ pub async fn run(
 
     tracing::info!("running ethereum indexer");
 
+    let mut block_heads_rx = match client.subscribe(SubscriptionType::NewHeads).await {
+        Ok(block_heads_rx) => block_heads_rx,
+        Err(err) => {
+            tracing::error!("Failed to subscribe to new block heads: {err:?}");
+            return;
+        }
+    };
+
     let Ok(eth_contract_addr) = Address::from_str(&format!("0x{}", eth.contract_address)) else {
         tracing::error!("Failed to parse contract address: {}", eth.contract_address);
         return;
@@ -489,13 +507,7 @@ pub async fn run(
 
     let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
 
-    let mut block_heads_rx = match client.subscribe(SubscriptionType::NewHeads).await {
-        Ok(block_heads_rx) => block_heads_rx,
-        Err(err) => {
-            tracing::error!("Failed to subscribe to new block heads: {err:?}");
-            return;
-        }
-    };
+    let (blocks_to_process_send, mut blocks_to_process_recv) = blocks_to_process_channel();
 
     let client = Arc::new(client);
 
@@ -543,60 +555,53 @@ pub async fn run(
         .await;
     });
 
-    let near_account_id_clone = node_near_account_id.clone();
-    let requests_indexed_send_clone = requests_indexed_send.clone();
-    let blocks_failed_send_clone = blocks_failed_send.clone();
-    let client_clone = Arc::clone(&client);
-    tokio::spawn(async move {
-        let end_block_result = catch_up(
-            &client_clone,
+    let blocks_to_process_send_clone = blocks_to_process_send.clone();
+    if let Some(last_processed_block) = last_processed_block {
+        let Ok(SubscriptionEvent::NewHeads(latest_block)) = block_heads_rx.recv().await else {
+            tracing::warn!("Failed to receive latest block head");
+            return;
+        };
+        let end_block_number = latest_block.header.number - 1;
+        add_catchup_blocks_to_process(
+            blocks_to_process_send_clone,
             last_processed_block,
-            eth_contract_addr,
-            requests_indexed_send_clone,
-            blocks_failed_send_clone,
-            total_timeout,
-            near_account_id_clone,
+            end_block_number,
         )
         .await;
-        tracing::info!("Catchup finished with result: {end_block_result:?}");
+    }
+
+    let blocks_to_process_send_clone = blocks_to_process_send.clone();
+    tokio::spawn(async move {
+        tracing::info!("Spawned task to add new blocks to process");
+        add_new_block_to_process(block_heads_rx, blocks_to_process_send_clone).await;
     });
 
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let requests_indexed_send_clone = requests_indexed_send.clone();
-    let mut receiver_state_update_timestamp = Instant::now();
     loop {
-        interval.tick().await;
-        if block_heads_rx.is_empty() {
-            if receiver_state_update_timestamp.elapsed() > Duration::from_secs(60) {
-                tracing::warn!("No new block heads received for 60 seconds, waiting...");
-                receiver_state_update_timestamp = Instant::now();
-            }
+        let Some(block_to_process) = blocks_to_process_recv.recv().await else {
+            interval.tick().await;
             continue;
-        }
-        let new_block_head = match block_heads_rx.recv().await {
-            Ok(new_block_head) => new_block_head,
-            Err(RecvError::Lagged(lagged_count)) => {
-                tracing::warn!(
-                    "Eth indexer failed to receive latest block header: block heads stream lagged too far behind, lagged count: {lagged_count}"
-                );
-                continue;
+        };
+        let (block_number, block_hash, is_catchup) = match block_to_process {
+            BlockToProcess::Catchup(block_number) => {
+                let block = fetch_block(
+                    &client,
+                    BlockId::Number(BlockNumberOrTag::Number(block_number)),
+                    5,
+                    Duration::from_millis(200),
+                )
+                .await;
+                if let Some(block) = block {
+                    (block.header.number, block.header.hash, true)
+                } else {
+                    continue;
+                }
             }
-            Err(RecvError::Closed) => {
-                tracing::error!(
-                    "Eth indexer failed to receive latest block header: block heads stream closed"
-                );
-                // TODO: add a retry mechanism for closed block heads stream
-                break;
+            BlockToProcess::NewBlock((block_number, block_hash)) => {
+                (block_number, block_hash, false)
             }
         };
-
-        receiver_state_update_timestamp = Instant::now();
-        let SubscriptionEvent::NewHeads(new_block) = new_block_head;
-        let block_number = new_block.header.number;
-        let block_hash = new_block.header.hash;
-        if block_number % 10 == 0 {
-            tracing::info!("Received new block head: {block_number}");
-        }
         if let Err(err) = process_block(
             block_number,
             block_hash,
@@ -611,6 +616,13 @@ pub async fn run(
             tracing::warn!("Eth indexer failed to process block number {block_number}: {err:?}");
             add_failed_block(blocks_failed_send.clone(), block_number, block_hash).await;
             continue;
+        }
+        if block_number % 10 == 0 {
+            if is_catchup {
+                tracing::info!("Processed catchup block number {block_number}");
+            } else {
+                tracing::info!("Processed new block number {block_number}");
+            }
         }
         crate::metrics::LATEST_BLOCK_NUMBER
             .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
@@ -662,6 +674,80 @@ async fn add_failed_block(
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to send failed block: {:?}", err);
         });
+}
+
+async fn add_new_block_to_process(
+    mut block_heads_rx: tokio::sync::broadcast::Receiver<
+        SubscriptionEvent<helios::ethereum::spec::Ethereum>,
+    >,
+    blocks_to_process: mpsc::Sender<BlockToProcess>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_millis(200));
+    let mut receiver_state_update_timestamp = Instant::now();
+    loop {
+        interval.tick().await;
+        if block_heads_rx.is_empty()
+            && receiver_state_update_timestamp.elapsed() > Duration::from_secs(60)
+        {
+            tracing::warn!("No new block heads received for 60 seconds, waiting...");
+            receiver_state_update_timestamp = Instant::now();
+        }
+        let new_block_head = match block_heads_rx.recv().await {
+            Ok(new_block_head) => new_block_head,
+            Err(RecvError::Lagged(lagged_count)) => {
+                tracing::warn!(
+                    "Eth indexer failed to receive latest block header: block heads stream lagged too far behind, lagged count: {lagged_count}"
+                );
+                continue;
+            }
+            Err(RecvError::Closed) => {
+                tracing::error!(
+                    "Eth indexer failed to receive latest block header: block heads stream closed"
+                );
+                // TODO: add a retry mechanism for closed block heads stream
+                break;
+            }
+        };
+        receiver_state_update_timestamp = Instant::now();
+        let SubscriptionEvent::NewHeads(new_block) = new_block_head;
+        let block_number = new_block.header.number;
+        let block_hash = new_block.header.hash;
+        if block_number % 10 == 0 {
+            tracing::info!("Received new block head: {block_number}");
+        }
+        if let Err(err) = blocks_to_process
+            .send(BlockToProcess::NewBlock((block_number, block_hash)))
+            .await
+        {
+            tracing::warn!("Failed to send block to process: {err:?}");
+        }
+    }
+}
+
+async fn add_catchup_blocks_to_process(
+    blocks_to_process: mpsc::Sender<BlockToProcess>,
+    start_block_number: u64,
+    end_block_number: u64,
+) {
+    // helios can only go back maximum 8191 blocks, so we need to adjust the start block number if it's too far behind
+    let helios_oldest_block_number = end_block_number - 8191;
+    let start_block_number = if start_block_number < helios_oldest_block_number {
+        tracing::warn!(
+            "Start block number {start_block_number} is too far behind the latest block {end_block_number}, adjusting to {helios_oldest_block_number}"
+        );
+        helios_oldest_block_number
+    } else {
+        start_block_number
+    };
+
+    for block_number in start_block_number..=end_block_number {
+        if let Err(err) = blocks_to_process
+            .send(BlockToProcess::Catchup(block_number))
+            .await
+        {
+            tracing::warn!("Failed to send block to process: {err:?}");
+        }
+    }
 }
 
 // retry getting block from helios with exponential backoff
@@ -920,79 +1006,6 @@ async fn send_requests_when_final(
             );
         }
     }
-}
-
-async fn catch_up(
-    helios_client: &Arc<EthereumClient>,
-    start_block_number: Option<BlockNumber>,
-    eth_contract_addr: Address,
-    requests_indexed: mpsc::Sender<BlockAndRequests>,
-    blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
-    total_timeout: Duration,
-    node_near_account_id: AccountId,
-) -> anyhow::Result<BlockNumber> {
-    let Some(start_block_number) = start_block_number else {
-        return Err(anyhow::anyhow!("No start block number provided"));
-    };
-    tracing::info!("Catching up from block number: {start_block_number}");
-    let latest_block = match fetch_block(
-        helios_client,
-        BlockId::Number(BlockNumberOrTag::Latest),
-        10,
-        Duration::from_millis(200),
-    )
-    .await
-    {
-        Some(block) => block,
-        None => {
-            return Err(anyhow::anyhow!("Failed to get latest block"));
-        }
-    };
-    let end_block_number = latest_block.header.number;
-    // helios can only go back maximum 8191 blocks, so we need to adjust the start block number if it's too far behind
-    let helios_oldest_block_number = latest_block.header.number - 8191;
-    let start_block_number = if start_block_number < helios_oldest_block_number {
-        tracing::warn!(
-            "Start block number {start_block_number} is too far behind the latest block {end_block_number}, adjusting to {helios_oldest_block_number}"
-        );
-        helios_oldest_block_number
-    } else {
-        start_block_number
-    };
-    for block_number in start_block_number..end_block_number {
-        let block = fetch_block(
-            helios_client,
-            block_number.into(),
-            5,
-            Duration::from_millis(200),
-        )
-        .await;
-        let Some(block) = block else {
-            tracing::warn!("When catching up, block {block_number} not found from Helios client, skipping this block and its requests");
-            continue;
-        };
-        let block_number = block.header.number;
-        let block_hash = block.header.hash;
-        if let Err(err) = process_block(
-            block_number,
-            block_hash,
-            helios_client,
-            eth_contract_addr,
-            node_near_account_id.clone(),
-            requests_indexed.clone(),
-            total_timeout,
-        )
-        .await
-        {
-            tracing::warn!("Eth indexer failed to process block number {block_number}: {err:?}");
-            add_failed_block(blocks_failed_tx.clone(), block_number, block_hash).await;
-            continue;
-        }
-        if block_number % 10 == 0 {
-            tracing::info!("Catchup progress: processed block number {block_number}, end block number {end_block_number}");
-        }
-    }
-    Ok(end_block_number)
 }
 
 fn parse_filtered_logs(logs: Vec<Log>, total_timeout: Duration) -> Vec<IndexedSignRequest> {

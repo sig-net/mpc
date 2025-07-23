@@ -1000,6 +1000,7 @@ async fn try_batch_publish_eth(
     let tx_hash =
         send_eth_transaction(&eth.contract, &params, gas, &sign_ids, near_account_id).await?;
 
+    tracing::info!(?tx_hash, "sent eth tx");
     let receipt = wait_for_transaction_receipt(
         eth.contract.provider(),
         tx_hash,
@@ -1102,6 +1103,8 @@ async fn execute_batch_publish(
             actions.clear();
             break;
         }
+
+        tracing::warn!("batch publish failed, {publish:?}");
 
         retry_count += 1;
         tokio::time::sleep(Duration::from_millis(100)).await;
