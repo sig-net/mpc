@@ -3,7 +3,7 @@ use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
 use crate::protocol::contract::primitives::ParticipantMap;
 use crate::protocol::signature::SignRequest;
-use crate::protocol::{Chain, ProtocolState};
+use crate::protocol::{Chain, Governance, ProtocolState};
 use crate::util::AffinePointExt as _;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
@@ -73,21 +73,21 @@ type EthContractFillProvider = FillProvider<
 type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
 #[derive(Clone)]
-struct PublishAction {
+pub struct PublishAction {
     public_key: mpc_crypto::PublicKey,
-    request: SignRequest,
+    pub request: SignRequest,
     output: FullSignature<Secp256k1>,
     timestamp: Instant,
     retry_count: usize,
 }
 
-enum RpcAction {
+pub enum RpcAction {
     Publish(PublishAction),
 }
 
 #[derive(Clone)]
 pub struct RpcChannel {
-    tx: mpsc::Sender<RpcAction>,
+    pub tx: mpsc::Sender<RpcAction>,
 }
 
 impl RpcChannel {
@@ -338,6 +338,20 @@ pub struct NearClient {
     signer: InMemorySigner,
     cipher_pk: hpke::PublicKey,
     sign_pk: near_crypto::PublicKey,
+}
+
+impl Governance for NearClient {
+    async fn propose_join(&self) -> anyhow::Result<()> {
+        self.propose_join().await
+    }
+
+    async fn vote_reshared(&self, epoch: u64) -> anyhow::Result<bool> {
+        self.vote_reshared(epoch).await
+    }
+
+    async fn vote_public_key(&self, public_key: &near_crypto::PublicKey) -> anyhow::Result<bool> {
+        self.vote_public_key(public_key).await
+    }
 }
 
 impl NearClient {
