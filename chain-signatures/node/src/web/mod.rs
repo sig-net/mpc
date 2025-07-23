@@ -4,6 +4,7 @@ use self::error::Error;
 use crate::indexer::NearIndexer;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
+use crate::protocol::MessageChannel;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::error::Result;
 
@@ -18,20 +19,19 @@ use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
-use tokio::sync::mpsc::Sender;
 
 struct AxumState {
-    sender: Sender<Ciphered>,
     node: NodeStateWatcher,
     indexer: Option<NearIndexer>,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
+    msg_channel: MessageChannel,
 }
 
 pub async fn run(
     port: u16,
-    sender: Sender<Ciphered>,
+    msg_channel: MessageChannel,
     node: NodeStateWatcher,
     indexer: Option<NearIndexer>,
     triple_storage: TripleStorage,
@@ -40,7 +40,7 @@ pub async fn run(
 ) {
     tracing::info!("starting web server");
     let axum_state = AxumState {
-        sender,
+        msg_channel,
         node,
         indexer,
         triple_storage,
@@ -80,16 +80,15 @@ pub async fn run(
 async fn msg(
     Extension(state): Extension<Arc<AxumState>>,
     WithRejection(Json(encrypted), _): WithRejection<Json<Vec<Ciphered>>, Error>,
-) -> Result<()> {
+) {
     for encrypted in encrypted.into_iter() {
-        if let Err(err) = state.sender.send(encrypted).await {
-            tracing::error!(?err, "failed to forward an encrypted protocol message");
-            return Err(Error::Internal(
-                "failed to forward an encrypted protocol message",
-            ));
-        }
+        let msg_channel = state.msg_channel.clone();
+        tokio::spawn(async move {
+            if let Err(err) = msg_channel.inbox.send(encrypted).await {
+                tracing::error!(?err, "failed to forward an encrypted protocol message");
+            }
+        });
     }
-    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
