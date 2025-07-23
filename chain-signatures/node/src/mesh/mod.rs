@@ -1,7 +1,11 @@
+use std::collections::BTreeSet;
 use std::time::Duration;
 
+use crate::mesh::connection::NodeStatus;
+use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
-use crate::{node_client::NodeClient, rpc::ContractStateWatcher};
+use crate::protocol::ParticipantInfo;
+use crate::rpc::ContractStateWatcher;
 use cait_sith::protocol::Participant;
 use tokio::sync::{mpsc, watch};
 
@@ -35,7 +39,29 @@ pub struct MeshState {
     pub need_sync: Participants,
 
     /// Participants that can be selected for a new protocol invocation.
-    pub stable: Vec<Participant>,
+    pub stable: BTreeSet<Participant>,
+}
+
+impl MeshState {
+    pub fn update(&mut self, participant: Participant, status: NodeStatus, info: ParticipantInfo) {
+        match status {
+            NodeStatus::Active => {
+                self.active.insert(&participant, info);
+                self.stable.insert(participant);
+            }
+            NodeStatus::Inactive => {
+                self.active.insert(&participant, info);
+            }
+            NodeStatus::Syncing => {
+                self.need_sync.insert(&participant, info);
+            }
+            NodeStatus::Offline => {
+                self.active.remove(&participant);
+                self.need_sync.remove(&participant);
+                self.stable.remove(&participant);
+            }
+        }
+    }
 }
 
 /// Set of connections to participants in the network. Each participant is pinged at regular
@@ -45,7 +71,6 @@ pub struct Mesh {
     connections: connection::Pool,
     state_tx: watch::Sender<MeshState>,
     state_rx: watch::Receiver<MeshState>,
-    ping_interval: Duration,
     synced_peer_rx: mpsc::Receiver<Participant>,
 }
 
@@ -57,11 +82,11 @@ impl Mesh {
     ) -> Self {
         let ping_interval = Duration::from_millis(options.ping_interval);
         let (state_tx, state_rx) = watch::channel(MeshState::default());
+        let connections = connection::Pool::new(client, ping_interval);
         Self {
-            connections: connection::Pool::new(client, ping_interval),
+            connections,
             state_tx,
             state_rx,
-            ping_interval,
             synced_peer_rx,
         }
     }
@@ -71,33 +96,26 @@ impl Mesh {
     }
 
     pub async fn run(mut self, mut contract: ContractStateWatcher) {
-        let mut interval = tokio::time::interval(self.ping_interval / 2);
+        let state_tx = self.state_tx.clone();
+        let mut conn_update = self.connections.watch();
+        tokio::spawn(async move {
+            loop {
+                let (p, status, info) = conn_update.next().await;
+                tracing::info!(?p, ?status, "mesh connection status changed");
+                state_tx.send_modify(|state| {
+                    state.update(p, status, info);
+                });
+            }
+        });
+
         loop {
             tokio::select! {
-                // TODO: this will be removed once we have reactive connection changes coming in:
-                // but for now, we will need to poll for changes in the connection pool when nodes
-                // go offline or come online again.
-                _ = interval.tick() => {
-                    let new_state = self.connections.status().await;
-                    let _ = self.state_tx.send(new_state);
-                }
                 Some(contract) = contract.next_state() => {
                     tracing::info!(?contract, "new contract state received");
                     self.connections.connect(contract).await;
-                    let new_state = self.connections.status().await;
-                    let _ = self.state_tx.send(new_state);
                 }
                 Some(participant) = self.synced_peer_rx.recv() => {
                     self.connections.report_node_synced(participant).await;
-                    self.state_tx.send_if_modified(|state| {
-                        if let Some(info) = state.need_sync.remove(&participant) {
-                            state.active.insert(&participant, info);
-                            state.stable.push(participant);
-                            true
-                        } else {
-                            false
-                        }
-                    });
                 }
             }
         }
