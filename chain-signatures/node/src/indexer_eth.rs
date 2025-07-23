@@ -425,13 +425,13 @@ pub async fn run(
         return;
     };
 
-    let last_processed_block = app_data_storage
-        .last_processed_block_eth()
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("Failed to get last processed block: {err:?}");
-            None
-        });
+    // let last_processed_block = app_data_storage
+    //     .last_processed_block_eth()
+    //     .await
+    //     .unwrap_or_else(|err| {
+    //         tracing::warn!("Failed to get last processed block: {err:?}");
+    //         None
+    //     });
 
     let Ok(network) = Network::from_str(eth.network.as_str()) else {
         tracing::error!("Network input incorrect: {}", eth.network);
@@ -550,7 +550,7 @@ pub async fn run(
     tokio::spawn(async move {
         let end_block_result = catch_up(
             &client_clone,
-            last_processed_block,
+            Some(8821185),
             eth_contract_addr,
             requests_indexed_send_clone,
             blocks_failed_send_clone,
