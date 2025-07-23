@@ -12,7 +12,7 @@ use solana_sdk::signer::keypair::Keypair;
 
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
-use alloy::providers::{Provider, RootProvider};
+use alloy::providers::{Provider, RootProvider, WalletProvider};
 use alloy::rpc::types::TransactionReceipt;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
@@ -866,6 +866,18 @@ async fn send_eth_transaction(
     near_account_id: &AccountId,
 ) -> Result<alloy::primitives::B256, ()> {
     let chain = Chain::Ethereum;
+    match contract
+        .provider()
+        .get_transaction_count(contract.provider().default_signer_address())
+        .await
+    {
+        Ok(nonce) => {
+            tracing::info!(nonce, "will send eth tx with nonce");
+        }
+        Err(err) => {
+            tracing::error!(?err, "failed to get nonce");
+        }
+    }
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         contract
@@ -887,7 +899,8 @@ async fn send_eth_transaction(
     .map_err(|err| {
         tracing::error!(
             ?sign_ids,
-            error = ?err,
+            error = %err,
+            debug = ?err,
             "failed to send ethereum signature transaction"
         );
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
