@@ -298,7 +298,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &account_id,
                 config_rx.clone(),
                 contract_watcher.clone(),
-                mesh_state.clone(),
             )
             .await;
             let protocol = MpcSignProtocol {
