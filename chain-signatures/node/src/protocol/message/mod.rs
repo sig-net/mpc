@@ -1,6 +1,10 @@
 mod filter;
+mod sub;
 mod types;
 
+use crate::protocol::message::sub::{
+    SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse, Subscriber,
+};
 pub use crate::protocol::message::types::{
     GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
     PresignatureMessage, Protocols, ResharingMessage, SignatureMessage, TripleMessage,
@@ -11,15 +15,11 @@ use crate::rpc::ContractStateWatcher;
 
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::PresignatureId;
-use super::state::{GeneratingState, NodeState, ResharingState};
 use super::triple::TripleId;
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::Config;
-use crate::protocol::MeshState;
-use crate::types::Epoch;
 
-use async_trait::async_trait;
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
@@ -28,72 +28,14 @@ use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use tokio::sync::{mpsc, watch};
+
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::{mpsc, watch, RwLock};
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
-
-/// This should be enough to hold a few messages in the inbox.
-pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
-
-enum Subscriber<T> {
-    /// Temporary/replaceable value, and will never be used. Only here so we can have a
-    /// way to convert from an Unsubscribed to a Subscribed subscription.
-    Unknown,
-    /// A subscribed channel where the subscriber has a handle to the receiver.
-    Subscribed(mpsc::Sender<T>),
-    /// An unsubscribed channel where there's potentially messages that have yet to be sent.
-    Unsubscribed(mpsc::Sender<T>, mpsc::Receiver<T>),
-}
-
-impl<T> Subscriber<T> {
-    pub fn subscribed() -> (Self, mpsc::Receiver<T>) {
-        let (tx, rx) = mpsc::channel(MAX_MESSAGE_SUB_CHANNEL_SIZE);
-        (Self::Subscribed(tx), rx)
-    }
-
-    pub fn unsubscribed() -> Self {
-        let (tx, rx) = mpsc::channel(MAX_MESSAGE_SUB_CHANNEL_SIZE);
-        Self::Unsubscribed(tx, rx)
-    }
-
-    /// Convert this subscriber into a subscribed one, returning the receiver.
-    /// If the subscriber is already subscribed, it overrides the existing subscription.
-    pub fn subscribe(&mut self) -> mpsc::Receiver<T> {
-        let sub = std::mem::replace(self, Self::Unknown);
-        let (sub, rx) = match sub {
-            Self::Subscribed(_) | Self::Unknown => Self::subscribed(),
-            Self::Unsubscribed(tx, rx) => (Self::Subscribed(tx), rx),
-        };
-        *self = sub;
-        rx
-    }
-
-    /// Unsubscribe from the subscriber, converting it into an unsubscribed one.
-    pub fn unsubscribe(&mut self) {
-        if matches!(self, Self::Subscribed(_) | Self::Unknown) {
-            *self = Self::unsubscribed();
-        }
-    }
-
-    pub async fn send(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
-        match self {
-            Self::Subscribed(tx) => tx.send(msg).await,
-            Self::Unsubscribed(tx, _) => tx.send(msg).await,
-            Self::Unknown => Ok(()),
-        }
-    }
-}
-
-impl<T> Default for Subscriber<T> {
-    fn default() -> Self {
-        Self::unsubscribed()
-    }
-}
+pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
 
 pub struct MessageInbox {
     /// encrypted messages that are pending to be decrypted. These are messages that we received
@@ -112,8 +54,11 @@ pub struct MessageInbox {
     /// Incoming messages that are pending to be processed. These are encrypted and signed.
     inbox_rx: mpsc::Receiver<Ciphered>,
 
-    generating: VecDeque<GeneratingMessage>,
-    resharing: HashMap<Epoch, VecDeque<ResharingMessage>>,
+    /// Subscription requests from MessageChannel
+    subscribe_rx: mpsc::Receiver<SubscribeRequest>,
+
+    generating: Subscriber<GeneratingMessage>,
+    resharing: Subscriber<ResharingMessage>,
     triple: HashMap<TripleId, Subscriber<TripleMessage>>,
     triple_init: Subscriber<(TripleId, Participant, PositAction)>,
     presignature: HashMap<PresignatureId, Subscriber<PresignatureMessage>>,
@@ -126,14 +71,16 @@ impl MessageInbox {
     pub fn new(
         inbox_rx: mpsc::Receiver<Ciphered>,
         filter_rx: mpsc::Receiver<(Protocols, u64)>,
+        subscribe_rx: mpsc::Receiver<SubscribeRequest>,
     ) -> Self {
         Self {
             try_decrypt: VecDeque::new(),
             idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
             filter: MessageFilter::new(filter_rx),
             inbox_rx,
-            generating: VecDeque::new(),
-            resharing: HashMap::new(),
+            subscribe_rx,
+            generating: Subscriber::unsubscribed(),
+            resharing: Subscriber::unsubscribed(),
             triple: HashMap::new(),
             triple_init: Subscriber::unsubscribed(),
             presignature: HashMap::new(),
@@ -165,12 +112,12 @@ impl MessageInbox {
                         .await;
                 }
             },
-            Message::Generating(message) => self.generating.push_back(message),
-            Message::Resharing(message) => self
-                .resharing
-                .entry(message.epoch)
-                .or_default()
-                .push_back(message),
+            Message::Generating(message) => {
+                let _ = self.generating.send(message).await;
+            }
+            Message::Resharing(message) => {
+                let _ = self.resharing.send(message).await;
+            }
             Message::Triple(message) => {
                 // NOTE: not logging the error because this is simply just channel closure.
                 // The error message should be reported on the generator side.
@@ -209,26 +156,6 @@ impl MessageInbox {
     fn expire(&mut self, timeout: Duration) {
         self.try_decrypt
             .retain(|(_, timestamp)| timestamp.elapsed() < timeout);
-    }
-
-    fn recv_updates(&mut self) {
-        self.filter.recv_updates();
-        loop {
-            let encrypted = match self.inbox_rx.try_recv() {
-                Ok(msg) => msg,
-                Err(TryRecvError::Empty) => {
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    tracing::error!(
-                        "inbox: communication disconnected, no more messages will be received"
-                    );
-                    break;
-                }
-            };
-
-            self.try_decrypt.push_back((encrypted, Instant::now()));
-        }
     }
 
     fn decrypt(
@@ -277,45 +204,11 @@ impl MessageInbox {
         messages
     }
 
-    pub fn filter_internal(&mut self) {
-        // NOTE: this might cause some warnings to pop up such as:
-        // "trying to unsub from an unknown triple subscription".
-        // This is fine since the filter made it here first before the
-        // subscription gets removed on TripleGenerator drop.
-        self.triple
-            .retain(|id, _| !self.filter.contains_id(*id, Protocols::Triple));
-        self.presignature
-            .retain(|id, _| !self.filter.contains_id(*id, Protocols::Presignature));
-        self.signature
-            .retain(|id, _| !self.filter.contains_id(id.id(), Protocols::Signature));
-    }
-
-    async fn recv(&mut self, messages: Vec<Message>) {
+    /// Publish messages to subscribers
+    async fn publish(&mut self, messages: Vec<Message>) {
         for message in messages {
             self.send(message).await;
         }
-    }
-
-    pub async fn update(
-        &mut self,
-        expiration: Duration,
-        cipher_sk: &hpke::SecretKey,
-        participants: &ParticipantMap,
-    ) {
-        self.expire(expiration);
-        self.recv_updates();
-        let messages = self.decrypt(cipher_sk, participants);
-        let messages = self.filter(messages);
-        self.recv(messages).await;
-    }
-
-    pub fn clear(&mut self) {
-        self.try_decrypt.clear();
-        self.generating.clear();
-        self.resharing.clear();
-        self.triple.clear();
-        self.presignature.clear();
-        self.signature.clear();
     }
 
     pub fn clear_filters(&mut self) {
@@ -325,41 +218,125 @@ impl MessageInbox {
     pub fn clear_idempotent(&mut self) {
         self.idempotent.clear();
     }
-}
 
-struct MessageExecutor {
-    inbox: Arc<RwLock<MessageInbox>>,
-    outbox: MessageOutbox,
+    pub fn process_subscribe(&mut self, sub: SubscribeRequest) {
+        match sub.id {
+            SubscribeId::Generating => match sub.action {
+                SubscribeRequestAction::Subscribe(resp) => {
+                    let rx = self.generating.subscribe();
+                    let _ = resp.send(SubscribeResponse::Generating(rx));
+                }
+                SubscribeRequestAction::Unsubscribe => {
+                    tracing::warn!("unsubscribing from generation not supported");
+                }
+            },
+            SubscribeId::Resharing => match sub.action {
+                SubscribeRequestAction::Subscribe(resp) => {
+                    let rx = self.resharing.subscribe();
+                    let _ = resp.send(SubscribeResponse::Resharing(rx));
+                }
+                SubscribeRequestAction::Unsubscribe => {
+                    tracing::warn!("unsubscribing from resharing not supported");
+                }
+            },
+            SubscribeId::Triple(id) => match sub.action {
+                SubscribeRequestAction::Subscribe(resp) => {
+                    let rx = self.triple.entry(id).or_default().subscribe();
+                    let _ = resp.send(SubscribeResponse::Triple(rx));
+                }
+                SubscribeRequestAction::Unsubscribe => {
+                    if self.triple.remove(&id).is_none() {
+                        tracing::warn!(id, "trying to unsub from an unknown triple subscription");
+                    }
+                }
+            },
+            SubscribeId::Presignature(id) => match sub.action {
+                SubscribeRequestAction::Subscribe(resp) => {
+                    let rx = self.presignature.entry(id).or_default().subscribe();
+                    let _ = resp.send(SubscribeResponse::Presignature(rx));
+                }
+                SubscribeRequestAction::Unsubscribe => {
+                    if self.presignature.remove(&id).is_none() {
+                        tracing::warn!(
+                            id,
+                            "trying to unsub from an unknown presignature subscription"
+                        );
+                    }
+                }
+            },
+            SubscribeId::Signature(sign_id, presignature_id) => match sub.action {
+                SubscribeRequestAction::Subscribe(resp) => {
+                    let rx = self
+                        .signature
+                        .entry((sign_id, presignature_id))
+                        .or_default()
+                        .subscribe();
+                    let _ = resp.send(SubscribeResponse::Signature(rx));
+                }
+                SubscribeRequestAction::Unsubscribe => {
+                    if self.signature.remove(&(sign_id, presignature_id)).is_none() {
+                        tracing::warn!(
+                            ?sign_id,
+                            presignature_id,
+                            "trying to unsub from an unknown signature subscription"
+                        );
+                    }
+                }
+            },
+            SubscribeId::Triples => match sub.action {
+                SubscribeRequestAction::Subscribe(resp) => {
+                    let rx = self.triple_init.subscribe();
+                    let _ = resp.send(SubscribeResponse::TriplePosit(rx));
+                }
+                SubscribeRequestAction::Unsubscribe => {
+                    self.triple_init.unsubscribe();
+                }
+            },
+            SubscribeId::Presignatures => match sub.action {
+                SubscribeRequestAction::Subscribe(resp) => {
+                    let rx = self.presignature_init.subscribe();
+                    let _ = resp.send(SubscribeResponse::PresignaturePosit(rx));
+                }
+                SubscribeRequestAction::Unsubscribe => {
+                    self.presignature_init.unsubscribe();
+                }
+            },
+            SubscribeId::Signatures => match sub.action {
+                SubscribeRequestAction::Subscribe(resp) => {
+                    let rx = self.signature_init.subscribe();
+                    let _ = resp.send(SubscribeResponse::SignaturePosit(rx));
+                }
+                SubscribeRequestAction::Unsubscribe => {
+                    self.signature_init.unsubscribe();
+                }
+            },
+        }
+    }
 
-    config: watch::Receiver<Config>,
-    contract: ContractStateWatcher,
-    mesh_state: watch::Receiver<MeshState>,
-}
-
-impl MessageExecutor {
-    pub async fn execute(mut self) {
-        let mut interval = tokio::time::interval(Duration::from_millis(10));
+    pub async fn run(mut self, config: watch::Receiver<Config>, contract: ContractStateWatcher) {
         loop {
-            interval.tick().await;
-            let config = self.config.borrow().clone();
+            tokio::select! {
+                _ = self.filter.update() => {}
+                Some(sub) = self.subscribe_rx.recv() => {
+                    self.process_subscribe(sub);
+                }
+                Some(encrypted) = self.inbox_rx.recv() => {
+                    let config = config.borrow().clone();
+                    let expiration = Duration::from_millis(config.protocol.message_timeout);
+                    let participants = contract.participant_map().await;
+                    let cipher_sk = config.local.network.cipher_sk;
 
-            let participants = self.contract.participants().await;
-            {
-                let mut inbox = self.inbox.write().await;
-                let expiration = Duration::from_millis(config.protocol.message_timeout);
-                inbox
-                    .update(expiration, &config.local.network.cipher_sk, &participants)
-                    .await;
+                    self.expire(expiration);
+                    self.try_decrypt.push_back((encrypted, Instant::now()));
+                    let messages = self.decrypt(&cipher_sk, &participants);
+
+                    // update filter before fanning out messages.
+                    self.filter.try_update();
+
+                    let messages = self.filter(messages);
+                    self.publish(messages).await;
+                }
             }
-
-            let active = self.mesh_state.borrow().active.clone();
-            self.outbox.expire(&config.protocol);
-            self.outbox.recv_updates();
-            let compacted = self.outbox.compact();
-            let encrypted = self
-                .outbox
-                .encrypt(&config.local.network.sign_sk, &active, compacted);
-            self.outbox.send(&active, encrypted).await;
         }
     }
 }
@@ -367,24 +344,28 @@ impl MessageExecutor {
 #[derive(Clone)]
 pub struct MessageChannel {
     outgoing: mpsc::Sender<SendMessage>,
-    inbox: Arc<RwLock<MessageInbox>>,
+    subscribe: mpsc::Sender<SubscribeRequest>,
     filter: mpsc::Sender<(Protocols, u64)>,
+    pub inbox: mpsc::Sender<Ciphered>,
 }
 
 impl MessageChannel {
-    pub fn new() -> (mpsc::Sender<Ciphered>, mpsc::Receiver<SendMessage>, Self) {
+    pub fn new() -> (MessageInbox, MessageOutbox, Self) {
         let (inbox_tx, inbox_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
         let (outbox_tx, outbox_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
         let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
+        let (subscribe_tx, subscribe_rx) = mpsc::channel(16384);
+        let inbox = MessageInbox::new(inbox_rx, filter_rx, subscribe_rx);
+        let outbox = MessageOutbox::new(outbox_rx);
 
-        let inbox = Arc::new(RwLock::new(MessageInbox::new(inbox_rx, filter_rx)));
         let channel = Self {
-            inbox,
+            inbox: inbox_tx,
             outgoing: outbox_tx,
+            subscribe: subscribe_tx,
             filter: filter_tx,
         };
 
-        (inbox_tx, outbox_rx, channel)
+        (inbox, outbox, channel)
     }
 
     pub async fn spawn(
@@ -392,25 +373,12 @@ impl MessageChannel {
         id: &AccountId,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
-        mesh_state: watch::Receiver<MeshState>,
-    ) -> (mpsc::Sender<Ciphered>, Self) {
-        let (inbox_tx, outbox_rx, channel) = Self::new();
-        let runner = MessageExecutor {
-            inbox: channel.inbox.clone(),
-            outbox: MessageOutbox::new(id, client, outbox_rx),
+    ) -> Self {
+        let (inbox, outbox, channel) = Self::new();
+        tokio::spawn(inbox.run(config.clone(), contract.clone()));
+        tokio::spawn(outbox.run(id.clone(), client, config, contract));
 
-            config,
-            contract,
-            mesh_state,
-        };
-        tokio::spawn(runner.execute());
-
-        (inbox_tx, channel)
-    }
-
-    /// Grab the inbox for all the messages we received from the network.
-    pub fn inbox(&self) -> &Arc<RwLock<MessageInbox>> {
-        &self.inbox
+        channel
     }
 
     /// Send a message to the participants in the network.
@@ -448,58 +416,128 @@ impl MessageChannel {
         self.filter(&(sign_id, presignature_id)).await;
     }
 
-    pub async fn subscribe_triple(&self, id: TripleId) -> mpsc::Receiver<TripleMessage> {
-        let mut inbox = self.inbox.write().await;
-        inbox.triple.entry(id).or_default().subscribe()
+    async fn subscribe(&self, id: SubscribeId) -> Option<SubscribeResponse> {
+        let (req, resp) = SubscribeRequest::subscribe(id);
+        if self.subscribe.send(req).await.is_err() {
+            return None;
+        };
+        let Ok(subscription) = resp.await else {
+            return None;
+        };
+        Some(subscription)
     }
 
-    pub async fn unsubscribe_triple(&self, id: TripleId) {
-        let mut inbox = self.inbox.write().await;
-        if inbox.triple.remove(&id).is_none() {
-            tracing::warn!(id, "trying to unsub from an unknown triple subscription");
+    pub async fn subscribe_triple(&self, id: TripleId) -> mpsc::Receiver<TripleMessage> {
+        let Some(subscription) = self.subscribe(SubscribeId::Triple(id)).await else {
+            tracing::warn!(id, "failed to subscribe for triple");
+            return mpsc::channel(1).1;
+        };
+        match subscription {
+            SubscribeResponse::Triple(rx) => rx,
+            _ => {
+                tracing::warn!(id, "received unexpected subscribe response for triple");
+                mpsc::channel(1).1
+            }
         }
     }
 
+    pub async fn unsubscribe_triple(&self, id: TripleId) {
+        if self
+            .subscribe
+            .send(SubscribeRequest::unsubscribe(SubscribeId::Triple(id)))
+            .await
+            .is_err()
+        {
+            tracing::warn!(id, "unable to send unsubscribe request for triple message");
+        };
+    }
+
+    /// Subscribe to the triple posit. It returns a dropped channel in the case that something
+    /// in the MessageInbox has gone wrong and unexpected, leading to the handling loop of whoever
+    /// has a handle to this newly created channel to just abort.
     pub async fn subscribe_triple_posit(
         &self,
     ) -> mpsc::Receiver<(TripleId, Participant, PositAction)> {
-        let mut inbox = self.inbox.write().await;
-        inbox.triple_init.subscribe()
+        let Some(subscription) = self.subscribe(SubscribeId::Triples).await else {
+            tracing::warn!("failed to subscribe for triple posits");
+            return mpsc::channel(1).1;
+        };
+        match subscription {
+            SubscribeResponse::TriplePosit(rx) => rx,
+            _ => {
+                tracing::warn!("received unexpected subscribe response for triple posits");
+                mpsc::channel(1).1
+            }
+        }
     }
 
     pub async fn unsubscribe_triple_posit(self) {
-        let mut inbox = self.inbox.write().await;
-        inbox.triple_init.unsubscribe();
+        if self
+            .subscribe
+            .send(SubscribeRequest::unsubscribe(SubscribeId::Triples))
+            .await
+            .is_err()
+        {
+            tracing::warn!("unable to send unsubscribe request for triple posits");
+        };
     }
 
     pub async fn subscribe_presignature(
         &self,
         id: PresignatureId,
     ) -> mpsc::Receiver<PresignatureMessage> {
-        let mut inbox = self.inbox.write().await;
-        inbox.presignature.entry(id).or_default().subscribe()
+        let Some(subscription) = self.subscribe(SubscribeId::Presignature(id)).await else {
+            tracing::warn!(id, "failed to subscribe for presignature");
+            return mpsc::channel(1).1;
+        };
+        match subscription {
+            SubscribeResponse::Presignature(rx) => rx,
+            _ => {
+                tracing::warn!(
+                    id,
+                    "received unexpected subscribe response for presignature"
+                );
+                mpsc::channel(1).1
+            }
+        }
     }
 
     pub async fn unsubscribe_presignature(&self, id: PresignatureId) {
-        let mut inbox = self.inbox.write().await;
-        if inbox.presignature.remove(&id).is_none() {
-            tracing::warn!(
-                id,
-                "trying to unsub from an unknown presignature subscription"
-            );
-        }
+        if self
+            .subscribe
+            .send(SubscribeRequest::unsubscribe(SubscribeId::Presignature(id)))
+            .await
+            .is_err()
+        {
+            tracing::warn!("unable to send unsubscribe request for presignature");
+        };
     }
 
     pub async fn subscribe_presignature_posit(
         &self,
     ) -> mpsc::Receiver<(FullPresignatureId, Participant, PositAction)> {
-        let mut inbox = self.inbox.write().await;
-        inbox.presignature_init.subscribe()
+        let Some(subscription) = self.subscribe(SubscribeId::Presignatures).await else {
+            tracing::warn!("failed to subscribe for presignature posits");
+            return mpsc::channel(1).1;
+        };
+        match subscription {
+            SubscribeResponse::PresignaturePosit(rx) => rx,
+            _ => {
+                tracing::warn!("received unexpected subscribe response for presignature posits");
+                mpsc::channel(1).1
+            }
+        }
     }
 
     pub async fn unsubscribe_presignature_posit(self) {
-        let mut inbox = self.inbox.write().await;
-        inbox.presignature_init.unsubscribe();
+        if self
+            .subscribe
+            .send(SubscribeRequest::unsubscribe(SubscribeId::Presignatures))
+            .await
+            .is_err()
+        {
+            tracing::warn!("unable to send unsubscribe request for presignature posits");
+        };
     }
 
     pub async fn subscribe_signature(
@@ -507,131 +545,97 @@ impl MessageChannel {
         sign_id: SignId,
         presignature_id: PresignatureId,
     ) -> mpsc::Receiver<SignatureMessage> {
-        let mut inbox = self.inbox.write().await;
-        inbox
-            .signature
-            .entry((sign_id, presignature_id))
-            .or_default()
-            .subscribe()
+        let Some(subscription) = self
+            .subscribe(SubscribeId::Signature(sign_id, presignature_id))
+            .await
+        else {
+            tracing::warn!(
+                ?sign_id,
+                presignature_id,
+                "failed to subscribe for signature"
+            );
+            return mpsc::channel(1).1;
+        };
+        match subscription {
+            SubscribeResponse::Signature(rx) => rx,
+            _ => {
+                tracing::warn!(
+                    ?sign_id,
+                    presignature_id,
+                    "received unexpected subscribe response for signature"
+                );
+                mpsc::channel(1).1
+            }
+        }
     }
 
     pub async fn unsubscribe_signature(&self, sign_id: SignId, presignature_id: PresignatureId) {
-        let mut inbox = self.inbox.write().await;
-        if inbox
-            .signature
-            .remove(&(sign_id, presignature_id))
-            .is_none()
+        if self
+            .subscribe
+            .send(SubscribeRequest::unsubscribe(SubscribeId::Signature(
+                sign_id,
+                presignature_id,
+            )))
+            .await
+            .is_err()
         {
             tracing::warn!(
                 ?sign_id,
                 presignature_id,
-                "trying to unsub from an unknown signature subscription"
+                "unable to send unsubscribe request for signature"
             );
-        }
+        };
     }
 
     pub async fn subscribe_signature_posit(
         &self,
     ) -> mpsc::Receiver<(SignId, PresignatureId, Participant, PositAction)> {
-        let mut inbox = self.inbox.write().await;
-        inbox.signature_init.subscribe()
+        let Some(subscription) = self.subscribe(SubscribeId::Signatures).await else {
+            tracing::warn!("failed to subscribe for signature posit");
+            return mpsc::channel(1).1;
+        };
+
+        match subscription {
+            SubscribeResponse::SignaturePosit(rx) => rx,
+            _ => {
+                tracing::warn!("received unexpected subscribe response for signature posit");
+                mpsc::channel(1).1
+            }
+        }
     }
 
     pub async fn unsubscribe_signature_posit(self) {
-        let mut inbox = self.inbox.write().await;
-        inbox.signature_init.unsubscribe();
-    }
-}
-
-#[async_trait]
-pub trait MessageReceiver {
-    async fn recv(
-        &mut self,
-        channel: &MessageChannel,
-        cfg: Config,
-        mesh_state: MeshState,
-    ) -> Result<(), MessageError>;
-}
-
-#[async_trait]
-impl MessageReceiver for GeneratingState {
-    async fn recv(
-        &mut self,
-        channel: &MessageChannel,
-        _cfg: Config,
-        _mesh_state: MeshState,
-    ) -> Result<(), MessageError> {
-        let mut inbox = channel.inbox().write().await;
-        if !inbox.generating.is_empty() {
-            let message_counts: HashMap<Participant, usize> =
-                inbox
-                    .generating
-                    .iter()
-                    .fold(HashMap::new(), |mut acc, msg| {
-                        *acc.entry(msg.from).or_default() += 1;
-                        acc
-                    });
-            tracing::info!(?message_counts, "generating: handling new messages");
-        }
-        while let Some(msg) = inbox.generating.pop_front() {
-            self.protocol.message(msg.from, msg.data);
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl MessageReceiver for ResharingState {
-    async fn recv(
-        &mut self,
-        channel: &MessageChannel,
-        _cfg: Config,
-        _mesh_state: MeshState,
-    ) -> Result<(), MessageError> {
-        let mut inbox = channel.inbox().write().await;
-        if !inbox.resharing.is_empty() {
-            let message_counts: HashMap<(Participant, Epoch), usize> =
-                inbox
-                    .resharing
-                    .iter()
-                    .fold(HashMap::new(), |mut acc, (epoch, messages)| {
-                        for msg in messages {
-                            *acc.entry((msg.from, *epoch)).or_default() += 1;
-                        }
-                        acc
-                    });
-
-            tracing::info!(?message_counts, "resharing: handling new messages");
-        }
-        let q = inbox.resharing.entry(self.old_epoch).or_default();
-        while let Some(msg) = q.pop_front() {
-            self.protocol.message(msg.from, msg.data);
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl MessageReceiver for NodeState {
-    async fn recv(
-        &mut self,
-        channel: &MessageChannel,
-        cfg: Config,
-        mesh_state: MeshState,
-    ) -> Result<(), MessageError> {
+        if self
+            .subscribe
+            .send(SubscribeRequest::unsubscribe(SubscribeId::Signatures))
+            .await
+            .is_err()
         {
-            // TODO: remove this after adding subscription model for tasks
-            // This is a temporary fix to ensure that the filter is updated before processing messages,
-            // such that we avoid the race condition where a message is filtered out before it is processed.
-            let mut inbox = channel.inbox().write().await;
-            inbox.filter.recv_updates();
-            inbox.filter_internal();
-        }
+            tracing::warn!("unable to send unsubscribe request for signature posit");
+        };
+    }
 
-        match self {
-            NodeState::Generating(state) => state.recv(channel, cfg, mesh_state).await,
-            NodeState::Resharing(state) => state.recv(channel, cfg, mesh_state).await,
-            _ => Ok(()),
+    pub async fn subscribe_generation(&self) -> mpsc::Receiver<GeneratingMessage> {
+        let Some(subscription) = self.subscribe(SubscribeId::Generating).await else {
+            panic!("failed to subscribe for generation");
+        };
+        match subscription {
+            SubscribeResponse::Generating(rx) => rx,
+            _ => {
+                panic!("received unexpected subscribe response for generation");
+            }
+        }
+    }
+
+    pub async fn subscribe_resharing(&self) -> mpsc::Receiver<ResharingMessage> {
+        let Some(subscription) = self.subscribe(SubscribeId::Resharing).await else {
+            panic!("failed to subscribe for resharing");
+        };
+        match subscription {
+            SubscribeResponse::Resharing(rx) => rx,
+            _ => {
+                panic!("received unexpected subscribe response for resharing");
+            }
         }
     }
 }
@@ -719,15 +723,13 @@ type SendMessage = (Message, (FromParticipant, ToParticipant, Instant));
 
 pub struct Partition {
     messages: Vec<Message>,
-    timestamps: Vec<Instant>,
+    /// The earliest timestamp from all the messages.
+    timestamp: Instant,
 }
 
 /// Message outbox is the set of messages that are pending to be sent to other nodes.
 /// These messages will be signed and encrypted before being sent out.
 pub struct MessageOutbox {
-    account_id: AccountId,
-    client: NodeClient,
-
     /// The messages that are pending to be sent to other nodes.
     outbox_rx: mpsc::Receiver<SendMessage>,
 
@@ -740,63 +742,10 @@ pub struct MessageOutbox {
 }
 
 impl MessageOutbox {
-    pub fn new(id: &AccountId, client: NodeClient, outbox_rx: mpsc::Receiver<SendMessage>) -> Self {
+    pub fn new(outbox_rx: mpsc::Receiver<SendMessage>) -> Self {
         Self {
-            client,
-            account_id: id.clone(),
             outbox_rx,
             messages: HashMap::new(),
-        }
-    }
-
-    pub fn recv_updates(&mut self) {
-        let mut message_count: i64 = 0;
-        loop {
-            let (msg, (from, to, timestamp)) = match self.outbox_rx.try_recv() {
-                Ok(msg) => msg,
-                Err(TryRecvError::Empty) => {
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    tracing::error!(
-                        "outbox: channel disconnected, no more messages will be received"
-                    );
-                    break;
-                }
-            };
-            // add it to the outbox and sort it by from and to participant
-            let entry = self.messages.entry((from, to)).or_default();
-            entry.push((msg, timestamp));
-            message_count += 1;
-        }
-        crate::metrics::MESSAGE_QUEUE_SIZE
-            .with_label_values(&[self.account_id.as_str()])
-            .set(message_count);
-    }
-
-    /// Expire messages that have been in the outbox for too long.
-    pub fn expire(&mut self, cfg: &ProtocolConfig) {
-        // timeout errors are very common for a message expiring, so map them to counts here:
-        let mut timeouts = HashMap::<String, usize>::new();
-        for ((_from, to), messages) in self.messages.iter_mut() {
-            messages.retain(|(msg, timestamp)| {
-                if timestamp.elapsed() > timeout(msg, cfg) {
-                    let counter = timeouts
-                        .entry(format!(
-                            "timeout message={} for node={to:?}",
-                            msg.typename(),
-                        ))
-                        .or_insert(0);
-                    *counter += 1;
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-
-        if !timeouts.is_empty() {
-            tracing::warn!(?timeouts, "messages expired");
         }
     }
 
@@ -814,24 +763,21 @@ impl MessageOutbox {
     pub fn encrypt(
         &mut self,
         sign_sk: &near_crypto::SecretKey,
-        active: &Participants,
+        participants: &Participants,
         compacted: HashMap<MessageRoute, Vec<Partition>>,
-    ) -> HashMap<MessageRoute, Vec<(Ciphered, Partition)>> {
+    ) -> HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>> {
         // failed for when a participant is not active, so keep this message for next round.
-        let mut retry = VecDeque::new();
         let mut errors = Vec::new();
-        let mut not_active = HashSet::new();
 
-        let mut encrypted_with_original = HashMap::new();
+        let mut encrypted = HashMap::new();
         for ((from, to), compacted) in compacted {
-            let Some(info) = active.get(&to) else {
-                not_active.insert(to);
-                retry.push_back(((from, to), compacted));
+            let Some(info) = participants.get(&to) else {
+                tracing::warn!(?to, "outbox: participant not found in all participants");
                 continue;
             };
 
             for partition in compacted {
-                let encrypted = match SignedMessage::encrypt(
+                let message = match SignedMessage::encrypt(
                     &partition.messages,
                     from,
                     sign_sk,
@@ -844,10 +790,11 @@ impl MessageOutbox {
                     }
                 };
 
-                encrypted_with_original
-                    .entry((from, to))
-                    .or_insert_with(Vec::new)
-                    .push((encrypted, partition));
+                encrypted.entry((from, to)).or_insert_with(Vec::new).push((
+                    message,
+                    partition.timestamp,
+                    partition.messages.len(),
+                ));
             }
         }
 
@@ -855,57 +802,39 @@ impl MessageOutbox {
             tracing::warn!(?errors, "outbox: encrypting messages failed on some");
         }
 
-        if !not_active.is_empty() {
-            tracing::warn!(
-                ?not_active,
-                "some participants are not active even though mesh says they are"
-            );
-        }
-
-        // Add back the failed attempts for next time.
-        for (route, partitions) in retry {
-            let entry = self.messages.entry(route).or_default();
-            for partition in partitions {
-                entry.extend(
-                    partition
-                        .messages
-                        .into_iter()
-                        .zip(partition.timestamps.into_iter()),
-                );
-            }
-        }
-
-        encrypted_with_original
+        encrypted
     }
 
     /// Send the encrypted messages to other participants.
     pub async fn send(
         &mut self,
-        active: &Participants,
-        encrypted: HashMap<MessageRoute, Vec<(Ciphered, Partition)>>,
+        account_id: &AccountId,
+        client: &NodeClient,
+        participants: &Participants,
+        cfg: &ProtocolConfig,
+        encrypted: HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>>,
     ) {
         let start = Instant::now();
-        let mut send_tasks = Vec::new();
+        let timeout = Duration::from_millis(cfg.message_timeout);
 
         let msg_send_delay_metric =
-            crate::metrics::MSG_CLIENT_SEND_DELAY.with_label_values(&[self.account_id.as_str()]);
-        let num_send_encrypted_failure_metric = crate::metrics::NUM_SEND_ENCRYPTED_FAILURE
-            .with_label_values(&[self.account_id.as_str()]);
+            crate::metrics::MSG_CLIENT_SEND_DELAY.with_label_values(&[account_id.as_str()]);
+        let num_send_encrypted_failure_metric =
+            crate::metrics::NUM_SEND_ENCRYPTED_FAILURE.with_label_values(&[account_id.as_str()]);
         let send_encrypted_latency_metric =
-            crate::metrics::SEND_ENCRYPTED_LATENCY.with_label_values(&[self.account_id.as_str()]);
-        let failed_send_encrypted_latency_metric = crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY
-            .with_label_values(&[self.account_id.as_str()]);
+            crate::metrics::SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
+        let failed_send_encrypted_latency_metric =
+            crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
 
-        for ((from, to), encrypted) in encrypted {
-            for (encrypted_partition, partition) in encrypted {
+        for ((_from, to), encrypted) in encrypted {
+            for (encrypted_partition, timestamp, message_len) in encrypted {
                 // guaranteed to unwrap due to our previous loop check:
-                let info = active.get(&to).unwrap();
-                let account_id = info.account_id.clone();
+                let info = participants.get(&to).unwrap();
                 let url = info.url.clone();
 
                 crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
                     .with_label_values(&[account_id.as_str()])
-                    .inc_by(partition.messages.len() as f64);
+                    .inc_by(message_len as f64);
 
                 let msg_send_delay_metric = msg_send_delay_metric.clone();
                 let num_send_encrypted_failure_metric = num_send_encrypted_failure_metric.clone();
@@ -913,68 +842,84 @@ impl MessageOutbox {
                 let failed_send_encrypted_latency_metric =
                     failed_send_encrypted_latency_metric.clone();
 
-                let client = self.client.clone();
-                send_tasks.push(tokio::spawn(async move {
-                    let start = Instant::now();
-                    for msg_inbox_time in partition.timestamps.iter() {
-                        msg_send_delay_metric.observe((start - *msg_inbox_time).as_millis() as f64);
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let instant = Instant::now();
+                    msg_send_delay_metric.observe((instant - timestamp).as_millis() as f64);
+                    let payload = &[&encrypted_partition];
+                    let timeout = tokio::time::sleep(timeout);
+                    tokio::pin!(timeout);
+
+                    loop {
+                        let attempt_timestamp = Instant::now();
+                        tokio::select! {
+                            () = &mut timeout => {
+                                tracing::warn!(
+                                    ?to, ?url, elapsed = ?instant.elapsed(),
+                                    "outbox: failed to send messages, timeout reached",
+                                );
+                                break;
+                            }
+                            result = client.msg(&url, payload) => {
+                                let Err(err) = result else {
+                                    send_encrypted_latency_metric.observe(start.elapsed().as_millis() as f64);
+                                    tracing::debug!(?to, ?url, elapsed = ?instant.elapsed(), "finished sending messages");
+                                    break;
+                                };
+
+                                tracing::warn!(
+                                    ?to, ?url, elapsed = ?attempt_timestamp.elapsed(), ?err,
+                                    "outbox: failed to send messages, retrying...",
+                                );
+                                num_send_encrypted_failure_metric.inc_by(message_len as f64);
+                                failed_send_encrypted_latency_metric
+                                    .observe(attempt_timestamp.elapsed().as_millis() as f64);
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
-                    if let Err(err) = client.msg(url, &[&encrypted_partition]).await {
-                        num_send_encrypted_failure_metric.inc_by(partition.messages.len() as f64);
-                        failed_send_encrypted_latency_metric
-                            .observe(start.elapsed().as_millis() as f64);
-                        Err(((from, to), partition, err))
-                    } else {
-                        send_encrypted_latency_metric.observe(start.elapsed().as_millis() as f64);
-                        Ok(partition.messages.len())
-                    }
-                }));
+                });
             }
         }
+    }
 
-        let mut errors = Vec::new();
-        let mut retry = VecDeque::new();
-        let mut uncompacted = 0;
-        let mut compacted = 0;
-        for task in send_tasks {
-            match task.await {
-                Ok(Ok(msgs_len)) => {
-                    uncompacted += msgs_len;
-                    compacted += 1;
+    /// Publish messages to other nodes
+    async fn publish(
+        &mut self,
+        id: &AccountId,
+        client: &NodeClient,
+        config: &watch::Receiver<Config>,
+        contract: &ContractStateWatcher,
+    ) {
+        let Some(participants) = contract.participants() else {
+            return;
+        };
+        let config = config.borrow().clone();
+        let compacted = self.compact();
+        let encrypted = self.encrypt(&config.local.network.sign_sk, &participants, compacted);
+        self.send(id, client, &participants, &config.protocol, encrypted)
+            .await;
+    }
+
+    pub async fn run(
+        mut self,
+        id: AccountId,
+        client: NodeClient,
+        config: watch::Receiver<Config>,
+        contract: ContractStateWatcher,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            tokio::select! {
+                Some((msg, (from, to, timestamp))) = self.outbox_rx.recv() => {
+                    // add it to the outbox and sort it by from and to participant
+                    let entry = self.messages.entry((from, to)).or_default();
+                    entry.push((msg, timestamp));
                 }
-                Ok(Err((route, partition, err))) => {
-                    // since we failed, put back all the messages related to this
-                    retry.push_back((route, partition));
-                    errors.push(err);
-                }
-                Err(err) => {
-                    tracing::warn!(?err, "outbox: task failed to send message");
+                _ = interval.tick() => {
+                    self.publish(&id, &client, &config, &contract).await;
                 }
             }
-        }
-
-        if uncompacted > 0 {
-            tracing::debug!(
-                uncompacted,
-                compacted,
-                "sent messages in {:?}",
-                start.elapsed()
-            );
-        }
-
-        if !errors.is_empty() {
-            tracing::warn!(?errors, "outbox: failed sending encrypted messages");
-        }
-
-        // Add back the failed attempts for next time.
-        for (route, partition) in retry {
-            let entry = self.messages.entry(route).or_default();
-            entry.extend(
-                partition
-                    .messages
-                    .into_iter()
-                    .zip(partition.timestamps.into_iter()),
-            );
         }
     }
 }
@@ -984,8 +929,8 @@ impl MessageOutbox {
 fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Vec<Partition> {
     let mut partitions = Vec::new();
     let mut current_messages = Vec::new();
-    let mut current_timestamps = Vec::new();
     let mut current_size: usize = 0;
+    let mut earliest = Instant::now();
 
     for (msg, timestamp) in outgoing {
         if matches!(msg, Message::Unknown(_)) {
@@ -997,17 +942,17 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
             continue;
         }
 
+        earliest = earliest.min(timestamp);
         let bytesize = msg.size();
         if current_size + bytesize > 256 * 1024 {
             // If adding this byte vector exceeds 256kb, start a new partition
             partitions.push(Partition {
                 messages: std::mem::take(&mut current_messages),
-                timestamps: std::mem::take(&mut current_timestamps),
+                timestamp: earliest,
             });
             current_size = 0;
         }
         current_messages.push(msg);
-        current_timestamps.push(timestamp);
         current_size += bytesize;
     }
 
@@ -1015,25 +960,11 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
         // Add the last partition
         partitions.push(Partition {
             messages: current_messages,
-            timestamps: current_timestamps,
+            timestamp: earliest,
         });
     }
 
     partitions
-}
-
-fn timeout(msg: &Message, cfg: &ProtocolConfig) -> Duration {
-    match msg {
-        Message::Posit(_) => Duration::from_millis(cfg.message_timeout),
-        Message::Generating(_) => Duration::from_millis(cfg.message_timeout),
-        Message::Resharing(_) => Duration::from_millis(cfg.message_timeout),
-        Message::Triple(_) => Duration::from_millis(cfg.triple.generation_timeout),
-        Message::Presignature(_) => Duration::from_millis(cfg.presignature.generation_timeout),
-        Message::Signature(_) => Duration::from_millis(cfg.signature.generation_timeout),
-
-        // unknown message cannot be handled at all, so we just expire them immediately.
-        Message::Unknown(_) => Duration::from_millis(1),
-    }
 }
 
 fn cbor_to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, MessageError> {
@@ -1071,10 +1002,15 @@ mod tests {
     use mpc_primitives::SignId;
     use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-    use crate::protocol::{
-        contract::primitives::{ParticipantMap, Participants},
-        message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
-        ParticipantInfo,
+    use crate::{
+        config::{Config, LocalConfig, NetworkConfig, OverrideConfig},
+        protocol::{
+            contract::primitives::{ParticipantMap, Participants},
+            message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
+            ParticipantInfo,
+        },
+        rpc::ContractStateWatcher,
+        util::NearPublicKeyExt,
     };
 
     use super::MessageChannel;
@@ -1339,12 +1275,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_inbox() {
-        let expiration = Duration::from_secs(300);
         let epoch = 299;
         let from = Participant::from(0);
         let (cipher_sk, cipher_pk) = hpke::generate();
+        let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
+        let node_id = "node0".parse().unwrap();
         let participants = {
             let mut map = Participants::default();
             for i in 0..2 {
@@ -1359,9 +1296,23 @@ mod tests {
                     },
                 );
             }
-            ParticipantMap::One(map)
+            map
         };
-        let (inbox_tx, _outbox_rx, channel) = MessageChannel::new();
+        let (_config_tx, config_rx) = Config::channel(LocalConfig {
+            over: OverrideConfig::default(),
+            network: NetworkConfig {
+                sign_sk: sign_sk.clone(),
+                cipher_sk,
+            },
+        });
+        let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
+            &node_id,
+            root_sk.public_key().into_affine_point(),
+            2,
+            participants,
+        );
+        let (inbox, _outbox, channel) = MessageChannel::new();
+        let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
 
         // Case 1:
         // Check that the inbox received our messages correctly:
@@ -1390,11 +1341,24 @@ mod tests {
                 }),
             ];
             let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-            inbox_tx.try_send(encrypted).unwrap();
-            let mut inbox = channel.inbox().try_write().unwrap();
-            inbox.update(expiration, &cipher_sk, &participants).await;
-            assert_eq!(inbox.triple.len(), 3, "initial triple messages not found");
-            inbox.clear();
+            channel.inbox.send(encrypted).await.unwrap();
+
+            let mut recv1 = channel.subscribe_triple(1).await;
+            let mut recv2 = channel.subscribe_triple(2).await;
+            let mut recv3 = channel.subscribe_triple(3).await;
+
+            let (m1, m2, m3) = match tokio::join!(recv1.recv(), recv2.recv(), recv3.recv()) {
+                (Some(m1), Some(m2), Some(m3)) => (m1, m2, m3),
+                _ => panic!("failed to join on inbox"),
+            };
+
+            assert_eq!(m1.id, 1);
+            assert_eq!(m2.id, 2);
+            assert_eq!(m3.id, 3);
+
+            channel.unsubscribe_triple(1).await;
+            channel.unsubscribe_triple(2).await;
+            channel.unsubscribe_triple(3).await;
         }
 
         // Case 2:
@@ -1408,7 +1372,7 @@ mod tests {
                 data: vec![129u8; 1024],
                 timestamp: 1,
             }),
-            Message::Triple(crate::protocol::message::TripleMessage {
+            Message::Triple(TripleMessage {
                 id: filter_id,
                 epoch,
                 from,
@@ -1425,34 +1389,60 @@ mod tests {
         ];
         {
             let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+
+            let mut recv1 = channel.subscribe_triple(1).await;
+            let mut recv2 = channel.subscribe_triple(filter_id).await;
+            let mut recv3 = channel.subscribe_triple(3).await;
+
             channel.filter_triple(filter_id).await;
-            inbox_tx.try_send(encrypted).unwrap();
-            let mut inbox = channel.inbox().try_write().unwrap();
-            inbox.update(expiration, &cipher_sk, &participants).await;
-            assert_eq!(
-                inbox.triple.len(),
-                2,
-                "inbox triple messages was not successfully filtered"
-            );
-            // do not clear messages, but clear the filters, have the next case check idempotentcy
-            inbox.clear_filters();
+            channel.inbox.send(encrypted).await.unwrap();
+
+            let (m1, m3) = match tokio::join!(recv1.recv(), recv3.recv()) {
+                (Some(m1), Some(m3)) => (m1, m3),
+                _ => panic!("failed to join on inbox"),
+            };
+
+            assert_eq!(m1.id, 1);
+            assert_eq!(m3.id, 3);
+
+            // Expect to timeout here since the message gets filtered out.
+            let result = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
+            assert!(result.is_err());
+
+            channel.unsubscribe_triple(1).await;
+            channel.unsubscribe_triple(2).await;
+            channel.unsubscribe_triple(3).await;
         }
 
         // Case 3:
         // Check idempotentcy. The same set of messages (from case 2) encrypted and signed again should produce
-        // the same signature. Thus sending the same encrypted message should be idempotent.
+        // the same signature. Thus sending the same encrypted message should be idempotent and no new messages
+        // should be received by the subscribers.
         {
             let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-            channel.filter_triple(filter_id).await;
-            inbox_tx.try_send(encrypted).unwrap();
-            let mut inbox = channel.inbox().try_write().unwrap();
-            inbox.update(expiration, &cipher_sk, &participants).await;
-            assert_eq!(
-                inbox.triple.len(),
-                2,
-                "inbox should have two messages from prev case for idempotentcy"
-            );
-            inbox.clear();
+            channel.inbox.send(encrypted).await.unwrap();
+            let mut recv1 =
+                tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(1))
+                    .await
+                    .unwrap();
+            let mut recv2 =
+                tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(2))
+                    .await
+                    .unwrap();
+            let mut recv3 =
+                tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(3))
+                    .await
+                    .unwrap();
+
+            let result1 = tokio::time::timeout(Duration::from_millis(100), recv1.recv()).await;
+            let result2 = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
+            let result3 = tokio::time::timeout(Duration::from_millis(100), recv3.recv()).await;
+
+            assert!(result1.is_err());
+            assert!(result2.is_err());
+            assert!(result3.is_err());
         }
+
+        inbox.abort();
     }
 }

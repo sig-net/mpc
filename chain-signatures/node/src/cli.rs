@@ -293,19 +293,20 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let node = Node::new();
             let node_watcher = node.watch();
 
-            let (sender, msg_channel) = MessageChannel::spawn(
+            let msg_channel = MessageChannel::spawn(
                 client,
                 &account_id,
                 config_rx.clone(),
                 contract_watcher.clone(),
-                mesh_state.clone(),
             )
             .await;
             let protocol = MpcSignProtocol {
                 my_account_id: account_id.clone(),
                 near: near_client,
                 rpc_channel,
-                msg_channel,
+                msg_channel: msg_channel.clone(),
+                generating: msg_channel.subscribe_generation().await,
+                resharing: msg_channel.subscribe_resharing().await,
                 sign_rx: Arc::new(RwLock::new(sign_rx)),
                 secret_storage: key_storage,
                 triple_storage: triple_storage.clone(),
@@ -324,7 +325,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
                 web_port,
-                sender,
+                msg_channel,
                 node_watcher,
                 indexer,
                 triple_storage,
