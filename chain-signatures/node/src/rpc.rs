@@ -823,10 +823,7 @@ async fn wait_for_pending_tx(
         {
             Ok(result) => match result {
                 Ok(Some(tx)) => {
-                    tracing::info!(
-                        ?sign_ids,
-                        "eth signature respond pending transaction not found"
-                    );
+                    tracing::info!(?sign_ids, "eth signature respond pending transaction found");
                     return Ok(tx);
                 }
                 Ok(None) => {
@@ -835,7 +832,7 @@ async fn wait_for_pending_tx(
                         max_attempts,
                         &sign_ids,
                         near_account_id,
-                        "eth signature respond ending transaction not found, retrying",
+                        "eth signature respond pending transaction not found, retrying",
                         initial_delay,
                     )
                     .await?;
