@@ -929,7 +929,7 @@ async fn send_eth_transaction(
     near_account_id: &AccountId,
 ) -> Result<alloy::primitives::B256, ()> {
     let chain = Chain::Ethereum;
-    // fetch nonce manually since the automatic nonce manangement in ContractInstance is lagging
+    // fetch nonce manually since the automatic nonce management in ContractInstance is lagging
     let nonce = match tokio::time::timeout(
         Duration::from_secs(10),
         contract
@@ -958,7 +958,7 @@ async fn send_eth_transaction(
             .function("respond", params)
             .unwrap()
             .gas(gas)
-            // setting nonce manually since the automatic nonce manangement in ContractInstance is lagging
+            // setting nonce manually since the automatic nonce management in ContractInstance is lagging
             .nonce(nonce)
             .send(),
     )
