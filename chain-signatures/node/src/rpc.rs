@@ -809,11 +809,10 @@ async fn wait_for_pending_tx(
     tx_hash: alloy::primitives::B256,
     near_account_id: &AccountId,
     sign_ids: Vec<SignId>,
+    max_attempts: usize,
 ) -> Result<Transaction, ()> {
     let mut attempt = 0;
-    let max_attempts = 6;
     let initial_delay = Duration::from_secs(5);
-
     loop {
         match tokio::time::timeout(
             Duration::from_secs(10),
@@ -869,11 +868,10 @@ async fn wait_for_transaction_receipt(
     tx_hash: alloy::primitives::B256,
     near_account_id: &AccountId,
     sign_ids: Vec<SignId>,
+    max_attempts: usize,
 ) -> Result<TransactionReceipt, ()> {
     let mut attempt = 0;
-    let max_attempts = 6;
     let initial_delay = Duration::from_secs(5);
-
     loop {
         match tokio::time::timeout(
             Duration::from_secs(10),
@@ -1022,6 +1020,7 @@ async fn try_publish_eth(
         tx_hash,
         near_account_id,
         vec![action.request.indexed.id],
+        6,
     )
     .await?;
 
@@ -1118,6 +1117,7 @@ async fn try_batch_publish_eth(
         tx_hash,
         near_account_id,
         sign_ids.clone(),
+        6,
     )
     .await?;
 
@@ -1128,6 +1128,7 @@ async fn try_batch_publish_eth(
         tx_hash,
         near_account_id,
         sign_ids.clone(),
+        6,
     )
     .await?;
 
