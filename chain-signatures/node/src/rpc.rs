@@ -139,7 +139,9 @@ impl ContractStateWatcher {
         id: &AccountId,
         state: ProtocolState,
     ) -> (Self, watch::Sender<Option<ProtocolState>>) {
-        let (tx, rx) = watch::channel(Some(state));
+        // Set the initial state to be None so that `changed()` will pick up the first state change.
+        let (tx, rx) = watch::channel(None);
+        let _ = tx.send(Some(state));
         (
             Self {
                 account_id: id.clone(),

@@ -88,6 +88,10 @@ mpc-keys.workspace = true
 mpc-primitives.workspace = true
 signet-program.workspace = true
 
+[dev-dependencies]
+mockito = "1.7.0"
+test-log = { version = "0.2.12", features = ["log", "trace"] }
+
 [features]
 default = []
 # utilized for benchmarking the node:

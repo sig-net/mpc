@@ -208,7 +208,7 @@ impl Pool {
         self.drop_connections(seen);
     }
 
-    async fn connect_nodes(
+    pub(crate) async fn connect_nodes(
         &mut self,
         participants: &Participants,
         seen: &mut HashSet<Participant>,
