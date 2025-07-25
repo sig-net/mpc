@@ -1,7 +1,8 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
-use crate::protocol::contract::primitives::ParticipantMap;
+use crate::protocol::contract::primitives::{ParticipantMap, Participants};
+use crate::protocol::contract::RunningContractState;
 use crate::protocol::signature::SignRequest;
 use crate::protocol::{Chain, ProtocolState};
 use crate::util::AffinePointExt as _;
@@ -15,7 +16,7 @@ use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::types::TransactionReceipt;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
-use k256::Secp256k1;
+use k256::{AffinePoint, Secp256k1};
 use mpc_keys::hpke;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
@@ -44,7 +45,7 @@ const MAX_PUBLISH_RETRY: usize = 6;
 /// The maximum number of concurrent RPC requests the system can make
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract state and config
-const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
+const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 /// The interval to batch send Ethereum responses
 const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 /// The batch size for Ethereum responses
@@ -148,6 +149,26 @@ impl ContractStateWatcher {
         )
     }
 
+    pub fn with_running(
+        node_id: &AccountId,
+        public_key: AffinePoint,
+        threshold: usize,
+        participants: Participants,
+    ) -> (Self, watch::Sender<Option<ProtocolState>>) {
+        Self::with(
+            node_id,
+            ProtocolState::Running(RunningContractState {
+                epoch: 0,
+                public_key,
+                participants,
+                candidates: Default::default(),
+                join_votes: Default::default(),
+                leave_votes: Default::default(),
+                threshold,
+            }),
+        )
+    }
+
     pub fn account_id(&self) -> &AccountId {
         &self.account_id
     }
@@ -169,8 +190,16 @@ impl ContractStateWatcher {
         self.contract_state.mark_changed();
     }
 
+    pub fn participants(&self) -> Option<Participants> {
+        match self.borrow_state().as_ref()? {
+            ProtocolState::Initializing(state) => Some(state.candidates.clone().into()),
+            ProtocolState::Running(state) => Some(state.participants.clone()),
+            ProtocolState::Resharing(state) => Some(state.new_participants.clone()),
+        }
+    }
+
     pub async fn me(&self) -> Option<Participant> {
-        match self.state().clone()? {
+        match self.borrow_state().as_ref()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => state
                 .participants
@@ -205,7 +234,7 @@ impl ContractStateWatcher {
         }
     }
 
-    pub async fn participants(&self) -> ParticipantMap {
+    pub async fn participant_map(&self) -> ParticipantMap {
         let Some(state) = self.state().clone() else {
             return ParticipantMap::Zero;
         };
@@ -364,19 +393,11 @@ impl NearClient {
     }
 
     pub async fn fetch_state(&self) -> anyhow::Result<ProtocolState> {
-        let contract_state: mpc_contract::ProtocolContractState = self
-            .client
-            .view(&self.contract_id, "state")
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(%err, "failed to fetch protocol state");
-            })?
-            .json()?;
+        let contract_state: mpc_contract::ProtocolContractState =
+            self.client.view(&self.contract_id, "state").await?.json()?;
 
         let protocol_state: ProtocolState = contract_state.try_into().map_err(|_| {
-            let msg = "failed to parse protocol state, has it been initialized?".to_string();
-            tracing::error!(msg);
-            anyhow::anyhow!(msg)
+            anyhow::anyhow!("failed to parse protocol state, has it been initialized?")
         })?;
 
         tracing::debug!(?protocol_state, "protocol state");
@@ -1008,6 +1029,8 @@ async fn try_batch_publish_eth(
     let tx_hash =
         send_eth_transaction(&eth.contract, &params, gas, &sign_ids, near_account_id).await?;
 
+    tracing::info!(?tx_hash, "sent eth tx");
+
     let receipt = wait_for_transaction_receipt(
         eth.contract.provider(),
         tx_hash,
@@ -1111,6 +1134,7 @@ async fn execute_batch_publish(
             break;
         }
 
+        tracing::warn!("batch publish failed, {publish:?}");
         retry_count += 1;
         tokio::time::sleep(Duration::from_millis(100)).await;
         if retry_count >= MAX_PUBLISH_RETRY {

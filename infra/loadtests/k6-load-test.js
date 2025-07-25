@@ -1,7 +1,7 @@
 import http from 'k6/http';
 import { group } from 'k6';
 
-const PINGER_URL = "https://contract-pinger-mainnet-1094058868047.europe-west1.run.app/ping";
+const PINGER_URL = "https://contract-ping.sig.network/ping";
 
 const strategies = {
   constant_low_rate_1h: {

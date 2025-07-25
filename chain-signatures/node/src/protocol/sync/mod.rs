@@ -355,6 +355,7 @@ impl SyncChannel {
 
         if let Err(err) = self.request_update.send(update).await {
             tracing::warn!(?err, "failed to request update");
+            return None;
         }
 
         rx.await
