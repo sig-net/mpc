@@ -23,7 +23,7 @@ use mpc_primitives::{SignArgs, SignId};
 use rand::rngs::StdRng;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::SeedableRng;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -95,7 +95,7 @@ pub struct SignRequest {
     pub indexed: IndexedSignRequest,
     pub proposer: Participant,
     pub participants: Vec<Participant>,
-    pub stable: Vec<Participant>,
+    pub stable: BTreeSet<Participant>,
 }
 
 pub struct SignQueue {
@@ -159,7 +159,7 @@ impl SignQueue {
     fn organize_request(
         &self,
         threshold: usize,
-        stable: &[Participant],
+        stable: &BTreeSet<Participant>,
         indexed: IndexedSignRequest,
         reorganize: bool,
     ) -> SignRequest {
@@ -188,7 +188,7 @@ impl SignQueue {
             indexed,
             proposer,
             participants: subset,
-            stable: stable.to_vec(),
+            stable: stable.clone(),
         };
 
         if in_subset {
@@ -211,14 +211,11 @@ impl SignQueue {
     pub async fn organize(
         &mut self,
         threshold: usize,
-        stable: &[Participant],
+        stable: &BTreeSet<Participant>,
         my_account_id: &AccountId,
     ) {
-        let mut stable = stable.to_vec();
-        stable.sort();
-
         // Reorganize the failed requests with a potentially newer list of stable participants.
-        self.organize_failed(threshold, &stable, my_account_id);
+        self.organize_failed(threshold, stable, my_account_id);
 
         // try and organize the new incoming requests.
         let mut sign_rx = self.sign_rx.write().await;
@@ -240,7 +237,7 @@ impl SignQueue {
                 .with_label_values(&[indexed.chain.as_str(), my_account_id.as_str()])
                 .inc();
 
-            let request = self.organize_request(threshold, &stable, indexed, false);
+            let request = self.organize_request(threshold, stable, indexed, false);
             let is_mine = request.proposer == self.me;
             if is_mine {
                 self.my_requests.push_back(sign_id);
@@ -264,7 +261,7 @@ impl SignQueue {
     fn organize_failed(
         &mut self,
         threshold: usize,
-        stable: &[Participant],
+        stable: &BTreeSet<Participant>,
         my_account_id: &AccountId,
     ) {
         while let Some(id) = self.failed_requests.pop_front() {
@@ -272,7 +269,7 @@ impl SignQueue {
                 continue;
             };
 
-            let (reorganized, request) = if request.stable == stable {
+            let (reorganized, request) = if &request.stable == stable {
                 // just use the same request if the participants are the same
                 (false, request)
             } else {
@@ -846,7 +843,7 @@ impl SignatureSpawner {
         self.ongoing.spawn((sign_id, presignature_id), task);
     }
 
-    async fn handle_requests(&mut self, stable: &[Participant], cfg: &ProtocolConfig) {
+    async fn handle_requests(&mut self, stable: &BTreeSet<Participant>, cfg: &ProtocolConfig) {
         if stable.len() < self.threshold {
             tracing::warn!(
                 ?stable,
@@ -883,8 +880,9 @@ impl SignatureSpawner {
                 continue;
             };
 
+            let stable = stable.iter().copied().collect::<Vec<_>>();
             let participants = intersect_vec(&[
-                stable,
+                &stable,
                 &taken.presignature.participants,
                 &my_request.participants,
             ]);
