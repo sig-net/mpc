@@ -50,6 +50,8 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 /// The batch size for Ethereum responses
 const ETH_RESPOND_BATCH_SIZE: usize = 10;
+/// The maximum number of attempts to fetch eth tx and its receipt
+const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
 
 type EthContractFillProvider = FillProvider<
     JoinFill<
@@ -975,8 +977,7 @@ async fn send_eth_transaction(
     .map_err(|err| {
         tracing::error!(
             ?sign_ids,
-            error = %err,
-            debug = ?err,
+            ?err,
             "failed to send ethereum signature transaction"
         );
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
@@ -1022,7 +1023,7 @@ async fn try_publish_eth(
         tx_hash,
         near_account_id,
         vec![action.request.indexed.id],
-        6,
+        ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
     .await?;
 
@@ -1119,7 +1120,7 @@ async fn try_batch_publish_eth(
         tx_hash,
         near_account_id,
         sign_ids.clone(),
-        6,
+        ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
     .await?;
 
@@ -1130,7 +1131,7 @@ async fn try_batch_publish_eth(
         tx_hash,
         near_account_id,
         sign_ids.clone(),
-        6,
+        ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
     .await?;
 
