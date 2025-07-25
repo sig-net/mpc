@@ -1,9 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::mesh::MeshState;
@@ -27,16 +28,16 @@ pub const RECURRING_SYNC_INTERVAL: Duration = Duration::from_secs(3600 * 24);
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
     pub from: Participant,
-    pub triples: Vec<TripleId>,
-    pub presignatures: Vec<PresignatureId>,
+    pub triples: HashSet<TripleId>,
+    pub presignatures: HashSet<PresignatureId>,
 }
 
 impl SyncUpdate {
     pub fn empty() -> Self {
         Self {
             from: Participant::from(u32::MAX),
-            triples: Vec::new(),
-            presignatures: Vec::new(),
+            triples: Default::default(),
+            presignatures: Default::default(),
         }
     }
 
@@ -45,8 +46,14 @@ impl SyncUpdate {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SyncView {
+    pub triples: HashSet<TripleId>,
+    pub presignatures: HashSet<PresignatureId>,
+}
+
 pub struct SyncRequestReceiver {
-    updates: mpsc::Receiver<SyncUpdate>,
+    updates: mpsc::Receiver<SyncInternalUpdate>,
 }
 
 pub struct SyncTask {
@@ -124,6 +131,8 @@ impl SyncTask {
                     let task = tokio::spawn(broadcast_sync(
                         self.client.clone(),
                         update,
+                        self.triples.clone(),
+                        self.presignatures.clone(),
                         receivers.into_iter(),
                         self.synced_peer_tx.clone(),
                         me,
@@ -144,6 +153,8 @@ impl SyncTask {
                     let task = tokio::spawn(broadcast_sync(
                         self.client.clone(),
                         update,
+                        self.triples.clone(),
+                        self.presignatures.clone(),
                         active.into_iter(),
                         self.synced_peer_tx.clone(),
                         me
@@ -164,7 +175,7 @@ impl SyncTask {
                     if let Err(err) = handle.await {
                         tracing::warn!(?err, "broadcast task failed");
                     } else {
-                        tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
+                        tracing::info!(elapsed = ?start.elapsed(), "processed broadcast");
                     }
                 }
                 Some(req) = self.requests.updates.recv() => {
@@ -174,15 +185,11 @@ impl SyncTask {
         }
     }
 
-    // TODO: use reserved values instead. Note that we cannot fetch our own triples via reserved
     async fn new_update(&self, me: Participant) -> SyncUpdate {
-        let triples = self.triples.fetch_owned(me).await;
-        let presignatures = self.presignatures.fetch_owned(me).await;
-
         SyncUpdate {
             from: me,
-            triples,
-            presignatures,
+            triples: self.triples.fetch_owned(me).await,
+            presignatures: self.presignatures.fetch_owned(me).await,
         }
     }
 
@@ -196,12 +203,14 @@ impl SyncTask {
 async fn broadcast_sync(
     client: NodeClient,
     update: SyncUpdate,
+    triples: TripleStorage,
+    presignatures: PresignatureStorage,
     receivers: impl Iterator<Item = (Participant, ParticipantInfo)>,
     synced_peer_tx: mpsc::Sender<Participant>,
     me: Participant,
-) {
+) -> SyncUpdate {
     if update.is_empty() {
-        return;
+        return update;
     }
 
     let start = Instant::now();
@@ -219,6 +228,9 @@ async fn broadcast_sync(
             // will trigger a sync to self.
             let sync_view = if p != me {
                 let res = client.sync(&url, &update).await;
+                if let Err(err) = &res {
+                    tracing::warn!(?err, "failed to sync with peer {p:?}");
+                }
                 Some(res)
             } else {
                 None
@@ -229,6 +241,7 @@ async fn broadcast_sync(
                     "synced_peer_tx failed, receiver is down. State sync will no longer work."
                 )
             }
+
             (p, sync_view)
         });
     }
@@ -238,8 +251,8 @@ async fn broadcast_sync(
         .await
         .into_iter()
         .filter_map(|(p, view)| {
-            if let Some(Ok(())) = view {
-                Some(p)
+            if let Some(Ok(view)) = view {
+                Some((p, view))
             } else {
                 None
             }
@@ -248,18 +261,52 @@ async fn broadcast_sync(
 
     tracing::debug!(
         elapsed = ?start.elapsed(),
-        responded = ?resps,
+        responded = ?resps.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
         "broadcast completed",
     );
+
+    let mut triple_kick = HashMap::new();
+    for &id in &update.triples {
+        let entry: &mut Vec<_> = triple_kick.entry(id).or_default();
+        for (p, view) in &resps {
+            if !view.triples.contains(&id) {
+                entry.push(*p);
+            }
+        }
+
+        if entry.is_empty() {
+            triple_kick.remove(&id);
+        }
+    }
+    triples.kick_participants(triple_kick).await;
+
+    let mut presignature_kick = HashMap::new();
+    for &id in &update.presignatures {
+        let entry: &mut Vec<_> = presignature_kick.entry(id).or_default();
+        for (p, view) in &resps {
+            if !view.presignatures.contains(&id) {
+                entry.push(*p);
+            }
+        }
+    }
+    presignatures.kick_participants(presignature_kick).await;
+
+    update
 }
 
-impl SyncUpdate {
-    async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
-        let start = Instant::now();
+pub struct SyncInternalUpdate {
+    update: SyncUpdate,
+    resp: oneshot::Sender<SyncView>,
+}
 
-        let outdated_triples = triples.remove_outdated(self.from, &self.triples).await;
-        let outdated_presignatures = presignatures
-            .remove_outdated(self.from, &self.presignatures)
+impl SyncInternalUpdate {
+    async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
+        let SyncInternalUpdate { update, resp } = self;
+        let start = Instant::now();
+        let outdated_triples: HashSet<TripleId> =
+            triples.remove_outdated(update.from, &update.triples).await;
+        let outdated_presignatures: HashSet<PresignatureId> = presignatures
+            .remove_outdated(update.from, &update.presignatures)
             .await;
 
         if !outdated_triples.is_empty() || !outdated_presignatures.is_empty() {
@@ -270,12 +317,22 @@ impl SyncUpdate {
                 "removed outdated",
             );
         }
+
+        if resp
+            .send(SyncView {
+                triples: triples.fetch_owned(update.from).await,
+                presignatures: presignatures.fetch_owned(update.from).await,
+            })
+            .is_err()
+        {
+            tracing::warn!("failed to send sync view due channel closure");
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct SyncChannel {
-    request_update: mpsc::Sender<SyncUpdate>,
+    request_update: mpsc::Sender<SyncInternalUpdate>,
 }
 
 impl SyncChannel {
@@ -292,9 +349,19 @@ impl SyncChannel {
         (requests, channel)
     }
 
-    pub async fn request_update(&self, update: SyncUpdate) {
+    pub async fn request_update(&self, update: SyncUpdate) -> Option<SyncView> {
+        let (tx, rx) = oneshot::channel();
+        let update = SyncInternalUpdate { update, resp: tx };
+
         if let Err(err) = self.request_update.send(update).await {
             tracing::warn!(?err, "failed to request update");
+            return None;
         }
+
+        rx.await
+            .inspect_err(|_err| {
+                tracing::warn!("failed to receive sync view due to channel closure");
+            })
+            .ok()
     }
 }
