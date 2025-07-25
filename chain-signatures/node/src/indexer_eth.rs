@@ -424,6 +424,8 @@ fn finalized_block_channel() -> (mpsc::Sender<BlockNumber>, mpsc::Receiver<Block
     mpsc::channel(MAX_FINALIZED_BLOCKS)
 }
 
+const MAX_CATCHUP_BLOCKS: u64 = 8191;
+
 pub async fn run(
     eth: Option<EthConfig>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
@@ -561,7 +563,7 @@ pub async fn run(
             tracing::warn!("Failed to receive latest block head");
             return;
         };
-        let end_block_number = latest_block.header.number - 1;
+        let end_block_number = latest_block.header.number;
         add_catchup_blocks_to_process(
             blocks_to_process_send_clone,
             last_processed_block,
@@ -729,8 +731,8 @@ async fn add_catchup_blocks_to_process(
     start_block_number: u64,
     end_block_number: u64,
 ) {
-    // helios can only go back maximum 8191 blocks, so we need to adjust the start block number if it's too far behind
-    let helios_oldest_block_number = end_block_number - 8191;
+    // helios can only go back maximum MAX_CATCHUP_BLOCKS blocks, so we need to adjust the start block number if it's too far behind
+    let helios_oldest_block_number = end_block_number - MAX_CATCHUP_BLOCKS;
     let start_block_number = if start_block_number < helios_oldest_block_number {
         tracing::warn!(
             "Start block number {start_block_number} is too far behind the latest block {end_block_number}, adjusting to {helios_oldest_block_number}"
