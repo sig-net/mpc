@@ -12,8 +12,8 @@ use solana_sdk::signer::keypair::Keypair;
 
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
-use alloy::providers::{Provider, RootProvider};
-use alloy::rpc::types::TransactionReceipt;
+use alloy::providers::{Provider, RootProvider, WalletProvider};
+use alloy::rpc::types::{Transaction, TransactionReceipt};
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
@@ -50,6 +50,8 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 /// The batch size for Ethereum responses
 const ETH_RESPOND_BATCH_SIZE: usize = 10;
+/// The maximum number of attempts to fetch eth tx and its receipt
+const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
 
 type EthContractFillProvider = FillProvider<
     JoinFill<
@@ -780,8 +782,8 @@ async fn try_publish_near(
     Ok(())
 }
 
-/// Retry waiting for transaction receipt with exponential backoff starting at the specified `initial_delay`
-async fn handle_wait_for_receipt_retry(
+/// Retry with exponential backoff starting at the specified `initial_delay`
+async fn handle_wait_for_polling_retry(
     attempt: &mut usize,
     max_attempts: usize,
     sign_ids: &[SignId],
@@ -792,10 +794,7 @@ async fn handle_wait_for_receipt_retry(
     *attempt += 1;
     tracing::error!(?sign_ids, attempt = *attempt, "{}", error_msg);
     if *attempt >= max_attempts {
-        tracing::error!(
-            ?sign_ids,
-            "exceeded max attempts to get eth signature respond transaction receipt"
-        );
+        tracing::error!(?sign_ids, "exceeded max attempts");
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
             .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
             .inc();
@@ -806,17 +805,75 @@ async fn handle_wait_for_receipt_retry(
     Ok(())
 }
 
-// wait for transaction receipt with 5 retries and exponential delay backoff starting at 5s
+// wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
+async fn wait_for_pending_tx(
+    provider: &EthContractFillProvider,
+    tx_hash: alloy::primitives::B256,
+    near_account_id: &AccountId,
+    sign_ids: Vec<SignId>,
+    max_attempts: usize,
+) -> Result<Transaction, ()> {
+    let mut attempt = 0;
+    let initial_delay = Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            provider.get_transaction_by_hash(tx_hash),
+        )
+        .await
+        {
+            Ok(result) => match result {
+                Ok(Some(tx)) => {
+                    tracing::info!(?sign_ids, "eth signature respond pending transaction found");
+                    return Ok(tx);
+                }
+                Ok(None) => {
+                    handle_wait_for_polling_retry(
+                        &mut attempt,
+                        max_attempts,
+                        &sign_ids,
+                        near_account_id,
+                        "eth signature respond pending transaction not found, retrying",
+                        initial_delay,
+                    )
+                    .await?;
+                }
+                Err(err) => {
+                    handle_wait_for_polling_retry(
+                        &mut attempt,
+                        max_attempts,
+                        &sign_ids,
+                        near_account_id,
+                        &format!("failed to get eth signature respond pending transaction, retrying: {err:?}"),
+                        initial_delay,
+                    ).await?;
+                }
+            },
+            Err(_) => {
+                handle_wait_for_polling_retry(
+                    &mut attempt,
+                    max_attempts,
+                    &sign_ids,
+                    near_account_id,
+                    "timeout while getting eth signature respond pending transaction, retrying",
+                    initial_delay,
+                )
+                .await?;
+            }
+        }
+    }
+}
+
+// wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
 async fn wait_for_transaction_receipt(
     provider: &EthContractFillProvider,
     tx_hash: alloy::primitives::B256,
     near_account_id: &AccountId,
     sign_ids: Vec<SignId>,
+    max_attempts: usize,
 ) -> Result<TransactionReceipt, ()> {
     let mut attempt = 0;
-    let max_attempts = 5;
     let initial_delay = Duration::from_secs(5);
-
     loop {
         match tokio::time::timeout(
             Duration::from_secs(10),
@@ -830,7 +887,7 @@ async fn wait_for_transaction_receipt(
                     return Ok(receipt);
                 }
                 Ok(None) => {
-                    handle_wait_for_receipt_retry(
+                    handle_wait_for_polling_retry(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
@@ -841,7 +898,7 @@ async fn wait_for_transaction_receipt(
                     .await?;
                 }
                 Err(err) => {
-                    handle_wait_for_receipt_retry(
+                    handle_wait_for_polling_retry(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
@@ -852,7 +909,7 @@ async fn wait_for_transaction_receipt(
                 }
             },
             Err(_) => {
-                handle_wait_for_receipt_retry(
+                handle_wait_for_polling_retry(
                     &mut attempt,
                     max_attempts,
                     &sign_ids,
@@ -874,12 +931,37 @@ async fn send_eth_transaction(
     near_account_id: &AccountId,
 ) -> Result<alloy::primitives::B256, ()> {
     let chain = Chain::Ethereum;
+    // fetch nonce manually since the automatic nonce management in ContractInstance is lagging
+    let nonce = match tokio::time::timeout(
+        Duration::from_secs(10),
+        contract
+            .provider()
+            .get_transaction_count(contract.provider().default_signer_address()),
+    )
+    .await
+    {
+        Ok(Ok(nonce)) => {
+            tracing::info!(nonce, "will send eth tx with nonce");
+            nonce
+        }
+        Ok(Err(err)) => {
+            tracing::error!(?err, "failed to get nonce");
+            return Err(());
+        }
+        Err(err) => {
+            tracing::error!(?err, "timeout to get nonce");
+            return Err(());
+        }
+    };
+
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         contract
             .function("respond", params)
             .unwrap()
             .gas(gas)
+            // setting nonce manually since the automatic nonce management in ContractInstance is lagging
+            .nonce(nonce)
             .send(),
     )
     .await
@@ -895,7 +977,7 @@ async fn send_eth_transaction(
     .map_err(|err| {
         tracing::error!(
             ?sign_ids,
-            error = ?err,
+            ?err,
             "failed to send ethereum signature transaction"
         );
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
@@ -941,6 +1023,7 @@ async fn try_publish_eth(
         tx_hash,
         near_account_id,
         vec![action.request.indexed.id],
+        ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
     .await?;
 
@@ -1004,6 +1087,7 @@ async fn try_batch_publish_eth(
         .iter()
         .map(|action| action.request.indexed.id)
         .collect::<Vec<_>>();
+    tracing::info!(?sign_ids, "will send eth batch tx");
     for action in actions {
         let signature = signatures
             .get(&action.request.indexed.id)
@@ -1031,11 +1115,23 @@ async fn try_batch_publish_eth(
 
     tracing::info!(?tx_hash, "sent eth tx");
 
+    let tx = wait_for_pending_tx(
+        eth.contract.provider(),
+        tx_hash,
+        near_account_id,
+        sign_ids.clone(),
+        ETH_TX_RECEIPT_MAX_ATTEMPTS,
+    )
+    .await?;
+
+    tracing::info!(?tx, "tx found in mempool");
+
     let receipt = wait_for_transaction_receipt(
         eth.contract.provider(),
         tx_hash,
         near_account_id,
         sign_ids.clone(),
+        ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
     .await?;
 
