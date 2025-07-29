@@ -34,8 +34,8 @@ const strategies = {
         maxVUs: 10,
         stages: [
           { duration: '1m', target: 1 },
-          { duration: '58m', target: 1 },
-          { duration: '1m', target: 0 },
+          { duration: '58m', target: 3 },
+          { duration: '1m', target: 1 },
         ],
       },
     },
@@ -54,7 +54,7 @@ const strategies = {
         maxVUs: 20,
         stages: [
           { duration: '1m', target: 2 },
-          { duration: '58m', target: 8 },
+          { duration: '58m', target: 5 },
           { duration: '1m', target: 2 },
         ],
       },
