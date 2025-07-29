@@ -1,6 +1,7 @@
 use std::fmt::{self, Display};
 use std::sync::OnceLock;
 
+use console_subscriber::ConsoleLayer;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
@@ -233,7 +234,12 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
             .init();
         tracing::info!("Set global logging subscriber: fmt, otlp, stackdriver");
     } else {
+        let console_layer = ConsoleLayer::builder()
+            .with_default_env()
+            .server_addr(([127, 0, 0, 1], pick_unused_port(6669).await.unwrap()))
+            .spawn();
         tracing_subscriber::registry()
+            .with(console_layer)
             .with(log_fmt_layer)
             .with(log_otlp_layer)
             .with(OpenTelemetryLayer::new(tracer_otlp))
@@ -252,4 +258,24 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
         tracer_otlp_provider,
         log_otlp_provider,
     }
+}
+
+/// Request an unused port from the OS.
+pub async fn pick_unused_port(port: u16) -> anyhow::Result<u16> {
+    // Port 0 means the OS gives us an unused port
+    // Important to use localhost as using 0.0.0.0 leads to users getting brief firewall popups to
+    // allow inbound connections on macOS
+    let listener = {
+        let addr = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, port);
+        tokio::net::TcpListener::bind(addr).await
+    };
+    let listener = match listener {
+        Ok(listener) => listener,
+        Err(_err) => {
+            let addr = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0);
+            tokio::net::TcpListener::bind(addr).await?
+        }
+    };
+    let port = listener.local_addr()?.port();
+    Ok(port)
 }

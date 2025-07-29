@@ -77,7 +77,7 @@ async fn test_signature_many() -> anyhow::Result<()> {
         })
         .await?;
 
-    for idx in 0..10 {
+    for idx in 0..100 {
         tracing::info!(idx, "producing signature");
         nodes.wait().signable().await?;
         nodes.sign().await?;

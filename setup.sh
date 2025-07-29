@@ -17,6 +17,6 @@ fi
 set --
 set -e
 . $ROOT_DIR/build-contract.sh $FEATURES
-cargo build -p mpc-node --release $FEATURES
+RUSTFLAGS="--cfg tokio_unstable" cargo build -p mpc-node --release $FEATURES
 
 exec $CARGO_CMD_ARGS
