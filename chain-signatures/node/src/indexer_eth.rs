@@ -732,7 +732,7 @@ async fn add_catchup_blocks_to_process(
     end_block_number: u64,
 ) {
     // helios can only go back maximum MAX_CATCHUP_BLOCKS blocks, so we need to adjust the start block number if it's too far behind
-    let helios_oldest_block_number = end_block_number - MAX_CATCHUP_BLOCKS;
+    let helios_oldest_block_number = end_block_number.saturating_sub(MAX_CATCHUP_BLOCKS);
     let start_block_number = if start_block_number < helios_oldest_block_number {
         tracing::warn!(
             "Start block number {start_block_number} is too far behind the latest block {end_block_number}, adjusting to {helios_oldest_block_number}"
