@@ -1,0 +1,29 @@
+@startuml Sig.Network Bidirectional Communication (Solana <-> Ethereum)
+!theme amiga
+actor Browser
+participant "USDT Contract\non Ethereum" as USDT
+participant "DEX Program\non Solana" as DEX
+participant "Signing Contract\non Solana" as SignContract
+participant "MPC Network" as MPC
+
+Browser -> Browser: Derive user Ethereum DEX USDT \ndeposit address from main address
+Browser -> USDT: Deposit 10 USDT on user address
+
+Browser -> Browser: Build and save Ethereum tx to transfer USDT \nfrom user to main DEX address
+Browser -> DEX: Call **claim_fund(offchain_parameters)**
+
+DEX -> SignContract: Build same tx and call **sign_respond(tx_hash)**
+
+SignContract -> MPC: Request signature
+MPC -> MPC: Sign tx hash with User key \n(sender is DEX, path is user address) \nStore tx ID (hash + signature)
+MPC -> SignContract: Return signature
+SignContract -> Browser: Return signature
+Browser -> USDT: Execute saved transaction
+USDT --> MPC: Notify tx executed (using MPC Ethereum indexer)
+
+MPC -> MPC: Buld DEX.read_respond() transaction
+MPC -> MPC: Request signature for DEX.read_respond() \nwith DEX key (sender is DEX, path is "")
+MPC -> DEX: Call **read_respond(tx_output)**
+
+DEX -> Browser: Success
+@enduml
