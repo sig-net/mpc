@@ -7,7 +7,7 @@ use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
-use crate::storage::app_data_storage;
+use crate::storage::{app_data_storage, sign_respond_tx_storage};
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -214,6 +214,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let presignature_storage =
                 storage::presignature_storage::init(&redis_pool, &account_id);
             let app_data_storage = app_data_storage::init(&redis_pool, &account_id);
+            let sign_respond_tx_storage = sign_respond_tx_storage::init(&redis_pool, &account_id);
 
             let mut rpc_client = near_fetch::Client::new(&near_rpc);
             if let Some(referer_param) = client_header_referer {
@@ -337,6 +338,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_tx.clone(),
                 app_data_storage.clone(),
                 account_id.clone(),
+                sign_respond_tx_storage,
             ));
             tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
             tracing::info!("protocol http server spawned");

@@ -1,5 +1,6 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::storage::app_data_storage::AppDataStorage;
+use crate::storage::sign_respond_tx_storage::SignRespondTxStorage;
 use alloy::consensus::BlockHeader;
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::hex::{self, ToHexExt};
@@ -13,6 +14,7 @@ use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::{fmt, path::PathBuf, str::FromStr, sync::LazyLock, time::Instant};
 use tokio::sync::broadcast::error::RecvError;
@@ -431,6 +433,7 @@ pub async fn run(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
+    sign_respond_tx_storage: SignRespondTxStorage,
 ) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
@@ -543,6 +546,7 @@ pub async fn run(
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let blocks_failed_send_clone = blocks_failed_send.clone();
     let client_clone = Arc::clone(&client);
+    let sign_respond_tx_storage_clone = sign_respond_tx_storage.clone();
     tokio::spawn(async move {
         tracing::info!("Spawned task to retry failed blocks");
         retry_failed_blocks(
@@ -553,6 +557,7 @@ pub async fn run(
             near_account_id_clone,
             requests_indexed_send_clone,
             total_timeout,
+            sign_respond_tx_storage_clone,
         )
         .await;
     });
@@ -604,6 +609,7 @@ pub async fn run(
                 (block_number, block_hash, false)
             }
         };
+        let sign_respond_tx_storage_clone = sign_respond_tx_storage.clone();
         if let Err(err) = process_block(
             block_number,
             block_hash,
@@ -612,6 +618,7 @@ pub async fn run(
             node_near_account_id.clone(),
             requests_indexed_send_clone.clone(),
             total_timeout,
+            sign_respond_tx_storage_clone,
         )
         .await
         {
@@ -632,6 +639,7 @@ pub async fn run(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn retry_failed_blocks(
     mut blocks_failed_rx: mpsc::Receiver<BlockNumberAndHash>,
     blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
@@ -640,6 +648,7 @@ async fn retry_failed_blocks(
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
+    sign_respond_tx_storage: SignRespondTxStorage,
 ) {
     loop {
         let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
@@ -654,6 +663,7 @@ async fn retry_failed_blocks(
             node_near_account_id.clone(),
             requests_indexed.clone(),
             total_timeout,
+            sign_respond_tx_storage.clone(),
         )
         .await
         {
@@ -855,6 +865,7 @@ async fn process_block(
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
+    sign_respond_tx_storage: SignRespondTxStorage,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -878,6 +889,30 @@ async fn process_block(
         tracing::info!("no receipts for block number {block_number}");
         return Ok(());
     };
+
+    let block_receipts_clone = block_receipts.clone();
+    let pending_txs: HashSet<_> = sign_respond_tx_storage
+        .fetch_pending()
+        .await
+        .into_iter()
+        .collect();
+    for receipt in block_receipts_clone {
+        if pending_txs.contains(&receipt.transaction_hash.into()) {
+            let status = receipt.status();
+            println!(
+                "Tx {} found in block {}: {}",
+                receipt.transaction_hash,
+                block_number,
+                if status { "✅ success" } else { "❌ failed" }
+            );
+            let sign_respond_tx_storage = sign_respond_tx_storage.clone();
+            tokio::spawn(async move {
+                sign_respond_tx_storage
+                    .complete(receipt.transaction_hash.into())
+                    .await;
+            });
+        }
+    }
 
     let filtered_logs: Vec<Log> = block_receipts
         .into_iter()
@@ -928,6 +963,7 @@ async fn process_block(
                 );
         }
     }
+
     Ok(())
 }
 
