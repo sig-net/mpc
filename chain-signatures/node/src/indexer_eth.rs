@@ -1,4 +1,5 @@
 use crate::protocol::{Chain, IndexedSignRequest};
+use crate::sign_respond_tx::SignRespondTxId;
 use crate::storage::app_data_storage::AppDataStorage;
 use crate::storage::sign_respond_tx_storage::SignRespondTxStorage;
 use alloy::consensus::BlockHeader;
@@ -7,6 +8,7 @@ use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::{sol, SolEvent};
+use chain_signatures_project::Sign;
 use helios::common::types::{SubscriptionEvent, SubscriptionType};
 use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 use k256::Scalar;
@@ -426,7 +428,13 @@ fn finalized_block_channel() -> (mpsc::Sender<BlockNumber>, mpsc::Receiver<Block
     mpsc::channel(MAX_FINALIZED_BLOCKS)
 }
 
-const MAX_CATCHUP_BLOCKS: u64 = 8191;
+const MAX_COMPLETED_TXS: usize = 1024;
+fn completed_txs_channel() -> (
+    mpsc::Sender<SignRespondTxId>,
+    mpsc::Receiver<SignRespondTxId>,
+) {
+    mpsc::channel(MAX_COMPLETED_TXS)
+}
 
 pub async fn run(
     eth: Option<EthConfig>,
@@ -547,6 +555,7 @@ pub async fn run(
     let blocks_failed_send_clone = blocks_failed_send.clone();
     let client_clone = Arc::clone(&client);
     let sign_respond_tx_storage_clone = sign_respond_tx_storage.clone();
+    let completed_txs_send_clone = completed_txs_send.clone();
     tokio::spawn(async move {
         tracing::info!("Spawned task to retry failed blocks");
         retry_failed_blocks(
@@ -558,6 +567,7 @@ pub async fn run(
             requests_indexed_send_clone,
             total_timeout,
             sign_respond_tx_storage_clone,
+            completed_txs_send_clone,
         )
         .await;
     });
@@ -610,6 +620,7 @@ pub async fn run(
             }
         };
         let sign_respond_tx_storage_clone = sign_respond_tx_storage.clone();
+        let completed_txs_send_clone = completed_txs_send.clone();
         if let Err(err) = process_block(
             block_number,
             block_hash,
@@ -619,6 +630,7 @@ pub async fn run(
             requests_indexed_send_clone.clone(),
             total_timeout,
             sign_respond_tx_storage_clone,
+            completed_txs_send_clone,
         )
         .await
         {
@@ -649,6 +661,7 @@ async fn retry_failed_blocks(
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
     sign_respond_tx_storage: SignRespondTxStorage,
+    completed_txs_send: mpsc::Sender<SignRespondTxId>,
 ) {
     loop {
         let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
@@ -664,6 +677,7 @@ async fn retry_failed_blocks(
             requests_indexed.clone(),
             total_timeout,
             sign_respond_tx_storage.clone(),
+            completed_txs_send.clone(),
         )
         .await
         {
@@ -798,6 +812,23 @@ async fn fetch_block(
     }
 }
 
+async fn mark_completed_tx(
+    tx_id: SignRespondTxId,
+    sign_respond_tx_storage: SignRespondTxStorage,
+    max_attempts: u64,
+) -> bool {
+    let mut attempts = 0;
+    while !sign_respond_tx_storage.complete(tx_id.clone()).await {
+        if attempts >= max_attempts {
+            tracing::warn!("Failed to mark tx as completed after {max_attempts} attempts");
+            return false;
+        }
+        attempts += 1;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    return true;
+}
+
 /// Polls for the latest finalized block and update finalized block channel.
 async fn refresh_finalized_block(
     helios_client: &Arc<EthereumClient>,
@@ -866,6 +897,7 @@ async fn process_block(
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
     sign_respond_tx_storage: SignRespondTxStorage,
+    completed_txs_send: mpsc::Sender<SignRespondTxId>,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -900,16 +932,28 @@ async fn process_block(
         if pending_txs.contains(&receipt.transaction_hash.into()) {
             let status = receipt.status();
             println!(
-                "Tx {} found in block {}: {}",
+                "Tx {} found in block {block_number}: {}",
                 receipt.transaction_hash,
-                block_number,
-                if status { "✅ success" } else { "❌ failed" }
+                if status { "success" } else { "failed" }
             );
             let sign_respond_tx_storage = sign_respond_tx_storage.clone();
+            let completed_txs_send = completed_txs_send.clone();
             tokio::spawn(async move {
-                sign_respond_tx_storage
-                    .complete(receipt.transaction_hash.into())
-                    .await;
+                if mark_completed_tx(receipt.transaction_hash.into(), sign_respond_tx_storage, 6)
+                    .await
+                {
+                    match completed_txs_send
+                        .send(receipt.transaction_hash.into())
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                "Failed to send completed sign respond tx for processing: {err:?}"
+                            );
+                        }
+                    }
+                }
             });
         }
     }
