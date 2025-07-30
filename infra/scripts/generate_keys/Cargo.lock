@@ -2091,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-keys"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "borsh",
  "hex",
