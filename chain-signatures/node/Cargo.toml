@@ -50,6 +50,7 @@ anyhow.workspace = true
 borsh.workspace = true
 borsh_sol = { package = "borsh", version = "0.10.4" } # solana anchor requires borsh 0.10
 cait-sith.workspace = true
+threshold-signatures.workspace = true
 ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true

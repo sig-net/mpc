@@ -51,7 +51,7 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_signature_basic() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().await?;
+    let nodes = cluster::spawn().nodes(5).disable_prestockpile().await?;
     nodes.wait().signable().await?;
     nodes.sign().await?;
 
