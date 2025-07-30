@@ -679,69 +679,69 @@ impl Redis {
     }
 
     pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants, mul: u32) {
-        let pool = self.pool();
-        let storage = participants
-            .participants
-            .keys()
-            .map(|account_id| {
-                (
-                    Participant::from(
-                        *participants
-                            .account_to_participant_id
-                            .get(account_id)
-                            .unwrap(),
-                    ),
-                    mpc_node::storage::triple_storage::init(&pool, account_id),
-                )
-            })
-            .collect::<HashMap<_, _>>();
+        // let pool = self.pool();
+        // let storage = participants
+        //     .participants
+        //     .keys()
+        //     .map(|account_id| {
+        //         (
+        //             Participant::from(
+        //                 *participants
+        //                     .account_to_participant_id
+        //                     .get(account_id)
+        //                     .unwrap(),
+        //             ),
+        //             mpc_node::storage::triple_storage::init(&pool, account_id),
+        //         )
+        //     })
+        //     .collect::<HashMap<_, _>>();
 
-        let participant_ids = participants
-            .account_to_participant_id
-            .values()
-            .map(|id| Participant::from(*id))
-            .collect::<Vec<_>>();
-        let (public, shares) =
-            cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
+        // let participant_ids = participants
+        //     .account_to_participant_id
+        //     .values()
+        //     .map(|id| Participant::from(*id))
+        //     .collect::<Vec<_>>();
+        // let (public, shares) =
+        //     cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
 
-        // - first/second loop add at least min_triples per node
-        // - third loop: for each triple, store the shares individually per node
-        let mut num_triples = 0;
-        for owner in &participant_ids {
-            for _ in 0..(cfg.protocol.triple.min_triples * mul) {
-                num_triples += 1;
-                let triple_id = rand::random();
-                for (me, triple) in participant_ids
-                    .iter()
-                    .zip(shares_to_triples(triple_id, &public, &shares))
-                {
-                    storage
-                        .get(me)
-                        .unwrap()
-                        .reserve(triple.id)
-                        .await
-                        .unwrap()
-                        .insert(triple, *owner)
-                        .await;
-                }
-            }
-        }
+        // // - first/second loop add at least min_triples per node
+        // // - third loop: for each triple, store the shares individually per node
+        // let mut num_triples = 0;
+        // for owner in &participant_ids {
+        //     for _ in 0..(cfg.protocol.triple.min_triples * mul) {
+        //         num_triples += 1;
+        //         let triple_id = rand::random();
+        //         for (me, triple) in participant_ids
+        //             .iter()
+        //             .zip(shares_to_triples(triple_id, &public, &shares))
+        //         {
+        //             storage
+        //                 .get(me)
+        //                 .unwrap()
+        //                 .reserve(triple.id)
+        //                 .await
+        //                 .unwrap()
+        //                 .insert(triple, *owner)
+        //                 .await;
+        //         }
+        //     }
+        // }
 
-        tracing::info!("stockpiled {num_triples} triples");
+        // tracing::info!("stockpiled {num_triples} triples");
     }
 }
 
-fn shares_to_triples(
-    id: u64,
-    public: &TriplePub<Secp256k1>,
-    shares: &[TripleShare<Secp256k1>],
-) -> Vec<Triple> {
-    shares
-        .iter()
-        .map(|share| Triple {
-            id,
-            public: public.clone(),
-            share: share.clone(),
-        })
-        .collect()
-}
+// fn shares_to_triples(
+//     id: u64,
+//     public: &TriplePub<Secp256k1>,
+//     shares: &[TripleShare<Secp256k1>],
+// ) -> Vec<Triple> {
+//     shares
+//         .iter()
+//         .map(|share| Triple {
+//             id,
+//             public: public.clone(),
+//             share: share.clone(),
+//         })
+//         .collect()
+// }

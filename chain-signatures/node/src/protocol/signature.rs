@@ -410,7 +410,7 @@ impl SignatureGenerator {
         );
 
         let (presignature, dropper) = taken.take();
-        let PresignOutput { big_r, k, sigma } = presignature.output;
+        let threshold_signatures::ecdsa::presign::PresignOutput { big_r, k, sigma } = presignature.output;
         let delta = derive_delta(indexed.id.request_id, indexed.args.entropy, big_r);
         // TODO: Check whether it is okay to use invert_vartime instead
         let output: PresignOutput<Secp256k1> = PresignOutput {

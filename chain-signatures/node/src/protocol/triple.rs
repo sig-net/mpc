@@ -9,13 +9,14 @@ use crate::util::{AffinePointExt, JoinMap};
 use mpc_contract::config::ProtocolConfig;
 
 use cait_sith::protocol::{InitializationError, Participant};
-use cait_sith::triples::{TriplePub, TripleShare};
+// use cait_sith::triples::{TriplePub, TripleShare};
 use chrono::Utc;
 use highway::{HighwayHash, HighwayHasher};
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::Secp256k1;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
+use threshold_signatures::ecdsa::triples::{TriplePub, TripleShare};
 use threshold_signatures::protocol::Action;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -37,45 +38,35 @@ pub struct Triple {
     pub public: TriplePub<Secp256k1>,
 }
 
-fn ts_into(p: Participant) -> threshold_signatures::protocol::Participant {
+pub fn ts_into(p: Participant) -> threshold_signatures::protocol::Participant {
     threshold_signatures::protocol::Participant::from(Into::<u32>::into(p))
 }
 
-fn ts_from(p: threshold_signatures::protocol::Participant) -> Participant {
+pub fn ts_from(p: threshold_signatures::protocol::Participant) -> Participant {
     Participant::from(Into::<u32>::into(p))
 }
 
-// fn ts_into_share(
-//     share: TripleShare<Secp256k1>,
-// ) -> threshold_signatures::ecdsa::triples::TripleShare<Secp256k1> {
-//     threshold_signatures::ecdsa::triples::TripleShare {
+// fn ts_from_share(
+//     share: threshold_signatures::ecdsa::triples::TripleShare<Secp256k1>,
+// ) -> TripleShare<Secp256k1> {
+//     TripleShare {
 //         a: share.a,
 //         b: share.b,
 //         c: share.c,
 //     }
 // }
 
-fn ts_from_share(
-    share: threshold_signatures::ecdsa::triples::TripleShare<Secp256k1>,
-) -> TripleShare<Secp256k1> {
-    TripleShare {
-        a: share.a,
-        b: share.b,
-        c: share.c,
-    }
-}
-
-fn ts_from_pub(
-    pub_triple: threshold_signatures::ecdsa::triples::TriplePub<Secp256k1>,
-) -> TriplePub<Secp256k1> {
-    TriplePub {
-        big_a: pub_triple.big_a,
-        big_b: pub_triple.big_b,
-        big_c: pub_triple.big_c,
-        participants: pub_triple.participants.into_iter().map(ts_from).collect(),
-        threshold: pub_triple.threshold,
-    }
-}
+// fn ts_from_pub(
+//     pub_triple: threshold_signatures::ecdsa::triples::TriplePub<Secp256k1>,
+// ) -> TriplePub<Secp256k1> {
+//     TriplePub {
+//         big_a: pub_triple.big_a,
+//         big_b: pub_triple.big_b,
+//         big_c: pub_triple.big_c,
+//         participants: pub_triple.participants.into_iter().map(ts_from).collect(),
+//         threshold: pub_triple.threshold,
+//     }
+// }
 
 struct TripleGenerator {
     id: TripleId,
@@ -232,8 +223,10 @@ impl TripleGenerator {
 
                     let triple = Triple {
                         id: self.id,
-                        share: ts_from_share(output.0),
-                        public: ts_from_pub(output.1),
+                        share: output.0,
+                        public: output.1,
+                        // share: ts_from_share(output.0),
+                        // public: ts_from_pub(output.1),
                     };
 
                     // After creation the triple is assigned to a random node, which is NOT necessarily the one that initiated it's creation
