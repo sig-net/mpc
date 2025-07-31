@@ -46,7 +46,7 @@ pub enum NodeStatus {
 /// A connection that runs in the background, constantly polling nodes for their
 /// active status.
 struct NodeConnection {
-    info: ParticipantInfo,
+    info_tx: watch::Sender<ParticipantInfo>,
     status_rx: watch::Receiver<(NodeStatus, ParticipantInfo)>,
     status_tx: watch::Sender<(NodeStatus, ParticipantInfo)>,
     task: JoinHandle<()>,
@@ -60,95 +60,106 @@ impl NodeConnection {
         ping_interval: Duration,
     ) -> Self {
         let (status_tx, status_rx) = watch::channel((NodeStatus::Offline, info.clone()));
+        let (info_tx, info_rx) = watch::channel(info.clone());
         let task = tokio::spawn(Self::run(
             client.clone(),
             status_tx.clone(),
+            info_rx,
             participant,
-            info.clone(),
             ping_interval,
         ));
         Self {
-            info: info.clone(),
+            info_tx,
             status_rx,
             status_tx,
             task,
         }
     }
 
-    fn update(&mut self, client: &NodeClient, info: &ParticipantInfo, ping_interval: Duration) {
-        tracing::info!(?self.info, "updating connection");
-        self.task.abort();
-        self.task = tokio::spawn(Self::run(
-            client.clone(),
-            self.status_tx.clone(),
-            Participant::from(self.info.id),
-            info.clone(),
-            ping_interval,
-        ));
+    fn update(&mut self, info: &ParticipantInfo) {
+        tracing::info!(?info, "updating connection with new info");
+        if self.info_tx.send(info.clone()).is_err() {
+            tracing::warn!("unable to update connection");
+        }
     }
 
     async fn run(
         client: NodeClient,
         status_tx: watch::Sender<(NodeStatus, ParticipantInfo)>,
+        mut info_rx: watch::Receiver<ParticipantInfo>,
         participant: Participant,
-        info: ParticipantInfo,
         ping_interval: Duration,
     ) {
-        let node = (participant, &info.url);
+        let mut url = info_rx.borrow().url.clone();
+        let mut node = (participant, &url);
         tracing::info!(?node, "starting connection task");
-        let url = info.url.clone();
         let mut interval = tokio::time::interval(ping_interval);
         loop {
-            interval.tick().await;
-            if let Err(err) = client.msg_empty(&url).await {
-                tracing::warn!(?node, ?err, "checking /msg (empty) failed");
-                status_tx.send_if_modified(|(status, _)| {
-                    std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
-                });
-                continue;
-            }
-
-            match client.state(&url).await {
-                Ok(state) => {
-                    // note: borrowing and sending later on `status_tx` can potentially deadlock,
-                    // but since we are copying the status, this is not the case. Change this carefully.
-                    let old_status = status_tx.borrow().0;
-                    let mut new_status = match state {
-                        StateView::Running { .. } => NodeStatus::Active,
-                        StateView::Resharing { .. }
-                        | StateView::Joining { .. }
-                        | StateView::NotRunning => NodeStatus::Inactive,
-                    };
-                    if old_status == NodeStatus::Inactive && new_status == NodeStatus::Active {
-                        // Sync when we want to enter an active state
-                        //
-                        // The peer is running. But before we can reliably
-                        // use the connected node in protocols we initiate,
-                        // we need to ensure the peer has the up-to-date
-                        // data about out owned IDs.
-                        new_status = NodeStatus::Syncing;
-                    }
-                    if old_status != new_status {
-                        tracing::info!(?node, ?new_status, "updated with new status");
-                        status_tx.send_modify(|(status, _)| {
-                            *status = new_status;
-                        });
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(?node, ?err, "checking /state failed");
-                    status_tx.send_if_modified(|(status, _)| {
-                        std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
+            tokio::select! {
+                Ok(()) = info_rx.changed() => {
+                    let new_info = info_rx.borrow_and_update().clone();
+                    url = new_info.url.clone();
+                    node = (participant, &url);
+                    status_tx.send_modify(|(_, info)| {
+                        *info = new_info;
                     });
+                }
+                _ = interval.tick() => {
+                    if let Err(err) = client.msg_empty(&url).await {
+                        tracing::warn!(?node, ?err, "checking /msg (empty) failed");
+                        status_tx.send_if_modified(|(status, _)| {
+                            std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
+                        });
+                        continue;
+                    }
+
+                    match client.state(&url).await {
+                        Ok(state) => {
+                            // note: borrowing and sending later on `status_tx` can potentially deadlock,
+                            // but since we are copying the status, this is not the case. Change this carefully.
+                            let old_status = status_tx.borrow().0;
+                            let mut new_status = match state {
+                                StateView::Running { .. } => NodeStatus::Active,
+                                StateView::Resharing { .. }
+                                | StateView::Joining { .. }
+                                | StateView::NotRunning => NodeStatus::Inactive,
+                            };
+                            if old_status == NodeStatus::Inactive && new_status == NodeStatus::Active {
+                                // Sync when we want to enter an active state
+                                //
+                                // The peer is running. But before we can reliably
+                                // use the connected node in protocols we initiate,
+                                // we need to ensure the peer has the up-to-date
+                                // data about out owned IDs.
+                                new_status = NodeStatus::Syncing;
+                            }
+                            if old_status != new_status {
+                                tracing::info!(?node, ?new_status, "updated with new status");
+                                status_tx.send_modify(|(status, _)| {
+                                    *status = new_status;
+                                });
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(?node, ?err, "checking /state failed");
+                            status_tx.send_if_modified(|(status, _)| {
+                                std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
+                            });
+                        }
+                    }
                 }
             }
         }
+    }
+
+    pub fn info(&self) -> watch::Ref<'_, ParticipantInfo> {
+        self.info_tx.borrow()
     }
 }
 
 impl Drop for NodeConnection {
     fn drop(&mut self) {
-        tracing::info!(info = ?self.info, "connection dropped");
+        tracing::info!(info = ?*self.info_tx.borrow(), "connection dropped");
         self.task.abort();
     }
 }
@@ -219,10 +230,9 @@ impl Pool {
             let node = (participant, &info.url);
             match self.connections.entry(participant) {
                 Entry::Occupied(mut conn) => {
-                    if &conn.get().info != info {
+                    if &*conn.get().info() != info {
                         tracing::info!(?node, "node connection updating");
-                        conn.get_mut()
-                            .update(&self.client, info, self.ping_interval);
+                        conn.get_mut().update(info);
                     }
                 }
                 Entry::Vacant(conn) => {
