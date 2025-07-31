@@ -11,8 +11,8 @@ use mpc_crypto::ScalarExt;
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_node::config::{Config, LocalConfig, NetworkConfig};
 use mpc_node::mesh::MeshState;
-use mpc_node::protocol::contract::primitives::{Candidates, Participants, Votes};
-use mpc_node::protocol::contract::RunningContractState;
+use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, Votes};
+use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, SignedMessage};
 use mpc_node::protocol::{
     self, Governance, IndexedSignRequest, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue,
@@ -20,9 +20,10 @@ use mpc_node::protocol::{
 use mpc_node::rpc::RpcChannel;
 use mpc_node::rpc::{ContractStateWatcher, RpcAction};
 use mpc_node::storage::{
-    presignature_storage, secret_storage, triple_storage, PresignatureStorage,
+    presignature_storage, secret_storage, triple_storage, Options, PresignatureStorage,
+    TripleStorage,
 };
-use mpc_node::types::SecretKeyShare;
+use mpc_node::util::NearPublicKeyExt;
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -33,12 +34,23 @@ use tokio::sync::RwLock;
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 
-pub struct TestMpcNetwork {
+pub struct TestMpcNetworkBuilder {
     prepared_nodes: Vec<TestMpcNodeBuilder>,
-    pub running: Vec<TestMpcNode>,
+    threshold: usize,
+    shared_public_key: Option<mpc_crypto::PublicKey>,
+    protocol_state: ProtocolState,
+    participants: Participants,
+    participants_by_id: ParticipantsById,
+    candidates: Candidates,
+    triple_stockpile_factor: u32,
+    presignature_stockpile: bool,
+}
+
+pub struct TestMpcNetwork {
+    pub nodes: Vec<TestMpcNode>,
     pub redis_container: Redis,
-    pub shared_public_key: mpc_crypto::PublicKey,
     pub rpc_actions: Arc<Mutex<HashSet<String>>>,
+    pub msg_log: Arc<Mutex<Vec<String>>>,
 }
 
 struct TestMpcNodeBuilder {
@@ -46,7 +58,6 @@ struct TestMpcNodeBuilder {
     candidate_info: CandidateInfo,
     participant_info: ParticipantInfo,
     config: Config,
-    secret_share: SecretKeyShare,
     msg_tx: Sender<Ciphered>,
     msg_rx: mpsc::Receiver<(
         mpc_node::protocol::Message,
@@ -64,41 +75,28 @@ pub struct TestMpcNode {
     pub sign_tx: Sender<IndexedSignRequest>,
     pub msg_tx: Sender<Ciphered>,
 
+    pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
 }
 
-impl TestMpcNetwork {
-    pub async fn new() -> Self {
+impl Default for TestMpcNetworkBuilder {
+    fn default() -> Self {
+        Self::new(3, 2)
+    }
+}
+
+impl TestMpcNetworkBuilder {
+    pub fn new(num_nodes: u32, threshold: usize) -> Self {
         // This is a bit of a weird place to install the subscriber but every
         // test needs to call it somewhere. Since tests will usually call this
         // before doing anything interesting, might as well do it here.
         crate::utils::init_tracing_log();
 
-        // TODO(jakmeier): make this configurable
-        let num_nodes = 3;
-        let redis_container = redis().await;
+        let prepared_nodes: Vec<_> = (0..num_nodes).map(TestMpcNodeBuilder::new).collect();
 
-        // TODO(jakmeier): make this configurable
-        let encoded = EncodedPoint::<Secp256k1>::from_str(
-            "0303D6C6F119014A09A6B2A58B0BB075A7938EDF3D0E9F58AC2ED58A19CB5C20C0",
-        )
-        .unwrap();
-        let shared_public_key: mpc_crypto::PublicKey =
-            mpc_crypto::PublicKey::from_encoded_point(&encoded).unwrap();
-
-        TestMpcNetwork {
-            prepared_nodes: (0..num_nodes).map(TestMpcNodeBuilder::new).collect(),
-            running: vec![],
-            redis_container,
-            shared_public_key,
-            rpc_actions: Default::default(),
-        }
-    }
-
-    pub async fn start(&mut self) {
         // construct full list of participants and candidates (same set)
         let mut candidates_by_id = CandidatesById::new();
-        for node in &self.prepared_nodes {
+        for node in &prepared_nodes {
             candidates_by_id.insert(
                 node.candidate_info.account_id.clone(),
                 node.candidate_info.clone(),
@@ -108,45 +106,82 @@ impl TestMpcNetwork {
         let participants = Participants::from(participants_by_id.clone());
         let candidates = Candidates::from(candidates_by_id);
 
-        // mark all participant as already active and stable when the network starts
-        let init_mesh = MeshState {
-            active: participants.clone(),
-            // active: Default::default(),
-            need_sync: Default::default(),
-            stable: participants.keys_vec(),
-            // stable: Default::default(),
-        };
-
-        // create a starting protocol state matching the participants
-        // include everyone already having voted for everybody else
-        let threshold = 2;
-        let mut join_votes = Votes::default();
-        let vote_for_all = HashSet::from_iter(participants.account_ids().into_iter().cloned());
-        for (_p, info) in participants.iter() {
-            join_votes
-                .votes
-                .insert(info.account_id.clone(), vote_for_all.clone());
-        }
-        let protocol_state = ProtocolState::Running(RunningContractState {
-            epoch: 0,
-            public_key: self.shared_public_key,
-            participants: participants.clone(),
+        let protocol_state = ProtocolState::Initializing(InitializingContractState {
             candidates: candidates.clone(),
-            join_votes,
-            leave_votes: Default::default(),
             threshold,
+            pk_votes: PkVotes {
+                pk_votes: Default::default(),
+            },
         });
+
+        TestMpcNetworkBuilder {
+            threshold,
+            triple_stockpile_factor: 0,
+            prepared_nodes,
+            shared_public_key: None,
+            protocol_state,
+            participants,
+            participants_by_id,
+            candidates,
+            presignature_stockpile: false,
+        }
+    }
+
+    pub async fn build(mut self) -> TestMpcNetwork {
+        let redis_container = self.build_redis().await;
 
         // Build a routing table: Participant -> msg_tx
         let mut routing_table: HashMap<Participant, Sender<Ciphered>> = HashMap::new();
         for node in &self.prepared_nodes {
-            let participant = participants_by_id
+            let participant = self
+                .participants_by_id
                 .account_to_participant_id
                 .get(&node.participant_info.account_id)
                 .unwrap();
             routing_table.insert(Participant::from(*participant), node.msg_tx.clone());
         }
 
+        // mark all participant as already active and stable when the network starts
+        let initial_mesh_state = MeshState {
+            active: self.participants.clone(),
+            need_sync: Default::default(),
+            stable: self.participants.keys_vec(),
+        };
+
+        let rpc_actions = Default::default();
+        let msg_log = Default::default();
+        let mut nodes = vec![];
+
+        // Start each node's tokio tasks
+        for node in self.prepared_nodes.drain(..) {
+            let started = node
+                .start(
+                    routing_table.clone(),
+                    &redis_container.pool(),
+                    &initial_mesh_state,
+                    &self.protocol_state,
+                    &self.shared_public_key,
+                    self.presignature_stockpile,
+                    Arc::clone(&msg_log),
+                    Arc::clone(&rpc_actions),
+                )
+                .await;
+
+            nodes.push(started);
+        }
+
+        TestMpcNetwork {
+            redis_container,
+            nodes,
+            rpc_actions,
+            msg_log,
+        }
+    }
+
+    async fn build_redis(&self) -> Redis {
+        let redis_container = redis().await;
+
+        // TODO(jakmeier): make this configurable
         let mut protocol = mpc_contract::config::ProtocolConfig::default();
         protocol.triple.min_triples = 10;
         protocol.triple.max_triples = 100;
@@ -154,39 +189,73 @@ impl TestMpcNetwork {
         protocol.presignature.max_presignatures = 100;
         let cfg = crate::NodeConfig {
             nodes: self.prepared_nodes.len(),
-            threshold,
+            threshold: self.threshold,
             protocol,
             eth: None,
             sol: None,
         };
 
-        // TODO(jakmeier): make this configurable
-        self.redis_container
-            .stockpile_triples(&cfg, &participants_by_id, 1)
-            .await;
+        if self.triple_stockpile_factor > 0 {
+            redis_container
+                .stockpile_triples(&cfg, &self.participants_by_id, self.triple_stockpile_factor)
+                .await;
+        }
 
-        // Start each node's tokio tasks
-        for node in self.prepared_nodes.drain(..) {
-            let started = node.start(
-                routing_table.clone(),
-                &self.redis_container.pool(),
-                &init_mesh,
-                &protocol_state,
-                &self.shared_public_key,
-            );
-            self.running.push(started);
+        redis_container
+    }
+
+    pub fn with_preshared_key(mut self) -> Self {
+        let encoded = EncodedPoint::<Secp256k1>::from_str(
+            "0303D6C6F119014A09A6B2A58B0BB075A7938EDF3D0E9F58AC2ED58A19CB5C20C0",
+        )
+        .unwrap();
+        self.shared_public_key = Some(mpc_crypto::PublicKey::from_encoded_point(&encoded).unwrap());
+
+        self.protocol_state = ProtocolState::Running(RunningContractState {
+            epoch: 0,
+            public_key: self.shared_public_key.unwrap(),
+            participants: self.participants.clone(),
+            candidates: self.candidates.clone(),
+            join_votes: Votes::default(),
+            leave_votes: Default::default(),
+            threshold: self.threshold,
+        });
+
+        self
+    }
+
+    pub fn with_stockpiled_triples(mut self, triple_stockpile_factor: u32) -> Self {
+        assert!(
+            self.shared_public_key.is_some(),
+            "can't stockpile without preshared key"
+        );
+        self.triple_stockpile_factor = triple_stockpile_factor;
+        self
+    }
+
+    pub fn with_presignature_stockpile(mut self) -> Self {
+        self.presignature_stockpile = true;
+        self
+    }
+}
+
+impl TestMpcNetwork {
+    pub async fn wait_for_triples(&self, threshold_per_node: usize) {
+        for node in &self.nodes {
+            node.wait_for_triples(threshold_per_node).await;
         }
     }
 
     pub async fn wait_for_presignatures(&self, threshold_per_node: usize) {
-        for node in &self.running {
+        for node in &self.nodes {
             node.wait_for_presignatures(threshold_per_node).await;
         }
     }
 }
 
 struct MockGovernance {
-    pub me: String,
+    pub me: AccountId,
+    pub protocol_state_tx: watch::Sender<Option<ProtocolState>>,
 }
 
 impl Governance for MockGovernance {
@@ -202,7 +271,38 @@ impl Governance for MockGovernance {
 
     async fn vote_public_key(&self, public_key: &near_crypto::PublicKey) -> anyhow::Result<bool> {
         tracing::debug!(me = ?self.me, ?public_key, "vote_public_key");
-        Ok(true)
+        let mut result = false;
+        self.protocol_state_tx.send_if_modified(|protocol_state| {
+            let modified;
+            match protocol_state {
+                Some(ProtocolState::Initializing(ref mut state)) => {
+                    modified = state
+                        .pk_votes
+                        .pk_votes
+                        .entry(public_key.clone())
+                        .or_default()
+                        .insert(self.me.clone());
+
+                    if state.pk_votes.pk_votes.len() >= state.threshold {
+                        *protocol_state = Some(ProtocolState::Running(RunningContractState {
+                            epoch: 0,
+                            participants: state.candidates.clone().into(),
+                            threshold: state.threshold,
+                            public_key: public_key.clone().into_affine_point(),
+                            candidates: Default::default(),
+                            join_votes: Default::default(),
+                            leave_votes: Default::default(),
+                        }));
+                        result = true;
+                    }
+                }
+
+                Some(_) => todo!(),
+                None => todo!(),
+            }
+            modified
+        });
+        Ok(result)
     }
 }
 
@@ -240,40 +340,70 @@ impl TestMpcNodeBuilder {
         // Needs to be built ahead of time to create routing table
         let (msg_tx, msg_rx, msg_channel) = MessageChannel::new();
 
-        // TODO(jakmeier): make this configurable
-        let secrets = [
-            "D098A0E6DE766B341F618B5651264ABAFD215E661080978489B99E6B9692201A",
-            "246E77A94C03FEEEC444C6EFC50232AB1A70ABF2E5A07368330AEA021A6223EB",
-            "4059292990D4E26D3291E41F20EFBE31D2B227A0CFF97DB0612F5D62CD2055EC",
-        ];
-        let bytes = hex::decode(secrets[index as usize]).unwrap();
-        let secret_share = k256::Scalar::from_bytes(bytes.try_into().unwrap()).unwrap();
-
         TestMpcNodeBuilder {
             me: Participant::from(index),
             candidate_info,
             participant_info,
             config,
-            secret_share,
             msg_tx,
             msg_rx,
             msg_channel,
         }
     }
 
-    fn start(
+    async fn start(
         self,
         routing_table: HashMap<Participant, Sender<Ciphered>>,
         redis_pool: &deadpool_redis::Pool,
         init_mesh: &MeshState,
         protocol_state: &ProtocolState,
-        public_key: &mpc_crypto::PublicKey,
+        public_key: &Option<mpc_crypto::PublicKey>,
+        presignature_stockpile: bool,
+        msg_log: Arc<Mutex<Vec<String>>>,
+        rpc_actions: Arc<Mutex<HashSet<String>>>,
     ) -> TestMpcNode {
-        let key_storage = secret_storage::test_store(0, self.secret_share, *public_key);
+        let index = u32::from(self.me);
+        let key_storage = if let Some(public_key) = public_key {
+            // TODO(jakmeier): make this work with other configs than num_nodes = 3
+            let secrets = [
+                "D098A0E6DE766B341F618B5651264ABAFD215E661080978489B99E6B9692201A",
+                "246E77A94C03FEEEC444C6EFC50232AB1A70ABF2E5A07368330AEA021A6223EB",
+                "4059292990D4E26D3291E41F20EFBE31D2B227A0CFF97DB0612F5D62CD2055EC",
+            ];
+            let bytes = hex::decode(secrets[index as usize]).unwrap();
+            let secret_share = k256::Scalar::from_bytes(bytes.try_into().unwrap()).unwrap();
+
+            secret_storage::test_store(0, secret_share, *public_key)
+        } else {
+            secret_storage::init(
+                None,
+                &Options {
+                    env: "test_env".to_owned(),
+                    gcp_project_id: "-".to_owned(),
+                    sk_share_secret_id: None,
+                    sk_share_local_path: None,
+                    redis_url: ".".to_owned(),
+                },
+                &self.participant_info.account_id,
+            )
+        };
 
         let triple_storage = triple_storage::init(redis_pool, &self.participant_info.account_id);
         let presignature_storage =
             presignature_storage::init(redis_pool, &self.participant_info.account_id);
+
+        if presignature_stockpile {
+            for presig in PRESIGNATURES[index as usize].iter() {
+                let mut slot = presignature_storage
+                    .reserve(presig.id)
+                    .await
+                    .expect("must be able to reserve slot");
+                let deserialized = serde_json::de::from_str(presig.presignature).unwrap();
+                // TODO(jakmeier): make this work with other configs than num_nodes = 3
+                let owner = (index % 3) as u32;
+                slot.insert(deserialized, owner.into()).await;
+            }
+        }
 
         let (sign_tx, sign_rx) = SignQueue::channel();
         const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
@@ -287,7 +417,7 @@ impl TestMpcNodeBuilder {
         let protocol = MpcSignProtocol::new_test(
             self.participant_info.account_id.clone(),
             key_storage,
-            triple_storage,
+            triple_storage.clone(),
             presignature_storage.clone(),
             Arc::new(RwLock::new(sign_rx)),
             self.msg_channel,
@@ -304,17 +434,18 @@ impl TestMpcNodeBuilder {
         let _protocol_handle = tokio::spawn(protocol.run(
             protocol::Node::new(),
             MockGovernance {
-                me: account_id.to_string(),
+                me: account_id.clone(),
+                protocol_state_tx: protocol_state_tx.clone(),
             },
             protocol_state_rx.clone(),
             config_rx.clone(),
             mesh_rx.clone(),
         ));
 
-        let rpc_actions = Default::default();
         let _mock_network_handle = Self::test_mock_network(
             routing_table,
-            Arc::clone(&rpc_actions),
+            rpc_actions,
+            msg_log,
             self.msg_rx,
             rpc_rx,
             mesh_tx.clone(),
@@ -334,6 +465,7 @@ impl TestMpcNodeBuilder {
             protocol_state: protocol_state_tx,
             sign_tx,
             msg_tx: self.msg_tx,
+            triple_storage,
             presignature_storage,
         }
     }
@@ -366,6 +498,7 @@ impl TestMpcNodeBuilder {
     fn test_mock_network(
         routing_table: HashMap<Participant, Sender<Ciphered>>,
         rpc_actions: Arc<Mutex<HashSet<String>>>,
+        msg_log: Arc<Mutex<Vec<String>>>,
         mut msg_rx: Receiver<(
             mpc_node::protocol::Message,
             (Participant, Participant, std::time::Instant),
@@ -381,6 +514,17 @@ impl TestMpcNodeBuilder {
                     Some((msg, (from, to, ts))) = msg_rx.recv() => {
                         tracing::debug!(target: "mock_network", ?to, ?ts, "Received MPC message");
 
+                        let log_msg = match msg {
+                            protocol::Message::Posit(_) => "Posit",
+                            protocol::Message::Generating(_) => "Generating",
+                            protocol::Message::Resharing(_) => "Resharing",
+                            protocol::Message::Triple(_) => "Triple",
+                            protocol::Message::Presignature(_) => "Presignature",
+                            protocol::Message::Signature(_) => "Signature",
+                            protocol::Message::Unknown(_) => "Unknown",
+                        };
+                        msg_log.lock().await.push(format!("{log_msg} from {from:?} to {to:?}"));
+
                         // directly send out single message, no batching
                         // (might want to add MessageOutbox, too, but for now this is easier)
                         let config = config.borrow().clone();
@@ -395,14 +539,14 @@ impl TestMpcNodeBuilder {
                             Ok(ciphered) => {
                                 if let Some(tx) = routing_table.get(&to) {
                                     if let Err(e) = tx.send(ciphered).await {
-                                        tracing::debug!(target: "mock_network", ?e, "Failed to forward encrypted message to {to:?}");
+                                        tracing::warn!(target: "mock_network", ?e, "Failed to forward encrypted message to {to:?}");
                                     }
                                 } else {
-                                    tracing::debug!(target: "mock_network", "No route to participant {:?}", to);
+                                    tracing::error!(target: "mock_network", "Test setup bug: No route to participant {:?}", to);
                                 }
                             }
                             Err(e) => {
-                                tracing::debug!(target: "mock_network", ?e, "Encryption failed");
+                                tracing::error!(target: "mock_network", ?e, "Encryption failed");
                             }
                         }
                     }
@@ -410,10 +554,13 @@ impl TestMpcNodeBuilder {
                     Some(rpc) = rpc_rx.recv() => {
                         let action_str = match rpc {
                             RpcAction::Publish(publish_action) => {
-                                format!("RpcAction::Publish({:?})", publish_action.request)
+                                format!(
+                                    "RpcAction::Publish({:?}",
+                                    publish_action.request,
+                                )
                             },
                         };
-                        tracing::debug!(target: "mock_network", ?action_str, "Received RPC action");
+                        tracing::error!(target: "mock_network", ?action_str, "Received RPC action");
                         let mut actions_log = rpc_actions.lock().await;
                         actions_log.insert(action_str);
                     }
@@ -430,6 +577,16 @@ impl TestMpcNodeBuilder {
 }
 
 impl TestMpcNode {
+    pub async fn wait_for_triples(&self, threshold_per_node: usize) {
+        loop {
+            let count = self.triple_storage.len_by_owner(self.me).await;
+            if count >= threshold_per_node {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+    }
+
     pub async fn wait_for_presignatures(&self, threshold_per_node: usize) {
         loop {
             let count = self.presignature_storage.len_by_owner(self.me).await;
@@ -440,6 +597,18 @@ impl TestMpcNode {
         }
     }
 }
+
+// impl Drop for TestMpcNetwork {
+//     fn drop(&mut self) {
+//         tracing::info!("printing all messages between nodes");
+//         let out = &mut std::fs::File::create("network_msg.txt").unwrap();
+
+//         for line in self.msg_log.lock().await.iter() {
+//             tracing::info!("{line}");
+//             writeln!(out, "{line}").unwrap();
+//         }
+//     }
+// }
 
 async fn redis() -> Redis {
     let spawner = crate::cluster::spawner::ClusterSpawner::default()
@@ -455,11 +624,70 @@ impl std::ops::Index<usize> for TestMpcNetwork {
     type Output = TestMpcNode;
 
     fn index(&self, index: usize) -> &TestMpcNode {
-        &self.running[index]
+        &self.nodes[index]
     }
 }
 impl std::ops::IndexMut<usize> for TestMpcNetwork {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.running[index]
+        &mut self.nodes[index]
     }
 }
+
+struct SerializedPresignature {
+    id: u64,
+    presignature: &'static str,
+}
+
+const PRESIGNATURES: [[SerializedPresignature; 15]; 3] = [
+    [
+        SerializedPresignature { id:10578615463967501927 , presignature:"{\"id\":10578615463967501927,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:13267685776613424333 , presignature:"{\"id\":13267685776613424333,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:13749498474387665027 , presignature:"{\"id\":13749498474387665027,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:14481654503363904241 , presignature:"{\"id\":14481654503363904241,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:15860611008650236091 , presignature:"{\"id\":15860611008650236091,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:2735443904802631835 , presignature:"{\"id\":2735443904802631835,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:3000585238922530005 , presignature:"{\"id\":3000585238922530005,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:3053026411059970257 , presignature:"{\"id\":3053026411059970257,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:3632459615945342142 , presignature:"{\"id\":3632459615945342142,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:3869672684191711158 , presignature:"{\"id\":3869672684191711158,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:4327689991975093939 , presignature:"{\"id\":4327689991975093939,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:5751834371102806199 , presignature:"{\"id\":5751834371102806199,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:7078077870043747112 , presignature:"{\"id\":7078077870043747112,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:8565255253298638177 , presignature:"{\"id\":8565255253298638177,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+        SerializedPresignature { id:928724233213890770 , presignature:"{\"id\":928724233213890770,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
+    ],
+    [
+    SerializedPresignature { id:10578615463967501927, presignature:"{\"id\":10578615463967501927,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:13267685776613424333, presignature:"{\"id\":13267685776613424333,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:13749498474387665027, presignature:"{\"id\":13749498474387665027,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:14481654503363904241, presignature:"{\"id\":14481654503363904241,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:15860611008650236091, presignature:"{\"id\":15860611008650236091,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:2735443904802631835, presignature:"{\"id\":2735443904802631835,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:3000585238922530005, presignature:"{\"id\":3000585238922530005,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:3053026411059970257, presignature:"{\"id\":3053026411059970257,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:3632459615945342142, presignature:"{\"id\":3632459615945342142,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:3869672684191711158, presignature:"{\"id\":3869672684191711158,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:4327689991975093939, presignature:"{\"id\":4327689991975093939,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:5751834371102806199, presignature:"{\"id\":5751834371102806199,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:7078077870043747112, presignature:"{\"id\":7078077870043747112,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:8565255253298638177, presignature:"{\"id\":8565255253298638177,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    SerializedPresignature { id:928724233213890770, presignature:"{\"id\":928724233213890770,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
+    ],
+    [
+    SerializedPresignature {id:10578615463967501927, presignature:"{\"id\":10578615463967501927,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:13267685776613424333, presignature:"{\"id\":13267685776613424333,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:13749498474387665027, presignature:"{\"id\":13749498474387665027,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:14481654503363904241, presignature:"{\"id\":14481654503363904241,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:15860611008650236091, presignature:"{\"id\":15860611008650236091,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:2735443904802631835, presignature:"{\"id\":2735443904802631835,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:3000585238922530005, presignature:"{\"id\":3000585238922530005,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:3053026411059970257, presignature:"{\"id\":3053026411059970257,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:3632459615945342142, presignature:"{\"id\":3632459615945342142,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:3869672684191711158, presignature:"{\"id\":3869672684191711158,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:4327689991975093939, presignature:"{\"id\":4327689991975093939,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:5751834371102806199, presignature:"{\"id\":5751834371102806199,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:7078077870043747112, presignature:"{\"id\":7078077870043747112,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:8565255253298638177, presignature:"{\"id\":8565255253298638177,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    SerializedPresignature {id:928724233213890770, presignature:"{\"id\":928724233213890770,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
+    ]
+];
