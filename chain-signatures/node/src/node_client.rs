@@ -7,8 +7,6 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::str::Utf8Error;
 use std::time::Duration;
-use tokio_retry::strategy::{jitter, ExponentialBackoff};
-use tokio_retry::Retry;
 use url::Url;
 
 #[derive(Debug, Clone, clap::Parser)]
@@ -121,9 +119,7 @@ impl NodeClient {
     pub async fn msg(&self, base: impl IntoUrl, msg: &[&Ciphered]) -> Result<(), RequestError> {
         let mut url = base.into_url()?;
         url.set_path("msg");
-
-        let strategy = ExponentialBackoff::from_millis(10).map(jitter).take(3);
-        Retry::spawn(strategy, || self.post_msg(&url, msg)).await
+        self.post_msg(&url, msg).await
     }
 
     pub async fn msg_empty(&self, base: impl IntoUrl) -> Result<(), RequestError> {

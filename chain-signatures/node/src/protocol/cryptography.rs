@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::state::{GeneratingState, NodeState, ResharingState};
 use super::MpcSignProtocol;
 use crate::config::Config;
@@ -6,9 +8,10 @@ use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::types::SecretKeyShare;
 
-use cait_sith::protocol::{Action, InitializationError, ProtocolError};
+use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
 use k256::elliptic_curve::group::GroupEncoding;
 use mpc_crypto::PublicKey;
+use tokio::sync::mpsc;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CryptographicError {
@@ -59,6 +62,25 @@ impl CryptographicProtocol for GeneratingState {
             match action {
                 Action::Wait => {
                     tracing::debug!("generating: waiting");
+                    let mut counts = HashMap::<Participant, usize>::new();
+                    loop {
+                        let msg = match ctx.generating.try_recv() {
+                            Ok(msg) => msg,
+                            Err(mpsc::error::TryRecvError::Empty) => {
+                                break;
+                            }
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                tracing::warn!("generating: unexpected channel closure, stopping");
+                                break;
+                            }
+                        };
+
+                        counts.entry(msg.from).and_modify(|c| *c += 1).or_insert(1);
+                        self.protocol.message(msg.from, msg.data);
+                    }
+                    if !counts.is_empty() {
+                        tracing::info!(?counts, "generating: handling new messages");
+                    }
                     return NodeState::Generating(self);
                 }
                 Action::SendMany(data) => {
@@ -176,6 +198,25 @@ impl CryptographicProtocol for ResharingState {
             match action {
                 Action::Wait => {
                     tracing::debug!("resharing: waiting");
+                    let mut counts = HashMap::<Participant, usize>::new();
+                    loop {
+                        let msg = match ctx.resharing.try_recv() {
+                            Ok(msg) => msg,
+                            Err(mpsc::error::TryRecvError::Empty) => {
+                                break;
+                            }
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                tracing::warn!("resharing: unexpected channel closure, stopping");
+                                break;
+                            }
+                        };
+
+                        counts.entry(msg.from).and_modify(|c| *c += 1).or_insert(1);
+                        self.protocol.message(msg.from, msg.data);
+                    }
+                    if !counts.is_empty() {
+                        tracing::info!(?counts, "resharing: handling new messages");
+                    }
                     return NodeState::Resharing(self);
                 }
                 Action::SendMany(data) => {

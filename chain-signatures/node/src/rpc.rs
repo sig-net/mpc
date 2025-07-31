@@ -1,7 +1,8 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
-use crate::protocol::contract::primitives::ParticipantMap;
+use crate::protocol::contract::primitives::{ParticipantMap, Participants};
+use crate::protocol::contract::RunningContractState;
 use crate::protocol::signature::SignRequest;
 use crate::protocol::{Chain, ProtocolState};
 use crate::util::AffinePointExt as _;
@@ -11,11 +12,11 @@ use solana_sdk::signer::keypair::Keypair;
 
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
-use alloy::providers::{Provider, RootProvider};
-use alloy::rpc::types::TransactionReceipt;
+use alloy::providers::{Provider, RootProvider, WalletProvider};
+use alloy::rpc::types::{Transaction, TransactionReceipt};
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
-use k256::Secp256k1;
+use k256::{AffinePoint, Secp256k1};
 use mpc_keys::hpke;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
@@ -44,11 +45,13 @@ const MAX_PUBLISH_RETRY: usize = 6;
 /// The maximum number of concurrent RPC requests the system can make
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract state and config
-const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
+const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 /// The interval to batch send Ethereum responses
 const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 /// The batch size for Ethereum responses
 const ETH_RESPOND_BATCH_SIZE: usize = 10;
+/// The maximum number of attempts to fetch eth tx and its receipt
+const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
 
 type EthContractFillProvider = FillProvider<
     JoinFill<
@@ -148,6 +151,26 @@ impl ContractStateWatcher {
         )
     }
 
+    pub fn with_running(
+        node_id: &AccountId,
+        public_key: AffinePoint,
+        threshold: usize,
+        participants: Participants,
+    ) -> (Self, watch::Sender<Option<ProtocolState>>) {
+        Self::with(
+            node_id,
+            ProtocolState::Running(RunningContractState {
+                epoch: 0,
+                public_key,
+                participants,
+                candidates: Default::default(),
+                join_votes: Default::default(),
+                leave_votes: Default::default(),
+                threshold,
+            }),
+        )
+    }
+
     pub fn account_id(&self) -> &AccountId {
         &self.account_id
     }
@@ -169,8 +192,16 @@ impl ContractStateWatcher {
         self.contract_state.mark_changed();
     }
 
+    pub fn participants(&self) -> Option<Participants> {
+        match self.borrow_state().as_ref()? {
+            ProtocolState::Initializing(state) => Some(state.candidates.clone().into()),
+            ProtocolState::Running(state) => Some(state.participants.clone()),
+            ProtocolState::Resharing(state) => Some(state.new_participants.clone()),
+        }
+    }
+
     pub async fn me(&self) -> Option<Participant> {
-        match self.state().clone()? {
+        match self.borrow_state().as_ref()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => state
                 .participants
@@ -205,7 +236,7 @@ impl ContractStateWatcher {
         }
     }
 
-    pub async fn participants(&self) -> ParticipantMap {
+    pub async fn participant_map(&self) -> ParticipantMap {
         let Some(state) = self.state().clone() else {
             return ParticipantMap::Zero;
         };
@@ -364,19 +395,11 @@ impl NearClient {
     }
 
     pub async fn fetch_state(&self) -> anyhow::Result<ProtocolState> {
-        let contract_state: mpc_contract::ProtocolContractState = self
-            .client
-            .view(&self.contract_id, "state")
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(%err, "failed to fetch protocol state");
-            })?
-            .json()?;
+        let contract_state: mpc_contract::ProtocolContractState =
+            self.client.view(&self.contract_id, "state").await?.json()?;
 
         let protocol_state: ProtocolState = contract_state.try_into().map_err(|_| {
-            let msg = "failed to parse protocol state, has it been initialized?".to_string();
-            tracing::error!(msg);
-            anyhow::anyhow!(msg)
+            anyhow::anyhow!("failed to parse protocol state, has it been initialized?")
         })?;
 
         tracing::debug!(?protocol_state, "protocol state");
@@ -759,8 +782,8 @@ async fn try_publish_near(
     Ok(())
 }
 
-/// Retry waiting for transaction receipt with exponential backoff starting at the specified `initial_delay`
-async fn handle_wait_for_receipt_retry(
+/// Retry with exponential backoff starting at the specified `initial_delay`
+async fn handle_wait_for_polling_retry(
     attempt: &mut usize,
     max_attempts: usize,
     sign_ids: &[SignId],
@@ -771,10 +794,7 @@ async fn handle_wait_for_receipt_retry(
     *attempt += 1;
     tracing::error!(?sign_ids, attempt = *attempt, "{}", error_msg);
     if *attempt >= max_attempts {
-        tracing::error!(
-            ?sign_ids,
-            "exceeded max attempts to get eth signature respond transaction receipt"
-        );
+        tracing::error!(?sign_ids, "exceeded max attempts");
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
             .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
             .inc();
@@ -785,17 +805,75 @@ async fn handle_wait_for_receipt_retry(
     Ok(())
 }
 
-// wait for transaction receipt with 5 retries and exponential delay backoff starting at 5s
+// wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
+async fn wait_for_pending_tx(
+    provider: &EthContractFillProvider,
+    tx_hash: alloy::primitives::B256,
+    near_account_id: &AccountId,
+    sign_ids: Vec<SignId>,
+    max_attempts: usize,
+) -> Result<Transaction, ()> {
+    let mut attempt = 0;
+    let initial_delay = Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            provider.get_transaction_by_hash(tx_hash),
+        )
+        .await
+        {
+            Ok(result) => match result {
+                Ok(Some(tx)) => {
+                    tracing::info!(?sign_ids, "eth signature respond pending transaction found");
+                    return Ok(tx);
+                }
+                Ok(None) => {
+                    handle_wait_for_polling_retry(
+                        &mut attempt,
+                        max_attempts,
+                        &sign_ids,
+                        near_account_id,
+                        "eth signature respond pending transaction not found, retrying",
+                        initial_delay,
+                    )
+                    .await?;
+                }
+                Err(err) => {
+                    handle_wait_for_polling_retry(
+                        &mut attempt,
+                        max_attempts,
+                        &sign_ids,
+                        near_account_id,
+                        &format!("failed to get eth signature respond pending transaction, retrying: {err:?}"),
+                        initial_delay,
+                    ).await?;
+                }
+            },
+            Err(_) => {
+                handle_wait_for_polling_retry(
+                    &mut attempt,
+                    max_attempts,
+                    &sign_ids,
+                    near_account_id,
+                    "timeout while getting eth signature respond pending transaction, retrying",
+                    initial_delay,
+                )
+                .await?;
+            }
+        }
+    }
+}
+
+// wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
 async fn wait_for_transaction_receipt(
     provider: &EthContractFillProvider,
     tx_hash: alloy::primitives::B256,
     near_account_id: &AccountId,
     sign_ids: Vec<SignId>,
+    max_attempts: usize,
 ) -> Result<TransactionReceipt, ()> {
     let mut attempt = 0;
-    let max_attempts = 5;
     let initial_delay = Duration::from_secs(5);
-
     loop {
         match tokio::time::timeout(
             Duration::from_secs(10),
@@ -809,7 +887,7 @@ async fn wait_for_transaction_receipt(
                     return Ok(receipt);
                 }
                 Ok(None) => {
-                    handle_wait_for_receipt_retry(
+                    handle_wait_for_polling_retry(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
@@ -820,7 +898,7 @@ async fn wait_for_transaction_receipt(
                     .await?;
                 }
                 Err(err) => {
-                    handle_wait_for_receipt_retry(
+                    handle_wait_for_polling_retry(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
@@ -831,7 +909,7 @@ async fn wait_for_transaction_receipt(
                 }
             },
             Err(_) => {
-                handle_wait_for_receipt_retry(
+                handle_wait_for_polling_retry(
                     &mut attempt,
                     max_attempts,
                     &sign_ids,
@@ -853,12 +931,37 @@ async fn send_eth_transaction(
     near_account_id: &AccountId,
 ) -> Result<alloy::primitives::B256, ()> {
     let chain = Chain::Ethereum;
+    // fetch nonce manually since the automatic nonce management in ContractInstance is lagging
+    let nonce = match tokio::time::timeout(
+        Duration::from_secs(10),
+        contract
+            .provider()
+            .get_transaction_count(contract.provider().default_signer_address()),
+    )
+    .await
+    {
+        Ok(Ok(nonce)) => {
+            tracing::info!(nonce, "will send eth tx with nonce");
+            nonce
+        }
+        Ok(Err(err)) => {
+            tracing::error!(?err, "failed to get nonce");
+            return Err(());
+        }
+        Err(err) => {
+            tracing::error!(?err, "timeout to get nonce");
+            return Err(());
+        }
+    };
+
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         contract
             .function("respond", params)
             .unwrap()
             .gas(gas)
+            // setting nonce manually since the automatic nonce management in ContractInstance is lagging
+            .nonce(nonce)
             .send(),
     )
     .await
@@ -874,7 +977,7 @@ async fn send_eth_transaction(
     .map_err(|err| {
         tracing::error!(
             ?sign_ids,
-            error = ?err,
+            ?err,
             "failed to send ethereum signature transaction"
         );
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
@@ -920,6 +1023,7 @@ async fn try_publish_eth(
         tx_hash,
         near_account_id,
         vec![action.request.indexed.id],
+        ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
     .await?;
 
@@ -983,6 +1087,7 @@ async fn try_batch_publish_eth(
         .iter()
         .map(|action| action.request.indexed.id)
         .collect::<Vec<_>>();
+    tracing::info!(?sign_ids, "will send eth batch tx");
     for action in actions {
         let signature = signatures
             .get(&action.request.indexed.id)
@@ -1008,11 +1113,25 @@ async fn try_batch_publish_eth(
     let tx_hash =
         send_eth_transaction(&eth.contract, &params, gas, &sign_ids, near_account_id).await?;
 
+    tracing::info!(?tx_hash, "sent eth tx");
+
+    let tx = wait_for_pending_tx(
+        eth.contract.provider(),
+        tx_hash,
+        near_account_id,
+        sign_ids.clone(),
+        ETH_TX_RECEIPT_MAX_ATTEMPTS,
+    )
+    .await?;
+
+    tracing::info!(?tx, "tx found in mempool");
+
     let receipt = wait_for_transaction_receipt(
         eth.contract.provider(),
         tx_hash,
         near_account_id,
         sign_ids.clone(),
+        ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
     .await?;
 
@@ -1111,6 +1230,7 @@ async fn execute_batch_publish(
             break;
         }
 
+        tracing::warn!("batch publish failed, {publish:?}");
         retry_count += 1;
         tokio::time::sleep(Duration::from_millis(100)).await;
         if retry_count >= MAX_PUBLISH_RETRY {

@@ -5,6 +5,7 @@ use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::watch;
 
 /// The contract's config is a dynamic representation of all configurations possible.
 pub type ContractConfig = HashMap<String, Value>;
@@ -16,6 +17,15 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn channel(local: LocalConfig) -> (watch::Sender<Self>, watch::Receiver<Self>) {
+        let config = Self::new(local);
+        watch::channel(config)
+    }
+
+    pub fn channel_default() -> (watch::Sender<Self>, watch::Receiver<Self>) {
+        Self::channel(LocalConfig::default())
+    }
+
     pub fn new(local: LocalConfig) -> Self {
         let mut protocol = ProtocolConfig::default();
 

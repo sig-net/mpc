@@ -170,15 +170,6 @@ pub(crate) static NUM_PRESIGNATURE_GENERATORS_TOTAL: LazyLock<IntGaugeVec> = Laz
     .unwrap()
 });
 
-pub(crate) static MESSAGE_QUEUE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
-    try_create_int_gauge_vec(
-        "multichain_message_queue_size",
-        "size of message queue of the node",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
-
 pub(crate) static NODE_VERSION: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec(
         "multichain_node_version",
@@ -291,16 +282,6 @@ pub(crate) static PROTOCOL_LATENCY_ITER_CONSENSUS: LazyLock<HistogramVec> = Lazy
     try_create_histogram_vec(
         "multichain_protocol_iter_consensus",
         "Latency of multichain protocol iter, start of consensus iter till end",
-        &["node_account_id"],
-        Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
-    )
-    .unwrap()
-});
-
-pub(crate) static PROTOCOL_LATENCY_ITER_MESSAGE: LazyLock<HistogramVec> = LazyLock::new(|| {
-    try_create_histogram_vec(
-        "multichain_protocol_iter_message",
-        "Latency of multichain protocol iter, start of message iter till end",
         &["node_account_id"],
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
