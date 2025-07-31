@@ -49,13 +49,10 @@ impl MeshState {
                 self.active.insert(&participant, info);
                 self.stable.insert(participant);
             }
-            NodeStatus::Inactive => {
-                self.active.insert(&participant, info);
-            }
             NodeStatus::Syncing => {
                 self.need_sync.insert(&participant, info);
             }
-            NodeStatus::Offline => {
+            NodeStatus::Inactive | NodeStatus::Offline => {
                 self.active.remove(&participant);
                 self.need_sync.remove(&participant);
                 self.stable.remove(&participant);
