@@ -1,4 +1,4 @@
-use crate::protocol::sync::SyncUpdate;
+use crate::protocol::sync::{SyncUpdate, SyncView};
 use crate::web::StateView;
 use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
@@ -140,7 +140,11 @@ impl NodeClient {
         Ok(resp.json::<StateView>().await?)
     }
 
-    pub async fn sync(&self, base: impl IntoUrl, update: &SyncUpdate) -> Result<(), RequestError> {
+    pub async fn sync(
+        &self,
+        base: impl IntoUrl,
+        update: &SyncUpdate,
+    ) -> Result<SyncView, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("sync");
 

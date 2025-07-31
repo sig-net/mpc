@@ -2,8 +2,9 @@ mod error;
 
 use self::error::Error;
 use crate::indexer::NearIndexer;
+use crate::protocol::message::MessageError;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus};
-use crate::protocol::sync::{SyncChannel, SyncUpdate};
+use crate::protocol::sync::{SyncChannel, SyncUpdate, SyncView};
 use crate::protocol::MessageChannel;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::error::Result;
@@ -223,7 +224,10 @@ async fn bench_metrics() -> Json<BenchMetrics> {
 async fn sync(
     Extension(state): Extension<Arc<AxumState>>,
     WithRejection(Json(update), _): WithRejection<Json<SyncUpdate>, Error>,
-) -> Result<Json<()>> {
-    state.sync_channel.request_update(update).await;
-    Ok(Json(()))
+) -> Result<Json<SyncView>> {
+    if let Some(view) = state.sync_channel.request_update(update).await {
+        Ok(Json(view))
+    } else {
+        Err(Error::Message(MessageError::Sync("unable to request sync")))
+    }
 }

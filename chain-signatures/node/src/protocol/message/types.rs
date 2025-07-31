@@ -192,6 +192,8 @@ pub enum MessageError {
     Encryption(#[from] hpke::Error),
     #[error("verify failed: {0}")]
     Verification(&'static str),
+    #[error("sync failed: {0}")]
+    Sync(&'static str),
     #[error("idempotent check failed")]
     Idempotent,
 }
