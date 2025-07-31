@@ -65,7 +65,7 @@ jobs:
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             echo "lt_chain=${CHAIN:-Solana}" >> "$GITHUB_OUTPUT"
             echo "lt_env=${ENV:-dev}" >> "$GITHUB_OUTPUT"
-            echo "lt_strategy=${STRATEGY:-constant_medium_rate_1h}" >> "$GITHUB_OUTPUT"
+            echo "lt_strategy=${STRATEGY:-constant_low_rate_1h}" >> "$GITHUB_OUTPUT"
             echo "lt_check_signature=${CHECK_SIGNATURE:-true}" >> "$GITHUB_OUTPUT"
           else
             echo "lt_chain=${CHAIN:-Solana}" >> "$GITHUB_OUTPUT"
