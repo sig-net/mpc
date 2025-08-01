@@ -380,7 +380,9 @@ impl PresignatureSpawner {
 
         match internal_action {
             PositInternalAction::None => {}
-            PositInternalAction::Abort => {}
+            PositInternalAction::Abort => {
+                self.introduced.remove(&id.id);
+            }
             PositInternalAction::Reply(action) => {
                 self.msg
                     .send(
