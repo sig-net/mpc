@@ -7750,6 +7750,7 @@ name = "mpc-node"
 version = "1.6.0"
 dependencies = [
  "alloy",
+ "alloy-dyn-abi",
  "alloy-signer-local",
  "alloy-sol-types",
  "anchor-client",

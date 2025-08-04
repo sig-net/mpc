@@ -34,17 +34,31 @@ impl SignRespondTxStorage {
             .ok()
     }
 
-    pub async fn fetch_pending(&self) -> Vec<SignRespondTxId> {
+    pub async fn fetch_pending(&self) -> Vec<SignRespondTx> {
         let Some(mut conn) = self.connect().await else {
             return Vec::new();
         };
 
-        conn.sdiff((&self.tx_key, &self.completed_key))
+        let pending_ids: Vec<SignRespondTxId> = conn
+            .sdiff((&self.tx_key, &self.completed_key))
             .await
             .inspect_err(|err| {
                 tracing::warn!(?err, "failed to fetch pending tx ids");
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        if pending_ids.is_empty() {
+            return Vec::new();
+        }
+
+        // Then, fetch values from the hash
+        match conn.hget(&self.tx_key, pending_ids).await {
+            Ok(pending_txs) => pending_txs,
+            Err(err) => {
+                tracing::warn!(?err, "failed to fetch pending tx data");
+                Vec::new()
+            }
+        }
     }
 
     pub async fn insert(&self, id: SignRespondTxId, tx: SignRespondTx) -> bool {
@@ -250,6 +264,19 @@ impl FromRedisValue for SignRespondTxId {
             RedisError::from((
                 redis::ErrorKind::TypeError,
                 "Failed to deserialize SignRespondTxId",
+                e.to_string(),
+            ))
+        })
+    }
+}
+
+impl FromRedisValue for SignRespondTx {
+    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
+        let json = String::from_redis_value(v)?;
+        serde_json::from_str(&json).map_err(|e| {
+            RedisError::from((
+                redis::ErrorKind::TypeError,
+                "Failed to deserialize SignRespondTx",
                 e.to_string(),
             ))
         })

@@ -1,5 +1,7 @@
 use crate::protocol::{Chain, IndexedSignRequest};
+use crate::sign_respond_tx::SignRespondTx;
 use crate::sign_respond_tx::SignRespondTxId;
+use crate::sign_respond_tx::TransactionOutput;
 use crate::storage::app_data_storage::AppDataStorage;
 use crate::storage::sign_respond_tx_storage::SignRespondTxStorage;
 use alloy::consensus::BlockHeader;
@@ -7,8 +9,8 @@ use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::Log;
+use alloy::rpc::types::{Transaction, TransactionReceipt, TransactionRequest};
 use alloy::sol_types::{sol, SolEvent};
-use chain_signatures_project::Sign;
 use helios::common::types::{SubscriptionEvent, SubscriptionType};
 use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 use k256::Scalar;
@@ -16,7 +18,7 @@ use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::{fmt, path::PathBuf, str::FromStr, sync::LazyLock, time::Instant};
 use tokio::sync::broadcast::error::RecvError;
@@ -429,10 +431,7 @@ fn finalized_block_channel() -> (mpsc::Sender<BlockNumber>, mpsc::Receiver<Block
 }
 
 const MAX_COMPLETED_TXS: usize = 1024;
-fn completed_txs_channel() -> (
-    mpsc::Sender<SignRespondTxId>,
-    mpsc::Receiver<SignRespondTxId>,
-) {
+fn completed_txs_channel() -> (mpsc::Sender<SignRespondTx>, mpsc::Receiver<SignRespondTx>) {
     mpsc::channel(MAX_COMPLETED_TXS)
 }
 
@@ -661,7 +660,7 @@ async fn retry_failed_blocks(
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
     sign_respond_tx_storage: SignRespondTxStorage,
-    completed_txs_send: mpsc::Sender<SignRespondTxId>,
+    completed_txs_send: mpsc::Sender<SignRespondTx>,
 ) {
     loop {
         let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
@@ -897,7 +896,7 @@ async fn process_block(
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
     sign_respond_tx_storage: SignRespondTxStorage,
-    completed_txs_send: mpsc::Sender<SignRespondTxId>,
+    completed_txs_send: mpsc::Sender<SignRespondTx>,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -923,39 +922,38 @@ async fn process_block(
     };
 
     let block_receipts_clone = block_receipts.clone();
-    let pending_txs: HashSet<_> = sign_respond_tx_storage
+    let pending_txs: HashMap<SignRespondTxId, SignRespondTx> = sign_respond_tx_storage
         .fetch_pending()
         .await
         .into_iter()
+        .map(|tx| (tx.id.clone(), tx.clone()))
         .collect();
     for receipt in block_receipts_clone {
-        if pending_txs.contains(&receipt.transaction_hash.into()) {
-            let status = receipt.status();
-            println!(
-                "Tx {} found in block {block_number}: {}",
-                receipt.transaction_hash,
-                if status { "success" } else { "failed" }
-            );
-            let sign_respond_tx_storage = sign_respond_tx_storage.clone();
-            let completed_txs_send = completed_txs_send.clone();
-            tokio::spawn(async move {
-                if mark_completed_tx(receipt.transaction_hash.into(), sign_respond_tx_storage, 6)
-                    .await
-                {
-                    match completed_txs_send
-                        .send(receipt.transaction_hash.into())
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(err) => {
-                            tracing::warn!(
-                                "Failed to send completed sign respond tx for processing: {err:?}"
-                            );
-                        }
+        let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
+            continue;
+        };
+        let status = receipt.status();
+        tracing::info!(
+            "Tx {} found in block {block_number}: {}",
+            receipt.transaction_hash,
+            if status { "success" } else { "failed" }
+        );
+        let sign_respond_tx_storage = sign_respond_tx_storage.clone();
+        let completed_txs_send = completed_txs_send.clone();
+        let pending_tx = pending_tx.clone();
+        tokio::spawn(async move {
+            if mark_completed_tx(receipt.transaction_hash.into(), sign_respond_tx_storage, 6).await
+            {
+                match completed_txs_send.send(pending_tx).await {
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            "Failed to send completed sign respond tx for processing: {err:?}"
+                        );
                     }
                 }
-            });
-        }
+            }
+        });
     }
 
     let filtered_logs: Vec<Log> = block_receipts
