@@ -7,12 +7,16 @@ use near_account_id::AccountId;
 
 pub fn init(pool: &Pool, account_id: &AccountId) -> SignRespondTxStorage {
     let tx_key = format!("sign_respond_tx:{STORAGE_VERSION}:{account_id}");
-    let completed_key = format!("sign_respond_tx_completed:{STORAGE_VERSION}:{account_id}");
+    let pending_key = format!("sign_respond_tx_pending:{STORAGE_VERSION}:{account_id}");
+    let success_key = format!("sign_respond_tx_success:{STORAGE_VERSION}:{account_id}");
+    let failed_key = format!("sign_respond_tx_failed:{STORAGE_VERSION}:{account_id}");
 
     SignRespondTxStorage {
         redis_pool: pool.clone(),
         tx_key,
-        completed_key,
+        pending_key,
+        success_key,
+        failed_key,
     }
 }
 
@@ -20,7 +24,9 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> SignRespondTxStorage {
 pub struct SignRespondTxStorage {
     redis_pool: Pool,
     tx_key: String,
-    completed_key: String,
+    pending_key: String,
+    success_key: String,
+    failed_key: String,
 }
 
 impl SignRespondTxStorage {
@@ -40,7 +46,7 @@ impl SignRespondTxStorage {
         };
 
         let pending_ids: Vec<SignRespondTxId> = conn
-            .sdiff((&self.tx_key, &self.completed_key))
+            .sdiff((&self.pending_key, &self.success_key, &self.failed_key))
             .await
             .inspect_err(|err| {
                 tracing::warn!(?err, "failed to fetch pending tx ids");
@@ -64,12 +70,11 @@ impl SignRespondTxStorage {
     pub async fn insert(&self, id: SignRespondTxId, tx: SignRespondTx) -> bool {
         const SCRIPT: &str = r#"
             local tx_key = KEYS[1]
-            local completed_key = KEYS[2]
             local tx_id = ARGV[1]
             local tx = ARGV[2]
 
-            if redis.call("HEXISTS", completed_key, tx_id) == 1 then
-                return {err = "WARN tx " .. tx_id .. " has already been completed"}
+            if redis.call("HEXISTS", tx_key, tx_id) == 1 then
+                return {err = "WARN tx " .. tx_id .. " has already been inserted}
             end
 
             redis.call("SADD", tx_key, tx_id)
@@ -82,7 +87,6 @@ impl SignRespondTxStorage {
         };
         let result: Result<(), _> = redis::Script::new(SCRIPT)
             .key(&self.tx_key)
-            .key(&self.completed_key)
             .arg(id.clone())
             .arg(tx)
             .invoke_async(&mut conn)
@@ -96,12 +100,14 @@ impl SignRespondTxStorage {
         }
     }
 
-    pub async fn complete(&self, id: SignRespondTxId) -> bool {
+    pub async fn mark_tx_success(&self, id: SignRespondTxId) -> bool {
         const SCRIPT: &str = r#"
-            local completed_key = KEYS[1]   
+            local success_key = KEYS[1]   
+            local pending_key = KEYS[2]
             local tx_id = ARGV[1]
 
-            redis.call("SADD", completed_key, tx_id)
+            redis.call("SADD", success_key, tx_id)
+            redis.call("SREM", pending_key, tx_id)
         "#;
 
         let Some(mut conn) = self.connect().await else {
@@ -109,7 +115,8 @@ impl SignRespondTxStorage {
             return false;
         };
         let outcome: Option<()> = redis::Script::new(SCRIPT)
-            .key(&self.completed_key)
+            .key(&self.success_key)
+            .key(&self.pending_key)
             .arg(id.clone())
             .invoke_async(&mut conn)
             .await
@@ -121,13 +128,43 @@ impl SignRespondTxStorage {
         outcome.is_some()
     }
 
-    pub async fn remove(&self, id: SignRespondTxId) -> bool {
+    pub async fn mark_tx_failed(&self, id: SignRespondTxId) -> bool {
         const SCRIPT: &str = r#"
-            local tx_key = KEYS[1]
-            local completed_key = KEYS[2]
+            local failed_key = KEYS[1]   
+            local pending_key = KEYS[2]
             local tx_id = ARGV[1]
 
-            redis.call("SREM", completed_key, tx_id)
+            redis.call("SADD", failed_key, tx_id)
+            redis.call("SREM", pending_key, tx_id)
+        "#;
+
+        let Some(mut conn) = self.connect().await else {
+            tracing::warn!(?id, "failed to remove tx: connection failed");
+            return false;
+        };
+        let outcome: Option<()> = redis::Script::new(SCRIPT)
+            .key(&self.failed_key)
+            .key(&self.pending_key)
+            .arg(id.clone())
+            .invoke_async(&mut conn)
+            .await
+            .inspect_err(|err| {
+                tracing::warn!(?id, ?err, "failed to remove tx");
+            })
+            .ok();
+
+        outcome.is_some()
+    }
+
+    pub async fn mark_success_responded(&self, id: SignRespondTxId) -> bool {
+        const SCRIPT: &str = r#"
+            local tx_key = KEYS[1]
+            local pending_key = KEYS[2]
+            local success_key = KEYS[3]
+            local tx_id = ARGV[1]
+
+            redis.call("SREM", pending_key, tx_id)
+            redis.call("SADD", success_key, tx_id)
             redis.call("HDEL", tx_key, tx_id)
         "#;
 
@@ -137,7 +174,39 @@ impl SignRespondTxStorage {
         };
         let outcome: Option<()> = redis::Script::new(SCRIPT)
             .key(&self.tx_key)
-            .key(&self.completed_key)
+            .key(&self.pending_key)
+            .key(&self.success_key)
+            .arg(id.clone())
+            .invoke_async(&mut conn)
+            .await
+            .inspect_err(|err| {
+                tracing::warn!(?id, ?err, "failed to remove tx");
+            })
+            .ok();
+
+        outcome.is_some()
+    }
+
+    pub async fn mark_failed_responded(&self, id: SignRespondTxId) -> bool {
+        const SCRIPT: &str = r#"
+            local tx_key = KEYS[1]
+            local pending_key = KEYS[2]
+            local failed_key = KEYS[3]
+            local tx_id = ARGV[1]
+
+            redis.call("SREM", pending_key, tx_id)
+            redis.call("SADD", failed_key, tx_id)
+            redis.call("HDEL", tx_key, tx_id)
+        "#;
+
+        let Some(mut conn) = self.connect().await else {
+            tracing::warn!(?id, "failed to remove tx: connection failed");
+            return false;
+        };
+        let outcome: Option<()> = redis::Script::new(SCRIPT)
+            .key(&self.tx_key)
+            .key(&self.pending_key)
+            .key(&self.failed_key)
             .arg(id.clone())
             .invoke_async(&mut conn)
             .await
@@ -162,11 +231,37 @@ impl SignRespondTxStorage {
         }
     }
 
-    pub async fn contains_completed(&self, id: SignRespondTxId) -> bool {
+    pub async fn contains_success(&self, id: SignRespondTxId) -> bool {
         let Some(mut conn) = self.connect().await else {
             return false;
         };
-        match conn.sismember(&self.completed_key, id.clone()).await {
+        match conn.sismember(&self.success_key, id.clone()).await {
+            Ok(exists) => exists,
+            Err(err) => {
+                tracing::warn!(?id, ?err, "failed to check if tx in completed set");
+                false
+            }
+        }
+    }
+
+    pub async fn contains_failed(&self, id: SignRespondTxId) -> bool {
+        let Some(mut conn) = self.connect().await else {
+            return false;
+        };
+        match conn.sismember(&self.failed_key, id.clone()).await {
+            Ok(exists) => exists,
+            Err(err) => {
+                tracing::warn!(?id, ?err, "failed to check if tx in completed set");
+                false
+            }
+        }
+    }
+
+    pub async fn contains_pending(&self, id: SignRespondTxId) -> bool {
+        let Some(mut conn) = self.connect().await else {
+            return false;
+        };
+        match conn.sismember(&self.pending_key, id.clone()).await {
             Ok(exists) => exists,
             Err(err) => {
                 tracing::warn!(?id, ?err, "failed to check if tx in completed set");
@@ -214,7 +309,9 @@ impl SignRespondTxStorage {
         };
         let outcome: Option<()> = redis::Script::new(SCRIPT)
             .key(&self.tx_key)
-            .key(&self.completed_key)
+            .key(&self.pending_key)
+            .key(&self.success_key)
+            .key(&self.failed_key)
             .invoke_async(&mut conn)
             .await
             .inspect_err(|err| {

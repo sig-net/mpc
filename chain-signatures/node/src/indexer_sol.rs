@@ -215,6 +215,7 @@ fn sign_request_from_event(
         timestamp_sign_queue: Some(Instant::now()),
         unix_timestamp_indexed: crate::util::current_unix_timestamp(),
         total_timeout,
+        sign_request_type: crate::protocol::SignRequestType::Sign,
     })
 }
 

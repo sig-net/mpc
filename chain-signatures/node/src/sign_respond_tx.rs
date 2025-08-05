@@ -3,11 +3,9 @@ use alloy::primitives::B256;
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use anchor_lang::prelude::Pubkey;
 use serde::Deserialize;
-use sha3::digest::consts::U802;
-use solana_sdk::blake3::Hash;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Copy)]
 pub struct SignRespondTxId(pub B256);
 
 impl From<B256> for SignRespondTxId {
@@ -16,7 +14,7 @@ impl From<B256> for SignRespondTxId {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct AbiField {
     name: String,
     #[serde(rename = "type")]
@@ -44,34 +42,38 @@ pub struct SignRespondTx {
     pub nonce: u64,
 }
 
-type OutputData = HashMap<String, DynSolValue>;
-
-#[derive(Debug)]
-struct Output {
-    pub is_function_call: bool,
-    pub data: OutputData,
-}
+#[derive(Debug, Clone, Default)]
+pub struct Output(pub HashMap<String, DynSolValue>);
 
 impl Output {
-    fn is_function_call(&self) -> bool {
-        self.is_function_call
+    pub fn is_function_call(&self) -> bool {
+        self.0
+            .get("is_function_call")
+            .is_some_and(|v| v.as_bool().unwrap_or(false))
     }
 
-    fn serialize_abi(self, schema: &[u8]) -> anyhow::Result<Vec<u8>> {
+    pub fn serialize(&self, format: u8, schema: &[u8]) -> anyhow::Result<Vec<u8>> {
+        if format == 1 {
+            self.serialize_abi(schema)
+        } else {
+            Err(anyhow::anyhow!(
+                "Unsupported serialization format: {format}"
+            ))
+        }
+    }
+
+    fn serialize_abi(&self, schema: &[u8]) -> anyhow::Result<Vec<u8>> {
         let schema: Vec<AbiField> = serde_json::from_slice(schema)
             .map_err(|e| anyhow::anyhow!("Failed to get abi fields from schema: {e:?}"))?;
 
-        let mut data_to_encode = self;
-        if !&self.is_function_call() {
-            data_to_encode = Output {
-                is_function_call: false,
-                data: create_abi_data(schema)?,
-            };
+        let mut data_to_encode = self.clone();
+        if !self.is_function_call() {
+            data_to_encode = create_abi_data(schema.clone())?;
         }
 
         let values = schema
             .iter()
-            .map(|field| match data_to_encode.data.get(&field.name) {
+            .map(|field| match data_to_encode.0.get(&field.name) {
                 Some(value) => Ok(value.clone()),
                 None => Err(anyhow::anyhow!(
                     "Missing required field '{}' in output",
@@ -94,10 +96,7 @@ impl TransactionOutput {
     pub fn non_function_call_output() -> Self {
         Self {
             success: true,
-            output: Output {
-                is_function_call: false,
-                data: HashMap::new(),
-            },
+            output: Output(HashMap::new()),
         }
     }
 
@@ -130,15 +129,12 @@ impl TransactionOutput {
 
         Ok(TransactionOutput {
             success: true,
-            output: Output {
-                is_function_call: true,
-                data: output_map,
-            },
+            output: Output(output_map),
         })
     }
 }
 
-fn create_abi_data(schema: Vec<AbiField>) -> anyhow::Result<OutputData> {
+fn create_abi_data(schema: Vec<AbiField>) -> anyhow::Result<Output> {
     let mut data = HashMap::new();
     for field in schema {
         if field.typ == "string" {
@@ -156,7 +152,7 @@ fn create_abi_data(schema: Vec<AbiField>) -> anyhow::Result<OutputData> {
         }
     }
 
-    Ok(data)
+    Ok(Output(data))
 }
 
 fn encode_abi_values(schema: &[AbiField], values: &[DynSolValue]) -> anyhow::Result<Vec<u8>> {
