@@ -331,6 +331,11 @@ impl PresignatureSpawner {
         self.presignatures.contains_by_owner(id, self.me).await
     }
 
+    /// Returns true if the presignature with the given id is already ongoing
+    pub async fn contains_ongoing(&self, id: PresignatureId) -> bool {
+        self.ongoing.contains_key(&id)
+    }
+
     pub async fn contains_used(&self, id: PresignatureId) -> bool {
         self.presignatures.contains_used(id).await
     }
@@ -369,11 +374,20 @@ impl PresignatureSpawner {
         // does not advance until the triples are available.
 
         let internal_action = if !id.validate() {
-            tracing::error!(?id, "presignature id does not match the expected hash");
+            tracing::error!(
+                ?id,
+                ?from,
+                ?action,
+                "presignature id does not match the expected hash"
+            );
+            PositInternalAction::Reply(PositAction::Reject)
+        } else if self.contains_ongoing(id.id).await {
+            tracing::warn!(?id, ?from, ?action, "presignature already generating");
             PositInternalAction::Reply(PositAction::Reject)
         } else if self.contains(id.id).await {
-            tracing::warn!(?id, "presignature already generated");
-            PositInternalAction::None
+            tracing::warn!(?id, ?from, ?action, "presignature already generated");
+            self.introduced.remove(&id.id);
+            PositInternalAction::Reply(PositAction::Reject)
         } else {
             self.posits.act(id.id, from, self.threshold, &action)
         };
@@ -425,6 +439,7 @@ impl PresignatureSpawner {
                         ?err,
                         "unable to start presignature generation on START"
                     );
+                    self.introduced.remove(&id.id);
                 }
             }
         }
