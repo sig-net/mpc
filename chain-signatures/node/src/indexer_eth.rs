@@ -688,11 +688,12 @@ async fn add_new_block_to_process(
     let mut receiver_state_update_timestamp = Instant::now();
     loop {
         interval.tick().await;
-        if block_heads_rx.is_empty()
-            && receiver_state_update_timestamp.elapsed() > Duration::from_secs(60)
-        {
-            tracing::warn!("No new block heads received for 60 seconds, waiting...");
-            receiver_state_update_timestamp = Instant::now();
+        if block_heads_rx.is_empty() {
+            if receiver_state_update_timestamp.elapsed() > Duration::from_secs(60) {
+                tracing::warn!("No new block heads received for 60 seconds, waiting...");
+                receiver_state_update_timestamp = Instant::now();
+            }
+            continue;
         }
         let new_block_head = match block_heads_rx.recv().await {
             Ok(new_block_head) => new_block_head,
