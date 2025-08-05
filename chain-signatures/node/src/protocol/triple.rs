@@ -308,6 +308,10 @@ impl TripleSpawner {
         self.triple_storage.contains_by_owner(id, self.me).await
     }
 
+    pub fn contains_ongoing(&self, id: TripleId) -> bool {
+        self.ongoing.contains_key(&id)
+    }
+
     pub async fn contains_used(&self, id: TripleId) -> bool {
         self.triple_storage.contains_used(id).await
     }
@@ -338,8 +342,13 @@ impl TripleSpawner {
         action: PositAction,
         timeout: Duration,
     ) {
-        let internal_action = if self.contains_id(id).await {
-            PositInternalAction::None
+        let internal_action = if self.contains_ongoing(id) {
+            tracing::warn!(id, ?from, ?action, "triple already generating");
+            PositInternalAction::Reply(PositAction::Reject)
+        } else if self.contains(id).await {
+            tracing::warn!(id, ?from, ?action, "triple already generated");
+            self.introduced.remove(&id);
+            PositInternalAction::Reply(PositAction::Reject)
         } else {
             self.posits.act(id, from, self.threshold, &action)
         };
@@ -390,6 +399,7 @@ impl TripleSpawner {
                         ?err,
                         "unable to start triple generation on START"
                     );
+                    self.introduced.remove(&id);
                 }
             }
         }
@@ -451,12 +461,6 @@ impl TripleSpawner {
             .inc();
 
         Ok(())
-    }
-
-    /// Check if the triple id is present in the system. This includes ongoing generation protocols
-    /// and the triple storage.
-    pub async fn contains_id(&self, id: TripleId) -> bool {
-        self.ongoing.contains_key(&id) || self.triple_storage.contains(id).await
     }
 
     /// Stockpile triples if the amount of unspent triples is below the minimum
