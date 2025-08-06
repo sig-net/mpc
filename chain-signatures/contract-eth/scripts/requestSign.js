@@ -11,8 +11,11 @@ async function main() {
   } else if (network === 'sepolia') {
     const deployments = require('../ignition/deployments/chain-11155111/deployed_addresses.json'); 
     contractAddress = deployments[Object.keys(deployments).pop()];
-  } else {
-    throw new Error('Unsupported network specified. Use "localhost" or "sepolia"');
+  } else if (network === 'mainnet') {
+    const deployments = require('../ignition/deployments/chain-1/deployed_addresses.json'); 
+    contractAddress = deployments[Object.keys(deployments).pop()];
+  }else {
+    throw new Error('Unsupported network specified. Use "localhost" or "sepolia" or "mainnet"');
   }
   console.log("network", network, "contractAddress", contractAddress);
 
