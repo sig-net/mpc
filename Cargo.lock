@@ -7751,6 +7751,7 @@ name = "mpc-node"
 version = "1.6.0"
 dependencies = [
  "alloy",
+ "alloy-rlp",
  "alloy-signer-local",
  "alloy-sol-types",
  "anchor-client",
@@ -7769,6 +7770,7 @@ dependencies = [
  "ciborium",
  "clap",
  "deadpool-redis",
+ "ethers-core",
  "futures-util",
  "google-datastore1",
  "google-secretmanager1",

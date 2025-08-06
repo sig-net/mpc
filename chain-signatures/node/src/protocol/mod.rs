@@ -19,11 +19,13 @@ pub use signature::{IndexedSignRequest, SignQueue};
 pub use state::{Node, NodeState};
 
 use crate::config::Config;
+use crate::indexer_sol::SignRespondRequestedEvent;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcChannel};
+use crate::sign_respond_tx::SignRespondTxId;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -208,6 +210,13 @@ pub enum Chain {
     NEAR,
     Ethereum,
     Solana,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SignRequestType {
+    Sign,
+    SignRespond(SignRespondRequestedEvent),
+    ReadRespond(SignRespondTxId),
 }
 
 impl Chain {

@@ -43,6 +43,7 @@ opentelemetry-appender-tracing = "0.29.1"
 alloy-signer-local = "1.0.9"
 alloy-sol-types = "1.2.0"
 helios = { git = "https://github.com/sig-net/helios", rev = "dcd7e23106eba82d9e288928f90b629ac2970db4" }
+ethers-core = "2.0.13"
 
 # workspace dependencies
 alloy.workspace = true
@@ -88,6 +89,7 @@ mpc-crypto.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
 signet-program.workspace = true
+alloy-rlp = "0.3.12"
 
 [features]
 default = []

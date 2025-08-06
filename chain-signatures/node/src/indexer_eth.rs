@@ -1,4 +1,4 @@
-use crate::protocol::{Chain, IndexedSignRequest};
+use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::storage::app_data_storage::AppDataStorage;
 use alloy::consensus::BlockHeader;
 use alloy::eips::{BlockId, BlockNumberOrTag};
@@ -314,6 +314,7 @@ fn sign_request_from_filtered_log(
         unix_timestamp_indexed: crate::util::current_unix_timestamp(),
         timestamp_sign_queue: None,
         total_timeout,
+        sign_request_type: SignRequestType::Sign,
     })
 }
 
@@ -1043,6 +1044,7 @@ fn send_indexed_requests(
                 unix_timestamp_indexed: request.unix_timestamp_indexed,
                 timestamp_sign_queue: Some(Instant::now()),
                 total_timeout: request.total_timeout,
+                sign_request_type: SignRequestType::Sign,
             };
             match sign_tx.send(request).await {
                 Ok(_) => {

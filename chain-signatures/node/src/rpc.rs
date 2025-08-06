@@ -285,6 +285,7 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
+        sign_respond_responded_send: mpsc::Sender<(crate::protocol::IndexedSignRequest, Signature)>,
     ) {
         // spin up update task for updating contract state and config
         let near = self.near.clone();
@@ -323,10 +324,17 @@ impl RpcExecutor {
             let near_account_id = self.near.my_account_id.clone();
             let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
 
+            let sign_respond_responded_send_clone = sign_respond_responded_send.clone();
             tokio::spawn(async move {
                 match chain {
                     Chain::NEAR | Chain::Solana => {
-                        execute_publish(client, action, near_account_id).await;
+                        execute_publish(
+                            client,
+                            action,
+                            near_account_id,
+                            sign_respond_responded_send_clone,
+                        )
+                        .await;
                     }
                     Chain::Ethereum => {
                         if let Err(err) = eth_rpc_tx.send(action).await {
@@ -605,6 +613,7 @@ async fn execute_publish(
     client: ChainClient,
     mut action: PublishAction,
     near_account_id: AccountId,
+    sign_respond_responded_send: mpsc::Sender<(crate::protocol::IndexedSignRequest, Signature)>,
 ) {
     let chain = action.request.indexed.chain;
     tracing::info!(
@@ -653,6 +662,7 @@ async fn execute_publish(
                 &action.timestamp,
                 &signature,
                 &near_account_id,
+                sign_respond_responded_send.clone(),
             )
             .await
             .map_err(|_| ()),
@@ -1255,9 +1265,11 @@ async fn try_publish_sol(
     timestamp: &Instant,
     signature: &Signature,
     near_account_id: &AccountId,
+    sign_respond_responded_send: mpsc::Sender<(crate::protocol::IndexedSignRequest, Signature)>,
 ) -> Result<(), ()> {
     let chain = action.request.indexed.chain;
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
+    let original_signature = signature.clone();
 
     let request_ids = vec![action.request.indexed.id.request_id];
     let signature = SolanaContractSignature {
@@ -1281,7 +1293,7 @@ async fn try_publish_sol(
         })
         .args(SolanaRespond {
             request_ids,
-            signatures: vec![signature],
+            signatures: vec![signature.clone()],
         })
         .send()
         .await
@@ -1302,6 +1314,10 @@ async fn try_publish_sol(
         elapsed = ?timestamp.elapsed(),
         "published solana signature successfully"
     );
+    sign_respond_responded_send
+        .send((action.request.indexed.clone(), original_signature))
+        .await
+        .unwrap();
 
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
