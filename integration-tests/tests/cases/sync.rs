@@ -83,8 +83,8 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
 
     let update = SyncUpdate {
         from: node1,
-        triples: valid.clone(),
-        presignatures: valid.clone(),
+        triples: valid.iter().copied().collect(),
+        presignatures: valid.iter().copied().collect(),
     };
     sync_channel.request_update(update).await;
     // Give it some time for sync to process the update
@@ -214,7 +214,7 @@ async fn test_state_sync_e2e() {
     validate_triples(&node0_triples, node1, &[4, 5], &[0, 1, 2, 3]).await;
     validate_triples(&node1_triples, node1, &[4, 5], &[0, 1, 2, 3]).await;
     validate_presignatures(&node0_presignatures, node1, &[4, 5], &[0, 1, 2, 3]).await;
-    validate_presignatures(&node0_presignatures, node1, &[4, 5], &[0, 1, 2, 3]).await;
+    validate_presignatures(&node1_presignatures, node1, &[4, 5], &[0, 1, 2, 3]).await;
 
     // TODO: add back being able to sign after sync. Need to be able to update the config from integration tests.
     // // Check that signing works as normal.

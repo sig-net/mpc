@@ -14,9 +14,9 @@ use mpc_node::{
     node_client::{self, NodeClient},
     protocol::{
         contract::{primitives::Participants, RunningContractState},
-        presignature::Presignature,
+        presignature::{Presignature, PresignatureId},
         sync::{SyncChannel, SyncTask},
-        triple::Triple,
+        triple::{Triple, TripleId},
         ParticipantInfo, ProtocolState,
     },
     rpc::ContractStateWatcher,
@@ -186,7 +186,7 @@ fn bench_load_keys(c: &mut Criterion) {
     c.bench_function("load 1024 mine triple keys", |b| {
         b.iter(|| {
             let task = || async {
-                env.triples.fetch_owned(env.me).await;
+                let _: Vec<TripleId> = env.triples.fetch_owned(env.me).await;
             };
 
             rt.block_on(task());
@@ -196,7 +196,7 @@ fn bench_load_keys(c: &mut Criterion) {
     c.bench_function("load 1024 mine presignature keys", |b| {
         b.iter(|| {
             let task = || async {
-                env.presignatures.fetch_owned(env.me).await;
+                let _: Vec<PresignatureId> = env.presignatures.fetch_owned(env.me).await;
             };
 
             rt.block_on(task());
