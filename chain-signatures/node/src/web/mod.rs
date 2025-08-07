@@ -1,4 +1,6 @@
 mod error;
+#[cfg(test)]
+pub mod mock;
 
 use self::error::Error;
 use crate::indexer::NearIndexer;
