@@ -8,8 +8,8 @@ async fn test_basic_generate_keys() {
     let network = TestMpcNetworkBuilder::new(5, 4).build().await;
 
     let result = tokio::time::timeout(Duration::from_secs(10), async {
-        let mut protocol_state_watcher = network.nodes[0].protocol_state.subscribe();
-        protocol_state_watcher
+        let mut contract_state_watcher = network.shared_contract_state.subscribe();
+        contract_state_watcher
             .wait_for(|protocol_state| {
                 tracing::info!("new protocol state: {protocol_state:?}");
                 protocol_state
@@ -21,9 +21,8 @@ async fn test_basic_generate_keys() {
     })
     .await;
 
-    // TODO: this fails with just one pk vote arriving, the others never vote
     if result.is_err() {
-        let protocol_state = network.nodes[0].protocol_state.borrow();
+        let protocol_state = network.shared_contract_state.borrow();
         panic!("should reach running state eventually, final state was {protocol_state:?}");
     }
 }

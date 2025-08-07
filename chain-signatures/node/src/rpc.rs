@@ -221,6 +221,23 @@ impl ContractStateWatcher {
             ),
         }
     }
+
+    // TODO: hide behind test features
+    /// Create a list of contract states that share a single channel but use different account ids.
+    pub fn test_batch(
+        ids: &[AccountId],
+        state: ProtocolState,
+    ) -> (Vec<Self>, watch::Sender<Option<ProtocolState>>) {
+        let (tx, rx) = watch::channel(Some(state));
+        let selfs = ids
+            .iter()
+            .map(|id| Self {
+                account_id: id.clone(),
+                contract_state: rx.clone(),
+            })
+            .collect();
+        (selfs, tx)
+    }
 }
 
 pub struct RpcExecutor {

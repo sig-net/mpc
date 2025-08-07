@@ -51,6 +51,7 @@ pub struct TestMpcNetwork {
     pub redis_container: Redis,
     pub rpc_actions: Arc<Mutex<HashSet<String>>>,
     pub msg_log: Arc<Mutex<Vec<String>>>,
+    pub shared_contract_state: watch::Sender<Option<ProtocolState>>,
 }
 
 struct TestMpcNodeBuilder {
@@ -71,7 +72,6 @@ pub struct TestMpcNode {
     pub mesh: watch::Sender<MeshState>,
     pub config: watch::Sender<Config>,
 
-    pub protocol_state: watch::Sender<Option<ProtocolState>>,
     pub sign_tx: Sender<IndexedSignRequest>,
     pub msg_tx: Sender<Ciphered>,
 
@@ -152,14 +152,24 @@ impl TestMpcNetworkBuilder {
         let msg_log = Default::default();
         let mut nodes = vec![];
 
+        let account_ids: Vec<_> = self
+            .prepared_nodes
+            .iter()
+            .map(|node| node.participant_info.account_id.clone())
+            .collect();
+
+        let (contract_state_watchers, shared_contract_state_tx) =
+            ContractStateWatcher::test_batch(&account_ids, self.protocol_state);
+
         // Start each node's tokio tasks
-        for node in self.prepared_nodes.drain(..) {
+        for (node, contract_state) in self.prepared_nodes.drain(..).zip(contract_state_watchers) {
             let started = node
                 .start(
                     routing_table.clone(),
                     &redis_container.pool(),
                     &initial_mesh_state,
-                    &self.protocol_state,
+                    contract_state,
+                    shared_contract_state_tx.clone(),
                     &self.shared_public_key,
                     self.presignature_stockpile,
                     Arc::clone(&msg_log),
@@ -175,6 +185,7 @@ impl TestMpcNetworkBuilder {
             nodes,
             rpc_actions,
             msg_log,
+            shared_contract_state: shared_contract_state_tx,
         }
     }
 
@@ -273,17 +284,18 @@ impl Governance for MockGovernance {
         tracing::debug!(me = ?self.me, ?public_key, "vote_public_key");
         let mut result = false;
         self.protocol_state_tx.send_if_modified(|protocol_state| {
-            let modified;
+            let mut modified;
             match protocol_state {
                 Some(ProtocolState::Initializing(ref mut state)) => {
-                    modified = state
+                    let entry = state
                         .pk_votes
                         .pk_votes
                         .entry(public_key.clone())
-                        .or_default()
-                        .insert(self.me.clone());
+                        .or_default();
 
-                    if state.pk_votes.pk_votes.len() >= state.threshold {
+                    modified = entry.insert(self.me.clone());
+
+                    if entry.len() >= state.threshold {
                         *protocol_state = Some(ProtocolState::Running(RunningContractState {
                             epoch: 0,
                             participants: state.candidates.clone().into(),
@@ -294,6 +306,7 @@ impl Governance for MockGovernance {
                             leave_votes: Default::default(),
                         }));
                         result = true;
+                        modified = true;
                     }
                 }
 
@@ -356,7 +369,8 @@ impl TestMpcNodeBuilder {
         routing_table: HashMap<Participant, Sender<Ciphered>>,
         redis_pool: &deadpool_redis::Pool,
         init_mesh: &MeshState,
-        protocol_state: &ProtocolState,
+        contract_state: ContractStateWatcher,
+        protocol_state_tx: watch::Sender<Option<ProtocolState>>,
         public_key: &Option<mpc_crypto::PublicKey>,
         presignature_stockpile: bool,
         msg_log: Arc<Mutex<Vec<String>>>,
@@ -429,15 +443,13 @@ impl TestMpcNodeBuilder {
         let account_id = protocol.my_account_id().clone();
 
         // task running the protocol
-        let (protocol_state_rx, protocol_state_tx) =
-            ContractStateWatcher::with(&account_id, protocol_state.clone());
         let _protocol_handle = tokio::spawn(protocol.run(
             protocol::Node::new(),
             MockGovernance {
                 me: account_id.clone(),
-                protocol_state_tx: protocol_state_tx.clone(),
+                protocol_state_tx,
             },
-            protocol_state_rx.clone(),
+            contract_state.clone(),
             config_rx.clone(),
             mesh_rx.clone(),
         ));
@@ -454,7 +466,7 @@ impl TestMpcNodeBuilder {
 
         let _message_executor_handle = tokio::spawn(Self::test_message_executor(
             config_rx,
-            protocol_state_rx,
+            contract_state,
             inbox,
         ));
 
@@ -462,7 +474,6 @@ impl TestMpcNodeBuilder {
             me: self.me,
             mesh: mesh_tx,
             config: config_tx,
-            protocol_state: protocol_state_tx,
             sign_tx,
             msg_tx: self.msg_tx,
             triple_storage,
