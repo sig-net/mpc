@@ -7803,6 +7803,7 @@ dependencies = [
  "rand 0.8.5",
  "redis",
  "reqwest 0.11.27",
+ "secp256k1 0.28.2",
  "semver 1.0.26",
  "serde",
  "serde_bytes",

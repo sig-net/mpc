@@ -10,6 +10,7 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::keypair::Keypair;
 
+use crate::protocol::SignRequestType;
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, RootProvider, WalletProvider};
@@ -76,9 +77,9 @@ type EthContractFillProvider = FillProvider<
 type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
 #[derive(Clone)]
-struct PublishAction {
-    public_key: mpc_crypto::PublicKey,
-    request: SignRequest,
+pub struct PublishAction {
+    pub public_key: mpc_crypto::PublicKey,
+    pub request: SignRequest,
     output: FullSignature<Secp256k1>,
     timestamp: Instant,
     retry_count: usize,
@@ -285,7 +286,7 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
-        sign_respond_responded_send: mpsc::Sender<(crate::protocol::IndexedSignRequest, Signature)>,
+        sign_respond_responded_send: mpsc::Sender<(PublishAction, Signature)>,
     ) {
         // spin up update task for updating contract state and config
         let near = self.near.clone();
@@ -613,7 +614,7 @@ async fn execute_publish(
     client: ChainClient,
     mut action: PublishAction,
     near_account_id: AccountId,
-    sign_respond_responded_send: mpsc::Sender<(crate::protocol::IndexedSignRequest, Signature)>,
+    sign_respond_responded_send: mpsc::Sender<(PublishAction, Signature)>,
 ) {
     let chain = action.request.indexed.chain;
     tracing::info!(
@@ -1265,7 +1266,7 @@ async fn try_publish_sol(
     timestamp: &Instant,
     signature: &Signature,
     near_account_id: &AccountId,
-    sign_respond_responded_send: mpsc::Sender<(crate::protocol::IndexedSignRequest, Signature)>,
+    sign_respond_responded_send: mpsc::Sender<(PublishAction, Signature)>,
 ) -> Result<(), ()> {
     let chain = action.request.indexed.chain;
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
@@ -1314,10 +1315,19 @@ async fn try_publish_sol(
         elapsed = ?timestamp.elapsed(),
         "published solana signature successfully"
     );
-    sign_respond_responded_send
-        .send((action.request.indexed.clone(), original_signature))
-        .await
-        .unwrap();
+
+    if let SignRequestType::SignRespond(_) = action.request.indexed.sign_request_type {
+        if sign_respond_responded_send
+            .send((action.clone(), original_signature))
+            .await
+            .is_err()
+        {
+            tracing::error!(
+                sign_id = ?action.request.indexed.id,
+                "failed to send sign respond tx"
+            );
+        }
+    }
 
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])

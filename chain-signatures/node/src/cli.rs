@@ -215,6 +215,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let presignature_storage =
                 storage::presignature_storage::init(&redis_pool, &account_id);
             let app_data_storage = app_data_storage::init(&redis_pool, &account_id);
+            let sign_respond_tx_storage =
+                storage::sign_respond_tx_storage::init(&redis_pool, &account_id);
 
             let mut rpc_client = near_fetch::Client::new(&near_rpc);
             if let Some(referer_param) = client_header_referer {
@@ -325,6 +327,11 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_state_tx,
                 config_tx.clone(),
                 sign_respond_responded_send,
+            ));
+            tokio::spawn(crate::sign_respond_tx::process_sign_responded_requests(
+                sign_respond_responded_rx,
+                sign_respond_tx_storage,
+                5,
             ));
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;

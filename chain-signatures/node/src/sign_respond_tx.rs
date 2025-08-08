@@ -1,10 +1,14 @@
 use crate::protocol::SignRequestType;
-use alloy::primitives::{Bytes, B256};
+use crate::rpc::PublishAction;
+use crate::storage::sign_respond_tx_storage::SignRespondTxStorage;
+use alloy::primitives::{Address, Bytes, B256};
 use alloy_rlp::Decodable;
 use anchor_lang::prelude::Pubkey;
 use ethers_core::types::U256;
 use hex;
 use k256::elliptic_curve::point::AffineCoordinates;
+use k256::{AffinePoint, Scalar};
+use mpc_crypto::derive_key;
 use mpc_primitives::Signature;
 use sha3::{Digest, Keccak256};
 use tokio::sync::mpsc;
@@ -35,16 +39,14 @@ pub struct SignRespondTx {
     pub callback_serialization_format: u8,
     pub callback_serialization_schema: Vec<u8>,
     pub request_id: [u8; 32],
-    pub from_address: String,
+    pub from_address: Address,
     pub nonce: u64,
 }
 
 impl SignRespondTx {
-    pub fn new(
-        sign_request: crate::protocol::IndexedSignRequest,
-        signature: Signature,
-    ) -> anyhow::Result<Self> {
-        let SignRequestType::SignRespond(sign_respond_event) = sign_request.sign_request_type
+    pub fn new(publish_action: PublishAction, signature: Signature) -> anyhow::Result<Self> {
+        let SignRequestType::SignRespond(sign_respond_event) =
+            publish_action.request.indexed.sign_request_type.clone()
         else {
             anyhow::bail!("sign request is not a sign respond");
         };
@@ -52,7 +54,7 @@ impl SignRespondTx {
         let rlp_data = sign_respond_event.transaction_data.clone();
         let is_eip1559 = rlp_data[0] == 0x02;
         let tx_type = if is_eip1559 { 0x02 } else { 0x00 };
-        let decoded = decode_rlp(rlp_data, false)?;
+        let decoded = decode_rlp(rlp_data, is_eip1559)?;
         let decoded_string: Vec<String> = decoded
             .iter()
             .map(|b| format!("0x{}", hex::encode(b)))
@@ -63,12 +65,17 @@ impl SignRespondTx {
             decoded_string[0].parse::<u64>()?
         };
 
-        let signed_transaction_hash = get_signed_transaction_hash(
+        let signed_transaction_hash = calculate_signed_transaction_hash(
             decoded,
             signature,
             is_eip1559,
             sign_respond_event.slip44_chain_id as u64,
             tx_type,
+        );
+
+        let from_address = derive_user_address(
+            publish_action.public_key,
+            publish_action.request.indexed.args.epsilon,
         );
 
         Ok(Self {
@@ -86,8 +93,8 @@ impl SignRespondTx {
             explorer_deserialization_schema: sign_respond_event.explorer_deserialization_schema,
             callback_serialization_format: sign_respond_event.callback_serialization_format,
             callback_serialization_schema: sign_respond_event.callback_serialization_schema,
-            request_id: sign_request.id.request_id,
-            from_address: sign_request.args.id.to_string(),
+            request_id: publish_action.request.indexed.id.request_id,
+            from_address,
             nonce,
         })
     }
@@ -110,12 +117,6 @@ pub fn decode_rlp(rlp_data: Vec<u8>, is_eip1559: bool) -> anyhow::Result<Vec<Byt
     let decoded: Vec<Bytes> = Vec::<Bytes>::decode(&mut stream)
         .map_err(|e| anyhow::anyhow!("Failed to decode RLP list: {e:?}"))?;
 
-    // let strings = decoded
-    //     .into_iter()
-    //     .map(|b| format!("0x{}", hex::encode(b)))
-    //     .collect();
-
-    // Ok(strings)
     Ok(decoded)
 }
 
@@ -125,11 +126,11 @@ pub fn to_eip155_v(recovery_id: u8, chain_id: u64) -> u64 {
 
 fn to_be_bytes_fixed(value: U256, width: usize) -> Bytes {
     let mut buf = vec![0u8; width];
-    value.to_big_endian(&mut buf[width.saturating_sub(value.bits() as usize / 8)..]);
+    value.to_big_endian(&mut buf[width.saturating_sub(value.bits() / 8)..]);
     Bytes::from(buf)
 }
 
-fn get_signed_transaction_hash(
+fn calculate_signed_transaction_hash(
     mut decoded: Vec<Bytes>,
     signature: Signature,
     is_eip1559: bool,
@@ -174,8 +175,67 @@ fn get_signed_transaction_hash(
     B256::from(hash_bytes)
 }
 
-async fn run(
-    mut sign_respond_responded_rx: mpsc::Receiver<(crate::protocol::IndexedSignRequest, Signature)>,
+/// Get the x coordinate of a point, as a scalar
+fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar {
+    <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
+}
+
+fn public_key_to_address(public_key: &secp256k1::PublicKey) -> Address {
+    let public_key = public_key.serialize_uncompressed();
+
+    debug_assert_eq!(public_key[0], 0x04);
+    let hash: [u8; 32] = *alloy::primitives::keccak256(&public_key[1..]);
+
+    Address::from_slice(&hash[12..])
+}
+
+fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Scalar) -> Address {
+    let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
+    let user_pk_y_parity = match user_pk.y_is_odd().unwrap_u8() {
+        0 => secp256k1::Parity::Even,
+        1 => secp256k1::Parity::Odd,
+        _ => unreachable!(),
+    };
+    let user_pk_x = x_coordinate::<k256::Secp256k1>(&user_pk);
+    let user_pk_x = secp256k1::XOnlyPublicKey::from_slice(&user_pk_x.to_bytes()).unwrap();
+    let user_secp_pk: secp256k1::PublicKey =
+        secp256k1::PublicKey::from_x_only_public_key(user_pk_x, user_pk_y_parity);
+    public_key_to_address(&user_secp_pk)
+}
+
+pub async fn process_sign_responded_requests(
+    mut sign_respond_responded_rx: mpsc::Receiver<(PublishAction, Signature)>,
+    sign_respond_tx_storage: SignRespondTxStorage,
+    max_attempts: u8,
 ) {
-    while let Some((sign_respond_event, signature)) = sign_respond_responded_rx.recv().await {}
+    while let Some((publish_action, signature)) = sign_respond_responded_rx.recv().await {
+        let mut attempts = 0;
+        while attempts < max_attempts {
+            attempts += 1;
+            let Ok(sign_respond_tx) = SignRespondTx::new(publish_action.clone(), signature.clone())
+            else {
+                tracing::error!(
+                    sign_id = ?publish_action.request.indexed.id,
+                    "failed to create sign respond tx"
+                );
+                continue;
+            };
+            let sign_respond_tx_id = sign_respond_tx.id;
+            if sign_respond_tx_storage
+                .insert(sign_respond_tx_id, sign_respond_tx)
+                .await
+            {
+                tracing::info!(
+                    sign_id = ?sign_respond_tx_id,
+                    "inserted sign respond tx into storage"
+                );
+                break;
+            } else {
+                tracing::error!(
+                    sign_id = ?sign_respond_tx_id,
+                    "failed to insert sign respond tx into storage"
+                );
+            }
+        }
+    }
 }
