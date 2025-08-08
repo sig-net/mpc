@@ -17,6 +17,7 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::sync::{watch, RwLock};
 use url::Url;
 
@@ -214,6 +215,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let presignature_storage =
                 storage::presignature_storage::init(&redis_pool, &account_id);
             let app_data_storage = app_data_storage::init(&redis_pool, &account_id);
+            let sign_respond_tx_storage =
+                storage::sign_respond_tx_storage::init(&redis_pool, &account_id);
 
             let mut rpc_client = near_fetch::Client::new(&near_rpc);
             if let Some(referer_param) = client_header_referer {
@@ -317,7 +320,19 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync.run());
-            tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
+            const MAX_SIGN_RESPOND_RESPONDED_CHANNEL: usize = 1024;
+            let (sign_respond_responded_send, sign_respond_responded_rx) =
+                mpsc::channel(MAX_SIGN_RESPOND_RESPONDED_CHANNEL);
+            tokio::spawn(rpc.run(
+                contract_state_tx,
+                config_tx.clone(),
+                sign_respond_responded_send,
+            ));
+            tokio::spawn(crate::sign_respond_tx::process_sign_responded_requests(
+                sign_respond_responded_rx,
+                sign_respond_tx_storage.clone(),
+                5,
+            ));
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
             let protocol_handle =
@@ -337,6 +352,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_tx.clone(),
                 app_data_storage.clone(),
                 account_id.clone(),
+                sign_respond_tx_storage,
             ));
             tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
             tracing::info!("protocol http server spawned");

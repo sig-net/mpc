@@ -10,6 +10,7 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::keypair::Keypair;
 
+use crate::protocol::SignRequestType;
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, RootProvider, WalletProvider};
@@ -76,9 +77,9 @@ type EthContractFillProvider = FillProvider<
 type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
 #[derive(Clone)]
-struct PublishAction {
-    public_key: mpc_crypto::PublicKey,
-    request: SignRequest,
+pub struct PublishAction {
+    pub public_key: mpc_crypto::PublicKey,
+    pub request: SignRequest,
     output: FullSignature<Secp256k1>,
     timestamp: Instant,
     retry_count: usize,
@@ -285,6 +286,7 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
+        sign_respond_responded_send: mpsc::Sender<(PublishAction, Signature)>,
     ) {
         // spin up update task for updating contract state and config
         let near = self.near.clone();
@@ -323,10 +325,17 @@ impl RpcExecutor {
             let near_account_id = self.near.my_account_id.clone();
             let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
 
+            let sign_respond_responded_send_clone = sign_respond_responded_send.clone();
             tokio::spawn(async move {
                 match chain {
                     Chain::NEAR | Chain::Solana => {
-                        execute_publish(client, action, near_account_id).await;
+                        execute_publish(
+                            client,
+                            action,
+                            near_account_id,
+                            sign_respond_responded_send_clone,
+                        )
+                        .await;
                     }
                     Chain::Ethereum => {
                         if let Err(err) = eth_rpc_tx.send(action).await {
@@ -605,6 +614,7 @@ async fn execute_publish(
     client: ChainClient,
     mut action: PublishAction,
     near_account_id: AccountId,
+    sign_respond_responded_send: mpsc::Sender<(PublishAction, Signature)>,
 ) {
     let chain = action.request.indexed.chain;
     tracing::info!(
@@ -653,6 +663,7 @@ async fn execute_publish(
                 &action.timestamp,
                 &signature,
                 &near_account_id,
+                sign_respond_responded_send.clone(),
             )
             .await
             .map_err(|_| ()),
@@ -1255,9 +1266,11 @@ async fn try_publish_sol(
     timestamp: &Instant,
     signature: &Signature,
     near_account_id: &AccountId,
+    sign_respond_responded_send: mpsc::Sender<(PublishAction, Signature)>,
 ) -> Result<(), ()> {
     let chain = action.request.indexed.chain;
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
+    let original_signature = signature.clone();
 
     let request_ids = vec![action.request.indexed.id.request_id];
     let signature = SolanaContractSignature {
@@ -1281,7 +1294,7 @@ async fn try_publish_sol(
         })
         .args(SolanaRespond {
             request_ids,
-            signatures: vec![signature],
+            signatures: vec![signature.clone()],
         })
         .send()
         .await
@@ -1297,11 +1310,24 @@ async fn try_publish_sol(
         })?;
 
     tracing::info!(
-        sign_id = ?action.request.indexed.id,
-        tx_hash = ?tx,
-        elapsed = ?timestamp.elapsed(),
-        "published solana signature successfully"
+    sign_id = ?action.request.indexed.id,
+    tx_hash = ?tx,
+    elapsed = ?timestamp.elapsed(),
+    "published solana signature successfully"
     );
+
+    if let SignRequestType::SignRespond(_) = action.request.indexed.sign_request_type {
+        if sign_respond_responded_send
+            .send((action.clone(), original_signature))
+            .await
+            .is_err()
+        {
+            tracing::error!(
+                sign_id = ?action.request.indexed.id,
+                "failed to send sign respond tx"
+            );
+        }
+    }
 
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])

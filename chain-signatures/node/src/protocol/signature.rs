@@ -13,6 +13,7 @@ use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap};
 
+use crate::protocol::SignRequestType;
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;
 use chrono::Utc;
@@ -44,6 +45,7 @@ pub struct IndexedSignRequest {
     pub unix_timestamp_indexed: u64,
     pub timestamp_sign_queue: Option<Instant>,
     pub total_timeout: Duration,
+    pub sign_request_type: SignRequestType,
 }
 
 #[allow(clippy::large_enum_variant)]

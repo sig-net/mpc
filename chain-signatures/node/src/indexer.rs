@@ -234,6 +234,7 @@ async fn handle_block(
                     unix_timestamp_indexed: crate::util::current_unix_timestamp(),
                     timestamp_sign_queue: Some(Instant::now()),
                     total_timeout: Duration::from_secs(200),
+                    sign_request_type: crate::protocol::SignRequestType::Sign,
                 });
             }
         }

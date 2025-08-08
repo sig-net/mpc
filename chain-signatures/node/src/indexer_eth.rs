@@ -1,10 +1,14 @@
-use crate::protocol::{Chain, IndexedSignRequest};
+use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::sign_respond_tx::SignRespondTx;
+use crate::sign_respond_tx::SignRespondTxId;
 use crate::storage::app_data_storage::AppDataStorage;
+use crate::storage::sign_respond_tx_storage::SignRespondTxStorage;
 use alloy::consensus::BlockHeader;
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::Log;
+
 use alloy::sol_types::{sol, SolEvent};
 use helios::common::types::{SubscriptionEvent, SubscriptionType};
 use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
@@ -13,6 +17,7 @@ use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::{fmt, path::PathBuf, str::FromStr, sync::LazyLock, time::Instant};
 use tokio::sync::broadcast::error::RecvError;
@@ -28,6 +33,7 @@ pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     )
     .unwrap()
 });
+const MAX_CATCHUP_BLOCKS: u64 = 8191;
 
 type BlockNumber = u64;
 
@@ -298,7 +304,7 @@ fn sign_request_from_filtered_log(
     // Use transaction hash as entropy
     let entropy = log.transaction_hash.unwrap_or_default();
 
-    let sign_id = SignId::new(calculate_request_id(&event));
+    let sign_id = SignId::new(event.generate_request_id());
     tracing::info!(?sign_id, "eth signature requested");
 
     Ok(IndexedSignRequest {
@@ -314,28 +320,9 @@ fn sign_request_from_filtered_log(
         unix_timestamp_indexed: crate::util::current_unix_timestamp(),
         timestamp_sign_queue: None,
         total_timeout,
+        sign_request_type: SignRequestType::Sign,
     })
 }
-
-fn encode_abi(event: &SignatureRequestedEvent) -> Vec<u8> {
-    let signature_requested_event_encoding = SignatureRequestedEncoding {
-        sender: event.requester,
-        payload: event.payload_hash.to_vec().into(),
-        path: event.path.clone(),
-        keyVersion: event.key_version,
-        chainId: event.chain_id,
-        algo: event.algo.clone(),
-        dest: event.dest.clone(),
-        params: event.params.clone(),
-    };
-    signature_requested_event_encoding.encode_data()
-}
-
-fn calculate_request_id(event: &SignatureRequestedEvent) -> [u8; 32] {
-    let abi_encoded = encode_abi(event);
-    alloy::primitives::keccak256(abi_encoded).into()
-}
-
 // Helper function to parse event logs
 fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
     // Parse data fields
@@ -424,13 +411,12 @@ fn finalized_block_channel() -> (mpsc::Sender<BlockNumber>, mpsc::Receiver<Block
     mpsc::channel(MAX_FINALIZED_BLOCKS)
 }
 
-const MAX_CATCHUP_BLOCKS: u64 = 8191;
-
 pub async fn run(
     eth: Option<EthConfig>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
+    sign_respond_tx_storage: SignRespondTxStorage,
 ) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
@@ -543,6 +529,7 @@ pub async fn run(
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let blocks_failed_send_clone = blocks_failed_send.clone();
     let client_clone = Arc::clone(&client);
+    let sign_respond_tx_storage_clone = sign_respond_tx_storage.clone();
     tokio::spawn(async move {
         tracing::info!("Spawned task to retry failed blocks");
         retry_failed_blocks(
@@ -553,6 +540,7 @@ pub async fn run(
             near_account_id_clone,
             requests_indexed_send_clone,
             total_timeout,
+            sign_respond_tx_storage_clone,
         )
         .await;
     });
@@ -604,6 +592,7 @@ pub async fn run(
                 (block_number, block_hash, false)
             }
         };
+        let sign_respond_tx_storage_clone = sign_respond_tx_storage.clone();
         if let Err(err) = process_block(
             block_number,
             block_hash,
@@ -612,6 +601,7 @@ pub async fn run(
             node_near_account_id.clone(),
             requests_indexed_send_clone.clone(),
             total_timeout,
+            sign_respond_tx_storage_clone,
         )
         .await
         {
@@ -632,6 +622,7 @@ pub async fn run(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn retry_failed_blocks(
     mut blocks_failed_rx: mpsc::Receiver<BlockNumberAndHash>,
     blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
@@ -640,6 +631,7 @@ async fn retry_failed_blocks(
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
+    sign_respond_tx_storage: SignRespondTxStorage,
 ) {
     loop {
         let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
@@ -654,6 +646,7 @@ async fn retry_failed_blocks(
             node_near_account_id.clone(),
             requests_indexed.clone(),
             total_timeout,
+            sign_respond_tx_storage.clone(),
         )
         .await
         {
@@ -855,6 +848,7 @@ async fn process_block(
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
+    sign_respond_tx_storage: SignRespondTxStorage,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -879,6 +873,43 @@ async fn process_block(
         return Ok(());
     };
 
+    let block_receipts_clone = block_receipts.clone();
+    let pending_txs: HashMap<SignRespondTxId, SignRespondTx> = sign_respond_tx_storage
+        .fetch_pending()
+        .await
+        .into_iter()
+        .map(|tx| (tx.id, tx.clone()))
+        .collect();
+    let mut sign_respond_requests: Vec<IndexedSignRequest> = Vec::new();
+    for receipt in block_receipts_clone {
+        let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
+            continue;
+        };
+        let status = receipt.status();
+        tracing::info!(
+            "Tx {} found in block {block_number}: {}",
+            receipt.transaction_hash,
+            if status { "success" } else { "failed" }
+        );
+        let sign_respond_tx_storage = sign_respond_tx_storage.clone();
+        let pending_tx = pending_tx.clone();
+        let client_clone = client.clone();
+
+        let completed_tx = crate::read_respond::CompletedTx::new(pending_tx, block_number, status);
+
+        let sign_respond_request: Option<IndexedSignRequest> = completed_tx
+            .create_sign_request_from_completed_tx(
+                &client_clone,
+                sign_respond_tx_storage,
+                6,
+                total_timeout,
+            )
+            .await;
+        if let Some(sign_respond_request) = sign_respond_request {
+            sign_respond_requests.push(sign_respond_request);
+        }
+    }
+
     let filtered_logs: Vec<Log> = block_receipts
         .into_iter()
         .filter_map(|receipt| receipt.as_ref().as_receipt().cloned())
@@ -897,11 +928,16 @@ async fn process_block(
     }
 
     let indexed_requests = parse_filtered_logs(filtered_logs, total_timeout);
+    let all_sign_requests = [sign_respond_requests, indexed_requests.clone()].concat();
+    if all_sign_requests.is_empty() {
+        return Ok(());
+    }
+
     requests_indexed
         .send(BlockAndRequests::new(
             block_number,
             block_hash,
-            indexed_requests.clone(),
+            all_sign_requests.clone(),
         ))
         .await
         .map_err(|err| anyhow::anyhow!("Failed to send indexed requests: {:?}", err))?;
@@ -928,6 +964,7 @@ async fn process_block(
                 );
         }
     }
+
     Ok(())
 }
 
@@ -1043,6 +1080,7 @@ fn send_indexed_requests(
                 unix_timestamp_indexed: request.unix_timestamp_indexed,
                 timestamp_sign_queue: Some(Instant::now()),
                 total_timeout: request.total_timeout,
+                sign_request_type: SignRequestType::Sign,
             };
             match sign_tx.send(request).await {
                 Ok(_) => {
@@ -1072,4 +1110,25 @@ struct SignatureRequestedEvent {
     algo: String,
     dest: String,
     params: String,
+}
+
+impl SignatureRequestedEvent {
+    fn encode_abi(&self) -> Vec<u8> {
+        let signature_requested_event_encoding = SignatureRequestedEncoding {
+            sender: self.requester,
+            payload: self.payload_hash.to_vec().into(),
+            path: self.path.clone(),
+            keyVersion: self.key_version,
+            chainId: self.chain_id,
+            algo: self.algo.clone(),
+            dest: self.dest.clone(),
+            params: self.params.clone(),
+        };
+        signature_requested_event_encoding.encode_data()
+    }
+
+    pub fn generate_request_id(&self) -> [u8; 32] {
+        let abi_encoded = self.encode_abi();
+        alloy::primitives::keccak256(abi_encoded).into()
+    }
 }
