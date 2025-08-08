@@ -1,20 +1,15 @@
 use crate::protocol::SignRequestType;
 use crate::rpc::PublishAction;
 use crate::storage::sign_respond_tx_storage::SignRespondTxStorage;
-use alloy::primitives::Bytes;
-use alloy::primitives::B256;
 use alloy::primitives::{Address, Bytes, B256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use alloy_rlp::Decodable;
 use anchor_lang::prelude::Pubkey;
-use anchor_lang::prelude::Pubkey;
 use ethers_core::types::U256;
-use hex;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
 use mpc_primitives::Signature;
-use serde::Deserialize;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -58,24 +53,22 @@ pub struct SignRespondTx {
 
 impl SignRespondTx {
     pub fn new(publish_action: PublishAction, signature: Signature) -> anyhow::Result<Self> {
-        let SignRequestType::SignRespond = publish_action.request.indexed.sign_request_type else {
+        let SignRequestType::SignRespond(sign_respond_event) =
+            publish_action.request.indexed.sign_request_type.clone()
+        else {
             anyhow::bail!("sign request is not a sign respond");
         };
-        let sign_respond_event = publish_action.request.indexed.sign_respond_event;
 
         let rlp_data = sign_respond_event.transaction_data.clone();
         let is_eip1559 = rlp_data[0] == 0x02;
         let tx_type = if is_eip1559 { 0x02 } else { 0x00 };
         let decoded = decode_rlp(rlp_data, is_eip1559)?;
-        let decoded_string: Vec<String> = decoded
-            .iter()
-            .map(|b| format!("0x{}", hex::encode(b)))
-            .collect();
-        let nonce = if is_eip1559 {
-            decoded_string[1].parse::<u64>()?
-        } else {
-            decoded_string[0].parse::<u64>()?
-        };
+        let nonce_index = if is_eip1559 { 1 } else { 0 };
+        let nonce = u64::from_be_bytes(
+            decoded[nonce_index][..8]
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid nonce bytes"))?,
+        );
 
         let signed_transaction_hash = calculate_signed_transaction_hash(
             decoded,
@@ -246,17 +239,13 @@ fn calculate_signed_transaction_hash(
     let ethers_v: U256 = to_eip155_v(signature.recovery_id, chain_id).into();
 
     // Convert U256 → Bytes
-    let r_bytes = {
+    let to_bytes = |val: U256| {
         let mut buf = [0u8; 32];
-        ethers_r.to_big_endian(&mut buf);
+        val.to_big_endian(&mut buf);
         Bytes::copy_from_slice(&buf)
     };
 
-    let s_bytes = {
-        let mut buf = [0u8; 32];
-        ethers_s.to_big_endian(&mut buf);
-        Bytes::copy_from_slice(&buf)
-    };
+    let (r_bytes, s_bytes) = (to_bytes(ethers_r), to_bytes(ethers_s));
     // Append v, r, s
     decoded.push(to_be_bytes_fixed(ethers_v, 1));
     decoded.push(s_bytes);
@@ -266,12 +255,13 @@ fn calculate_signed_transaction_hash(
     let rlp_encoded = alloy_rlp::encode(&decoded);
 
     // Step 4: Handle EIP-1559 typed transaction
-    let signed_tx = if is_eip1559 {
-        let mut tx = vec![tx_type];
-        tx.extend_from_slice(&rlp_encoded);
-        Bytes::from(tx)
-    } else {
-        rlp_encoded.into()
+    let signed_tx: Bytes = match is_eip1559 {
+        true => {
+            let mut tx = vec![tx_type];
+            tx.extend_from_slice(&rlp_encoded);
+            tx.into()
+        }
+        false => rlp_encoded.into(),
     };
 
     // Step 5: Hash the signed transaction
@@ -295,16 +285,17 @@ fn public_key_to_address(public_key: &secp256k1::PublicKey) -> Address {
 
 fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Scalar) -> Address {
     let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
-    let user_pk_y_parity = match user_pk.y_is_odd().unwrap_u8() {
+    let parity = match user_pk.y_is_odd().unwrap_u8() {
         0 => secp256k1::Parity::Even,
         1 => secp256k1::Parity::Odd,
         _ => unreachable!(),
     };
-    let user_pk_x = x_coordinate::<k256::Secp256k1>(&user_pk);
-    let user_pk_x = secp256k1::XOnlyPublicKey::from_slice(&user_pk_x.to_bytes()).unwrap();
-    let user_secp_pk: secp256k1::PublicKey =
-        secp256k1::PublicKey::from_x_only_public_key(user_pk_x, user_pk_y_parity);
-    public_key_to_address(&user_secp_pk)
+
+    let x_coord = x_coordinate::<k256::Secp256k1>(&user_pk);
+    let x_only = secp256k1::XOnlyPublicKey::from_slice(&x_coord.to_bytes()).unwrap();
+    let secp_pk = secp256k1::PublicKey::from_x_only_public_key(x_only, parity);
+
+    public_key_to_address(&secp_pk)
 }
 
 pub async fn process_sign_responded_requests(
@@ -313,32 +304,23 @@ pub async fn process_sign_responded_requests(
     max_attempts: u8,
 ) {
     while let Some((publish_action, signature)) = sign_respond_responded_rx.recv().await {
-        let mut attempts = 0;
-        while attempts < max_attempts {
-            attempts += 1;
-            let Ok(sign_respond_tx) = SignRespondTx::new(publish_action.clone(), signature.clone())
-            else {
-                tracing::error!(
-                    sign_id = ?publish_action.request.indexed.id,
-                    "failed to create sign respond tx"
-                );
+        let sign_respond_tx = match SignRespondTx::new(publish_action.clone(), signature.clone()) {
+            Ok(tx) => tx,
+            Err(_) => {
+                tracing::error!(sign_id = ?publish_action.request.indexed.id, "failed to create sign respond tx");
                 continue;
-            };
-            let sign_respond_tx_id = sign_respond_tx.id;
+            }
+        };
+
+        for attempt in 1..=max_attempts {
             if sign_respond_tx_storage
-                .insert(sign_respond_tx_id, sign_respond_tx)
+                .insert(sign_respond_tx.id, sign_respond_tx.clone())
                 .await
             {
-                tracing::info!(
-                    sign_id = ?sign_respond_tx_id,
-                    "inserted sign respond tx into storage"
-                );
+                tracing::info!(sign_id = ?sign_respond_tx.id, "inserted sign respond tx into storage");
                 break;
-            } else {
-                tracing::error!(
-                    sign_id = ?sign_respond_tx_id,
-                    "failed to insert sign respond tx into storage"
-                );
+            } else if attempt == max_attempts {
+                tracing::error!(sign_id = ?sign_respond_tx.id, "failed to insert after {max_attempts} attempts");
             }
         }
     }

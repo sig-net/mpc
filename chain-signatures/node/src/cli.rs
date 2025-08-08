@@ -7,7 +7,7 @@ use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
-use crate::storage::{app_data_storage, sign_respond_tx_storage};
+use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -330,7 +330,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             ));
             tokio::spawn(crate::sign_respond_tx::process_sign_responded_requests(
                 sign_respond_responded_rx,
-                sign_respond_tx_storage,
+                sign_respond_tx_storage.clone(),
                 5,
             ));
             tokio::spawn(mesh.run(contract_watcher.clone()));

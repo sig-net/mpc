@@ -1,20 +1,17 @@
-use crate::protocol::{Chain, IndexedSignRequest};
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::sign_respond_tx::SignRespondTx;
 use crate::sign_respond_tx::SignRespondTxId;
-use crate::sign_respond_tx::TransactionOutput;
 use crate::storage::app_data_storage::AppDataStorage;
 use crate::storage::sign_respond_tx_storage::SignRespondTxStorage;
-use alloy::consensus::{BlockHeader, Transaction};
+use alloy::consensus::BlockHeader;
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::Log;
-use alloy::rpc::types::TransactionRequest;
+
 use alloy::sol_types::{sol, SolEvent};
 use helios::common::types::{SubscriptionEvent, SubscriptionType};
 use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
-use hex::FromHex;
 use k256::Scalar;
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId};
@@ -307,7 +304,7 @@ fn sign_request_from_filtered_log(
     // Use transaction hash as entropy
     let entropy = log.transaction_hash.unwrap_or_default();
 
-    let sign_id = SignId::new(calculate_request_id(&event));
+    let sign_id = SignId::new(event.generate_request_id());
     tracing::info!(?sign_id, "eth signature requested");
 
     Ok(IndexedSignRequest {
@@ -326,26 +323,6 @@ fn sign_request_from_filtered_log(
         sign_request_type: SignRequestType::Sign,
     })
 }
-
-fn encode_abi(event: &SignatureRequestedEvent) -> Vec<u8> {
-    let signature_requested_event_encoding = SignatureRequestedEncoding {
-        sender: event.requester,
-        payload: event.payload_hash.to_vec().into(),
-        path: event.path.clone(),
-        keyVersion: event.key_version,
-        chainId: event.chain_id,
-        algo: event.algo.clone(),
-        dest: event.dest.clone(),
-        params: event.params.clone(),
-    };
-    signature_requested_event_encoding.encode_data()
-}
-
-fn calculate_request_id(event: &SignatureRequestedEvent) -> [u8; 32] {
-    let abi_encoded = encode_abi(event);
-    alloy::primitives::keccak256(abi_encoded).into()
-}
-
 // Helper function to parse event logs
 fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
     // Parse data fields
@@ -432,12 +409,6 @@ fn failed_blocks_channel() -> (
 const MAX_FINALIZED_BLOCKS: usize = 1024;
 fn finalized_block_channel() -> (mpsc::Sender<BlockNumber>, mpsc::Receiver<BlockNumber>) {
     mpsc::channel(MAX_FINALIZED_BLOCKS)
-}
-
-struct CompletedTx {
-    tx: SignRespondTx,
-    block_number: u64,
-    status: bool,
 }
 
 pub async fn run(
@@ -810,39 +781,6 @@ async fn fetch_block(
     }
 }
 
-async fn mark_tx_success(
-    tx_id: SignRespondTxId,
-    sign_respond_tx_storage: SignRespondTxStorage,
-    max_attempts: u64,
-) -> bool {
-    let mut attempts = 0;
-    while !sign_respond_tx_storage.mark_tx_success(tx_id.clone()).await {
-        if attempts >= max_attempts {
-            tracing::warn!("Failed to mark tx as completed after {max_attempts} attempts");
-            return false;
-        }
-        attempts += 1;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    true
-}
-
-async fn mark_tx_failed(
-    tx_id: SignRespondTxId,
-    sign_respond_tx_storage: SignRespondTxStorage,
-    max_attempts: u64,
-) -> bool {
-    let mut attempts = 0;
-    while !sign_respond_tx_storage.mark_tx_failed(tx_id.clone()).await {
-        if attempts >= max_attempts {
-            tracing::warn!("Failed to mark tx as completed after {max_attempts} attempts");
-            return false;
-        }
-        attempts += 1;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    true
-}
 /// Polls for the latest finalized block and update finalized block channel.
 async fn refresh_finalized_block(
     helios_client: &Arc<EthereumClient>,
@@ -940,7 +878,7 @@ async fn process_block(
         .fetch_pending()
         .await
         .into_iter()
-        .map(|tx| (tx.id.clone(), tx.clone()))
+        .map(|tx| (tx.id, tx.clone()))
         .collect();
     let mut sign_respond_requests: Vec<IndexedSignRequest> = Vec::new();
     for receipt in block_receipts_clone {
@@ -957,26 +895,16 @@ async fn process_block(
         let pending_tx = pending_tx.clone();
         let client_clone = client.clone();
 
-        let sign_respond_request: Option<IndexedSignRequest> = if (status
-            && mark_tx_success(
-                receipt.transaction_hash.into(),
-                sign_respond_tx_storage.clone(),
+        let completed_tx = crate::read_respond::CompletedTx::new(pending_tx, block_number, status);
+
+        let sign_respond_request: Option<IndexedSignRequest> = completed_tx
+            .create_sign_request_from_completed_tx(
+                &client_clone,
+                sign_respond_tx_storage,
                 6,
+                total_timeout,
             )
-            .await)
-            || (!status
-                && mark_tx_failed(receipt.transaction_hash.into(), sign_respond_tx_storage, 6)
-                    .await)
-        {
-            let completed_tx = CompletedTx {
-                tx: pending_tx.clone(),
-                block_number,
-                status,
-            };
-            Some(process_completed_tx(&client_clone, &completed_tx, total_timeout).await?)
-        } else {
-            None
-        };
+            .await;
         if let Some(sign_respond_request) = sign_respond_request {
             sign_respond_requests.push(sign_respond_request);
         }
@@ -1119,206 +1047,6 @@ async fn send_requests_when_final(
     }
 }
 
-async fn process_completed_tx(
-    helios_client: &Arc<EthereumClient>,
-    completed_tx: &CompletedTx,
-    total_timeout: Duration,
-) -> anyhow::Result<IndexedSignRequest> {
-    if completed_tx.status {
-        process_success_tx(helios_client, completed_tx, 6, total_timeout).await
-    } else {
-        process_failed_tx(completed_tx, total_timeout).await
-    }
-}
-
-const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
-async fn process_failed_tx(
-    failed_tx: &CompletedTx,
-    total_timeout: Duration,
-) -> anyhow::Result<IndexedSignRequest> {
-    tracing::info!("Tx failed: {:?}", failed_tx.tx.id);
-    let callback_serialization_format = failed_tx.tx.callback_serialization_format;
-
-    let mut output = Vec::new();
-    output.extend_from_slice(&MAGIC_ERROR_PREFIX);
-    let serialized_output: Vec<u8> = if callback_serialization_format == 0 {
-        let borsh_data = vec![1u8]; // Simple serialization: 1 = true
-        output.extend_from_slice(&borsh_data);
-        Bytes::from(output).into()
-    } else {
-        // Encode boolean as ABI: true = 0x0000000000000000000000000000000000000000000000000000000000000001
-        let abi_encoded = [0u8; 32];
-        let mut encoded = abi_encoded;
-        encoded[31] = 1; // Set last byte to 1 for true
-        output.extend_from_slice(&encoded);
-        Bytes::from(output).into()
-    };
-    let sign_request =
-        create_read_respond_sign_request(failed_tx, &serialized_output, total_timeout)?;
-    Ok(sign_request)
-}
-
-async fn process_success_tx(
-    helios_client: &Arc<EthereumClient>,
-    success_tx: &CompletedTx,
-    max_attempts: u8,
-    total_timeout: Duration,
-) -> anyhow::Result<IndexedSignRequest> {
-    let tx_output = extract_success_tx_output(helios_client, success_tx, max_attempts).await?;
-    tracing::info!("Tx succeeded: {tx_output:?}");
-    let callback_serialization_format = success_tx.tx.callback_serialization_format;
-    let callback_serialization_schema = &success_tx.tx.callback_serialization_schema;
-    let serialized_output = tx_output
-        .output
-        .serialize(callback_serialization_format, callback_serialization_schema)?;
-    let sign_request =
-        create_read_respond_sign_request(success_tx, &serialized_output, total_timeout)?;
-    Ok(sign_request)
-}
-
-fn create_read_respond_sign_request(
-    completed_tx: &CompletedTx,
-    serialized_output: &[u8],
-    total_timeout: Duration,
-) -> anyhow::Result<IndexedSignRequest> {
-    let request_id_hex = &completed_tx.tx.requqest_id.as_str()[2..]; // remove "0x"
-    let request_id_bytes = <[u8; 32]>::from_hex(request_id_hex)?;
-    let message = calculate_read_respond_hash_message(&request_id_bytes, serialized_output);
-    let Some(payload) = Scalar::from_bytes(message) else {
-        return Err(anyhow::anyhow!(
-            "Failed to convert read respond message to scalar: {message:?}"
-        ));
-    };
-    let epsilon = derive_epsilon_eth(
-        format!("0x{}", completed_tx.tx.from_address),
-        &completed_tx.tx.path,
-    );
-    let entropy = completed_tx.tx.id.0;
-    Ok(IndexedSignRequest {
-        id: SignId::new(request_id_bytes),
-        chain: Chain::Solana,
-        args: SignArgs {
-            entropy: entropy.into(),
-            epsilon,
-            payload,
-            path: completed_tx.tx.path.clone(),
-            key_version: completed_tx.tx.key_version,
-        },
-        unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-        timestamp_sign_queue: None,
-        total_timeout,
-        sign_request_type: crate::protocol::SignRequestType::ReadRespond(completed_tx.tx.id),
-    })
-}
-
-fn calculate_read_respond_hash_message(request_id: &[u8], serialized_output: &[u8]) -> [u8; 32] {
-    let mut combined = Vec::with_capacity(request_id.len() + serialized_output.len());
-    combined.extend_from_slice(request_id);
-    combined.extend_from_slice(serialized_output);
-
-    // Compute keccak256 hash
-    alloy::primitives::keccak256(&combined).into()
-}
-
-async fn extract_success_tx_output(
-    helios_client: &Arc<EthereumClient>,
-    success_tx: &CompletedTx,
-    max_attempts: u8,
-) -> anyhow::Result<TransactionOutput> {
-    let tx = fetch_tx_from_helios(helios_client, success_tx.tx.id.clone(), max_attempts).await;
-    let Some(tx) = tx else {
-        return Err(anyhow::anyhow!(
-            "Failed to fetch tx from helios, tx id: {:?}",
-            success_tx.tx.id
-        ));
-    };
-    let explorer_deserialization_format = success_tx.tx.explorer_deserialization_format;
-    let explorer_deserialization_schema = &success_tx.tx.explorer_deserialization_schema;
-    let from_address = Address::from_str(&success_tx.tx.from_address)
-        .map_err(|err| anyhow::anyhow!("Failed to parse from address: {err:?}"))?;
-
-    let data = tx.inner.input();
-    let is_contract_call = data.len() > 2 && *data != Bytes::from("0x");
-    if is_contract_call && explorer_deserialization_format == 1 {
-        let to_address = tx.inner.to().unwrap();
-        let call_result = fetch_call_result(
-            helios_client,
-            from_address,
-            to_address,
-            data.clone(),
-            success_tx.block_number - 1,
-            5,
-        )
-        .await?;
-        TransactionOutput::from_call_result(explorer_deserialization_schema, &call_result)
-    } else {
-        Ok(TransactionOutput::non_function_call_output())
-    }
-}
-
-async fn fetch_call_result(
-    helios_client: &Arc<EthereumClient>,
-    from_address: Address,
-    to_address: Address,
-    data: Bytes,
-    block_number: u64,
-    max_attempts: u8,
-) -> anyhow::Result<Bytes> {
-    let mut attempts = 0;
-    loop {
-        match helios_client
-            .call(
-                &TransactionRequest::default()
-                    .from(from_address)
-                    .to(to_address)
-                    .input(alloy::rpc::types::TransactionInput::both(data.clone())),
-                BlockId::Number(BlockNumberOrTag::Number(block_number)),
-            )
-            .await
-        {
-            Ok(call_result) => return Ok(call_result),
-            Err(err) => {
-                if attempts >= max_attempts {
-                    return Err(anyhow::anyhow!(
-                        "Failed to fecth call result from helios: {err:?}, exceeded maximum retry"
-                    ));
-                }
-                tracing::warn!("Failed to fecth call result from helios: {err:?}, retrying...");
-                attempts += 1;
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    }
-}
-
-async fn fetch_tx_from_helios(
-    helios_client: &Arc<EthereumClient>,
-    tx_id: SignRespondTxId,
-    max_attempts: u8,
-) -> Option<alloy::rpc::types::Transaction> {
-    let mut attempts = 0;
-    loop {
-        match helios_client.get_transaction(tx_id.0).await {
-            Ok(Some(tx)) => return Some(tx),
-            Ok(None) => {
-                tracing::error!("Failed to fecth tx from helios: result is None");
-                return None;
-            }
-            Err(err) => {
-                if attempts >= max_attempts {
-                    tracing::error!(
-                        "Failed to fecth tx from helios: {err:?}, exceeded maximum retry"
-                    );
-                    return None;
-                }
-                tracing::warn!("Failed to fecth tx from helios: {err:?}, retrying...");
-                attempts += 1;
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    }
-}
-
 fn parse_filtered_logs(logs: Vec<Log>, total_timeout: Duration) -> Vec<IndexedSignRequest> {
     let mut indexed_requests = Vec::new();
     for log in logs {
@@ -1382,4 +1110,25 @@ struct SignatureRequestedEvent {
     algo: String,
     dest: String,
     params: String,
+}
+
+impl SignatureRequestedEvent {
+    fn encode_abi(&self) -> Vec<u8> {
+        let signature_requested_event_encoding = SignatureRequestedEncoding {
+            sender: self.requester,
+            payload: self.payload_hash.to_vec().into(),
+            path: self.path.clone(),
+            keyVersion: self.key_version,
+            chainId: self.chain_id,
+            algo: self.algo.clone(),
+            dest: self.dest.clone(),
+            params: self.params.clone(),
+        };
+        signature_requested_event_encoding.encode_data()
+    }
+
+    pub fn generate_request_id(&self) -> [u8; 32] {
+        let abi_encoded = self.encode_abi();
+        alloy::primitives::keccak256(abi_encoded).into()
+    }
 }

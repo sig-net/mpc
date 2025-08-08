@@ -3,23 +3,16 @@ use crate::storage::STORAGE_VERSION;
 use deadpool_redis::{Connection, Pool};
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
-use deadpool_redis::{Connection, Pool};
-use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
-
-use crate::sign_respond_tx::{SignRespondTx, SignRespondTxId};
-use crate::storage::STORAGE_VERSION;
 use near_account_id::AccountId;
 
 pub fn init(pool: &Pool, account_id: &AccountId) -> SignRespondTxStorage {
     let tx_key = format!("sign_respond_tx:{STORAGE_VERSION}:{account_id}");
-    let pending_key = format!("sign_respond_tx_pending:{STORAGE_VERSION}:{account_id}");
     let success_key = format!("sign_respond_tx_success:{STORAGE_VERSION}:{account_id}");
     let failed_key = format!("sign_respond_tx_failed:{STORAGE_VERSION}:{account_id}");
 
     SignRespondTxStorage {
         redis_pool: pool.clone(),
         tx_key,
-        pending_key,
         success_key,
         failed_key,
     }
@@ -29,7 +22,6 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> SignRespondTxStorage {
 pub struct SignRespondTxStorage {
     redis_pool: Pool,
     tx_key: String,
-    pending_key: String,
     success_key: String,
     failed_key: String,
 }
@@ -51,7 +43,7 @@ impl SignRespondTxStorage {
         };
 
         let pending_ids: Vec<SignRespondTxId> = conn
-            .sdiff((&self.pending_key, &self.success_key, &self.failed_key))
+            .sdiff((&self.tx_key, &self.success_key, &self.failed_key))
             .await
             .inspect_err(|err| {
                 tracing::warn!(?err, "failed to fetch pending tx ids");
@@ -111,11 +103,9 @@ impl SignRespondTxStorage {
     pub async fn mark_tx_success(&self, id: SignRespondTxId) -> bool {
         const SCRIPT: &str = r#"
             local success_key = KEYS[1]   
-            local pending_key = KEYS[2]
             local tx_id = ARGV[1]
 
             redis.call("SADD", success_key, tx_id)
-            redis.call("SREM", pending_key, tx_id)
         "#;
 
         let Some(mut conn) = self.connect().await else {
@@ -125,7 +115,6 @@ impl SignRespondTxStorage {
 
         let outcome: Option<()> = redis::Script::new(SCRIPT)
             .key(&self.success_key)
-            .key(&self.pending_key)
             .arg(id)
             .invoke_async(&mut conn)
             .await
@@ -140,11 +129,9 @@ impl SignRespondTxStorage {
     pub async fn mark_tx_failed(&self, id: SignRespondTxId) -> bool {
         const SCRIPT: &str = r#"
             local failed_key = KEYS[1]   
-            local pending_key = KEYS[2]
             local tx_id = ARGV[1]
 
             redis.call("SADD", failed_key, tx_id)
-            redis.call("SREM", pending_key, tx_id)
         "#;
 
         let Some(mut conn) = self.connect().await else {
@@ -155,7 +142,6 @@ impl SignRespondTxStorage {
 
         let outcome: Option<()> = redis::Script::new(SCRIPT)
             .key(&self.failed_key)
-            .key(&self.pending_key)
             .arg(id)
             .invoke_async(&mut conn)
             .await
@@ -170,11 +156,9 @@ impl SignRespondTxStorage {
     pub async fn mark_success_responded(&self, id: SignRespondTxId) -> bool {
         const SCRIPT: &str = r#"
             local tx_key = KEYS[1]
-            local pending_key = KEYS[2]
             local success_key = KEYS[3]
             local tx_id = ARGV[1]
 
-            redis.call("SREM", pending_key, tx_id)
             redis.call("SADD", success_key, tx_id)
             redis.call("HDEL", tx_key, tx_id)
         "#;
@@ -187,7 +171,6 @@ impl SignRespondTxStorage {
 
         let outcome: Option<()> = redis::Script::new(SCRIPT)
             .key(&self.tx_key)
-            .key(&self.pending_key)
             .key(&self.success_key)
             .arg(id)
             .invoke_async(&mut conn)
@@ -203,11 +186,9 @@ impl SignRespondTxStorage {
     pub async fn mark_failed_responded(&self, id: SignRespondTxId) -> bool {
         const SCRIPT: &str = r#"
             local tx_key = KEYS[1]
-            local pending_key = KEYS[2]
             local failed_key = KEYS[3]
             local tx_id = ARGV[1]
 
-            redis.call("SREM", pending_key, tx_id)
             redis.call("SADD", failed_key, tx_id)
             redis.call("HDEL", tx_key, tx_id)
         "#;
@@ -220,7 +201,6 @@ impl SignRespondTxStorage {
 
         let outcome: Option<()> = redis::Script::new(SCRIPT)
             .key(&self.tx_key)
-            .key(&self.pending_key)
             .key(&self.failed_key)
             .arg(id)
             .invoke_async(&mut conn)
@@ -286,7 +266,7 @@ impl SignRespondTxStorage {
             return false;
         };
 
-        match conn.sismember(&self.pending_key, id).await {
+        match conn.sismember(&self.tx_key, id).await {
             Ok(exists) => exists,
 
             Err(err) => {
@@ -311,39 +291,6 @@ impl SignRespondTxStorage {
                 tracing::warn!(?err, "failed to get number of txs");
             })
             .unwrap_or(0)
-    }
-
-    pub async fn clear(&self) -> bool {
-        const SCRIPT: &str = r#"
-            local owner_keys = redis.call("SMEMBERS", KEYS[1])
-            local del = {}
-            for _, key in ipairs(KEYS) do
-                table.insert(del, key)
-            end
-            for _, key in ipairs(owner_keys) do
-                table.insert(del, key)
-            end
-
-            redis.call("DEL", unpack(del))
-        "#;
-
-        let Some(mut conn) = self.connect().await else {
-            return false;
-        };
-        let outcome: Option<()> = redis::Script::new(SCRIPT)
-            .key(&self.tx_key)
-            .key(&self.pending_key)
-            .key(&self.success_key)
-            .key(&self.failed_key)
-            .invoke_async(&mut conn)
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(?err, "failed to clear sign respond tx storage");
-            })
-            .ok();
-
-        // if the outcome is None, it means the script failed or there was an error.
-        outcome.is_some()
     }
 }
 
