@@ -30,6 +30,7 @@ use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
 
+use crate::sign_respond_tx::SignRespondTxId;
 use near_account_id::AccountId;
 use semver::Version;
 use std::fmt;
@@ -203,6 +204,13 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
             std::thread::sleep(Duration::from_secs(5));
         }
     })
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy, Hash)]
+pub enum SignRequestType {
+    Sign,
+    SignRespond,
+    ReadRespond(SignRespondTxId),
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy, Hash)]

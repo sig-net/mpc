@@ -1316,7 +1316,7 @@ async fn try_publish_sol(
         "published solana signature successfully"
     );
 
-    if let SignRequestType::SignRespond(_) = action.request.indexed.sign_request_type {
+    if let SignRequestType::SignRespond = action.request.indexed.sign_request_type {
         if sign_respond_responded_send
             .send((action.clone(), original_signature))
             .await

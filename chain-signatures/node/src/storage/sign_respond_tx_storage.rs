@@ -3,6 +3,11 @@ use crate::storage::STORAGE_VERSION;
 use deadpool_redis::{Connection, Pool};
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
+use deadpool_redis::{Connection, Pool};
+use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
+
+use crate::sign_respond_tx::{SignRespondTx, SignRespondTxId};
+use crate::storage::STORAGE_VERSION;
 use near_account_id::AccountId;
 
 pub fn init(pool: &Pool, account_id: &AccountId) -> SignRespondTxStorage {
@@ -21,7 +26,6 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> SignRespondTxStorage {
 }
 
 #[derive(Clone)]
-
 pub struct SignRespondTxStorage {
     redis_pool: Pool,
     tx_key: String,
@@ -65,7 +69,6 @@ impl SignRespondTxStorage {
 
             Err(err) => {
                 tracing::warn!(?err, "failed to fetch pending tx data");
-
                 Vec::new()
             }
         }
@@ -103,32 +106,6 @@ impl SignRespondTxStorage {
         } else {
             true
         }
-    }
-
-    pub async fn mark_tx_pending(&self, id: SignRespondTxId) -> bool {
-        const SCRIPT: &str = r#"  
-            local pending_key = KEYS[1]
-            local tx_id = ARGV[1]
-
-            redis.call("SADD", pending_key, tx_id)
-        "#;
-
-        let Some(mut conn) = self.connect().await else {
-            tracing::warn!(?id, "failed to complete tx: connection failed");
-            return false;
-        };
-
-        let outcome: Option<()> = redis::Script::new(SCRIPT)
-            .key(&self.pending_key)
-            .arg(id)
-            .invoke_async(&mut conn)
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(?id, ?err, "failed to mark tx as pending");
-            })
-            .ok();
-
-        outcome.is_some()
     }
 
     pub async fn mark_tx_success(&self, id: SignRespondTxId) -> bool {
@@ -328,7 +305,6 @@ impl SignRespondTxStorage {
         let Some(mut conn) = self.connect().await else {
             return 0;
         };
-
         conn.hlen(&self.tx_key)
             .await
             .inspect_err(|err| {
@@ -344,7 +320,6 @@ impl SignRespondTxStorage {
             for _, key in ipairs(KEYS) do
                 table.insert(del, key)
             end
-
             for _, key in ipairs(owner_keys) do
                 table.insert(del, key)
             end
@@ -355,7 +330,6 @@ impl SignRespondTxStorage {
         let Some(mut conn) = self.connect().await else {
             return false;
         };
-
         let outcome: Option<()> = redis::Script::new(SCRIPT)
             .key(&self.tx_key)
             .key(&self.pending_key)
@@ -369,7 +343,6 @@ impl SignRespondTxStorage {
             .ok();
 
         // if the outcome is None, it means the script failed or there was an error.
-
         outcome.is_some()
     }
 }
@@ -411,7 +384,6 @@ impl ToRedisArgs for SignRespondTx {
 impl FromRedisValue for SignRespondTxId {
     fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
         let json = String::from_redis_value(v)?;
-
         serde_json::from_str(&json).map_err(|e| {
             RedisError::from((
                 redis::ErrorKind::TypeError,
@@ -425,7 +397,6 @@ impl FromRedisValue for SignRespondTxId {
 impl FromRedisValue for SignRespondTx {
     fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
         let json = String::from_redis_value(v)?;
-
         serde_json::from_str(&json).map_err(|e| {
             RedisError::from((
                 redis::ErrorKind::TypeError,
