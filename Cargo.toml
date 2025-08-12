@@ -2,6 +2,7 @@
 members = [
     "chain-signatures/crypto",
     "chain-signatures/contract",
+    "chain-signatures/contract-sol",
     "chain-signatures/keys",
     "chain-signatures/node",
     "chain-signatures/primitives",
@@ -61,7 +62,7 @@ mpc-crypto = { path = "./chain-signatures/crypto" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-node = { path = "./chain-signatures/node" }
 mpc-primitives = { path = "./chain-signatures/primitives" }
-signet-program = { path = "./chain-signatures/contract-sol/programs/signet-program" }
+signet-program = { path = "./chain-signatures/contract-sol" }
 
 [patch.crates-io]
 # TODO: trigger Cargo.lock update for x25519-dalek once they release.
