@@ -290,7 +290,7 @@ async fn subscribe_to_program_events<C: Deref<Target = Keypair> + Clone>(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
-) -> anyhow::Result<anchor_client::EventUnsubscriber> {
+) -> anyhow::Result<anchor_client::EventUnsubscriber<'_>> {
     tracing::info!("Subscribing to program events");
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let event_unsubscriber = program

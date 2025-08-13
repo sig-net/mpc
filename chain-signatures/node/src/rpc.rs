@@ -1015,7 +1015,7 @@ async fn try_publish_eth(
         &eth.contract,
         &params,
         40000,
-        &[action.request.indexed.id],
+        std::slice::from_ref(&action.request.indexed.id),
         near_account_id,
     )
     .await?;
