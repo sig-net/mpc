@@ -5,6 +5,7 @@ description = "Minimal types for Solana indexer integration"
 edition = "2021"
 
 [lib]
+crate-type = ["lib"]
 name = "signet_program"
 
 [dependencies]
