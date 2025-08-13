@@ -1246,10 +1246,10 @@ async fn execute_batch_publish(
     }
 }
 
-use chain_signatures_project::accounts::Respond as SolanaRespondAccount;
-use chain_signatures_project::instruction::Respond as SolanaRespond;
-use chain_signatures_project::AffinePoint as SolanaContractAffinePoint;
-use chain_signatures_project::Signature as SolanaContractSignature;
+use signet_program::accounts::Respond as SolanaRespondAccount;
+use signet_program::instruction::Respond as SolanaRespond;
+use signet_program::AffinePoint as SolanaContractAffinePoint;
+use signet_program::Signature as SolanaContractSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
 async fn try_publish_sol(
     sol: &SolanaClient,
