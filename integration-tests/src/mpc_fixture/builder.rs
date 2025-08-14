@@ -1,7 +1,10 @@
-//! Create an isolated MPC network for testing without hitting a real network.
+//! Types used by tests directly to create an MPC network fixture and configure
+//! it before it starts running.
 
 use crate::containers::Redis;
-use crate::mpc::fixture_input::FixtureInput;
+use crate::mpc_fixture::input::FixtureInput;
+use crate::mpc_fixture::mock_governance::MockGovernance;
+use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
 use mpc_contract::primitives::{
@@ -12,31 +15,20 @@ use mpc_node::config::{Config, LocalConfig, NetworkConfig};
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, Votes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
-use mpc_node::protocol::message::{MessageInbox, SignedMessage};
-use mpc_node::protocol::state::{NodeKeyInfo, NodeStateWatcher};
-use mpc_node::protocol::{
-    self, Governance, IndexedSignRequest, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue,
-};
+use mpc_node::protocol::state::NodeKeyInfo;
+use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue};
+use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
-use mpc_node::rpc::{ContractStateWatcher, RpcAction};
-use mpc_node::storage::{
-    presignature_storage, secret_storage, triple_storage, Options, PresignatureStorage,
-    TripleStorage,
-};
-use mpc_node::util::NearPublicKeyExt;
+use mpc_node::storage::{presignature_storage, secret_storage, triple_storage, Options};
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::RwLock;
 use tokio::sync::{watch, Mutex};
-use tokio::task::JoinHandle;
 
-mod fixture_input;
-
-pub struct TestMpcNetworkBuilder {
-    prepared_nodes: Vec<TestMpcNodeBuilder>,
+pub struct MpcFixtureBuilder {
+    prepared_nodes: Vec<MpcFixtureNodeBuilder>,
     threshold: usize,
     shared_public_key: Option<mpc_crypto::PublicKey>,
     protocol_state: ProtocolState,
@@ -55,15 +47,7 @@ pub struct TestMpcNetworkBuilder {
     max_presignatures: u32,
 }
 
-pub struct TestMpcNetwork {
-    pub nodes: Vec<TestMpcNode>,
-    pub redis_container: Redis,
-    pub rpc_actions: Arc<Mutex<HashSet<String>>>,
-    pub msg_log: Arc<Mutex<Vec<String>>>,
-    pub shared_contract_state: watch::Sender<Option<ProtocolState>>,
-}
-
-struct TestMpcNodeBuilder {
+struct MpcFixtureNodeBuilder {
     me: Participant,
     candidate_info: CandidateInfo,
     participant_info: ParticipantInfo,
@@ -77,26 +61,13 @@ struct TestMpcNodeBuilder {
     key_info: Option<NodeKeyInfo>,
 }
 
-pub struct TestMpcNode {
-    pub me: Participant,
-    pub state: NodeStateWatcher,
-    pub mesh: watch::Sender<MeshState>,
-    pub config: watch::Sender<Config>,
-
-    pub sign_tx: Sender<IndexedSignRequest>,
-    pub msg_tx: Sender<Ciphered>,
-
-    pub triple_storage: TripleStorage,
-    pub presignature_storage: PresignatureStorage,
-}
-
-impl Default for TestMpcNetworkBuilder {
+impl Default for MpcFixtureBuilder {
     fn default() -> Self {
         Self::new(3, 2)
     }
 }
 
-impl TestMpcNetworkBuilder {
+impl MpcFixtureBuilder {
     pub fn new(num_nodes: u32, threshold: usize) -> Self {
         // This is a bit of a weird place to install the subscriber but every
         // test needs to call it somewhere. Since tests will usually call this
@@ -104,7 +75,7 @@ impl TestMpcNetworkBuilder {
         crate::utils::init_tracing_log();
 
         let fixture_input = FixtureInput::load(num_nodes);
-        let prepared_nodes: Vec<_> = (0..num_nodes).map(TestMpcNodeBuilder::new).collect();
+        let prepared_nodes: Vec<_> = (0..num_nodes).map(MpcFixtureNodeBuilder::new).collect();
 
         // construct full list of participants and candidates (same set)
         let mut candidates_by_id = CandidatesById::new();
@@ -126,7 +97,7 @@ impl TestMpcNetworkBuilder {
             },
         });
 
-        TestMpcNetworkBuilder {
+        MpcFixtureBuilder {
             threshold,
             prepared_nodes,
             shared_public_key: None,
@@ -147,7 +118,7 @@ impl TestMpcNetworkBuilder {
         }
     }
 
-    pub async fn build(mut self) -> TestMpcNetwork {
+    pub async fn build(mut self) -> MpcFixture {
         let finalized_protocol_config = self.build_protocol_config();
         let redis_container = self.build_redis(finalized_protocol_config.clone()).await;
 
@@ -204,7 +175,7 @@ impl TestMpcNetworkBuilder {
             nodes.push(started);
         }
 
-        TestMpcNetwork {
+        MpcFixture {
             redis_container,
             nodes,
             rpc_actions,
@@ -306,76 +277,7 @@ impl TestMpcNetworkBuilder {
     }
 }
 
-impl TestMpcNetwork {
-    pub async fn wait_for_triples(&self, threshold_per_node: usize) {
-        for node in &self.nodes {
-            node.wait_for_triples(threshold_per_node).await;
-        }
-    }
-
-    pub async fn wait_for_presignatures(&self, threshold_per_node: usize) {
-        for node in &self.nodes {
-            node.wait_for_presignatures(threshold_per_node).await;
-        }
-    }
-}
-
-struct MockGovernance {
-    pub me: AccountId,
-    pub protocol_state_tx: watch::Sender<Option<ProtocolState>>,
-}
-
-impl Governance for MockGovernance {
-    async fn propose_join(&self) -> anyhow::Result<()> {
-        tracing::debug!(me = ?self.me, "propose_join");
-        Ok(())
-    }
-
-    async fn vote_reshared(&self, epoch: u64) -> anyhow::Result<bool> {
-        tracing::debug!(me = ?self.me, ?epoch, "vote_reshared");
-        Ok(true)
-    }
-
-    async fn vote_public_key(&self, public_key: &near_crypto::PublicKey) -> anyhow::Result<bool> {
-        tracing::debug!(me = ?self.me, ?public_key, "vote_public_key");
-        let mut result = false;
-        self.protocol_state_tx.send_if_modified(|protocol_state| {
-            let mut modified;
-            match protocol_state {
-                Some(ProtocolState::Initializing(ref mut state)) => {
-                    let entry = state
-                        .pk_votes
-                        .pk_votes
-                        .entry(public_key.clone())
-                        .or_default();
-
-                    modified = entry.insert(self.me.clone());
-
-                    if entry.len() >= state.threshold {
-                        *protocol_state = Some(ProtocolState::Running(RunningContractState {
-                            epoch: 0,
-                            participants: state.candidates.clone().into(),
-                            threshold: state.threshold,
-                            public_key: public_key.clone().into_affine_point(),
-                            candidates: Default::default(),
-                            join_votes: Default::default(),
-                            leave_votes: Default::default(),
-                        }));
-                        result = true;
-                        modified = true;
-                    }
-                }
-
-                Some(_) => todo!(),
-                None => todo!(),
-            }
-            modified
-        });
-        Ok(result)
-    }
-}
-
-impl TestMpcNodeBuilder {
+impl MpcFixtureNodeBuilder {
     fn new(index: u32) -> Self {
         let account_id: AccountId = format!("p-{index}").parse().unwrap();
         let url = format!("fake{index}.url");
@@ -383,10 +285,8 @@ impl TestMpcNodeBuilder {
         let cipher_sk = hpke::SecretKey::from_bytes(&[index as u8; 32]);
         let cipher_pk = cipher_sk.public_key().to_bytes();
 
-        let sign_sk = near_crypto::SecretKey::from_seed(
-            near_crypto::KeyType::ED25519,
-            &account_id.to_string(),
-        );
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, account_id.as_ref());
         let sign_pk = near_sdk::PublicKey::from_parts(
             near_sdk::CurveType::ED25519,
             sign_sk.public_key().key_data().to_vec(),
@@ -409,7 +309,7 @@ impl TestMpcNodeBuilder {
         // Needs to be built ahead of time to create routing table
         let (msg_tx, msg_rx, msg_channel) = MessageChannel::new();
 
-        TestMpcNodeBuilder {
+        MpcFixtureNodeBuilder {
             me: Participant::from(index),
             candidate_info,
             participant_info,
@@ -421,6 +321,7 @@ impl TestMpcNodeBuilder {
         }
     }
 
+    // TODO: refactor to make clippy happy
     async fn start(
         self,
         routing_table: HashMap<Participant, Sender<Ciphered>>,
@@ -433,7 +334,7 @@ impl TestMpcNodeBuilder {
         msg_log: Arc<Mutex<Vec<String>>>,
         rpc_actions: Arc<Mutex<HashSet<String>>>,
         fixture_input: &mut FixtureInput,
-    ) -> TestMpcNode {
+    ) -> MpcFixtureNode {
         let key_storage = if let Some(key) = self.key_info {
             secret_storage::test_store(0, key.private_share, key.public_key)
         } else {
@@ -517,7 +418,7 @@ impl TestMpcNodeBuilder {
             mesh_rx.clone(),
         ));
 
-        let _mock_network_handle = Self::test_mock_network(
+        let _mock_network_handle = fixture_tasks::test_mock_network(
             routing_table,
             rpc_actions,
             msg_log,
@@ -527,13 +428,13 @@ impl TestMpcNodeBuilder {
             config_tx.clone(),
         );
 
-        let _message_executor_handle = tokio::spawn(Self::test_message_executor(
+        let _message_executor_handle = tokio::spawn(fixture_tasks::test_message_executor(
             config_rx,
             contract_state,
             inbox,
         ));
 
-        TestMpcNode {
+        MpcFixtureNode {
             me: self.me,
             state: node_state,
             mesh: mesh_tx,
@@ -544,146 +445,7 @@ impl TestMpcNodeBuilder {
             presignature_storage,
         }
     }
-
-    /// This replaces what is usually done by MessageExecutor::spawn.
-    ///
-    /// Right now, this only polls the inbox to update.
-    /// The outbox is skipped because the mock network directly inserts non-encrypted messages.
-    async fn test_message_executor(
-        config: watch::Receiver<Config>,
-        contract: ContractStateWatcher,
-        inbox: Arc<RwLock<MessageInbox>>,
-    ) {
-        let mut interval = tokio::time::interval(Duration::from_millis(10));
-        loop {
-            interval.tick().await;
-            let config = config.borrow().clone();
-
-            let participants = contract.participants().await;
-            {
-                let mut inbox = inbox.write().await;
-                let expiration = Duration::from_millis(config.protocol.message_timeout);
-                inbox
-                    .update(expiration, &config.local.network.cipher_sk, &participants)
-                    .await;
-            }
-        }
-    }
-
-    fn test_mock_network(
-        routing_table: HashMap<Participant, Sender<Ciphered>>,
-        rpc_actions: Arc<Mutex<HashSet<String>>>,
-        msg_log: Arc<Mutex<Vec<String>>>,
-        mut msg_rx: Receiver<(
-            mpc_node::protocol::Message,
-            (Participant, Participant, std::time::Instant),
-        )>,
-        mut rpc_rx: Receiver<RpcAction>,
-        mesh: watch::Sender<MeshState>,
-        config: watch::Sender<Config>,
-    ) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            tracing::debug!(target: "mock_network", "Test message executor started");
-            loop {
-                tokio::select! {
-                    Some((msg, (from, to, ts))) = msg_rx.recv() => {
-                        tracing::debug!(target: "mock_network", ?to, ?ts, "Received MPC message");
-
-                        let log_msg = match msg {
-                            protocol::Message::Posit(_) => "Posit",
-                            protocol::Message::Generating(_) => "Generating",
-                            protocol::Message::Resharing(_) => "Resharing",
-                            protocol::Message::Triple(_) => "Triple",
-                            protocol::Message::Presignature(_) => "Presignature",
-                            protocol::Message::Signature(_) => "Signature",
-                            protocol::Message::Unknown(_) => "Unknown",
-                        };
-                        msg_log.lock().await.push(format!("{log_msg} from {from:?} to {to:?}"));
-
-                        // directly send out single message, no batching
-                        // (might want to add MessageOutbox, too, but for now this is easier)
-                        let config = config.borrow().clone();
-                        let participants = mesh.borrow().active.clone();
-                        let receiver_info = participants.get(&to).expect("TODO: support sending to non-active participants in tests");
-                        match SignedMessage::encrypt(
-                            &[msg],
-                            from,
-                            &config.local.network.sign_sk,
-                            &receiver_info.cipher_pk,
-                        ) {
-                            Ok(ciphered) => {
-                                if let Some(tx) = routing_table.get(&to) {
-                                    if let Err(e) = tx.send(ciphered).await {
-                                        tracing::warn!(target: "mock_network", ?e, "Failed to forward encrypted message to {to:?}");
-                                    }
-                                } else {
-                                    tracing::error!(target: "mock_network", "Test setup bug: No route to participant {:?}", to);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!(target: "mock_network", ?e, "Encryption failed");
-                            }
-                        }
-                    }
-
-                    Some(rpc) = rpc_rx.recv() => {
-                        let action_str = match rpc {
-                            RpcAction::Publish(publish_action) => {
-                                format!(
-                                    "RpcAction::Publish({:?}",
-                                    publish_action.request,
-                                )
-                            },
-                        };
-                        tracing::error!(target: "mock_network", ?action_str, "Received RPC action");
-                        let mut actions_log = rpc_actions.lock().await;
-                        actions_log.insert(action_str);
-                    }
-
-                    else => {
-                        tracing::info!(target: "mock_network", "All channels closed, exiting handler loop for one node");
-                        break;
-                    }
-                }
-            }
-            tracing::info!(target: "mock_network", "Test mock network task exited");
-        })
-    }
 }
-
-impl TestMpcNode {
-    pub async fn wait_for_triples(&self, threshold_per_node: usize) {
-        loop {
-            let count = self.triple_storage.len_by_owner(self.me).await;
-            if count >= threshold_per_node {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        }
-    }
-
-    pub async fn wait_for_presignatures(&self, threshold_per_node: usize) {
-        loop {
-            let count = self.presignature_storage.len_by_owner(self.me).await;
-            if count >= threshold_per_node {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        }
-    }
-}
-
-// impl Drop for TestMpcNetwork {
-//     fn drop(&mut self) {
-//         tracing::info!("printing all messages between nodes");
-//         let out = &mut std::fs::File::create("network_msg.txt").unwrap();
-
-//         for line in self.msg_log.lock().await.iter() {
-//             tracing::info!("{line}");
-//             writeln!(out, "{line}").unwrap();
-//         }
-//     }
-// }
 
 async fn redis() -> Redis {
     let spawner = crate::cluster::spawner::ClusterSpawner::default()
@@ -693,17 +455,4 @@ async fn redis() -> Redis {
         .expect("failed setting up redis container");
 
     crate::containers::Redis::run(&spawner).await
-}
-
-impl std::ops::Index<usize> for TestMpcNetwork {
-    type Output = TestMpcNode;
-
-    fn index(&self, index: usize) -> &TestMpcNode {
-        &self.nodes[index]
-    }
-}
-impl std::ops::IndexMut<usize> for TestMpcNetwork {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.nodes[index]
-    }
 }

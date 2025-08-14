@@ -3,7 +3,7 @@ pub mod cluster;
 pub mod containers;
 pub mod execute;
 pub mod local;
-pub mod mpc;
+pub mod mpc_fixture;
 pub mod utils;
 
 use cluster::spawner::ClusterSpawner;

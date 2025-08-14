@@ -23,7 +23,7 @@ impl FixtureInput {
             other => panic!("No fixture input for {other} nodes available"),
         };
 
-        let file = fs::File::open(format!("src/mpc/{file_name}")).unwrap();
+        let file = fs::File::open(format!("src/mpc_fixture/{file_name}")).unwrap();
         let reader = io::BufReader::new(file);
         serde_json::from_reader(reader).expect("parsing failed")
     }

@@ -20,5 +20,7 @@
             "private_share": "61B1ECF4EF44E078436A1BED81B97D0AEB2E60D204DFA41D8C25D29F6F545F6E",
             "public_key": "02309C830938C749FB9F8CAD2DFC13BC4E2BA4BBF5C35B56791E03BB8DCB3ED16F"
         }
-    }
+    },
+    "triples": {},
+    "presignatures": {}
 }

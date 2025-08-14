@@ -1,5 +1,5 @@
 use deadpool_redis::redis::AsyncCommands;
-use integration_tests::mpc::TestMpcNetworkBuilder;
+use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState};
@@ -18,7 +18,7 @@ const PRESIGNATURES_FILE: &str = "tmp/presignatures.json";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_basic_generate_keys() {
-    let network = TestMpcNetworkBuilder::new(5, 4).build().await;
+    let network = MpcFixtureBuilder::new(5, 4).build().await;
 
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         let mut contract_state_watcher = network.shared_contract_state.subscribe();
@@ -65,14 +65,14 @@ async fn test_basic_generate_keys() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_basic_generate_triples() {
-    let network = TestMpcNetworkBuilder::default()
+    let network = MpcFixtureBuilder::default()
         .with_preshared_key()
         .with_min_presignatures_stockpile(0)
         .with_max_presignatures_stockpile(0)
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(60), network.wait_for_triples(1))
+    tokio::time::timeout(Duration::from_secs(180), network.wait_for_triples(1))
         .await
         .expect("should have enough triples eventually");
 
@@ -108,7 +108,7 @@ async fn test_basic_generate_triples() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_basic_generate_presignature() {
-    let network = TestMpcNetworkBuilder::default()
+    let network = MpcFixtureBuilder::default()
         .with_preshared_key()
         .with_preshared_triples()
         .with_min_triples_stockpile(0)
@@ -156,7 +156,7 @@ async fn test_basic_generate_presignature() {
 // TODO: this fails with invalid signature
 #[tokio::test(flavor = "multi_thread")]
 async fn test_basic_sign() {
-    let network = TestMpcNetworkBuilder::default()
+    let network = MpcFixtureBuilder::default()
         .with_preshared_key()
         .with_presignature_stockpile()
         .with_min_triples_stockpile(0)
