@@ -544,3 +544,10 @@ impl FromRedisValue for Presignature {
         })
     }
 }
+
+// TODO: hide behind test feature
+impl PresignatureStorage {
+    pub fn presignature_key(&self) -> &str {
+        &self.presig_key
+    }
+}

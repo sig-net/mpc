@@ -19,6 +19,7 @@ hex.workspace = true
 hyper.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 shell-escape = "0.1.5"
 testcontainers = "0.23.1"

@@ -1,19 +1,19 @@
 //! Create an isolated MPC network for testing without hitting a real network.
 
 use crate::containers::Redis;
+use crate::mpc::fixture_input::FixtureInput;
 use cait_sith::protocol::Participant;
-use elliptic_curve::sec1::{EncodedPoint, FromEncodedPoint};
-use k256::Secp256k1;
+use mpc_contract::config::ProtocolConfig;
 use mpc_contract::primitives::{
     CandidateInfo, Candidates as CandidatesById, ParticipantInfo, Participants as ParticipantsById,
 };
-use mpc_crypto::ScalarExt;
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_node::config::{Config, LocalConfig, NetworkConfig};
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, Votes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, SignedMessage};
+use mpc_node::protocol::state::{NodeKeyInfo, NodeStateWatcher};
 use mpc_node::protocol::{
     self, Governance, IndexedSignRequest, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue,
 };
@@ -26,13 +26,14 @@ use mpc_node::storage::{
 use mpc_node::util::NearPublicKeyExt;
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::RwLock;
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
+
+mod fixture_input;
 
 pub struct TestMpcNetworkBuilder {
     prepared_nodes: Vec<TestMpcNodeBuilder>,
@@ -42,8 +43,16 @@ pub struct TestMpcNetworkBuilder {
     participants: Participants,
     participants_by_id: ParticipantsById,
     candidates: Candidates,
-    triple_stockpile_factor: u32,
+    fixture_input: FixtureInput,
+
     presignature_stockpile: bool,
+    use_preshared_triples: bool,
+
+    triple_stockpile_factor: u32,
+    min_triples: u32,
+    max_triples: u32,
+    min_presignatures: u32,
+    max_presignatures: u32,
 }
 
 pub struct TestMpcNetwork {
@@ -65,10 +74,12 @@ struct TestMpcNodeBuilder {
         (Participant, Participant, std::time::Instant),
     )>,
     msg_channel: MessageChannel,
+    key_info: Option<NodeKeyInfo>,
 }
 
 pub struct TestMpcNode {
     pub me: Participant,
+    pub state: NodeStateWatcher,
     pub mesh: watch::Sender<MeshState>,
     pub config: watch::Sender<Config>,
 
@@ -92,6 +103,7 @@ impl TestMpcNetworkBuilder {
         // before doing anything interesting, might as well do it here.
         crate::utils::init_tracing_log();
 
+        let fixture_input = FixtureInput::load(num_nodes);
         let prepared_nodes: Vec<_> = (0..num_nodes).map(TestMpcNodeBuilder::new).collect();
 
         // construct full list of participants and candidates (same set)
@@ -116,19 +128,28 @@ impl TestMpcNetworkBuilder {
 
         TestMpcNetworkBuilder {
             threshold,
-            triple_stockpile_factor: 0,
             prepared_nodes,
             shared_public_key: None,
             protocol_state,
             participants,
             participants_by_id,
             candidates,
+            fixture_input,
+
+            use_preshared_triples: false,
             presignature_stockpile: false,
+
+            triple_stockpile_factor: 0,
+            min_triples: 10,
+            max_triples: 100,
+            min_presignatures: 10,
+            max_presignatures: 100,
         }
     }
 
     pub async fn build(mut self) -> TestMpcNetwork {
-        let redis_container = self.build_redis().await;
+        let finalized_protocol_config = self.build_protocol_config();
+        let redis_container = self.build_redis(finalized_protocol_config.clone()).await;
 
         // Build a routing table: Participant -> msg_tx
         let mut routing_table: HashMap<Participant, Sender<Ciphered>> = HashMap::new();
@@ -162,7 +183,9 @@ impl TestMpcNetworkBuilder {
             ContractStateWatcher::test_batch(&account_ids, self.protocol_state);
 
         // Start each node's tokio tasks
-        for (node, contract_state) in self.prepared_nodes.drain(..).zip(contract_state_watchers) {
+        for (mut node, contract_state) in self.prepared_nodes.drain(..).zip(contract_state_watchers)
+        {
+            node.config.protocol = finalized_protocol_config.clone();
             let started = node
                 .start(
                     routing_table.clone(),
@@ -170,10 +193,11 @@ impl TestMpcNetworkBuilder {
                     &initial_mesh_state,
                     contract_state,
                     shared_contract_state_tx.clone(),
-                    &self.shared_public_key,
+                    self.use_preshared_triples,
                     self.presignature_stockpile,
                     Arc::clone(&msg_log),
                     Arc::clone(&rpc_actions),
+                    &mut self.fixture_input,
                 )
                 .await;
 
@@ -189,19 +213,22 @@ impl TestMpcNetworkBuilder {
         }
     }
 
-    async fn build_redis(&self) -> Redis {
+    fn build_protocol_config(&self) -> ProtocolConfig {
+        let mut config = ProtocolConfig::default();
+        config.presignature.max_presignatures = self.max_presignatures;
+        config.presignature.min_presignatures = self.min_presignatures;
+        config.triple.max_triples = self.max_triples;
+        config.triple.min_triples = self.min_triples;
+        config
+    }
+
+    async fn build_redis(&self, protocol_config: ProtocolConfig) -> Redis {
         let redis_container = redis().await;
 
-        // TODO(jakmeier): make this configurable
-        let mut protocol = mpc_contract::config::ProtocolConfig::default();
-        protocol.triple.min_triples = 10;
-        protocol.triple.max_triples = 100;
-        protocol.presignature.min_presignatures = 10;
-        protocol.presignature.max_presignatures = 100;
         let cfg = crate::NodeConfig {
             nodes: self.prepared_nodes.len(),
             threshold: self.threshold,
-            protocol,
+            protocol: protocol_config,
             eth: None,
             sol: None,
         };
@@ -216,11 +243,9 @@ impl TestMpcNetworkBuilder {
     }
 
     pub fn with_preshared_key(mut self) -> Self {
-        let encoded = EncodedPoint::<Secp256k1>::from_str(
-            "0303D6C6F119014A09A6B2A58B0BB075A7938EDF3D0E9F58AC2ED58A19CB5C20C0",
-        )
-        .unwrap();
-        self.shared_public_key = Some(mpc_crypto::PublicKey::from_encoded_point(&encoded).unwrap());
+        let keys = &self.fixture_input.keys;
+        let public_key = keys.first_key_value().unwrap().1.public_key;
+        self.shared_public_key = Some(public_key);
 
         self.protocol_state = ProtocolState::Running(RunningContractState {
             epoch: 0,
@@ -232,10 +257,21 @@ impl TestMpcNetworkBuilder {
             threshold: self.threshold,
         });
 
+        for node in &mut self.prepared_nodes {
+            node.key_info = keys.get(&node.me).cloned();
+        }
+
         self
     }
 
-    pub fn with_stockpiled_triples(mut self, triple_stockpile_factor: u32) -> Self {
+    /// Use triples from fixture input
+    pub fn with_preshared_triples(mut self) -> Self {
+        self.use_preshared_triples = true;
+        self
+    }
+
+    /// Deal triples from cait-sith's central triple generation
+    pub fn with_dealt_triples(mut self, triple_stockpile_factor: u32) -> Self {
         assert!(
             self.shared_public_key.is_some(),
             "can't stockpile without preshared key"
@@ -246,6 +282,26 @@ impl TestMpcNetworkBuilder {
 
     pub fn with_presignature_stockpile(mut self) -> Self {
         self.presignature_stockpile = true;
+        self
+    }
+
+    pub fn with_min_triples_stockpile(mut self, value: u32) -> Self {
+        self.min_triples = value;
+        self
+    }
+
+    pub fn with_max_triples_stockpile(mut self, value: u32) -> Self {
+        self.max_triples = value;
+        self
+    }
+
+    pub fn with_min_presignatures_stockpile(mut self, value: u32) -> Self {
+        self.min_presignatures = value;
+        self
+    }
+
+    pub fn with_max_presignatures_stockpile(mut self, value: u32) -> Self {
+        self.max_presignatures = value;
         self
     }
 }
@@ -361,6 +417,7 @@ impl TestMpcNodeBuilder {
             msg_tx,
             msg_rx,
             msg_channel,
+            key_info: None,
         }
     }
 
@@ -371,23 +428,14 @@ impl TestMpcNodeBuilder {
         init_mesh: &MeshState,
         contract_state: ContractStateWatcher,
         protocol_state_tx: watch::Sender<Option<ProtocolState>>,
-        public_key: &Option<mpc_crypto::PublicKey>,
+        use_preshared_triples: bool,
         presignature_stockpile: bool,
         msg_log: Arc<Mutex<Vec<String>>>,
         rpc_actions: Arc<Mutex<HashSet<String>>>,
+        fixture_input: &mut FixtureInput,
     ) -> TestMpcNode {
-        let index = u32::from(self.me);
-        let key_storage = if let Some(public_key) = public_key {
-            // TODO(jakmeier): make this work with other configs than num_nodes = 3
-            let secrets = [
-                "D098A0E6DE766B341F618B5651264ABAFD215E661080978489B99E6B9692201A",
-                "246E77A94C03FEEEC444C6EFC50232AB1A70ABF2E5A07368330AEA021A6223EB",
-                "4059292990D4E26D3291E41F20EFBE31D2B227A0CFF97DB0612F5D62CD2055EC",
-            ];
-            let bytes = hex::decode(secrets[index as usize]).unwrap();
-            let secret_share = k256::Scalar::from_bytes(bytes.try_into().unwrap()).unwrap();
-
-            secret_storage::test_store(0, secret_share, *public_key)
+        let key_storage = if let Some(key) = self.key_info {
+            secret_storage::test_store(0, key.private_share, key.public_key)
         } else {
             secret_storage::init(
                 None,
@@ -403,19 +451,32 @@ impl TestMpcNodeBuilder {
         };
 
         let triple_storage = triple_storage::init(redis_pool, &self.participant_info.account_id);
+
+        if use_preshared_triples {
+            // removing here because we can't clone a triple
+            let my_shares = fixture_input.triples.remove(&self.me).unwrap();
+            for (owner, triple_shares) in my_shares {
+                for triple_share in triple_shares {
+                    let mut slot = triple_storage.reserve(triple_share.id).await.unwrap();
+                    slot.insert(triple_share, owner).await;
+                }
+            }
+        }
+
         let presignature_storage =
             presignature_storage::init(redis_pool, &self.participant_info.account_id);
 
         if presignature_stockpile {
-            for presig in PRESIGNATURES[index as usize].iter() {
-                let mut slot = presignature_storage
-                    .reserve(presig.id)
-                    .await
-                    .expect("must be able to reserve slot");
-                let deserialized = serde_json::de::from_str(presig.presignature).unwrap();
-                // TODO(jakmeier): make this work with other configs than num_nodes = 3
-                let owner = (index % 3) as u32;
-                slot.insert(deserialized, owner.into()).await;
+            // removing here because we can't clone a presignature
+            let my_shares = fixture_input.presignatures.remove(&self.me).unwrap();
+            for (owner, presignature_shares) in my_shares {
+                for presignature_share in presignature_shares {
+                    let mut slot = presignature_storage
+                        .reserve(presignature_share.id)
+                        .await
+                        .unwrap();
+                    slot.insert(presignature_share, owner).await;
+                }
             }
         }
 
@@ -441,10 +502,12 @@ impl TestMpcNodeBuilder {
         );
 
         let account_id = protocol.my_account_id().clone();
+        let node = protocol::Node::new();
+        let node_state = node.watch();
 
         // task running the protocol
         let _protocol_handle = tokio::spawn(protocol.run(
-            protocol::Node::new(),
+            node,
             MockGovernance {
                 me: account_id.clone(),
                 protocol_state_tx,
@@ -472,6 +535,7 @@ impl TestMpcNodeBuilder {
 
         TestMpcNode {
             me: self.me,
+            state: node_state,
             mesh: mesh_tx,
             config: config_tx,
             sign_tx,
@@ -643,62 +707,3 @@ impl std::ops::IndexMut<usize> for TestMpcNetwork {
         &mut self.nodes[index]
     }
 }
-
-struct SerializedPresignature {
-    id: u64,
-    presignature: &'static str,
-}
-
-const PRESIGNATURES: [[SerializedPresignature; 15]; 3] = [
-    [
-        SerializedPresignature { id:10578615463967501927 , presignature:"{\"id\":10578615463967501927,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:13267685776613424333 , presignature:"{\"id\":13267685776613424333,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:13749498474387665027 , presignature:"{\"id\":13749498474387665027,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:14481654503363904241 , presignature:"{\"id\":14481654503363904241,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:15860611008650236091 , presignature:"{\"id\":15860611008650236091,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:2735443904802631835 , presignature:"{\"id\":2735443904802631835,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:3000585238922530005 , presignature:"{\"id\":3000585238922530005,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:3053026411059970257 , presignature:"{\"id\":3053026411059970257,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:3632459615945342142 , presignature:"{\"id\":3632459615945342142,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:3869672684191711158 , presignature:"{\"id\":3869672684191711158,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:4327689991975093939 , presignature:"{\"id\":4327689991975093939,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:5751834371102806199 , presignature:"{\"id\":5751834371102806199,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:7078077870043747112 , presignature:"{\"id\":7078077870043747112,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:8565255253298638177 , presignature:"{\"id\":8565255253298638177,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-        SerializedPresignature { id:928724233213890770 , presignature:"{\"id\":928724233213890770,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"7E1BA6970B802E7B6AB1D7AD3B83B6BB6CA24DEE615137B2A025BE5DEDCB0CEE\",\"output_sigma\":\"8EE0E2CB16B8A9DAC6DDF008835A7CB3B79A5591EA46291FFF1FB9CB90765ED3\",\"participants\":[0,1,2]}" },
-    ],
-    [
-    SerializedPresignature { id:10578615463967501927, presignature:"{\"id\":10578615463967501927,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:13267685776613424333, presignature:"{\"id\":13267685776613424333,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:13749498474387665027, presignature:"{\"id\":13749498474387665027,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:14481654503363904241, presignature:"{\"id\":14481654503363904241,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:15860611008650236091, presignature:"{\"id\":15860611008650236091,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:2735443904802631835, presignature:"{\"id\":2735443904802631835,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:3000585238922530005, presignature:"{\"id\":3000585238922530005,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:3053026411059970257, presignature:"{\"id\":3053026411059970257,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:3632459615945342142, presignature:"{\"id\":3632459615945342142,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:3869672684191711158, presignature:"{\"id\":3869672684191711158,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:4327689991975093939, presignature:"{\"id\":4327689991975093939,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:5751834371102806199, presignature:"{\"id\":5751834371102806199,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:7078077870043747112, presignature:"{\"id\":7078077870043747112,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:8565255253298638177, presignature:"{\"id\":8565255253298638177,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    SerializedPresignature { id:928724233213890770, presignature:"{\"id\":928724233213890770,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"AC01734F9AF01194F4D47C33EE71AAB3A0010121E04CBAC3BE685F06F43AB1F4\",\"output_sigma\":\"5A447495B032C71EED5D48CAB355D7D43F1C804249E36F877E74C59138F9D607\",\"participants\":[0,1,2]}"},
-    ],
-    [
-    SerializedPresignature {id:10578615463967501927, presignature:"{\"id\":10578615463967501927,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:13267685776613424333, presignature:"{\"id\":13267685776613424333,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:13749498474387665027, presignature:"{\"id\":13749498474387665027,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:14481654503363904241, presignature:"{\"id\":14481654503363904241,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:15860611008650236091, presignature:"{\"id\":15860611008650236091,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:2735443904802631835, presignature:"{\"id\":2735443904802631835,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:3000585238922530005, presignature:"{\"id\":3000585238922530005,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:3053026411059970257, presignature:"{\"id\":3053026411059970257,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:3632459615945342142, presignature:"{\"id\":3632459615945342142,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:3869672684191711158, presignature:"{\"id\":3869672684191711158,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:4327689991975093939, presignature:"{\"id\":4327689991975093939,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:5751834371102806199, presignature:"{\"id\":5751834371102806199,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:7078077870043747112, presignature:"{\"id\":7078077870043747112,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:8565255253298638177, presignature:"{\"id\":8565255253298638177,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    SerializedPresignature {id:928724233213890770, presignature:"{\"id\":928724233213890770,\"output_big_r\":\"030D71EEF1DD9992CA5D615C46C87B3EEE508EC6F28F2087970E195B2F7B222D63\",\"output_k\":\"D9E740082A5FF4AE7EF720BAA15F9EABD35FB4555F483DD4DCAAFFAFFAAA56FA\",\"output_sigma\":\"F7572E67C047F51C19C18A7BCC96BE7EF6A497ADA3183DEE063B956A1ADC4803\",\"participants\":[0,1,2]}"},
-    ]
-];

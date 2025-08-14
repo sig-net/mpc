@@ -635,3 +635,10 @@ impl FromRedisValue for Triple {
         })
     }
 }
+
+// TODO: hide behind test feature
+impl TripleStorage {
+    pub fn triple_key(&self) -> &str {
+        &self.triple_key
+    }
+}
