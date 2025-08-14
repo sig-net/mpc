@@ -1,7 +1,9 @@
 use crate::protocol::SignRequestType;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_respond_tx::hash_rlp_data;
+use alloy_sol_types::SolValue;
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use futures_util::StreamExt;
 use k256::Scalar;
@@ -269,21 +271,20 @@ pub struct SignRespondRequestedEvent {
 
 impl SignatureEventTrait for SignRespondRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        // Encode the event data in ABI format
-        let encoded = encode(&[
-            Token::String(self.sender.to_string()),
-            Token::Bytes(self.transaction_data.to_vec()),
-            Token::Uint(self.slip44_chain_id.into()),
-            Token::Uint(self.key_version.into()),
-            Token::String(self.path.to_string()),
-            Token::String(self.algo.clone()),
-            Token::String(self.dest.clone()),
-            Token::String(self.params.clone()),
-        ]);
-        // Calculate keccak256 hash
-        let mut hasher = Keccak256::new();
-        hasher.update(&encoded);
-        hasher.finalize().into()
+        // Match TypeScript implementation using ABI encoding
+        let encoded = (
+            self.sender.to_string(),
+            self.transaction_data.clone(),
+            self.slip44_chain_id,
+            self.key_version,
+            self.path.clone(),
+            self.algo.clone(),
+            self.dest.clone(),
+            self.params.clone(),
+        )
+            .abi_encode_packed();
+
+        keccak::hash(&encoded).to_bytes()
     }
 
     fn generate_sign_request(
@@ -304,8 +305,6 @@ impl SignatureEventTrait for SignRespondRequestedEvent {
 
         let request_id = self.generate_request_id();
         let rlp_encoded_tx = self.transaction_data.clone();
-        tracing::info!("RLP-encoded transaction: {rlp_encoded_tx:?}");
-        tracing::info!("SLIP-44 Chain ID: {:?}", self.slip44_chain_id);
 
         // Call the existing derive_epsilon_sol function with the correct parameters
         // to match the TypeScript implementation
@@ -387,14 +386,14 @@ where
 
         // Validate instruction discriminator matches emit_cpi! instruction discriminator
         if !ix_data.starts_with(anchor_lang::event::EVENT_IX_TAG_LE) {
-            tracing::debug!("Instruction discriminator mismatch - not our instruction type");
+            tracing::warn!("Instruction discriminator mismatch - not our instruction type");
             return Ok(Vec::new());
         }
 
         // Validate event discriminator matches our target event type
         let event_discriminator = &ix_data[8..16];
         if event_discriminator != T::DISCRIMINATOR {
-            tracing::debug!("Event discriminator mismatch - not our event type");
+            tracing::warn!("Event discriminator mismatch - not our event type");
             return Ok(Vec::new());
         }
 
@@ -432,7 +431,10 @@ where
                 // Check if inner instruction is from our target program
                 if ui_partially_decoded_instruction.program_id == target_program_str {
                     match process_instruction_data(&ui_partially_decoded_instruction.data) {
-                        Ok(mut instruction_events) => events.append(&mut instruction_events),
+                        Ok(mut instruction_events) => {
+                            tracing::info!("instruction events: {:?}", instruction_events);
+                            events.append(&mut instruction_events);
+                        }
                         Err(e) => tracing::warn!(
                             "Error processing inner instruction {}.{}: {}",
                             set_idx,
@@ -486,6 +488,7 @@ pub async fn run(
                 &rpc_http_url_clone.clone(),
                 &rpc_ws_url_clone.clone(),
                 move |event, signature, _slot| {
+                    tracing::info!("got event: {:?}", event);
                     let tx_sig: Vec<u8> = signature.as_ref().to_vec();
 
                     let sign_tx_inner = sign_tx_clone.clone();
@@ -516,43 +519,43 @@ pub async fn run(
         }
     });
 
-    loop {
-        let sign_tx_clone = sign_tx.clone();
-        let node_near_account_id_clone = node_near_account_id.clone();
+    // loop {
+    //     let sign_tx_clone = sign_tx.clone();
+    //     let node_near_account_id_clone = node_near_account_id.clone();
 
-        let result = subscribe_to_program_logs::<SignatureRequestedEvent, _>(
-            program_id,
-            &sol.rpc_http_url,
-            &sol.rpc_ws_url,
-            move |event, signature, _slot| {
-                let tx_sig: Vec<u8> = signature.as_ref().to_vec();
+    //     let result = subscribe_to_program_logs::<SignatureRequestedEvent, _>(
+    //         program_id,
+    //         &sol.rpc_http_url,
+    //         &sol.rpc_ws_url,
+    //         move |event, signature, _slot| {
+    //             let tx_sig: Vec<u8> = signature.as_ref().to_vec();
 
-                let sign_tx_inner = sign_tx_clone.clone();
-                let node_near_account_id_inner = node_near_account_id_clone.clone();
+    //             let sign_tx_inner = sign_tx_clone.clone();
+    //             let node_near_account_id_inner = node_near_account_id_clone.clone();
 
-                tokio::spawn(async move {
-                    if let Err(err) = process_anchor_sign_event(
-                        event,
-                        tx_sig,
-                        sign_tx_inner,
-                        node_near_account_id_inner,
-                        total_timeout,
-                    )
-                    .await
-                    {
-                        tracing::warn!("Failed to process event: {:?}", err);
-                    }
-                });
-            },
-        )
-        .await;
+    //             tokio::spawn(async move {
+    //                 if let Err(err) = process_anchor_sign_event(
+    //                     event,
+    //                     tx_sig,
+    //                     sign_tx_inner,
+    //                     node_near_account_id_inner,
+    //                     total_timeout,
+    //                 )
+    //                 .await
+    //                 {
+    //                     tracing::warn!("Failed to process event: {:?}", err);
+    //                 }
+    //             });
+    //         },
+    //     )
+    //     .await;
 
-        if let Err(err) = result {
-            tracing::warn!("Failed to subscribe to solana events: {:?}", err);
-        }
+    //     if let Err(err) = result {
+    //         tracing::warn!("Failed to subscribe to solana events: {:?}", err);
+    //     }
 
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    //     tokio::time::sleep(Duration::from_secs(1)).await;
+    // }
 }
 
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L311

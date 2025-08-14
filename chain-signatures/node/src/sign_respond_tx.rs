@@ -1,15 +1,14 @@
 use crate::protocol::SignRequestType;
 use crate::rpc::PublishAction;
 use crate::storage::sign_respond_tx_storage::SignRespondTxStorage;
-use alloy::primitives::{Address, Bytes, B256};
+use alloy::primitives::{keccak256, Address, Bytes, B256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
-use alloy_rlp::Decodable;
 use anchor_lang::prelude::Pubkey;
-use ethers_core::types::U256;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
 use mpc_primitives::Signature;
+use rlp::{Rlp, RlpStream};
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -59,32 +58,22 @@ impl SignRespondTx {
             anyhow::bail!("sign request is not a sign respond");
         };
 
-        let rlp_data = sign_respond_event.transaction_data.clone();
-        let is_eip1559 = rlp_data[0] == 0x02;
-        let tx_type = if is_eip1559 { 0x02 } else { 0x00 };
-        let decoded = decode_rlp(rlp_data, is_eip1559)?;
-        let nonce_index = if is_eip1559 { 1 } else { 0 };
-        let nonce = u64::from_be_bytes(
-            decoded[nonce_index][..8]
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("Invalid nonce bytes"))?,
-        );
+        let unsigned_rlp_data = &sign_respond_event.transaction_data;
 
-        let signed_transaction_hash = calculate_signed_transaction_hash(
-            decoded,
-            signature,
-            is_eip1559,
-            sign_respond_event.slip44_chain_id as u64,
-            tx_type,
-        );
+        let (signed_transaction_hash, nonce) =
+            sign_and_hash_transaction(unsigned_rlp_data, signature)?;
+
+        tracing::info!(signed_transaction_hash = ?signed_transaction_hash, "signed_transaction_hash");
 
         let from_address = derive_user_address(
             publish_action.public_key,
             publish_action.request.indexed.args.epsilon,
         );
 
+        tracing::info!(from_address = ?from_address, "from_address");
+
         Ok(Self {
-            id: SignRespondTxId(signed_transaction_hash),
+            id: SignRespondTxId(signed_transaction_hash.into()),
             sender: sign_respond_event.sender,
             transaction_data: sign_respond_event.transaction_data,
             slip44_chain_id: sign_respond_event.slip44_chain_id,
@@ -210,63 +199,109 @@ pub fn decode_rlp(rlp_data: Vec<u8>, is_eip1559: bool) -> anyhow::Result<Vec<Byt
         &rlp_data
     };
 
-    let mut stream = payload;
-    let decoded: Vec<Bytes> = Vec::<Bytes>::decode(&mut stream)
-        .map_err(|e| anyhow::anyhow!("Failed to decode RLP list: {e:?}"))?;
+    let rlp = rlp::Rlp::new(payload);
 
-    Ok(decoded)
+    if !rlp.is_list() {
+        anyhow::bail!("Input is not a valid RLP list");
+    }
+
+    let mut result = Vec::new();
+
+    for i in 0..rlp.item_count()? {
+        let item = rlp.at(i)?;
+        result.push(Bytes::copy_from_slice(item.data()?));
+    }
+
+    Ok(result)
 }
 
-pub fn to_eip155_v(recovery_id: u8, chain_id: u64) -> u64 {
-    (recovery_id as u64) + 35 + chain_id * 2
-}
-
-fn to_be_bytes_fixed(value: U256, width: usize) -> Bytes {
-    let mut buf = vec![0u8; width];
-    value.to_big_endian(&mut buf[width.saturating_sub(value.bits() / 8)..]);
-    Bytes::from(buf)
-}
-
-fn calculate_signed_transaction_hash(
-    mut decoded: Vec<Bytes>,
+fn sign_and_hash_transaction(
+    unsigned_rlp: &[u8],
     signature: Signature,
-    is_eip1559: bool,
-    chain_id: u64,
-    tx_type: u8,
-) -> B256 {
-    let ethers_r = ethers_core::types::U256::from_big_endian(&signature.big_r.x());
-    let ethers_s = ethers_core::types::U256::from_big_endian(signature.s.to_bytes().as_slice());
-    let ethers_v: U256 = to_eip155_v(signature.recovery_id, chain_id).into();
+) -> anyhow::Result<([u8; 32], u64)> {
+    let r = signature.big_r.x().as_slice().to_vec();
+    let s = signature.s.to_bytes().as_slice().to_vec();
+    let y_parity = signature.recovery_id == 1;
 
-    // Convert U256 → Bytes
-    let to_bytes = |val: U256| {
-        let mut buf = [0u8; 32];
-        val.to_big_endian(&mut buf);
-        Bytes::copy_from_slice(&buf)
+    if is_eip1559(unsigned_rlp) {
+        sign_and_hash_eip1559_from_unsigned(unsigned_rlp, &r, &s, y_parity)
+    } else {
+        sign_and_hash_legacy_from_unsigned(unsigned_rlp, Some(60), &r, &s, y_parity)
+    }
+}
+
+fn is_eip1559(unsigned_rlp: &[u8]) -> bool {
+    unsigned_rlp[0] == 0x02
+}
+
+pub fn sign_and_hash_eip1559_from_unsigned(
+    unsigned: &[u8], // may be 0x02||RLP(body) or just RLP(body)
+    r: &[u8],
+    s: &[u8],
+    y_parity: bool,
+) -> anyhow::Result<([u8; 32], u64)> {
+    // Strip optional type prefix
+    let (_, body) = match unsigned.first().copied() {
+        Some(0x02) => (true, &unsigned[1..]),
+        _ => (false, unsigned),
     };
 
-    let (r_bytes, s_bytes) = (to_bytes(ethers_r), to_bytes(ethers_s));
-    // Append v, r, s
-    decoded.push(to_be_bytes_fixed(ethers_v, 1));
-    decoded.push(s_bytes);
-    decoded.push(r_bytes);
+    // Decode the 9-field unsigned body
+    let rlp = Rlp::new(body);
+    anyhow::ensure!(rlp.is_list(), "unsigned 1559 payload must be an RLP list");
+    anyhow::ensure!(
+        rlp.item_count()? == 9,
+        "unexpected 1559 unsigned field count"
+    );
 
-    // Step 3: RLP encode all fields
-    let rlp_encoded = alloy_rlp::encode(&decoded);
+    let nonce: u64 = rlp.val_at::<u64>(1)?;
 
-    // Step 4: Handle EIP-1559 typed transaction
-    let signed_tx: Bytes = match is_eip1559 {
-        true => {
-            let mut tx = vec![tx_type];
-            tx.extend_from_slice(&rlp_encoded);
-            tx.into()
-        }
-        false => rlp_encoded.into(),
-    };
+    // Re-encode with signature fields appended
+    let mut srlp = RlpStream::new_list(12);
+    for i in 0..9 {
+        srlp.append_raw(rlp.at(i)?.as_raw(), 1);
+    }
+    let y: u8 = if y_parity { 1 } else { 0 };
+    srlp.append(&y);
+    srlp.append(&r);
+    srlp.append(&s);
 
-    // Step 5: Hash the signed transaction
-    let hash_bytes: [u8; 32] = Keccak256::digest(&signed_tx).into();
-    B256::from(hash_bytes)
+    let srlp_body = srlp.as_raw(); // &[u8]
+    let mut signed_bytes = Vec::with_capacity(1 + srlp_body.len());
+    signed_bytes.push(0x02);
+    signed_bytes.extend_from_slice(srlp_body);
+
+    let hash = keccak256(&signed_bytes);
+    Ok((hash.into(), nonce))
+}
+
+pub fn sign_and_hash_legacy_from_unsigned(
+    unsigned_rlp: &[u8], // the exact preimage you hashed (… , chainId, 0, 0)
+    chain_id: Option<u64>,
+    r: &[u8],
+    s: &[u8],
+    y_parity: bool,
+) -> anyhow::Result<([u8; 32], u64)> {
+    let rlp = Rlp::new(unsigned_rlp);
+    anyhow::ensure!(rlp.is_list(), "unsigned legacy must be an RLP list");
+    anyhow::ensure!(
+        rlp.item_count()? >= 9,
+        "unexpected legacy unsigned field count"
+    );
+
+    let nonce: u64 = rlp.val_at::<u64>(0)?;
+    let mut out = RlpStream::new_list(9);
+    for i in 0..6 {
+        out.append_raw(rlp.at(i)?.as_raw(), 1);
+    }
+    let v: u64 = 35 + 2 * chain_id.unwrap_or(0) + if y_parity { 1 } else { 0 };
+    out.append(&v);
+    out.append(&r);
+    out.append(&s);
+
+    let signed_bytes = out.out().to_vec();
+    let hash = alloy_primitives::keccak256(&signed_bytes);
+    Ok((hash.into(), nonce))
 }
 
 /// Get the x coordinate of a point, as a scalar
@@ -306,8 +341,8 @@ pub async fn process_sign_responded_requests(
     while let Some((publish_action, signature)) = sign_respond_responded_rx.recv().await {
         let sign_respond_tx = match SignRespondTx::new(publish_action.clone(), signature.clone()) {
             Ok(tx) => tx,
-            Err(_) => {
-                tracing::error!(sign_id = ?publish_action.request.indexed.id, "failed to create sign respond tx");
+            Err(err) => {
+                tracing::error!(sign_id = ?publish_action.request.indexed.id, "failed to create sign respond tx: {err:?}");
                 continue;
             }
         };

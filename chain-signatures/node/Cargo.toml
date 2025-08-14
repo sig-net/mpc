@@ -46,6 +46,9 @@ helios = { git = "https://github.com/sig-net/helios", rev = "a0e50e11066f999c393
 alloy-dyn-abi = "1.2.0"
 ethers-core = "2.0.13"
 secp256k1 = "0.28.2"
+rlp = "0.5"
+alloy-consensus = "1.0.23"
+alloy-primitives = "1.2.1"
 
 
 # workspace dependencies
