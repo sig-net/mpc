@@ -2,7 +2,6 @@ use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_respond_tx::SignRespondTx;
 use crate::sign_respond_tx::SignRespondTxId;
 use crate::sign_respond_tx::TransactionOutput;
-use crate::storage::sign_respond_tx_storage::SignRespondTxStorage;
 use alloy::consensus::Transaction;
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::{Address, Bytes};
@@ -23,6 +22,8 @@ pub struct CompletedTx {
     status: bool,
 }
 
+pub type ReadRespondSerializedOutput = Vec<u8>;
+
 impl CompletedTx {
     pub fn new(tx: SignRespondTx, block_number: u64, status: bool) -> Self {
         Self {
@@ -35,51 +36,29 @@ impl CompletedTx {
     pub async fn create_sign_request_from_completed_tx(
         &self,
         helios_client: &Arc<EthereumClient>,
-        sign_respond_tx_storage: SignRespondTxStorage,
         max_attempts: u8,
         signature_generation_total_timeout: Duration,
     ) -> Option<IndexedSignRequest> {
-        if self
-            .mark_tx_complete_storage(sign_respond_tx_storage, max_attempts)
+        match self
+            .process_completed_tx(
+                helios_client,
+                max_attempts,
+                signature_generation_total_timeout,
+            )
             .await
         {
-            match self
-                .process_completed_tx(
-                    helios_client,
-                    max_attempts,
-                    signature_generation_total_timeout,
-                )
-                .await
-            {
-                Ok(sign_request) => Some(sign_request),
-                Err(err) => {
-                    tracing::error!("Failed to process completed tx: {err:?}");
-                    None
-                }
+            Ok(sign_request) => {
+                tracing::info!("Successfully created sign request from completed tx");
+                Some(sign_request)
             }
-        } else {
-            None
-        }
-    }
-
-    async fn mark_tx_complete_storage(
-        &self,
-        sign_respond_tx_storage: SignRespondTxStorage,
-        max_attempts: u8,
-    ) -> bool {
-        let mut attempts = 0;
-        while !match self.status {
-            true => sign_respond_tx_storage.mark_tx_success(self.tx.id).await,
-            false => sign_respond_tx_storage.mark_tx_failed(self.tx.id).await,
-        } {
-            if attempts >= max_attempts {
-                tracing::warn!("Failed to mark tx as completed after {max_attempts} attempts");
-                return false;
+            Err(err) => {
+                tracing::error!(
+                    "Failed to process completed tx: {err:?}, tx id: {:?}",
+                    self.tx.id
+                );
+                None
             }
-            attempts += 1;
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        true
     }
 
     async fn process_completed_tx(
@@ -123,7 +102,7 @@ impl CompletedTx {
             Bytes::from(output).into()
         };
         let sign_request =
-            self.create_read_respond_sign_request(&serialized_output, total_timeout)?;
+            self.create_read_respond_sign_request(serialized_output, total_timeout)?;
         Ok(sign_request)
     }
 
@@ -142,20 +121,16 @@ impl CompletedTx {
         let serialized_output = tx_output
             .output
             .serialize(callback_serialization_format, callback_serialization_schema)?;
-        let sign_request = self.create_read_respond_sign_request(
-            &serialized_output,
-            signature_generation_total_timeout,
-        )?;
-        Ok(sign_request)
+        self.create_read_respond_sign_request(serialized_output, signature_generation_total_timeout)
     }
 
     fn create_read_respond_sign_request(
         &self,
-        serialized_output: &[u8],
+        serialized_output: ReadRespondSerializedOutput,
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
         let request_id_bytes = self.tx.request_id;
-        let message = calculate_read_respond_hash_message(&request_id_bytes, serialized_output);
+        let message = calculate_read_respond_hash_message(&request_id_bytes, &serialized_output);
         let Some(payload) = Scalar::from_bytes(message) else {
             return Err(anyhow::anyhow!(
                 "Failed to convert read respond message to scalar: {message:?}"
@@ -176,7 +151,7 @@ impl CompletedTx {
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             timestamp_sign_queue: None,
             total_timeout: signature_generation_total_timeout,
-            sign_request_type: crate::protocol::SignRequestType::ReadRespond(self.tx.id),
+            sign_request_type: crate::protocol::SignRequestType::ReadRespond(serialized_output),
         })
     }
 

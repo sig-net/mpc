@@ -2,7 +2,6 @@ use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::sign_respond_tx::SignRespondTx;
 use crate::sign_respond_tx::SignRespondTxId;
 use crate::storage::app_data_storage::AppDataStorage;
-use crate::storage::sign_respond_tx_storage::SignRespondTxStorage;
 use alloy::consensus::BlockHeader;
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::hex::{self, ToHexExt};
@@ -22,6 +21,7 @@ use std::sync::Arc;
 use std::{fmt, path::PathBuf, str::FromStr, sync::LazyLock, time::Instant};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
@@ -416,7 +416,7 @@ pub async fn run(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
-    sign_respond_tx_storage: SignRespondTxStorage,
+    sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
 ) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
@@ -529,7 +529,7 @@ pub async fn run(
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let blocks_failed_send_clone = blocks_failed_send.clone();
     let client_clone = Arc::clone(&client);
-    let sign_respond_tx_storage_clone = sign_respond_tx_storage.clone();
+    let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
     tokio::spawn(async move {
         tracing::info!("Spawned task to retry failed blocks");
         retry_failed_blocks(
@@ -540,7 +540,7 @@ pub async fn run(
             near_account_id_clone,
             requests_indexed_send_clone,
             total_timeout,
-            sign_respond_tx_storage_clone,
+            sign_respond_tx_map_clone,
         )
         .await;
     });
@@ -592,7 +592,7 @@ pub async fn run(
                 (block_number, block_hash, false)
             }
         };
-        let sign_respond_tx_storage_clone = sign_respond_tx_storage.clone();
+        let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
         if let Err(err) = process_block(
             block_number,
             block_hash,
@@ -601,7 +601,7 @@ pub async fn run(
             node_near_account_id.clone(),
             requests_indexed_send_clone.clone(),
             total_timeout,
-            sign_respond_tx_storage_clone,
+            sign_respond_tx_map_clone,
         )
         .await
         {
@@ -631,7 +631,7 @@ async fn retry_failed_blocks(
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
-    sign_respond_tx_storage: SignRespondTxStorage,
+    sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
 ) {
     loop {
         let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
@@ -646,7 +646,7 @@ async fn retry_failed_blocks(
             node_near_account_id.clone(),
             requests_indexed.clone(),
             total_timeout,
-            sign_respond_tx_storage.clone(),
+            sign_respond_tx_map.clone(),
         )
         .await
         {
@@ -848,7 +848,7 @@ async fn process_block(
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
-    sign_respond_tx_storage: SignRespondTxStorage,
+    sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -874,12 +874,14 @@ async fn process_block(
     };
 
     let block_receipts_clone = block_receipts.clone();
-    let pending_txs: HashMap<SignRespondTxId, SignRespondTx> = sign_respond_tx_storage
-        .fetch_pending()
-        .await
-        .into_iter()
-        .map(|tx| (tx.id, tx.clone()))
-        .collect();
+    let pending_txs: HashMap<SignRespondTxId, SignRespondTx> = {
+        sign_respond_tx_map
+            .read()
+            .await
+            .iter()
+            .map(|(id, tx)| (*id, tx.clone()))
+            .collect()
+    };
     let mut sign_respond_requests: Vec<IndexedSignRequest> = Vec::new();
     for receipt in block_receipts_clone {
         let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
@@ -891,19 +893,13 @@ async fn process_block(
             receipt.transaction_hash,
             if status { "success" } else { "failed" }
         );
-        let sign_respond_tx_storage = sign_respond_tx_storage.clone();
         let pending_tx = pending_tx.clone();
         let client_clone = client.clone();
 
         let completed_tx = crate::read_respond::CompletedTx::new(pending_tx, block_number, status);
 
         let sign_respond_request: Option<IndexedSignRequest> = completed_tx
-            .create_sign_request_from_completed_tx(
-                &client_clone,
-                sign_respond_tx_storage,
-                6,
-                total_timeout,
-            )
+            .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
             .await;
         if let Some(sign_respond_request) = sign_respond_request {
             sign_respond_requests.push(sign_respond_request);
@@ -923,12 +919,14 @@ async fn process_block(
         })
         .collect();
 
-    if filtered_logs.is_empty() {
-        return Ok(());
+    let mut all_sign_requests = Vec::new();
+    if !filtered_logs.is_empty() {
+        all_sign_requests.extend(parse_filtered_logs(filtered_logs, total_timeout));
+    }
+    if !sign_respond_requests.is_empty() {
+        all_sign_requests.extend(sign_respond_requests);
     }
 
-    let indexed_requests = parse_filtered_logs(filtered_logs, total_timeout);
-    let all_sign_requests = [sign_respond_requests, indexed_requests.clone()].concat();
     if all_sign_requests.is_empty() {
         return Ok(());
     }
@@ -951,7 +949,7 @@ async fn process_block(
         .ok()
         .and_then(|block| block.map(|b| b.header.timestamp()));
 
-    for request in &indexed_requests {
+    for request in &all_sign_requests {
         if let Some(block_timestamp) = block_timestamp {
             crate::metrics::INDEXER_DELAY
                 .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
@@ -997,14 +995,15 @@ async fn send_requests_when_final(
             return;
         };
 
+        // skip checking finality for now in order to test the claim deposit
         // Wait for finalized block if needed
-        while finalized_block_number.is_none_or(|n| block_number > n) {
-            let Some(new_finalized_block) = finalized_block_rx.recv().await else {
-                tracing::error!("Failed to receive finalized blocks");
-                return;
-            };
-            finalized_block_number.replace(new_finalized_block);
-        }
+        // while finalized_block_number.is_none_or(|n| block_number > n) {
+        //     let Some(new_finalized_block) = finalized_block_rx.recv().await else {
+        //         tracing::error!("Failed to receive finalized blocks");
+        //         return;
+        //     };
+        //     finalized_block_number.replace(new_finalized_block);
+        // }
 
         // Verify block hash and send requests
         let block = fetch_block(

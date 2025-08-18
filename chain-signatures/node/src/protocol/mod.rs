@@ -24,8 +24,9 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
+use crate::read_respond::ReadRespondSerializedOutput;
 use crate::rpc::{ContractStateWatcher, NearClient, RpcChannel};
-use crate::sign_respond_tx::SignRespondTxId;
+use crate::sign_respond_tx::SignRespondSignatureChannel;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -53,6 +54,7 @@ pub struct MpcSignProtocol {
     pub(crate) rpc_channel: RpcChannel,
     pub(crate) config: watch::Receiver<Config>,
     pub(crate) mesh_state: watch::Receiver<MeshState>,
+    pub(crate) sign_respond_signature_channel: SignRespondSignatureChannel,
 }
 
 impl MpcSignProtocol {
@@ -216,7 +218,7 @@ pub enum Chain {
 pub enum SignRequestType {
     Sign,
     SignRespond(SignRespondRequestedEvent),
-    ReadRespond(SignRespondTxId),
+    ReadRespond(ReadRespondSerializedOutput),
 }
 
 impl Chain {

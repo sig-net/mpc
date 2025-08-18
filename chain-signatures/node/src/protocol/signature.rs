@@ -8,6 +8,7 @@ use crate::protocol::posit::{PositAction, PositInternalAction, Positor, Posits};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::RpcChannel;
+use crate::sign_respond_tx::SignRespondSignatureChannel;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
@@ -369,6 +370,7 @@ struct SignatureGenerator {
     inbox: mpsc::Receiver<SignatureMessage>,
     msg: MessageChannel,
     rpc: RpcChannel,
+    sign_respond_signature_channel: SignRespondSignatureChannel,
 }
 
 impl SignatureGenerator {
@@ -382,6 +384,7 @@ impl SignatureGenerator {
         cfg: ProtocolConfig,
         msg: MessageChannel,
         rpc: RpcChannel,
+        sign_respond_signature_channel: SignRespondSignatureChannel,
     ) -> Result<Self, InitializationError> {
         let sign_id = request.id();
         let request = request
@@ -439,6 +442,7 @@ impl SignatureGenerator {
             inbox,
             msg,
             rpc,
+            sign_respond_signature_channel,
         })
     }
 
@@ -594,6 +598,12 @@ impl SignatureGenerator {
                     if self.request.proposer == me {
                         self.rpc
                             .publish(self.public_key, self.request.clone(), output);
+                    } else {
+                        self.sign_respond_signature_channel.send(
+                            self.public_key,
+                            self.request.clone(),
+                            output,
+                        );
                     }
 
                     break Ok(());
@@ -632,6 +642,7 @@ pub struct SignatureSpawner {
     epoch: u64,
     msg: MessageChannel,
     rpc: RpcChannel,
+    sign_respond_signature_channel: SignRespondSignatureChannel,
 }
 
 impl SignatureSpawner {
@@ -646,6 +657,7 @@ impl SignatureSpawner {
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
         rpc: RpcChannel,
+        sign_respond_signature_channel: SignRespondSignatureChannel,
     ) -> Self {
         Self {
             presignatures: presignatures.clone(),
@@ -659,6 +671,7 @@ impl SignatureSpawner {
             epoch,
             msg,
             rpc,
+            sign_respond_signature_channel,
         }
     }
 
@@ -791,8 +804,14 @@ impl SignatureSpawner {
                         self.presignatures.clone(),
                     ),
                 };
-                self.generate(request, presignature, participants, cfg)
-                    .await;
+                self.generate(
+                    request,
+                    presignature,
+                    participants,
+                    cfg,
+                    self.sign_respond_signature_channel.clone(),
+                )
+                .await;
             }
         }
     }
@@ -804,6 +823,7 @@ impl SignatureSpawner {
         presignature: PendingPresignature,
         participants: Vec<Participant>,
         cfg: ProtocolConfig,
+        sign_respond_signature_channel: SignRespondSignatureChannel,
     ) {
         let me = self.me;
         let epoch = self.epoch;
@@ -823,6 +843,7 @@ impl SignatureSpawner {
                 cfg,
                 msg,
                 rpc,
+                sign_respond_signature_channel,
             )
             .await
             {
@@ -999,6 +1020,7 @@ impl SignatureSpawnerTask {
             &ctx.presignature_storage,
             ctx.msg_channel.clone(),
             ctx.rpc_channel.clone(),
+            ctx.sign_respond_signature_channel.clone(),
         );
 
         Self {

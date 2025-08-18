@@ -1,20 +1,27 @@
-use crate::protocol::SignRequestType;
-use crate::rpc::PublishAction;
-use crate::storage::sign_respond_tx_storage::SignRespondTxStorage;
-use alloy::primitives::{keccak256, Address, Bytes, B256};
+use crate::protocol::signature::SignRequest;
+use crate::protocol::{IndexedSignRequest, SignRequestType};
+use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use anchor_lang::prelude::Pubkey;
+use borsh::BorshSerialize;
+use cait_sith::FullSignature;
 use k256::elliptic_curve::point::AffineCoordinates;
-use k256::{AffinePoint, Scalar};
+use k256::{AffinePoint, Scalar, Secp256k1};
 use mpc_crypto::derive_key;
 use mpc_primitives::Signature;
 use rlp::{Rlp, RlpStream};
+use serde_json::Value;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
+use std::io::Write;
+use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Copy)]
 pub struct SignRespondTxId(pub B256);
+
+pub type RequestId = [u8; 32];
 
 impl From<B256> for SignRespondTxId {
     fn from(b256: B256) -> Self {
@@ -51,9 +58,9 @@ pub struct SignRespondTx {
 }
 
 impl SignRespondTx {
-    pub fn new(publish_action: PublishAction, signature: Signature) -> anyhow::Result<Self> {
+    pub fn new(sign_respond_signature: SignRespondSignature) -> anyhow::Result<Self> {
         let SignRequestType::SignRespond(sign_respond_event) =
-            publish_action.request.indexed.sign_request_type.clone()
+            sign_respond_signature.request.sign_request_type.clone()
         else {
             anyhow::bail!("sign request is not a sign respond");
         };
@@ -61,13 +68,13 @@ impl SignRespondTx {
         let unsigned_rlp_data = &sign_respond_event.transaction_data;
 
         let (signed_transaction_hash, nonce) =
-            sign_and_hash_transaction(unsigned_rlp_data, signature)?;
+            sign_and_hash_transaction(unsigned_rlp_data, sign_respond_signature.signature)?;
 
         tracing::info!(signed_transaction_hash = ?signed_transaction_hash, "signed_transaction_hash");
 
         let from_address = derive_user_address(
-            publish_action.public_key,
-            publish_action.request.indexed.args.epsilon,
+            sign_respond_signature.public_key,
+            sign_respond_signature.request.args.epsilon,
         );
 
         tracing::info!(from_address = ?from_address, "from_address");
@@ -87,7 +94,7 @@ impl SignRespondTx {
             explorer_deserialization_schema: sign_respond_event.explorer_deserialization_schema,
             callback_serialization_format: sign_respond_event.callback_serialization_format,
             callback_serialization_schema: sign_respond_event.callback_serialization_schema,
-            request_id: publish_action.request.indexed.id.request_id,
+            request_id: sign_respond_signature.request.id.request_id,
             from_address,
             nonce,
         })
@@ -108,9 +115,7 @@ impl Output {
         if format == 1 {
             self.serialize_abi(schema)
         } else {
-            Err(anyhow::anyhow!(
-                "Unsupported serialization format: {format}"
-            ))
+            self.serialize_borsh(schema)
         }
     }
 
@@ -135,6 +140,35 @@ impl Output {
             .collect::<Result<Vec<_>, _>>()?;
 
         encode_abi_values(&schema, &values)
+    }
+
+    /// Serialize `Output` to Borsh using the **order from `schema_json_bytes`**
+    /// Schema is a JSON array like: `[{"name":"...", "type":"..."}, ...]`
+    pub fn serialize_borsh(&self, schema_json_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let fields: Vec<AbiField> = parse_borsh_schema_fields(schema_json_bytes)?;
+
+        tracing::info!("serialize borsh schema: {fields:?}");
+
+        let mut buf = Vec::with_capacity(128);
+
+        // Top-level framing (example): number of fields (u32)
+        (fields.len() as u32).serialize(&mut buf)?;
+
+        for f in fields {
+            // 1) Field name as Borsh string
+            f.name.serialize(&mut buf)?;
+
+            // 2) Value (required)
+            let val = self
+                .0
+                .get(&f.name)
+                .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", f.name))?;
+
+            // 3) Serialize the DynSolValue using Borsh-friendly helpers
+            serialize_dynsol(&mut buf, val)?;
+        }
+
+        Ok(buf)
     }
 }
 
@@ -172,6 +206,8 @@ impl TransactionOutput {
         else {
             return Err(anyhow::anyhow!("Can't decode to tuple type"));
         };
+        // let json_abi = parse_abi(schema_json)?;
+        // let decoded_tokens = decode_with_alloy(&json_abi, call_result)?;
 
         // Map to named output
         let mut output_map = HashMap::new();
@@ -333,34 +369,6 @@ fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Scalar
     public_key_to_address(&secp_pk)
 }
 
-pub async fn process_sign_responded_requests(
-    mut sign_respond_responded_rx: mpsc::Receiver<(PublishAction, Signature)>,
-    sign_respond_tx_storage: SignRespondTxStorage,
-    max_attempts: u8,
-) {
-    while let Some((publish_action, signature)) = sign_respond_responded_rx.recv().await {
-        let sign_respond_tx = match SignRespondTx::new(publish_action.clone(), signature.clone()) {
-            Ok(tx) => tx,
-            Err(err) => {
-                tracing::error!(sign_id = ?publish_action.request.indexed.id, "failed to create sign respond tx: {err:?}");
-                continue;
-            }
-        };
-
-        for attempt in 1..=max_attempts {
-            if sign_respond_tx_storage
-                .insert(sign_respond_tx.id, sign_respond_tx.clone())
-                .await
-            {
-                tracing::info!(sign_id = ?sign_respond_tx.id, "inserted sign respond tx into storage");
-                break;
-            } else if attempt == max_attempts {
-                tracing::error!(sign_id = ?sign_respond_tx.id, "failed to insert after {max_attempts} attempts");
-            }
-        }
-    }
-}
-
 fn create_abi_data(schema: Vec<AbiField>) -> anyhow::Result<Output> {
     let mut data = HashMap::new();
     for field in schema {
@@ -406,4 +414,193 @@ fn encode_abi_values(schema: &[AbiField], values: &[DynSolValue]) -> anyhow::Res
     }
 
     Ok(combined)
+}
+
+/* ---------- DynSolValue -> Borsh serializer (runtime) ---------- */
+
+fn serialize_dynsol<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<()> {
+    use DynSolValue::*;
+    match v {
+        // -------- Primitives --------
+        Bool(b) => {
+            // Borsh bool is u8 (0/1) via BorshSerialize on bool
+            b.serialize(w)?;
+        }
+        Address(a) => a.serialize(w)?,
+        Uint(u, size) => write_u256(w, *u, *size)?,
+        Int(i, size) => write_i256(w, *i, *size)?,
+
+        // -------- Bytes-like --------
+        // Fixed bytes -> raw bytes (no length)
+        FixedBytes(b, _) => w.write_all(b.as_slice())?,
+        // Dynamic bytes -> Vec<u8> (u32 length + bytes)
+        Bytes(b) => b.serialize(w)?,
+
+        // -------- Strings --------
+        String(s) => s.serialize(w)?,
+
+        // -------- Arrays --------
+        // Dynamic array -> Borsh Vec<T>: u32 length + elements
+        Array(xs) => {
+            (xs.len() as u32).serialize(w)?;
+            for x in xs {
+                serialize_dynsol(w, x)?;
+            }
+        }
+        // Fixed array -> elements inline (no length)
+        FixedArray(xs) => {
+            for x in xs {
+                serialize_dynsol(w, x)?;
+            }
+        }
+
+        // -------- Tuple --------
+        // Concatenate members
+        Tuple(xs) => {
+            for x in xs {
+                serialize_dynsol(w, x)?;
+            }
+        }
+
+        // Add more variants if you use them (e.g., custom types).
+        other => anyhow::bail!("unsupported DynSolValue variant: {other:?}"),
+    }
+    Ok(())
+}
+
+/* ------------------ helpers using borsh where possible ------------------ */
+
+fn write_u256<W: Write>(w: &mut W, x: U256, size: usize) -> anyhow::Result<()> {
+    // Use the size parameter to determine how many bytes to write
+    let le = x.to_le_bytes::<{ U256::BYTES }>();
+    w.write_all(&le[..size.min(U256::BYTES)])
+        .map_err(Into::into)
+}
+
+fn write_i256<W: Write>(w: &mut W, x: I256, size: usize) -> anyhow::Result<()> {
+    // Use the size parameter to determine how many bytes to write
+    let le = x.to_le_bytes::<{ I256::BYTES }>();
+    w.write_all(&le[..size.min(I256::BYTES)])
+        .map_err(Into::into)
+}
+
+fn parse_borsh_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>> {
+    let v: Value = serde_json::from_slice(schema_json_bytes)
+        .map_err(|e| anyhow::anyhow!("schema JSON parse failed: {e:?}"))?;
+
+    Ok(match v {
+        Value::Array(arr) => arr
+            .into_iter()
+            .map(|item| {
+                serde_json::from_value(item)
+                    .map_err(|e| anyhow::anyhow!("invalid field in array: {e:?}"))
+            })
+            .collect::<Result<Vec<_>, anyhow::Error>>()?,
+        Value::Object(obj) => {
+            vec![serde_json::from_value(Value::Object(obj))
+                .map_err(|e| anyhow::anyhow!("invalid single object schema: {e:?}"))?]
+        }
+        Value::String(s) => vec![AbiField {
+            name: String::new(),
+            typ: s,
+        }],
+        other => anyhow::bail!("unsupported schema JSON shape: {other}"),
+    })
+}
+
+#[derive(Clone)]
+pub struct SignRespondSignature {
+    pub public_key: mpc_crypto::PublicKey,
+    pub request: IndexedSignRequest,
+    pub signature: Signature,
+}
+
+#[derive(Clone)]
+pub struct SignRespondSignatureChannel {
+    tx: mpsc::Sender<SignRespondSignature>,
+}
+
+impl SignRespondSignatureChannel {
+    pub fn send(
+        &self,
+        public_key: mpc_crypto::PublicKey,
+        request: SignRequest,
+        output: FullSignature<Secp256k1>,
+    ) {
+        let request = request.indexed;
+        let tx = self.tx.clone();
+        let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
+        let Ok(signature) = crate::kdf::into_eth_sig(
+            &expected_public_key,
+            &output.big_r,
+            &output.s,
+            request.args.payload,
+        ) else {
+            tracing::error!(
+                sign_id = ?request.id,
+                "failed to generate a recovery id; trashing publish request",
+            );
+            return;
+        };
+        tokio::spawn(async move {
+            if let Err(err) = tx
+                .send(SignRespondSignature {
+                    public_key,
+                    request,
+                    signature,
+                })
+                .await
+            {
+                tracing::error!(%err, "failed to send sign respond signature");
+            }
+        });
+    }
+}
+
+pub struct SignRespondSignatureProcessor {
+    sign_respond_signature_rx: mpsc::Receiver<SignRespondSignature>,
+}
+
+const MAX_CONCURRENT_SIGN_RESPOND_SIGNATURE_REQUESTS: usize = 1024;
+
+impl SignRespondSignatureProcessor {
+    pub fn new() -> (SignRespondSignatureChannel, Self) {
+        let (tx, rx) = mpsc::channel(MAX_CONCURRENT_SIGN_RESPOND_SIGNATURE_REQUESTS);
+        (
+            SignRespondSignatureChannel { tx },
+            Self {
+                sign_respond_signature_rx: rx,
+            },
+        )
+    }
+
+    pub async fn run(
+        mut self,
+        sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+        max_attempts: u8,
+    ) {
+        while let Some(sign_respond_signature) = self.sign_respond_signature_rx.recv().await {
+            let sign_respond_tx = match SignRespondTx::new(sign_respond_signature.clone()) {
+                Ok(tx) => tx,
+                Err(err) => {
+                    tracing::error!(sign_id = ?sign_respond_signature.request.id, "failed to create sign respond tx: {err:?}");
+                    continue;
+                }
+            };
+
+            for attempt in 1..=max_attempts {
+                if sign_respond_tx_map
+                    .write()
+                    .await
+                    .insert(sign_respond_tx.id, sign_respond_tx.clone())
+                    .is_some()
+                {
+                    tracing::info!(sign_id = ?sign_respond_tx.id, "inserted sign respond tx into map");
+                    break;
+                } else if attempt == max_attempts {
+                    tracing::error!(sign_id = ?sign_respond_tx.id, "failed to insert sign respond tx into map after {max_attempts} attempts");
+                }
+            }
+        }
+    }
 }

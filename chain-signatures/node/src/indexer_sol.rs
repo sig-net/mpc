@@ -2,6 +2,7 @@ use crate::protocol::SignRequestType;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_respond_tx::hash_rlp_data;
 use alloy_sol_types::SolValue;
+use anchor_client::anchor_lang::{AnchorDeserialize, AnchorSerialize};
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
@@ -519,43 +520,43 @@ pub async fn run(
         }
     });
 
-    // loop {
-    //     let sign_tx_clone = sign_tx.clone();
-    //     let node_near_account_id_clone = node_near_account_id.clone();
+    loop {
+        let sign_tx_clone = sign_tx.clone();
+        let node_near_account_id_clone = node_near_account_id.clone();
 
-    //     let result = subscribe_to_program_logs::<SignatureRequestedEvent, _>(
-    //         program_id,
-    //         &sol.rpc_http_url,
-    //         &sol.rpc_ws_url,
-    //         move |event, signature, _slot| {
-    //             let tx_sig: Vec<u8> = signature.as_ref().to_vec();
+        let result = subscribe_to_program_logs::<SignatureRequestedEvent, _>(
+            program_id,
+            &sol.rpc_http_url,
+            &sol.rpc_ws_url,
+            move |event, signature, _slot| {
+                let tx_sig: Vec<u8> = signature.as_ref().to_vec();
 
-    //             let sign_tx_inner = sign_tx_clone.clone();
-    //             let node_near_account_id_inner = node_near_account_id_clone.clone();
+                let sign_tx_inner = sign_tx_clone.clone();
+                let node_near_account_id_inner = node_near_account_id_clone.clone();
 
-    //             tokio::spawn(async move {
-    //                 if let Err(err) = process_anchor_sign_event(
-    //                     event,
-    //                     tx_sig,
-    //                     sign_tx_inner,
-    //                     node_near_account_id_inner,
-    //                     total_timeout,
-    //                 )
-    //                 .await
-    //                 {
-    //                     tracing::warn!("Failed to process event: {:?}", err);
-    //                 }
-    //             });
-    //         },
-    //     )
-    //     .await;
+                tokio::spawn(async move {
+                    if let Err(err) = process_anchor_sign_event(
+                        event,
+                        tx_sig,
+                        sign_tx_inner,
+                        node_near_account_id_inner,
+                        total_timeout,
+                    )
+                    .await
+                    {
+                        tracing::warn!("Failed to process event: {:?}", err);
+                    }
+                });
+            },
+        )
+        .await;
 
-    //     if let Err(err) = result {
-    //         tracing::warn!("Failed to subscribe to solana events: {:?}", err);
-    //     }
+        if let Err(err) = result {
+            tracing::warn!("Failed to subscribe to solana events: {:?}", err);
+        }
 
-    //     tokio::time::sleep(Duration::from_secs(1)).await;
-    // }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L311

@@ -1,7 +1,6 @@
 pub mod app_data_storage;
 pub mod presignature_storage;
 pub mod secret_storage;
-pub mod sign_respond_tx_storage;
 pub mod triple_storage;
 
 use cait_sith::protocol::Participant;
