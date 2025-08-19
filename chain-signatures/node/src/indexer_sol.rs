@@ -248,6 +248,7 @@ impl SignatureEventTrait for SignatureRequestedEvent {
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::Sign,
+            participants: None,
         })
     }
 }
@@ -343,6 +344,7 @@ impl SignatureEventTrait for SignRespondRequestedEvent {
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::SignRespond(self.clone()),
+            participants: None,
         })
     }
 }

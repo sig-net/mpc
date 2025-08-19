@@ -235,6 +235,7 @@ async fn handle_block(
                     timestamp_sign_queue: Some(Instant::now()),
                     total_timeout: Duration::from_secs(200),
                     sign_request_type: crate::protocol::SignRequestType::Sign,
+                    participants: None,
                 });
             }
         }

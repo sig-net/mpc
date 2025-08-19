@@ -321,6 +321,7 @@ fn sign_request_from_filtered_log(
         timestamp_sign_queue: None,
         total_timeout,
         sign_request_type: SignRequestType::Sign,
+        participants: None,
     })
 }
 // Helper function to parse event logs
@@ -882,7 +883,7 @@ async fn process_block(
             .map(|(id, tx)| (*id, tx.clone()))
             .collect()
     };
-    let mut sign_respond_requests: Vec<IndexedSignRequest> = Vec::new();
+    let mut read_respond_requests: Vec<IndexedSignRequest> = Vec::new();
     for receipt in block_receipts_clone {
         let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
             continue;
@@ -898,11 +899,11 @@ async fn process_block(
 
         let completed_tx = crate::read_respond::CompletedTx::new(pending_tx, block_number, status);
 
-        let sign_respond_request: Option<IndexedSignRequest> = completed_tx
+        let read_respond_request: Option<IndexedSignRequest> = completed_tx
             .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
             .await;
-        if let Some(sign_respond_request) = sign_respond_request {
-            sign_respond_requests.push(sign_respond_request);
+        if let Some(read_respond_request) = read_respond_request {
+            read_respond_requests.push(read_respond_request);
         }
     }
 
@@ -923,8 +924,8 @@ async fn process_block(
     if !filtered_logs.is_empty() {
         all_sign_requests.extend(parse_filtered_logs(filtered_logs, total_timeout));
     }
-    if !sign_respond_requests.is_empty() {
-        all_sign_requests.extend(sign_respond_requests);
+    if !read_respond_requests.is_empty() {
+        all_sign_requests.extend(read_respond_requests);
     }
 
     if all_sign_requests.is_empty() {
@@ -1079,7 +1080,8 @@ fn send_indexed_requests(
                 unix_timestamp_indexed: request.unix_timestamp_indexed,
                 timestamp_sign_queue: Some(Instant::now()),
                 total_timeout: request.total_timeout,
-                sign_request_type: SignRequestType::Sign,
+                sign_request_type: request.sign_request_type,
+                participants: request.participants,
             };
             match sign_tx.send(request).await {
                 Ok(_) => {

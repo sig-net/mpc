@@ -1,9 +1,10 @@
 use crate::protocol::signature::SignRequest;
-use crate::protocol::{IndexedSignRequest, SignRequestType};
+use crate::protocol::SignRequestType;
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use anchor_lang::prelude::Pubkey;
 use borsh::BorshSerialize;
+use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::{AffinePoint, Scalar, Secp256k1};
@@ -55,12 +56,16 @@ pub struct SignRespondTx {
     pub request_id: [u8; 32],
     pub from_address: Address,
     pub nonce: u64,
+    pub participants: Vec<Participant>,
 }
 
 impl SignRespondTx {
     pub fn new(sign_respond_signature: SignRespondSignature) -> anyhow::Result<Self> {
-        let SignRequestType::SignRespond(sign_respond_event) =
-            sign_respond_signature.request.sign_request_type.clone()
+        let SignRequestType::SignRespond(sign_respond_event) = sign_respond_signature
+            .request
+            .indexed
+            .sign_request_type
+            .clone()
         else {
             anyhow::bail!("sign request is not a sign respond");
         };
@@ -74,7 +79,7 @@ impl SignRespondTx {
 
         let from_address = derive_user_address(
             sign_respond_signature.public_key,
-            sign_respond_signature.request.args.epsilon,
+            sign_respond_signature.request.indexed.args.epsilon,
         );
 
         tracing::info!(from_address = ?from_address, "from_address");
@@ -94,9 +99,10 @@ impl SignRespondTx {
             explorer_deserialization_schema: sign_respond_event.explorer_deserialization_schema,
             callback_serialization_format: sign_respond_event.callback_serialization_format,
             callback_serialization_schema: sign_respond_event.callback_serialization_schema,
-            request_id: sign_respond_signature.request.id.request_id,
+            request_id: sign_respond_signature.request.indexed.id.request_id,
             from_address,
             nonce,
+            participants: sign_respond_signature.request.participants,
         })
     }
 }
@@ -511,7 +517,7 @@ fn parse_borsh_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<Abi
 #[derive(Clone)]
 pub struct SignRespondSignature {
     pub public_key: mpc_crypto::PublicKey,
-    pub request: IndexedSignRequest,
+    pub request: SignRequest,
     pub signature: Signature,
 }
 
@@ -527,17 +533,16 @@ impl SignRespondSignatureChannel {
         request: SignRequest,
         output: FullSignature<Secp256k1>,
     ) {
-        let request = request.indexed;
         let tx = self.tx.clone();
-        let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
+        let expected_public_key = mpc_crypto::derive_key(public_key, request.indexed.args.epsilon);
         let Ok(signature) = crate::kdf::into_eth_sig(
             &expected_public_key,
             &output.big_r,
             &output.s,
-            request.args.payload,
+            request.indexed.args.payload,
         ) else {
             tracing::error!(
-                sign_id = ?request.id,
+                sign_id = ?request.indexed.id,
                 "failed to generate a recovery id; trashing publish request",
             );
             return;
@@ -583,7 +588,7 @@ impl SignRespondSignatureProcessor {
             let sign_respond_tx = match SignRespondTx::new(sign_respond_signature.clone()) {
                 Ok(tx) => tx,
                 Err(err) => {
-                    tracing::error!(sign_id = ?sign_respond_signature.request.id, "failed to create sign respond tx: {err:?}");
+                    tracing::error!(sign_id = ?sign_respond_signature.request.indexed.id, "failed to create sign respond tx: {err:?}");
                     continue;
                 }
             };

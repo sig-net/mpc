@@ -8,7 +8,6 @@ use alloy::primitives::{Address, Bytes};
 use alloy::rpc::types::TransactionRequest;
 use helios::ethereum::EthereumClient;
 use k256::Scalar;
-use mpc_crypto::kdf::derive_epsilon_eth;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::SignArgs;
 use mpc_primitives::SignId;
@@ -48,7 +47,10 @@ impl CompletedTx {
             .await
         {
             Ok(sign_request) => {
-                tracing::info!("Successfully created sign request from completed tx");
+                tracing::info!(
+                    ?sign_request,
+                    "Successfully created sign request from completed tx"
+                );
                 Some(sign_request)
             }
             Err(err) => {
@@ -136,7 +138,8 @@ impl CompletedTx {
                 "Failed to convert read respond message to scalar: {message:?}"
             ));
         };
-        let epsilon = derive_epsilon_eth(format!("0x{}", self.tx.from_address), &self.tx.path);
+        let epsilon =
+            mpc_crypto::kdf::derive_epsilon_sol(&self.tx.sender.to_string(), &self.tx.path);
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest {
             id: SignId::new(request_id_bytes),
@@ -152,6 +155,7 @@ impl CompletedTx {
             timestamp_sign_queue: None,
             total_timeout: signature_generation_total_timeout,
             sign_request_type: crate::protocol::SignRequestType::ReadRespond(serialized_output),
+            participants: Some(self.tx.participants.clone()),
         })
     }
 

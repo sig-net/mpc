@@ -47,6 +47,7 @@ pub struct IndexedSignRequest {
     pub timestamp_sign_queue: Option<Instant>,
     pub total_timeout: Duration,
     pub sign_request_type: SignRequestType,
+    pub participants: Option<Vec<Participant>>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -170,7 +171,11 @@ impl SignQueue {
         // NOTE: reorganize, will use the same entropy for reorganizing the participants. The only
         // thing that would be different is the passed in stable participants.
         let mut rng = StdRng::from_seed(indexed.args.entropy);
-        let subset = stable.iter().copied().choose_multiple(&mut rng, threshold);
+        let subset = if indexed.participants.is_some() {
+            indexed.participants.clone().unwrap()
+        } else {
+            stable.iter().copied().choose_multiple(&mut rng, threshold)
+        };
         let in_subset = subset.contains(&self.me);
         let proposer = *subset.choose(&mut rng).unwrap();
         let is_mine = proposer == self.me;
@@ -599,11 +604,15 @@ impl SignatureGenerator {
                         self.rpc
                             .publish(self.public_key, self.request.clone(), output);
                     } else {
-                        self.sign_respond_signature_channel.send(
-                            self.public_key,
-                            self.request.clone(),
-                            output,
-                        );
+                        if let SignRequestType::SignRespond(_) =
+                            self.request.indexed.sign_request_type
+                        {
+                            self.sign_respond_signature_channel.send(
+                                self.public_key,
+                                self.request.clone(),
+                                output,
+                            );
+                        }
                     }
 
                     break Ok(());
