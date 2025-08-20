@@ -1,3 +1,4 @@
+mod cbor;
 mod error;
 #[cfg(test)]
 pub mod mock;
@@ -8,6 +9,7 @@ use crate::protocol::state::{NodeStateWatcher, NodeStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::MessageChannel;
 use crate::storage::{PresignatureStorage, TripleStorage};
+use crate::web::cbor::Cbor;
 use crate::web::error::Result;
 
 use anyhow::Context;
@@ -87,7 +89,7 @@ pub async fn run(
 #[tracing::instrument(level = "debug", skip_all)]
 async fn msg(
     Extension(state): Extension<Arc<AxumState>>,
-    WithRejection(Json(encrypted), _): WithRejection<Json<Vec<Ciphered>>, Error>,
+    WithRejection(Cbor(encrypted), _): WithRejection<Cbor<Vec<Ciphered>>, Error>,
 ) {
     for encrypted in encrypted.into_iter() {
         let msg_channel = state.msg_channel.clone();

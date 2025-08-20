@@ -967,7 +967,7 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
     partitions
 }
 
-fn cbor_to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, MessageError> {
+pub fn cbor_to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, MessageError> {
     let mut buf = Vec::new();
     ciborium::into_writer(value, &mut buf)
         .map_err(|err| MessageError::CborConversion(err.to_string()))?;
