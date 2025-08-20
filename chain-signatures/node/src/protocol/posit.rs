@@ -255,9 +255,6 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                     return PositInternalAction::Abort;
                 }
 
-                // TODO: have a timeout on waiting for votes. The moment we have enough threshold accepts,
-                // we can start the protocol after a timeout, such that we don't wait for slow responders.
-                // This will be our way to cleanup the posits that are nowhere to be found.
                 if !counter.meets_totality() {
                     return PositInternalAction::None;
                 }
