@@ -452,7 +452,12 @@ impl SignatureGenerator {
     async fn recv(&mut self) -> Result<SignatureMessage, SignError> {
         let sign_id = self.request.indexed.id;
         let presignature_id = self.dropper.id;
-        match tokio::time::timeout(self.timeout - self.created.elapsed(), self.inbox.recv()).await {
+        match tokio::time::timeout(
+            self.timeout.saturating_sub(self.created.elapsed()),
+            self.inbox.recv(),
+        )
+        .await
+        {
             Ok(Some(msg)) => Ok(msg),
             Ok(None) => {
                 tracing::warn!(?sign_id, presignature_id, "signature generation aborted");

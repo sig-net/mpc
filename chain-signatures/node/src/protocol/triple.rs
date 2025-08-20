@@ -85,7 +85,12 @@ impl TripleGenerator {
     /// Receive the next message for the triple protocol; error out on the timeout being reached
     /// or the channel having been closed (aborted).
     async fn recv(&mut self) -> Option<TripleMessage> {
-        match tokio::time::timeout(self.timeout - self.created.elapsed(), self.inbox.recv()).await {
+        match tokio::time::timeout(
+            self.timeout.saturating_sub(self.created.elapsed()),
+            self.inbox.recv(),
+        )
+        .await
+        {
             Ok(Some(msg)) => Some(msg),
             Ok(None) => {
                 tracing::warn!(id = self.id, "triple generation aborted");
