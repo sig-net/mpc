@@ -9,6 +9,7 @@ use mpc_node::kdf::into_eth_sig;
 use mpc_node::util::NearPublicKeyExt as _;
 use test_log::test;
 
+pub mod mpc;
 pub mod nightly;
 pub mod store;
 pub mod sync;
