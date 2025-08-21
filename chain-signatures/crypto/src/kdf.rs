@@ -12,7 +12,69 @@ use sha3::{Digest, Keccak256, Sha3_256};
 // Sig.Network with key derivation protocol vX.Y.Z.
 const EPSILON_DERIVATION_PREFIX: &str = "sig.network v1.0.0 epsilon derivation";
 
-const CHAIN_ID_NEAR: &str = "0x18d";
+enum Chain {
+    Near,
+    Ethereum,
+    Solana,
+    _Bitcoin,
+}
+
+/// Sig.Network Environment
+enum Env {
+    Mainnet,
+    Testnet,
+    Devnet,
+}
+
+impl From<&str> for Env {
+    fn from(env: &str) -> Self {
+        match env {
+            "mainnet" => Env::Mainnet,
+            "testnet" => Env::Testnet,
+            _ => Env::Devnet,
+        }
+    }
+}
+
+impl Chain {
+    fn _caip2_chain_id(&self, env: &Env) -> String {
+        match (self, env) {
+            (Chain::Near, Env::Mainnet) => "near:mainnet".to_string(),
+            (Chain::Near, Env::Testnet) => "near:testnet".to_string(),
+            (Chain::Near, Env::Devnet) => "near:testnet".to_string(),
+            (Chain::Ethereum, Env::Mainnet) => "eip155:1".to_string(),
+            (Chain::Ethereum, Env::Testnet) => "eip155:11155111".to_string(), // Sepolia
+            (Chain::Ethereum, Env::Devnet) => "eip155:11155111".to_string(),  // Sepolia
+            (Chain::Solana, Env::Mainnet) => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp".to_string(),
+            (Chain::Solana, Env::Testnet) => "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1".to_string(), // Solana Devnet
+            (Chain::Solana, Env::Devnet) => "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1".to_string(), // Solana Devnet
+            (Chain::_Bitcoin, Env::Mainnet) => "bip122:000000000019d6689c085ae165831e93".to_string(),
+            (Chain::_Bitcoin, Env::Testnet) => "bip122:000000000933ea01ad0ee984209779ba".to_string(),
+            (Chain::_Bitcoin, Env::Devnet) => "bip122:000000000933ea01ad0ee984209779ba".to_string(),
+        }
+    }
+
+    fn deprecated_chain_id(&self) -> &'static str {
+        match self {
+            Chain::Near => "0x18d",
+            Chain::Ethereum => "0x1",
+            Chain::Solana => "0x800001f5",
+            Chain::_Bitcoin => "not_supported", // _Bitcoin doesn't have a legacy chain ID in this format
+        }
+    }
+}
+
+fn _caip_derivation_path(chain: Chain, env: Env, sender: String, path: String) -> String {
+    let caip2_chain_id = chain._caip2_chain_id(&env);
+    format!("{EPSILON_DERIVATION_PREFIX}:{caip2_chain_id}:{sender}:{path}")
+}
+
+fn deprecated_derivation_path(chain: Chain, sender: String, path: String) -> String {
+    let chain_id = chain.deprecated_chain_id();
+    // Use comma separator as per ACCOUNT_DATA_SEPARATOR from nearcore
+    format!("{EPSILON_DERIVATION_PREFIX},{chain_id},{sender},{path}")
+}
+
 pub fn derive_epsilon_near(predecessor_id: &AccountId, path: &str) -> Scalar {
     // TODO: Use a key derivation library instead of doing this manually.
     // https://crates.io/crates/hkdf might be a good option?
@@ -23,27 +85,24 @@ pub fn derive_epsilon_near(predecessor_id: &AccountId, path: &str) -> Scalar {
     // Do not reuse this hash function on anything that isn't an account
     // ID or it'll be vunerable to Hash Melleability/extention attacks.
     let derivation_path =
-        format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_NEAR},{predecessor_id},{path}");
+        deprecated_derivation_path(Chain::Near, predecessor_id.to_string(), path.to_string());
     let mut hasher = Sha3_256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
     Scalar::from_non_biased(hash)
 }
 
-const CHAIN_ID_ETHEREUM: &str = "0x1";
 pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
-    let derivation_path =
-        format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{requester},{path}");
+    let derivation_path = deprecated_derivation_path(Chain::Ethereum, requester, path.to_string());
     let mut hasher = Keccak256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
     Scalar::from_non_biased(hash)
 }
 
-const CHAIN_ID_SOLANA: &str = "0x800001f5";
 pub fn derive_epsilon_sol(requester: &str, path: &str) -> Scalar {
     let derivation_path =
-        format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_SOLANA},{requester},{path}");
+        deprecated_derivation_path(Chain::Solana, requester.to_string(), path.to_string());
     let mut hasher = Keccak256::new();
     hasher.update(derivation_path.as_bytes());
     let hash: [u8; 32] = hasher.finalize().into();
@@ -131,8 +190,7 @@ mod tests {
         // Define epsilon
         let requester = "%admin#".to_string();
         let path = "signing_contract_control".to_string();
-        let derivation_path =
-            format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{requester},{path}");
+        let derivation_path = deprecated_derivation_path(Chain::Ethereum, requester, path);
 
         let mut hasher = Keccak256::new();
         hasher.update(derivation_path);
