@@ -95,7 +95,6 @@ impl PendingRequest {
 pub struct SignRequest {
     pub indexed: IndexedSignRequest,
     pub proposer: Participant,
-    pub participants: Vec<Participant>,
     pub stable: BTreeSet<Participant>,
     pub round: usize,
 }
@@ -160,7 +159,6 @@ impl SignQueue {
 
     fn organize_request(
         &self,
-        threshold: usize,
         stable: &BTreeSet<Participant>,
         participants: &Participants,
         indexed: IndexedSignRequest,
@@ -204,27 +202,12 @@ impl SignQueue {
                 )
             });
 
-        // NOTE: reorganize, will use the same entropy for reorganizing the participants. The only
-        // thing that would be different is the passed in stable participants.
-        let mut rng = StdRng::from_seed(indexed.args.entropy);
-        let mut subset = stable.iter().copied().choose_multiple(&mut rng, threshold);
-        if !subset.contains(&proposer) {
-            // replace the last randomly chosen participant with the proposer
-            subset.pop();
-            subset.push(proposer);
-        }
-        subset.sort();
-
-        let in_subset = subset.contains(&self.me);
         let is_mine = proposer == self.me;
-
         tracing::info!(
             ?stable,
             ?sign_id,
-            ?subset,
             ?proposer,
             me = ?self.me,
-            in_subset,
             is_mine,
             "sign queue: {}organizing request",
             if reorganize { "re" } else { "" },
@@ -233,12 +216,11 @@ impl SignQueue {
         let request = SignRequest {
             indexed,
             proposer,
-            participants: subset,
             stable: stable.clone(),
             round,
         };
 
-        if in_subset {
+        if is_mine {
             tracing::info!(
                 ?sign_id,
                 "saving sign request: node is in the {}signer subset",
@@ -257,13 +239,12 @@ impl SignQueue {
 
     pub async fn organize(
         &mut self,
-        threshold: usize,
         stable: &BTreeSet<Participant>,
         participants: &Participants,
         my_account_id: &AccountId,
     ) {
         // Reorganize the failed requests with a potentially newer list of stable participants.
-        self.organize_failed(threshold, stable, participants, my_account_id);
+        self.organize_failed(stable, participants, my_account_id);
 
         // try and organize the new incoming requests.
         let mut sign_rx = self.sign_rx.write().await;
@@ -285,7 +266,7 @@ impl SignQueue {
                 .with_label_values(&[indexed.chain.as_str(), my_account_id.as_str()])
                 .inc();
 
-            let request = self.organize_request(threshold, stable, participants, indexed, 0);
+            let request = self.organize_request(stable, participants, indexed, 0);
             let is_mine = request.proposer == self.me;
             if is_mine {
                 self.my_requests.push_back(sign_id);
@@ -308,7 +289,6 @@ impl SignQueue {
 
     fn organize_failed(
         &mut self,
-        threshold: usize,
         stable: &BTreeSet<Participant>,
         participants: &Participants,
         my_account_id: &AccountId,
@@ -322,13 +302,8 @@ impl SignQueue {
                 // just use the same request if the participants are the same
                 (false, request)
             } else {
-                let request = self.organize_request(
-                    threshold,
-                    stable,
-                    participants,
-                    request.indexed,
-                    request.round,
-                );
+                let request =
+                    self.organize_request(stable, participants, request.indexed, request.round);
                 (true, request)
             };
 
@@ -411,6 +386,7 @@ enum SignError {
 struct SignatureGenerator {
     protocol: SignatureProtocol,
     dropper: PresignatureTakenDropper,
+    participants: Vec<Participant>,
     request: SignRequest,
     public_key: PublicKey,
     created: Instant,
@@ -481,6 +457,7 @@ impl SignatureGenerator {
         Ok(Self {
             protocol,
             dropper,
+            participants,
             request,
             public_key,
             created: Instant::now(),
@@ -586,14 +563,14 @@ impl SignatureGenerator {
                     self.protocol.message(msg.from, msg.data);
                 }
                 Action::SendMany(data) => {
-                    for to in self.request.participants.iter() {
-                        if *to == me {
+                    for &to in self.participants.iter() {
+                        if to == me {
                             continue;
                         }
                         self.msg
                             .send(
                                 me,
-                                *to,
+                                to,
                                 SignatureMessage {
                                     id: sign_id,
                                     proposer: self.request.proposer,
@@ -915,7 +892,7 @@ impl SignatureSpawner {
 
         self.sign_queue.expire(cfg);
         self.sign_queue
-            .organize(self.threshold, stable, participants, &self.my_account_id)
+            .organize(stable, participants, &self.my_account_id)
             .await;
         crate::metrics::SIGN_QUEUE_SIZE
             .with_label_values(&[self.my_account_id.as_str()])
@@ -941,11 +918,7 @@ impl SignatureSpawner {
             };
 
             let stable = stable.iter().copied().collect::<Vec<_>>();
-            let participants = intersect_vec(&[
-                &stable,
-                &taken.presignature.participants,
-                &my_request.participants,
-            ]);
+            let participants = intersect_vec(&[&stable, &taken.presignature.participants]);
             if participants.len() < self.threshold {
                 tracing::warn!(
                     sign_id = ?my_request.indexed.id,
