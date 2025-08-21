@@ -9,6 +9,7 @@ RUN npx hardhat compile
 
 FROM rust:latest AS node-builder
 RUN rustc --version --verbose
+RUN rustup update && rustup default stable
 WORKDIR /usr/src/app
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive \

@@ -7,6 +7,7 @@ use clap::Parser;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::NodeConfig;
 use mpc_node::indexer_eth::EthConfig;
+use mpc_node::indexer_sol::SolConfig;
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -41,6 +42,23 @@ enum Cli {
         eth_refresh_finalized_interval: u64,
         #[arg(long, default_value = "1200")]
         eth_total_timeout: u64,
+        #[arg(
+            long,
+            default_value = "fS5jS6X5qvaquBV1bg2YWBdYeCiRSUwNAdNpgNkjS72oNxUJcZJZduaq2oCcXJb8erTbtqqq4wxriUmRJk7bMDw"
+        )]
+        sol_account_sk: String,
+        /// Solana RPC HTTP URL
+        #[arg(long, default_value = "https://api.devnet.solana.com")]
+        sol_rpc_http_url: String,
+        /// Solana RPC WS URL
+        #[arg(long, default_value = "wss://api.devnet.solana.com")]
+        sol_rpc_ws_url: String,
+        /// The program address to watch
+        #[arg(long, default_value = "4uvZW8K4g4jBg7dzPNbb9XDxJLFBK7V6iC76uofmYvEU")]
+        sol_program_address: String,
+        /// total timeout for a sign request starting from indexed time in seconds
+        #[arg(long, default_value = "200")]
+        sol_total_timeout: u64,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
@@ -64,6 +82,11 @@ async fn main() -> anyhow::Result<()> {
             eth_helios_data_path,
             eth_refresh_finalized_interval,
             eth_total_timeout,
+            sol_account_sk,
+            sol_rpc_http_url,
+            sol_rpc_ws_url,
+            sol_program_address,
+            sol_total_timeout,
         } => {
             println!("Setting up an environment with {nodes} nodes, {threshold} threshold ...");
             let config = NodeConfig {
@@ -78,6 +101,13 @@ async fn main() -> anyhow::Result<()> {
                     helios_data_path: eth_helios_data_path,
                     refresh_finalized_interval: eth_refresh_finalized_interval,
                     total_timeout: eth_total_timeout,
+                }),
+                sol: Some(SolConfig {
+                    account_sk: sol_account_sk,
+                    rpc_http_url: sol_rpc_http_url,
+                    rpc_ws_url: sol_rpc_ws_url,
+                    program_address: sol_program_address,
+                    total_timeout: sol_total_timeout,
                 }),
                 ..Default::default()
             };
