@@ -998,13 +998,13 @@ async fn send_requests_when_final(
 
         // skip checking finality for now in order to test the claim deposit
         // Wait for finalized block if needed
-        // while finalized_block_number.is_none_or(|n| block_number > n) {
-        //     let Some(new_finalized_block) = finalized_block_rx.recv().await else {
-        //         tracing::error!("Failed to receive finalized blocks");
-        //         return;
-        //     };
-        //     finalized_block_number.replace(new_finalized_block);
-        // }
+        while finalized_block_number.is_none_or(|n| block_number > n) {
+            let Some(new_finalized_block) = finalized_block_rx.recv().await else {
+                tracing::error!("Failed to receive finalized blocks");
+                return;
+            };
+            finalized_block_number.replace(new_finalized_block);
+        }
 
         // Verify block hash and send requests
         let block = fetch_block(
