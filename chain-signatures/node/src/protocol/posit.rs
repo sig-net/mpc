@@ -5,9 +5,11 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
+use std::time::{Duration, Instant};
 
 pub type ProposerId = Participant;
 
+#[derive(Debug)]
 pub enum Positor<T> {
     Proposer(ProposerId, T),
     Deliberator(ProposerId),
@@ -42,6 +44,7 @@ impl PositAction {
     }
 }
 
+#[derive(Debug)]
 pub enum PositInternalAction<S> {
     StartProtocol(Vec<Participant>, Positor<S>),
     Reply(PositAction),
@@ -59,6 +62,20 @@ pub struct PositCounter<S> {
     store: S,
 }
 
+impl<T> PositCounter<T> {
+    pub fn enough_accepts(&self, threshold: usize) -> bool {
+        self.accepts.len() >= threshold
+    }
+
+    pub fn enough_rejects(&self, threshold: usize) -> bool {
+        self.rejects.len() > self.participants.len() - threshold
+    }
+
+    pub fn meets_totality(&self) -> bool {
+        self.accepts.len() + self.rejects.len() == self.participants.len()
+    }
+}
+
 /// A collection of posits that are being proposed. This is used to track
 /// the posits that are being proposed and the participants that have
 /// accepted them.
@@ -66,10 +83,10 @@ pub struct Posits<Id, S> {
     me: Participant,
 
     /// The posits that either our node proposed or that we are a part of.
-    posits: HashMap<Id, Positor<PositCounter<S>>>,
+    posits: HashMap<Id, (Positor<PositCounter<S>>, Instant)>,
 }
 
-impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
+impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
     pub fn new(me: Participant) -> Self {
         Self {
             me,
@@ -77,7 +94,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
         }
     }
 
-    pub fn propose(&mut self, id: T, store: S, participants: &[Participant]) -> PositAction {
+    pub fn propose(&mut self, id: Id, store: S, participants: &[Participant]) -> PositAction {
         let entry = match self.posits.entry(id) {
             Entry::Vacant(entry) => entry,
             Entry::Occupied(_) => {
@@ -88,7 +105,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
 
         let mut accepts = HashSet::new();
         accepts.insert(self.me);
-        entry.insert(Positor::Proposer(
+        let positor = Positor::Proposer(
             self.me,
             PositCounter {
                 participants: participants.iter().copied().collect(),
@@ -96,7 +113,9 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                 rejects: HashSet::new(),
                 store,
             },
-        ));
+        );
+        let timestamp = Instant::now();
+        entry.insert((positor, timestamp));
 
         PositAction::Propose
     }
@@ -106,7 +125,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
     /// actions the node should take.
     pub fn act(
         &mut self,
-        id: T,
+        id: Id,
         from: Participant,
         threshold: usize,
         action: &PositAction,
@@ -118,30 +137,31 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
 
         match action {
             PositAction::Propose => {
+                // We have no information about this posit, so we can just accept it.
+                let Some((positor, _)) = self.posits.get(&id) else {
+                    self.posits
+                        .insert(id, (Positor::Deliberator(from), Instant::now()));
+                    return PositInternalAction::Reply(PositAction::Accept);
+                };
+
                 // Checks:
                 // 1. We are not the proposer.
                 // 2. Somebody else hasn't also proposed the protocol.
-
-                if let Some(positor) = self.posits.get(&id) {
-                    let proposer = positor.id();
-                    if positor.is_proposer() {
-                        tracing::warn!(?id, ?from, "received INIT on protocol we already proposed");
-                        return PositInternalAction::Reply(PositAction::Reject);
-                    } else if proposer != from {
-                        tracing::warn!(
-                            ?id,
-                            ?from,
-                            ?proposer,
-                            "received INIT on conflicting proposer"
-                        );
-                        return PositInternalAction::Reply(PositAction::Reject);
-                    }
+                let proposer = positor.id();
+                if positor.is_proposer() {
+                    tracing::warn!(?id, ?from, "received INIT on protocol we already proposed");
+                    PositInternalAction::Reply(PositAction::Reject)
+                } else if proposer != from {
+                    tracing::warn!(
+                        ?id,
+                        ?from,
+                        ?proposer,
+                        "received INIT on conflicting proposer"
+                    );
+                    PositInternalAction::Reply(PositAction::Reject)
                 } else {
-                    self.posits.insert(id, Positor::Deliberator(from));
+                    PositInternalAction::Reply(PositAction::Accept)
                 }
-
-                // No further checks necessary, we can just accept the posit.
-                PositInternalAction::Reply(PositAction::Accept)
             }
             PositAction::Start(participants) => {
                 // Checks:
@@ -158,7 +178,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                     return PositInternalAction::Reply(PositAction::Reject);
                 }
 
-                if let Some(positor) = self.posits.remove(&id) {
+                if let Some((positor, timestamp)) = self.posits.remove(&id) {
                     let proposer = positor.id();
                     if positor.is_proposer() {
                         tracing::warn!(
@@ -166,7 +186,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                             ?from,
                             "received START on protocol we already proposed"
                         );
-                        self.posits.insert(id, positor);
+                        self.posits.insert(id, (positor, timestamp));
                         return PositInternalAction::Reply(PositAction::Reject);
                     } else if proposer != from {
                         tracing::warn!(
@@ -175,7 +195,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                             ?proposer,
                             "received START on conflicting proposer"
                         );
-                        self.posits.insert(id, positor);
+                        self.posits.insert(id, (positor, timestamp));
                         return PositInternalAction::Reply(PositAction::Reject);
                     }
                 } else {
@@ -202,7 +222,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                     }
                 };
 
-                let Positor::Proposer(_, counter) = entry.get_mut() else {
+                let (Positor::Proposer(_, counter), _) = entry.get_mut() else {
                     tracing::warn!(
                         ?id,
                         ?from,
@@ -229,9 +249,7 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                 }
 
                 // TODO: broadcast aborting the protocol if we have enough rejections
-                let enough_rejections =
-                    counter.rejects.len() > counter.participants.len() - threshold;
-                if enough_rejections {
+                if counter.enough_rejects(threshold) {
                     tracing::info!(?id, rejects = ?counter.rejects, "received enough REJECTs, aborting protocol");
                     entry.remove();
                     return PositInternalAction::Abort;
@@ -240,14 +258,12 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
                 // TODO: have a timeout on waiting for votes. The moment we have enough threshold accepts,
                 // we can start the protocol after a timeout, such that we don't wait for slow responders.
                 // This will be our way to cleanup the posits that are nowhere to be found.
-                let enough_votes = counter.accepts.len() >= threshold
-                    && counter.accepts.len() + counter.rejects.len() == counter.participants.len();
-                if !enough_votes {
+                if !counter.meets_totality() {
                     return PositInternalAction::None;
                 }
 
-                tracing::info!(?id, "received enough ACCEPTs, starting protocol");
-                let Positor::Proposer(_, counter) = entry.remove() else {
+                tracing::info!(?id, ?counter.accepts, ?counter.rejects, "received enough ACCEPTs, starting protocol");
+                let (Positor::Proposer(_, counter), _) = entry.remove() else {
                     unreachable!("we already checked that we are the proposer");
                 };
                 let participants = counter.accepts.into_iter().collect();
@@ -263,8 +279,64 @@ impl<T: Copy + Hash + Eq + fmt::Debug, S> Posits<T, S> {
         self.posits.len()
     }
 
+    pub fn len_proposed(&self) -> usize {
+        self.posits
+            .values()
+            .filter(|(positor, _)| positor.is_proposer())
+            .count()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.posits.is_empty()
+    }
+
+    pub fn expire_and_start(
+        &mut self,
+        threshold: usize,
+        timeout: Duration,
+    ) -> Vec<(Id, PositInternalAction<S>)> {
+        let mut expired = Vec::new();
+        for (id, (_, timestamp)) in &self.posits {
+            if timestamp.elapsed() > timeout {
+                expired.push(*id);
+            }
+        }
+
+        let mut expired_proposers = Vec::new();
+        let mut expired_deliberators = Vec::new();
+        let mut expired_and_accepted = Vec::new();
+        let mut actions = Vec::new();
+        for id in &expired {
+            let Some((positor, _)) = self.posits.remove(id) else {
+                continue;
+            };
+            let Positor::Proposer(_, counter) = positor else {
+                expired_deliberators.push(*id);
+                continue;
+            };
+            if counter.enough_accepts(threshold) {
+                expired_and_accepted.push(*id);
+                actions.push((
+                    *id,
+                    PositInternalAction::StartProtocol(
+                        counter.accepts.into_iter().collect(),
+                        Positor::Proposer(self.me, counter.store),
+                    ),
+                ));
+            } else {
+                expired_proposers.push(*id);
+            }
+        }
+
+        if expired_proposers.len() + expired_deliberators.len() + expired_and_accepted.len() > 0 {
+            tracing::info!(
+                ?expired_deliberators,
+                ?expired_proposers,
+                ?expired_and_accepted,
+                "expiring posits"
+            );
+        }
+        actions
     }
 }
 
@@ -379,5 +451,55 @@ mod tests {
         assert!(matches!(action, PositInternalAction::None));
         let action = posits0.act(id, Participant::from(2), threshold, &PositAction::Reject);
         assert!(matches!(action, PositInternalAction::Abort));
+    }
+
+    #[test]
+    fn test_posits_expiration() {
+        let threshold = 2;
+        let participants = vec![
+            Participant::from(0),
+            Participant::from(1),
+            Participant::from(2),
+            Participant::from(3),
+        ];
+        let mut posits0 = Posits::<Id, ()>::new(Participant::from(0));
+
+        // have proposer accept and participants 1 and 2 accept. participant 3 will neither accept or reject.
+        let id101 = 101;
+        posits0.propose(id101, (), &participants);
+        for from in &participants[1..=2] {
+            posits0.act(id101, *from, threshold, &PositAction::Accept);
+        }
+
+        // have proposer accept, and everyone else not reply at all.
+        let id202 = 202;
+        posits0.propose(id202, (), &participants);
+        // expire the posit after 1 second. Only the posit for id101 should return to start the protocol.
+        std::thread::sleep(Duration::from_millis(1100));
+        // add a posit that will not expire yet
+        posits0.propose(303, (), &participants);
+        let actions = posits0.expire_and_start(threshold, Duration::from_secs(1));
+        assert_eq!(posits0.len(), 1);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            actions[0],
+            (
+                101,
+                PositInternalAction::StartProtocol(_, Positor::Proposer(_, _))
+            ),
+        ));
+
+        // the posit for id101 should have expired after not receiving a start action.
+        let mut posits1 = Posits::<Id, ()>::new(Participant::from(1));
+        posits1.act(
+            id101,
+            Participant::from(0),
+            threshold,
+            &PositAction::Propose,
+        );
+        std::thread::sleep(Duration::from_millis(1100));
+        let actions = posits1.expire_and_start(threshold, Duration::from_secs(1));
+        assert_eq!(actions.len(), 0);
+        assert_eq!(posits1.len(), 0);
     }
 }

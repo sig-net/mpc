@@ -1,5 +1,10 @@
+use crate::protocol::SignRequestType;
 use crate::protocol::{Chain, IndexedSignRequest};
+use crate::sign_respond_tx::hash_rlp_data;
+use alloy_sol_types::SolValue;
+use anchor_client::anchor_lang::{AnchorDeserialize, AnchorSerialize};
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use futures_util::StreamExt;
 use k256::Scalar;
@@ -144,6 +149,15 @@ pub struct SolSignRequest {
     pub key_version: u32,
 }
 
+trait SignatureEventTrait {
+    fn generate_request_id(&self) -> [u8; 32];
+    fn generate_sign_request(
+        &self,
+        tx_sig: Vec<u8>,
+        total_timeout: Duration,
+    ) -> anyhow::Result<IndexedSignRequest>;
+}
+
 #[event]
 #[derive(Clone, Debug)]
 pub struct SignatureRequestedEvent {
@@ -159,80 +173,180 @@ pub struct SignatureRequestedEvent {
     pub fee_payer: Option<Pubkey>,
 }
 
-fn sign_request_from_event(
-    event: SignatureRequestedEvent,
-    tx_sig: Vec<u8>,
-    total_timeout: Duration,
-) -> anyhow::Result<IndexedSignRequest> {
-    tracing::info!("found solana event: {:?}", event);
-    if event.deposit == 0 {
-        tracing::warn!("deposit is 0, skipping sign request");
-        return Err(anyhow::anyhow!("deposit is 0"));
+impl SignatureEventTrait for SignatureRequestedEvent {
+    fn generate_request_id(&self) -> [u8; 32] {
+        // Encode the event data in ABI format
+        let encoded = encode(&[
+            Token::String(self.sender.to_string()),
+            Token::Bytes(self.payload.to_vec()),
+            Token::String(self.path.clone()),
+            Token::Uint(self.key_version.into()),
+            Token::Uint(self.chain_id.into()),
+            Token::String(self.algo.clone()),
+            Token::String(self.dest.clone()),
+            Token::String(self.params.clone()),
+        ]);
+        // Calculate keccak256 hash
+        let mut hasher = Keccak256::new();
+        hasher.update(&encoded);
+        hasher.finalize().into()
     }
 
-    if event.key_version != 0 {
-        tracing::warn!("unsupported key version: {}", event.key_version);
-        return Err(anyhow::anyhow!("unsupported key version"));
+    fn generate_sign_request(
+        &self,
+        tx_sig: Vec<u8>,
+        total_timeout: Duration,
+    ) -> anyhow::Result<IndexedSignRequest> {
+        tracing::info!("found solana event: {:?}", self);
+        if self.deposit == 0 {
+            tracing::warn!("deposit is 0, skipping sign request");
+            return Err(anyhow::anyhow!("deposit is 0"));
+        }
+
+        if self.key_version != 0 {
+            tracing::warn!("unsupported key version: {}", self.key_version);
+            return Err(anyhow::anyhow!("unsupported key version"));
+        }
+
+        let Some(payload) = Scalar::from_bytes(self.payload) else {
+            tracing::warn!(
+                "solana `sign` did not produce payload hash correctly: {:?}",
+                self.payload,
+            );
+            return Err(anyhow::anyhow!(
+                "failed to convert event payload hash to scalar"
+            ));
+        };
+
+        if payload > *MAX_SECP256K1_SCALAR {
+            tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
+            anyhow::bail!("payload exceeds secp256k1 curve order");
+        }
+
+        // Call the existing derive_epsilon_sol function with the correct parameters
+        // to match the TypeScript implementation
+        let epsilon = derive_epsilon_sol(&self.sender.to_string(), &self.path);
+
+        // Use transaction signature as entropy
+        let mut entropy = [0u8; 32];
+        entropy.copy_from_slice(&tx_sig[..32]);
+
+        let sign_id = SignId::new(self.generate_request_id());
+        tracing::info!(?sign_id, "solana signature requested");
+
+        Ok(IndexedSignRequest {
+            id: sign_id,
+            args: SignArgs {
+                entropy,
+                epsilon,
+                payload,
+                path: self.path.clone(),
+                key_version: 0,
+            },
+            chain: Chain::Solana,
+            timestamp_sign_queue: Some(Instant::now()),
+            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
+            total_timeout,
+            sign_request_type: SignRequestType::Sign,
+            participants: None,
+        })
     }
-
-    let Some(payload) = Scalar::from_bytes(event.payload) else {
-        tracing::warn!(
-            "solana `sign` did not produce payload hash correctly: {:?}",
-            event.payload,
-        );
-        return Err(anyhow::anyhow!(
-            "failed to convert event payload hash to scalar"
-        ));
-    };
-
-    if payload > *MAX_SECP256K1_SCALAR {
-        tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
-        anyhow::bail!("payload exceeds secp256k1 curve order");
-    }
-
-    // Call the existing derive_epsilon_sol function with the correct parameters
-    // to match the TypeScript implementation
-    let epsilon = derive_epsilon_sol(&event.sender.to_string(), &event.path);
-
-    // Use transaction signature as entropy
-    let mut entropy = [0u8; 32];
-    entropy.copy_from_slice(&tx_sig[..32]);
-
-    let sign_id = SignId::new(calculate_request_id(&event));
-    tracing::info!(?sign_id, "solana signature requested");
-
-    Ok(IndexedSignRequest {
-        id: sign_id,
-        args: SignArgs {
-            entropy,
-            epsilon,
-            payload,
-            path: event.path,
-            key_version: 0,
-        },
-        chain: Chain::Solana,
-        timestamp_sign_queue: Some(Instant::now()),
-        unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-        total_timeout,
-    })
 }
 
-fn calculate_request_id(event: &SignatureRequestedEvent) -> [u8; 32] {
-    // Encode the event data in ABI format
-    let encoded = encode(&[
-        Token::String(event.sender.to_string()),
-        Token::Bytes(event.payload.to_vec()),
-        Token::String(event.path.clone()),
-        Token::Uint(event.key_version.into()),
-        Token::Uint(event.chain_id.into()),
-        Token::String(event.algo.clone()),
-        Token::String(event.dest.clone()),
-        Token::String(event.params.clone()),
-    ]);
-    // Calculate keccak256 hash
-    let mut hasher = Keccak256::new();
-    hasher.update(&encoded);
-    hasher.finalize().into()
+#[event]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SignRespondRequestedEvent {
+    pub sender: Pubkey,
+    pub transaction_data: Vec<u8>,
+    pub slip44_chain_id: u32,
+    pub key_version: u32,
+    pub deposit: u64,
+    pub path: String,
+    pub algo: String,
+    pub dest: String,
+    pub params: String,
+    pub explorer_deserialization_format: u8,
+    pub explorer_deserialization_schema: Vec<u8>,
+    pub callback_serialization_format: u8,
+    pub callback_serialization_schema: Vec<u8>,
+}
+
+impl SignatureEventTrait for SignRespondRequestedEvent {
+    fn generate_request_id(&self) -> [u8; 32] {
+        // Match TypeScript implementation using ABI encoding
+        let encoded = (
+            self.sender.to_string(),
+            self.transaction_data.clone(),
+            self.slip44_chain_id,
+            self.key_version,
+            self.path.clone(),
+            self.algo.clone(),
+            self.dest.clone(),
+            self.params.clone(),
+        )
+            .abi_encode_packed();
+
+        keccak::hash(&encoded).to_bytes()
+    }
+
+    fn generate_sign_request(
+        &self,
+        tx_sig: Vec<u8>,
+        total_timeout: Duration,
+    ) -> anyhow::Result<IndexedSignRequest> {
+        tracing::info!("found solana event: {:?}", self);
+        if self.deposit == 0 {
+            tracing::warn!("deposit is 0, skipping sign request");
+            return Err(anyhow::anyhow!("deposit is 0"));
+        }
+
+        if self.key_version != 0 {
+            tracing::warn!("unsupported key version: {}", self.key_version);
+            return Err(anyhow::anyhow!("unsupported key version"));
+        }
+
+        let request_id = self.generate_request_id();
+        let rlp_encoded_tx = self.transaction_data.clone();
+
+        // Call the existing derive_epsilon_sol function with the correct parameters
+        // to match the TypeScript implementation
+        let epsilon = derive_epsilon_sol(&self.sender.to_string(), &self.path);
+
+        // Use transaction signature as entropy
+        let mut entropy = [0u8; 32];
+        entropy.copy_from_slice(&tx_sig[..32]);
+
+        let sign_id = SignId::new(request_id);
+        tracing::info!(?sign_id, "solana signature requested");
+        let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
+        let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
+            return Err(anyhow::anyhow!(
+                "Failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}"
+            ));
+        };
+
+        if payload > *MAX_SECP256K1_SCALAR {
+            tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
+            anyhow::bail!("payload exceeds secp256k1 curve order");
+        }
+
+        Ok(IndexedSignRequest {
+            id: sign_id,
+            args: SignArgs {
+                entropy,
+                epsilon,
+                payload,
+                path: self.path.clone(),
+                key_version: 0,
+            },
+            chain: Chain::Solana,
+            timestamp_sign_queue: Some(Instant::now()),
+            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
+            total_timeout,
+            sign_request_type: SignRequestType::SignRespond(self.clone()),
+            participants: None,
+        })
+    }
 }
 
 type Result<T> = anyhow::Result<T>;
@@ -275,14 +389,14 @@ where
 
         // Validate instruction discriminator matches emit_cpi! instruction discriminator
         if !ix_data.starts_with(anchor_lang::event::EVENT_IX_TAG_LE) {
-            tracing::debug!("Instruction discriminator mismatch - not our instruction type");
+            tracing::warn!("Instruction discriminator mismatch - not our instruction type");
             return Ok(Vec::new());
         }
 
         // Validate event discriminator matches our target event type
         let event_discriminator = &ix_data[8..16];
         if event_discriminator != T::DISCRIMINATOR {
-            tracing::debug!("Event discriminator mismatch - not our event type");
+            tracing::warn!("Event discriminator mismatch - not our event type");
             return Ok(Vec::new());
         }
 
@@ -320,7 +434,10 @@ where
                 // Check if inner instruction is from our target program
                 if ui_partially_decoded_instruction.program_id == target_program_str {
                     match process_instruction_data(&ui_partially_decoded_instruction.data) {
-                        Ok(mut instruction_events) => events.append(&mut instruction_events),
+                        Ok(mut instruction_events) => {
+                            tracing::info!("instruction events: {:?}", instruction_events);
+                            events.append(&mut instruction_events);
+                        }
                         Err(e) => tracing::warn!(
                             "Error processing inner instruction {}.{}: {}",
                             set_idx,
@@ -357,8 +474,55 @@ pub async fn run(
         sol.rpc_ws_url,
         program_id
     );
+
+    let total_timeout = Duration::from_secs(sol.total_timeout);
+    let sign_tx_clone = sign_tx.clone();
+    let node_near_account_id_clone = node_near_account_id.clone();
+    let rpc_http_url_clone = sol.rpc_http_url.clone();
+    let rpc_ws_url_clone = sol.rpc_ws_url.clone();
+    tokio::spawn(async move {
+        loop {
+            let total_timeout = total_timeout;
+            let sign_tx_clone = sign_tx_clone.clone();
+            let node_near_account_id_clone = node_near_account_id_clone.clone();
+
+            let result = subscribe_to_program_logs::<SignRespondRequestedEvent, _>(
+                program_id,
+                &rpc_http_url_clone.clone(),
+                &rpc_ws_url_clone.clone(),
+                move |event, signature, _slot| {
+                    tracing::info!("got event: {:?}", event);
+                    let tx_sig: Vec<u8> = signature.as_ref().to_vec();
+
+                    let sign_tx_inner = sign_tx_clone.clone();
+                    let node_near_account_id_inner = node_near_account_id_clone.clone();
+
+                    tokio::spawn(async move {
+                        if let Err(err) = process_anchor_sign_respond_event(
+                            event,
+                            tx_sig,
+                            sign_tx_inner,
+                            node_near_account_id_inner,
+                            total_timeout,
+                        )
+                        .await
+                        {
+                            tracing::warn!("Failed to process event: {:?}", err);
+                        }
+                    });
+                },
+            )
+            .await;
+
+            if let Err(err) = result {
+                tracing::warn!("Failed to subscribe to solana events: {:?}", err);
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+
     loop {
-        let total_timeout = Duration::from_secs(sol.total_timeout);
         let sign_tx_clone = sign_tx.clone();
         let node_near_account_id_clone = node_near_account_id.clone();
 
@@ -373,7 +537,7 @@ pub async fn run(
                 let node_near_account_id_inner = node_near_account_id_clone.clone();
 
                 tokio::spawn(async move {
-                    if let Err(err) = process_anchor_event(
+                    if let Err(err) = process_anchor_sign_event(
                         event,
                         tx_sig,
                         sign_tx_inner,
@@ -454,14 +618,34 @@ where
     Ok(())
 }
 
-async fn process_anchor_event(
+async fn process_anchor_sign_event(
     event: SignatureRequestedEvent,
     tx_sig: Vec<u8>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
 ) -> anyhow::Result<()> {
-    let sign_request = sign_request_from_event(event, tx_sig, total_timeout)?;
+    let sign_request = event.generate_sign_request(tx_sig, total_timeout)?;
+
+    if let Err(err) = sign_tx.send(sign_request).await {
+        tracing::error!(?err, "Failed to send Solana sign request into queue");
+    } else {
+        crate::metrics::NUM_SIGN_REQUESTS
+            .with_label_values(&[Chain::Solana.as_str(), node_near_account_id.as_str()])
+            .inc();
+    }
+
+    Ok(())
+}
+
+async fn process_anchor_sign_respond_event(
+    event: SignRespondRequestedEvent,
+    tx_sig: Vec<u8>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    node_near_account_id: AccountId,
+    total_timeout: Duration,
+) -> anyhow::Result<()> {
+    let sign_request = event.generate_sign_request(tx_sig, total_timeout)?;
 
     if let Err(err) = sign_tx.send(sign_request).await {
         tracing::error!(?err, "Failed to send Solana sign request into queue");
