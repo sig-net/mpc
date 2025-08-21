@@ -145,6 +145,7 @@ impl MpcSignProtocol {
         }
     }
 
+    #[cfg(feature = "test-feature")]
     pub fn new_test(
         my_account_id: AccountId,
         secret_storage: SecretNodeStorageBox,

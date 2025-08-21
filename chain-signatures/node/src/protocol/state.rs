@@ -150,7 +150,7 @@ pub struct Node {
     pub state: NodeState,
     pub watcher_tx: watch::Sender<NodeStatus>,
     pub watcher: NodeStateWatcher,
-    // TODO: hide behind test feature
+    #[cfg(feature = "test-feature")]
     test_key_info_watcher_tx: watch::Sender<Option<NodeKeyInfo>>,
 }
 
@@ -163,15 +163,18 @@ impl Default for Node {
 impl Node {
     pub fn new() -> Self {
         let (watcher_tx, watcher_rx) = watch::channel(NodeStatus::Starting);
+        #[cfg(feature = "test-feature")]
         let (test_key_info_watcher_tx, test_key_info_watcher) = watch::channel(None);
         let watcher = NodeStateWatcher {
             watcher: watcher_rx,
+            #[cfg(feature = "test-feature")]
             test_key_info_watcher,
         };
         Self {
             state: NodeState::Starting,
             watcher_tx,
             watcher,
+            #[cfg(feature = "test-feature")]
             test_key_info_watcher_tx,
         }
     }
@@ -219,7 +222,7 @@ impl Node {
             }
         }
 
-        // TODO: only do this with test features enabled
+        #[cfg(feature = "test-feature")]
         let _ = self.test_key_info_watcher_tx.send(self.state.key_info());
     }
 }
@@ -227,9 +230,9 @@ impl Node {
 #[derive(Clone)]
 pub struct NodeStateWatcher {
     watcher: watch::Receiver<NodeStatus>,
-    // TODO: hide behind test feature
     // Note: this gives access to the private key share and should not be
     // exposed to other code outside of tests
+    #[cfg(feature = "test-feature")]
     pub test_key_info_watcher: watch::Receiver<Option<NodeKeyInfo>>,
 }
 
@@ -260,14 +263,14 @@ impl NodeStateWatcher {
     }
 }
 
-// TODO: hide behind test features
+#[cfg(feature = "test-feature")]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NodeKeyInfo {
     pub private_share: SecretKeyShare,
     pub public_key: PublicKey,
 }
 
-// TODO: hide behind test features
+#[cfg(feature = "test-feature")]
 impl NodeState {
     fn key_info(&self) -> Option<NodeKeyInfo> {
         match &self {

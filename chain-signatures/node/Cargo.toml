@@ -91,3 +91,5 @@ signet-program.workspace = true
 default = []
 # utilized for benchmarking the node:
 bench = []
+# utilized by "integration-tests" package:
+test-feature = []

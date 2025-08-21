@@ -51,7 +51,7 @@ near-workspaces = { git = "https://github.com/near/near-workspaces-rs", branch =
 mpc-crypto.workspace = true
 mpc-contract.workspace = true
 mpc-keys.workspace = true
-mpc-node.workspace = true
+mpc-node = { path = "../chain-signatures/node", features = ["test-feature"] }
 mpc-primitives.workspace = true
 
 [dev-dependencies]

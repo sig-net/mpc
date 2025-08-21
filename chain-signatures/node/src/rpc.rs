@@ -222,8 +222,8 @@ impl ContractStateWatcher {
         }
     }
 
-    // TODO: hide behind test features
     /// Create a list of contract states that share a single channel but use different account ids.
+    #[cfg(feature = "test-feature")]
     pub fn test_batch(
         ids: &[AccountId],
         state: ProtocolState,

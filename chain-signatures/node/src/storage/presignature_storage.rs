@@ -545,7 +545,7 @@ impl FromRedisValue for Presignature {
     }
 }
 
-// TODO: hide behind test feature
+#[cfg(feature = "test-feature")]
 impl PresignatureStorage {
     pub fn presignature_key(&self) -> &str {
         &self.presig_key
