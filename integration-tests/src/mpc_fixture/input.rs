@@ -3,7 +3,6 @@ use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::triple::Triple;
 use std::collections::BTreeMap;
-use std::{fs, io};
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct FixtureInput {
@@ -17,14 +16,12 @@ pub struct FixtureInput {
 
 impl FixtureInput {
     pub fn load(num_nodes: u32) -> Self {
-        let file_name = match num_nodes {
-            3 => "3_nodes.json",
-            5 => "5_nodes.json",
+        let data = match num_nodes {
+            3 => include_str!("./3_nodes.json"),
+            5 => include_str!("./5_nodes.json"),
             other => panic!("No fixture input for {other} nodes available"),
         };
 
-        let file = fs::File::open(format!("src/mpc_fixture/{file_name}")).unwrap();
-        let reader = io::BufReader::new(file);
-        serde_json::from_reader(reader).expect("parsing failed")
+        serde_json::from_str(data).expect("parsing failed")
     }
 }
