@@ -132,14 +132,16 @@ impl CompletedTx {
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
         let request_id_bytes = self.tx.request_id;
+        tracing::info!("Read respond serialized output: {:?}", serialized_output);
         let message = calculate_read_respond_hash_message(&request_id_bytes, &serialized_output);
+        tracing::info!("Read respond message hash: {:?}", hex::encode(&message));
         let Some(payload) = Scalar::from_bytes(message) else {
             return Err(anyhow::anyhow!(
                 "Failed to convert read respond message to scalar: {message:?}"
             ));
         };
-        let epsilon =
-            mpc_crypto::kdf::derive_epsilon_sol(&self.tx.sender.to_string(), &self.tx.path);
+        let path = "solana response key".to_string();
+        let epsilon = mpc_crypto::kdf::derive_epsilon_sol(&self.tx.sender.to_string(), &path);
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest {
             id: SignId::new(request_id_bytes),
@@ -148,7 +150,7 @@ impl CompletedTx {
                 entropy: entropy.into(),
                 epsilon,
                 payload,
-                path: self.tx.path.clone(),
+                path,
                 key_version: self.tx.key_version,
             },
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),

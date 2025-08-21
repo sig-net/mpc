@@ -157,22 +157,28 @@ impl Output {
 
         let mut buf = Vec::with_capacity(128);
 
-        // Top-level framing (example): number of fields (u32)
-        (fields.len() as u32).serialize(&mut buf)?;
+        // // Top-level framing (example): number of fields (u32)
+        // (fields.len() as u32).serialize(&mut buf)?;
 
-        for f in fields {
-            // 1) Field name as Borsh string
-            f.name.serialize(&mut buf)?;
+        // for f in fields {
+        //     // 1) Field name as Borsh string
+        //     f.name.serialize(&mut buf)?;
 
-            // 2) Value (required)
-            let val = self
-                .0
-                .get(&f.name)
-                .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", f.name))?;
+        //     // 2) Value (required)
+        //     let val = self
+        //         .0
+        //         .get(&f.name)
+        //         .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", f.name))?;
 
-            // 3) Serialize the DynSolValue using Borsh-friendly helpers
-            serialize_dynsol(&mut buf, val)?;
-        }
+        //     // 3) Serialize the DynSolValue using Borsh-friendly helpers
+        //     serialize_dynsol(&mut buf, val)?;
+        // }
+        assert!(fields.len() == 1);
+        let val = self
+            .0
+            .get(&fields[0].name)
+            .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", fields[0].name))?;
+        serialize_dynsol(&mut buf, val)?;
 
         Ok(buf)
     }
