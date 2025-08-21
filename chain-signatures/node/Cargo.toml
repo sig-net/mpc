@@ -28,6 +28,7 @@ redis = "0.27.2"
 semver = "1.0.23"
 sysinfo = "0.32.0"
 tokio-retry = "0.3"
+tokio-stream = { version = "0.1.17", features = ["sync"] }
 tracing-appender = "0.2.2"
 tracing-stackdriver = "0.10.0"
 tracing-opentelemetry = "0.30.0"
@@ -97,6 +98,10 @@ mpc-keys.workspace = true
 mpc-primitives.workspace = true
 signet-program.workspace = true
 alloy-rlp = "0.3.12"
+
+[dev-dependencies]
+mockito = "1.7.0"
+test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [features]
 default = []
