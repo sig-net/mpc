@@ -153,7 +153,6 @@ async fn test_basic_generate_presignature() {
     }
 }
 
-// TODO: this fails with invalid signature
 #[tokio::test(flavor = "multi_thread")]
 async fn test_basic_sign() {
     let network = MpcFixtureBuilder::default()
@@ -166,11 +165,14 @@ async fn test_basic_sign() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(10), network.wait_for_presignatures(2))
-        .await
-        .expect("should have enough presignatures eventually");
-    tracing::info!("sending requests now");
+    tokio::time::timeout(
+        Duration::from_millis(300),
+        network.wait_for_presignatures(2),
+    )
+    .await
+    .expect("should start with enough presignatures");
 
+    tracing::info!("sending requests now");
     let request = sign_request(0);
     network[0].sign_tx.send(request.clone()).await.unwrap();
     network[1].sign_tx.send(request.clone()).await.unwrap();
