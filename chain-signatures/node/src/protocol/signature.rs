@@ -603,16 +603,14 @@ impl SignatureGenerator {
                     if self.request.proposer == me {
                         self.rpc
                             .publish(self.public_key, self.request.clone(), output);
-                    } else {
-                        if let SignRequestType::SignRespond(_) =
-                            self.request.indexed.sign_request_type
-                        {
-                            self.sign_respond_signature_channel.send(
-                                self.public_key,
-                                self.request.clone(),
-                                output,
-                            );
-                        }
+                    } else if let SignRequestType::SignRespond(_) =
+                        self.request.indexed.sign_request_type
+                    {
+                        self.sign_respond_signature_channel.send(
+                            self.public_key,
+                            self.request.clone(),
+                            output,
+                        );
                     }
 
                     break Ok(());
