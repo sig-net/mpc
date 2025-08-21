@@ -61,8 +61,6 @@ struct FixtureConfig {
 
     use_preshared_triples: bool,
     presignature_stockpile: bool,
-    // TODO: probably better to remove
-    triple_stockpile_factor: u32,
 
     min_triples: u32,
     max_triples: u32,
@@ -93,7 +91,6 @@ impl FixtureConfig {
             input: FixtureInput::load(num_nodes),
             use_preshared_triples: false,
             presignature_stockpile: false,
-            triple_stockpile_factor: 0,
             min_triples: 10,
             max_triples: 100,
             min_presignatures: 10,
@@ -145,7 +142,7 @@ impl MpcFixtureBuilder {
 
     pub async fn build(mut self) -> MpcFixture {
         let finalized_protocol_config = self.build_protocol_config();
-        let redis_container = self.build_redis(finalized_protocol_config.clone()).await;
+        let redis_container = redis().await;
 
         // Build a routing table: Participant -> msg_tx
         let mut routing_table: HashMap<Participant, Sender<Ciphered>> = HashMap::new();
@@ -218,30 +215,6 @@ impl MpcFixtureBuilder {
         config
     }
 
-    async fn build_redis(&self, protocol_config: ProtocolConfig) -> Redis {
-        let redis_container = redis().await;
-
-        let cfg = crate::NodeConfig {
-            nodes: self.prepared_nodes.len(),
-            threshold: self.threshold,
-            protocol: protocol_config,
-            eth: None,
-            sol: None,
-        };
-
-        if self.fixture_config.triple_stockpile_factor > 0 {
-            redis_container
-                .stockpile_triples(
-                    &cfg,
-                    &self.participants_by_id,
-                    self.fixture_config.triple_stockpile_factor,
-                )
-                .await;
-        }
-
-        redis_container
-    }
-
     pub fn with_preshared_key(mut self) -> Self {
         let keys = &self.fixture_config.input.keys;
         let public_key = keys.first_key_value().unwrap().1.public_key;
@@ -270,36 +243,31 @@ impl MpcFixtureBuilder {
         self
     }
 
-    /// Deal triples from cait-sith's central triple generation
-    pub fn with_dealt_triples(mut self, triple_stockpile_factor: u32) -> Self {
-        assert!(
-            self.shared_public_key.is_some(),
-            "can't stockpile without preshared key"
-        );
-        self.fixture_config.triple_stockpile_factor = triple_stockpile_factor;
-        self
-    }
-
+    /// Use presignatures from fixture input
     pub fn with_presignature_stockpile(mut self) -> Self {
         self.fixture_config.presignature_stockpile = true;
         self
     }
 
+    /// Set protocol config
     pub fn with_min_triples_stockpile(mut self, value: u32) -> Self {
         self.fixture_config.min_triples = value;
         self
     }
 
+    /// Set protocol config
     pub fn with_max_triples_stockpile(mut self, value: u32) -> Self {
         self.fixture_config.max_triples = value;
         self
     }
 
+    /// Set protocol config
     pub fn with_min_presignatures_stockpile(mut self, value: u32) -> Self {
         self.fixture_config.min_presignatures = value;
         self
     }
 
+    /// Set protocol config
     pub fn with_max_presignatures_stockpile(mut self, value: u32) -> Self {
         self.fixture_config.max_presignatures = value;
         self
