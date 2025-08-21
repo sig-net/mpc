@@ -72,8 +72,7 @@ async fn test_basic_generate_triples() {
         .build()
         .await;
 
-    // this is really slow in debug mode
-    tokio::time::timeout(Duration::from_secs(600), network.wait_for_triples(1))
+    tokio::time::timeout(Duration::from_secs(60), network.wait_for_triples(1))
         .await
         .expect("should have enough triples eventually");
 
