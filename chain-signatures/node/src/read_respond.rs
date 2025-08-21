@@ -11,7 +11,10 @@ use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::SignArgs;
 use mpc_primitives::SignId;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
@@ -19,6 +22,12 @@ pub struct CompletedTx {
     tx: SignRespondTx,
     block_number: u64,
     status: bool,
+}
+
+#[derive(Hash, PartialEq, Eq, Clone, Debug)]
+pub struct ReadRespondedTx {
+    pub tx_id: SignRespondTxId,
+    pub output: ReadRespondSerializedOutput,
 }
 
 pub type ReadRespondSerializedOutput = Vec<u8>;
@@ -156,7 +165,10 @@ impl CompletedTx {
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             timestamp_sign_queue: None,
             total_timeout: signature_generation_total_timeout,
-            sign_request_type: crate::protocol::SignRequestType::ReadRespond(serialized_output),
+            sign_request_type: crate::protocol::SignRequestType::ReadRespond(ReadRespondedTx {
+                tx_id: self.tx.id,
+                output: serialized_output,
+            }),
             participants: Some(self.tx.participants.clone()),
         })
     }
@@ -264,6 +276,62 @@ async fn fetch_tx_from_helios(
                 tracing::warn!("Failed to fecth tx from helios: {err:?}, retrying...");
                 attempts += 1;
                 tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ReadRespondedTxChannel {
+    tx: mpsc::Sender<SignRespondTxId>,
+}
+
+impl ReadRespondedTxChannel {
+    pub fn send(&self, tx_id: SignRespondTxId) {
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Err(err) = tx.send(tx_id).await {
+                tracing::error!(%err, "failed to send read responded tx id");
+            }
+        });
+    }
+}
+
+pub struct ReadRespondedTxProcessor {
+    read_responded_tx_rx: mpsc::Receiver<SignRespondTxId>,
+}
+
+const MAX_CONCURRENT_READ_RESPONDED_TX_REQUESTS: usize = 1024;
+
+impl ReadRespondedTxProcessor {
+    pub fn new() -> (ReadRespondedTxChannel, Self) {
+        let (tx, rx) = mpsc::channel(MAX_CONCURRENT_READ_RESPONDED_TX_REQUESTS);
+        (
+            ReadRespondedTxChannel { tx },
+            Self {
+                read_responded_tx_rx: rx,
+            },
+        )
+    }
+
+    pub async fn run(
+        mut self,
+        sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+        max_attempts: u8,
+    ) {
+        while let Some(sign_respond_tx_id) = self.read_responded_tx_rx.recv().await {
+            for attempt in 1..=max_attempts {
+                if sign_respond_tx_map
+                    .write()
+                    .await
+                    .remove(&sign_respond_tx_id)
+                    .is_some()
+                {
+                    tracing::info!(sign_id = ?sign_respond_tx_id, "removed sign respond tx from map");
+                    break;
+                } else if attempt == max_attempts {
+                    tracing::error!(sign_id = ?sign_respond_tx_id, "failed to remove sign respond tx from map after {max_attempts} attempts");
+                }
             }
         }
     }

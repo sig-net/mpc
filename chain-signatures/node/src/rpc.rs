@@ -11,6 +11,7 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::keypair::Keypair;
 
 use crate::protocol::SignRequestType;
+use crate::read_respond::ReadRespondedTxChannel;
 use crate::sign_respond_tx::SignRespondSignatureChannel;
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
@@ -290,6 +291,7 @@ impl RpcExecutor {
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
         sign_respond_signature_channel: SignRespondSignatureChannel,
+        read_responded_tx_channel: ReadRespondedTxChannel,
     ) {
         // spin up update task for updating contract state and config
         let near = self.near.clone();
@@ -329,6 +331,7 @@ impl RpcExecutor {
             let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
 
             let sign_respond_signature_channel_clone = sign_respond_signature_channel.clone();
+            let read_responded_tx_channel_clone = read_responded_tx_channel.clone();
             tokio::spawn(async move {
                 match chain {
                     Chain::NEAR | Chain::Solana => {
@@ -337,6 +340,7 @@ impl RpcExecutor {
                             action,
                             near_account_id,
                             sign_respond_signature_channel_clone,
+                            read_responded_tx_channel_clone,
                         )
                         .await;
                     }
@@ -618,6 +622,7 @@ async fn execute_publish(
     mut action: PublishAction,
     near_account_id: AccountId,
     sign_respond_signature_channel: SignRespondSignatureChannel,
+    read_responded_tx_channel: ReadRespondedTxChannel,
 ) {
     let chain = action.request.indexed.chain;
     tracing::info!(
@@ -667,6 +672,7 @@ async fn execute_publish(
                 &signature,
                 &near_account_id,
                 sign_respond_signature_channel.clone(),
+                read_responded_tx_channel.clone(),
             )
             .await
             .map_err(|_| ()),
@@ -1272,6 +1278,7 @@ async fn try_publish_sol(
     signature: &Signature,
     near_account_id: &AccountId,
     sign_respond_signature_channel: SignRespondSignatureChannel,
+    read_responded_tx_channel: ReadRespondedTxChannel,
 ) -> Result<(), ()> {
     let chain = action.request.indexed.chain;
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
@@ -1322,7 +1329,8 @@ async fn try_publish_sol(
             "published solana signature successfully"
             );
         }
-        SignRequestType::ReadRespond(read_respond_serialized_output) => {
+        SignRequestType::ReadRespond(read_responded_tx) => {
+            let read_respond_serialized_output = read_responded_tx.output.clone();
             let tx = program
                 .request()
                 .signer(sol.payer.clone())
@@ -1353,6 +1361,7 @@ async fn try_publish_sol(
             elapsed = ?timestamp.elapsed(),
             "published read respond solana signature successfully"
             );
+            read_responded_tx_channel.send(read_responded_tx.tx_id);
         }
     }
 

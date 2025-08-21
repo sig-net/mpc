@@ -24,7 +24,7 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
-use crate::read_respond::ReadRespondSerializedOutput;
+use crate::read_respond::ReadRespondedTx;
 use crate::rpc::{ContractStateWatcher, NearClient, RpcChannel};
 use crate::sign_respond_tx::SignRespondSignatureChannel;
 use crate::storage::presignature_storage::PresignatureStorage;
@@ -218,7 +218,7 @@ pub enum Chain {
 pub enum SignRequestType {
     Sign,
     SignRespond(SignRespondRequestedEvent),
-    ReadRespond(ReadRespondSerializedOutput),
+    ReadRespond(ReadRespondedTx),
 }
 
 impl Chain {

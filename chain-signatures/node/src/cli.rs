@@ -6,6 +6,7 @@ use crate::protocol::message::MessageChannel;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
+use crate::read_respond::ReadRespondedTxProcessor;
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::sign_respond_tx::SignRespondSignatureProcessor;
 use crate::storage::app_data_storage;
@@ -267,6 +268,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol);
             let (sign_respond_signature_channel, sign_respond_signature_processor) =
                 SignRespondSignatureProcessor::new();
+            let (read_responded_tx_channel, read_responded_tx_processor) =
+                ReadRespondedTxProcessor::new();
             let (sync_channel, sync) = SyncTask::new(
                 &client,
                 triple_storage.clone(),
@@ -331,10 +334,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_state_tx,
                 config_tx.clone(),
                 sign_respond_signature_channel.clone(),
+                read_responded_tx_channel.clone(),
             ));
 
             let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
             tokio::spawn(sign_respond_signature_processor.run(sign_respond_tx_map_clone, 5));
+            let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
+            tokio::spawn(read_responded_tx_processor.run(sign_respond_tx_map_clone, 5));
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
             let protocol_handle =
