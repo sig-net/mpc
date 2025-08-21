@@ -311,6 +311,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 secret_storage: key_storage,
                 triple_storage: triple_storage.clone(),
                 presignature_storage: presignature_storage.clone(),
+                contract: contract_watcher.clone(),
                 config: config_rx.clone(),
                 mesh_state: mesh_state.clone(),
             };
