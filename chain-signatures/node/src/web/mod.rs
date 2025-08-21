@@ -1,4 +1,6 @@
 mod error;
+#[cfg(test)]
+pub mod mock;
 
 use self::error::Error;
 use crate::indexer::NearIndexer;
@@ -9,6 +11,7 @@ use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::error::Result;
 
 use anyhow::Context;
+use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -48,6 +51,11 @@ pub async fn run(
         sync_channel,
     };
 
+    // Sync can be a large payload, so we set a higher limit for payload.
+    let sync = Router::new()
+        .route("/sync", post(sync))
+        .layer(DefaultBodyLimit::max(20 * 1024 * 1024));
+
     let mut router = Router::new()
         // healthcheck endpoint
         .route(
@@ -60,7 +68,7 @@ pub async fn run(
         .route("/msg", post(msg))
         .route("/state", get(state))
         .route("/metrics", get(metrics))
-        .route("/sync", post(sync));
+        .merge(sync);
 
     if cfg!(feature = "bench") {
         router = router.route("/bench/metrics", get(bench_metrics));

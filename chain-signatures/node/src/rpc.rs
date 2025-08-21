@@ -141,7 +141,9 @@ impl ContractStateWatcher {
         id: &AccountId,
         state: ProtocolState,
     ) -> (Self, watch::Sender<Option<ProtocolState>>) {
-        let (tx, rx) = watch::channel(Some(state));
+        // Set the initial state to be None so that `changed()` will pick up the first state change.
+        let (tx, rx) = watch::channel(None);
+        let _ = tx.send(Some(state));
         (
             Self {
                 account_id: id.clone(),
@@ -1013,7 +1015,7 @@ async fn try_publish_eth(
         &eth.contract,
         &params,
         40000,
-        &[action.request.indexed.id],
+        std::slice::from_ref(&action.request.indexed.id),
         near_account_id,
     )
     .await?;

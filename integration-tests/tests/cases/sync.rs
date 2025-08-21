@@ -97,7 +97,7 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn test_state_sync_large_outdated_stockpile() {
+async fn test_state_sync_e2e_large_outdated_stockpile() {
     // start the cluster of nodes immediately without waiting for them to be running.
     let mut spawner = cluster::spawn();
     {
@@ -169,52 +169,6 @@ async fn test_state_sync_large_outdated_stockpile() {
         &[6, 100, 500, 2030, 1337, 10000],
     )
     .await;
-}
-
-#[test_log::test(tokio::test)]
-async fn test_state_sync_e2e() {
-    // start the cluster of nodes immediately without waiting for them to be running.
-    let nodes = cluster::spawn()
-        .disable_wait_running()
-        .disable_prestockpile()
-        .with_config(|cfg| {
-            // Need these to be set otherwise we will be constantly taking our mock triples:
-            cfg.protocol.triple.min_triples = 1;
-            cfg.protocol.triple.max_triples = 1;
-            cfg.protocol.presignature.min_presignatures = 1;
-            cfg.protocol.presignature.max_presignatures = 1;
-        })
-        .await
-        .unwrap();
-
-    // immediately add to triples/presignatures storage the triples/presignatures we want to invalidate.
-
-    // NOTE: cannot reliably get the first participant until running state is reached, so
-    // this assumes that 0 is the first participant.
-    let node0 = 0;
-    let node0_triples = nodes.triples(node0);
-    let node0_presignatures = nodes.presignatures(node0);
-
-    let node1 = Participant::from(1);
-    let node1_triples = nodes.triples(u32::from(node1) as usize);
-    let node1_presignatures = nodes.presignatures(u32::from(node1) as usize);
-
-    // insert triples that will be invalidated after a sync, since nobody else has them.
-    // node0 is saying that they have 0 to 5, but node1 will sync and say they have 4 and 5 only.
-    insert_triples(&node0_triples, node1, 0..=5).await;
-    insert_triples(&node1_triples, node1, 4..=5).await;
-    insert_presignatures(&node0_presignatures, node1, 0..=5).await;
-    insert_presignatures(&node1_presignatures, node1, 4..=5).await;
-
-    // Wait for the nodes to be running and then check the nodes has the right triples/presignatures
-    nodes.wait().running().await.unwrap();
-    // Give some time for the first sync broadcast to finish.
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    validate_triples(&node0_triples, node1, &[4, 5], &[0, 1, 2, 3]).await;
-    validate_triples(&node1_triples, node1, &[4, 5], &[0, 1, 2, 3]).await;
-    validate_presignatures(&node0_presignatures, node1, &[4, 5], &[0, 1, 2, 3]).await;
-    validate_presignatures(&node0_presignatures, node1, &[4, 5], &[0, 1, 2, 3]).await;
 
     // TODO: add back being able to sign after sync. Need to be able to update the config from integration tests.
     // // Check that signing works as normal.
