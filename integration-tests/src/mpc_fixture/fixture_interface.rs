@@ -17,9 +17,8 @@ use tokio::sync::{watch, Mutex};
 pub struct MpcFixture {
     pub nodes: Vec<MpcFixtureNode>,
     pub redis_container: Redis,
-    pub rpc_actions: Arc<Mutex<HashSet<String>>>,
-    pub msg_log: Arc<Mutex<Vec<String>>>,
     pub shared_contract_state: watch::Sender<Option<ProtocolState>>,
+    pub output: SharedOutput,
 }
 
 pub struct MpcFixtureNode {
@@ -33,6 +32,13 @@ pub struct MpcFixtureNode {
 
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
+}
+
+/// Logs for reading outputs after a test run for assertions and debugging.
+#[derive(Default)]
+pub struct SharedOutput {
+    pub msg_log: Arc<Mutex<Vec<String>>>,
+    pub rpc_actions: Arc<Mutex<HashSet<String>>>,
 }
 
 impl MpcFixture {

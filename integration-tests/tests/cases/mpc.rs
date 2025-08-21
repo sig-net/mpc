@@ -183,7 +183,7 @@ async fn test_basic_sign() {
     let deadline = Instant::now() + timeout;
 
     loop {
-        let actions = network.rpc_actions.lock().await;
+        let actions = network.output.rpc_actions.lock().await;
 
         if actions.len() >= 1 {
             assert_eq!(actions.len(), 1);

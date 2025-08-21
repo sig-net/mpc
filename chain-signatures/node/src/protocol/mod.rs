@@ -11,6 +11,9 @@ pub mod state;
 pub mod sync;
 pub mod triple;
 
+#[cfg(feature = "test-feature")]
+pub mod test_setup;
+
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
@@ -142,31 +145,6 @@ impl MpcSignProtocol {
                 .with_label_values(&[my_account_id.as_str()])
                 .observe(protocol_time.elapsed().as_secs_f64());
             tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
-        }
-    }
-
-    #[cfg(feature = "test-feature")]
-    pub fn new_test(
-        my_account_id: AccountId,
-        secret_storage: SecretNodeStorageBox,
-        triple_storage: TripleStorage,
-        presignature_storage: PresignatureStorage,
-        sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
-        msg_channel: MessageChannel,
-        rpc_channel: RpcChannel,
-        config: watch::Receiver<Config>,
-        mesh_state: watch::Receiver<MeshState>,
-    ) -> Self {
-        Self {
-            my_account_id,
-            secret_storage,
-            triple_storage,
-            presignature_storage,
-            sign_rx,
-            msg_channel,
-            rpc_channel,
-            config,
-            mesh_state,
         }
     }
 

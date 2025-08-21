@@ -1,6 +1,7 @@
 //! Tasks running for the MPC network fixture, simulating things like message
 //! passing between nodes and updates to the governance smart contract.
 
+use crate::mpc_fixture::fixture_interface::SharedOutput;
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke::Ciphered;
 use mpc_node::config::Config;
@@ -8,12 +9,12 @@ use mpc_node::mesh::MeshState;
 use mpc_node::protocol;
 use mpc_node::protocol::message::{MessageInbox, SignedMessage};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::watch;
 use tokio::sync::RwLock;
-use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 
 /// This replaces what is usually done by MessageExecutor::spawn.
@@ -43,8 +44,7 @@ pub(super) async fn test_message_executor(
 
 pub(super) fn test_mock_network(
     routing_table: HashMap<Participant, Sender<Ciphered>>,
-    rpc_actions: Arc<Mutex<HashSet<String>>>,
-    msg_log: Arc<Mutex<Vec<String>>>,
+    shared_output: &SharedOutput,
     mut msg_rx: Receiver<(
         protocol::Message,
         (Participant, Participant, std::time::Instant),
@@ -53,6 +53,9 @@ pub(super) fn test_mock_network(
     mesh: watch::Sender<MeshState>,
     config: watch::Sender<Config>,
 ) -> JoinHandle<()> {
+    let msg_log = Arc::clone(&shared_output.msg_log);
+    let rpc_actions = Arc::clone(&shared_output.rpc_actions);
+
     tokio::spawn(async move {
         tracing::debug!(target: "mock_network", "Test message executor started");
         loop {

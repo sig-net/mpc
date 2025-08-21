@@ -2,6 +2,7 @@
 //! it before it starts running.
 
 use crate::containers::Redis;
+use crate::mpc_fixture::fixture_interface::SharedOutput;
 use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
@@ -21,11 +22,11 @@ use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
 use mpc_node::storage::{presignature_storage, secret_storage, triple_storage, Options};
 use near_sdk::AccountId;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::watch;
 use tokio::sync::RwLock;
-use tokio::sync::{watch, Mutex};
 
 pub struct MpcFixtureBuilder {
     prepared_nodes: Vec<MpcFixtureNodeBuilder>,
@@ -35,16 +36,7 @@ pub struct MpcFixtureBuilder {
     participants: Participants,
     participants_by_id: ParticipantsById,
     candidates: Candidates,
-    fixture_input: FixtureInput,
-
-    presignature_stockpile: bool,
-    use_preshared_triples: bool,
-
-    triple_stockpile_factor: u32,
-    min_triples: u32,
-    max_triples: u32,
-    min_presignatures: u32,
-    max_presignatures: u32,
+    fixture_config: FixtureConfig,
 }
 
 struct MpcFixtureNodeBuilder {
@@ -61,9 +53,52 @@ struct MpcFixtureNodeBuilder {
     key_info: Option<NodeKeyInfo>,
 }
 
+/// Config options for the test setup.
+///
+/// This struct is used to change settings before building the final network.
+struct FixtureConfig {
+    input: FixtureInput,
+
+    use_preshared_triples: bool,
+    presignature_stockpile: bool,
+    // TODO: probably better to remove
+    triple_stockpile_factor: u32,
+
+    min_triples: u32,
+    max_triples: u32,
+    min_presignatures: u32,
+    max_presignatures: u32,
+}
+
+/// Context required to start a fixture node.
+///
+/// This is constructed right before a node starts, as it depends on builder
+/// configs.
+struct MockedNodeContext {
+    routing_table: HashMap<Participant, Sender<Ciphered>>,
+    redis_pool: deadpool_redis::Pool,
+    init_mesh: MeshState,
+    contract_state: ContractStateWatcher,
+}
+
 impl Default for MpcFixtureBuilder {
     fn default() -> Self {
         Self::new(3, 2)
+    }
+}
+
+impl FixtureConfig {
+    fn new(num_nodes: u32) -> Self {
+        Self {
+            input: FixtureInput::load(num_nodes),
+            use_preshared_triples: false,
+            presignature_stockpile: false,
+            triple_stockpile_factor: 0,
+            min_triples: 10,
+            max_triples: 100,
+            min_presignatures: 10,
+            max_presignatures: 100,
+        }
     }
 }
 
@@ -74,7 +109,6 @@ impl MpcFixtureBuilder {
         // before doing anything interesting, might as well do it here.
         crate::utils::init_tracing_log();
 
-        let fixture_input = FixtureInput::load(num_nodes);
         let prepared_nodes: Vec<_> = (0..num_nodes).map(MpcFixtureNodeBuilder::new).collect();
 
         // construct full list of participants and candidates (same set)
@@ -105,16 +139,7 @@ impl MpcFixtureBuilder {
             participants,
             participants_by_id,
             candidates,
-            fixture_input,
-
-            use_preshared_triples: false,
-            presignature_stockpile: false,
-
-            triple_stockpile_factor: 0,
-            min_triples: 10,
-            max_triples: 100,
-            min_presignatures: 10,
-            max_presignatures: 100,
+            fixture_config: FixtureConfig::new(num_nodes),
         }
     }
 
@@ -140,8 +165,7 @@ impl MpcFixtureBuilder {
             stable: self.participants.keys_vec(),
         };
 
-        let rpc_actions = Default::default();
-        let msg_log = Default::default();
+        let output = SharedOutput::default();
         let mut nodes = vec![];
 
         let account_ids: Vec<_> = self
@@ -157,18 +181,20 @@ impl MpcFixtureBuilder {
         for (mut node, contract_state) in self.prepared_nodes.drain(..).zip(contract_state_watchers)
         {
             node.config.protocol = finalized_protocol_config.clone();
+
+            let node_context = MockedNodeContext {
+                routing_table: routing_table.clone(),
+                redis_pool: redis_container.pool(),
+                init_mesh: initial_mesh_state.clone(),
+                contract_state,
+            };
+
             let started = node
                 .start(
-                    routing_table.clone(),
-                    &redis_container.pool(),
-                    &initial_mesh_state,
-                    contract_state,
+                    node_context,
                     shared_contract_state_tx.clone(),
-                    self.use_preshared_triples,
-                    self.presignature_stockpile,
-                    Arc::clone(&msg_log),
-                    Arc::clone(&rpc_actions),
-                    &mut self.fixture_input,
+                    &mut self.fixture_config,
+                    &output,
                 )
                 .await;
 
@@ -178,18 +204,17 @@ impl MpcFixtureBuilder {
         MpcFixture {
             redis_container,
             nodes,
-            rpc_actions,
-            msg_log,
+            output,
             shared_contract_state: shared_contract_state_tx,
         }
     }
 
     fn build_protocol_config(&self) -> ProtocolConfig {
         let mut config = ProtocolConfig::default();
-        config.presignature.max_presignatures = self.max_presignatures;
-        config.presignature.min_presignatures = self.min_presignatures;
-        config.triple.max_triples = self.max_triples;
-        config.triple.min_triples = self.min_triples;
+        config.presignature.max_presignatures = self.fixture_config.max_presignatures;
+        config.presignature.min_presignatures = self.fixture_config.min_presignatures;
+        config.triple.max_triples = self.fixture_config.max_triples;
+        config.triple.min_triples = self.fixture_config.min_triples;
         config
     }
 
@@ -204,9 +229,13 @@ impl MpcFixtureBuilder {
             sol: None,
         };
 
-        if self.triple_stockpile_factor > 0 {
+        if self.fixture_config.triple_stockpile_factor > 0 {
             redis_container
-                .stockpile_triples(&cfg, &self.participants_by_id, self.triple_stockpile_factor)
+                .stockpile_triples(
+                    &cfg,
+                    &self.participants_by_id,
+                    self.fixture_config.triple_stockpile_factor,
+                )
                 .await;
         }
 
@@ -214,7 +243,7 @@ impl MpcFixtureBuilder {
     }
 
     pub fn with_preshared_key(mut self) -> Self {
-        let keys = &self.fixture_input.keys;
+        let keys = &self.fixture_config.input.keys;
         let public_key = keys.first_key_value().unwrap().1.public_key;
         self.shared_public_key = Some(public_key);
 
@@ -237,7 +266,7 @@ impl MpcFixtureBuilder {
 
     /// Use triples from fixture input
     pub fn with_preshared_triples(mut self) -> Self {
-        self.use_preshared_triples = true;
+        self.fixture_config.use_preshared_triples = true;
         self
     }
 
@@ -247,32 +276,32 @@ impl MpcFixtureBuilder {
             self.shared_public_key.is_some(),
             "can't stockpile without preshared key"
         );
-        self.triple_stockpile_factor = triple_stockpile_factor;
+        self.fixture_config.triple_stockpile_factor = triple_stockpile_factor;
         self
     }
 
     pub fn with_presignature_stockpile(mut self) -> Self {
-        self.presignature_stockpile = true;
+        self.fixture_config.presignature_stockpile = true;
         self
     }
 
     pub fn with_min_triples_stockpile(mut self, value: u32) -> Self {
-        self.min_triples = value;
+        self.fixture_config.min_triples = value;
         self
     }
 
     pub fn with_max_triples_stockpile(mut self, value: u32) -> Self {
-        self.max_triples = value;
+        self.fixture_config.max_triples = value;
         self
     }
 
     pub fn with_min_presignatures_stockpile(mut self, value: u32) -> Self {
-        self.min_presignatures = value;
+        self.fixture_config.min_presignatures = value;
         self
     }
 
     pub fn with_max_presignatures_stockpile(mut self, value: u32) -> Self {
-        self.max_presignatures = value;
+        self.fixture_config.max_presignatures = value;
         self
     }
 }
@@ -321,21 +350,86 @@ impl MpcFixtureNodeBuilder {
         }
     }
 
-    // TODO: refactor to make clippy happy
     async fn start(
         self,
-        routing_table: HashMap<Participant, Sender<Ciphered>>,
-        redis_pool: &deadpool_redis::Pool,
-        init_mesh: &MeshState,
-        contract_state: ContractStateWatcher,
+        context: MockedNodeContext,
         protocol_state_tx: watch::Sender<Option<ProtocolState>>,
-        use_preshared_triples: bool,
-        presignature_stockpile: bool,
-        msg_log: Arc<Mutex<Vec<String>>>,
-        rpc_actions: Arc<Mutex<HashSet<String>>>,
-        fixture_input: &mut FixtureInput,
+        fixture_config: &mut FixtureConfig,
+        shared_output: &SharedOutput,
     ) -> MpcFixtureNode {
-        let key_storage = if let Some(key) = self.key_info {
+        let storage = self.build_storage(&context, fixture_config).await;
+        let triple_storage = storage.triple_storage.clone();
+        let presignature_storage = storage.presignature_storage.clone();
+
+        let (sign_tx, sign_rx) = SignQueue::channel();
+        const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
+        let (rpc_tx, rpc_rx) = tokio::sync::mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
+        let rpc_channel = RpcChannel { tx: rpc_tx };
+        let (mesh_tx, mesh_rx) = watch::channel(context.init_mesh.clone());
+        let (config_tx, config_rx) = watch::channel(self.config);
+        let inbox = Arc::clone(self.msg_channel.inbox());
+
+        let channels = protocol::test_setup::TestProtocolChannels {
+            sign_rx: Arc::new(RwLock::new(sign_rx)),
+            msg_channel: self.msg_channel,
+            rpc_channel,
+            config: config_rx.clone(),
+            mesh_state: mesh_rx.clone(),
+        };
+
+        let protocol =
+            MpcSignProtocol::new_test(self.participant_info.account_id.clone(), storage, channels);
+
+        let account_id = protocol.my_account_id().clone();
+        let node = protocol::Node::new();
+        let node_state = node.watch();
+
+        // task running the protocol
+        let _protocol_handle = tokio::spawn(protocol.run(
+            node,
+            MockGovernance {
+                me: account_id.clone(),
+                protocol_state_tx,
+            },
+            context.contract_state.clone(),
+            config_rx.clone(),
+            mesh_rx.clone(),
+        ));
+
+        let _mock_network_handle = fixture_tasks::test_mock_network(
+            context.routing_table,
+            shared_output,
+            self.msg_rx,
+            rpc_rx,
+            mesh_tx.clone(),
+            config_tx.clone(),
+        );
+
+        let _message_executor_handle = tokio::spawn(fixture_tasks::test_message_executor(
+            config_rx,
+            context.contract_state,
+            inbox,
+        ));
+
+        MpcFixtureNode {
+            me: self.me,
+            state: node_state,
+            mesh: mesh_tx,
+            config: config_tx,
+            sign_tx,
+            msg_tx: self.msg_tx,
+            triple_storage,
+            presignature_storage,
+        }
+    }
+
+    /// Build a node's triple, presignature, and secret storage.
+    async fn build_storage(
+        &self,
+        context: &MockedNodeContext,
+        fixture_config: &mut FixtureConfig,
+    ) -> protocol::test_setup::TestProtocolStorage {
+        let secret_storage = if let Some(key) = &self.key_info {
             secret_storage::test_store(0, key.private_share, key.public_key)
         } else {
             secret_storage::init(
@@ -351,11 +445,12 @@ impl MpcFixtureNodeBuilder {
             )
         };
 
-        let triple_storage = triple_storage::init(redis_pool, &self.participant_info.account_id);
+        let triple_storage =
+            triple_storage::init(&context.redis_pool, &self.participant_info.account_id);
 
-        if use_preshared_triples {
+        if fixture_config.use_preshared_triples {
             // removing here because we can't clone a triple
-            let my_shares = fixture_input.triples.remove(&self.me).unwrap();
+            let my_shares = fixture_config.input.triples.remove(&self.me).unwrap();
             for (owner, triple_shares) in my_shares {
                 for triple_share in triple_shares {
                     let mut slot = triple_storage.reserve(triple_share.id).await.unwrap();
@@ -365,11 +460,11 @@ impl MpcFixtureNodeBuilder {
         }
 
         let presignature_storage =
-            presignature_storage::init(redis_pool, &self.participant_info.account_id);
+            presignature_storage::init(&context.redis_pool, &self.participant_info.account_id);
 
-        if presignature_stockpile {
+        if fixture_config.presignature_stockpile {
             // removing here because we can't clone a presignature
-            let my_shares = fixture_input.presignatures.remove(&self.me).unwrap();
+            let my_shares = fixture_config.input.presignatures.remove(&self.me).unwrap();
             for (owner, presignature_shares) in my_shares {
                 for presignature_share in presignature_shares {
                     let mut slot = presignature_storage
@@ -381,66 +476,8 @@ impl MpcFixtureNodeBuilder {
             }
         }
 
-        let (sign_tx, sign_rx) = SignQueue::channel();
-        const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
-        let (rpc_tx, rpc_rx) = tokio::sync::mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
-        let rpc_channel = RpcChannel { tx: rpc_tx };
-
-        let (mesh_tx, mesh_rx) = watch::channel(init_mesh.clone());
-        let (config_tx, config_rx) = watch::channel(self.config);
-
-        let inbox = Arc::clone(self.msg_channel.inbox());
-        let protocol = MpcSignProtocol::new_test(
-            self.participant_info.account_id.clone(),
-            key_storage,
-            triple_storage.clone(),
-            presignature_storage.clone(),
-            Arc::new(RwLock::new(sign_rx)),
-            self.msg_channel,
-            rpc_channel,
-            config_rx.clone(),
-            mesh_rx.clone(),
-        );
-
-        let account_id = protocol.my_account_id().clone();
-        let node = protocol::Node::new();
-        let node_state = node.watch();
-
-        // task running the protocol
-        let _protocol_handle = tokio::spawn(protocol.run(
-            node,
-            MockGovernance {
-                me: account_id.clone(),
-                protocol_state_tx,
-            },
-            contract_state.clone(),
-            config_rx.clone(),
-            mesh_rx.clone(),
-        ));
-
-        let _mock_network_handle = fixture_tasks::test_mock_network(
-            routing_table,
-            rpc_actions,
-            msg_log,
-            self.msg_rx,
-            rpc_rx,
-            mesh_tx.clone(),
-            config_tx.clone(),
-        );
-
-        let _message_executor_handle = tokio::spawn(fixture_tasks::test_message_executor(
-            config_rx,
-            contract_state,
-            inbox,
-        ));
-
-        MpcFixtureNode {
-            me: self.me,
-            state: node_state,
-            mesh: mesh_tx,
-            config: config_tx,
-            sign_tx,
-            msg_tx: self.msg_tx,
+        protocol::test_setup::TestProtocolStorage {
+            secret_storage,
             triple_storage,
             presignature_storage,
         }
