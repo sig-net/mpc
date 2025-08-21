@@ -72,7 +72,8 @@ async fn test_basic_generate_triples() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(180), network.wait_for_triples(1))
+    // this is really slow in debug mode
+    tokio::time::timeout(Duration::from_secs(600), network.wait_for_triples(1))
         .await
         .expect("should have enough triples eventually");
 
@@ -185,7 +186,7 @@ async fn test_basic_sign() {
     loop {
         let actions = network.output.rpc_actions.lock().await;
 
-        if actions.len() >= 1 {
+        if !actions.is_empty() {
             assert_eq!(actions.len(), 1);
             break;
         }
