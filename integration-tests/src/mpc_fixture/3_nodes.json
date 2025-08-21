@@ -2323,6 +2323,28 @@
         "0": {
             "0": [
                 {
+                    "id": 14697161525969795409,
+                    "output_big_r": "02972F46AABFE8E356AD17BEFD248E52FB79E8A555428AFD86004C2720620F900A",
+                    "output_k": "60A18379F3E754498C39F78D215C26DD009C8BD85B833409467D10FFD104397B",
+                    "output_sigma": "3C569104F39EB51D6DF1428D9B723F271ECB3F7B66B512208D95EF7DB4DB4BB8",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 15446211684585113244,
+                    "output_big_r": "03B7C18C54C3BDEA343847A3F209D49AF55D5BADBA08D37A142DC42B38A4482D05",
+                    "output_k": "772345F0045EB76B7B695059AAFA5AB9FC034D344A30C87EB96A703691CAC0EA",
+                    "output_sigma": "F70ECBCF72E695805BA3F2F2DDEF87F2BA92F3DB6D399E38F5CE4D4845A8E3EC",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
                     "id": 9331902372014898687,
                     "output_big_r": "039A0C324A6271ECDE800EAC79C8E4926BBA544780ACB17788478AEFE4B600E262",
                     "output_k": "4DE9B553D8348EA1ABE6AAB7620CE2740780A6520AA784E838B760E8A1552D7A",
@@ -2334,10 +2356,21 @@
                     ]
                 },
                 {
-                    "id": 11117971444663272446,
-                    "output_big_r": "02972F46AABFE8E356AD17BEFD248E52FB79E8A555428AFD86004C2720620F900A",
-                    "output_k": "60A18379F3E754498C39F78D215C26DD009C8BD85B833409467D10FFD104397B",
-                    "output_sigma": "31F7472F0F0BE34CD92683B25904F35BF27E5038DA4869DEB11F84210510AE7F",
+                    "id": 9563474037721979108,
+                    "output_big_r": "036ADE4EED8FFC5384E232010FACE4080540CCCCDAC0899CD2A669B77D9A95C3C5",
+                    "output_k": "871FC2EFE6C40A7B8BC24301786B932378D912B84211F7B07444D316D62460C8",
+                    "output_sigma": "ACD9AADEF5FBC35781F79F3A9B318D3893D52E95BA24C55FF8F5AA029C37F644",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 10165293884822970660,
+                    "output_big_r": "026A017DA555647C12C857623297EADDD0B27D6AD89048DC20B8BE058C5EBD0F7E",
+                    "output_k": "5F435610227F45FB532FB87B2B322B8050F210C4393D7ECD3C1E408E79B73F55",
+                    "output_sigma": "738DFC19317E21ED265AE7501B80B6FFD4DC6079E6A8A3889D3D43C063BBFEBE",
                     "participants": [
                         0,
                         1,
@@ -2346,6 +2379,17 @@
                 }
             ],
             "1": [
+                {
+                    "id": 2584590797988933597,
+                    "output_big_r": "03CA9D0A284EB28C2E4DEAC44680C33352E04ED211175D24E09CD8E708EF0EC85F",
+                    "output_k": "1FA258B617C554A09BE36FA0A6778BB728C0A48F11147972F602005B46A21103",
+                    "output_sigma": "74FDDDBCBFDDB17E5A7374552AE028AA4A6CFC8F424D2FBE5253411EE7F91F4F",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
                 {
                     "id": 16549524361721611867,
                     "output_big_r": "037A1EA4E6536A35EB09172AD54910491560F6256C55048FDD0893BD9EBE951E7D",
@@ -2356,14 +2400,91 @@
                         1,
                         2
                     ]
+                },
+                {
+                    "id": 824752643766183199,
+                    "output_big_r": "036EFDAA37A9C61AA640A31A0E885A1B9DBEF51CDCE9F91518924B3315E78F3D3B",
+                    "output_k": "581F977A434DBB2F657CC9159B0734B4891FE5969534C85DA167ED2EC62E88E5",
+                    "output_sigma": "12CFF28087680D083674C1A1991DB8661C9856F65A08C592D6D0EC6CD9A36AF9",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 16773239413744438546,
+                    "output_big_r": "0209683803E044EF7EB7DC4B67C1661D8F199ABF4517C8D0CD00AA3E19D33302CB",
+                    "output_k": "661D222F237325BC27A54B059DA421C4E7B977A181150AD92DD5849DB2A1C890",
+                    "output_sigma": "77C4D49D0813977E6CC0565B15FF10578E3947CAEAD062442B79B1C2E471F826",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
                 }
             ],
             "2": [
                 {
-                    "id": 3544239335226899479,
+                    "id": 724547453032826784,
                     "output_big_r": "024305BC64132053E1F335E6EDD18F7E064F03250D54838F0D66B66081C5093FDA",
                     "output_k": "97421EC896AD072F684C19F042E78132C39E56EA0BD9BC7CAEDCE7BFDA22966C",
-                    "output_sigma": "C8AF6CF0FCB181518B6AA4F82E90BC5B92280FF71266AD80E9C8D5F2F13DC553",
+                    "output_sigma": "F87003CCC34CC75A856F1D38D9B028E9430EF74018FF521CC0DBADE5623F7380",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 17974995448401825971,
+                    "output_big_r": "0290E0CB5FA07819CC29F2B83FC91E60961F16077D3BA590A3AF5008E6C4C5AD90",
+                    "output_k": "E3DC3BD0FB6725E417D6AE17F4BBC721202AC1F8E49EF9B9DC9402480C3691CC",
+                    "output_sigma": "36FE0B2DA228D26F83C14A46303CB967C1C5C6D0CFD95DAD9C7D939B647D53E1",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 16629255271240607253,
+                    "output_big_r": "021468FF736E1FF7C4C5E1EFD77AAAB5B49728B58341AF340B5559C803DEF20713",
+                    "output_k": "CBF93F82642DE0EE99EBE15DD53FE32E5C88A1E620FEAEBF0AC733CCDCBE9CAF",
+                    "output_sigma": "2B908A3A57521238C849941B154F3479EB5A5A75BCA907D4B910253899A0DB66",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 15527070112533397413,
+                    "output_big_r": "03380CFED14F41BDF83DCF1D615F8E6654951ABC81A008036068AC69F0DC998EB2",
+                    "output_k": "6BC2F2212A40E527331DC8762F430D7BF7258BB88D4E3546A27BB6D5619979FB",
+                    "output_sigma": "F74373B5F3D1AD2C5B2A88198AF84B61FFDF9AECD628B77D3B963117C46BE518",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 2572395321455905591,
+                    "output_big_r": "02693AAF838631873FE069EC7EA16F035AB64BF409257026E40B8584F2DADE5B13",
+                    "output_k": "3BCCAB8D819FEC01ED8D9970360082A5034E5E5E12D3EE8E6CA8FBE36CFDA289",
+                    "output_sigma": "850D89412932E0B72D5D939EC434B74B4AC49CFE9BCD3CC8BD7FBA7F0DFC2EA4",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 16476110752355387943,
+                    "output_big_r": "0304BA5FEBF7FA3F752544C6AB0097BA6C7746CC8CDEB388A76BF628194A5209AC",
+                    "output_k": "ADDF4A6B1937A6C6D35F6354F182A51F2EE7BA445AEFCF509CD2DA65B2FCA405",
+                    "output_sigma": "EABB2C8BCB6F8F830DF71983BEE066E3484CFC1C7D5C42B6547C380D29BD2CC9",
                     "participants": [
                         0,
                         1,
@@ -2375,6 +2496,28 @@
         "1": {
             "0": [
                 {
+                    "id": 14697161525969795409,
+                    "output_big_r": "02972F46AABFE8E356AD17BEFD248E52FB79E8A555428AFD86004C2720620F900A",
+                    "output_k": "5D0E8BE3F4ACD95C63FB678C7E4B60F6367E47A535E62625B670670A35425F50",
+                    "output_sigma": "8808C2622D4F2A8AD9826766D5D5BC7A43021CD2293992F975F673AA859EEF81",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 15446211684585113244,
+                    "output_big_r": "03B7C18C54C3BDEA343847A3F209D49AF55D5BADBA08D37A142DC42B38A4482D05",
+                    "output_k": "69DACCFFD9CF9B1834D4B5E01488E0DA0EC1B52785B3D10E31FDF6CF81BD8B18",
+                    "output_sigma": "35D145DA39AEEE3491BFDC0FF7820639B52C88D8FDE36C1A66D850A0C05A7FEF",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
                     "id": 9331902372014898687,
                     "output_big_r": "039A0C324A6271ECDE800EAC79C8E4926BBA544780ACB17788478AEFE4B600E262",
                     "output_k": "C6587E5187FBDF8E389B699DED24905026EF54D29C00A2CBC163171AB7A94DBE",
@@ -2384,9 +2527,42 @@
                         1,
                         2
                     ]
+                },
+                {
+                    "id": 9563474037721979108,
+                    "output_big_r": "036ADE4EED8FFC5384E232010FACE4080540CCCCDAC0899CD2A669B77D9A95C3C5",
+                    "output_k": "426C528F6B7DCBEEBE6CCE3562554B95C8616B5AF64A8EE0D7C081C94DD2AFC9",
+                    "output_sigma": "75BB781BD025BA58B614BC2BB2BEE76862629E278E87C07A85B4D18799788AC9",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 10165293884822970660,
+                    "output_big_r": "026A017DA555647C12C857623297EADDD0B27D6AD89048DC20B8BE058C5EBD0F7E",
+                    "output_k": "3D563BE16283263E0763391F849C785C4E88D88E1470047FC4A05340845D62D3",
+                    "output_sigma": "76498D4BB66C7255992331F6FC98DBAF55060B87DE8A182C1DC01579320E829E",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
                 }
             ],
             "1": [
+                {
+                    "id": 2584590797988933597,
+                    "output_big_r": "03CA9D0A284EB28C2E4DEAC44680C33352E04ED211175D24E09CD8E708EF0EC85F",
+                    "output_k": "F1F67FB7CB9951B215F68AEB46B8C37BD938B30D3416F151F7CD3C227FAB038B",
+                    "output_sigma": "BED85BC5EBD68F0A0190F88C1AEE5535B2BA9AA89F29A431CA37405A4984DF41",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
                 {
                     "id": 16549524361721611867,
                     "output_big_r": "037A1EA4E6536A35EB09172AD54910491560F6256C55048FDD0893BD9EBE951E7D",
@@ -2397,14 +2573,91 @@
                         1,
                         2
                     ]
+                },
+                {
+                    "id": 824752643766183199,
+                    "output_big_r": "036EFDAA37A9C61AA640A31A0E885A1B9DBEF51CDCE9F91518924B3315E78F3D3B",
+                    "output_k": "06C9586583BB9100CAE12F7E829D63A7288B56A4C0A1F00FE927E7F85C26219D",
+                    "output_sigma": "D375A251D4563321772D64DD16A32864B250E1DF1DCD752760570E31F2D59FF4",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 16773239413744438546,
+                    "output_big_r": "0209683803E044EF7EB7DC4B67C1661D8F199ABF4517C8D0CD00AA3E19D33302CB",
+                    "output_k": "5B37C79425DC2719A5E44251979F026EEA4C5FD789437F9CF851E55D1765116B",
+                    "output_sigma": "C9EF47BDC2CFC31D393FC6060C66565C843816778BDE70EAA43A3D2C2E23EA3F",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
                 }
             ],
             "2": [
                 {
-                    "id": 3544239335226899479,
+                    "id": 724547453032826784,
                     "output_big_r": "024305BC64132053E1F335E6EDD18F7E064F03250D54838F0D66B66081C5093FDA",
                     "output_k": "8F6D4CC80542B495F07F5ABF008F6E064D91BC8A848A70DC79307311DDE7E807",
-                    "output_sigma": "3CF38FB939B600E3FDC2C501A73045B4FD857279098169E49ABD05F7B0F15CFF",
+                    "output_sigma": "9C74BD70C6EC8CF5F1CBB582FD6F1ED05F53410B16B2B31C48E2B5DC92F4B959",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 17974995448401825971,
+                    "output_big_r": "0290E0CB5FA07819CC29F2B83FC91E60961F16077D3BA590A3AF5008E6C4C5AD90",
+                    "output_k": "F99C5B54BB7F29914F94D98F2A5E20CB3CA226B2EE6642F274C0780B9155E581",
+                    "output_sigma": "983A3D31ADA398A0DDB538BFA8EDA0C98CEB1FE0158C341F56629F785264D769",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 16629255271240607253,
+                    "output_big_r": "021468FF736E1FF7C4C5E1EFD77AAAB5B49728B58341AF340B5559C803DEF20713",
+                    "output_k": "DAFBF9EB828B0EA4C07E6C07656282584692E76D256E0ABC85D572D410A2282D",
+                    "output_sigma": "B688B7601838766EAB119A91260CDDDC8708E1A54BDAADC72C09193762790802",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 15527070112533397413,
+                    "output_big_r": "03380CFED14F41BDF83DCF1D615F8E6654951ABC81A008036068AC69F0DC998EB2",
+                    "output_k": "4E0F16DFAB1B8A69C3F0F38F8B564CB199F475219DBFD0E691104E507003E876",
+                    "output_sigma": "4A0793D7EDC18DF29199B08EDBB516419F8C164DEC7122456D18D3CC292E9514",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 2572395321455905591,
+                    "output_big_r": "02693AAF838631873FE069EC7EA16F035AB64BF409257026E40B8584F2DADE5B13",
+                    "output_k": "89FEE5FF6DA2876379369609DED4E2DC00580967E7CCE8C1DE560FE2A1D1C8B6",
+                    "output_sigma": "116AEB543582CBB769E1FE54CEF9B6B43589354B9A2E883B81D2BC8DC35FABB6",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 16476110752355387943,
+                    "output_big_r": "0304BA5FEBF7FA3F752544C6AB0097BA6C7746CC8CDEB388A76BF628194A5209AC",
+                    "output_k": "F80314C671CA5DF25A3CCDB1B118A5F5578EF11B46E1B6BDEB7E34E2108029DB",
+                    "output_sigma": "36B937F4B77B5D5161F5BDE38404432C8EF8B19B72DA75DD066E73F484BF53DF",
                     "participants": [
                         0,
                         1,
@@ -2415,6 +2668,28 @@
         },
         "2": {
             "0": [
+                {
+                    "id": 14697161525969795409,
+                    "output_big_r": "02972F46AABFE8E356AD17BEFD248E52FB79E8A555428AFD86004C2720620F900A",
+                    "output_k": "597B944DF5725E6F3BBCD78BDB3A9B0F6C600372104918422663BD1499808525",
+                    "output_sigma": "D3BAF3BF66FF9FF845138C40103939CD6738FA28EBBE13D25E56F7D75662934A",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 15446211684585113244,
+                    "output_big_r": "03B7C18C54C3BDEA343847A3F209D49AF55D5BADBA08D37A142DC42B38A4482D05",
+                    "output_k": "5C92540FAF407EC4EE401B667E1766FA21801D1AC136D99DAA917D6871B05546",
+                    "output_sigma": "7493BFE5007746E8C7DBC52D1114847F6A74FABD3DD5DA3797B4B2860B425D33",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
                 {
                     "id": 9331902372014898687,
                     "output_big_r": "039A0C324A6271ECDE800EAC79C8E4926BBA544780ACB17788478AEFE4B600E262",
@@ -2427,10 +2702,32 @@
                     ]
                 },
                 {
-                    "id": 11117971444663272446,
-                    "output_big_r": "02972F46AABFE8E356AD17BEFD248E52FB79E8A555428AFD86004C2720620F900A",
-                    "output_k": "597B944DF5725E6F3BBCD78BDB3A9B0F6C600372104918422663BD1499808525",
-                    "output_sigma": "B49D163DB9472A8686B34FAE48F1566BE2522C6146781B0CC8F3B5C14702BB9F",
+                    "id": 9563474037721979108,
+                    "output_big_r": "036ADE4EED8FFC5384E232010FACE4080540CCCCDAC0899CD2A669B77D9A95C3C5",
+                    "output_k": "FDB8E22EF0378D61F11759694C3F0406D298A0E459CBC64CFB0E8F0895B7400B",
+                    "output_sigma": "3E9D4558AA4FB159EA31D91CCA4C419830F00DB962EABB951273F90C96B91F4E",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 10165293884822970660,
+                    "output_big_r": "026A017DA555647C12C857623297EADDD0B27D6AD89048DC20B8BE058C5EBD0F7E",
+                    "output_k": "1B6921B2A2870680BB96B9C3DE06C5384C1FA057EFA28A324D2265F28F038651",
+                    "output_sigma": "79051E7E3B5AC2BE0BEB7C9DDDB1005ED52FB695D66B8CCF9E42E7320061067E",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 653020968231480174,
+                    "output_big_r": "030C3DF90499E14C287CD7E271091001AFD04F3EF9017CACD51A232CB05A26ECA9",
+                    "output_k": "BE1FC24C997E1154411DFDCECE8D841D297935D26984F5CAF5F64E77BA5D245D",
+                    "output_sigma": "F2AFC5ABD55767C7C6F526E3DE91657B539759B619C922BA3AD94EDB47B3001B",
                     "participants": [
                         0,
                         1,
@@ -2439,6 +2736,17 @@
                 }
             ],
             "1": [
+                {
+                    "id": 2584590797988933597,
+                    "output_big_r": "03CA9D0A284EB28C2E4DEAC44680C33352E04ED211175D24E09CD8E708EF0EC85F",
+                    "output_k": "C44AA6B97F6D4EC39009A635E6F9FB41CF01E4A4A7D0C8F539C6195CE87DB4D2",
+                    "output_sigma": "08B2D9CF17CF6C95A8AE7CC30AFC81C260595BDB4CBD78698248E108DADA5DF2",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
                 {
                     "id": 16549524361721611867,
                     "output_big_r": "037A1EA4E6536A35EB09172AD54910491560F6256C55048FDD0893BD9EBE951E7D",
@@ -2449,14 +2757,91 @@
                         1,
                         2
                     ]
+                },
+                {
+                    "id": 824752643766183199,
+                    "output_big_r": "036EFDAA37A9C61AA640A31A0E885A1B9DBEF51CDCE9F91518924B3315E78F3D3B",
+                    "output_k": "B5731950C42966D2304595E76A33929882A5A4999B57B7FDF0BA414EC253FB96",
+                    "output_sigma": "941B52232144593AB7E60818942898648D5A8FE1324984802A0AD16A3BD193AE",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 16773239413744438546,
+                    "output_big_r": "0209683803E044EF7EB7DC4B67C1661D8F199ABF4517C8D0CD00AA3E19D33302CB",
+                    "output_k": "50526CF9284528772423399D9199E318ECDF480D9171F460C2CE461C7C285A46",
+                    "output_sigma": "1C19BADE7D8BEEBC05BF35B102CD9C62BF88083D7DA3DF555D286A08A79F9B17",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
                 }
             ],
             "2": [
                 {
-                    "id": 3544239335226899479,
+                    "id": 724547453032826784,
                     "output_big_r": "024305BC64132053E1F335E6EDD18F7E064F03250D54838F0D66B66081C5093FDA",
                     "output_k": "87987AC773D861FC78B29B8DBE375AD9D785222AFD3B253C4383FE63E1AD39A2",
-                    "output_sigma": "B137B28176BA8076701AE50B1FCFCF0D2391B1E1AFE4C6840B83948940DB35EC",
+                    "output_sigma": "40797714CA8C52915E284DCD212E14B77B978AD61466141BD0E9BDD3C3A9FF32",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 17974995448401825971,
+                    "output_big_r": "0290E0CB5FA07819CC29F2B83FC91E60961F16077D3BA590A3AF5008E6C4C5AD90",
+                    "output_k": "0F5C7AD87B972D3E8753050660007A769E6AAE8648E4EBEF4D1A8F42463EF7F5",
+                    "output_sigma": "F9766F35B91E5ED237A92739219E882B581078EF5B3F0A911047AB55404C5AF1",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 16629255271240607253,
+                    "output_big_r": "021468FF736E1FF7C4C5E1EFD77AAAB5B49728B58341AF340B5559C803DEF20713",
+                    "output_k": "E9FEB454A0E83C5AE710F6B0F5852182309D2CF429DD66BA00E3B1DB4485B3AB",
+                    "output_sigma": "4180E485D91EDAA48DD9A10736CA874068088BEE2BC3B37DDF2FAEA95B1AF35D",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 15527070112533397413,
+                    "output_big_r": "03380CFED14F41BDF83DCF1D615F8E6654951ABC81A008036068AC69F0DC998EB2",
+                    "output_k": "305B3B9E2BF62FAC54C41EA8E7698BE73CC35E8AAE316C867FA4E5CB7E6E56F1",
+                    "output_sigma": "9CCBB3F9E7B16EB8C808D9042C71E11FF9E76E95B2022D495E6DD50D5E278651",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 2572395321455905591,
+                    "output_big_r": "02693AAF838631873FE069EC7EA16F035AB64BF409257026E40B8584F2DADE5B13",
+                    "output_k": "D831207159A522C504DF92A387A94312FD61B471BCC5E2F5500323E1D6A5EEE3",
+                    "output_sigma": "9DC84D6741D2B6B7A666690AD9BEB61BDAFCAA7F47D873EA05F81D2948F96A09",
+                    "participants": [
+                        0,
+                        1,
+                        2
+                    ]
+                },
+                {
+                    "id": 16476110752355387943,
+                    "output_big_r": "0304BA5FEBF7FA3F752544C6AB0097BA6C7746CC8CDEB388A76BF628194A5209AC",
+                    "output_k": "4226DF21CA5D151DE11A380E70AEA6CCC5874B0B838AFDEF7A5730D19DCD6E70",
+                    "output_sigma": "82B7435DA3872B1FB5F4624349281F749053440117A1493F78330E68AFF7BC36",
                     "participants": [
                         0,
                         1,
