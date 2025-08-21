@@ -96,9 +96,9 @@ impl FixtureConfig {
             use_preshared_triples: false,
             presignature_stockpile: false,
             min_triples: 10,
-            max_triples: 100,
+            max_triples: 30,
             min_presignatures: 10,
-            max_presignatures: 100,
+            max_presignatures: 30,
         }
     }
 }
