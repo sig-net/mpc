@@ -115,6 +115,7 @@ impl NodeClient {
         if status.is_success() {
             Ok(())
         } else {
+            // TODO: parse response body and convert to mpc_node::Error type.
             let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
             let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
             Err(RequestError::Unsuccessful(status, resp.into()))
@@ -153,6 +154,6 @@ impl NodeClient {
         let mut url = base.into_url()?;
         url.set_path("sync");
 
-        self.post_json(&url, update).await
+        self.post_cbor(&url, update).await
     }
 }

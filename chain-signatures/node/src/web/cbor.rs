@@ -42,7 +42,7 @@ where
     type Rejection = CborRejection;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        if Self::valid_header(req.headers()) == false {
+        if !Self::valid_header(req.headers()) {
             return Err(CborRejection {
                 status: StatusCode::BAD_REQUEST,
                 message: "expecting `content-type: application/cbor`".to_string(),
