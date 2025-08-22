@@ -1,3 +1,4 @@
+use crate::protocol::message::cbor_to_bytes;
 use crate::protocol::sync::SyncUpdate;
 use crate::web::StateView;
 use hyper::StatusCode;
@@ -51,6 +52,8 @@ pub enum RequestError {
     MalformedBody(reqwest::Error),
     #[error("http response body is not valid utf-8: {0}")]
     MalformedResponse(Utf8Error),
+    #[error("io error: {0}")]
+    Conversion(String),
 }
 
 #[derive(Debug, Clone)]
@@ -95,12 +98,16 @@ impl NodeClient {
         }
     }
 
-    async fn post_msg(&self, url: &Url, msg: &[&Ciphered]) -> Result<(), RequestError> {
+    pub async fn post_cbor<T: Serialize + ?Sized>(
+        &self,
+        url: &Url,
+        payload: &T,
+    ) -> Result<(), RequestError> {
         let resp = self
             .http
             .post(url.clone())
-            .header("content-type", "application/json")
-            .json(&msg)
+            .header("content-type", "application/cbor")
+            .body(cbor_to_bytes(payload).map_err(|err| RequestError::Conversion(err.to_string()))?)
             .send()
             .await?;
 
@@ -111,9 +118,12 @@ impl NodeClient {
             // TODO: parse response body and convert to mpc_node::Error type.
             let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
             let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            tracing::warn!("failed to send a message to {url} with code {status}: {resp}");
             Err(RequestError::Unsuccessful(status, resp.into()))
         }
+    }
+
+    async fn post_msg(&self, url: &Url, msg: &[&Ciphered]) -> Result<(), RequestError> {
+        self.post_cbor(url, msg).await
     }
 
     pub async fn msg(&self, base: impl IntoUrl, msg: &[&Ciphered]) -> Result<(), RequestError> {
@@ -144,6 +154,6 @@ impl NodeClient {
         let mut url = base.into_url()?;
         url.set_path("sync");
 
-        self.post_json(&url, update).await
+        self.post_cbor(&url, update).await
     }
 }
