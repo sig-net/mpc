@@ -49,6 +49,7 @@ pub struct MpcSignProtocol {
     pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
     pub(crate) msg_channel: MessageChannel,
     pub(crate) rpc_channel: RpcChannel,
+    pub(crate) contract: ContractStateWatcher,
     pub(crate) config: watch::Receiver<Config>,
     pub(crate) mesh_state: watch::Receiver<MeshState>,
 }
