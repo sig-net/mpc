@@ -986,7 +986,6 @@ dependencies = [
  "anchor-derive-accounts",
  "anchor-derive-serde",
  "anchor-derive-space",
- "anchor-lang-idl",
  "base64 0.21.7",
  "bincode",
  "borsh 0.10.4",
@@ -1004,7 +1003,6 @@ dependencies = [
  "anchor-lang-idl-spec",
  "anyhow",
  "heck 0.3.3",
- "regex",
  "serde",
  "serde_json",
  "sha2 0.10.8",
@@ -1021,21 +1019,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anchor-spl"
-version = "0.31.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c08cb5d762c0694f74bd02c9a5b04ea53cefc496e2c27b3234acffca5cd076b"
-dependencies = [
- "anchor-lang",
- "spl-associated-token-account",
- "spl-pod",
- "spl-token",
- "spl-token-2022 6.0.0",
- "spl-token-group-interface",
- "spl-token-metadata-interface",
-]
-
-[[package]]
 name = "anchor-syn"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1043,7 +1026,6 @@ checksum = "5dc7a6d90cc643df0ed2744862cdf180587d1e5d28936538c18fc8908489ed67"
 dependencies = [
  "anyhow",
  "bs58 0.5.1",
- "cargo_toml",
  "heck 0.3.3",
  "proc-macro2",
  "quote",
@@ -3077,16 +3059,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "cargo_toml"
-version = "0.19.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a98356df42a2eb1bd8f1793ae4ee4de48e384dd974ce5eac8eee802edb7492be"
-dependencies = [
- "serde",
- "toml 0.8.22",
 ]
 
 [[package]]
@@ -12190,7 +12162,6 @@ name = "signet-program"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
- "anchor-spl",
 ]
 
 [[package]]
