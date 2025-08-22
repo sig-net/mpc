@@ -14,7 +14,7 @@ pub enum Error {
     #[error(transparent)]
     JsonExtractorRejection(#[from] JsonRejection),
     #[error(transparent)]
-    CborExtratorRejection(#[from] CborRejection),
+    CborExtractorRejection(#[from] CborRejection),
     #[error(transparent)]
     Cryptography(#[from] CryptographicError),
     #[error(transparent)]
@@ -27,7 +27,7 @@ impl Error {
     pub fn status(&self) -> StatusCode {
         match self {
             Error::JsonExtractorRejection(rejection) => rejection.status(),
-            Error::CborExtratorRejection(rejection) => rejection.status(),
+            Error::CborExtractorRejection(rejection) => rejection.status(),
             Error::Cryptography(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Message(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Rpc(_) => StatusCode::BAD_REQUEST,
