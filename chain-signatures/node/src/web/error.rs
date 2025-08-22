@@ -1,8 +1,9 @@
 use axum::extract::rejection::JsonRejection;
-use reqwest::StatusCode;
+use http::StatusCode;
 
 use crate::protocol::message::MessageError;
 use crate::protocol::CryptographicError;
+use crate::web::cbor::CborRejection;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -12,6 +13,8 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error(transparent)]
     JsonExtractorRejection(#[from] JsonRejection),
+    #[error(transparent)]
+    CborExtratorRejection(#[from] CborRejection),
     #[error(transparent)]
     Cryptography(#[from] CryptographicError),
     #[error(transparent)]
@@ -24,6 +27,7 @@ impl Error {
     pub fn status(&self) -> StatusCode {
         match self {
             Error::JsonExtractorRejection(rejection) => rejection.status(),
+            Error::CborExtratorRejection(rejection) => rejection.status(),
             Error::Cryptography(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Message(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Rpc(_) => StatusCode::BAD_REQUEST,

@@ -23,7 +23,7 @@ use mpc_keys::hpke::Ciphered;
 use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 
 struct AxumState {
     node: NodeStateWatcher,
@@ -78,12 +78,10 @@ pub async fn run(
 
     let app = router.layer(Extension(Arc::new(axum_state)));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = format!("0.0.0.0:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!(?addr, "starting http server");
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
