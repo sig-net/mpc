@@ -863,7 +863,6 @@ impl MessageOutbox {
                             result = client.msg(&url, payload) => {
                                 let Err(err) = result else {
                                     send_encrypted_latency_metric.observe(start.elapsed().as_millis() as f64);
-                                    tracing::debug!(?to, ?url, elapsed = ?instant.elapsed(), "finished sending messages");
                                     break;
                                 };
 
