@@ -8,7 +8,7 @@ use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
 use cait_sith::protocol::Participant;
-use mpc_contract::config::ProtocolConfig;
+use mpc_contract::config::{min_to_ms, ProtocolConfig};
 use mpc_contract::primitives::{
     CandidateInfo, Candidates as CandidatesById, ParticipantInfo, Participants as ParticipantsById,
 };
@@ -109,7 +109,7 @@ impl FixtureConfig {
             max_presignatures: 30,
             signature_timeout_ms: 10_000,
             presignature_timeout_ms: 10_000,
-            triple_timeout_ms: 10_000,
+            triple_timeout_ms: min_to_ms(10),
         }
     }
 }
