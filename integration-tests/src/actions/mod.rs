@@ -16,6 +16,7 @@ use mpc_contract::errors::SignError;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt;
 use mpc_crypto::{derive_epsilon_near, derive_key};
+use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_fetch::ops::Function;
@@ -110,7 +111,7 @@ pub async fn validate_signature(
 ) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
-    let epsilon = derive_epsilon_near(account_id, "test");
+    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, account_id, "test");
     let user_pk = derive_key(mpc_pk, epsilon);
     signature
         .verify(
@@ -291,6 +292,7 @@ mod tests {
     use k256::elliptic_curve::ProjectivePoint;
     use k256::{AffinePoint, EncodedPoint, Scalar};
     use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
+    use mpc_primitives::LATEST_MPC_KEY_VERSION;
 
     use super::{public_key_to_address, recover, x_coordinate};
 
@@ -318,7 +320,8 @@ mod tests {
         let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
 
         let account_id = account_id.parse().unwrap();
-        let derivation_epsilon: k256::Scalar = derive_epsilon_near(&account_id, "test");
+        let derivation_epsilon: k256::Scalar =
+            derive_epsilon_near(LATEST_MPC_KEY_VERSION, &account_id, "test");
         let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
         let user_pk_y_parity = match user_pk.y_is_odd().unwrap_u8() {
             0 => secp256k1::Parity::Even,

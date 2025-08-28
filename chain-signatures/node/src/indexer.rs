@@ -205,7 +205,11 @@ async fn handle_block(
                     continue;
                 };
                 let predecessor_id = action.predecessor_id();
-                let epsilon = derive_epsilon_near(&predecessor_id, &arguments.request.path);
+                let epsilon = derive_epsilon_near(
+                    arguments.request.key_version,
+                    &predecessor_id,
+                    &arguments.request.path,
+                );
                 let sign_id = SignId::from_parts(
                     &predecessor_id,
                     &arguments.request.payload,

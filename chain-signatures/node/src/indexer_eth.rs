@@ -293,7 +293,11 @@ fn sign_request_from_filtered_log(
         anyhow::bail!("payload exceeds secp256k1 curve order");
     }
 
-    let epsilon = derive_epsilon_eth(format!("0x{}", event.requester.encode_hex()), &event.path);
+    let epsilon = derive_epsilon_eth(
+        event.key_version,
+        format!("0x{}", event.requester.encode_hex()),
+        &event.path,
+    );
 
     // Use transaction hash as entropy
     let entropy = log.transaction_hash.unwrap_or_default();

@@ -42,15 +42,24 @@ impl Chain {
 }
 
 /// Creates a derivation path string using the legacy format
-fn depricated_derivation_path(chain: Chain, requester: &str, path: &str) -> String {
+fn depricated_derivation_path(chain: Chain, sender: &str, path: &str) -> String {
     let chain_id = chain.deprecated_chain_id();
-    format!("{EPSILON_DERIVATION_PREFIX_V1},{chain_id},{requester},{path}")
+    format!("{EPSILON_DERIVATION_PREFIX_V1},{chain_id},{sender},{path}")
 }
 
 /// Creates a derivation path string using the extended with prefix CAIP-2 format
 fn caip2_derivation_path(chain: Chain, sender: &str, derivation_path: &str) -> String {
     let chain_id = chain.caip2_chain_id();
     format!("{EPSILON_DERIVATION_PREFIX_V2}:{chain_id}:{sender}:{derivation_path}")
+}
+
+///
+fn derivation_path(key_version: u32, chain: Chain, sender: &str, derivation_path: &str) -> String {
+    match key_version {
+        0 => depricated_derivation_path(chain, sender, derivation_path),
+        // Note: if the user provides a key_version that is higher than supported, we fall back to the latest supported one
+        _ => caip2_derivation_path(chain, sender, derivation_path),
+    }
 }
 
 fn hash_derivation_path(derivation_path: impl AsRef<[u8]>) -> Scalar {
@@ -60,19 +69,19 @@ fn hash_derivation_path(derivation_path: impl AsRef<[u8]>) -> Scalar {
     Scalar::from_non_biased(hash)
 }
 
-pub fn derive_epsilon_near(predecessor_id: &AccountId, path: &str) -> Scalar {
+pub fn derive_epsilon_near(key_version: u32, predecessor_id: &AccountId, path: &str) -> Scalar {
     let derivation_path =
-        depricated_derivation_path(Chain::Near, &predecessor_id.to_string(), path);
+        derivation_path(key_version, Chain::Near, &predecessor_id.to_string(), path);
     hash_derivation_path(derivation_path)
 }
 
-pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
-    let derivation_path = depricated_derivation_path(Chain::Ethereum, &requester, path);
+pub fn derive_epsilon_eth(key_version: u32, requester: String, path: &str) -> Scalar {
+    let derivation_path = derivation_path(key_version, Chain::Ethereum, &requester, path);
     hash_derivation_path(derivation_path)
 }
 
-pub fn derive_epsilon_sol(requester: &str, path: &str) -> Scalar {
-    let derivation_path = depricated_derivation_path(Chain::Solana, requester, path);
+pub fn derive_epsilon_sol(key_version: u32, requester: &str, path: &str) -> Scalar {
+    let derivation_path = derivation_path(key_version, Chain::Solana, requester, path);
     hash_derivation_path(derivation_path.as_bytes())
 }
 
