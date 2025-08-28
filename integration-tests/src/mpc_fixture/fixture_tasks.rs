@@ -59,7 +59,7 @@ pub(super) fn test_mock_network(
                     // (might want to add MessageOutbox, too, but for now this is easier)
                     let config = config.borrow().clone();
                     let participants = mesh.borrow().active.clone();
-                    let receiver_info = participants.get(&to).expect("TODO: support sending to non-active participants in tests");
+                    let receiver_info = participants.get(to).expect("TODO: support sending to non-active participants in tests");
                     match SignedMessage::encrypt(
                         &[msg],
                         *from,
@@ -67,7 +67,7 @@ pub(super) fn test_mock_network(
                         &receiver_info.cipher_pk,
                     ) {
                         Ok(ciphered) => {
-                            if let Some(tx) = routing_table.get(&to) {
+                            if let Some(tx) = routing_table.get(to) {
                                 if let Err(e) = tx.send(ciphered).await {
                                     tracing::warn!(target: "mock_network", ?e, "Failed to forward encrypted message to {to:?}");
                                 }
