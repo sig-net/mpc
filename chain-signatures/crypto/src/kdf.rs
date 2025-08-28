@@ -69,8 +69,7 @@ fn hash_derivation_path(derivation_path: impl AsRef<[u8]>) -> Scalar {
 }
 
 pub fn derive_epsilon_near(key_version: u32, predecessor_id: &AccountId, path: &str) -> Scalar {
-    let derivation_path =
-        derivation_path(key_version, Chain::Near, predecessor_id.as_ref(), path);
+    let derivation_path = derivation_path(key_version, Chain::Near, predecessor_id.as_ref(), path);
     hash_derivation_path(derivation_path)
 }
 
