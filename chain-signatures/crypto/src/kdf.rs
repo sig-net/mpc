@@ -53,7 +53,6 @@ fn caip2_derivation_path(chain: Chain, sender: &str, derivation_path: &str) -> S
     format!("{EPSILON_DERIVATION_PREFIX_V2}:{chain_id}:{sender}:{derivation_path}")
 }
 
-///
 fn derivation_path(key_version: u32, chain: Chain, sender: &str, derivation_path: &str) -> String {
     match key_version {
         0 => depricated_derivation_path(chain, sender, derivation_path),
@@ -71,7 +70,7 @@ fn hash_derivation_path(derivation_path: impl AsRef<[u8]>) -> Scalar {
 
 pub fn derive_epsilon_near(key_version: u32, predecessor_id: &AccountId, path: &str) -> Scalar {
     let derivation_path =
-        derivation_path(key_version, Chain::Near, &predecessor_id.to_string(), path);
+        derivation_path(key_version, Chain::Near, predecessor_id.as_ref(), path);
     hash_derivation_path(derivation_path)
 }
 
