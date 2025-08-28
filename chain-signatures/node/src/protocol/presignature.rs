@@ -129,35 +129,6 @@ pub struct PresignatureGenerator {
 }
 
 impl PresignatureGenerator {
-    /// Receive the next message for the presignature protocol; error out on the timeout being reached
-    /// or the channel having been closed (aborted).
-    async fn recv(&mut self) -> Option<PresignatureMessage> {
-        match tokio::time::timeout(
-            self.timeout.saturating_sub(self.created.elapsed()),
-            self.inbox.recv(),
-        )
-        .await
-        {
-            Ok(Some(msg)) => Some(msg),
-            Ok(None) => {
-                tracing::warn!(
-                    id = self.id,
-                    owner = ?self.owner,
-                    "presignature generation aborted",
-                );
-                None
-            }
-            Err(_err) => {
-                tracing::warn!(
-                    id = self.id,
-                    owner = ?self.owner,
-                    "presignature generation timeout",
-                );
-                None
-            }
-        }
-    }
-
     pub async fn run(mut self, my_account_id: &AccountId, me: Participant, epoch: u64) {
         let failure_counts = crate::metrics::PRESIGNATURE_GENERATOR_FAILURES
             .with_label_values(&[my_account_id.as_str()]);
@@ -185,6 +156,13 @@ impl PresignatureGenerator {
         before_first_poke_delay.observe(self.created.elapsed().as_millis() as f64);
 
         loop {
+            let elapsed = self.created.elapsed();
+            if elapsed > self.timeout {
+                failure_counts.inc();
+                tracing::warn!(id = self.id, ?elapsed, "presignature generation timeout");
+                break;
+            }
+
             let poke_start_time = Instant::now();
             let action = match self.protocol.poke() {
                 Ok(action) => action,
@@ -208,8 +186,7 @@ impl PresignatureGenerator {
             match action {
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
-                    let Some(msg) = self.recv().await else {
-                        failure_counts.inc();
+                    let Some(msg) = self.inbox.recv().await else {
                         break;
                     };
                     self.protocol.message(msg.from, msg.data);
@@ -262,7 +239,6 @@ impl PresignatureGenerator {
                     tracing::info!(
                         id = self.id,
                         ?me,
-                        owner = ?self.owner,
                         big_r = ?output.big_r.to_base58(),
                         elapsed = ?self.created.elapsed(),
                         "completed presignature generation"

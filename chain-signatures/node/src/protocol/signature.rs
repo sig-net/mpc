@@ -469,6 +469,10 @@ impl SignatureGenerator {
         })
     }
 
+    fn timeout(&self) -> bool {
+        self.created.elapsed() >= self.timeout
+    }
+
     fn timeout_total(&self) -> bool {
         let timestamp = self
             .request
@@ -477,33 +481,6 @@ impl SignatureGenerator {
             .as_ref()
             .unwrap_or(&self.created);
         timestamp.elapsed() >= self.timeout_total
-    }
-
-    /// Receive the next message for the signature protocol; error out on the timeout being reached
-    /// or the channel having been closed (aborted).
-    async fn recv(&mut self) -> Result<SignatureMessage, SignError> {
-        let sign_id = self.request.indexed.id;
-        let presignature_id = self.dropper.id;
-        match tokio::time::timeout(
-            self.timeout.saturating_sub(self.created.elapsed()),
-            self.inbox.recv(),
-        )
-        .await
-        {
-            Ok(Some(msg)) => Ok(msg),
-            Ok(None) => {
-                tracing::warn!(?sign_id, presignature_id, "signature generation aborted");
-                Err(SignError::Aborted)
-            }
-            Err(_err) => {
-                tracing::warn!(
-                    ?sign_id,
-                    presignature_id,
-                    "signature generation timeout, retrying..."
-                );
-                Err(SignError::Retry)
-            }
-        }
     }
 
     async fn run(
@@ -547,6 +524,18 @@ impl SignatureGenerator {
                 break Err(SignError::TotalTimeout);
             }
 
+            if self.timeout() {
+                tracing::warn!(
+                    ?sign_id,
+                    presignature_id,
+                    "signature generation timeout, retrying..."
+                );
+                if self.request.proposer == me {
+                    signature_generator_failures_metric.inc();
+                }
+                break Err(SignError::Retry);
+            }
+
             let poke_start_time = Instant::now();
             let action = match self.protocol.poke() {
                 Ok(action) => action,
@@ -568,11 +557,9 @@ impl SignatureGenerator {
             match action {
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
-                    let msg = self.recv().await.inspect_err(|_| {
-                        if self.request.proposer == me {
-                            signature_generator_failures_metric.inc();
-                        }
-                    })?;
+                    let Some(msg) = self.inbox.recv().await else {
+                        break Err(SignError::Aborted);
+                    };
                     self.protocol.message(msg.from, msg.data);
                 }
                 Action::SendMany(data) => {

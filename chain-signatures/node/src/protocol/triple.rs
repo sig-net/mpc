@@ -82,27 +82,6 @@ impl TripleGenerator {
         })
     }
 
-    /// Receive the next message for the triple protocol; error out on the timeout being reached
-    /// or the channel having been closed (aborted).
-    async fn recv(&mut self) -> Option<TripleMessage> {
-        match tokio::time::timeout(
-            self.timeout.saturating_sub(self.created.elapsed()),
-            self.inbox.recv(),
-        )
-        .await
-        {
-            Ok(Some(msg)) => Some(msg),
-            Ok(None) => {
-                tracing::warn!(id = self.id, "triple generation aborted");
-                None
-            }
-            Err(_err) => {
-                tracing::warn!(id = self.id, "triple generation timeout");
-                None
-            }
-        }
-    }
-
     async fn run(mut self, my_account_id: AccountId, epoch: u64) {
         let before_first_poke_delay =
             crate::metrics::TRIPLE_BEFORE_POKE_DELAY.with_label_values(&[my_account_id.as_str()]);
@@ -131,6 +110,13 @@ impl TripleGenerator {
         before_first_poke_delay.observe(self.created.elapsed().as_millis() as f64);
 
         loop {
+            let elapsed = self.created.elapsed();
+            if elapsed > self.timeout {
+                failure_counts.inc();
+                tracing::warn!(id = self.id, ?elapsed, "triple protocol timed out");
+                break;
+            }
+
             let poke_start_time = Instant::now();
             let action = match self.protocol.poke() {
                 Ok(action) => action,
@@ -154,8 +140,7 @@ impl TripleGenerator {
             match action {
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
-                    let Some(msg) = self.recv().await else {
-                        failure_counts.inc();
+                    let Some(msg) = self.inbox.recv().await else {
                         break;
                     };
                     self.protocol.message(msg.from, msg.data);
@@ -226,7 +211,7 @@ impl TripleGenerator {
                         big_a = ?triple.public.big_a.to_base58(),
                         big_b = ?triple.public.big_b.to_base58(),
                         big_c = ?triple.public.big_c.to_base58(),
-                        elapsed = ?self.created.elapsed(),
+                        ?elapsed,
                         "completed triple generation"
                     );
 
