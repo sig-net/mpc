@@ -6,48 +6,39 @@ use k256::{
     Scalar, Secp256k1, SecretKey,
 };
 use near_account_id::AccountId;
-use sha3::{Digest, Keccak256, Sha3_256};
+use sha3::{Digest, Keccak256};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // Sig.Network with key derivation protocol vX.Y.Z.
 const EPSILON_DERIVATION_PREFIX: &str = "sig.network v1.0.0 epsilon derivation";
 
-const CHAIN_ID_NEAR: &str = "0x18d";
-pub fn derive_epsilon_near(predecessor_id: &AccountId, path: &str) -> Scalar {
-    // TODO: Use a key derivation library instead of doing this manually.
-    // https://crates.io/crates/hkdf might be a good option?
-    //
-    // ',' is ACCOUNT_DATA_SEPARATOR from nearcore that indicate the end
-    // of the accound id in the trie key. We reuse the same constant to
-    // indicate the end of the account id in derivation path.
-    // Do not reuse this hash function on anything that isn't an account
-    // ID or it'll be vunerable to Hash Melleability/extention attacks.
-    let derivation_path =
-        format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_NEAR},{predecessor_id},{path}");
-    let mut hasher = Sha3_256::new();
+fn full_derivation_path(chain_id: &str, requester: &str, path: &str) -> String {
+    format!("{EPSILON_DERIVATION_PREFIX},{chain_id},{requester},{path}")
+}
+
+fn hash_derivation_path(derivation_path: impl AsRef<[u8]>) -> Scalar {
+    let mut hasher = Keccak256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
     Scalar::from_non_biased(hash)
+}
+
+const CHAIN_ID_NEAR: &str = "0x18d";
+pub fn derive_epsilon_near(predecessor_id: &AccountId, path: &str) -> Scalar {
+    let derivation_path = full_derivation_path(CHAIN_ID_NEAR, &predecessor_id.to_string(), path);
+    hash_derivation_path(derivation_path)
 }
 
 const CHAIN_ID_ETHEREUM: &str = "0x1";
 pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
-    let derivation_path =
-        format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{requester},{path}");
-    let mut hasher = Keccak256::new();
-    hasher.update(derivation_path);
-    let hash: [u8; 32] = hasher.finalize().into();
-    Scalar::from_non_biased(hash)
+    let derivation_path = full_derivation_path(CHAIN_ID_ETHEREUM, &requester, path);
+    hash_derivation_path(derivation_path)
 }
 
 const CHAIN_ID_SOLANA: &str = "0x800001f5";
 pub fn derive_epsilon_sol(requester: &str, path: &str) -> Scalar {
-    let derivation_path =
-        format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_SOLANA},{requester},{path}");
-    let mut hasher = Keccak256::new();
-    hasher.update(derivation_path.as_bytes());
-    let hash: [u8; 32] = hasher.finalize().into();
-    Scalar::from_non_biased(hash)
+    let derivation_path = full_derivation_path(CHAIN_ID_SOLANA, requester, path);
+    hash_derivation_path(derivation_path.as_bytes())
 }
 
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
