@@ -74,7 +74,7 @@ pub(super) fn test_mock_network(
                     let action_str = match rpc {
                         RpcAction::Publish(publish_action) => {
                             format!(
-                                "RpcAction::Publish({:?}",
+                                "RpcAction::Publish({:?})",
                                 publish_action.request,
                             )
                         },
