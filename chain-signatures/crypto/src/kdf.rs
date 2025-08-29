@@ -165,14 +165,8 @@ mod tests {
         // Define epsilon
         let requester = "%admin#".to_string();
         let path = "signing_contract_control".to_string();
-        let chain_id = Chain::Ethereum.deprecated_chain_id();
-        let derivation_path =
-            format!("{EPSILON_DERIVATION_PREFIX_V1},{chain_id},{requester},{path}");
-
-        let mut hasher = Keccak256::new();
-        hasher.update(derivation_path);
-        let hash: [u8; 32] = hasher.finalize().into();
-        let epsilon = Scalar::from_non_biased(hash);
+        let derivation_path = derivation_path(0, Chain::Ethereum, &requester, &path);
+        let epsilon = hash_derivation_path(derivation_path);
 
         // Mainnet root PK
         let root_pk = "secp256k1:4tY4qMzusmgX5wYdG35663Y3Qar3CTbpApotwk9ZKLoF79XA4DjG8XoByaKdNHKQX9Lz5hd7iJqsWdTKyA7dKa6Z";
