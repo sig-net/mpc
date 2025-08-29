@@ -921,6 +921,13 @@ impl MessageOutbox {
             }
         }
     }
+
+    /// Allows tests to manually handle outgoing message before they are
+    /// encrypted and published.
+    #[cfg(feature = "test-feature")]
+    pub fn intercept_outgoing_messages(&mut self) -> &mut mpsc::Receiver<SendMessage> {
+        &mut self.outbox_rx
+    }
 }
 
 /// Partition a list of messages into a list of partitions where each partition is at most 256kb
@@ -966,7 +973,7 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
     partitions
 }
 
-fn cbor_to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, MessageError> {
+pub fn cbor_to_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, MessageError> {
     let mut buf = Vec::new();
     ciborium::into_writer(value, &mut buf)
         .map_err(|err| MessageError::CborConversion(err.to_string()))?;

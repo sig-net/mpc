@@ -10,6 +10,7 @@ use mpc_node::util::NearPublicKeyExt as _;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use test_log::test;
 
+pub mod mpc;
 pub mod nightly;
 pub mod store;
 pub mod sync;

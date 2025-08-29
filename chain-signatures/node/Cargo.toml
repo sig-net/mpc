@@ -12,8 +12,8 @@ async-trait = "0.1"
 atty = "0.2"
 aws-config = "1.4"
 aws-sdk-s3 = "1.29"
-axum = "0.6.19"
-axum-extra = "0.7"
+axum = "0.7.9"
+axum-extra = "0.9.6"
 chrono = "0.4.24"
 google-datastore1 = "=5.0.4"
 google-secretmanager1 = "5"
@@ -23,6 +23,7 @@ http = "1.1.0"
 hyper-rustls = { version = "=0.24", features = ["http2"] }
 local-ip-address = "0.5.4"
 lru = "0.13.0"
+mime = "0.3.17"
 prometheus = "0.14.0"
 redis = "0.27.2"
 semver = "1.0.23"
@@ -96,3 +97,5 @@ test-log = { version = "0.2.12", features = ["log", "trace"] }
 default = []
 # utilized for benchmarking the node:
 bench = []
+# utilized by "integration-tests" package:
+test-feature = []
