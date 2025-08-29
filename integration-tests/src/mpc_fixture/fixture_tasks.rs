@@ -7,13 +7,15 @@ use mpc_keys::hpke::Ciphered;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol;
-use mpc_node::protocol::message::{MessageOutbox, SignedMessage};
+use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
 use mpc_node::rpc::RpcAction;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+pub type MessageFilter = Box<dyn FnMut(&SendMessage) -> bool + Send>;
 
 pub(super) fn test_mock_network(
     routing_table: HashMap<Participant, Sender<Ciphered>>,
@@ -22,6 +24,7 @@ pub(super) fn test_mock_network(
     mut rpc_rx: Receiver<RpcAction>,
     mesh: watch::Sender<MeshState>,
     config: watch::Sender<Config>,
+    mut filter: MessageFilter,
 ) -> JoinHandle<()> {
     let msg_log = Arc::clone(&shared_output.msg_log);
     let rpc_actions = Arc::clone(&shared_output.rpc_actions);
@@ -30,7 +33,9 @@ pub(super) fn test_mock_network(
         tracing::debug!(target: "mock_network", "Test message executor started");
         loop {
             tokio::select! {
-                Some((msg, (from, to, ts))) = outbox.intercept_outgoing_messages().recv() => {
+                Some(send_message) = outbox.intercept_outgoing_messages().recv() => {
+                    let (msg, (from, to, ts)) = &send_message;
+
                     tracing::debug!(target: "mock_network", ?to, ?ts, "Received MPC message");
 
                     let log_msg = match msg {
@@ -44,19 +49,25 @@ pub(super) fn test_mock_network(
                     };
                     msg_log.lock().await.push(format!("{log_msg} from {from:?} to {to:?}"));
 
+                    if !filter(&send_message) {
+                        tracing::info!("Dropping a message because it didn't pass the test's filter");
+                        continue;
+                    }
+
+
                     // directly send out single message, no batching
                     // (might want to add MessageOutbox, too, but for now this is easier)
                     let config = config.borrow().clone();
                     let participants = mesh.borrow().active.clone();
-                    let receiver_info = participants.get(&to).expect("TODO: support sending to non-active participants in tests");
+                    let receiver_info = participants.get(to).expect("TODO: support sending to non-active participants in tests");
                     match SignedMessage::encrypt(
                         &[msg],
-                        from,
+                        *from,
                         &config.local.network.sign_sk,
                         &receiver_info.cipher_pk,
                     ) {
                         Ok(ciphered) => {
-                            if let Some(tx) = routing_table.get(&to) {
+                            if let Some(tx) = routing_table.get(to) {
                                 if let Err(e) = tx.send(ciphered).await {
                                     tracing::warn!(target: "mock_network", ?e, "Failed to forward encrypted message to {to:?}");
                                 }
