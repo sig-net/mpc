@@ -554,3 +554,10 @@ impl FromRedisValue for Presignature {
         })
     }
 }
+
+#[cfg(feature = "test-feature")]
+impl PresignatureStorage {
+    pub fn presignature_key(&self) -> &str {
+        &self.presig_key
+    }
+}

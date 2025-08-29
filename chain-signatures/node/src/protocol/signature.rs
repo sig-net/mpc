@@ -3,11 +3,12 @@ use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
+use crate::protocol::contract::primitives::Participants;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId, SignatureMessage};
 use crate::protocol::posit::{PositAction, PositInternalAction, Positor, Posits};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
-use crate::rpc::RpcChannel;
+use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_respond_tx::SignRespondSignatureChannel;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
@@ -23,7 +24,7 @@ use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::{derive_key, PublicKey};
 use mpc_primitives::{SignArgs, SignId};
 use rand::rngs::StdRng;
-use rand::seq::{IteratorRandom, SliceRandom};
+use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
@@ -98,8 +99,8 @@ impl PendingRequest {
 pub struct SignRequest {
     pub indexed: IndexedSignRequest,
     pub proposer: Participant,
-    pub participants: Vec<Participant>,
     pub stable: BTreeSet<Participant>,
+    pub round: usize,
 }
 
 pub struct SignQueue {
@@ -162,31 +163,60 @@ impl SignQueue {
 
     fn organize_request(
         &self,
-        threshold: usize,
         stable: &BTreeSet<Participant>,
+        participants: &Participants,
         indexed: IndexedSignRequest,
-        reorganize: bool,
+        initial_round: usize,
     ) -> SignRequest {
         let sign_id = indexed.id;
-        // NOTE: reorganize, will use the same entropy for reorganizing the participants. The only
-        // thing that would be different is the passed in stable participants.
-        let mut rng = StdRng::from_seed(indexed.args.entropy);
-        let subset = if indexed.participants.is_some() {
+        let reorganize = initial_round > 0;
+        let participants = if indexed.participants.is_some() {
             indexed.participants.clone().unwrap()
         } else {
-            stable.iter().copied().choose_multiple(&mut rng, threshold)
+            participants.iter().collect()
         };
-        let in_subset = subset.contains(&self.me);
-        let proposer = *subset.choose(&mut rng).unwrap();
-        let is_mine = proposer == self.me;
+        let mut participants = participants.keys_vec();
+        participants.sort();
 
+        // Simple round-robin selection of the proposer, using only inputs that
+        // are guaranteed to be the same on all nodes.
+        fn proposer_per_round(
+            round: usize,
+            participants: &[Participant],
+            entropy: &[u8; 32],
+        ) -> Participant {
+            // if entropy is random, using one byte is as good as using all
+            let index = entropy[0] as usize + round;
+            participants[index % participants.len()]
+        }
+
+        let max_rounds = initial_round + 512;
+        // Use the smallest round that selects a stable proposer.
+        let (round, proposer) = (initial_round..max_rounds)
+            .map(|round| {
+                (
+                    round,
+                    proposer_per_round(round, &participants, &indexed.args.entropy),
+                )
+            })
+            .find(|(_, potential_proposer)| stable.contains(potential_proposer))
+            // on exhausting all rounds, just pick one at random and have posits error out.
+            .unwrap_or_else(|| {
+                (
+                    max_rounds,
+                    *stable
+                        .iter()
+                        .choose(&mut StdRng::from_seed(indexed.args.entropy))
+                        .unwrap(),
+                )
+            });
+
+        let is_mine = proposer == self.me;
         tracing::info!(
             ?stable,
             ?sign_id,
-            ?subset,
             ?proposer,
             me = ?self.me,
-            in_subset,
             is_mine,
             "sign queue: {}organizing request",
             if reorganize { "re" } else { "" },
@@ -195,11 +225,11 @@ impl SignQueue {
         let request = SignRequest {
             indexed,
             proposer,
-            participants: subset,
             stable: stable.clone(),
+            round,
         };
 
-        if in_subset {
+        if is_mine {
             tracing::info!(
                 ?sign_id,
                 "saving sign request: node is in the {}signer subset",
@@ -218,12 +248,12 @@ impl SignQueue {
 
     pub async fn organize(
         &mut self,
-        threshold: usize,
         stable: &BTreeSet<Participant>,
+        participants: &Participants,
         my_account_id: &AccountId,
     ) {
         // Reorganize the failed requests with a potentially newer list of stable participants.
-        self.organize_failed(threshold, stable, my_account_id);
+        self.organize_failed(stable, participants, my_account_id);
 
         // try and organize the new incoming requests.
         let mut sign_rx = self.sign_rx.write().await;
@@ -245,7 +275,7 @@ impl SignQueue {
                 .with_label_values(&[indexed.chain.as_str(), my_account_id.as_str()])
                 .inc();
 
-            let request = self.organize_request(threshold, stable, indexed, false);
+            let request = self.organize_request(stable, participants, indexed, 0);
             let is_mine = request.proposer == self.me;
             if is_mine {
                 self.my_requests.push_back(sign_id);
@@ -268,8 +298,8 @@ impl SignQueue {
 
     fn organize_failed(
         &mut self,
-        threshold: usize,
         stable: &BTreeSet<Participant>,
+        participants: &Participants,
         my_account_id: &AccountId,
     ) {
         while let Some(id) = self.failed_requests.pop_front() {
@@ -281,7 +311,8 @@ impl SignQueue {
                 // just use the same request if the participants are the same
                 (false, request)
             } else {
-                let request = self.organize_request(threshold, stable, request.indexed, true);
+                let request =
+                    self.organize_request(stable, participants, request.indexed, request.round);
                 (true, request)
             };
 
@@ -364,6 +395,7 @@ enum SignError {
 struct SignatureGenerator {
     protocol: SignatureProtocol,
     dropper: PresignatureTakenDropper,
+    participants: Vec<Participant>,
     request: SignRequest,
     public_key: PublicKey,
     created: Instant,
@@ -436,6 +468,7 @@ impl SignatureGenerator {
         Ok(Self {
             protocol,
             dropper,
+            participants,
             request,
             public_key,
             created: Instant::now(),
@@ -448,10 +481,6 @@ impl SignatureGenerator {
         })
     }
 
-    fn timeout(&self) -> bool {
-        self.created.elapsed() >= self.timeout
-    }
-
     fn timeout_total(&self) -> bool {
         let timestamp = self
             .request
@@ -460,6 +489,33 @@ impl SignatureGenerator {
             .as_ref()
             .unwrap_or(&self.created);
         timestamp.elapsed() >= self.timeout_total
+    }
+
+    /// Receive the next message for the signature protocol; error out on the timeout being reached
+    /// or the channel having been closed (aborted).
+    async fn recv(&mut self) -> Result<SignatureMessage, SignError> {
+        let sign_id = self.request.indexed.id;
+        let presignature_id = self.dropper.id;
+        match tokio::time::timeout(
+            self.timeout.saturating_sub(self.created.elapsed()),
+            self.inbox.recv(),
+        )
+        .await
+        {
+            Ok(Some(msg)) => Ok(msg),
+            Ok(None) => {
+                tracing::warn!(?sign_id, presignature_id, "signature generation aborted");
+                Err(SignError::Aborted)
+            }
+            Err(_err) => {
+                tracing::warn!(
+                    ?sign_id,
+                    presignature_id,
+                    "signature generation timeout, retrying..."
+                );
+                Err(SignError::Retry)
+            }
+        }
     }
 
     async fn run(
@@ -503,18 +559,6 @@ impl SignatureGenerator {
                 break Err(SignError::TotalTimeout);
             }
 
-            if self.timeout() {
-                tracing::warn!(
-                    ?sign_id,
-                    presignature_id,
-                    "signature generation timeout, retrying..."
-                );
-                if self.request.proposer == me {
-                    signature_generator_failures_metric.inc();
-                }
-                break Err(SignError::Retry);
-            }
-
             let poke_start_time = Instant::now();
             let action = match self.protocol.poke() {
                 Ok(action) => action,
@@ -536,20 +580,22 @@ impl SignatureGenerator {
             match action {
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
-                    let Some(msg) = self.inbox.recv().await else {
-                        break Err(SignError::Aborted);
-                    };
+                    let msg = self.recv().await.inspect_err(|_| {
+                        if self.request.proposer == me {
+                            signature_generator_failures_metric.inc();
+                        }
+                    })?;
                     self.protocol.message(msg.from, msg.data);
                 }
                 Action::SendMany(data) => {
-                    for to in self.request.participants.iter() {
-                        if *to == me {
+                    for &to in self.participants.iter() {
+                        if to == me {
                             continue;
                         }
                         self.msg
                             .send(
                                 me,
-                                *to,
+                                to,
                                 SignatureMessage {
                                     id: sign_id,
                                     proposer: self.request.proposer,
@@ -873,7 +919,12 @@ impl SignatureSpawner {
         self.ongoing.spawn((sign_id, presignature_id), task);
     }
 
-    async fn handle_requests(&mut self, stable: &BTreeSet<Participant>, cfg: &ProtocolConfig) {
+    async fn handle_requests(
+        &mut self,
+        stable: &BTreeSet<Participant>,
+        participants: &Participants,
+        cfg: &ProtocolConfig,
+    ) {
         if stable.len() < self.threshold {
             tracing::warn!(
                 ?stable,
@@ -885,7 +936,7 @@ impl SignatureSpawner {
 
         self.sign_queue.expire(cfg);
         self.sign_queue
-            .organize(self.threshold, stable, &self.my_account_id)
+            .organize(stable, participants, &self.my_account_id)
             .await;
         crate::metrics::SIGN_QUEUE_SIZE
             .with_label_values(&[self.my_account_id.as_str()])
@@ -911,11 +962,7 @@ impl SignatureSpawner {
             };
 
             let stable = stable.iter().copied().collect::<Vec<_>>();
-            let participants = intersect_vec(&[
-                &stable,
-                &taken.presignature.participants,
-                &my_request.participants,
-            ]);
+            let participants = intersect_vec(&[&stable, &taken.presignature.participants]);
             if participants.len() < self.threshold {
                 tracing::warn!(
                     sign_id = ?my_request.indexed.id,
@@ -935,7 +982,12 @@ impl SignatureSpawner {
         }
     }
 
-    async fn run(mut self, mesh_state: watch::Receiver<MeshState>, cfg: watch::Receiver<Config>) {
+    async fn run(
+        mut self,
+        contract: ContractStateWatcher,
+        mesh_state: watch::Receiver<MeshState>,
+        cfg: watch::Receiver<Config>,
+    ) {
         // NOTE: signatures should only use stable and not active participants. The difference here is that
         // stable participants utilizes more than the online status of a node, such as whether or not their
         // block height is up to date, such that they too can process signature requests. If they cannot
@@ -987,9 +1039,12 @@ impl SignatureSpawner {
                     }
                 }
                 _ = check_requests_interval.tick() => {
+                    let Some(participants) = contract.participants() else {
+                        continue;
+                    };
                     let stable = mesh_state.borrow().stable.clone();
                     let protocol = cfg.borrow().protocol.clone();
-                    self.handle_requests(&stable, &protocol).await;
+                    self.handle_requests(&stable, &participants, &protocol).await;
                 }
             }
         }
@@ -1029,7 +1084,11 @@ impl SignatureSpawnerTask {
         );
 
         Self {
-            handle: tokio::spawn(spawner.run(ctx.mesh_state.clone(), ctx.config.clone())),
+            handle: tokio::spawn(spawner.run(
+                ctx.contract.clone(),
+                ctx.mesh_state.clone(),
+                ctx.config.clone(),
+            )),
         }
     }
 
