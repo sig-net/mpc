@@ -295,7 +295,7 @@ fn sign_request_from_filtered_log(
 
     let epsilon = derive_epsilon_eth(
         event.key_version,
-        format!("0x{}", event.requester.encode_hex()),
+        format!("0x{}", event.requester.encode_hex()).as_str(),
         &event.path,
     );
 
