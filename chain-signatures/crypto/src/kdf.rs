@@ -10,44 +10,84 @@ use sha3::{Digest, Keccak256, Sha3_256};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // Sig.Network with key derivation protocol vX.Y.Z.
-const EPSILON_DERIVATION_PREFIX: &str = "sig.network v1.0.0 epsilon derivation";
+const EPSILON_DERIVATION_PREFIX_V1: &str = "sig.network v1.0.0 epsilon derivation";
+const EPSILON_DERIVATION_PREFIX_V2: &str = "sig.network v2.0.0 epsilon derivation";
 
-const CHAIN_ID_NEAR: &str = "0x18d";
-pub fn derive_epsilon_near(predecessor_id: &AccountId, path: &str) -> Scalar {
-    // TODO: Use a key derivation library instead of doing this manually.
-    // https://crates.io/crates/hkdf might be a good option?
-    //
-    // ',' is ACCOUNT_DATA_SEPARATOR from nearcore that indicate the end
-    // of the accound id in the trie key. We reuse the same constant to
-    // indicate the end of the account id in derivation path.
-    // Do not reuse this hash function on anything that isn't an account
-    // ID or it'll be vunerable to Hash Melleability/extention attacks.
-    let derivation_path =
-        format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_NEAR},{predecessor_id},{path}");
+#[derive(Debug, Clone, Copy)]
+pub enum Chain {
+    Near,
+    Ethereum,
+    Solana,
+    Bitcoin,
+}
+
+impl Chain {
+    pub fn deprecated_chain_id(&self) -> &str {
+        match self {
+            Chain::Near => "0x18d",
+            Chain::Ethereum => "0x1",
+            Chain::Solana => "0x800001f5",
+            Chain::Bitcoin => "not_supported",
+        }
+    }
+
+    pub fn caip2_chain_id(&self) -> &str {
+        match self {
+            Chain::Near => "near:mainnet",
+            Chain::Ethereum => "eip155:1",
+            Chain::Solana => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
+        }
+    }
+}
+
+/// Creates a derivation path string using the legacy format
+fn depricated_derivation_path(chain: Chain, sender: &str, path: &str) -> String {
+    let chain_id = chain.deprecated_chain_id();
+    format!("{EPSILON_DERIVATION_PREFIX_V1},{chain_id},{sender},{path}")
+}
+
+/// Creates a derivation path string using the extended with prefix CAIP-2 format
+fn caip2_derivation_path(chain: Chain, sender: &str, derivation_path: &str) -> String {
+    let chain_id = chain.caip2_chain_id();
+    format!("{EPSILON_DERIVATION_PREFIX_V2}:{chain_id}:{sender}:{derivation_path}")
+}
+
+fn derivation_path(key_version: u32, chain: Chain, sender: &str, derivation_path: &str) -> String {
+    match key_version {
+        0 => depricated_derivation_path(chain, sender, derivation_path),
+        // Note: if the user provides a key_version that is higher than supported, we fall back to the latest supported one
+        _ => caip2_derivation_path(chain, sender, derivation_path),
+    }
+}
+
+fn hash_derivation_path_sha3(derivation_path: impl AsRef<[u8]>) -> Scalar {
     let mut hasher = Sha3_256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
     Scalar::from_non_biased(hash)
 }
 
-const CHAIN_ID_ETHEREUM: &str = "0x1";
-pub fn derive_epsilon_eth(requester: String, path: &str) -> Scalar {
-    let derivation_path =
-        format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{requester},{path}");
+fn hash_derivation_path_keccak(derivation_path: impl AsRef<[u8]>) -> Scalar {
     let mut hasher = Keccak256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
     Scalar::from_non_biased(hash)
 }
 
-const CHAIN_ID_SOLANA: &str = "0x800001f5";
-pub fn derive_epsilon_sol(requester: &str, path: &str) -> Scalar {
-    let derivation_path =
-        format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_SOLANA},{requester},{path}");
-    let mut hasher = Keccak256::new();
-    hasher.update(derivation_path.as_bytes());
-    let hash: [u8; 32] = hasher.finalize().into();
-    Scalar::from_non_biased(hash)
+pub fn derive_epsilon_near(key_version: u32, predecessor_id: &AccountId, path: &str) -> Scalar {
+    let derivation_path = derivation_path(key_version, Chain::Near, predecessor_id.as_str(), path);
+    hash_derivation_path_sha3(derivation_path)
+}
+
+pub fn derive_epsilon_eth(key_version: u32, sender: &str, path: &str) -> Scalar {
+    let derivation_path = derivation_path(key_version, Chain::Ethereum, sender, path);
+    hash_derivation_path_keccak(derivation_path)
+}
+
+pub fn derive_epsilon_sol(key_version: u32, sender: &str, path: &str) -> Scalar {
+    let derivation_path = derivation_path(key_version, Chain::Solana, sender, path);
+    hash_derivation_path_keccak(derivation_path.as_bytes())
 }
 
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
@@ -129,15 +169,9 @@ mod tests {
     #[test]
     fn derive_ethereum_admin_key() {
         // Define epsilon
-        let requester = "%admin#".to_string();
+        let sender = "%admin#".to_string();
         let path = "signing_contract_control".to_string();
-        let derivation_path =
-            format!("{EPSILON_DERIVATION_PREFIX},{CHAIN_ID_ETHEREUM},{requester},{path}");
-
-        let mut hasher = Keccak256::new();
-        hasher.update(derivation_path);
-        let hash: [u8; 32] = hasher.finalize().into();
-        let epsilon = Scalar::from_non_biased(hash);
+        let epsilon = derive_epsilon_eth(0, &sender, &path);
 
         // Mainnet root PK
         let root_pk = "secp256k1:4tY4qMzusmgX5wYdG35663Y3Qar3CTbpApotwk9ZKLoF79XA4DjG8XoByaKdNHKQX9Lz5hd7iJqsWdTKyA7dKa6Z";

@@ -8,6 +8,8 @@ use sha3::Digest;
 
 use crate::bytes::cbor_scalar;
 
+pub const LATEST_MPC_KEY_VERSION: u32 = 1;
+
 #[derive(
     Copy,
     Clone,

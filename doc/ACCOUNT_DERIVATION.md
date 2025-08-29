@@ -13,11 +13,10 @@ At Sig.Network we use the [CAIP-2](https://chainagnostic.org/CAIPs/caip-2) stand
 
 The following examples show how different blockchain networks are identified using CAIP-2:
 - Solana Mainnet: `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`
-- Solana Devnet: `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`
 - Ethereum Mainnet: `eip155:1`
-- Ethereum Sepolia: `eip155:11155111`
 - Bitcoin Mainnet: `bip122:000000000019d6689c085ae165831e93`
-- Bitcoin Testnet: `bip122:000000000933ea01ad0ee984209779ba`
+
+For simplicity, we reuse Mainnet derivation paths for all dev and testnet networks. For example, Ethereum Sepolia will have the same derivation path as Ethereum Mainnet.
 
 ## Account Derivation
 
@@ -31,7 +30,7 @@ The full derivation path consists of the following variables:
 {EPSILON_DERIVATION_PREFIX}:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}
 ```
 Where:
-- **EPSILON_DERIVATION_PREFIX** = `sig.network v1 epsilon derivation`
+- **EPSILON_DERIVATION_PREFIX** = `sig.network v2.0.0 epsilon derivation`
 - **CAIP2_CHAIN_ID** - CAIP-2 chain_id, for example `eip155:1`
 - **SENDER** - Account ID, often a public key, of the account that sent the signature request
 - **DERIVATION_PATH** - A string provided by the SENDER, that is included at the end of the derivation path

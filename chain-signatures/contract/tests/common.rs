@@ -11,7 +11,7 @@ use mpc_contract::primitives::{CandidateInfo, ParticipantInfo, Participants, Sig
 use mpc_contract::update::UpdateId;
 use mpc_crypto::kdf::{check_ec_signature, derive_secret_key};
 use mpc_crypto::{derive_epsilon_near, derive_key};
-use mpc_primitives::{SignId, Signature};
+use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccountId, NearToken};
 use near_workspaces::{Account, Contract, Worker};
@@ -157,7 +157,7 @@ pub async fn create_response(
     let (digest, scalar_hash, payload_hash) = process_message(msg).await;
     let pk = sk.public_key();
 
-    let epsilon = derive_epsilon_near(predecessor_id, path);
+    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, predecessor_id, path);
     let derived_sk = derive_secret_key(sk, epsilon);
     let derived_pk = derive_key(pk.into(), epsilon);
     let signing_key = k256::ecdsa::SigningKey::from(&derived_sk);
