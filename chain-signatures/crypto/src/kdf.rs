@@ -6,7 +6,7 @@ use k256::{
     Scalar, Secp256k1, SecretKey,
 };
 use near_account_id::AccountId;
-use sha3::{Digest, Keccak256};
+use sha3::{Digest, Keccak256, Sha3_256};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // Sig.Network with key derivation protocol vX.Y.Z.
@@ -61,7 +61,14 @@ fn derivation_path(key_version: u32, chain: Chain, sender: &str, derivation_path
     }
 }
 
-fn hash_derivation_path(derivation_path: impl AsRef<[u8]>) -> Scalar {
+fn hash_derivation_path_sha3(derivation_path: impl AsRef<[u8]>) -> Scalar {
+    let mut hasher = Sha3_256::new();
+    hasher.update(derivation_path);
+    let hash: [u8; 32] = hasher.finalize().into();
+    Scalar::from_non_biased(hash)
+}
+
+fn hash_derivation_path_keccak(derivation_path: impl AsRef<[u8]>) -> Scalar {
     let mut hasher = Keccak256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
@@ -69,18 +76,18 @@ fn hash_derivation_path(derivation_path: impl AsRef<[u8]>) -> Scalar {
 }
 
 pub fn derive_epsilon_near(key_version: u32, predecessor_id: &AccountId, path: &str) -> Scalar {
-    let derivation_path = derivation_path(key_version, Chain::Near, predecessor_id.as_ref(), path);
-    hash_derivation_path(derivation_path)
+    let derivation_path = derivation_path(key_version, Chain::Near, predecessor_id.as_str(), path);
+    hash_derivation_path_sha3(derivation_path)
 }
 
-pub fn derive_epsilon_eth(key_version: u32, requester: String, path: &str) -> Scalar {
-    let derivation_path = derivation_path(key_version, Chain::Ethereum, &requester, path);
-    hash_derivation_path(derivation_path)
+pub fn derive_epsilon_eth(key_version: u32, sender: &str, path: &str) -> Scalar {
+    let derivation_path = derivation_path(key_version, Chain::Ethereum, sender, path);
+    hash_derivation_path_keccak(derivation_path)
 }
 
-pub fn derive_epsilon_sol(key_version: u32, requester: &str, path: &str) -> Scalar {
-    let derivation_path = derivation_path(key_version, Chain::Solana, requester, path);
-    hash_derivation_path(derivation_path.as_bytes())
+pub fn derive_epsilon_sol(key_version: u32, sender: &str, path: &str) -> Scalar {
+    let derivation_path = derivation_path(key_version, Chain::Solana, sender, path);
+    hash_derivation_path_keccak(derivation_path.as_bytes())
 }
 
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
@@ -157,16 +164,14 @@ mod tests {
     use super::*;
     use crate::near_public_key_to_affine_point;
     use std::str::FromStr;
-    use Chain;
 
     // This logic is used to determine MPC PK (address) that is set as admin in Ethereum contract
     #[test]
     fn derive_ethereum_admin_key() {
         // Define epsilon
-        let requester = "%admin#".to_string();
+        let sender = "%admin#".to_string();
         let path = "signing_contract_control".to_string();
-        let derivation_path = derivation_path(0, Chain::Ethereum, &requester, &path);
-        let epsilon = hash_derivation_path(derivation_path);
+        let epsilon = derive_epsilon_eth(0, &sender, &path);
 
         // Mainnet root PK
         let root_pk = "secp256k1:4tY4qMzusmgX5wYdG35663Y3Qar3CTbpApotwk9ZKLoF79XA4DjG8XoByaKdNHKQX9Lz5hd7iJqsWdTKyA7dKa6Z";
