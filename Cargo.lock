@@ -5514,7 +5514,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "helios"
 version = "0.9.0"
-source = "git+https://github.com/sig-net/helios?rev=a0e50e11066f999c393f58271cb255ace2a6c179#a0e50e11066f999c393f58271cb255ace2a6c179"
+source = "git+https://github.com/sig-net/helios?rev=eda05b39886fd4ef4ad55f17291f25e45edab7f5#eda05b39886fd4ef4ad55f17291f25e45edab7f5"
 dependencies = [
  "helios-common",
  "helios-core",
@@ -5525,7 +5525,7 @@ dependencies = [
 [[package]]
 name = "helios-common"
 version = "0.9.0"
-source = "git+https://github.com/sig-net/helios?rev=a0e50e11066f999c393f58271cb255ace2a6c179#a0e50e11066f999c393f58271cb255ace2a6c179"
+source = "git+https://github.com/sig-net/helios?rev=eda05b39886fd4ef4ad55f17291f25e45edab7f5#eda05b39886fd4ef4ad55f17291f25e45edab7f5"
 dependencies = [
  "alloy",
  "async-trait",
@@ -5541,7 +5541,7 @@ dependencies = [
 [[package]]
 name = "helios-consensus-core"
 version = "0.9.0"
-source = "git+https://github.com/sig-net/helios?rev=a0e50e11066f999c393f58271cb255ace2a6c179#a0e50e11066f999c393f58271cb255ace2a6c179"
+source = "git+https://github.com/sig-net/helios?rev=eda05b39886fd4ef4ad55f17291f25e45edab7f5#eda05b39886fd4ef4ad55f17291f25e45edab7f5"
 dependencies = [
  "alloy",
  "alloy-rlp",
@@ -5566,7 +5566,7 @@ dependencies = [
 [[package]]
 name = "helios-core"
 version = "0.9.0"
-source = "git+https://github.com/sig-net/helios?rev=a0e50e11066f999c393f58271cb255ace2a6c179#a0e50e11066f999c393f58271cb255ace2a6c179"
+source = "git+https://github.com/sig-net/helios?rev=eda05b39886fd4ef4ad55f17291f25e45edab7f5#eda05b39886fd4ef4ad55f17291f25e45edab7f5"
 dependencies = [
  "alloy",
  "alloy-trie",
@@ -5596,7 +5596,7 @@ dependencies = [
 [[package]]
 name = "helios-ethereum"
 version = "0.9.0"
-source = "git+https://github.com/sig-net/helios?rev=a0e50e11066f999c393f58271cb255ace2a6c179#a0e50e11066f999c393f58271cb255ace2a6c179"
+source = "git+https://github.com/sig-net/helios?rev=eda05b39886fd4ef4ad55f17291f25e45edab7f5#eda05b39886fd4ef4ad55f17291f25e45edab7f5"
 dependencies = [
  "alloy",
  "alloy-trie",
@@ -5634,7 +5634,7 @@ dependencies = [
 [[package]]
 name = "helios-opstack"
 version = "0.9.0"
-source = "git+https://github.com/sig-net/helios?rev=a0e50e11066f999c393f58271cb255ace2a6c179#a0e50e11066f999c393f58271cb255ace2a6c179"
+source = "git+https://github.com/sig-net/helios?rev=eda05b39886fd4ef4ad55f17291f25e45edab7f5#eda05b39886fd4ef4ad55f17291f25e45edab7f5"
 dependencies = [
  "alloy",
  "alloy-rlp",
@@ -5680,7 +5680,7 @@ dependencies = [
 [[package]]
 name = "helios-revm-utils"
 version = "0.9.0"
-source = "git+https://github.com/sig-net/helios?rev=a0e50e11066f999c393f58271cb255ace2a6c179#a0e50e11066f999c393f58271cb255ace2a6c179"
+source = "git+https://github.com/sig-net/helios?rev=eda05b39886fd4ef4ad55f17291f25e45edab7f5#eda05b39886fd4ef4ad55f17291f25e45edab7f5"
 dependencies = [
  "alloy",
  "eyre",
@@ -5695,7 +5695,7 @@ dependencies = [
 [[package]]
 name = "helios-verifiable-api-client"
 version = "0.9.0"
-source = "git+https://github.com/sig-net/helios?rev=a0e50e11066f999c393f58271cb255ace2a6c179#a0e50e11066f999c393f58271cb255ace2a6c179"
+source = "git+https://github.com/sig-net/helios?rev=eda05b39886fd4ef4ad55f17291f25e45edab7f5#eda05b39886fd4ef4ad55f17291f25e45edab7f5"
 dependencies = [
  "alloy",
  "async-trait",
@@ -5714,7 +5714,7 @@ dependencies = [
 [[package]]
 name = "helios-verifiable-api-types"
 version = "0.9.0"
-source = "git+https://github.com/sig-net/helios?rev=a0e50e11066f999c393f58271cb255ace2a6c179#a0e50e11066f999c393f58271cb255ace2a6c179"
+source = "git+https://github.com/sig-net/helios?rev=eda05b39886fd4ef4ad55f17291f25e45edab7f5#eda05b39886fd4ef4ad55f17291f25e45edab7f5"
 dependencies = [
  "alloy",
  "helios-common",

@@ -437,13 +437,13 @@ pub async fn run(
         return;
     };
 
-    let last_processed_block = app_data_storage
-        .last_processed_block_eth()
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("Failed to get last processed block: {err:?}");
-            None
-        });
+    // let last_processed_block = app_data_storage
+    //     .last_processed_block_eth()
+    //     .await
+    //     .unwrap_or_else(|err| {
+    //         tracing::warn!("Failed to get last processed block: {err:?}");
+    //         None
+    //     });
 
     let Ok(network) = Network::from_str(eth.network.as_str()) else {
         tracing::error!("Network input incorrect: {}", eth.network);
@@ -489,147 +489,147 @@ pub async fn run(
 
     tracing::info!("running ethereum indexer");
 
-    let mut block_heads_rx = match client.subscribe(SubscriptionType::NewHeads).await {
-        Ok(block_heads_rx) => block_heads_rx,
-        Err(err) => {
-            tracing::error!("Failed to subscribe to new block heads: {err:?}");
-            return;
-        }
-    };
+    // let mut block_heads_rx = match client.subscribe(SubscriptionType::NewHeads).await {
+    //     Ok(block_heads_rx) => block_heads_rx,
+    //     Err(err) => {
+    //         tracing::error!("Failed to subscribe to new block heads: {err:?}");
+    //         return;
+    //     }
+    // };
 
-    let Ok(eth_contract_addr) = Address::from_str(&format!("0x{}", eth.contract_address)) else {
-        tracing::error!("Failed to parse contract address: {}", eth.contract_address);
-        return;
-    };
-    let total_timeout = Duration::from_secs(eth.total_timeout);
+    // let Ok(eth_contract_addr) = Address::from_str(&format!("0x{}", eth.contract_address)) else {
+    //     tracing::error!("Failed to parse contract address: {}", eth.contract_address);
+    //     return;
+    // };
+    // let total_timeout = Duration::from_secs(eth.total_timeout);
 
-    let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
+    // let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
 
-    let (requests_indexed_send, requests_indexed_recv) = indexed_channel();
+    // let (requests_indexed_send, requests_indexed_recv) = indexed_channel();
 
-    let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
+    // let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
 
-    let (blocks_to_process_send, mut blocks_to_process_recv) = blocks_to_process_channel();
+    // let (blocks_to_process_send, mut blocks_to_process_recv) = blocks_to_process_channel();
 
-    let client = Arc::new(client);
+    // let client = Arc::new(client);
 
-    let client_clone = Arc::clone(&client);
-    tokio::spawn(async move {
-        tracing::info!("Spawned task to refresh the latest finalized block");
-        refresh_finalized_block(
-            &client_clone,
-            finalized_block_send.clone(),
-            eth.refresh_finalized_interval,
-        )
-        .await;
-    });
+    // let client_clone = Arc::clone(&client);
+    // tokio::spawn(async move {
+    //     tracing::info!("Spawned task to refresh the latest finalized block");
+    //     refresh_finalized_block(
+    //         &client_clone,
+    //         finalized_block_send.clone(),
+    //         eth.refresh_finalized_interval,
+    //     )
+    //     .await;
+    // });
 
-    let near_account_id_clone = node_near_account_id.clone();
-    let client_clone = Arc::clone(&client);
-    tokio::spawn(async move {
-        tracing::info!("Spawned task to send indexed requests to send queue");
-        send_requests_when_final(
-            &client_clone,
-            requests_indexed_recv,
-            finalized_block_recv,
-            sign_tx.clone(),
-            app_data_storage.clone(),
-            near_account_id_clone.clone(),
-        )
-        .await;
-    });
+    // let near_account_id_clone = node_near_account_id.clone();
+    // let client_clone = Arc::clone(&client);
+    // tokio::spawn(async move {
+    //     tracing::info!("Spawned task to send indexed requests to send queue");
+    //     send_requests_when_final(
+    //         &client_clone,
+    //         requests_indexed_recv,
+    //         finalized_block_recv,
+    //         sign_tx.clone(),
+    //         app_data_storage.clone(),
+    //         near_account_id_clone.clone(),
+    //     )
+    //     .await;
+    // });
 
-    let near_account_id_clone = node_near_account_id.clone();
-    let requests_indexed_send_clone = requests_indexed_send.clone();
-    let blocks_failed_send_clone = blocks_failed_send.clone();
-    let client_clone = Arc::clone(&client);
-    tokio::spawn(async move {
-        tracing::info!("Spawned task to retry failed blocks");
-        retry_failed_blocks(
-            blocks_failed_recv,
-            blocks_failed_send_clone,
-            &client_clone,
-            eth_contract_addr,
-            near_account_id_clone,
-            requests_indexed_send_clone,
-            total_timeout,
-        )
-        .await;
-    });
+    // let near_account_id_clone = node_near_account_id.clone();
+    // let requests_indexed_send_clone = requests_indexed_send.clone();
+    // let blocks_failed_send_clone = blocks_failed_send.clone();
+    // let client_clone = Arc::clone(&client);
+    // tokio::spawn(async move {
+    //     tracing::info!("Spawned task to retry failed blocks");
+    //     retry_failed_blocks(
+    //         blocks_failed_recv,
+    //         blocks_failed_send_clone,
+    //         &client_clone,
+    //         eth_contract_addr,
+    //         near_account_id_clone,
+    //         requests_indexed_send_clone,
+    //         total_timeout,
+    //     )
+    //     .await;
+    // });
 
-    let blocks_to_process_send_clone = blocks_to_process_send.clone();
-    if let Some(last_processed_block) = last_processed_block {
-        let Ok(SubscriptionEvent::NewHeads(latest_block)) = block_heads_rx.recv().await else {
-            tracing::warn!("Failed to receive latest block head");
-            return;
-        };
-        let end_block_number = latest_block.header.number;
-        add_catchup_blocks_to_process(
-            blocks_to_process_send_clone,
-            last_processed_block,
-            end_block_number,
-        )
-        .await;
-    }
+    // let blocks_to_process_send_clone = blocks_to_process_send.clone();
+    // if let Some(last_processed_block) = last_processed_block {
+    //     let Ok(SubscriptionEvent::NewHeads(latest_block)) = block_heads_rx.recv().await else {
+    //         tracing::warn!("Failed to receive latest block head");
+    //         return;
+    //     };
+    //     let end_block_number = latest_block.header.number;
+    //     add_catchup_blocks_to_process(
+    //         blocks_to_process_send_clone,
+    //         last_processed_block,
+    //         end_block_number,
+    //     )
+    //     .await;
+    // }
 
-    let blocks_to_process_send_clone = blocks_to_process_send.clone();
-    tokio::spawn(async move {
-        tracing::info!("Spawned task to add new blocks to process");
-        add_new_block_to_process(block_heads_rx, blocks_to_process_send_clone).await;
-    });
+    // let blocks_to_process_send_clone = blocks_to_process_send.clone();
+    // tokio::spawn(async move {
+    //     tracing::info!("Spawned task to add new blocks to process");
+    //     add_new_block_to_process(block_heads_rx, blocks_to_process_send_clone).await;
+    // });
 
-    let mut interval = tokio::time::interval(Duration::from_millis(200));
-    let requests_indexed_send_clone = requests_indexed_send.clone();
-    loop {
-        let Some(block_to_process) = blocks_to_process_recv.recv().await else {
-            interval.tick().await;
-            continue;
-        };
-        let (block_number, block_hash, is_catchup) = match block_to_process {
-            BlockToProcess::Catchup(block_number) => {
-                let block = fetch_block(
-                    &client,
-                    BlockId::Number(BlockNumberOrTag::Number(block_number)),
-                    5,
-                    Duration::from_millis(200),
-                )
-                .await;
-                if let Some(block) = block {
-                    (block.header.number, block.header.hash, true)
-                } else {
-                    continue;
-                }
-            }
-            BlockToProcess::NewBlock((block_number, block_hash)) => {
-                (block_number, block_hash, false)
-            }
-        };
-        if let Err(err) = process_block(
-            block_number,
-            block_hash,
-            &client,
-            eth_contract_addr,
-            node_near_account_id.clone(),
-            requests_indexed_send_clone.clone(),
-            total_timeout,
-        )
-        .await
-        {
-            tracing::warn!("Eth indexer failed to process block number {block_number}: {err:?}");
-            add_failed_block(blocks_failed_send.clone(), block_number, block_hash).await;
-            continue;
-        }
-        if block_number % 10 == 0 {
-            if is_catchup {
-                tracing::info!("Processed catchup block number {block_number}");
-            } else {
-                tracing::info!("Processed new block number {block_number}");
-            }
-        }
-        crate::metrics::LATEST_BLOCK_NUMBER
-            .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
-            .set(block_number as i64);
-    }
+    // let mut interval = tokio::time::interval(Duration::from_millis(200));
+    // let requests_indexed_send_clone = requests_indexed_send.clone();
+    // loop {
+    //     let Some(block_to_process) = blocks_to_process_recv.recv().await else {
+    //         interval.tick().await;
+    //         continue;
+    //     };
+    //     let (block_number, block_hash, is_catchup) = match block_to_process {
+    //         BlockToProcess::Catchup(block_number) => {
+    //             let block = fetch_block(
+    //                 &client,
+    //                 BlockId::Number(BlockNumberOrTag::Number(block_number)),
+    //                 5,
+    //                 Duration::from_millis(200),
+    //             )
+    //             .await;
+    //             if let Some(block) = block {
+    //                 (block.header.number, block.header.hash, true)
+    //             } else {
+    //                 continue;
+    //             }
+    //         }
+    //         BlockToProcess::NewBlock((block_number, block_hash)) => {
+    //             (block_number, block_hash, false)
+    //         }
+    //     };
+    //     if let Err(err) = process_block(
+    //         block_number,
+    //         block_hash,
+    //         &client,
+    //         eth_contract_addr,
+    //         node_near_account_id.clone(),
+    //         requests_indexed_send_clone.clone(),
+    //         total_timeout,
+    //     )
+    //     .await
+    //     {
+    //         tracing::warn!("Eth indexer failed to process block number {block_number}: {err:?}");
+    //         add_failed_block(blocks_failed_send.clone(), block_number, block_hash).await;
+    //         continue;
+    //     }
+    //     if block_number % 10 == 0 {
+    //         if is_catchup {
+    //             tracing::info!("Processed catchup block number {block_number}");
+    //         } else {
+    //             tracing::info!("Processed new block number {block_number}");
+    //         }
+    //     }
+    //     crate::metrics::LATEST_BLOCK_NUMBER
+    //         .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
+    //         .set(block_number as i64);
+    // }
 }
 
 async fn retry_failed_blocks(
