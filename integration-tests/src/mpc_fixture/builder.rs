@@ -21,6 +21,7 @@ use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
+use mpc_node::sign_respond_tx::SignRespondSignatureProcessor;
 use mpc_node::storage::{presignature_storage, secret_storage, triple_storage, Options};
 use near_sdk::AccountId;
 use std::collections::HashMap;
@@ -354,6 +355,8 @@ impl MpcFixtureNodeBuilder {
         let rpc_channel = RpcChannel { tx: rpc_tx };
         let (mesh_tx, mesh_rx) = watch::channel(context.init_mesh.clone());
         let (config_tx, config_rx) = watch::channel(self.config);
+        let (sign_respond_signature_channel, _sign_respond_signature_processor) =
+            SignRespondSignatureProcessor::new();
 
         let channels = protocol::test_setup::TestProtocolChannels {
             sign_rx: Arc::new(RwLock::new(sign_rx)),
@@ -361,6 +364,7 @@ impl MpcFixtureNodeBuilder {
             rpc_channel,
             config: config_rx.clone(),
             mesh_state: mesh_rx.clone(),
+            sign_respond_signature_channel: sign_respond_signature_channel.clone(),
         };
 
         // We have to start the inbox job before calling

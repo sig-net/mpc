@@ -83,6 +83,7 @@ pub struct PublishAction {
     pub public_key: mpc_crypto::PublicKey,
     pub request: SignRequest,
     output: FullSignature<Secp256k1>,
+    pub participants: Vec<Participant>,
     timestamp: Instant,
     retry_count: usize,
 }
@@ -102,6 +103,7 @@ impl RpcChannel {
         public_key: mpc_crypto::PublicKey,
         request: SignRequest,
         output: FullSignature<Secp256k1>,
+        participants: Vec<Participant>,
     ) {
         let rpc = self.clone();
         tokio::spawn(async move {
@@ -111,6 +113,7 @@ impl RpcChannel {
                     public_key,
                     request,
                     output,
+                    participants,
                     timestamp: Instant::now(),
                     retry_count: 0,
                 }))
@@ -1401,6 +1404,7 @@ async fn try_publish_sol(
             action.public_key,
             action.request.clone(),
             action.output.clone(),
+            action.participants.clone(),
         );
     }
 

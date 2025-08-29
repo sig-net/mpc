@@ -170,12 +170,11 @@ impl SignQueue {
     ) -> SignRequest {
         let sign_id = indexed.id;
         let reorganize = initial_round > 0;
-        let participants = if indexed.participants.is_some() {
+        let mut participants = if indexed.participants.is_some() {
             indexed.participants.clone().unwrap()
         } else {
-            participants.iter().collect()
+            participants.keys().cloned().collect()
         };
-        let mut participants = participants.keys_vec();
         participants.sort();
 
         // Simple round-robin selection of the proposer, using only inputs that
@@ -644,8 +643,12 @@ impl SignatureGenerator {
                         .observe(self.created.elapsed().as_secs_f64());
 
                     if self.request.proposer == me {
-                        self.rpc
-                            .publish(self.public_key, self.request.clone(), output);
+                        self.rpc.publish(
+                            self.public_key,
+                            self.request.clone(),
+                            output,
+                            self.participants.clone(),
+                        );
                     } else if let SignRequestType::SignRespond(_) =
                         self.request.indexed.sign_request_type
                     {
@@ -653,6 +656,7 @@ impl SignatureGenerator {
                             self.public_key,
                             self.request.clone(),
                             output,
+                            self.participants.clone(),
                         );
                     }
 

@@ -102,7 +102,7 @@ impl SignRespondTx {
             request_id: sign_respond_signature.request.indexed.id.request_id,
             from_address,
             nonce,
-            participants: sign_respond_signature.request.participants,
+            participants: sign_respond_signature.participants,
         })
     }
 }
@@ -525,6 +525,7 @@ pub struct SignRespondSignature {
     pub public_key: mpc_crypto::PublicKey,
     pub request: SignRequest,
     pub signature: Signature,
+    pub participants: Vec<Participant>,
 }
 
 #[derive(Clone)]
@@ -538,6 +539,7 @@ impl SignRespondSignatureChannel {
         public_key: mpc_crypto::PublicKey,
         request: SignRequest,
         output: FullSignature<Secp256k1>,
+        participants: Vec<Participant>,
     ) {
         let tx = self.tx.clone();
         let expected_public_key = mpc_crypto::derive_key(public_key, request.indexed.args.epsilon);
@@ -559,6 +561,7 @@ impl SignRespondSignatureChannel {
                     public_key,
                     request,
                     signature,
+                    participants,
                 })
                 .await
             {
