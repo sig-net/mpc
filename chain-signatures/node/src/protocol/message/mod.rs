@@ -719,7 +719,7 @@ impl SignedMessage {
 type FromParticipant = Participant;
 type ToParticipant = Participant;
 type MessageRoute = (FromParticipant, ToParticipant);
-type SendMessage = (Message, (FromParticipant, ToParticipant, Instant));
+pub type SendMessage = (Message, (FromParticipant, ToParticipant, Instant));
 
 pub struct Partition {
     messages: Vec<Message>,
