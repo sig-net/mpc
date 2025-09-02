@@ -37,6 +37,13 @@ struct AbiField {
     typ: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SignRespondTxStatus {
+    Pending,
+    Failed,
+    Success,
+}
+
 #[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SignRespondTx {
     pub id: SignRespondTxId,
@@ -57,6 +64,7 @@ pub struct SignRespondTx {
     pub from_address: Address,
     pub nonce: u64,
     pub participants: Vec<Participant>,
+    pub status: SignRespondTxStatus,
 }
 
 impl SignRespondTx {
@@ -103,6 +111,7 @@ impl SignRespondTx {
             from_address,
             nonce,
             participants: sign_respond_signature.participants,
+            status: SignRespondTxStatus::Pending,
         })
     }
 }
@@ -157,22 +166,6 @@ impl Output {
 
         let mut buf = Vec::with_capacity(128);
 
-        // // Top-level framing (example): number of fields (u32)
-        // (fields.len() as u32).serialize(&mut buf)?;
-
-        // for f in fields {
-        //     // 1) Field name as Borsh string
-        //     f.name.serialize(&mut buf)?;
-
-        //     // 2) Value (required)
-        //     let val = self
-        //         .0
-        //         .get(&f.name)
-        //         .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", f.name))?;
-
-        //     // 3) Serialize the DynSolValue using Borsh-friendly helpers
-        //     serialize_dynsol(&mut buf, val)?;
-        // }
         assert!(fields.len() == 1);
         let val = self
             .0
@@ -218,8 +211,6 @@ impl TransactionOutput {
         else {
             return Err(anyhow::anyhow!("Can't decode to tuple type"));
         };
-        // let json_abi = parse_abi(schema_json)?;
-        // let decoded_tokens = decode_with_alloy(&json_abi, call_result)?;
 
         // Map to named output
         let mut output_map = HashMap::new();

@@ -8,6 +8,7 @@ use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::Log;
 
+use crate::sign_respond_tx::SignRespondTxStatus;
 use alloy::sol_types::{sol, SolEvent};
 use helios::common::types::{SubscriptionEvent, SubscriptionType};
 use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
@@ -881,6 +882,7 @@ async fn process_block(
             .await
             .iter()
             .map(|(id, tx)| (*id, tx.clone()))
+            .filter(|(_, tx)| tx.status == SignRespondTxStatus::Pending)
             .collect()
     };
     let mut read_respond_requests: Vec<IndexedSignRequest> = Vec::new();
@@ -894,16 +896,89 @@ async fn process_block(
             receipt.transaction_hash,
             if status { "success" } else { "failed" }
         );
-        let pending_tx = pending_tx.clone();
         let client_clone = client.clone();
+        let mut pending_tx = pending_tx.clone();
+        pending_tx.status = if status {
+            SignRespondTxStatus::Success
+        } else {
+            SignRespondTxStatus::Failed
+        };
 
-        let completed_tx = crate::read_respond::CompletedTx::new(pending_tx, block_number, status);
+        let pending_tx_clone = pending_tx.clone();
+        let completed_tx = crate::read_respond::CompletedTx::new(pending_tx_clone, block_number);
 
         let read_respond_request: Option<IndexedSignRequest> = completed_tx
             .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
             .await;
         if let Some(read_respond_request) = read_respond_request {
             read_respond_requests.push(read_respond_request);
+            sign_respond_tx_map
+                .write()
+                .await
+                .insert(receipt.transaction_hash.into(), pending_tx.clone());
+        } else {
+            // failed to create sign request from completed tx, remove the tx from the map
+            tracing::warn!(
+                "Failed to create sign request from completed tx, removing tx from map: {:?}",
+                receipt.transaction_hash
+            );
+            sign_respond_tx_map
+                .write()
+                .await
+                .remove(&receipt.transaction_hash.into());
+        }
+    }
+
+    let remaining_pending_txs: HashMap<SignRespondTxId, SignRespondTx> = {
+        sign_respond_tx_map
+            .read()
+            .await
+            .iter()
+            .map(|(id, tx)| (*id, tx.clone()))
+            .filter(|(_, tx)| tx.status == SignRespondTxStatus::Pending)
+            .collect()
+    };
+
+    for (tx_id, mut tx) in remaining_pending_txs {
+        let current_nonce = client
+            .get_nonce(
+                tx.from_address,
+                BlockId::Number(BlockNumberOrTag::Number(block_number)),
+            )
+            .await;
+        if current_nonce.is_err() {
+            tracing::warn!("Failed to get current nonce: {:?}", current_nonce.err());
+            continue;
+        }
+        let current_nonce = current_nonce.unwrap();
+        if current_nonce != tx.nonce {
+            tracing::warn!(
+                "Nonce mismatch for tx {:?}: expected {}, got {}",
+                tx_id,
+                tx.nonce,
+                current_nonce
+            );
+            tx.status = SignRespondTxStatus::Failed;
+            let client_clone = client.clone();
+
+            let pending_tx = tx.clone();
+
+            let completed_tx = crate::read_respond::CompletedTx::new(pending_tx, block_number);
+
+            let read_respond_request: Option<IndexedSignRequest> = completed_tx
+                .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
+                .await;
+            if let Some(read_respond_request) = read_respond_request {
+                read_respond_requests.push(read_respond_request);
+                sign_respond_tx_map.write().await.insert(tx_id, tx);
+            } else {
+                // failed to create sign request from completed tx, remove the tx from the map
+                tracing::warn!(
+                    "Failed to create sign request from completed tx, removing tx from map: {:?}",
+                    tx_id
+                );
+                sign_respond_tx_map.write().await.remove(&tx_id);
+            }
         }
     }
 
@@ -998,13 +1073,13 @@ async fn send_requests_when_final(
 
         // skip checking finality for now in order to test the claim deposit
         // Wait for finalized block if needed
-        while finalized_block_number.is_none_or(|n| block_number > n) {
-            let Some(new_finalized_block) = finalized_block_rx.recv().await else {
-                tracing::error!("Failed to receive finalized blocks");
-                return;
-            };
-            finalized_block_number.replace(new_finalized_block);
-        }
+        // while finalized_block_number.is_none_or(|n| block_number > n) {
+        //     let Some(new_finalized_block) = finalized_block_rx.recv().await else {
+        //         tracing::error!("Failed to receive finalized blocks");
+        //         return;
+        //     };
+        //     finalized_block_number.replace(new_finalized_block);
+        // }
 
         // Verify block hash and send requests
         let block = fetch_block(

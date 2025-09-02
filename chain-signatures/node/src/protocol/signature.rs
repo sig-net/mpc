@@ -221,28 +221,12 @@ impl SignQueue {
             if reorganize { "re" } else { "" },
         );
 
-        let request = SignRequest {
+        SignRequest {
             indexed,
             proposer,
             stable: stable.clone(),
             round,
-        };
-
-        if is_mine {
-            tracing::info!(
-                ?sign_id,
-                "saving sign request: node is in the {}signer subset",
-                if reorganize { "reorganized " } else { "" },
-            );
-        } else {
-            tracing::info!(
-                ?sign_id,
-                "skipping sign request: node is NOT in the {}signer subset",
-                if reorganize { "reorganized " } else { "" },
-            );
         }
-
-        request
     }
 
     pub async fn organize(
