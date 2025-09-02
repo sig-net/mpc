@@ -1,6 +1,7 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_respond_tx::SignRespondTx;
 use crate::sign_respond_tx::SignRespondTxId;
+use crate::sign_respond_tx::SignRespondTxStatus;
 use crate::sign_respond_tx::TransactionOutput;
 use alloy::consensus::Transaction;
 use alloy::eips::{BlockId, BlockNumberOrTag};
@@ -21,7 +22,6 @@ const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 pub struct CompletedTx {
     tx: SignRespondTx,
     block_number: u64,
-    status: bool,
 }
 
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
@@ -33,12 +33,8 @@ pub struct ReadRespondedTx {
 pub type ReadRespondSerializedOutput = Vec<u8>;
 
 impl CompletedTx {
-    pub fn new(tx: SignRespondTx, block_number: u64, status: bool) -> Self {
-        Self {
-            tx,
-            block_number,
-            status,
-        }
+    pub fn new(tx: SignRespondTx, block_number: u64) -> Self {
+        Self { tx, block_number }
     }
 
     pub async fn create_sign_request_from_completed_tx(
@@ -78,7 +74,7 @@ impl CompletedTx {
         max_attempts: u8,
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
-        if self.status {
+        if self.tx.status == SignRespondTxStatus::Success {
             self.process_success_tx(
                 helios_client,
                 max_attempts,
@@ -150,6 +146,10 @@ impl CompletedTx {
             ));
         };
         let path = "solana response key".to_string();
+        tracing::info!(
+            "requester to derive epsilon: {:?}",
+            self.tx.sender.to_string()
+        );
         let epsilon = mpc_crypto::kdf::derive_epsilon_sol(&self.tx.sender.to_string(), &path);
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest {
