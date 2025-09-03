@@ -884,43 +884,67 @@ impl VersionedMpcContract {
         Ok(voter)
     }
 
-    /// Update the latest block height for a chain (called by indexers)
+    /// Submit a vote for a chain state (called by MPC nodes)
     #[handle_result]
-    pub fn update_chain_height(&mut self, chain_id: String, height: u64) -> Result<(), Error> {
-        // Only participants can update chain heights
-        let _voter = self.voter()?;
-        
-        match self {
-            Self::V0(contract) => {
-                contract.checkpoint_manager.update_chain_height(
-                    crate::checkpoint::ChainId(chain_id), 
-                    height
-                );
-                Ok(())
-            }
-        }
-    }
-
-    /// Record a logical dependency between chains
-    #[handle_result]
-    pub fn observe_dependency(
+    pub fn vote_chain_state(
         &mut self,
-        source_chain: String,
-        target_chain: String,
-        source_height: u64,
-        target_height: u64,
+        chain_state: crate::checkpoint::ChainState,
+        signature: Vec<u8>,
     ) -> Result<(), Error> {
         let _voter = self.voter()?;
         
         match self {
             Self::V0(contract) => {
-                contract.checkpoint_manager.observe_dependency(
-                    crate::checkpoint::ChainId(source_chain),
-                    crate::checkpoint::ChainId(target_chain),
-                    source_height,
-                    target_height,
-                );
-                Ok(())
+                // Get total participants from the protocol state
+                let total_participants = match &contract.protocol_state {
+                    ProtocolContractState::Running(state) => state.participants.len() as u32,
+                    ProtocolContractState::Resharing(state) => state.old_participants.len() as u32,
+                    ProtocolContractState::Initializing(state) => state.candidates.candidates.len() as u32,
+                    ProtocolContractState::NotInitialized => 0,
+                };
+                
+                // Convert AccountId to PublicKey (we need the signer's public key)
+                // For now, we'll use a placeholder - this should be improved to get the actual public key
+                let voter_pk = near_sdk::env::signer_account_pk();
+                
+                contract.checkpoint_manager.vote_chain_state(
+                    voter_pk,
+                    chain_state,
+                    signature,
+                    total_participants,
+                ).map_err(|e| Error::message(
+                    crate::errors::ErrorKind::InvalidParameters(
+                        crate::errors::InvalidParameters::ChainNotFound
+                    ), 
+                    e
+                ))
+            }
+        }
+    }
+
+    /// Get the consensus chain state for a specific chain
+    pub fn get_consensus_chain_state(
+        &self,
+        chain_id: String,
+    ) -> Option<crate::checkpoint::ChainState> {
+        match self {
+            Self::V0(contract) => {
+                contract.checkpoint_manager
+                    .get_consensus_chain_state(&crate::checkpoint::ChainId(chain_id))
+                    .cloned()
+            }
+        }
+    }
+
+    /// Get all votes for a specific chain (for transparency/debugging)
+    pub fn get_votes_for_chain(
+        &self,
+        chain_id: String,
+    ) -> Vec<crate::checkpoint::ChainStateVote> {
+        match self {
+            Self::V0(contract) => {
+                contract.checkpoint_manager
+                    .get_votes_for_chain(&crate::checkpoint::ChainId(chain_id))
             }
         }
     }
@@ -968,11 +992,11 @@ impl VersionedMpcContract {
         }
     }
 
-    /// Get current state for all chains (useful for indexer coordination)
+    /// Get current consensus state for all chains (useful for indexer coordination)
     pub fn get_all_chain_states(&self) -> std::collections::BTreeMap<String, crate::checkpoint::ChainState> {
         match self {
             Self::V0(contract) => {
-                contract.checkpoint_manager.get_all_chain_states()
+                contract.checkpoint_manager.get_all_consensus_chain_states()
                     .into_iter()
                     .map(|(chain_id, state)| (chain_id.0, state))
                     .collect()
@@ -996,7 +1020,7 @@ impl VersionedMpcContract {
             Self::V0(contract) => {
                 let mut stats = std::collections::BTreeMap::new();
                 
-                for (chain_id, chain_state) in &contract.checkpoint_manager.chain_states {
+                for (chain_id, chain_state) in &contract.checkpoint_manager.consensus_chain_states {
                     let checkpoint_count = contract.checkpoint_manager.checkpoints
                         .iter()
                         .filter(|((stored_chain_id, _), _)| stored_chain_id == chain_id)
@@ -1007,7 +1031,7 @@ impl VersionedMpcContract {
                         (
                             chain_state.latest_block_height,
                             checkpoint_count,
-                            chain_state.last_updated,
+                            chain_state.computed_at,
                         ),
                     );
                 }

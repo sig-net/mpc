@@ -41,8 +41,8 @@ pub type BlockHeight = u64;
 #[borsh(crate = "near_sdk::borsh")]
 pub struct RequestId(pub [u8; 32]);
 
-/// Minimal contract state for tracking chain progress and dependencies
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+/// Chain state computed by nodes and voted on in the contract
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct ChainState {
     /// The chain this state tracks
@@ -55,8 +55,8 @@ pub struct ChainState {
     /// where the other chain was the source and this chain was the target.
     pub latest_logical_dependency: BTreeMap<ChainId, BlockHeight>,
     
-    /// Last time this chain state was updated
-    pub last_updated: u64,
+    /// Timestamp when this state was computed by the node
+    pub computed_at: u64,
 }
 
 impl ChainState {
@@ -65,34 +65,36 @@ impl ChainState {
             chain_id,
             latest_block_height: 0,
             latest_logical_dependency: BTreeMap::new(),
-            last_updated: near_sdk::env::block_timestamp(),
+            computed_at: near_sdk::env::block_timestamp(),
         }
     }
 
-    /// Update the latest block height for this chain
-    pub fn update_block_height(&mut self, height: BlockHeight) {
-        if height > self.latest_block_height {
-            self.latest_block_height = height;
-            self.last_updated = near_sdk::env::block_timestamp();
-        }
-    }
-
-    /// Record a logical dependency from another chain
-    pub fn observe_dependency_from(
-        &mut self,
-        source_chain: ChainId,
-        _source_height: BlockHeight,
-        target_height: BlockHeight,
-    ) {
-        let current_height = self.latest_logical_dependency
-            .get(&source_chain)
-            .copied()
-            .unwrap_or(0);
-        
+    /// Get the minimum block height across all dependencies
+    /// This is useful for ordering chain states by their "completeness"
+    pub fn min_dependency_height(&self) -> BlockHeight {
         self.latest_logical_dependency
-            .insert(source_chain, target_height.max(current_height));
-        self.last_updated = near_sdk::env::block_timestamp();
+            .values()
+            .min()
+            .copied()
+            .unwrap_or(0)
     }
+}
+
+/// A vote for a particular chain state from a node
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct ChainStateVote {
+    /// The node (participant) submitting this vote
+    pub voter: PublicKey,
+    
+    /// The chain state being voted for
+    pub chain_state: ChainState,
+    
+    /// When this vote was submitted
+    pub voted_at: u64,
+    
+    /// Signature of the chain state by the voting node
+    pub signature: Vec<u8>,
 }
 
 /// A checkpoint represents a snapshot of pending requests and chain state at a specific time
@@ -173,12 +175,17 @@ impl Checkpoint {
     }
 }
 
-/// Contract-side checkpoint manager - stores minimal state for indexer coordination
+/// Contract-side checkpoint manager - coordinates chain state voting and consensus
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct CheckpointManager {
-    /// Current state for each tracked chain
-    pub chain_states: BTreeMap<ChainId, ChainState>,
+    /// Current votes for chain states by participants
+    /// Key: (chain_id, voter), Value: their latest vote
+    pub chain_state_votes: BTreeMap<(ChainId, PublicKey), ChainStateVote>,
+    
+    /// Consensus chain states (computed from votes)
+    /// This represents the agreed-upon state up to a certain threshold
+    pub consensus_chain_states: BTreeMap<ChainId, ChainState>,
     
     /// Stored checkpoints for recovery - nodes can request these via API
     pub checkpoints: IterableMap<(ChainId, BlockHeight), Checkpoint>,
@@ -188,41 +195,99 @@ pub struct CheckpointManager {
     
     /// Minimum interval between checkpoints (in nanoseconds)
     pub min_checkpoint_interval: u64,
+    
+    /// Voting threshold (fraction of participants that must agree)
+    /// e.g., 0.67 means 67% of participants must have voted for states at or above the consensus
+    pub voting_threshold: f64,
 }
 
 impl CheckpointManager {
     pub fn new() -> Self {
         Self {
-            chain_states: BTreeMap::new(),
+            chain_state_votes: BTreeMap::new(),
+            consensus_chain_states: BTreeMap::new(),
             checkpoints: IterableMap::new(StorageKey::Checkpoints),
             max_checkpoints_per_chain: 100,
             min_checkpoint_interval: 3_600_000_000_000, // 1 hour in nanoseconds
+            voting_threshold: 0.67, // 67% threshold
         }
     }
 
-    /// Get or create chain state
-    pub fn get_or_create_chain_state(&mut self, chain_id: ChainId) -> &mut ChainState {
-        self.chain_states
-            .entry(chain_id.clone())
-            .or_insert_with(|| ChainState::new(chain_id))
-    }
-
-    /// Update the latest block height for a chain
-    pub fn update_chain_height(&mut self, chain_id: ChainId, height: BlockHeight) {
-        let chain_state = self.get_or_create_chain_state(chain_id);
-        chain_state.update_block_height(height);
-    }
-
-    /// Record a logical dependency between chains
-    pub fn observe_dependency(
+    /// Submit a vote for a chain state (called by MPC nodes)
+    pub fn vote_chain_state(
         &mut self,
-        source_chain: ChainId,
-        target_chain: ChainId,
-        source_height: BlockHeight,
-        target_height: BlockHeight,
-    ) {
-        let chain_state = self.get_or_create_chain_state(target_chain);
-        chain_state.observe_dependency_from(source_chain, source_height, target_height);
+        voter: PublicKey,
+        chain_state: ChainState,
+        signature: Vec<u8>,
+        total_participants: u32,
+    ) -> Result<(), &'static str> {
+        // TODO: Verify signature of chain_state by voter
+        
+        let vote = ChainStateVote {
+            voter: voter.clone(),
+            chain_state,
+            voted_at: near_sdk::env::block_timestamp(),
+            signature,
+        };
+        
+        let chain_id = vote.chain_state.chain_id.clone();
+        let key = (vote.chain_state.chain_id.clone(), voter);
+        self.chain_state_votes.insert(key, vote);
+        
+        // Recompute consensus for this chain
+        self.compute_consensus_for_chain(&chain_id, total_participants);
+        
+        Ok(())
+    }
+
+    /// Compute consensus chain state for a given chain based on votes
+    fn compute_consensus_for_chain(&mut self, chain_id: &ChainId, total_participants: u32) {
+        // Collect all votes for this chain
+        let mut votes: Vec<&ChainStateVote> = self.chain_state_votes
+            .iter()
+            .filter_map(|((voted_chain_id, _), vote)| {
+                if voted_chain_id == chain_id {
+                    Some(vote)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        
+        if votes.is_empty() {
+            return;
+        }
+        
+        // Sort votes by minimum dependency height (most conservative first)
+        votes.sort_by_key(|vote| vote.chain_state.min_dependency_height());
+        
+        // Find the threshold position
+        let threshold_count = ((total_participants as f64) * self.voting_threshold).ceil() as usize;
+        
+        if votes.len() >= threshold_count {
+            // Take the chain state at the threshold position (most conservative that meets threshold)
+            let consensus_state = votes[threshold_count - 1].chain_state.clone();
+            self.consensus_chain_states.insert(chain_id.clone(), consensus_state);
+        }
+    }
+
+    /// Get the consensus chain state for a given chain
+    pub fn get_consensus_chain_state(&self, chain_id: &ChainId) -> Option<&ChainState> {
+        self.consensus_chain_states.get(chain_id)
+    }
+
+    /// Get all current votes for a chain
+    pub fn get_votes_for_chain(&self, chain_id: &ChainId) -> Vec<ChainStateVote> {
+        self.chain_state_votes
+            .iter()
+            .filter_map(|((voted_chain_id, _), vote)| {
+                if voted_chain_id == chain_id {
+                    Some(vote.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Store a checkpoint (typically called by MPC nodes)
@@ -277,22 +342,22 @@ impl CheckpointManager {
         checkpoints
     }
 
-    /// Get the current state for all chains
-    pub fn get_all_chain_states(&self) -> BTreeMap<ChainId, ChainState> {
-        self.chain_states.clone()
+    /// Get the current consensus state for all chains
+    pub fn get_all_consensus_chain_states(&self) -> BTreeMap<ChainId, ChainState> {
+        self.consensus_chain_states.clone()
     }
 
-    /// Check if a checkpoint should be created for a chain
+    /// Check if a checkpoint should be created for a chain based on consensus state
     pub fn should_create_checkpoint(&self, chain_id: &ChainId) -> bool {
-        if let Some(chain_state) = self.chain_states.get(chain_id) {
+        if let Some(consensus_state) = self.consensus_chain_states.get(chain_id) {
             if let Some(last_checkpoint) = self.get_latest_checkpoint(chain_id) {
                 let time_since_last = near_sdk::env::block_timestamp() - last_checkpoint.timestamp;
-                let height_since_last = chain_state.latest_block_height - last_checkpoint.block_height;
+                let height_since_last = consensus_state.latest_block_height - last_checkpoint.block_height;
                 
                 // Create checkpoint if enough time has passed or enough blocks have been processed
                 time_since_last >= self.min_checkpoint_interval || height_since_last >= 1000
             } else {
-                // Create first checkpoint
+                // Create first checkpoint if we have consensus
                 true
             }
         } else {
