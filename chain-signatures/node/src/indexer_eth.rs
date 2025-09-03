@@ -419,6 +419,7 @@ pub async fn run(
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
     sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+    checkpoint_manager: Arc<crate::checkpoint::CheckpointManager>,
 ) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
@@ -532,6 +533,7 @@ pub async fn run(
     let blocks_failed_send_clone = blocks_failed_send.clone();
     let client_clone = Arc::clone(&client);
     let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
+    let checkpoint_manager_clone = checkpoint_manager.clone();
     tokio::spawn(async move {
         tracing::info!("Spawned task to retry failed blocks");
         retry_failed_blocks(
@@ -543,6 +545,7 @@ pub async fn run(
             requests_indexed_send_clone,
             total_timeout,
             sign_respond_tx_map_clone,
+            checkpoint_manager_clone,
         )
         .await;
     });
@@ -595,6 +598,7 @@ pub async fn run(
             }
         };
         let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
+        let checkpoint_manager_clone = checkpoint_manager.clone();
         if let Err(err) = process_block(
             block_number,
             block_hash,
@@ -604,6 +608,7 @@ pub async fn run(
             requests_indexed_send_clone.clone(),
             total_timeout,
             sign_respond_tx_map_clone,
+            checkpoint_manager_clone,
         )
         .await
         {
@@ -634,6 +639,7 @@ async fn retry_failed_blocks(
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
     sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+    checkpoint_manager: Arc<crate::checkpoint::CheckpointManager>,
 ) {
     loop {
         let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
@@ -649,6 +655,7 @@ async fn retry_failed_blocks(
             requests_indexed.clone(),
             total_timeout,
             sign_respond_tx_map.clone(),
+            checkpoint_manager.clone(),
         )
         .await
         {
@@ -851,6 +858,7 @@ async fn process_block(
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
     sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+    checkpoint_manager: Arc<crate::checkpoint::CheckpointManager>,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -875,7 +883,11 @@ async fn process_block(
         return Ok(());
     };
 
-    let block_receipts_clone = block_receipts.clone();
+    // Update checkpoint for processed block
+    checkpoint_manager
+        .processed_block("ethereum".to_string(), block_number)
+        .await;
+
     let pending_txs: HashMap<SignRespondTxId, SignRespondTx> = {
         sign_respond_tx_map
             .read()
@@ -886,7 +898,7 @@ async fn process_block(
             .collect()
     };
     let mut read_respond_requests: Vec<IndexedSignRequest> = Vec::new();
-    for receipt in block_receipts_clone {
+    for receipt in &block_receipts {
         let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
             continue;
         };
@@ -896,7 +908,19 @@ async fn process_block(
             receipt.transaction_hash,
             if status { "success" } else { "failed" }
         );
-        let client_clone = client.clone();
+
+        // Update checkpoint status - transaction has been executed on target chain
+        if let Some(sign_id) = checkpoint_manager
+            .get_sign_id_from_tx_id(&receipt.transaction_hash.into())
+            .await
+        {
+            if status {
+                checkpoint_manager
+                    .found_tx_output(&"ethereum".to_string(), &sign_id)
+                    .await;
+            }
+        }
+
         let mut pending_tx = pending_tx.clone();
         pending_tx.status = if status {
             SignRespondTxStatus::Success
@@ -908,7 +932,7 @@ async fn process_block(
         let completed_tx = crate::read_respond::CompletedTx::new(pending_tx_clone, block_number);
 
         let read_respond_request: Option<IndexedSignRequest> = completed_tx
-            .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
+            .create_sign_request_from_completed_tx(&client, 6, total_timeout)
             .await;
         if let Some(read_respond_request) = read_respond_request {
             read_respond_requests.push(read_respond_request);

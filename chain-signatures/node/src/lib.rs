@@ -1,3 +1,6 @@
+pub mod checkpoint;
+#[cfg(test)]
+mod checkpoint_test;
 pub mod cli;
 pub mod config;
 pub mod gcp;

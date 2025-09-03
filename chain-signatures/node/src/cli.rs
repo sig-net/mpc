@@ -284,6 +284,11 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 crate::sign_respond_tx::SignRespondTx,
             >::new()));
 
+            // Initialize checkpoint manager for bidirectional messaging
+            let checkpoint_manager = crate::checkpoint::CheckpointManager::new(
+                sign_respond_tx_map.clone()
+            );
+
             tracing::info!(
                 %digest,
                 ?mpc_contract_id,
@@ -366,6 +371,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 app_data_storage.clone(),
                 account_id.clone(),
                 sign_respond_tx_map,
+                Arc::new(checkpoint_manager),
             ));
             tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
             tracing::info!("protocol http server spawned");
