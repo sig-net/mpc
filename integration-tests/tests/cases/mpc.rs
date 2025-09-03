@@ -1,4 +1,5 @@
 use deadpool_redis::redis::AsyncCommands;
+use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
@@ -235,4 +236,45 @@ fn sign_arg(seed: u8) -> SignArgs {
         path: "test".to_owned(),
         key_version: 0,
     }
+}
+
+/// drop the first 20 presignature messages on each node and see if the system
+/// can recover
+#[tokio::test(flavor = "multi_thread")]
+async fn test_presignature_timeout() {
+    fn create_filter() -> MessageFilter {
+        let mut drop_counter = 20;
+        Box::new(move |(msg, _)| {
+            let pass = match msg {
+                mpc_node::protocol::Message::Presignature(_) => drop_counter == 0,
+                _ => true,
+            };
+
+            if !pass {
+                drop_counter -= 1;
+            }
+            pass
+        })
+    }
+
+    let network = MpcFixtureBuilder::default()
+        // configure network ready to generate presignatures immediately
+        .with_preshared_key()
+        .with_preshared_triples()
+        .with_min_presignatures_stockpile(5)
+        .with_max_presignatures_stockpile(5)
+        .with_min_triples_stockpile(0)
+        .with_max_triples_stockpile(0)
+        // apply message filter to all nodes
+        .with_outgoing_message_filter(0, create_filter())
+        .with_outgoing_message_filter(1, create_filter())
+        .with_outgoing_message_filter(2, create_filter())
+        // speed up timeout
+        .with_presignature_timeout_ms(2000)
+        .build()
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(10), network.wait_for_presignatures(1))
+        .await
+        .expect("should have enough presignatures eventually");
 }

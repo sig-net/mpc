@@ -3,11 +3,12 @@
 
 use crate::containers::Redis;
 use crate::mpc_fixture::fixture_interface::SharedOutput;
+use crate::mpc_fixture::fixture_tasks::MessageFilter;
 use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
 use cait_sith::protocol::Participant;
-use mpc_contract::config::ProtocolConfig;
+use mpc_contract::config::{min_to_ms, ProtocolConfig};
 use mpc_contract::primitives::{
     CandidateInfo, Candidates as CandidatesById, ParticipantInfo, Participants as ParticipantsById,
 };
@@ -63,6 +64,10 @@ struct FixtureConfig {
     max_triples: u32,
     min_presignatures: u32,
     max_presignatures: u32,
+
+    signature_timeout_ms: u64,
+    presignature_timeout_ms: u64,
+    triple_timeout_ms: u64,
 }
 
 /// Context required to start a fixture node.
@@ -82,6 +87,9 @@ struct NodeMessagingBuilder {
     channel: MessageChannel,
     inbox: MessageInbox,
     outbox: MessageOutbox,
+
+    /// allows dropping specific messages sent by this node
+    filter: MessageFilter,
 }
 
 impl Default for MpcFixtureBuilder {
@@ -100,6 +108,9 @@ impl FixtureConfig {
             max_triples: 30,
             min_presignatures: 10,
             max_presignatures: 30,
+            signature_timeout_ms: 10_000,
+            presignature_timeout_ms: 10_000,
+            triple_timeout_ms: min_to_ms(10),
         }
     }
 }
@@ -194,10 +205,13 @@ impl MpcFixtureBuilder {
 
     fn build_protocol_config(&self) -> ProtocolConfig {
         let mut config = ProtocolConfig::default();
+        config.signature.generation_timeout = self.fixture_config.signature_timeout_ms;
         config.presignature.max_presignatures = self.fixture_config.max_presignatures;
         config.presignature.min_presignatures = self.fixture_config.min_presignatures;
+        config.presignature.generation_timeout = self.fixture_config.presignature_timeout_ms;
         config.triple.max_triples = self.fixture_config.max_triples;
         config.triple.min_triples = self.fixture_config.min_triples;
+        config.triple.generation_timeout = self.fixture_config.triple_timeout_ms;
         config
     }
 
@@ -284,6 +298,30 @@ impl MpcFixtureBuilder {
         self.fixture_config.max_presignatures = value;
         self
     }
+
+    /// Set protocol config
+    pub fn with_signature_timeout_ms(mut self, ms: u64) -> Self {
+        self.fixture_config.signature_timeout_ms = ms;
+        self
+    }
+
+    /// Set protocol config
+    pub fn with_triple_timeout_ms(mut self, ms: u64) -> Self {
+        self.fixture_config.triple_timeout_ms = ms;
+        self
+    }
+
+    /// Set protocol config
+    pub fn with_presignature_timeout_ms(mut self, ms: u64) -> Self {
+        self.fixture_config.presignature_timeout_ms = ms;
+        self
+    }
+
+    /// Specify a method that acts as message filter for all sent messages the given node.
+    pub fn with_outgoing_message_filter(mut self, node_idx: usize, filter: MessageFilter) -> Self {
+        self.prepared_nodes[node_idx].messaging.filter = filter;
+        self
+    }
 }
 
 impl MpcFixtureNodeBuilder {
@@ -321,6 +359,7 @@ impl MpcFixtureNodeBuilder {
             inbox,
             outbox,
             channel,
+            filter: Box::new(|_| true),
         };
 
         MpcFixtureNodeBuilder {
@@ -408,6 +447,7 @@ impl MpcFixtureNodeBuilder {
             rpc_rx,
             mesh_tx.clone(),
             config_tx.clone(),
+            self.messaging.filter,
         );
 
         MpcFixtureNode {

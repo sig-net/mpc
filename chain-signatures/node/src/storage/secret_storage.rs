@@ -157,6 +157,7 @@ pub fn init(
     }
 }
 
+#[cfg(feature = "test-feature")]
 pub fn test_store(
     epoch: u64,
     private_share: crate::types::SecretKeyShare,
