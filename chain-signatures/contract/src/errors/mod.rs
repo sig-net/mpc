@@ -63,6 +63,8 @@ pub enum InvalidParameters {
     RequestNotFound,
     #[error("Update not found.")]
     UpdateNotFound,
+    #[error("Chain not found.")]
+    ChainNotFound,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]

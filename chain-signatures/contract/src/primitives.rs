@@ -13,6 +13,7 @@ pub mod hpke {
 pub enum StorageKey {
     PendingRequests,
     ProposedUpdatesEntries,
+    Checkpoints,
 }
 
 /// The index into calling the YieldResume feature of NEAR. This will allow to resume

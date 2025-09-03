@@ -1,3 +1,4 @@
+pub mod checkpoint;
 pub mod config;
 pub mod errors;
 pub mod primitives;
@@ -29,6 +30,7 @@ use primitives::{
 };
 use std::collections::{BTreeMap, HashSet};
 
+use crate::checkpoint::CheckpointManager;
 use crate::config::Config;
 use crate::errors::Error;
 use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
@@ -72,6 +74,7 @@ pub struct MpcContract {
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
+    checkpoint_manager: CheckpointManager,
 }
 
 impl MpcContract {
@@ -112,6 +115,7 @@ impl MpcContract {
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: config.unwrap_or_default(),
+            checkpoint_manager: CheckpointManager::new(),
         }
     }
 }
@@ -638,6 +642,7 @@ impl VersionedMpcContract {
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: config.unwrap_or_default(),
+            checkpoint_manager: CheckpointManager::new(),
         }))
     }
 
@@ -877,5 +882,138 @@ impl VersionedMpcContract {
             },
         }
         Ok(voter)
+    }
+
+    /// Update the latest block height for a chain (called by indexers)
+    #[handle_result]
+    pub fn update_chain_height(&mut self, chain_id: String, height: u64) -> Result<(), Error> {
+        // Only participants can update chain heights
+        let _voter = self.voter()?;
+        
+        match self {
+            Self::V0(contract) => {
+                contract.checkpoint_manager.update_chain_height(
+                    crate::checkpoint::ChainId(chain_id), 
+                    height
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Record a logical dependency between chains
+    #[handle_result]
+    pub fn observe_dependency(
+        &mut self,
+        source_chain: String,
+        target_chain: String,
+        source_height: u64,
+        target_height: u64,
+    ) -> Result<(), Error> {
+        let _voter = self.voter()?;
+        
+        match self {
+            Self::V0(contract) => {
+                contract.checkpoint_manager.observe_dependency(
+                    crate::checkpoint::ChainId(source_chain),
+                    crate::checkpoint::ChainId(target_chain),
+                    source_height,
+                    target_height,
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Store a checkpoint for a specific chain (called by MPC nodes)
+    #[handle_result]
+    pub fn store_checkpoint(&mut self, checkpoint: crate::checkpoint::Checkpoint) -> Result<(), Error> {
+        // Only participants can store checkpoints
+        let _voter = self.voter()?;
+        
+        match self {
+            Self::V0(contract) => {
+                contract.checkpoint_manager.store_checkpoint(checkpoint)
+                    .map_err(|e| Error::message(
+                        crate::errors::ErrorKind::InvalidParameters(
+                            crate::errors::InvalidParameters::ChainNotFound
+                        ), 
+                        e
+                    ))
+            }
+        }
+    }
+
+    /// Get the latest checkpoint for a chain
+    pub fn get_latest_checkpoint(&self, chain_id: String) -> Option<crate::checkpoint::Checkpoint> {
+        match self {
+            Self::V0(contract) => {
+                let chain_id = crate::checkpoint::ChainId(chain_id);
+                contract.checkpoint_manager.get_latest_checkpoint(&chain_id)
+            }
+        }
+    }
+
+    /// Get checkpoints after a certain block height for a chain
+    pub fn get_checkpoints_after(
+        &self,
+        chain_id: String,
+        after_height: u64,
+    ) -> Vec<crate::checkpoint::Checkpoint> {
+        match self {
+            Self::V0(contract) => {
+                let chain_id = crate::checkpoint::ChainId(chain_id);
+                contract.checkpoint_manager.get_checkpoints_after(&chain_id, after_height)
+            }
+        }
+    }
+
+    /// Get current state for all chains (useful for indexer coordination)
+    pub fn get_all_chain_states(&self) -> std::collections::BTreeMap<String, crate::checkpoint::ChainState> {
+        match self {
+            Self::V0(contract) => {
+                contract.checkpoint_manager.get_all_chain_states()
+                    .into_iter()
+                    .map(|(chain_id, state)| (chain_id.0, state))
+                    .collect()
+            }
+        }
+    }
+
+    /// Check if a checkpoint should be created for a chain
+    pub fn should_create_checkpoint(&self, chain_id: String) -> bool {
+        match self {
+            Self::V0(contract) => {
+                let chain_id = crate::checkpoint::ChainId(chain_id);
+                contract.checkpoint_manager.should_create_checkpoint(&chain_id)
+            }
+        }
+    }
+
+    /// Get statistics about checkpoints (for monitoring)
+    pub fn get_checkpoint_stats(&self) -> std::collections::BTreeMap<String, (u64, u32, u64)> {
+        match self {
+            Self::V0(contract) => {
+                let mut stats = std::collections::BTreeMap::new();
+                
+                for (chain_id, chain_state) in &contract.checkpoint_manager.chain_states {
+                    let checkpoint_count = contract.checkpoint_manager.checkpoints
+                        .iter()
+                        .filter(|((stored_chain_id, _), _)| stored_chain_id == chain_id)
+                        .count() as u32;
+                    
+                    stats.insert(
+                        chain_id.0.clone(),
+                        (
+                            chain_state.latest_block_height,
+                            checkpoint_count,
+                            chain_state.last_updated,
+                        ),
+                    );
+                }
+                
+                stats
+            }
+        }
     }
 }
