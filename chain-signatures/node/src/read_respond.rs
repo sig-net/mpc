@@ -19,6 +19,8 @@ use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+const SOLANA_READ_RESPOND_PATH: &str = "solana response key";
+
 pub struct CompletedTx {
     tx: SignRespondTx,
     block_number: u64,
@@ -145,7 +147,7 @@ impl CompletedTx {
                 "Failed to convert read respond message to scalar: {message:?}"
             ));
         };
-        let path = "solana response key".to_string();
+        let path = SOLANA_READ_RESPOND_PATH.to_string();
         tracing::info!(
             "requester to derive epsilon: {:?}",
             self.tx.sender.to_string()
