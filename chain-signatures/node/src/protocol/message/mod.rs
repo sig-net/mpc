@@ -875,7 +875,7 @@ impl MessageOutbox {
                                     .observe(attempt_timestamp.elapsed().as_millis() as f64);
                             }
                         }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 });
             }
