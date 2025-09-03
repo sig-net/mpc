@@ -45,15 +45,16 @@ Successfully implemented a comprehensive checkpoint system for pending request m
 **Location**: `/Users/entropy/space/mpc/chain-signatures/node/src/indexer_eth.rs`
 
 **Enhanced Ethereum Indexer**:
-- Integrated checkpoint manager into the main indexer flow
+- Fully integrated checkpoint manager to replace direct `sign_respond_tx_map` usage
 - Added checkpoint state tracking when processing transaction receipts
 - Cross-chain transaction completion monitoring
 - Proper ownership handling for async block processing
+- Streamlined function signatures by removing redundant `sign_respond_tx_map` parameter
 
 **CLI Integration**:
 - CheckpointManager initialization in main node startup
 - Passed checkpoint manager to indexer components
-- Coordinated with existing sign_respond_tx_map
+- Checkpoint manager now encapsulates the sign_respond_tx_map functionality
 
 ## Implementation Highlights
 

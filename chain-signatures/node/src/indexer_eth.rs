@@ -22,7 +22,6 @@ use std::sync::Arc;
 use std::{fmt, path::PathBuf, str::FromStr, sync::LazyLock, time::Instant};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
@@ -418,7 +417,6 @@ pub async fn run(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
-    sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
     checkpoint_manager: Arc<crate::checkpoint::CheckpointManager>,
 ) {
     let Some(eth) = eth else {
@@ -532,7 +530,6 @@ pub async fn run(
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let blocks_failed_send_clone = blocks_failed_send.clone();
     let client_clone = Arc::clone(&client);
-    let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
     let checkpoint_manager_clone = checkpoint_manager.clone();
     tokio::spawn(async move {
         tracing::info!("Spawned task to retry failed blocks");
@@ -544,7 +541,6 @@ pub async fn run(
             near_account_id_clone,
             requests_indexed_send_clone,
             total_timeout,
-            sign_respond_tx_map_clone,
             checkpoint_manager_clone,
         )
         .await;
@@ -597,7 +593,6 @@ pub async fn run(
                 (block_number, block_hash, false)
             }
         };
-        let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
         let checkpoint_manager_clone = checkpoint_manager.clone();
         if let Err(err) = process_block(
             block_number,
@@ -607,7 +602,6 @@ pub async fn run(
             node_near_account_id.clone(),
             requests_indexed_send_clone.clone(),
             total_timeout,
-            sign_respond_tx_map_clone,
             checkpoint_manager_clone,
         )
         .await
@@ -638,7 +632,6 @@ async fn retry_failed_blocks(
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
-    sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
     checkpoint_manager: Arc<crate::checkpoint::CheckpointManager>,
 ) {
     loop {
@@ -654,7 +647,6 @@ async fn retry_failed_blocks(
             node_near_account_id.clone(),
             requests_indexed.clone(),
             total_timeout,
-            sign_respond_tx_map.clone(),
             checkpoint_manager.clone(),
         )
         .await
@@ -857,7 +849,6 @@ async fn process_block(
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
-    sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
     checkpoint_manager: Arc<crate::checkpoint::CheckpointManager>,
 ) -> anyhow::Result<()> {
     tracing::info!(
@@ -888,15 +879,10 @@ async fn process_block(
         .processed_block("ethereum".to_string(), block_number)
         .await;
 
-    let pending_txs: HashMap<SignRespondTxId, SignRespondTx> = {
-        sign_respond_tx_map
-            .read()
-            .await
-            .iter()
-            .map(|(id, tx)| (*id, tx.clone()))
-            .filter(|(_, tx)| tx.status == SignRespondTxStatus::Pending)
-            .collect()
-    };
+    let pending_txs: HashMap<SignRespondTxId, SignRespondTx> = 
+        checkpoint_manager
+            .get_pending_sign_respond_txs(&"ethereum".to_string())
+            .await;
     let mut read_respond_requests: Vec<IndexedSignRequest> = Vec::new();
     for receipt in &block_receipts {
         let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
@@ -936,32 +922,25 @@ async fn process_block(
             .await;
         if let Some(read_respond_request) = read_respond_request {
             read_respond_requests.push(read_respond_request);
-            sign_respond_tx_map
-                .write()
-                .await
-                .insert(receipt.transaction_hash.into(), pending_tx.clone());
+            checkpoint_manager
+                .insert_or_update_tx(&"ethereum".to_string(), receipt.transaction_hash.into(), pending_tx.clone())
+                .await;
         } else {
             // failed to create sign request from completed tx, remove the tx from the map
             tracing::warn!(
                 "Failed to create sign request from completed tx, removing tx from map: {:?}",
                 receipt.transaction_hash
             );
-            sign_respond_tx_map
-                .write()
-                .await
-                .remove(&receipt.transaction_hash.into());
+            checkpoint_manager
+                .remove_tx_by_id(&"ethereum".to_string(), &receipt.transaction_hash.into())
+                .await;
         }
     }
 
-    let remaining_pending_txs: HashMap<SignRespondTxId, SignRespondTx> = {
-        sign_respond_tx_map
-            .read()
-            .await
-            .iter()
-            .map(|(id, tx)| (*id, tx.clone()))
-            .filter(|(_, tx)| tx.status == SignRespondTxStatus::Pending)
-            .collect()
-    };
+    let remaining_pending_txs: HashMap<SignRespondTxId, SignRespondTx> = 
+        checkpoint_manager
+            .get_pending_sign_respond_txs(&"ethereum".to_string())
+            .await;
 
     for (tx_id, mut tx) in remaining_pending_txs {
         let current_nonce = client
@@ -994,14 +973,14 @@ async fn process_block(
                 .await;
             if let Some(read_respond_request) = read_respond_request {
                 read_respond_requests.push(read_respond_request);
-                sign_respond_tx_map.write().await.insert(tx_id, tx);
+                checkpoint_manager.insert_or_update_tx(&"ethereum".to_string(), tx_id, tx).await;
             } else {
                 // failed to create sign request from completed tx, remove the tx from the map
                 tracing::warn!(
                     "Failed to create sign request from completed tx, removing tx from map: {:?}",
                     tx_id
                 );
-                sign_respond_tx_map.write().await.remove(&tx_id);
+                checkpoint_manager.remove_tx_by_id(&"ethereum".to_string(), &tx_id).await;
             }
         }
     }

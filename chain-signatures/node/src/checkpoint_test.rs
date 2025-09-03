@@ -2,16 +2,37 @@
 mod tests {
     use crate::checkpoint::{CheckpointManager, PendingTxStatus};
     use mpc_primitives::SignId;
-    use std::collections::HashMap;
-    use tokio::sync::RwLock;
-    use std::sync::Arc;
-    use crate::sign_respond_tx::SignRespondTxId;
-    use alloy::primitives::B256;
+    use crate::sign_respond_tx::{SignRespondTxId, SignRespondTx, SignRespondTxStatus};
+    use alloy::primitives::{B256, Address};
+    use anchor_lang::prelude::Pubkey;
+
+    fn create_mock_sign_respond_tx(tx_id: SignRespondTxId, request_id: [u8; 32]) -> SignRespondTx {
+        SignRespondTx {
+            id: tx_id,
+            sender: Pubkey::new_unique(),
+            transaction_data: vec![0u8; 32],
+            slip44_chain_id: 60, // Ethereum
+            key_version: 1,
+            deposit: 1000000,
+            path: "test_path".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "0x1234567890123456789012345678901234567890".to_string(),
+            params: "{}".to_string(),
+            explorer_deserialization_format: 1,
+            explorer_deserialization_schema: vec![],
+            callback_serialization_format: 1,
+            callback_serialization_schema: vec![],
+            request_id,
+            from_address: Address::ZERO,
+            nonce: 1,
+            participants: vec![],
+            status: SignRespondTxStatus::Pending,
+        }
+    }
 
     #[tokio::test]
     async fn test_checkpoint_manager_basic_flow() {
-        let sign_respond_tx_map = Arc::new(RwLock::new(HashMap::new()));
-        let checkpoint_manager = CheckpointManager::new(sign_respond_tx_map);
+        let checkpoint_manager = CheckpointManager::new();
 
         let sign_id = SignId::new([1; 32]);
         let chain_id = "ethereum".to_string();
@@ -34,8 +55,9 @@ mod tests {
         assert_eq!(pending_tx.unwrap().status, PendingTxStatus::PendingSignAndRespond);
 
         // Test 2: Published signed transaction
+        let mock_tx = create_mock_sign_respond_tx(tx_id, sign_id.request_id);
         let updated = checkpoint_manager
-            .published_signed_transaction(&chain_id, &sign_id, tx_id)
+            .published_signed_transaction(&chain_id, &sign_id, tx_id, mock_tx)
             .await;
         assert!(updated);
 
@@ -74,8 +96,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_manager_multiple_chains() {
-        let sign_respond_tx_map = Arc::new(RwLock::new(HashMap::new()));
-        let checkpoint_manager = CheckpointManager::new(sign_respond_tx_map);
+        let checkpoint_manager = CheckpointManager::new();
 
         let sign_id1 = SignId::new([1; 32]);
         let sign_id2 = SignId::new([2; 32]);
@@ -103,9 +124,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_checkpoint_manager_cross_chain_dependency() {
-        let sign_respond_tx_map = Arc::new(RwLock::new(HashMap::new()));
-        let checkpoint_manager = CheckpointManager::new(sign_respond_tx_map);
+    async fn test_checkpoint_manager_dependencies() {
+        let checkpoint_manager = CheckpointManager::new();
 
         let sign_id = SignId::new([1; 32]);
         let source_chain = "ethereum".to_string();

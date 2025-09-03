@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use mpc_primitives::SignId;
-use crate::sign_respond_tx::{SignRespondTx, SignRespondTxId};
+use crate::sign_respond_tx::{SignRespondTx, SignRespondTxId, SignRespondTxStatus};
 
 /// Chain identifier for cross-chain management
 pub type ChainId = String;
@@ -20,7 +20,7 @@ pub enum PendingTxStatus {
     PendingRespond,
 }
 
-/// Information about a pending transaction
+/// Information about a pending transaction including full transaction data
 #[derive(Debug, Clone)]
 pub struct PendingTxInfo {
     pub request_id: SignId,
@@ -28,6 +28,9 @@ pub struct PendingTxInfo {
     pub block_height: BlockHeight,
     pub status: PendingTxStatus,
     pub timestamp: u64,
+    /// Full transaction data for processing
+    pub tx_data: Option<SignRespondTx>,
+    pub tx_id: Option<SignRespondTxId>,
 }
 
 /// Chain-specific checkpoint tracking pending requests and logical dependencies
@@ -53,7 +56,7 @@ pub struct CheckpointManager {
     /// Map from SignRespondTxId to SignId for bidirectional tracking
     pub tx_id_to_sign_id: Arc<RwLock<HashMap<SignRespondTxId, SignId>>>,
     
-    /// Legacy sign_respond_tx_map for compatibility
+    /// Legacy sign_respond_tx_map for compatibility with existing processors
     pub sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
 }
 
@@ -86,6 +89,8 @@ impl ChainCheckpoint {
             block_height,
             status: PendingTxStatus::PendingSignAndRespond,
             timestamp,
+            tx_data: None,
+            tx_id: None,
         };
         
         self.pending_tx.insert(request_id, pending_info);
@@ -97,9 +102,11 @@ impl ChainCheckpoint {
     }
 
     /// Mark that a signed transaction has been published
-    pub fn published_signed_transaction(&mut self, request_id: &SignId) -> bool {
+    pub fn published_signed_transaction(&mut self, request_id: &SignId, tx_data: SignRespondTx) -> bool {
         if let Some(pending_info) = self.pending_tx.get_mut(request_id) {
             pending_info.status = PendingTxStatus::PendingExecuteRespond;
+            pending_info.tx_data = Some(tx_data.clone());
+            pending_info.tx_id = Some(tx_data.id);
             true
         } else {
             false
@@ -153,14 +160,114 @@ impl ChainCheckpoint {
             .values()
             .all(|&dep_height| dep_height >= height)
     }
+
+    /// Get all pending transactions with their data
+    pub fn get_pending_txs_by_status(&self, status: PendingTxStatus) -> HashMap<SignRespondTxId, SignRespondTx> {
+        self.pending_tx
+            .values()
+            .filter(|info| info.status == status && info.tx_data.is_some())
+            .filter_map(|info| {
+                info.tx_id.and_then(|tx_id| {
+                    info.tx_data.as_ref().map(|tx_data| (tx_id, tx_data.clone()))
+                })
+            })
+            .collect()
+    }
+
+    /// Update transaction status by tx_id
+    pub fn update_tx_status_by_id(&mut self, tx_id: &SignRespondTxId, new_status: SignRespondTxStatus) -> bool {
+        for pending_info in self.pending_tx.values_mut() {
+            if pending_info.tx_id == Some(*tx_id) {
+                if let Some(ref mut tx_data) = pending_info.tx_data {
+                    tx_data.status = new_status;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Get transaction data by tx_id
+    pub fn get_tx_by_id(&self, tx_id: &SignRespondTxId) -> Option<SignRespondTx> {
+        for pending_info in self.pending_tx.values() {
+            if pending_info.tx_id == Some(*tx_id) {
+                return pending_info.tx_data.clone();
+            }
+        }
+        None
+    }
+
+    /// Store transaction data for a pending request
+    pub fn store_tx_data(&mut self, request_id: &SignId, tx_data: SignRespondTx) -> bool {
+        if let Some(pending_info) = self.pending_tx.get_mut(request_id) {
+            pending_info.tx_data = Some(tx_data.clone());
+            pending_info.tx_id = Some(tx_data.id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove transaction by tx_id
+    pub fn remove_tx_by_id(&mut self, tx_id: &SignRespondTxId) -> Option<SignRespondTx> {
+        for (request_id, pending_info) in &self.pending_tx {
+            if pending_info.tx_id == Some(*tx_id) {
+                let result = pending_info.tx_data.clone();
+                let request_id_to_remove = *request_id;
+                self.pending_tx.remove(&request_id_to_remove);
+                return result;
+            }
+        }
+        None
+    }
+
+    /// Insert or update a transaction
+    pub fn insert_or_update_tx(&mut self, tx_id: SignRespondTxId, tx_data: SignRespondTx) {
+        // Find existing entry by tx_id or create new one
+        let mut found = false;
+        for pending_info in self.pending_tx.values_mut() {
+            if pending_info.tx_id == Some(tx_id) {
+                pending_info.tx_data = Some(tx_data.clone());
+                found = true;
+                break;
+            }
+        }
+        
+        if !found {
+            // Create new entry if not found
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+                
+            let request_id = SignId::new(tx_data.request_id);
+            let status = match tx_data.status {
+                SignRespondTxStatus::Pending => PendingTxStatus::PendingExecuteRespond,
+                SignRespondTxStatus::Success => PendingTxStatus::PendingRespond,
+                SignRespondTxStatus::Failed => PendingTxStatus::PendingRespond,
+            };
+                
+            let pending_info = PendingTxInfo {
+                request_id,
+                chain_id: "ethereum".to_string(), // Default to ethereum for now
+                block_height: 0, // Will be updated when we know the block
+                status,
+                timestamp,
+                tx_data: Some(tx_data),
+                tx_id: Some(tx_id),
+            };
+            
+            self.pending_tx.insert(request_id, pending_info);
+        }
+    }
 }
 
 impl CheckpointManager {
-    pub fn new(sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>) -> Self {
+    pub fn new() -> Self {
         Self {
             chain_checkpoints: Arc::new(RwLock::new(BTreeMap::new())),
             tx_id_to_sign_id: Arc::new(RwLock::new(HashMap::new())),
-            sign_respond_tx_map,
+            sign_respond_tx_map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -185,13 +292,14 @@ impl CheckpointManager {
         chain_id: &ChainId,
         request_id: &SignId,
         tx_id: SignRespondTxId,
+        tx_data: SignRespondTx,
     ) -> bool {
         // Store mapping for future lookup
         self.tx_id_to_sign_id.write().await.insert(tx_id, *request_id);
         
         let mut checkpoints = self.chain_checkpoints.write().await;
         if let Some(checkpoint) = checkpoints.get_mut(chain_id) {
-            checkpoint.published_signed_transaction(request_id)
+            checkpoint.published_signed_transaction(request_id, tx_data)
         } else {
             false
         }
@@ -287,5 +395,103 @@ impl CheckpointManager {
         );
         
         retry_candidates
+    }
+
+    /// Get all pending transactions with their data by status for a specific chain
+    pub async fn get_pending_txs_by_status(
+        &self,
+        chain_id: &ChainId,
+        status: PendingTxStatus,
+    ) -> HashMap<SignRespondTxId, SignRespondTx> {
+        let checkpoints = self.chain_checkpoints.read().await;
+        if let Some(checkpoint) = checkpoints.get(chain_id) {
+            checkpoint.get_pending_txs_by_status(status)
+        } else {
+            HashMap::new()
+        }
+    }
+
+    /// Get all pending transactions with status Pending (for SignRespondTxStatus compatibility)
+    pub async fn get_pending_sign_respond_txs(&self, chain_id: &ChainId) -> HashMap<SignRespondTxId, SignRespondTx> {
+        // Get all transactions that are in PendingExecuteRespond status (equivalent to SignRespondTxStatus::Pending)
+        self.get_pending_txs_by_status(chain_id, PendingTxStatus::PendingExecuteRespond).await
+    }
+
+    /// Update transaction status by tx_id
+    pub async fn update_tx_status_by_id(
+        &self,
+        chain_id: &ChainId,
+        tx_id: &SignRespondTxId,
+        new_status: SignRespondTxStatus,
+    ) -> bool {
+        let mut checkpoints = self.chain_checkpoints.write().await;
+        if let Some(checkpoint) = checkpoints.get_mut(chain_id) {
+            checkpoint.update_tx_status_by_id(tx_id, new_status)
+        } else {
+            false
+        }
+    }
+
+    /// Get transaction data by tx_id
+    pub async fn get_tx_by_id(&self, chain_id: &ChainId, tx_id: &SignRespondTxId) -> Option<SignRespondTx> {
+        let checkpoints = self.chain_checkpoints.read().await;
+        if let Some(checkpoint) = checkpoints.get(chain_id) {
+            checkpoint.get_tx_by_id(tx_id)
+        } else {
+            None
+        }
+    }
+
+    /// Store transaction data for a pending request
+    pub async fn store_tx_data(&self, chain_id: &ChainId, request_id: &SignId, tx_data: SignRespondTx) -> bool {
+        let mut checkpoints = self.chain_checkpoints.write().await;
+        if let Some(checkpoint) = checkpoints.get_mut(chain_id) {
+            checkpoint.store_tx_data(request_id, tx_data)
+        } else {
+            false
+        }
+    }
+
+    /// Insert or update a transaction
+    pub async fn insert_or_update_tx(&self, chain_id: &ChainId, tx_id: SignRespondTxId, tx_data: SignRespondTx) {
+        let mut checkpoints = self.chain_checkpoints.write().await;
+        let checkpoint = checkpoints
+            .entry(chain_id.clone())
+            .or_insert_with(ChainCheckpoint::default);
+        
+        checkpoint.insert_or_update_tx(tx_id, tx_data.clone());
+        
+        // Sync to legacy map
+        drop(checkpoints); // Release lock before calling sync method
+        self.sync_to_legacy_map(tx_id, Some(tx_data)).await;
+    }
+
+    /// Remove transaction by tx_id
+    pub async fn remove_tx_by_id(&self, chain_id: &ChainId, tx_id: &SignRespondTxId) -> Option<SignRespondTx> {
+        let mut checkpoints = self.chain_checkpoints.write().await;
+        let result = if let Some(checkpoint) = checkpoints.get_mut(chain_id) {
+            checkpoint.remove_tx_by_id(tx_id)
+        } else {
+            None
+        };
+        
+        // Sync to legacy map
+        drop(checkpoints); // Release lock before calling sync method
+        self.sync_to_legacy_map(*tx_id, None).await;
+        
+        result
+    }
+
+    /// Sync transaction data to legacy map (for compatibility)
+    async fn sync_to_legacy_map(&self, tx_id: SignRespondTxId, tx_data: Option<SignRespondTx>) {
+        let mut legacy_map = self.sign_respond_tx_map.write().await;
+        match tx_data {
+            Some(tx) => {
+                legacy_map.insert(tx_id, tx);
+            }
+            None => {
+                legacy_map.remove(&tx_id);
+            }
+        }
     }
 }
