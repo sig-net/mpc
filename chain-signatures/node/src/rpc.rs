@@ -4,7 +4,7 @@ use crate::indexer_sol::SolConfig;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::signature::SignRequest;
-use crate::protocol::{Chain, ProtocolState};
+use crate::protocol::{Chain, Governance, ProtocolState};
 use crate::util::AffinePointExt as _;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
@@ -76,21 +76,21 @@ type EthContractFillProvider = FillProvider<
 type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
 #[derive(Clone)]
-struct PublishAction {
+pub struct PublishAction {
     public_key: mpc_crypto::PublicKey,
-    request: SignRequest,
+    pub request: SignRequest,
     output: FullSignature<Secp256k1>,
     timestamp: Instant,
     retry_count: usize,
 }
 
-enum RpcAction {
+pub enum RpcAction {
     Publish(PublishAction),
 }
 
 #[derive(Clone)]
 pub struct RpcChannel {
-    tx: mpsc::Sender<RpcAction>,
+    pub tx: mpsc::Sender<RpcAction>,
 }
 
 impl RpcChannel {
@@ -254,6 +254,23 @@ impl ContractStateWatcher {
             ),
         }
     }
+
+    /// Create a list of contract states that share a single channel but use different account ids.
+    #[cfg(feature = "test-feature")]
+    pub fn test_batch(
+        ids: &[AccountId],
+        state: ProtocolState,
+    ) -> (Vec<Self>, watch::Sender<Option<ProtocolState>>) {
+        let (tx, rx) = watch::channel(Some(state));
+        let selfs = ids
+            .iter()
+            .map(|id| Self {
+                account_id: id.clone(),
+                contract_state: rx.clone(),
+            })
+            .collect();
+        (selfs, tx)
+    }
 }
 
 pub struct RpcExecutor {
@@ -371,6 +388,20 @@ pub struct NearClient {
     signer: InMemorySigner,
     cipher_pk: hpke::PublicKey,
     sign_pk: near_crypto::PublicKey,
+}
+
+impl Governance for NearClient {
+    async fn propose_join(&self) -> anyhow::Result<()> {
+        self.propose_join().await
+    }
+
+    async fn vote_reshared(&self, epoch: u64) -> anyhow::Result<bool> {
+        self.vote_reshared(epoch).await
+    }
+
+    async fn vote_public_key(&self, public_key: &near_crypto::PublicKey) -> anyhow::Result<bool> {
+        self.vote_public_key(public_key).await
+    }
 }
 
 impl NearClient {
@@ -1246,10 +1277,10 @@ async fn execute_batch_publish(
     }
 }
 
-use chain_signatures_project::accounts::Respond as SolanaRespondAccount;
-use chain_signatures_project::instruction::Respond as SolanaRespond;
-use chain_signatures_project::AffinePoint as SolanaContractAffinePoint;
-use chain_signatures_project::Signature as SolanaContractSignature;
+use signet_program::accounts::Respond as SolanaRespondAccount;
+use signet_program::instruction::Respond as SolanaRespond;
+use signet_program::AffinePoint as SolanaContractAffinePoint;
+use signet_program::Signature as SolanaContractSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
 async fn try_publish_sol(
     sol: &SolanaClient,

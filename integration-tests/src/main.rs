@@ -11,7 +11,6 @@ use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
 use tokio::signal;
-use tracing_subscriber::EnvFilter;
 
 mod commands;
 
@@ -51,10 +50,7 @@ enum Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let subscriber = tracing_subscriber::fmt()
-        .with_thread_ids(true)
-        .with_env_filter(EnvFilter::from_default_env());
-    subscriber.init();
+    integration_tests::utils::init_tracing_log();
 
     match Cli::parse() {
         Cli::SetupEnv {
