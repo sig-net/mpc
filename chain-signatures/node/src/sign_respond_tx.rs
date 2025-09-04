@@ -1,3 +1,4 @@
+use crate::checkpoint::{Chain, CheckpointManager};
 use crate::protocol::signature::SignRequest;
 use crate::protocol::SignRequestType;
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
@@ -15,9 +16,7 @@ use serde_json::Value;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Copy)]
 pub struct SignRespondTxId(pub B256);
@@ -521,12 +520,13 @@ pub struct SignRespondSignature {
 
 #[derive(Clone)]
 pub struct SignRespondSignatureChannel {
-    tx: mpsc::Sender<SignRespondSignature>,
+    tx: mpsc::Sender<(Chain, SignRespondSignature)>,
 }
 
 impl SignRespondSignatureChannel {
     pub fn send(
         &self,
+        chain: Chain,
         public_key: mpc_crypto::PublicKey,
         request: SignRequest,
         output: FullSignature<Secp256k1>,
@@ -548,12 +548,15 @@ impl SignRespondSignatureChannel {
         };
         tokio::spawn(async move {
             if let Err(err) = tx
-                .send(SignRespondSignature {
-                    public_key,
-                    request,
-                    signature,
-                    participants,
-                })
+                .send((
+                    chain,
+                    SignRespondSignature {
+                        public_key,
+                        request,
+                        signature,
+                        participants,
+                    },
+                ))
                 .await
             {
                 tracing::error!(%err, "failed to send sign respond signature");
@@ -563,7 +566,7 @@ impl SignRespondSignatureChannel {
 }
 
 pub struct SignRespondSignatureProcessor {
-    sign_respond_signature_rx: mpsc::Receiver<SignRespondSignature>,
+    sign_respond_signature_rx: mpsc::Receiver<(Chain, SignRespondSignature)>,
 }
 
 const MAX_CONCURRENT_SIGN_RESPOND_SIGNATURE_REQUESTS: usize = 1024;
@@ -579,12 +582,10 @@ impl SignRespondSignatureProcessor {
         )
     }
 
-    pub async fn run(
-        mut self,
-        sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
-        max_attempts: u8,
-    ) {
-        while let Some(sign_respond_signature) = self.sign_respond_signature_rx.recv().await {
+    pub async fn run(mut self, checkpoint: CheckpointManager, max_attempts: u8) {
+        while let Some((chain, sign_respond_signature)) =
+            self.sign_respond_signature_rx.recv().await
+        {
             let sign_respond_tx = match SignRespondTx::new(sign_respond_signature.clone()) {
                 Ok(tx) => tx,
                 Err(err) => {
@@ -594,11 +595,9 @@ impl SignRespondSignatureProcessor {
             };
 
             for attempt in 1..=max_attempts {
-                if sign_respond_tx_map
-                    .write()
+                if checkpoint
+                    .insert_or_update_tx(chain, sign_respond_tx.id, sign_respond_tx.clone())
                     .await
-                    .insert(sign_respond_tx.id, sign_respond_tx.clone())
-                    .is_some()
                 {
                     tracing::info!(sign_id = ?sign_respond_tx.id, "inserted sign respond tx into map");
                     break;

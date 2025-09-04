@@ -234,7 +234,9 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
     })
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy, Hash)]
+#[derive(
+    Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy, Hash, Ord, PartialOrd,
+)]
 pub enum Chain {
     NEAR,
     Ethereum,

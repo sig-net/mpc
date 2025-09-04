@@ -334,10 +334,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 read_responded_tx_channel.clone(),
             ));
 
-            let sign_respond_tx_map_clone = checkpoint_manager.sign_respond_tx_map.clone();
-            tokio::spawn(sign_respond_signature_processor.run(sign_respond_tx_map_clone, 5));
-            let sign_respond_tx_map_clone = checkpoint_manager.sign_respond_tx_map.clone();
-            tokio::spawn(read_responded_tx_processor.run(sign_respond_tx_map_clone, 5));
+            tokio::spawn(sign_respond_signature_processor.run(checkpoint_manager.clone(), 5));
+            tokio::spawn(read_responded_tx_processor.run(checkpoint_manager.clone(), 5));
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
             let protocol_handle = tokio::spawn(protocol.run(
@@ -362,7 +360,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_tx.clone(),
                 app_data_storage.clone(),
                 account_id.clone(),
-                Arc::new(checkpoint_manager),
+                checkpoint_manager,
             ));
             tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
             tracing::info!("protocol http server spawned");

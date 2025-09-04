@@ -1395,12 +1395,13 @@ async fn try_publish_sol(
             elapsed = ?timestamp.elapsed(),
             "published read respond solana signature successfully"
             );
-            read_responded_tx_channel.send(read_responded_tx.tx_id);
+            read_responded_tx_channel.send(Chain::Solana, read_responded_tx.tx_id);
         }
     }
 
     if let SignRequestType::SignRespond(_) = action.request.indexed.sign_request_type {
         sign_respond_signature_channel.send(
+            Chain::Solana,
             action.public_key,
             action.request.clone(),
             action.output.clone(),

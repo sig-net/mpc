@@ -637,6 +637,7 @@ impl SignatureGenerator {
                         self.request.indexed.sign_request_type
                     {
                         self.sign_respond_signature_channel.send(
+                            self.request.indexed.chain,
                             self.public_key,
                             self.request.clone(),
                             output,

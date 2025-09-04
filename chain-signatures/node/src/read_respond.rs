@@ -1,3 +1,4 @@
+use crate::checkpoint::CheckpointManager;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_respond_tx::SignRespondTx;
 use crate::sign_respond_tx::SignRespondTxId;
@@ -12,10 +13,8 @@ use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::SignArgs;
 use mpc_primitives::SignId;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
@@ -285,14 +284,14 @@ async fn fetch_tx_from_helios(
 
 #[derive(Clone)]
 pub struct ReadRespondedTxChannel {
-    tx: mpsc::Sender<SignRespondTxId>,
+    tx: mpsc::Sender<(Chain, SignRespondTxId)>,
 }
 
 impl ReadRespondedTxChannel {
-    pub fn send(&self, tx_id: SignRespondTxId) {
+    pub fn send(&self, chain: Chain, tx_id: SignRespondTxId) {
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Err(err) = tx.send(tx_id).await {
+            if let Err(err) = tx.send((chain, tx_id)).await {
                 tracing::error!(%err, "failed to send read responded tx id");
             }
         });
@@ -300,7 +299,7 @@ impl ReadRespondedTxChannel {
 }
 
 pub struct ReadRespondedTxProcessor {
-    read_responded_tx_rx: mpsc::Receiver<SignRespondTxId>,
+    read_responded_tx_rx: mpsc::Receiver<(Chain, SignRespondTxId)>,
 }
 
 const MAX_CONCURRENT_READ_RESPONDED_TX_REQUESTS: usize = 1024;
@@ -316,17 +315,12 @@ impl ReadRespondedTxProcessor {
         )
     }
 
-    pub async fn run(
-        mut self,
-        sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
-        max_attempts: u8,
-    ) {
-        while let Some(sign_respond_tx_id) = self.read_responded_tx_rx.recv().await {
+    pub async fn run(mut self, checkpoint: CheckpointManager, max_attempts: u8) {
+        while let Some((chain, sign_respond_tx_id)) = self.read_responded_tx_rx.recv().await {
             for attempt in 1..=max_attempts {
-                if sign_respond_tx_map
-                    .write()
+                if checkpoint
+                    .remove_tx_by_id(chain, &sign_respond_tx_id)
                     .await
-                    .remove(&sign_respond_tx_id)
                     .is_some()
                 {
                     tracing::info!(sign_id = ?sign_respond_tx_id, "removed sign respond tx from map");
