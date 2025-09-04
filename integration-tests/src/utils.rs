@@ -6,6 +6,21 @@ use near_workspaces::{
     Account, AccountId, Worker,
 };
 use rand::Rng;
+use std::sync::Once;
+use tracing_subscriber::EnvFilter;
+
+static INIT: Once = Once::new();
+
+/// Call at least once in every test to see tracing output
+pub fn init_tracing_log() {
+    INIT.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_thread_ids(true)
+            .with_env_filter(EnvFilter::from_default_env());
+
+        subscriber.init();
+    });
+}
 
 pub async fn vote_join(
     accounts: &[&Account],

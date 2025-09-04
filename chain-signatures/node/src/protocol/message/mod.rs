@@ -719,7 +719,7 @@ impl SignedMessage {
 type FromParticipant = Participant;
 type ToParticipant = Participant;
 type MessageRoute = (FromParticipant, ToParticipant);
-type SendMessage = (Message, (FromParticipant, ToParticipant, Instant));
+pub type SendMessage = (Message, (FromParticipant, ToParticipant, Instant));
 
 pub struct Partition {
     messages: Vec<Message>,
@@ -863,7 +863,6 @@ impl MessageOutbox {
                             result = client.msg(&url, payload) => {
                                 let Err(err) = result else {
                                     send_encrypted_latency_metric.observe(start.elapsed().as_millis() as f64);
-                                    tracing::debug!(?to, ?url, elapsed = ?instant.elapsed(), "finished sending messages");
                                     break;
                                 };
 
@@ -876,7 +875,7 @@ impl MessageOutbox {
                                     .observe(attempt_timestamp.elapsed().as_millis() as f64);
                             }
                         }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 });
             }
@@ -921,6 +920,13 @@ impl MessageOutbox {
                 }
             }
         }
+    }
+
+    /// Allows tests to manually handle outgoing message before they are
+    /// encrypted and published.
+    #[cfg(feature = "test-feature")]
+    pub fn intercept_outgoing_messages(&mut self) -> &mut mpsc::Receiver<SendMessage> {
+        &mut self.outbox_rx
     }
 }
 
@@ -967,7 +973,7 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
     partitions
 }
 
-fn cbor_to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, MessageError> {
+pub fn cbor_to_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, MessageError> {
     let mut buf = Vec::new();
     ciborium::into_writer(value, &mut buf)
         .map_err(|err| MessageError::CborConversion(err.to_string()))?;

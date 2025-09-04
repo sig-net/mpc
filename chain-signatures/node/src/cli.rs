@@ -302,7 +302,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             .await;
             let protocol = MpcSignProtocol {
                 my_account_id: account_id.clone(),
-                near: near_client,
                 rpc_channel,
                 msg_channel: msg_channel.clone(),
                 generating: msg_channel.subscribe_generation().await,
@@ -311,6 +310,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 secret_storage: key_storage,
                 triple_storage: triple_storage.clone(),
                 presignature_storage: presignature_storage.clone(),
+                contract: contract_watcher.clone(),
                 config: config_rx.clone(),
                 mesh_state: mesh_state.clone(),
             };
@@ -320,8 +320,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
-            let protocol_handle =
-                tokio::spawn(protocol.run(node, contract_watcher, config_rx, mesh_state));
+            let protocol_handle = tokio::spawn(protocol.run(
+                node,
+                near_client,
+                contract_watcher,
+                config_rx,
+                mesh_state,
+            ));
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
                 web_port,

@@ -645,3 +645,10 @@ impl FromRedisValue for Triple {
         })
     }
 }
+
+#[cfg(feature = "test-feature")]
+impl TripleStorage {
+    pub fn triple_key(&self) -> &str {
+        &self.triple_key
+    }
+}

@@ -11,6 +11,9 @@ pub mod state;
 pub mod sync;
 pub mod triple;
 
+#[cfg(feature = "test-feature")]
+pub mod test_setup;
+
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
@@ -23,7 +26,7 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
-use crate::rpc::{ContractStateWatcher, NearClient, RpcChannel};
+use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -40,7 +43,6 @@ use tokio::sync::{mpsc, watch};
 
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
-    pub(crate) near: NearClient,
     pub(crate) secret_storage: SecretNodeStorageBox,
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
@@ -49,14 +51,32 @@ pub struct MpcSignProtocol {
     pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
     pub(crate) msg_channel: MessageChannel,
     pub(crate) rpc_channel: RpcChannel,
+    pub(crate) contract: ContractStateWatcher,
     pub(crate) config: watch::Receiver<Config>,
     pub(crate) mesh_state: watch::Receiver<MeshState>,
 }
 
+/// Interface required by the [`MpcSignProtocol`] to participate in the
+/// self-governing methods of the MPC network.
+pub trait Governance {
+    fn propose_join(&self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+
+    fn vote_reshared(
+        &self,
+        epoch: u64,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+
+    fn vote_public_key(
+        &self,
+        public_key: &near_crypto::PublicKey,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+}
+
 impl MpcSignProtocol {
-    pub async fn run(
+    pub async fn run<G: Governance>(
         mut self,
         mut node: Node,
+        mut gov_client: G,
         contract_state: ContractStateWatcher,
         config: watch::Receiver<Config>,
         mesh_state: watch::Receiver<MeshState>,
@@ -95,7 +115,10 @@ impl MpcSignProtocol {
 
             if let Some(contract_state) = contract_state.state() {
                 let consensus_time = Instant::now();
-                node.state = node.state.advance(&mut self, contract_state).await;
+                node.state = node
+                    .state
+                    .advance(&mut self, &mut gov_client, contract_state)
+                    .await;
                 crate::metrics::PROTOCOL_LATENCY_ITER_CONSENSUS
                     .with_label_values(&[my_account_id.as_str()])
                     .observe(consensus_time.elapsed().as_secs_f64());
@@ -118,6 +141,10 @@ impl MpcSignProtocol {
                 .observe(protocol_time.elapsed().as_secs_f64());
             tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
         }
+    }
+
+    pub fn my_account_id(&self) -> &AccountId {
+        &self.my_account_id
     }
 }
 

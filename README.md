@@ -4,7 +4,7 @@ Sig.Network MPC is a service that facilitates the ability to sign arbitrary payl
 
 ### More information:
 - [Docs](https://docs.sig.network/)
-- [Roadmap](ROADMAP.md)
-- [Architecture](ARCHITECTURE.md)
-- [Scaling and Security](SCALING_AND_SECURITY.md)
+- [Roadmap](https://sig.network/#network-roadmap)
+- [Architecture](doc/ARCHITECTURE.md)
+- [Scaling and Security](doc/SCALING_AND_SECURITY.md)
 - [Contributing](./integration-tests/README.md)

@@ -1,4 +1,7 @@
+mod cbor;
 mod error;
+#[cfg(test)]
+pub mod mock;
 
 use self::error::Error;
 use crate::indexer::NearIndexer;
@@ -6,9 +9,11 @@ use crate::protocol::state::{NodeStateWatcher, NodeStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::MessageChannel;
 use crate::storage::{PresignatureStorage, TripleStorage};
+use crate::web::cbor::Cbor;
 use crate::web::error::Result;
 
 use anyhow::Context;
+use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -18,7 +23,7 @@ use mpc_keys::hpke::Ciphered;
 use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 
 struct AxumState {
     node: NodeStateWatcher,
@@ -48,6 +53,11 @@ pub async fn run(
         sync_channel,
     };
 
+    // Sync can be a large payload, so we set a higher limit for payload.
+    let sync = Router::new()
+        .route("/sync", post(sync))
+        .layer(DefaultBodyLimit::max(20 * 1024 * 1024));
+
     let mut router = Router::new()
         // healthcheck endpoint
         .route(
@@ -60,7 +70,7 @@ pub async fn run(
         .route("/msg", post(msg))
         .route("/state", get(state))
         .route("/metrics", get(metrics))
-        .route("/sync", post(sync));
+        .merge(sync);
 
     if cfg!(feature = "bench") {
         router = router.route("/bench/metrics", get(bench_metrics));
@@ -68,18 +78,16 @@ pub async fn run(
 
     let app = router.layer(Extension(Arc::new(axum_state)));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = format!("0.0.0.0:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!(?addr, "starting http server");
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
 async fn msg(
     Extension(state): Extension<Arc<AxumState>>,
-    WithRejection(Json(encrypted), _): WithRejection<Json<Vec<Ciphered>>, Error>,
+    WithRejection(Cbor(encrypted), _): WithRejection<Cbor<Vec<Ciphered>>, Error>,
 ) {
     for encrypted in encrypted.into_iter() {
         let msg_channel = state.msg_channel.clone();
@@ -222,7 +230,7 @@ async fn bench_metrics() -> Json<BenchMetrics> {
 #[tracing::instrument(level = "debug", skip_all)]
 async fn sync(
     Extension(state): Extension<Arc<AxumState>>,
-    WithRejection(Json(update), _): WithRejection<Json<SyncUpdate>, Error>,
+    WithRejection(Cbor(update), _): WithRejection<Cbor<SyncUpdate>, Error>,
 ) -> Result<Json<()>> {
     state.sync_channel.request_update(update).await;
     Ok(Json(()))
