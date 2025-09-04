@@ -639,24 +639,3 @@ async fn subscribe_and_process_sign_events<T>(
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
-
-// async fn process_anchor_sign_respond_event(
-//     event: SignRespondRequestedEvent,
-//     tx_sig: Vec<u8>,
-//     sign_tx: mpsc::Sender<IndexedSignRequest>,
-//     node_near_account_id: AccountId,
-//     total_timeout: Duration,
-// ) -> anyhow::Result<()> {
-//     let sign_request = event.generate_sign_request(tx_sig, total_timeout)?;
-
-//     if let Err(err) = sign_tx.send(sign_request).await {
-//         // TODO: handle error to ensure 100% success rate
-//         tracing::error!(?err, "Failed to send Solana sign request into queue");
-//     } else {
-//         crate::metrics::NUM_SIGN_REQUESTS
-//             .with_label_values(&[Chain::Solana.as_str(), node_near_account_id.as_str()])
-//             .inc();
-//     }
-
-//     Ok(())
-// }
