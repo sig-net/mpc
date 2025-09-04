@@ -6,6 +6,7 @@ publish = false
 
 
 [dependencies]
+anchor-lang.workspace = true
 alloy.workspace = true
 anyhow.workspace = true
 async-process = "1"

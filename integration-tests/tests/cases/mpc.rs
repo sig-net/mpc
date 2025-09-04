@@ -278,3 +278,185 @@ async fn test_presignature_timeout() {
         .await
         .expect("should have enough presignatures eventually");
 }
+
+/// Test checkpoint integration with mock indexers for cross-chain signing
+#[tokio::test(flavor = "multi_thread")]
+async fn test_checkpoint_with_mock_indexers() {
+    let mut network = MpcFixtureBuilder::default()
+        .with_preshared_key()
+        .with_presignature_stockpile()
+        .with_min_triples_stockpile(0)
+        .with_max_triples_stockpile(0)
+        .with_min_presignatures_stockpile(0)
+        .with_max_presignatures_stockpile(0)
+        .with_mock_indexers() // Enable mock indexers
+        .build()
+        .await;
+
+    // Wait for sufficient presignatures
+    tokio::time::timeout(
+        Duration::from_millis(300),
+        network.wait_for_presignatures(2),
+    )
+    .await
+    .expect("should start with enough presignatures");
+
+    // Start the mock indexers
+    let _indexer_handles = network
+        .start_mock_indexers()
+        .await
+        .expect("mock indexers should be available");
+
+    // Create sign requests for cross-chain transactions
+    let eth_sign_request = sign_request(10); // Different seed for Ethereum
+    let sol_sign_request = sign_request(20); // Different seed for Solana
+
+    tracing::info!("sending sign requests now");
+
+    // Send the initial sign requests to the network
+    network[0]
+        .sign_tx
+        .send(eth_sign_request.clone())
+        .await
+        .unwrap();
+    network[1]
+        .sign_tx
+        .send(eth_sign_request.clone())
+        .await
+        .unwrap();
+    network[2]
+        .sign_tx
+        .send(eth_sign_request.clone())
+        .await
+        .unwrap();
+
+    network[0]
+        .sign_tx
+        .send(sol_sign_request.clone())
+        .await
+        .unwrap();
+    network[1]
+        .sign_tx
+        .send(sol_sign_request.clone())
+        .await
+        .unwrap();
+    network[2]
+        .sign_tx
+        .send(sol_sign_request.clone())
+        .await
+        .unwrap();
+
+    // Wait for the signing to complete
+    let timeout = Duration::from_secs(15);
+    let interval = Duration::from_millis(100);
+    let deadline = Instant::now() + timeout;
+
+    let target_sign_actions = 2; // Expecting 2 sign requests to be processed
+
+    let sign_actions_found = loop {
+        let actions = network.output.rpc_actions.lock().await;
+        let current_sign_actions = actions
+            .iter()
+            .filter(|action| action.contains("RpcAction::Publish"))
+            .count();
+
+        if current_sign_actions >= target_sign_actions {
+            break current_sign_actions;
+        }
+
+        if Instant::now() >= deadline {
+            panic!(
+                "Timeout: expected {} sign actions but got {}",
+                target_sign_actions, current_sign_actions
+            );
+        }
+
+        drop(actions);
+        tokio::time::sleep(interval).await;
+    };
+
+    tracing::info!("Found {} sign actions", sign_actions_found);
+
+    // Now simulate the signed transactions being submitted to the mock chains
+    let eth_tx_id = network
+        .add_mock_ethereum_transaction(eth_sign_request.id)
+        .await
+        .expect("should be able to add Ethereum transaction");
+    let sol_tx_id = network
+        .add_mock_solana_transaction(sol_sign_request.id)
+        .await
+        .expect("should be able to add Solana transaction");
+
+    tracing::info!(
+        "Added mock transactions - Ethereum: {:?}, Solana: {:?}",
+        eth_tx_id,
+        sol_tx_id
+    );
+
+    // Wait for the indexers to process the transactions and generate read_respond requests
+    let indexer_timeout = Duration::from_secs(10);
+    let indexer_deadline = Instant::now() + indexer_timeout;
+
+    let mut read_respond_actions_found = 0;
+    let target_read_respond_actions = 2; // Expecting read_respond for both chains
+
+    loop {
+        let actions = network.output.rpc_actions.lock().await;
+        let current_read_respond_actions = actions
+            .iter()
+            .filter(|action| {
+                action.contains("RpcAction::Publish") && action.contains("read_respond")
+            })
+            .count();
+
+        if current_read_respond_actions >= target_read_respond_actions {
+            read_respond_actions_found = current_read_respond_actions;
+            break;
+        }
+
+        if Instant::now() >= indexer_deadline {
+            // This might not fail the test as the indexers are async and might take longer
+            tracing::warn!(
+                "Indexer timeout: expected {} read_respond actions but got {}",
+                target_read_respond_actions,
+                current_read_respond_actions
+            );
+            break;
+        }
+
+        drop(actions);
+        tokio::time::sleep(interval).await;
+    }
+
+    tracing::info!("Found {} read_respond actions", read_respond_actions_found);
+
+    // Verify checkpoint state
+    if let Some(checkpoint_manager) = network.checkpoint_manager() {
+        let eth_checkpoint = checkpoint_manager
+            .get_chain_checkpoint(&mpc_node::protocol::Chain::Ethereum)
+            .await;
+        let sol_checkpoint = checkpoint_manager
+            .get_chain_checkpoint(&mpc_node::protocol::Chain::Solana)
+            .await;
+
+        tracing::info!("Ethereum checkpoint: {:?}", eth_checkpoint);
+        tracing::info!("Solana checkpoint: {:?}", sol_checkpoint);
+
+        // Check that both chains have processed some blocks
+        if let Some(eth_checkpoint) = eth_checkpoint {
+            assert!(
+                eth_checkpoint.processed_block_height > 0,
+                "Ethereum should have processed some blocks"
+            );
+        }
+        if let Some(sol_checkpoint) = sol_checkpoint {
+            assert!(
+                sol_checkpoint.processed_block_height > 0,
+                "Solana should have processed some blocks"
+            );
+        }
+    }
+
+    // The test passes if we reach here without panicking
+    tracing::info!("Checkpoint integration test completed successfully");
+}

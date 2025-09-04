@@ -2,8 +2,10 @@
 //! it with controlled inputs, and assert on outputs.
 
 use crate::containers::Redis;
+use crate::mpc_fixture::mock_indexers::MockIndexer;
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke::Ciphered;
+use mpc_node::checkpoint::CheckpointManager;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::state::NodeStateWatcher;
@@ -19,6 +21,9 @@ pub struct MpcFixture {
     pub redis_container: Redis,
     pub shared_contract_state: watch::Sender<Option<ProtocolState>>,
     pub output: SharedOutput,
+    pub checkpoint_manager: Option<CheckpointManager>,
+    pub ethereum_indexer: Option<MockIndexer>,
+    pub solana_indexer: Option<MockIndexer>,
 }
 
 pub struct MpcFixtureNode {
@@ -52,6 +57,62 @@ impl MpcFixture {
         for node in &self.nodes {
             node.wait_for_presignatures(threshold_per_node).await;
         }
+    }
+
+    /// Start the mock indexers if they are available
+    pub async fn start_mock_indexers(
+        &mut self,
+    ) -> Option<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> {
+        if let (Some(checkpoint_manager), Some(ethereum_indexer), Some(solana_indexer)) = (
+            &self.checkpoint_manager,
+            &self.ethereum_indexer,
+            &self.solana_indexer,
+        ) {
+            let eth_handle = MockIndexer::start(
+                ethereum_indexer.chain(),
+                Arc::new(checkpoint_manager.clone()),
+                ethereum_indexer.sign_request_tx(),
+            );
+
+            let sol_handle = MockIndexer::start(
+                solana_indexer.chain(),
+                Arc::new(checkpoint_manager.clone()),
+                solana_indexer.sign_request_tx(),
+            );
+
+            Some((eth_handle, sol_handle))
+        } else {
+            None
+        }
+    }
+
+    /// Add a mock transaction to be tracked by the Ethereum indexer
+    pub async fn add_mock_ethereum_transaction(
+        &mut self,
+        sign_id: mpc_primitives::SignId,
+    ) -> Option<mpc_node::sign_respond_tx::SignRespondTxId> {
+        if let Some(ref mut ethereum_indexer) = &mut self.ethereum_indexer {
+            Some(ethereum_indexer.add_mock_transaction(sign_id).await)
+        } else {
+            None
+        }
+    }
+
+    /// Add a mock transaction to be tracked by the Solana indexer
+    pub async fn add_mock_solana_transaction(
+        &mut self,
+        sign_id: mpc_primitives::SignId,
+    ) -> Option<mpc_node::sign_respond_tx::SignRespondTxId> {
+        if let Some(ref mut solana_indexer) = &mut self.solana_indexer {
+            Some(solana_indexer.add_mock_transaction(sign_id).await)
+        } else {
+            None
+        }
+    }
+
+    /// Get the checkpoint manager if available
+    pub fn checkpoint_manager(&self) -> Option<&CheckpointManager> {
+        self.checkpoint_manager.as_ref()
     }
 }
 

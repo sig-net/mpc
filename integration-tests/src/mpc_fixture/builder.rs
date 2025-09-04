@@ -6,6 +6,7 @@ use crate::mpc_fixture::fixture_interface::SharedOutput;
 use crate::mpc_fixture::fixture_tasks::MessageFilter;
 use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::mock_governance::MockGovernance;
+use crate::mpc_fixture::mock_indexers::MockIndexer;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
 use cait_sith::protocol::Participant;
 use mpc_contract::config::{min_to_ms, ProtocolConfig};
@@ -13,13 +14,16 @@ use mpc_contract::primitives::{
     CandidateInfo, Candidates as CandidatesById, ParticipantInfo, Participants as ParticipantsById,
 };
 use mpc_keys::hpke::{self, Ciphered};
+use mpc_node::checkpoint::CheckpointManager;
 use mpc_node::config::{Config, LocalConfig, NetworkConfig};
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, Votes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
 use mpc_node::protocol::state::NodeKeyInfo;
-use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue};
+use mpc_node::protocol::{
+    self, IndexedSignRequest, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue,
+};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
 use mpc_node::sign_respond_tx::SignRespondSignatureProcessor;
@@ -68,6 +72,9 @@ struct FixtureConfig {
     signature_timeout_ms: u64,
     presignature_timeout_ms: u64,
     triple_timeout_ms: u64,
+
+    // Mock indexer config
+    use_mock_indexers: bool,
 }
 
 /// Context required to start a fixture node.
@@ -111,6 +118,7 @@ impl FixtureConfig {
             signature_timeout_ms: 10_000,
             presignature_timeout_ms: 10_000,
             triple_timeout_ms: min_to_ms(10),
+            use_mock_indexers: false,
         }
     }
 }
@@ -195,11 +203,49 @@ impl MpcFixtureBuilder {
             nodes.push(started);
         }
 
+        // Setup checkpoint manager and mock indexers if enabled
+        let (checkpoint_manager, ethereum_indexer, solana_indexer) =
+            if self.fixture_config.use_mock_indexers {
+                let checkpoint_manager = CheckpointManager::new();
+
+                // Create a shared sign request channel that both indexers can use
+                let (sign_tx, mut sign_rx) = tokio::sync::mpsc::channel::<IndexedSignRequest>(100);
+
+                // Forward sign requests to the first available node (for testing purposes)
+                let first_node_sign_tx = nodes[0].sign_tx.clone();
+                tokio::spawn(async move {
+                    while let Some(sign_request) = sign_rx.recv().await {
+                        tracing::info!(
+                            "Forwarding sign request from mock indexer: {:?}",
+                            sign_request.id
+                        );
+                        let _ = first_node_sign_tx.send(sign_request).await;
+                    }
+                });
+
+                let ethereum_indexer =
+                    MockIndexer::ethereum(Arc::new(checkpoint_manager.clone()), sign_tx.clone());
+
+                let solana_indexer =
+                    MockIndexer::solana(Arc::new(checkpoint_manager.clone()), sign_tx);
+
+                (
+                    Some(checkpoint_manager),
+                    Some(ethereum_indexer),
+                    Some(solana_indexer),
+                )
+            } else {
+                (None, None, None)
+            };
+
         MpcFixture {
             redis_container,
             nodes,
             output,
             shared_contract_state: shared_contract_state_tx,
+            checkpoint_manager,
+            ethereum_indexer,
+            solana_indexer,
         }
     }
 
@@ -320,6 +366,12 @@ impl MpcFixtureBuilder {
     /// Specify a method that acts as message filter for all sent messages the given node.
     pub fn with_outgoing_message_filter(mut self, node_idx: usize, filter: MessageFilter) -> Self {
         self.prepared_nodes[node_idx].messaging.filter = filter;
+        self
+    }
+
+    /// Enable mock indexers (Ethereum and Solana) for testing checkpoint integration
+    pub fn with_mock_indexers(mut self) -> Self {
+        self.fixture_config.use_mock_indexers = true;
         self
     }
 }
