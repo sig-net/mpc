@@ -193,7 +193,7 @@ fn sign_request_from_event(
 
     // Call the existing derive_epsilon_sol function with the correct parameters
     // to match the TypeScript implementation
-    let epsilon = derive_epsilon_sol(&event.sender.to_string(), &event.path);
+    let epsilon = derive_epsilon_sol(event.key_version, &event.sender.to_string(), &event.path);
 
     // Use transaction signature as entropy
     let mut entropy = [0u8; 32];

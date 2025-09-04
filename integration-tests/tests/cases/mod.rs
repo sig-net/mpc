@@ -7,6 +7,7 @@ use mpc_contract::update::ProposeUpdateArgs;
 use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt};
 use mpc_node::kdf::into_eth_sig;
 use mpc_node::util::NearPublicKeyExt as _;
+use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use test_log::test;
 
 pub mod mpc;
@@ -115,7 +116,8 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         nodes.wait().signable().await?;
         let outcome = nodes.sign().path(hd_path).await?;
 
-        let derivation_epsilon = derive_epsilon_near(outcome.account.id(), hd_path);
+        let derivation_epsilon =
+            derive_epsilon_near(LATEST_MPC_KEY_VERSION, outcome.account.id(), hd_path);
         let user_pk = derive_key(mpc_pk, derivation_epsilon);
         let multichain_sig = into_eth_sig(
             &user_pk,
