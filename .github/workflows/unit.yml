@@ -84,5 +84,6 @@ jobs:
         # RUSTSEC-2024-0421 temporarily ignored to make CI green [https://github.com/sig-net/mpc/issues/414]
         # RUSTSEC-2025-0009 temporarily ignored to make CI green [https://github.com/sig-net/mpc/issues/415]
         # RUSTSEC-2024-0336 temporarily ignored to make CI green [https://github.com/sig-net/mpc/issues/415]
+        # RUSTSEC-2025-0055 helios' underlying package uses tracing-subscriber. Less important to handle since it's just ANSI encoding and helios logging shouldn't be affecting us.
         run: |
-          cargo audit --ignore RUSTSEC-2022-0093 --ignore RUSTSEC-2024-0344 --ignore RUSTSEC-2022-0054 --ignore RUSTSEC-2021-0145 --ignore RUSTSEC-2024-0399 --ignore RUSTSEC-2024-0421 --ignore RUSTSEC-2025-0009 --ignore RUSTSEC-2024-0336
+          cargo audit --ignore RUSTSEC-2022-0093 --ignore RUSTSEC-2024-0344 --ignore RUSTSEC-2022-0054 --ignore RUSTSEC-2021-0145 --ignore RUSTSEC-2024-0399 --ignore RUSTSEC-2024-0421 --ignore RUSTSEC-2025-0009 --ignore RUSTSEC-2024-0336 --ignore RUSTSEC-2025-0055
