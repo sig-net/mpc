@@ -99,7 +99,7 @@ impl CompletedTx {
         let mut output = Vec::new();
         output.extend_from_slice(&MAGIC_ERROR_PREFIX);
         let serialized_output: Vec<u8> = if callback_serialization_format == 0 {
-            let borsh_data = vec![1u8]; // Simple serialization: 1 = true
+            let borsh_data = [1u8]; // Simple serialization: 1 = true
             output.extend_from_slice(&borsh_data);
             Bytes::from(output).into()
         } else {
@@ -143,9 +143,7 @@ impl CompletedTx {
         let message = calculate_read_respond_hash_message(&request_id_bytes, &serialized_output);
         tracing::info!("Read respond message hash: {:?}", hex::encode(message));
         let Some(payload) = Scalar::from_bytes(message) else {
-            return Err(anyhow::anyhow!(
-                "Failed to convert read respond message to scalar: {message:?}"
-            ));
+            anyhow::bail!("Failed to convert read respond message to scalar: {message:?}");
         };
         let path = SOLANA_READ_RESPOND_PATH.to_string();
         tracing::info!(
@@ -182,10 +180,7 @@ impl CompletedTx {
     ) -> anyhow::Result<TransactionOutput> {
         let tx = fetch_tx_from_helios(helios_client, self.tx.id, max_attempts).await;
         let Some(tx) = tx else {
-            return Err(anyhow::anyhow!(
-                "Failed to fetch tx from helios, tx id: {:?}",
-                self.tx.id
-            ));
+            anyhow::bail!("Failed to fetch tx from helios, tx id: {:?}", self.tx.id);
         };
         let explorer_deserialization_format = self.tx.explorer_deserialization_format;
         let explorer_deserialization_schema = &self.tx.explorer_deserialization_schema;
@@ -243,9 +238,9 @@ async fn fetch_call_result(
             Ok(call_result) => return Ok(call_result),
             Err(err) => {
                 if attempts >= max_attempts {
-                    return Err(anyhow::anyhow!(
+                    anyhow::bail!(
                         "Failed to fecth call result from helios: {err:?}, exceeded maximum retry"
-                    ));
+                    );
                 }
                 tracing::warn!("Failed to fecth call result from helios: {err:?}, retrying...");
                 attempts += 1;

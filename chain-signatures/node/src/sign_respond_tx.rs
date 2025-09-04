@@ -209,7 +209,7 @@ impl TransactionOutput {
             .abi_decode(call_result)
             .map_err(|e| anyhow::anyhow!("Failed to tuple types: {e:?}"))?
         else {
-            return Err(anyhow::anyhow!("Can't decode to tuple type"));
+            anyhow::bail!("Can't decode to tuple type");
         };
 
         // Map to named output
@@ -383,10 +383,10 @@ fn create_abi_data(schema: Vec<AbiField>) -> anyhow::Result<Output> {
         } else if field.typ == "bool" {
             data.insert(field.name, DynSolValue::Bool(true));
         } else {
-            return Err(anyhow::anyhow!(
+            anyhow::bail!(
                 "Cannot serialize non-function call success as type {}",
                 field.typ
-            ));
+            );
         }
     }
 
@@ -395,19 +395,16 @@ fn create_abi_data(schema: Vec<AbiField>) -> anyhow::Result<Output> {
 
 fn encode_abi_values(schema: &[AbiField], values: &[DynSolValue]) -> anyhow::Result<Vec<u8>> {
     if schema.len() != values.len() {
-        return Err(anyhow::anyhow!(
+        anyhow::bail!(
             "Schema and values length mismatch: {} != {}",
             schema.len(),
             values.len()
-        ));
+        );
     }
     for (f, v) in schema.iter().zip(values.iter()) {
         let ty: DynSolType = f.typ.parse()?;
         if !ty.matches(v) {
-            return Err(anyhow::anyhow!(
-                "Value {v:?} doesn't match Solidity type {}",
-                f.typ
-            ));
+            anyhow::bail!("Value {v:?} doesn't match Solidity type {}", f.typ);
         }
     }
     // Encode each value and concatenate

@@ -440,7 +440,7 @@ async fn update_last_processed_block(
             "last processed block is greater than latest block: last_processed_block={last_processed_block}, latest_block={latest_block}"
         );
         tracing::error!("{error_message}");
-        Err(anyhow::anyhow!(error_message))?;
+        anyhow::bail!(error_message);
     }
 
     const MAX_YIELD_RESUME_BLOCKS: u64 = 200;

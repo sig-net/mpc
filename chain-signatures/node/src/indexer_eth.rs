@@ -276,12 +276,12 @@ fn sign_request_from_filtered_log(
     tracing::debug!("found eth event: {:?}", event);
     if event.deposit == U256::ZERO {
         tracing::warn!("deposit is 0, skipping sign request");
-        return Err(anyhow::anyhow!("deposit is 0"));
+        anyhow::bail!("deposit is 0");
     }
 
     if event.key_version != 0 {
         tracing::warn!("unsupported key version: {}", event.key_version);
-        return Err(anyhow::anyhow!("unsupported key version"));
+        anyhow::bail!("unsupported key version");
     }
 
     // Create sign request from event
@@ -290,9 +290,7 @@ fn sign_request_from_filtered_log(
             "eth `sign` did not produce payload hash correctly: {:?}",
             event.payload_hash,
         );
-        return Err(anyhow::anyhow!(
-            "failed to convert event payload hash to scalar"
-        ));
+        anyhow::bail!("failed to convert event payload hash to scalar");
     };
 
     if payload > *MAX_SECP256K1_SCALAR {
@@ -918,6 +916,7 @@ async fn process_block(
                 .insert(receipt.transaction_hash.into(), pending_tx.clone());
         } else {
             // failed to create sign request from completed tx, remove the tx from the map
+            // TODO: we need to implement a better solution for not finding such txs in helios. possible: https://github.com/sig-net/mpc/issues/499
             tracing::warn!(
                 "Failed to create sign request from completed tx, removing tx from map: {:?}",
                 receipt.transaction_hash

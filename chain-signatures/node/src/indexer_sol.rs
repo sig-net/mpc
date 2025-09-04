@@ -481,84 +481,28 @@ pub async fn run(
     let rpc_http_url_clone = sol.rpc_http_url.clone();
     let rpc_ws_url_clone = sol.rpc_ws_url.clone();
     tokio::spawn(async move {
-        loop {
-            let total_timeout = total_timeout;
-            let sign_tx_clone = sign_tx_clone.clone();
-            let node_near_account_id_clone = node_near_account_id_clone.clone();
-
-            let result = subscribe_to_program_logs::<SignRespondRequestedEvent, _>(
-                program_id,
-                &rpc_http_url_clone.clone(),
-                &rpc_ws_url_clone.clone(),
-                move |event, signature, _slot| {
-                    tracing::info!("got event: {:?}", event);
-                    let tx_sig: Vec<u8> = signature.as_ref().to_vec();
-
-                    let sign_tx_inner = sign_tx_clone.clone();
-                    let node_near_account_id_inner = node_near_account_id_clone.clone();
-
-                    tokio::spawn(async move {
-                        if let Err(err) = process_anchor_sign_respond_event(
-                            event,
-                            tx_sig,
-                            sign_tx_inner,
-                            node_near_account_id_inner,
-                            total_timeout,
-                        )
-                        .await
-                        {
-                            tracing::warn!("Failed to process event: {:?}", err);
-                        }
-                    });
-                },
-            )
-            .await;
-
-            if let Err(err) = result {
-                tracing::warn!("Failed to subscribe to solana events: {:?}", err);
-            }
-
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
-
-    loop {
-        let sign_tx_clone = sign_tx.clone();
-        let node_near_account_id_clone = node_near_account_id.clone();
-
-        let result = subscribe_to_program_logs::<SignatureRequestedEvent, _>(
+        subscribe_and_process_sign_events::<SignRespondRequestedEvent>(
             program_id,
-            &sol.rpc_http_url,
-            &sol.rpc_ws_url,
-            move |event, signature, _slot| {
-                let tx_sig: Vec<u8> = signature.as_ref().to_vec();
-
-                let sign_tx_inner = sign_tx_clone.clone();
-                let node_near_account_id_inner = node_near_account_id_clone.clone();
-
-                tokio::spawn(async move {
-                    if let Err(err) = process_anchor_sign_event(
-                        event,
-                        tx_sig,
-                        sign_tx_inner,
-                        node_near_account_id_inner,
-                        total_timeout,
-                    )
-                    .await
-                    {
-                        tracing::warn!("Failed to process event: {:?}", err);
-                    }
-                });
-            },
+            &rpc_http_url_clone,
+            &rpc_ws_url_clone,
+            sign_tx_clone,
+            node_near_account_id_clone,
+            total_timeout,
         )
         .await;
+    });
 
-        if let Err(err) = result {
-            tracing::warn!("Failed to subscribe to solana events: {:?}", err);
-        }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    let sign_tx_clone = sign_tx.clone();
+    let node_near_account_id_clone = node_near_account_id.clone();
+    subscribe_and_process_sign_events::<SignatureRequestedEvent>(
+        program_id,
+        &sol.rpc_http_url,
+        &sol.rpc_ws_url,
+        sign_tx_clone,
+        node_near_account_id_clone,
+        total_timeout,
+    )
+    .await;
 }
 
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L311
@@ -618,16 +562,17 @@ where
     Ok(())
 }
 
-async fn process_anchor_sign_event(
-    event: SignatureRequestedEvent,
+async fn process_anchor_sign_event<T: SignatureEventTrait>(
+    sign_event: T,
     tx_sig: Vec<u8>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
 ) -> anyhow::Result<()> {
-    let sign_request = event.generate_sign_request(tx_sig, total_timeout)?;
+    let sign_request = sign_event.generate_sign_request(tx_sig, total_timeout)?;
 
     if let Err(err) = sign_tx.send(sign_request).await {
+        // TODO: handle error to ensure 100% success rate
         tracing::error!(?err, "Failed to send Solana sign request into queue");
     } else {
         crate::metrics::NUM_SIGN_REQUESTS
@@ -638,22 +583,80 @@ async fn process_anchor_sign_event(
     Ok(())
 }
 
-async fn process_anchor_sign_respond_event(
-    event: SignRespondRequestedEvent,
-    tx_sig: Vec<u8>,
+async fn subscribe_and_process_sign_events<T>(
+    program_id: Pubkey,
+    rpc_url: &str,
+    ws_url: &str,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
-) -> anyhow::Result<()> {
-    let sign_request = event.generate_sign_request(tx_sig, total_timeout)?;
+) where
+    T: anchor_lang::Event
+        + anchor_lang::AnchorDeserialize
+        + anchor_lang::Discriminator
+        + Clone
+        + std::fmt::Debug
+        + Send
+        + SignatureEventTrait
+        + 'static,
+{
+    loop {
+        let sign_tx_clone = sign_tx.clone();
+        let node_near_account_id_clone = node_near_account_id.clone();
 
-    if let Err(err) = sign_tx.send(sign_request).await {
-        tracing::error!(?err, "Failed to send Solana sign request into queue");
-    } else {
-        crate::metrics::NUM_SIGN_REQUESTS
-            .with_label_values(&[Chain::Solana.as_str(), node_near_account_id.as_str()])
-            .inc();
+        let result = subscribe_to_program_logs::<T, _>(
+            program_id,
+            rpc_url,
+            ws_url,
+            move |sign_event, signature, _slot| {
+                tracing::info!("got event: {:?}", sign_event);
+                let tx_sig: Vec<u8> = signature.as_ref().to_vec();
+
+                let sign_tx_inner = sign_tx_clone.clone();
+                let node_near_account_id_inner = node_near_account_id_clone.clone();
+
+                tokio::spawn(async move {
+                    if let Err(err) = process_anchor_sign_event(
+                        sign_event,
+                        tx_sig,
+                        sign_tx_inner,
+                        node_near_account_id_inner,
+                        total_timeout,
+                    )
+                    .await
+                    {
+                        tracing::warn!("Failed to process event: {:?}", err);
+                    }
+                });
+            },
+        )
+        .await;
+
+        if let Err(err) = result {
+            tracing::warn!("Failed to subscribe to solana events: {:?}", err);
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
-
-    Ok(())
 }
+
+// async fn process_anchor_sign_respond_event(
+//     event: SignRespondRequestedEvent,
+//     tx_sig: Vec<u8>,
+//     sign_tx: mpsc::Sender<IndexedSignRequest>,
+//     node_near_account_id: AccountId,
+//     total_timeout: Duration,
+// ) -> anyhow::Result<()> {
+//     let sign_request = event.generate_sign_request(tx_sig, total_timeout)?;
+
+//     if let Err(err) = sign_tx.send(sign_request).await {
+//         // TODO: handle error to ensure 100% success rate
+//         tracing::error!(?err, "Failed to send Solana sign request into queue");
+//     } else {
+//         crate::metrics::NUM_SIGN_REQUESTS
+//             .with_label_values(&[Chain::Solana.as_str(), node_near_account_id.as_str()])
+//             .inc();
+//     }
+
+//     Ok(())
+// }
