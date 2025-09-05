@@ -74,6 +74,8 @@ anchor-client.workspace = true
 anchor-lang.workspace = true
 solana-sdk.workspace = true
 solana-transaction-status.workspace = true
+solana-client = "2.2.7"
+futures-util = "0.3.31"
 
 near-account-id.workspace = true
 near-crypto = "0.26.0"
