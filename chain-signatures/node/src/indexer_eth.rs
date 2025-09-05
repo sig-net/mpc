@@ -34,6 +34,7 @@ pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     )
     .unwrap()
 });
+// This is the maximum number of blocks that Helios can look back to
 const MAX_CATCHUP_BLOCKS: u64 = 8191;
 
 type BlockNumber = u64;
