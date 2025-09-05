@@ -12,7 +12,7 @@ exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
 [workspace.package]
-version = "1.6.0"
+version = "1.7.0"
 
 [workspace.dependencies]
 alloy = { version = "=1.0.9", features = ["contract", "json"] }
@@ -40,7 +40,7 @@ sha3 = "0.10.8"
 thiserror = "1"
 tokio = { version = "1.45.1", features = ["full"] }
 tracing = "0.1.35"
-tracing-subscriber = { version = "0.3.0", default-features = false, features = [
+tracing-subscriber = { version = "0.3.20", default-features = false, features = [
     "env-filter",
     "registry",
     "std",

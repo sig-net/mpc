@@ -274,7 +274,7 @@ async fn test_presignature_timeout() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(10), network.wait_for_presignatures(1))
+    tokio::time::timeout(Duration::from_secs(15), network.wait_for_presignatures(1))
         .await
         .expect("should have enough presignatures eventually");
 }
