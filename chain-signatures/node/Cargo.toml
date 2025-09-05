@@ -45,6 +45,13 @@ opentelemetry-appender-tracing = "0.29.1"
 alloy-signer-local = "1.0.9"
 alloy-sol-types = "1.2.0"
 helios = { git = "https://github.com/a16z/helios", branch = "simple-cache" }
+alloy-dyn-abi = "1.2.0"
+ethers-core = "2.0.13"
+secp256k1 = "0.28.2"
+rlp = "0.5"
+alloy-consensus = "1.0.23"
+alloy-primitives = "1.2.1"
+alloy-json-abi = "1.2.0"
 
 # workspace dependencies
 alloy.workspace = true
@@ -90,6 +97,7 @@ mpc-crypto.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
 signet-program.workspace = true
+alloy-rlp = "0.3.12"
 
 [dev-dependencies]
 mockito = "1.7.0"

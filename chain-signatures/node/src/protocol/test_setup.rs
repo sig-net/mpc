@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::{IndexedSignRequest, MessageChannel, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
+use crate::sign_respond_tx::SignRespondSignatureChannel;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use near_sdk::AccountId;
@@ -21,6 +22,7 @@ pub struct TestProtocolChannels {
     pub rpc_channel: RpcChannel,
     pub config: watch::Receiver<Config>,
     pub mesh_state: watch::Receiver<MeshState>,
+    pub sign_respond_signature_channel: SignRespondSignatureChannel,
 }
 
 impl MpcSignProtocol {
@@ -45,6 +47,7 @@ impl MpcSignProtocol {
             contract,
             config: channels.config,
             mesh_state: channels.mesh_state,
+            sign_respond_signature_channel: channels.sign_respond_signature_channel,
         }
     }
 }
