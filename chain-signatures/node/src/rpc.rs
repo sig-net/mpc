@@ -1357,10 +1357,10 @@ async fn try_publish_sol(
                 })?;
 
             tracing::info!(
-            sign_id = ?action.request.indexed.id,
-            tx_hash = ?tx,
-            elapsed = ?timestamp.elapsed(),
-            "published solana signature successfully"
+                sign_id = ?action.request.indexed.id,
+                tx_hash = ?tx,
+                elapsed = ?timestamp.elapsed(),
+                "published solana signature successfully"
             );
         }
         SignRequestType::ReadRespond(read_responded_tx) => {
@@ -1390,10 +1390,10 @@ async fn try_publish_sol(
                 })?;
 
             tracing::info!(
-            sign_id = ?action.request.indexed.id,
-            tx_hash = ?tx,
-            elapsed = ?timestamp.elapsed(),
-            "published read respond solana signature successfully"
+                sign_id = ?action.request.indexed.id,
+                tx_hash = ?tx,
+                elapsed = ?timestamp.elapsed(),
+                "published read respond solana signature successfully"
             );
             read_responded_tx_channel.send(read_responded_tx.tx_id);
         }
