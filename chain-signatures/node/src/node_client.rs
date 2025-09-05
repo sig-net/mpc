@@ -14,11 +14,11 @@ use url::Url;
 #[group(id = "message_options")]
 pub struct Options {
     /// Default timeout used for all outbound requests to other nodes.
-    #[clap(long, env("MPC_NODE_TIMEOUT"), default_value = "1000")]
+    #[clap(long, env("MPC_NODE_TIMEOUT"), default_value = "5000")]
     pub timeout: u64,
 
     /// Timeout used for fetching the state of a node.
-    #[clap(long, env("MPC_NODE_STATE_TIMEOUT"), default_value = "1000")]
+    #[clap(long, env("MPC_NODE_STATE_TIMEOUT"), default_value = "5000")]
     pub state_timeout: u64,
 }
 
@@ -36,8 +36,8 @@ impl Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            timeout: 1000,
-            state_timeout: 1000,
+            timeout: 5000,
+            state_timeout: 5000,
         }
     }
 }
