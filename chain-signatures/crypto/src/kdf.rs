@@ -137,7 +137,10 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(derive_epsilon_eth("sender".to_string(), "path"), expected_eth_v0);
+        assert_eq!(
+            derive_epsilon_eth("sender".to_string(), "path"),
+            expected_eth_v0
+        );
 
         // Expected scalar values for Solana epsilon derivation
         let expected_sol_v0 = Scalar::from_bytes([
