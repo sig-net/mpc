@@ -32,11 +32,11 @@ web3.workspace = true
 
 # crypto dependencies
 ecdsa = "0.16.9"
-ethers-core = "2.0.13"
+ethers-core.workspace = true
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 elliptic-curve = { version = "0.13.5", default-features = false }
 k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
-secp256k1 = "0.28.2"
+secp256k1.workspace = true
 
 # near dependencies
 near-account-id.workspace = true

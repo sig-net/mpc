@@ -874,18 +874,17 @@ async fn process_block(
         return Ok(());
     };
 
-    let block_receipts_clone = block_receipts.clone();
     let pending_txs: HashMap<SignRespondTxId, SignRespondTx> = {
         sign_respond_tx_map
             .read()
             .await
             .iter()
-            .map(|(id, tx)| (*id, tx.clone()))
             .filter(|(_, tx)| tx.status == SignRespondTxStatus::Pending)
+            .map(|(id, tx)| (*id, tx.clone()))
             .collect()
     };
     let mut read_respond_requests: Vec<IndexedSignRequest> = Vec::new();
-    for receipt in block_receipts_clone {
+    for receipt in &block_receipts {
         let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
             continue;
         };
@@ -914,7 +913,7 @@ async fn process_block(
             sign_respond_tx_map
                 .write()
                 .await
-                .insert(receipt.transaction_hash.into(), pending_tx.clone());
+                .insert(receipt.transaction_hash.into(), pending_tx);
         } else {
             // failed to create sign request from completed tx, remove the tx from the map
             // TODO: we need to implement a better solution for not finding such txs in helios. possible: https://github.com/sig-net/mpc/issues/499
@@ -934,8 +933,8 @@ async fn process_block(
             .read()
             .await
             .iter()
-            .map(|(id, tx)| (*id, tx.clone()))
             .filter(|(_, tx)| tx.status == SignRespondTxStatus::Pending)
+            .map(|(id, tx)| (*id, tx.clone()))
             .collect()
     };
 
@@ -951,9 +950,9 @@ async fn process_block(
             continue;
         }
         let current_nonce = current_nonce.unwrap();
-        if current_nonce != tx.nonce {
+        if tx.nonce < current_nonce {
             tracing::warn!(
-                "Nonce mismatch for tx {:?}: expected {}, got {}",
+                "Nonce too low for tx {:?}: expected {}, got {}",
                 tx_id,
                 tx.nonce,
                 current_nonce
