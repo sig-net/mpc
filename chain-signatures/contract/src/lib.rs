@@ -14,7 +14,7 @@ use mpc_crypto::{
     derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     ScalarExt as _,
 };
-use mpc_primitives::{SignId, Signature};
+use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
@@ -222,7 +222,7 @@ impl VersionedMpcContract {
     /// Older key versions will always work but newer key versions were never held by older signers
     /// Newer key versions may also add new security features, like only existing within a secure enclave
     pub const fn latest_key_version(&self) -> u32 {
-        1
+        LATEST_MPC_KEY_VERSION
     }
 
     /// This experimental function calculates the fee for a signature request.
