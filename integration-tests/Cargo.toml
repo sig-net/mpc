@@ -29,6 +29,7 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 url.workspace = true
 web3.workspace = true
+base64.workspace = true
 
 # crypto dependencies
 ecdsa = "0.16.9"

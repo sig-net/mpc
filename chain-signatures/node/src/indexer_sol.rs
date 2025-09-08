@@ -1,6 +1,8 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use anchor_lang::prelude::*;
 use anchor_lang::Discriminator;
+use base64::engine::general_purpose;
+use base64::prelude::Engine as _;
 use futures_util::StreamExt;
 use k256::Scalar;
 use mpc_crypto::kdf::derive_epsilon_sol;
@@ -14,6 +16,7 @@ use solana_client::{
     rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
+use solana_transaction_status::option_serializer::OptionSerializer;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -237,7 +240,11 @@ fn calculate_request_id(event: &SignatureRequestedEvent) -> [u8; 32] {
 
 type Result<T> = anyhow::Result<T>;
 
-async fn parse_cpi_events<T>(
+// Parse Anchor events from a single transaction signature, covering both:
+// - `emit!` events (emitted via logs, base64 payload in `Program data: ...`)
+// - `emit_cpi!` events (emitted via an inner CPI instruction, base58-encoded with EVENT_IX_TAG_LE)
+// Only events whose discriminator matches `T::DISCRIMINATOR` are returned.
+pub async fn parse_anchor_events<T>(
     rpc_client: &RpcClient,
     signature: &Signature,
     target_program_id: &Pubkey,
@@ -253,6 +260,7 @@ where
         .get_transaction_with_config(
             signature,
             solana_client::rpc_config::RpcTransactionConfig {
+                // Use JsonParsed so that inner instructions surface as PartiallyDecoded
                 encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
                 commitment: Some(CommitmentConfig::confirmed()),
                 max_supported_transaction_version: Some(0),
@@ -263,77 +271,120 @@ where
     let Some(meta) = tx.transaction.meta else {
         return Ok(Vec::new());
     };
-
     let target_program_str = target_program_id.to_string();
-    let mut events = Vec::new();
+    let mut out = Vec::<T>::new();
 
-    let process_instruction_data = |data: &str| -> Result<Vec<T>> {
-        let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
-            tracing::warn!("Failed to decode instruction data for target program");
-            return Ok(Vec::new());
+    // -------- Path 1: emit_cpi! (inner instructions / base58 / has EVENT_IX_TAG prefix) --------
+    // Decode a CPI instruction data payload; if it represents our event, deserialize it.
+    let process_cpi_ix_data = |data_b58: &str| -> Result<Option<T>> {
+        let ix_data = match solana_sdk::bs58::decode(data_b58).into_vec() {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
         };
-
-        // Validate instruction discriminator matches emit_cpi! instruction discriminator
+        // Layout: 8-byte EVENT_IX_TAG_LE + 8-byte event discriminator + payload
         if !ix_data.starts_with(anchor_lang::event::EVENT_IX_TAG_LE) {
-            tracing::debug!("Instruction discriminator mismatch - not our instruction type");
-            return Ok(Vec::new());
+            return Ok(None);
         }
-
-        // Validate event discriminator matches our target event type
-        let event_discriminator = &ix_data[8..16];
-        if event_discriminator != T::DISCRIMINATOR {
-            tracing::debug!("Event discriminator mismatch - not our event type");
-            return Ok(Vec::new());
+        if ix_data.len() < 16 {
+            return Ok(None);
         }
-
-        let event_data = &ix_data[16..];
-
-        match T::deserialize(&mut &event_data[..]) {
-            Ok(event) => Ok(vec![event]),
+        let event_disc = &ix_data[8..16];
+        if event_disc != T::DISCRIMINATOR {
+            return Ok(None);
+        }
+        let mut payload = &ix_data[16..];
+        match T::deserialize(&mut payload) {
+            Ok(ev) => Ok(Some(ev)),
             Err(e) => {
-                tracing::warn!(
-                    "Failed to deserialize event data from target program: {}",
-                    e
-                );
-                Ok(Vec::new())
+                tracing::warn!("CPI event deserialize failed: {e}");
+                Ok(None)
             }
         }
     };
 
-    // Check inner instructions for CPI calls
-    let inner_ixs = match meta.inner_instructions {
-        solana_transaction_status::option_serializer::OptionSerializer::Some(ixs) => ixs,
-        _ => return Ok(Vec::new()),
-    };
-
-    for (set_idx, inner_ix_set) in inner_ixs.iter().enumerate() {
-        for (ix_idx, instruction) in inner_ix_set.instructions.iter().enumerate() {
-            // We only care about:
-            // 1. Parsed instructions (not Compiled - only used for non-JsonParsed encodings)
-            // 2. PartiallyDecoded instructions (not fully Parsed - only applies to well-known programs like System, Token, etc.)
-            if let solana_transaction_status::UiInstruction::Parsed(
-                solana_transaction_status::UiParsedInstruction::PartiallyDecoded(
-                    ui_partially_decoded_instruction,
-                ),
-            ) = instruction
-            {
-                // Check if inner instruction is from our target program
-                if ui_partially_decoded_instruction.program_id == target_program_str {
-                    match process_instruction_data(&ui_partially_decoded_instruction.data) {
-                        Ok(mut instruction_events) => events.append(&mut instruction_events),
-                        Err(e) => tracing::warn!(
-                            "Error processing inner instruction {}.{}: {}",
-                            set_idx,
-                            ix_idx,
-                            e
-                        ),
+    if let solana_transaction_status::option_serializer::OptionSerializer::Some(ix_sets) =
+        &meta.inner_instructions
+    {
+        for (set_idx, set) in ix_sets.iter().enumerate() {
+            for (ix_idx, ui_ix) in set.instructions.iter().enumerate() {
+                use solana_transaction_status::{UiInstruction, UiParsedInstruction};
+                if let UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(ix)) = ui_ix {
+                    if ix.program_id == target_program_str {
+                        if let Some(ev) = process_cpi_ix_data(&ix.data)? {
+                            tracing::debug!("matched emit_cpi! at {set_idx}.{ix_idx}");
+                            out.push(ev);
+                        }
                     }
                 }
             }
         }
     }
 
-    Ok(events)
+    // -------- Path 2: emit! (log_messages / base64 / "Program data: ...") --------
+    // Maintain a program call stack via "Program <pid> invoke/success/failed" lines,
+    // and only decode data logs when the current executing program matches our target.
+    if let OptionSerializer::Some(logs) = &meta.log_messages {
+        let mut callstack: Vec<String> = Vec::new();
+        for (ln, line) in logs.iter().enumerate() {
+            // Maintain call stack
+            if let Some(rest) = line.strip_prefix("Program ") {
+                if let Some((pid, tail)) = rest.split_once(' ') {
+                    if tail.starts_with("invoke [") {
+                        callstack.push(pid.to_string());
+                        continue;
+                    } else if tail.starts_with("success") || tail.starts_with("failed:") {
+                        if callstack.last().map(|s| s == pid).unwrap_or(false) {
+                            callstack.pop();
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            // Parse only data logs produced by the target program at the current stack top
+            if !line.starts_with("Program data: ") {
+                continue;
+            }
+            if callstack
+                .last()
+                .map(|s| s != &target_program_str)
+                .unwrap_or(true)
+            {
+                continue;
+            }
+
+            // `sol_log_data` may split payload into multiple base64 chunks:
+            // "Program data: <b64a>, <b64b>, ..."
+            let payload_str = &line["Program data: ".len()..];
+            let mut buf = Vec::<u8>::new();
+            for seg in payload_str.split(", ") {
+                match general_purpose::STANDARD.decode(seg) {
+                    Ok(mut part) => buf.append(&mut part),
+                    Err(e) => {
+                        tracing::warn!("base64 decode failed at log #{ln}: {e}");
+                        buf.clear();
+                        break;
+                    }
+                }
+            }
+            if buf.len() < 8 {
+                continue;
+            }
+            if &buf[..8] != T::DISCRIMINATOR {
+                continue;
+            }
+            let mut data = &buf[8..];
+            match T::deserialize(&mut data) {
+                Ok(ev) => {
+                    tracing::debug!("matched emit! at log #{ln}");
+                    out.push(ev)
+                }
+                Err(e) => tracing::warn!("log event deserialize failed at log #{ln}: {e}"),
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 pub async fn run(
@@ -439,7 +490,7 @@ where
             continue;
         };
 
-        match parse_cpi_events::<T>(&rpc_client, &signature, &program_id).await {
+        match parse_anchor_events::<T>(&rpc_client, &signature, &program_id).await {
             Ok(events) => {
                 for event in events {
                     event_handler(event, signature, response.context.slot);
