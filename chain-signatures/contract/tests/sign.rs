@@ -3,7 +3,7 @@ use common::{candidates, create_response, init, init_env, sign_and_validate};
 
 use mpc_contract::errors;
 use mpc_contract::primitives::{CandidateInfo, SignRequest};
-use mpc_primitives::Signature;
+use mpc_primitives::{Signature, LATEST_MPC_KEY_VERSION};
 use near_workspaces::types::{AccountId, NearToken};
 
 use std::collections::HashMap;
@@ -29,7 +29,7 @@ async fn test_contract_sign_request() -> anyhow::Result<()> {
         let request = SignRequest {
             payload: payload_hash,
             path: path.into(),
-            key_version: 0,
+            key_version: LATEST_MPC_KEY_VERSION,
         };
 
         sign_and_validate(&request, Some((&respond_req, &respond_resp)), &contract).await?;
@@ -42,7 +42,7 @@ async fn test_contract_sign_request() -> anyhow::Result<()> {
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
-        key_version: 0,
+        key_version: LATEST_MPC_KEY_VERSION,
     };
     sign_and_validate(&request, Some((&respond_req, &respond_resp)), &contract).await?;
     sign_and_validate(&request, Some((&respond_req, &respond_resp)), &contract).await?;
@@ -72,7 +72,7 @@ async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
-        key_version: 0,
+        key_version: LATEST_MPC_KEY_VERSION,
     };
 
     let status = alice
@@ -146,7 +146,7 @@ async fn test_contract_sign_fail_refund() -> anyhow::Result<()> {
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
-        key_version: 0,
+        key_version: LATEST_MPC_KEY_VERSION,
     };
 
     let status = alice
@@ -205,7 +205,7 @@ async fn test_contract_sign_request_deposits() -> anyhow::Result<()> {
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
-        key_version: 0,
+        key_version: LATEST_MPC_KEY_VERSION,
     };
 
     let status = contract

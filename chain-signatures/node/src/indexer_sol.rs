@@ -8,7 +8,7 @@ use anchor_lang::Discriminator;
 use k256::Scalar;
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
-use mpc_primitives::{SignArgs, SignId};
+use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
@@ -171,7 +171,7 @@ fn sign_request_from_event(
         return Err(anyhow::anyhow!("deposit is 0"));
     }
 
-    if event.key_version != 0 {
+    if event.key_version > LATEST_MPC_KEY_VERSION {
         tracing::warn!("unsupported key version: {}", event.key_version);
         return Err(anyhow::anyhow!("unsupported key version"));
     }
@@ -209,7 +209,7 @@ fn sign_request_from_event(
             epsilon,
             payload,
             path: event.path,
-            key_version: 0,
+            key_version: event.key_version,
         },
         chain: Chain::Solana,
         timestamp_sign_queue: Some(Instant::now()),
