@@ -18,7 +18,7 @@ async fn test_key_version() -> anyhow::Result<()> {
         .unwrap()
         .json()
         .unwrap();
-    assert_eq!(version, 0);
+    assert_eq!(version, 1);
     Ok(())
 }
 
@@ -40,6 +40,7 @@ async fn test_derived_public_key() -> anyhow::Result<()> {
     let key: String = contract
         .view("derived_public_key")
         .args_json(json!({
+            "key_version": LATEST_MPC_KEY_VERSION,
             "path": "test",
             "predecessor": "alice.near"
         }))
