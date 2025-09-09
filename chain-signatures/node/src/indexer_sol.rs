@@ -373,6 +373,7 @@ pub async fn run(
 
     let sign_tx_clone = sign_tx.clone();
     let node_near_account_id_clone = node_near_account_id.clone();
+    // Subscribe to CPI events
     tokio::spawn(async move {
         loop {
             let total_timeout = Duration::from_secs(sol.total_timeout);
@@ -411,6 +412,7 @@ pub async fn run(
         }
     });
 
+    // Subscribe to non-CPI sign events
     loop {
         let Ok(program) = client.program(program_id) else {
             tracing::error!("Failed to get program");
