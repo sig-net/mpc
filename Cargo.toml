@@ -60,6 +60,8 @@ alloy-consensus = "1.0.23"
 alloy-primitives = "1.2.1"
 alloy-json-abi = "1.2.0"
 alloy-rlp = "0.3.12"
+solana-client = "2.2.7"
+futures-util = "0.3.31"
 
 near-account-id = "1.0.0"
 near-primitives = "0.26.0"

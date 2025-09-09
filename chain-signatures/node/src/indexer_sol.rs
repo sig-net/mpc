@@ -3,6 +3,7 @@ use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_respond_tx::hash_rlp_data;
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::{AnchorDeserialize, AnchorSerialize};
+use anchor_client::{Client, Cluster, Program};
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
@@ -18,9 +19,12 @@ use solana_client::{
     nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},
     rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
 };
+use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use std::fmt;
+use std::ops::Deref;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -200,12 +204,12 @@ impl SignatureEventTrait for SignatureRequestedEvent {
         tracing::info!("found solana event: {:?}", self);
         if self.deposit == 0 {
             tracing::warn!("deposit is 0, skipping sign request");
-            return Err(anyhow::anyhow!("deposit is 0"));
+            anyhow::bail!("deposit is 0");
         }
 
         if self.key_version != 0 {
             tracing::warn!("unsupported key version: {}", self.key_version);
-            return Err(anyhow::anyhow!("unsupported key version"));
+            anyhow::bail!("unsupported key version");
         }
 
         let Some(payload) = Scalar::from_bytes(self.payload) else {
@@ -213,9 +217,7 @@ impl SignatureEventTrait for SignatureRequestedEvent {
                 "solana `sign` did not produce payload hash correctly: {:?}",
                 self.payload,
             );
-            return Err(anyhow::anyhow!(
-                "failed to convert event payload hash to scalar"
-            ));
+            anyhow::bail!("failed to convert event payload hash to scalar");
         };
 
         if payload > *MAX_SECP256K1_SCALAR {
@@ -297,12 +299,12 @@ impl SignatureEventTrait for SignRespondRequestedEvent {
         tracing::info!("found solana event: {:?}", self);
         if self.deposit == 0 {
             tracing::warn!("deposit is 0, skipping sign request");
-            return Err(anyhow::anyhow!("deposit is 0"));
+            anyhow::bail!("deposit is 0");
         }
 
         if self.key_version != 0 {
             tracing::warn!("unsupported key version: {}", self.key_version);
-            return Err(anyhow::anyhow!("unsupported key version"));
+            anyhow::bail!("unsupported key version");
         }
 
         let request_id = self.generate_request_id();
@@ -320,9 +322,7 @@ impl SignatureEventTrait for SignRespondRequestedEvent {
         tracing::info!(?sign_id, "solana signature requested");
         let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
         let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
-            return Err(anyhow::anyhow!(
-                "Failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}"
-            ));
+            anyhow::bail!("Failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
         };
 
         if payload > *MAX_SECP256K1_SCALAR {
@@ -468,6 +468,12 @@ pub async fn run(
         tracing::error!("Failed to parse program address: {}", sol.program_address);
         return;
     };
+
+    let keypair = Keypair::from_base58_string(&sol.account_sk);
+    let cluster = Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
+    let client =
+        Client::new_with_options(cluster, Arc::new(keypair), CommitmentConfig::confirmed());
+
     tracing::info!(
         "rpc http url: {}, rpc websocket url: {}, program id: {}",
         sol.rpc_http_url,
@@ -494,19 +500,44 @@ pub async fn run(
 
     let sign_tx_clone = sign_tx.clone();
     let node_near_account_id_clone = node_near_account_id.clone();
-    subscribe_and_process_sign_events::<SignatureRequestedEvent>(
-        program_id,
-        &sol.rpc_http_url,
-        &sol.rpc_ws_url,
-        sign_tx_clone,
-        node_near_account_id_clone,
-        total_timeout,
-    )
-    .await;
+    tokio::spawn(async move {
+        subscribe_and_process_sign_events::<SignatureRequestedEvent>(
+            program_id,
+            &sol.rpc_http_url,
+            &sol.rpc_ws_url,
+            sign_tx_clone,
+            node_near_account_id_clone,
+            total_timeout,
+        )
+        .await;
+    });
+
+    // Subscribe to non-CPI sign events
+    loop {
+        let Ok(program) = client.program(program_id) else {
+            tracing::error!("Failed to get program");
+            return;
+        };
+        let total_timeout = Duration::from_secs(sol.total_timeout);
+        let unsub = subscribe_to_program_non_cpi_events(
+            &program,
+            sign_tx.clone(),
+            node_near_account_id.clone(),
+            total_timeout,
+        )
+        .await;
+        if let Err(err) = unsub {
+            tracing::warn!("Failed to subscribe to solana non-CPI events: {:?}", err);
+        } else {
+            unsub.unwrap().unsubscribe().await;
+            tracing::info!("unsubscribing to solana non-CPIevents");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L311
-async fn subscribe_to_program_logs<T, F>(
+async fn subscribe_to_program_cpi_events<T, F>(
     program_id: Pubkey,
     rpc_url: &str,
     ws_url: &str,
@@ -562,6 +593,42 @@ where
     Ok(())
 }
 
+async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>(
+    program: &Program<C>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    node_near_account_id: AccountId,
+    total_timeout: Duration,
+) -> anyhow::Result<anchor_client::EventUnsubscriber<'_>> {
+    tracing::info!("Subscribing to program events");
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let event_unsubscriber = program
+        .on(move |ctx, event: SignatureRequestedEvent| {
+            let tx_sig: Vec<u8> = ctx.signature.as_ref().to_vec();
+            tracing::info!("Received event: {:?}", event);
+            if sender.send((event, tx_sig)).is_err() {
+                tracing::error!("Error while transferring the event.");
+            }
+        })
+        .await?;
+
+    tracing::info!("Subscribed to program events");
+    while let Some((event, tx_sig)) = receiver.recv().await {
+        if let Err(err) = process_anchor_sign_event(
+            event,
+            tx_sig,
+            sign_tx.clone(),
+            node_near_account_id.clone(),
+            total_timeout,
+        )
+        .await
+        {
+            tracing::warn!("Failed to process event: {:?}", err);
+        }
+    }
+
+    Ok(event_unsubscriber)
+}
+
 async fn process_anchor_sign_event<T: SignatureEventTrait>(
     sign_event: T,
     tx_sig: Vec<u8>,
@@ -604,7 +671,7 @@ async fn subscribe_and_process_sign_events<T>(
         let sign_tx_clone = sign_tx.clone();
         let node_near_account_id_clone = node_near_account_id.clone();
 
-        let result = subscribe_to_program_logs::<T, _>(
+        let result = subscribe_to_program_cpi_events::<T, _>(
             program_id,
             rpc_url,
             ws_url,
