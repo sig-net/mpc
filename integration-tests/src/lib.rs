@@ -7,7 +7,6 @@ pub mod mpc_fixture;
 pub mod utils;
 
 use cluster::spawner::ClusterSpawner;
-use containers::Container;
 use deadpool_redis::Pool;
 use mpc_node::indexer_eth::EthConfig;
 use mpc_node::indexer_sol::SolConfig;
@@ -15,18 +14,14 @@ use std::collections::HashMap;
 
 use self::local::NodeEnvConfig;
 use crate::containers::DockerClient;
-use crate::containers::LocalStack;
 
 use anyhow::Context as _;
-use bollard::exec::{CreateExecOptions, StartExecResults};
-use futures::StreamExt;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
 use mpc_node::storage::triple_storage::TripleStorage;
 use mpc_node::{logs, mesh, node_client, storage};
-use near_crypto::KeyFile;
-use near_workspaces::network::{Sandbox, ValidatorKey};
+use near_workspaces::network::Sandbox;
 use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
@@ -258,8 +253,6 @@ pub struct Context {
     pub docker_network: String,
     pub release: bool,
 
-    pub localstack: containers::LocalStack,
-    pub lake_indexer: containers::LakeIndexer,
     pub worker: Worker<Sandbox>,
     pub mpc_contract: Contract,
     pub redis: containers::Redis,
@@ -267,15 +260,10 @@ pub struct Context {
     pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
     pub message_options: node_client::Options,
-    pub toxiproxy: bool,
 }
 
 pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
-    let LakeIndexerCtx {
-        localstack,
-        lake_indexer,
-        worker,
-    } = spawner.take_lake().await;
+    let worker = spawner.take_worker().await;
     spawner.create_accounts(&worker).await;
 
     let mpc_contract = worker
@@ -315,8 +303,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         docker_client: spawner.docker.clone(),
         docker_network: spawner.network.clone(),
         release: spawner.release,
-        localstack,
-        lake_indexer,
         worker,
         mpc_contract,
         redis,
@@ -324,7 +310,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         log_options,
         mesh_options,
         message_options,
-        toxiproxy: spawner.toxiproxy,
     })
 }
 
@@ -400,7 +385,7 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         .collect();
 
     println!("\nPlease call below to update localnet:\n");
-    let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
+    let near_rpc = ctx.worker.rpc_addr();
     println!("near config add-connection --network-name local --connection-name local --rpc-url {near_rpc} --wallet-url http://127.0.0.1/ --explorer-transaction-url http://127.0.0.1:6666/");
     println!("\nAfter run the nodes, please call the following command to init contract: ");
     let args = json!({
@@ -481,86 +466,4 @@ pub async fn dry_run(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     #[cfg(not(feature = "docker-test"))]
     return dry_host(spawner).await;
-}
-
-async fn fetch_from_validator(
-    docker_client: &DockerClient,
-    container: &Container,
-    path: &str,
-) -> anyhow::Result<Vec<u8>> {
-    tracing::info!(path, "fetching data from validator");
-    let create_result = docker_client
-        .docker
-        .create_exec(
-            container.id(),
-            CreateExecOptions::<&str> {
-                attach_stdout: Some(true),
-                attach_stderr: Some(true),
-                cmd: Some(vec!["cat", path]),
-                ..Default::default()
-            },
-        )
-        .await?;
-
-    let start_result = docker_client
-        .docker
-        .start_exec(&create_result.id, None)
-        .await?;
-
-    match start_result {
-        StartExecResults::Attached { mut output, .. } => {
-            let mut stream_contents = Vec::new();
-            while let Some(chunk) = output.next().await {
-                stream_contents.extend_from_slice(&chunk?.into_bytes());
-            }
-
-            tracing::info!("data fetched");
-            Ok(stream_contents)
-        }
-        StartExecResults::Detached => unreachable!("unexpected detached output"),
-    }
-}
-
-async fn fetch_validator_keys(
-    docker_client: &DockerClient,
-    container: &Container,
-) -> anyhow::Result<KeyFile> {
-    let _span = tracing::info_span!("fetch_validator_keys");
-    let key_data =
-        fetch_from_validator(docker_client, container, "/root/.near/validator_key.json").await?;
-    Ok(serde_json::from_slice(&key_data)?)
-}
-
-pub struct LakeIndexerCtx {
-    pub localstack: containers::LocalStack,
-    pub lake_indexer: containers::LakeIndexer,
-    pub worker: Worker<Sandbox>,
-}
-
-pub async fn initialize_lake_indexer(spawner: &ClusterSpawner) -> anyhow::Result<LakeIndexerCtx> {
-    let s3_bucket = "near-lake-custom";
-    let s3_region = "us-east-1";
-    let localstack = LocalStack::run(spawner, s3_bucket, s3_region).await;
-
-    let lake_indexer =
-        containers::LakeIndexer::run(spawner, &localstack.s3_address, s3_bucket, s3_region).await;
-
-    let validator_key = fetch_validator_keys(&spawner.docker, &lake_indexer.container).await?;
-
-    tracing::info!("initializing sandbox worker");
-    let worker = near_workspaces::sandbox()
-        // use not proxied rpc address because workspace is used in setup (create dev account, deploy
-        // contract which we can assume succeed
-        .rpc_addr(&lake_indexer.rpc_host_address)
-        .validator_key(ValidatorKey::Known(
-            validator_key.account_id.to_string().parse()?,
-            validator_key.secret_key.to_string().parse()?,
-        ))
-        .await?;
-
-    Ok(LakeIndexerCtx {
-        localstack,
-        lake_indexer,
-        worker,
-    })
 }

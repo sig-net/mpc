@@ -60,7 +60,7 @@ pub enum Cli {
         /// Solana Indexer options
         #[clap(flatten)]
         sol: indexer_sol::SolArgs,
-        /// NEAR Lake Indexer options
+        /// NEAR requests options
         #[clap(flatten)]
         indexer_options: indexer::Options,
         /// Local address that other peers can use to message this node.
