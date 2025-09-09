@@ -398,14 +398,14 @@ pub async fn run(
                         )
                         .await
                         {
-                            tracing::warn!("Failed to process event: {:?}", err);
+                            tracing::warn!("Failed to process CPI event: {:?}", err);
                         }
                     });
                 },
             )
             .await;
             if let Err(err) = result {
-                tracing::warn!("Failed to subscribe to solana events: {:?}", err);
+                tracing::warn!("Failed to subscribe to solana CPI events: {:?}", err);
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -425,10 +425,10 @@ pub async fn run(
         )
         .await;
         if let Err(err) = unsub {
-            tracing::warn!("Failed to subscribe to solana events: {:?}", err);
+            tracing::warn!("Failed to subscribe to solana non-CPI events: {:?}", err);
         } else {
             unsub.unwrap().unsubscribe().await;
-            tracing::info!("unsubscribing to solana events");
+            tracing::info!("unsubscribing to solana non-CPIevents");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
