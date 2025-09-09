@@ -27,7 +27,7 @@ use primitives::{
     CandidateInfo, Candidates, InternalSignRequest, Participants, PendingRequest, PkVotes,
     SignPoll, SignRequest, StorageKey, Votes, YieldIndex,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::config::Config;
 use crate::errors::Error;
@@ -680,9 +680,9 @@ impl VersionedMpcContract {
         }
     }
 
-    pub fn pending_requests_data(&self) -> BTreeMap<SignId, PendingRequest> {
+    pub fn pending_requests_data(&self) -> Vec<(&SignId, &PendingRequest)> {
         match self {
-            Self::V0(mpc_contract) => mpc_contract.pending_requests.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            Self::V0(mpc_contract) => mpc_contract.pending_requests.iter().collect(),
         }
     }
 

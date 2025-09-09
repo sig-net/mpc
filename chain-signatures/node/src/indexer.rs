@@ -2,12 +2,13 @@ use crate::protocol::Chain;
 use crate::protocol::IndexedSignRequest;
 use crate::storage::app_data_storage::AppDataStorage;
 use k256::Scalar;
+use mpc_contract::primitives::PendingRequest;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use near_primitives::types::BlockHeight;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -86,7 +87,10 @@ impl NearIndexer {
     }
 
     async fn mark_request_processed(&self, sign_id: SignId) {
-        self.processed_requests.write().await.insert(sign_id, Instant::now());
+        self.processed_requests
+            .write()
+            .await
+            .insert(sign_id, Instant::now());
     }
 
     async fn cleanup_old_processed_requests(&self) {
@@ -100,38 +104,28 @@ impl NearIndexer {
         &self,
         rpc_client: &near_fetch::Client,
         contract_id: &AccountId,
-    ) -> anyhow::Result<BTreeMap<String, ContractPendingRequest>> {
+    ) -> anyhow::Result<Vec<(SignId, PendingRequest)>> {
         let response = rpc_client
             .view(contract_id, "pending_requests_data")
             .await?;
-        
-        let pending_requests: BTreeMap<String, ContractPendingRequest> = response.json()?;
-        Ok(pending_requests)
+
+        Ok(response.json()?)
     }
 
     /// Convert contract pending request to indexed sign request
     fn convert_to_indexed_request(
         &self,
-        sign_id_str: &str, 
-        pending_request: &ContractPendingRequest,
+        sign_id: SignId,
+        pending_request: PendingRequest,
     ) -> anyhow::Result<IndexedSignRequest> {
-        // Parse the sign_id from string format back to SignId
-        let sign_id: SignId = serde_json::from_str(&format!("\"{}\"", sign_id_str))?;
-        
-        // Extract payload and epsilon as Scalars directly from the contract data
-        let Some(payload) = Scalar::from_bytes(pending_request.payload) else {
-            anyhow::bail!("Invalid payload in pending request: {:?}", pending_request.payload);
-        };
-        
-        let Some(epsilon) = Scalar::from_bytes(pending_request.epsilon) else {
-            anyhow::bail!("Invalid epsilon in pending request: {:?}", pending_request.epsilon);
-        };
+        let payload = pending_request.payload;
+        let epsilon = pending_request.epsilon;
 
-        // LIMITATION: We cannot extract the original path, key_version, and predecessor_id 
+        // LIMITATION: We cannot extract the original path, key_version, and predecessor_id
         // from the SignId hash or the contract's PendingRequest structure.
         // The contract only stores payload and epsilon, but the original transaction data
         // contained path, key_version, and predecessor_id which are now lost.
-        // 
+        //
         // Possible solutions:
         // 1. Modify the contract to store additional fields in PendingRequest (requires contract change)
         // 2. Use default values (current approach)
@@ -143,10 +137,10 @@ impl NearIndexer {
             "Using default values for path and key_version due to contract data limitations. \
              Original transaction details are not available in pending_requests_data."
         );
-        
+
         let path = "unknown".to_string();
         let key_version = 0u32;
-        
+
         // Generate entropy deterministically from the sign_id since we can't get it from transaction logs
         let entropy = self.derive_entropy_from_sign_id(&sign_id);
 
@@ -192,32 +186,25 @@ struct Context {
 }
 
 async fn poll_pending_requests(ctx: &Context) -> anyhow::Result<()> {
-    tracing::debug!("polling pending requests from contract");
-    
     // Fetch pending requests from the contract
-    let pending_requests = ctx.indexer
+    let pending_requests = ctx
+        .indexer
         .fetch_pending_requests(&ctx.rpc_client, &ctx.mpc_contract_id)
         .await?;
 
     let mut new_requests = Vec::new();
-    
-    for (sign_id_str, pending_request) in pending_requests.iter() {
-        // Parse sign_id to check if we've already processed this request
-        let sign_id: SignId = match serde_json::from_str(&format!("\"{}\"", sign_id_str)) {
-            Ok(id) => id,
-            Err(err) => {
-                tracing::warn!(%err, sign_id_str = %sign_id_str, "failed to parse sign_id");
-                continue;
-            }
-        };
 
+    for (sign_id, pending_request) in pending_requests.into_iter() {
         // Skip if we've already processed this request
         if ctx.indexer.is_request_processed(&sign_id).await {
             continue;
         }
 
         // Convert to IndexedSignRequest
-        match ctx.indexer.convert_to_indexed_request(sign_id_str, pending_request) {
+        match ctx
+            .indexer
+            .convert_to_indexed_request(sign_id, pending_request)
+        {
             Ok(indexed_request) => {
                 tracing::info!(
                     sign_id = ?indexed_request.id,
@@ -230,7 +217,7 @@ async fn poll_pending_requests(ctx: &Context) -> anyhow::Result<()> {
                 ctx.indexer.mark_request_processed(sign_id).await;
             }
             Err(err) => {
-                tracing::warn!(%err, sign_id_str = %sign_id_str, "failed to convert pending request");
+                tracing::warn!(%err, ?sign_id, "failed to convert pending request");
                 continue;
             }
         }
@@ -361,7 +348,7 @@ pub fn run(
 
 async fn run_polling_loop(context: &Context) -> anyhow::Result<()> {
     tracing::info!("starting polling loop for pending requests");
-    
+
     loop {
         match poll_pending_requests(context).await {
             Ok(()) => {
@@ -369,7 +356,6 @@ async fn run_polling_loop(context: &Context) -> anyhow::Result<()> {
             }
             Err(err) => {
                 tracing::error!(%err, "failed to poll pending requests");
-                // Continue polling even if one iteration fails
             }
         }
 

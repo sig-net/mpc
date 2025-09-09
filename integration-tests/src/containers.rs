@@ -111,11 +111,7 @@ impl Node {
 
     pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let indexer_options = mpc_node::indexer::Options {
-            s3_bucket: ctx.localstack.s3_bucket.clone(),
-            s3_region: ctx.localstack.s3_region.clone(),
-            s3_url: Some(ctx.localstack.s3_host_address.clone()),
             running_threshold: 120,
-            behind_threshold: 120,
         };
         let eth_args = EthArgs::from_config(config.cfg.eth.clone());
         let sol_args = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
