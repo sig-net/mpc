@@ -419,7 +419,7 @@ pub async fn run(
             return;
         };
         let total_timeout = Duration::from_secs(sol.total_timeout);
-        let unsub = subscribe_to_program_events(
+        let unsub = subscribe_to_program_non_cpi_events(
             &program,
             sign_tx.clone(),
             node_near_account_id.clone(),
@@ -513,7 +513,7 @@ async fn process_anchor_event(
     Ok(())
 }
 
-async fn subscribe_to_program_events<C: Deref<Target = Keypair> + Clone>(
+async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>(
     program: &Program<C>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
