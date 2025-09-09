@@ -230,7 +230,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     &mpc_contract_id,
                     &account_id,
                     sign_tx.clone(),
-                    app_data_storage.clone(),
                     rpc_client.clone(),
                 )?;
                 Some(indexer)

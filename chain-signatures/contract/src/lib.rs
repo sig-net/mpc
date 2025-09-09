@@ -27,7 +27,7 @@ use primitives::{
     CandidateInfo, Candidates, InternalSignRequest, Participants, PendingRequest, PkVotes,
     SignPoll, SignRequest, StorageKey, Votes, YieldIndex,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use crate::config::Config;
 use crate::errors::Error;
