@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::containers::{self, DockerClient};
 use crate::utils::dev_gen_indexed;
-use crate::{execute, initialize_lake_indexer, LakeIndexerCtx, NodeConfig, Nodes};
+use crate::{execute, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
 
@@ -35,9 +35,8 @@ pub struct ClusterSpawner {
 
     pub cfg: NodeConfig,
     pub wait_for_running: bool,
-    pub toxiproxy: bool,
     pub redis: Option<containers::Redis>,
-    pub lake: Option<LakeIndexerCtx>,
+    pub worker: Option<Worker<Sandbox>>,
     prestockpile: Option<Prestockpile>,
 }
 
@@ -63,9 +62,8 @@ impl Default for ClusterSpawner {
 
             cfg,
             wait_for_running: true,
-            toxiproxy: false,
             redis: None,
-            lake: None,
+            worker: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
         }
     }
@@ -99,11 +97,6 @@ impl ClusterSpawner {
 
     pub fn with_config(mut self, call: impl FnOnce(&mut NodeConfig)) -> Self {
         call(&mut self.cfg);
-        self
-    }
-
-    pub fn enable_toxiproxy(mut self) -> Self {
-        self.toxiproxy = true;
         self
     }
 
@@ -165,21 +158,6 @@ impl ClusterSpawner {
             .extend((0..self.accounts.len() as u32).map(Participant::from));
     }
 
-    pub async fn prespawn_lake(&mut self) -> anyhow::Result<&LakeIndexerCtx> {
-        let lake = initialize_lake_indexer(self).await?;
-        self.lake = Some(lake);
-        Ok(self.lake.as_ref().unwrap())
-    }
-
-    /// Grabs the underlying lake instance that was prespawned, or if not prespawned, create a
-    /// new one from start up.
-    pub async fn take_lake(&mut self) -> LakeIndexerCtx {
-        match self.lake.take() {
-            Some(lake) => lake,
-            None => initialize_lake_indexer(self).await.unwrap(),
-        }
-    }
-
     pub async fn spawn_redis(&self) -> containers::Redis {
         containers::Redis::run(self).await
     }
@@ -201,9 +179,22 @@ impl ClusterSpawner {
         }
     }
 
+    pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Worker<Sandbox>> {
+        if self.worker.is_none() {
+            self.worker = Some(near_workspaces::sandbox().await?);
+        }
+        Ok(self.worker.as_ref().unwrap())
+    }
+
+    pub async fn take_worker(&mut self) -> Worker<Sandbox> {
+        match self.worker.take() {
+            Some(worker) => worker,
+            None => near_workspaces::sandbox().await.unwrap(),
+        }
+    }
+
     pub async fn presetup(&mut self) -> anyhow::Result<&containers::Redis> {
-        let lake = self.prespawn_lake().await?;
-        let worker = lake.worker.clone();
+        let worker = self.prespawn_sandbox().await?.clone();
         self.create_accounts(&worker).await;
         Ok(self.prespawn_redis().await)
     }
@@ -215,13 +206,6 @@ impl ClusterSpawner {
     pub async fn dry_run(&mut self) -> anyhow::Result<crate::Context> {
         crate::dry_run(self).await
     }
-
-    /// Integration tests rely on a fake AWS configuration for LocalStack
-    pub fn fake_aws_credentials(&self) {
-        std::env::set_var("AWS_ACCESS_KEY_ID", "123");
-        std::env::set_var("AWS_SECRET_ACCESS_KEY", "456");
-        std::env::set_var("AWS_DEFAULT_REGION", "us-east-1");
-    }
 }
 
 impl IntoFuture for ClusterSpawner {
@@ -231,11 +215,10 @@ impl IntoFuture for ClusterSpawner {
     fn into_future(mut self) -> Self::IntoFuture {
         Box::pin(async move {
             self = self.init_network().await?;
-            self.fake_aws_credentials();
 
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
-            let jsonrpc_client = connector.connect(&nodes.ctx().lake_indexer.rpc_host_address);
+            let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
 
             let cluster = Cluster {

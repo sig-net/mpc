@@ -680,6 +680,12 @@ impl VersionedMpcContract {
         }
     }
 
+    pub fn pending_requests_data(&self) -> Vec<(&SignId, &PendingRequest)> {
+        match self {
+            Self::V0(mpc_contract) => mpc_contract.pending_requests.iter().collect(),
+        }
+    }
+
     // contract version
     pub fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()

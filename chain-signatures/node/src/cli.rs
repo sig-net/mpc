@@ -63,7 +63,7 @@ pub enum Cli {
         /// Solana Indexer options
         #[clap(flatten)]
         sol: indexer_sol::SolArgs,
-        /// NEAR Lake Indexer options
+        /// NEAR requests options
         #[clap(flatten)]
         indexer_options: indexer::Options,
         /// Local address that other peers can use to message this node.
@@ -233,7 +233,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     &mpc_contract_id,
                     &account_id,
                     sign_tx.clone(),
-                    app_data_storage.clone(),
                     rpc_client.clone(),
                 )?;
                 Some(indexer)

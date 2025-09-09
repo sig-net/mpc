@@ -1,8 +1,9 @@
 pub mod common;
 use common::{create_response, init_env};
 
-use mpc_contract::primitives::SignRequest;
+use mpc_contract::primitives::{PendingRequest, SignRequest};
 
+use mpc_primitives::SignId;
 use near_sdk::{CurveType, PublicKey};
 use near_workspaces::types::NearToken;
 use serde_json::json;
@@ -98,5 +99,42 @@ async fn test_experimental_signature_deposit() -> anyhow::Result<()> {
         .unwrap()
         .parse()?;
     assert_eq!(deposit, NearToken::from_yoctonear(1).as_yoctonear());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_poll_pending_requests() -> anyhow::Result<()> {
+    let (_worker, contract, _, sk) = init_env().await;
+
+    let predecessor_id = "alice.near".parse().unwrap();
+    let msg = "hello world!";
+    let path = "test";
+    let (payload_hash, _respond_req, _respond_resp) =
+        create_response(&predecessor_id, msg, path, &sk).await;
+    let request = SignRequest {
+        payload: payload_hash,
+        path: path.into(),
+        key_version: 0,
+    };
+
+    let _status = contract
+        .call("sign")
+        .args_json(serde_json::json!({
+            "request": request,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact_async()
+        .await?;
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let pending_requests: Vec<(SignId, PendingRequest)> = contract
+        .view("pending_requests_data")
+        .await
+        .unwrap()
+        .json()?;
+
+    assert_eq!(pending_requests.len(), 1);
     Ok(())
 }

@@ -10,8 +10,6 @@ path = "src/main.rs"
 [dependencies]
 async-trait = "0.1"
 atty = "0.2"
-aws-config = "1.4"
-aws-sdk-s3 = "1.29"
 axum = "0.7.9"
 axum-extra = "0.9.6"
 chrono = "0.4.24"
@@ -81,8 +79,6 @@ futures-util.workspace = true
 near-account-id.workspace = true
 near-crypto = "0.26.0"
 near-fetch = "0.6.0"
-near-lake-framework = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/2.3.0" }
-near-lake-primitives = { git = "https://github.com/near/near-lake-framework-rs", branch = "node/2.3.0" }
 near-primitives.workspace = true
 near-sdk.workspace = true
 
