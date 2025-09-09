@@ -1,4 +1,8 @@
 use crate::protocol::{Chain, IndexedSignRequest};
+use anchor_client::{
+    anchor_lang::{AnchorDeserialize, AnchorSerialize},
+    Client, Cluster, Program,
+};
 use anchor_lang::prelude::*;
 use anchor_lang::Discriminator;
 use futures_util::StreamExt;
@@ -13,9 +17,12 @@ use solana_client::{
     nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},
     rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
 };
+use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use std::fmt;
+use std::ops::Deref;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -351,54 +358,86 @@ pub async fn run(
         tracing::error!("Failed to parse program address: {}", sol.program_address);
         return;
     };
+
+    let keypair = Keypair::from_base58_string(&sol.account_sk);
+    let cluster = Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
+    let client =
+        Client::new_with_options(cluster, Arc::new(keypair), CommitmentConfig::confirmed());
+
     tracing::info!(
         "rpc http url: {}, rpc websocket url: {}, program id: {}",
         sol.rpc_http_url,
         sol.rpc_ws_url,
         program_id
     );
+
+    let sign_tx_clone = sign_tx.clone();
+    let node_near_account_id_clone = node_near_account_id.clone();
+    // Subscribe to CPI events
+    tokio::spawn(async move {
+        loop {
+            let total_timeout = Duration::from_secs(sol.total_timeout);
+            let sign_tx_clone = sign_tx_clone.clone();
+            let node_near_account_id_clone = node_near_account_id_clone.clone();
+            let result = subscribe_to_program_cpi_events::<SignatureRequestedEvent, _>(
+                program_id,
+                &sol.rpc_http_url,
+                &sol.rpc_ws_url,
+                move |event, signature, _slot| {
+                    let tx_sig: Vec<u8> = signature.as_ref().to_vec();
+
+                    let sign_tx_inner = sign_tx_clone.clone();
+                    let node_near_account_id_inner = node_near_account_id_clone.clone();
+
+                    tokio::spawn(async move {
+                        if let Err(err) = process_anchor_event(
+                            event,
+                            tx_sig,
+                            sign_tx_inner,
+                            node_near_account_id_inner,
+                            total_timeout,
+                        )
+                        .await
+                        {
+                            tracing::warn!("Failed to process CPI event: {:?}", err);
+                        }
+                    });
+                },
+            )
+            .await;
+            if let Err(err) = result {
+                tracing::warn!("Failed to subscribe to solana CPI events: {:?}", err);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+
+    // Subscribe to non-CPI sign events
     loop {
+        let Ok(program) = client.program(program_id) else {
+            tracing::error!("Failed to get program");
+            return;
+        };
         let total_timeout = Duration::from_secs(sol.total_timeout);
-        let sign_tx_clone = sign_tx.clone();
-        let node_near_account_id_clone = node_near_account_id.clone();
-
-        let result = subscribe_to_program_logs::<SignatureRequestedEvent, _>(
-            program_id,
-            &sol.rpc_http_url,
-            &sol.rpc_ws_url,
-            move |event, signature, _slot| {
-                let tx_sig: Vec<u8> = signature.as_ref().to_vec();
-
-                let sign_tx_inner = sign_tx_clone.clone();
-                let node_near_account_id_inner = node_near_account_id_clone.clone();
-
-                tokio::spawn(async move {
-                    if let Err(err) = process_anchor_event(
-                        event,
-                        tx_sig,
-                        sign_tx_inner,
-                        node_near_account_id_inner,
-                        total_timeout,
-                    )
-                    .await
-                    {
-                        tracing::warn!("Failed to process event: {:?}", err);
-                    }
-                });
-            },
+        let unsub = subscribe_to_program_non_cpi_events(
+            &program,
+            sign_tx.clone(),
+            node_near_account_id.clone(),
+            total_timeout,
         )
         .await;
-
-        if let Err(err) = result {
-            tracing::warn!("Failed to subscribe to solana events: {:?}", err);
+        if let Err(err) = unsub {
+            tracing::warn!("Failed to subscribe to solana non-CPI events: {:?}", err);
+        } else {
+            unsub.unwrap().unsubscribe().await;
+            tracing::info!("unsubscribing to solana non-CPIevents");
         }
-
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L311
-async fn subscribe_to_program_logs<T, F>(
+async fn subscribe_to_program_cpi_events<T, F>(
     program_id: Pubkey,
     rpc_url: &str,
     ws_url: &str,
@@ -472,4 +511,40 @@ async fn process_anchor_event(
     }
 
     Ok(())
+}
+
+async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>(
+    program: &Program<C>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    node_near_account_id: AccountId,
+    total_timeout: Duration,
+) -> anyhow::Result<anchor_client::EventUnsubscriber<'_>> {
+    tracing::info!("Subscribing to program events");
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let event_unsubscriber = program
+        .on(move |ctx, event: SignatureRequestedEvent| {
+            let tx_sig: Vec<u8> = ctx.signature.as_ref().to_vec();
+            tracing::info!("Received event: {:?}", event);
+            if sender.send((event, tx_sig)).is_err() {
+                tracing::error!("Error while transferring the event.");
+            }
+        })
+        .await?;
+
+    tracing::info!("Subscribed to program events");
+    while let Some((event, tx_sig)) = receiver.recv().await {
+        if let Err(err) = process_anchor_event(
+            event,
+            tx_sig,
+            sign_tx.clone(),
+            node_near_account_id.clone(),
+            total_timeout,
+        )
+        .await
+        {
+            tracing::warn!("Failed to process event: {:?}", err);
+        }
+    }
+
+    Ok(event_unsubscriber)
 }
