@@ -493,26 +493,6 @@ where
     Ok(())
 }
 
-async fn process_anchor_event(
-    event: SignatureRequestedEvent,
-    tx_sig: Vec<u8>,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
-    node_near_account_id: AccountId,
-    total_timeout: Duration,
-) -> anyhow::Result<()> {
-    let sign_request = sign_request_from_event(event, tx_sig, total_timeout)?;
-
-    if let Err(err) = sign_tx.send(sign_request).await {
-        tracing::error!(?err, "Failed to send Solana sign request into queue");
-    } else {
-        crate::metrics::NUM_SIGN_REQUESTS
-            .with_label_values(&[Chain::Solana.as_str(), node_near_account_id.as_str()])
-            .inc();
-    }
-
-    Ok(())
-}
-
 async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>(
     program: &Program<C>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
@@ -547,4 +527,24 @@ async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>
     }
 
     Ok(event_unsubscriber)
+}
+
+async fn process_anchor_event(
+    event: SignatureRequestedEvent,
+    tx_sig: Vec<u8>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    node_near_account_id: AccountId,
+    total_timeout: Duration,
+) -> anyhow::Result<()> {
+    let sign_request = sign_request_from_event(event, tx_sig, total_timeout)?;
+
+    if let Err(err) = sign_tx.send(sign_request).await {
+        tracing::error!(?err, "Failed to send Solana sign request into queue");
+    } else {
+        crate::metrics::NUM_SIGN_REQUESTS
+            .with_label_values(&[Chain::Solana.as_str(), node_near_account_id.as_str()])
+            .inc();
+    }
+
+    Ok(())
 }
