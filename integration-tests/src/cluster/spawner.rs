@@ -37,6 +37,7 @@ pub struct ClusterSpawner {
     pub wait_for_running: bool,
     pub redis: Option<containers::Redis>,
     pub worker: Option<Worker<Sandbox>>,
+    pub solana: Option<containers::Solana>,
     prestockpile: Option<Prestockpile>,
 }
 
@@ -64,6 +65,7 @@ impl Default for ClusterSpawner {
             wait_for_running: true,
             redis: None,
             worker: None,
+            solana: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
         }
     }
@@ -116,6 +118,12 @@ impl ClusterSpawner {
         self
     }
 
+    /// Configures the cluster to spawn with Solana sandbox.
+    /// This method sets up a Solana test validator and configures the SolConfig.
+    pub fn sol(self) -> SolanaClusterSpawner {
+        SolanaClusterSpawner { spawner: self }
+    }
+
     pub fn env(mut self, env: &str) -> Self {
         self.env = env.to_string();
         self
@@ -162,12 +170,22 @@ impl ClusterSpawner {
         containers::Redis::run(self).await
     }
 
+    pub async fn spawn_solana(&self) -> containers::Solana {
+        containers::Solana::run(self).await
+    }
+
     /// Prespawns a redis instance where we're able to make use of it before the nodes are spun
     /// up and are in running phase. This redis instance will be reused when the whole environment
     /// is setup.
     pub async fn prespawn_redis(&mut self) -> &containers::Redis {
         self.redis = Some(self.spawn_redis().await);
         self.redis.as_ref().unwrap()
+    }
+
+    /// Prespawns a Solana test validator instance for integration testing.
+    pub async fn prespawn_solana(&mut self) -> &containers::Solana {
+        self.solana = Some(self.spawn_solana().await);
+        self.solana.as_ref().unwrap()
     }
 
     /// Grabs the underlying redis instance that was prespawned, or if not prespawned, create a
@@ -177,6 +195,12 @@ impl ClusterSpawner {
             Some(redis) => redis,
             None => self.spawn_redis().await,
         }
+    }
+
+    /// Grabs the underlying Solana instance that was prespawned, or if not prespawned, create a
+    /// new one from start up.
+    pub async fn take_solana(&mut self) -> Option<containers::Solana> {
+        self.solana.take()
     }
 
     pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Worker<Sandbox>> {
@@ -234,6 +258,162 @@ impl IntoFuture for ClusterSpawner {
                 cluster.wait().running().nodes_running().await?;
 
                 if let Some(prestockpile) = self.prestockpile {
+                    cluster.prestockpile(prestockpile).await;
+                }
+            }
+
+            Ok(cluster)
+        })
+    }
+}
+
+pub struct SolanaClusterSpawner {
+    spawner: ClusterSpawner,
+}
+
+impl SolanaClusterSpawner {
+    /// Set the Solana program address to watch for events.
+    pub fn program_address(mut self, address: String) -> Self {
+        // Store the program address in the spawner for later use
+        // We'll need to modify the NodeConfig to include this
+        if let Some(ref mut sol_config) = self.spawner.cfg.sol {
+            sol_config.program_address = address;
+        } else {
+            // Create a default SolConfig with the program address
+            self.spawner.cfg.sol = Some(mpc_node::indexer_sol::SolConfig {
+                account_sk: String::new(),   // Will be filled in later
+                rpc_http_url: String::new(), // Will be filled in later
+                rpc_ws_url: String::new(),   // Will be filled in later
+                program_address: address,
+                total_timeout: 60,
+            });
+        }
+        self
+    }
+
+    /// Set the total timeout for Solana sign requests.
+    pub fn total_timeout(mut self, timeout: u64) -> Self {
+        if let Some(ref mut sol_config) = self.spawner.cfg.sol {
+            sol_config.total_timeout = timeout;
+        } else {
+            self.spawner.cfg.sol = Some(mpc_node::indexer_sol::SolConfig {
+                account_sk: String::new(),      // Will be filled in later
+                rpc_http_url: String::new(),    // Will be filled in later
+                rpc_ws_url: String::new(),      // Will be filled in later
+                program_address: String::new(), // Will be filled in later
+                total_timeout: timeout,
+            });
+        }
+        self
+    }
+
+    /// Forward other configuration methods to the inner spawner
+    pub fn nodes(mut self, nodes: usize) -> Self {
+        self.spawner = self.spawner.nodes(nodes);
+        self
+    }
+
+    pub fn threshold(mut self, threshold: usize) -> Self {
+        self.spawner = self.spawner.threshold(threshold);
+        self
+    }
+
+    pub fn protocol(mut self, protocol: ProtocolConfig) -> Self {
+        self.spawner = self.spawner.protocol(protocol);
+        self
+    }
+
+    pub fn config(mut self, cfg: NodeConfig) -> Self {
+        self.spawner = self.spawner.config(cfg);
+        self
+    }
+
+    pub fn with_config(mut self, call: impl FnOnce(&mut NodeConfig)) -> Self {
+        self.spawner = self.spawner.with_config(call);
+        self
+    }
+
+    pub fn disable_wait_running(mut self) -> Self {
+        self.spawner = self.spawner.disable_wait_running();
+        self
+    }
+
+    pub fn disable_prestockpile(mut self) -> Self {
+        self.spawner = self.spawner.disable_prestockpile();
+        self
+    }
+
+    pub fn prestockpile(mut self, multiplier: u32) -> Self {
+        self.spawner = self.spawner.prestockpile(multiplier);
+        self
+    }
+
+    pub fn env(mut self, env: &str) -> Self {
+        self.spawner = self.spawner.env(env);
+        self
+    }
+
+    pub fn gcp_project_id(mut self, gcp_project_id: &str) -> Self {
+        self.spawner = self.spawner.gcp_project_id(gcp_project_id);
+        self
+    }
+
+    pub fn network(mut self, network: &str) -> Self {
+        self.spawner = self.spawner.network(network);
+        self
+    }
+
+    pub fn debug_node(&mut self) -> &mut Self {
+        self.spawner.debug_node();
+        self
+    }
+}
+
+impl IntoFuture for SolanaClusterSpawner {
+    type Output = anyhow::Result<Cluster>;
+    type IntoFuture = std::pin::Pin<Box<dyn Future<Output = Self::Output> + Send>>;
+
+    fn into_future(mut self) -> Self::IntoFuture {
+        Box::pin(async move {
+            // Initialize network
+            self.spawner = self.spawner.init_network().await?;
+
+            // Start Solana test validator
+            let solana = self.spawner.spawn_solana().await;
+
+            // Configure SolConfig with the actual Solana container details
+            let program_address = self
+                .spawner
+                .cfg
+                .sol
+                .as_ref()
+                .map(|cfg| cfg.program_address.clone())
+                .unwrap_or_else(|| "11111111111111111111111111111112".to_string()); // Default system program
+
+            let sol_config = solana.get_config(program_address);
+            self.spawner.cfg.sol = Some(sol_config);
+
+            // Store the Solana container for potential later use
+            self.spawner.solana = Some(solana);
+
+            let nodes = self.spawner.run().await?;
+            let connector = near_jsonrpc_client::JsonRpcClient::new_client();
+            let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
+            let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
+
+            let cluster = Cluster {
+                cfg: self.spawner.cfg,
+                rpc_client,
+                http_client: reqwest::Client::default(),
+                docker_client: self.spawner.docker,
+                account_idx: nodes.len(),
+                nodes,
+            };
+
+            if self.spawner.wait_for_running {
+                cluster.wait().running().nodes_running().await?;
+
+                if let Some(prestockpile) = self.spawner.prestockpile {
                     cluster.prestockpile(prestockpile).await;
                 }
             }

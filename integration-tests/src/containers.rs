@@ -32,6 +32,8 @@ use testcontainers::{
 use tokio::io::AsyncWriteExt;
 use tracing;
 
+use solana_sdk::signer::Signer;
+
 pub type Container = ContainerAsync<GenericImage>;
 
 pub struct Node {
@@ -424,4 +426,95 @@ fn shares_to_triples(
             share: share.clone(),
         })
         .collect()
+}
+
+pub struct Solana {
+    pub container: Container,
+    pub internal_rpc_address: String,
+    pub external_rpc_address: String,
+    pub internal_ws_address: String,
+    pub external_ws_address: String,
+    pub keypair: solana_sdk::signer::keypair::Keypair,
+}
+
+impl Solana {
+    const DEFAULT_RPC_PORT: u16 = 8899;
+    const DEFAULT_WS_PORT: u16 = 8900;
+
+    pub async fn run(spawner: &ClusterSpawner) -> Self {
+        tracing::info!("Running Solana Test Validator container...");
+
+        // Generate a new keypair for the test validator
+        let keypair = solana_sdk::signer::keypair::Keypair::new();
+
+        let container = GenericImage::new("solanalabs/solana", "v1.18.26")
+            .with_exposed_port(Self::DEFAULT_RPC_PORT.tcp())
+            .with_exposed_port(Self::DEFAULT_WS_PORT.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("spl_feature-proposal-1.0.0.so"))
+            .with_network(&spawner.network)
+            .with_cmd([
+                "solana-test-validator",
+                "--rpc-port",
+                &Self::DEFAULT_RPC_PORT.to_string(),
+                "--rpc-bind-address",
+                "0.0.0.0",
+                "--websocket-port",
+                &Self::DEFAULT_WS_PORT.to_string(),
+                "--reset",
+                "--quiet",
+                "--log",
+                // Don't fund any accounts initially to avoid keypair issues
+            ])
+            .start()
+            .await
+            .unwrap();
+
+        let network_ip = spawner
+            .docker
+            .get_network_ip_address(&container, &spawner.network)
+            .await
+            .unwrap();
+
+        let external_rpc_address = format!("http://{}:{}", network_ip, Self::DEFAULT_RPC_PORT);
+        let external_ws_address = format!("ws://{}:{}", network_ip, Self::DEFAULT_WS_PORT);
+
+        let host_rpc_port = container
+            .get_host_port_ipv4(Self::DEFAULT_RPC_PORT)
+            .await
+            .unwrap();
+        let host_ws_port = container
+            .get_host_port_ipv4(Self::DEFAULT_WS_PORT)
+            .await
+            .unwrap();
+
+        let internal_rpc_address = format!("http://127.0.0.1:{host_rpc_port}");
+        let internal_ws_address = format!("ws://127.0.0.1:{host_ws_port}");
+
+        tracing::info!(
+            external_rpc_address,
+            external_ws_address,
+            internal_rpc_address,
+            internal_ws_address,
+            "Solana Test Validator container is running",
+        );
+
+        Self {
+            container,
+            internal_rpc_address,
+            external_rpc_address,
+            internal_ws_address,
+            external_ws_address,
+            keypair,
+        }
+    }
+
+    pub fn get_config(&self, program_address: String) -> mpc_node::indexer_sol::SolConfig {
+        mpc_node::indexer_sol::SolConfig {
+            account_sk: bs58::encode(self.keypair.to_bytes()).into_string(),
+            rpc_http_url: self.external_rpc_address.clone(),
+            rpc_ws_url: self.external_ws_address.clone(),
+            program_address,
+            total_timeout: 60, // Default timeout in seconds
+        }
+    }
 }

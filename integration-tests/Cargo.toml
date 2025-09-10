@@ -11,6 +11,7 @@ anyhow.workspace = true
 async-process = "1"
 backon = "0.4"
 bollard = "0.17.0"
+bs58 = "0.5.1"
 clap.workspace = true
 deadpool-redis.workspace = true
 futures = "0.3"
@@ -29,6 +30,9 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 url.workspace = true
 web3.workspace = true
+
+# solana dependencies
+solana-sdk.workspace = true
 
 # crypto dependencies
 ecdsa = "0.16.9"
