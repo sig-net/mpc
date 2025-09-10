@@ -78,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
                     helios_data_path: eth_helios_data_path,
                     refresh_finalized_interval: eth_refresh_finalized_interval,
                     total_timeout: eth_total_timeout,
+                    optimistic_requests: false,
                 }),
                 ..Default::default()
             };

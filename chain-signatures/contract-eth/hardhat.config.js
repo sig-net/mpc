@@ -32,7 +32,7 @@ module.exports = {
       },
     },
     sepolia: {
-      url: `https://sepolia.infura.io/v3/${INFURA_API_KEY}`,
+      url: `https://ethereum-sepolia-rpc.publicnode.com`,
       accounts: [SEPOLIA_PRIVATE_KEY],
     },
     mainnet: {
