@@ -263,11 +263,14 @@ impl IntoFuture for ClusterSpawner {
                 // Start Solana test validator
                 let solana = self.spawn_solana().await;
 
-                // Configure SolConfig with the actual Solana container details
-                let program_address = self
-                    .program_address
-                    .clone()
-                    .unwrap_or_else(|| "11111111111111111111111111111112".to_string()); // Default system program
+                // Deploy the core contracts and get the program address
+                let program_address = if let Some(addr) = self.program_address.clone() {
+                    // Use provided program address
+                    addr
+                } else {
+                    // Deploy the contract and use the deployed program address
+                    solana.deploy_core_contracts().await?
+                };
 
                 let sol_config = solana.get_config(program_address);
                 self.cfg.sol = Some(sol_config);

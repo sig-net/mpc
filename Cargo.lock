@@ -5747,6 +5747,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shell-escape",
+ "solana-client",
  "solana-sdk",
  "test-log",
  "testcontainers",

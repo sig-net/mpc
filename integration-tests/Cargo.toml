@@ -33,6 +33,7 @@ web3.workspace = true
 
 # solana dependencies
 solana-sdk.workspace = true
+solana-client.workspace = true
 
 # crypto dependencies
 ecdsa = "0.16.9"
