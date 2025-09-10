@@ -6,7 +6,6 @@ async fn test_solana_sandbox_spawn() -> anyhow::Result<()> {
     let cluster = cluster::spawn()
         .sol()
         .program_address("11111111111111111111111111111112".to_string()) // System program ID for testing
-        .total_timeout(30)
         .nodes(3)
         .threshold(2)
         .disable_wait_running() // Disable waiting for nodes to be fully running

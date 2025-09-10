@@ -32,8 +32,6 @@ use testcontainers::{
 use tokio::io::AsyncWriteExt;
 use tracing;
 
-use solana_sdk::signer::Signer;
-
 pub type Container = ContainerAsync<GenericImage>;
 
 pub struct Node {
