@@ -42,7 +42,7 @@ impl Chain {
 }
 
 /// Creates a derivation path string using the legacy format
-fn depricated_derivation_path(chain: Chain, sender: &str, path: &str) -> String {
+fn deprecated_derivation_path(chain: Chain, sender: &str, path: &str) -> String {
     let chain_id = chain.deprecated_chain_id();
     format!("{EPSILON_DERIVATION_PREFIX_V1},{chain_id},{sender},{path}")
 }
@@ -55,7 +55,7 @@ fn caip2_derivation_path(chain: Chain, sender: &str, derivation_path: &str) -> S
 
 fn derivation_path(key_version: u32, chain: Chain, sender: &str, derivation_path: &str) -> String {
     match key_version {
-        0 => depricated_derivation_path(chain, sender, derivation_path),
+        0 => deprecated_derivation_path(chain, sender, derivation_path),
         // Note: if the user provides a key_version that is higher than supported, we fall back to the latest supported one
         _ => caip2_derivation_path(chain, sender, derivation_path),
     }
