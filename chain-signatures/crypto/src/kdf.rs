@@ -61,14 +61,14 @@ fn derivation_path(key_version: u32, chain: Chain, sender: &str, derivation_path
     }
 }
 
-fn hash_derivation_path_sha3(derivation_path: impl AsRef<[u8]>) -> Scalar {
+fn sha3(derivation_path: impl AsRef<[u8]>) -> Scalar {
     let mut hasher = Sha3_256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
     Scalar::from_non_biased(hash)
 }
 
-fn hash_derivation_path_keccak(derivation_path: impl AsRef<[u8]>) -> Scalar {
+fn keccak(derivation_path: impl AsRef<[u8]>) -> Scalar {
     let mut hasher = Keccak256::new();
     hasher.update(derivation_path);
     let hash: [u8; 32] = hasher.finalize().into();
@@ -77,17 +77,17 @@ fn hash_derivation_path_keccak(derivation_path: impl AsRef<[u8]>) -> Scalar {
 
 pub fn derive_epsilon_near(key_version: u32, predecessor_id: &AccountId, path: &str) -> Scalar {
     let derivation_path = derivation_path(key_version, Chain::Near, predecessor_id.as_str(), path);
-    hash_derivation_path_sha3(derivation_path)
+    sha3(derivation_path)
 }
 
 pub fn derive_epsilon_eth(key_version: u32, sender: &str, path: &str) -> Scalar {
     let derivation_path = derivation_path(key_version, Chain::Ethereum, sender, path);
-    hash_derivation_path_keccak(derivation_path)
+    keccak(derivation_path)
 }
 
 pub fn derive_epsilon_sol(key_version: u32, sender: &str, path: &str) -> Scalar {
     let derivation_path = derivation_path(key_version, Chain::Solana, sender, path);
-    hash_derivation_path_keccak(derivation_path.as_bytes())
+    keccak(derivation_path.as_bytes())
 }
 
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
