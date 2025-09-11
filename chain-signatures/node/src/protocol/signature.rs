@@ -9,11 +9,13 @@ use crate::protocol::posit::{PositAction, PositInternalAction, Positor, Posits};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
+use crate::sign_respond_tx::SignRespondSignatureChannel;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap};
 
+use crate::protocol::SignRequestType;
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;
 use chrono::Utc;
@@ -45,6 +47,8 @@ pub struct IndexedSignRequest {
     pub unix_timestamp_indexed: u64,
     pub timestamp_sign_queue: Option<Instant>,
     pub total_timeout: Duration,
+    pub sign_request_type: SignRequestType,
+    pub participants: Option<Vec<Participant>>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -166,7 +170,11 @@ impl SignQueue {
     ) -> SignRequest {
         let sign_id = indexed.id;
         let reorganize = initial_round > 0;
-        let mut participants = participants.keys_vec();
+        let mut participants = if indexed.participants.is_some() {
+            indexed.participants.clone().unwrap()
+        } else {
+            participants.keys().cloned().collect()
+        };
         participants.sort();
 
         // Simple round-robin selection of the proposer, using only inputs that
@@ -213,28 +221,12 @@ impl SignQueue {
             if reorganize { "re" } else { "" },
         );
 
-        let request = SignRequest {
+        SignRequest {
             indexed,
             proposer,
             stable: stable.clone(),
             round,
-        };
-
-        if is_mine {
-            tracing::info!(
-                ?sign_id,
-                "saving sign request: node is in the {}signer subset",
-                if reorganize { "reorganized " } else { "" },
-            );
-        } else {
-            tracing::info!(
-                ?sign_id,
-                "skipping sign request: node is NOT in the {}signer subset",
-                if reorganize { "reorganized " } else { "" },
-            );
         }
-
-        request
     }
 
     pub async fn organize(
@@ -395,6 +387,7 @@ struct SignatureGenerator {
     inbox: mpsc::Receiver<SignatureMessage>,
     msg: MessageChannel,
     rpc: RpcChannel,
+    sign_respond_signature_channel: SignRespondSignatureChannel,
 }
 
 impl SignatureGenerator {
@@ -408,6 +401,7 @@ impl SignatureGenerator {
         cfg: ProtocolConfig,
         msg: MessageChannel,
         rpc: RpcChannel,
+        sign_respond_signature_channel: SignRespondSignatureChannel,
     ) -> Result<Self, InitializationError> {
         let sign_id = request.id();
         let request = request
@@ -466,6 +460,7 @@ impl SignatureGenerator {
             inbox,
             msg,
             rpc,
+            sign_respond_signature_channel,
         })
     }
 
@@ -632,8 +627,21 @@ impl SignatureGenerator {
                         .observe(self.created.elapsed().as_secs_f64());
 
                     if self.request.proposer == me {
-                        self.rpc
-                            .publish(self.public_key, self.request.clone(), output);
+                        self.rpc.publish(
+                            self.public_key,
+                            self.request.clone(),
+                            output,
+                            self.participants.clone(),
+                        );
+                    } else if let SignRequestType::SignRespond(_) =
+                        self.request.indexed.sign_request_type
+                    {
+                        self.sign_respond_signature_channel.send(
+                            self.public_key,
+                            self.request.clone(),
+                            output,
+                            self.participants.clone(),
+                        );
                     }
 
                     break Ok(());
@@ -672,6 +680,7 @@ pub struct SignatureSpawner {
     epoch: u64,
     msg: MessageChannel,
     rpc: RpcChannel,
+    sign_respond_signature_channel: SignRespondSignatureChannel,
 }
 
 impl SignatureSpawner {
@@ -686,6 +695,7 @@ impl SignatureSpawner {
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
         rpc: RpcChannel,
+        sign_respond_signature_channel: SignRespondSignatureChannel,
     ) -> Self {
         Self {
             presignatures: presignatures.clone(),
@@ -699,6 +709,7 @@ impl SignatureSpawner {
             epoch,
             msg,
             rpc,
+            sign_respond_signature_channel,
         }
     }
 
@@ -831,8 +842,14 @@ impl SignatureSpawner {
                         self.presignatures.clone(),
                     ),
                 };
-                self.generate(request, presignature, participants, cfg)
-                    .await;
+                self.generate(
+                    request,
+                    presignature,
+                    participants,
+                    cfg,
+                    self.sign_respond_signature_channel.clone(),
+                )
+                .await;
             }
         }
     }
@@ -844,6 +861,7 @@ impl SignatureSpawner {
         presignature: PendingPresignature,
         participants: Vec<Participant>,
         cfg: ProtocolConfig,
+        sign_respond_signature_channel: SignRespondSignatureChannel,
     ) {
         let me = self.me;
         let epoch = self.epoch;
@@ -863,6 +881,7 @@ impl SignatureSpawner {
                 cfg,
                 msg,
                 rpc,
+                sign_respond_signature_channel,
             )
             .await
             {
@@ -1049,6 +1068,7 @@ impl SignatureSpawnerTask {
             &ctx.presignature_storage,
             ctx.msg_channel.clone(),
             ctx.rpc_channel.clone(),
+            ctx.sign_respond_signature_channel.clone(),
         );
 
         Self {

@@ -101,8 +101,7 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
     // start the cluster of nodes immediately without waiting for them to be running.
     let mut spawner = cluster::spawn();
     {
-        let lake = spawner.prespawn_lake().await.unwrap();
-        let worker = lake.worker.clone();
+        let worker = spawner.prespawn_sandbox().await.unwrap().clone();
         spawner.create_accounts(&worker).await;
     }
     // NOTE: cannot reliably get the first participant until running state is reached, so

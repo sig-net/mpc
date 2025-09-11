@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
             println!("  release:        {}", ctx.release);
 
             println!("\nExternal services:");
-            println!("  lake_indexer:  {}", ctx.lake_indexer.rpc_host_address);
+            println!("  near sandbox rpc:  {}", ctx.worker.rpc_addr());
             println!("  redis:  {}", ctx.redis.internal_address);
 
             println!("\nNodes:");

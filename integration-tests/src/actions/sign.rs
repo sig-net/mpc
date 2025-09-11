@@ -234,7 +234,7 @@ impl SignAction<'_> {
         let rogue = self.nodes.worker().dev_create_account().await?;
         let signer = InMemorySigner {
             account_id: rogue.id().clone(),
-            public_key: rogue.secret_key().public_key().clone().into(),
+            public_key: rogue.secret_key().public_key().to_string().parse()?,
             secret_key: rogue.secret_key().to_string().parse()?,
         };
 

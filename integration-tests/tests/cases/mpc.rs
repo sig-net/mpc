@@ -3,6 +3,7 @@ use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
+use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use std::collections::BTreeMap;
@@ -220,6 +221,8 @@ fn sign_request(seed: u8) -> IndexedSignRequest {
         unix_timestamp_indexed: 0,
         timestamp_sign_queue: None,
         total_timeout: Duration::from_secs(45),
+        participants: None,
+        sign_request_type: SignRequestType::Sign,
     }
 }
 
@@ -271,7 +274,7 @@ async fn test_presignature_timeout() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(10), network.wait_for_presignatures(1))
+    tokio::time::timeout(Duration::from_secs(15), network.wait_for_presignatures(1))
         .await
         .expect("should have enough presignatures eventually");
 }

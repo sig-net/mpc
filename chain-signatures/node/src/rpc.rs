@@ -10,6 +10,9 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::keypair::Keypair;
 
+use crate::protocol::SignRequestType;
+use crate::read_respond::ReadRespondedTxChannel;
+use crate::sign_respond_tx::SignRespondSignatureChannel;
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, RootProvider, WalletProvider};
@@ -77,9 +80,10 @@ type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
 #[derive(Clone)]
 pub struct PublishAction {
-    public_key: mpc_crypto::PublicKey,
+    pub public_key: mpc_crypto::PublicKey,
     pub request: SignRequest,
     output: FullSignature<Secp256k1>,
+    pub participants: Vec<Participant>,
     timestamp: Instant,
     retry_count: usize,
 }
@@ -99,6 +103,7 @@ impl RpcChannel {
         public_key: mpc_crypto::PublicKey,
         request: SignRequest,
         output: FullSignature<Secp256k1>,
+        participants: Vec<Participant>,
     ) {
         let rpc = self.clone();
         tokio::spawn(async move {
@@ -108,6 +113,7 @@ impl RpcChannel {
                     public_key,
                     request,
                     output,
+                    participants,
                     timestamp: Instant::now(),
                     retry_count: 0,
                 }))
@@ -304,6 +310,8 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
+        sign_respond_signature_channel: SignRespondSignatureChannel,
+        read_responded_tx_channel: ReadRespondedTxChannel,
     ) {
         // spin up update task for updating contract state and config
         let near = self.near.clone();
@@ -342,10 +350,19 @@ impl RpcExecutor {
             let near_account_id = self.near.my_account_id.clone();
             let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
 
+            let sign_respond_signature_channel_clone = sign_respond_signature_channel.clone();
+            let read_responded_tx_channel_clone = read_responded_tx_channel.clone();
             tokio::spawn(async move {
                 match chain {
                     Chain::NEAR | Chain::Solana => {
-                        execute_publish(client, action, near_account_id).await;
+                        execute_publish(
+                            client,
+                            action,
+                            near_account_id,
+                            sign_respond_signature_channel_clone,
+                            read_responded_tx_channel_clone,
+                        )
+                        .await;
                     }
                     Chain::Ethereum => {
                         if let Err(err) = eth_rpc_tx.send(action).await {
@@ -638,6 +655,8 @@ async fn execute_publish(
     client: ChainClient,
     mut action: PublishAction,
     near_account_id: AccountId,
+    sign_respond_signature_channel: SignRespondSignatureChannel,
+    read_responded_tx_channel: ReadRespondedTxChannel,
 ) {
     let chain = action.request.indexed.chain;
     tracing::info!(
@@ -686,6 +705,8 @@ async fn execute_publish(
                 &action.timestamp,
                 &signature,
                 &near_account_id,
+                sign_respond_signature_channel.clone(),
+                read_responded_tx_channel.clone(),
             )
             .await
             .map_err(|_| ()),
@@ -1277,7 +1298,9 @@ async fn execute_batch_publish(
     }
 }
 
+use signet_program::accounts::ReadRespond as SolanaReadRespondAccount;
 use signet_program::accounts::Respond as SolanaRespondAccount;
+use signet_program::instruction::ReadRespond as SolanaReadRespond;
 use signet_program::instruction::Respond as SolanaRespond;
 use signet_program::AffinePoint as SolanaContractAffinePoint;
 use signet_program::Signature as SolanaContractSignature;
@@ -1288,6 +1311,8 @@ async fn try_publish_sol(
     timestamp: &Instant,
     signature: &Signature,
     near_account_id: &AccountId,
+    sign_respond_signature_channel: SignRespondSignatureChannel,
+    read_responded_tx_channel: ReadRespondedTxChannel,
 ) -> Result<(), ()> {
     let chain = action.request.indexed.chain;
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
@@ -1306,35 +1331,82 @@ async fn try_publish_sol(
         recovery_id: signature.recovery_id,
     };
 
-    let tx = program
-        .request()
-        .signer(sol.payer.clone())
-        .accounts(SolanaRespondAccount {
-            responder: sol.payer.clone().try_pubkey().unwrap(),
-        })
-        .args(SolanaRespond {
-            request_ids,
-            signatures: vec![signature],
-        })
-        .send()
-        .await
-        .map_err(|err| {
-            tracing::error!(
-                sign_id = ?action.request.indexed.id,
-                error = ?err,
-                "failed to publish solana signature"
-            );
-            crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .inc();
-        })?;
+    match &action.request.indexed.sign_request_type {
+        SignRequestType::Sign | SignRequestType::SignRespond(_) => {
+            let tx = program
+                .request()
+                .signer(sol.payer.clone())
+                .accounts(SolanaRespondAccount {
+                    responder: sol.payer.clone().try_pubkey().unwrap(),
+                })
+                .args(SolanaRespond {
+                    request_ids,
+                    signatures: vec![signature.clone()],
+                })
+                .send()
+                .await
+                .map_err(|err| {
+                    tracing::error!(
+                        sign_id = ?action.request.indexed.id,
+                        error = ?err,
+                        "failed to publish solana signature"
+                    );
+                    crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                        .inc();
+                })?;
 
-    tracing::info!(
-        sign_id = ?action.request.indexed.id,
-        tx_hash = ?tx,
-        elapsed = ?timestamp.elapsed(),
-        "published solana signature successfully"
-    );
+            tracing::info!(
+                sign_id = ?action.request.indexed.id,
+                tx_hash = ?tx,
+                elapsed = ?timestamp.elapsed(),
+                "published solana signature successfully"
+            );
+        }
+        SignRequestType::ReadRespond(read_responded_tx) => {
+            let read_respond_serialized_output = read_responded_tx.output.clone();
+            let tx = program
+                .request()
+                .signer(sol.payer.clone())
+                .accounts(SolanaReadRespondAccount {
+                    responder: sol.payer.clone().try_pubkey().unwrap(),
+                })
+                .args(SolanaReadRespond {
+                    request_id: request_ids[0],
+                    serialized_output: read_respond_serialized_output.clone(),
+                    signature: signature.clone(),
+                })
+                .send()
+                .await
+                .map_err(|err| {
+                    tracing::error!(
+                        sign_id = ?action.request.indexed.id,
+                        error = ?err,
+                        "failed to publish read respond solana signature"
+                    );
+                    crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                        .inc();
+                })?;
+
+            tracing::info!(
+                sign_id = ?action.request.indexed.id,
+                tx_hash = ?tx,
+                elapsed = ?timestamp.elapsed(),
+                "published read respond solana signature successfully"
+            );
+            read_responded_tx_channel.send(read_responded_tx.tx_id);
+        }
+    }
+
+    if let SignRequestType::SignRespond(_) = action.request.indexed.sign_request_type {
+        sign_respond_signature_channel.send(
+            action.public_key,
+            action.request.clone(),
+            action.output.clone(),
+            action.participants.clone(),
+        );
+    }
 
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
