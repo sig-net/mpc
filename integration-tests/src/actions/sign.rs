@@ -15,6 +15,21 @@ use rand::Rng;
 use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
 
+// Solana-specific imports
+use solana_sdk::{
+    commitment_config::CommitmentConfig, instruction::Instruction, pubkey::Pubkey,
+    signature::Keypair, signer::Signer, transaction::Transaction,
+};
+use std::str::FromStr;
+
+// Solana contract types for sign instruction
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SolanaSignRequest {
+    pub payload: [u8; 32],
+    pub path: String,
+    pub key_version: u32,
+}
+
 pub const SIGN_GAS: Gas = Gas::from_tgas(50);
 pub const SIGN_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
 
@@ -119,6 +134,142 @@ impl SignAction<'_> {
     pub fn rogue_responder(mut self) -> Self {
         self.execute_rogue = true;
         self
+    }
+
+    /// Create a Solana-specific sign action that calls the Solana contract's sign function
+    pub fn sol<'a>(self) -> SolanaSignAction<'a>
+    where
+        Self: 'a,
+    {
+        SolanaSignAction::new(self)
+    }
+}
+
+/// Solana-specific sign action that calls the Solana contract's respond function
+pub struct SolanaSignAction<'a> {
+    inner: SignAction<'a>,
+}
+
+impl<'a> SolanaSignAction<'a> {
+    fn new(inner: SignAction<'a>) -> Self {
+        Self { inner }
+    }
+
+    /// Set the payload of this sign call.
+    pub fn payload(mut self, payload: [u8; 32]) -> Self {
+        self.inner = self.inner.payload(payload);
+        self
+    }
+
+    /// Set the derivation path of this sign call.
+    pub fn path(mut self, path: &str) -> Self {
+        self.inner = self.inner.path(path);
+        self
+    }
+
+    /// Set the key version of this sign call.
+    pub fn key_version(mut self, key_version: u32) -> Self {
+        self.inner = self.inner.key_version(key_version);
+        self
+    }
+}
+
+impl<'a> IntoFuture for SolanaSignAction<'a> {
+    type Output = anyhow::Result<SolanaSignOutcome>;
+    type IntoFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.execute_solana())
+    }
+}
+
+/// Result of a Solana contract sign call
+#[derive(Debug)]
+pub struct SolanaSignOutcome {
+    pub transaction_signature: String,
+    pub request_id: [u8; 32],
+}
+
+impl<'a> SolanaSignAction<'a> {
+    async fn execute_solana(self) -> anyhow::Result<SolanaSignOutcome> {
+        // Get Solana configuration from cluster
+        let sol_config = self
+            .inner
+            .nodes
+            .cfg
+            .sol
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Solana configuration not available"))?;
+
+        let payload = self
+            .inner
+            .payload
+            .unwrap_or_else(|| rand::thread_rng().gen());
+        let payload_hash = *alloy::primitives::keccak256(payload);
+
+        // Call Solana contract's sign function (not respond!)
+        let transaction_signature = self
+            .call_solana_sign(
+                sol_config,
+                payload_hash,
+                &self.inner.path,
+                self.inner.key_version,
+            )
+            .await?;
+
+        Ok(SolanaSignOutcome {
+            transaction_signature,
+            request_id: payload_hash,
+        })
+    }
+
+    async fn call_solana_sign(
+        &self,
+        sol_config: &mpc_node::indexer_sol::SolConfig,
+        payload_hash: [u8; 32],
+        path: &str,
+        key_version: u32,
+    ) -> anyhow::Result<String> {
+        // Create Solana async RPC client
+        let client = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
+            sol_config.rpc_http_url.clone(),
+            CommitmentConfig::confirmed(),
+        );
+
+        let keypair = Keypair::from_base58_string(&sol_config.account_sk);
+        let program_id = Pubkey::from_str(&sol_config.program_address)?;
+
+        // Create the sign instruction data
+        let sign_request = SolanaSignRequest {
+            payload: payload_hash,
+            path: path.to_string(),
+            key_version,
+        };
+
+        // For now, create a simple instruction - you'll need to adjust based on your Solana contract
+        let instruction_data = serde_json::to_vec(&sign_request)?;
+
+        let instruction = Instruction {
+            program_id,
+            accounts: vec![solana_sdk::instruction::AccountMeta::new(
+                keypair.pubkey(),
+                true, // is_signer
+            )],
+            data: instruction_data,
+        };
+
+        let recent_blockhash = client.get_latest_blockhash().await?;
+        let transaction = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&keypair.pubkey()),
+            &[&keypair],
+            recent_blockhash,
+        );
+
+        let signature = client.send_and_confirm_transaction(&transaction).await?;
+
+        Ok(signature.to_string())
     }
 }
 

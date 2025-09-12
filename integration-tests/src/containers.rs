@@ -6,6 +6,7 @@ use crate::local::NodeEnvConfig;
 use crate::NodeConfig;
 
 use anyhow::anyhow;
+use async_process::{Child, Command};
 use bollard::container::LogsOptions;
 use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
@@ -22,6 +23,7 @@ use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
+use solana_sdk::signer::Signer;
 use testcontainers::core::ExecCommand;
 use testcontainers::ContainerAsync;
 use testcontainers::{
@@ -31,8 +33,6 @@ use testcontainers::{
 };
 use tokio::io::AsyncWriteExt;
 use tracing;
-use solana_sdk::signer::Signer;
-use async_process::{Child, Command};
 
 pub type Container = ContainerAsync<GenericImage>;
 
@@ -438,12 +438,15 @@ pub struct Solana {
 }
 
 impl Solana {
-
     pub async fn run(_spawner: &ClusterSpawner) -> Self {
         tracing::info!("Starting Solana Test Validator process...");
 
         // Check if solana-test-validator is available
-        match Command::new("solana-test-validator").arg("--help").output().await {
+        match Command::new("solana-test-validator")
+            .arg("--help")
+            .output()
+            .await
+        {
             Err(_) => {
                 panic!(
                     "solana-test-validator not found in PATH. Please install Solana CLI tools.\n\
@@ -594,19 +597,27 @@ impl Solana {
 
         // Create temporary files for keypairs
         let temp_dir = std::env::temp_dir();
-        let payer_keypair_path = temp_dir.join(format!("payer-keypair-{}.json", uuid::Uuid::new_v4()));
-        let program_keypair_path = temp_dir.join(format!("program-keypair-{}.json", uuid::Uuid::new_v4()));
+        let payer_keypair_path =
+            temp_dir.join(format!("payer-keypair-{}.json", uuid::Uuid::new_v4()));
+        let program_keypair_path =
+            temp_dir.join(format!("program-keypair-{}.json", uuid::Uuid::new_v4()));
 
         // Write the payer keypair to a file (solana CLI format)
         let payer_keypair_bytes = self.keypair.to_bytes();
         let payer_keypair_array: [u8; 64] = payer_keypair_bytes;
-        std::fs::write(&payer_keypair_path, serde_json::to_string(&payer_keypair_array.to_vec())?)?;
+        std::fs::write(
+            &payer_keypair_path,
+            serde_json::to_string(&payer_keypair_array.to_vec())?,
+        )?;
 
         // Generate a new program keypair
         let program_keypair = solana_sdk::signer::keypair::Keypair::new();
         let program_keypair_bytes = program_keypair.to_bytes();
         let program_keypair_array: [u8; 64] = program_keypair_bytes;
-        std::fs::write(&program_keypair_path, serde_json::to_string(&program_keypair_array.to_vec())?)?;
+        std::fs::write(
+            &program_keypair_path,
+            serde_json::to_string(&program_keypair_array.to_vec())?,
+        )?;
 
         let program_pubkey = program_keypair.pubkey();
 
@@ -652,7 +663,11 @@ impl Solana {
         if !deploy_output.status.success() {
             let stderr = String::from_utf8_lossy(&deploy_output.stderr);
             let stdout = String::from_utf8_lossy(&deploy_output.stdout);
-            anyhow::bail!("Failed to deploy Solana program. stdout: {}, stderr: {}", stdout, stderr);
+            anyhow::bail!(
+                "Failed to deploy Solana program. stdout: {}, stderr: {}",
+                stdout,
+                stderr
+            );
         }
 
         let stdout = String::from_utf8_lossy(&deploy_output.stdout);
