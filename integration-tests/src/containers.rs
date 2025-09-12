@@ -32,6 +32,7 @@ use testcontainers::{
 use tokio::io::AsyncWriteExt;
 use tracing;
 use solana_sdk::signer::Signer;
+use async_process::{Child, Command};
 
 pub type Container = ContainerAsync<GenericImage>;
 
@@ -428,90 +429,102 @@ fn shares_to_triples(
 }
 
 pub struct Solana {
-    pub container: Container,
-    pub internal_rpc_address: String,
-    pub external_rpc_address: String,
-    pub internal_ws_address: String,
-    pub external_ws_address: String,
+    pub process: Child,
+    pub rpc_address: String,
+    pub ws_address: String,
     pub keypair: solana_sdk::signer::keypair::Keypair,
+    pub rpc_port: u16,
+    pub ws_port: u16,
 }
 
 impl Solana {
-    const DEFAULT_RPC_PORT: u16 = 8899;
-    const DEFAULT_WS_PORT: u16 = 8900;
 
-    pub async fn run(spawner: &ClusterSpawner) -> Self {
-        tracing::info!("Running Solana Test Validator container...");
+    pub async fn run(_spawner: &ClusterSpawner) -> Self {
+        tracing::info!("Starting Solana Test Validator process...");
+
+        // Check if solana-test-validator is available
+        match Command::new("solana-test-validator").arg("--help").output().await {
+            Err(_) => {
+                panic!(
+                    "solana-test-validator not found in PATH. Please install Solana CLI tools.\n\
+                     Install instructions: https://docs.solana.com/cli/install-solana-cli-tools"
+                );
+            }
+            Ok(output) if !output.status.success() => {
+                panic!("solana-test-validator exists but returned error when checking --help");
+            }
+            Ok(_) => {
+                tracing::info!("Found solana-test-validator in PATH");
+            }
+        }
 
         // Generate a new keypair for the test validator
         let keypair = solana_sdk::signer::keypair::Keypair::new();
 
-        let container = GenericImage::new("solanalabs/solana", "v1.18.26")
-            .with_exposed_port(Self::DEFAULT_RPC_PORT.tcp())
-            .with_exposed_port(Self::DEFAULT_WS_PORT.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("spl_feature-proposal-1.0.0.so"))
-            .with_network(&spawner.network)
-            .with_cmd([
-                "solana-test-validator",
-                "--rpc-port",
-                &Self::DEFAULT_RPC_PORT.to_string(),
-                "--rpc-bind-address",
-                "0.0.0.0",
-                "--websocket-port",
-                &Self::DEFAULT_WS_PORT.to_string(),
-                "--reset",
-                "--quiet",
-                "--log",
-                // Don't fund any accounts initially to avoid keypair issues
-            ])
-            .start()
-            .await
-            .unwrap();
+        // Find available ports for RPC and WebSocket
+        // Find available ports (websocket is automatically rpc_port + 1)
+        let rpc_port = Self::find_available_port(8899).await;
+        let ws_port = rpc_port + 1;
 
-        let network_ip = spawner
-            .docker
-            .get_network_ip_address(&container, &spawner.network)
-            .await
-            .unwrap();
+        let rpc_address = format!("http://127.0.0.1:{}", rpc_port);
+        let ws_address = format!("ws://127.0.0.1:{}", ws_port);
 
-        let external_rpc_address = format!("http://{}:{}", network_ip, Self::DEFAULT_RPC_PORT);
-        let external_ws_address = format!("ws://{}:{}", network_ip, Self::DEFAULT_WS_PORT);
-
-        let host_rpc_port = container
-            .get_host_port_ipv4(Self::DEFAULT_RPC_PORT)
-            .await
-            .unwrap();
-        let host_ws_port = container
-            .get_host_port_ipv4(Self::DEFAULT_WS_PORT)
-            .await
-            .unwrap();
-
-        let internal_rpc_address = format!("http://127.0.0.1:{host_rpc_port}");
-        let internal_ws_address = format!("ws://127.0.0.1:{host_ws_port}");
+        // Start the solana-test-validator process
+        let process = Command::new("solana-test-validator")
+            .arg("--rpc-port")
+            .arg(rpc_port.to_string())
+            .arg("--bind-address")
+            .arg("127.0.0.1")
+            .arg("--reset")
+            .arg("--quiet")
+            .spawn()
+            .expect("Failed to start solana-test-validator");
 
         tracing::info!(
-            external_rpc_address,
-            external_ws_address,
-            internal_rpc_address,
-            internal_ws_address,
-            "Solana Test Validator container is running",
+            rpc_address,
+            ws_address,
+            "Solana Test Validator process is running",
         );
 
+        // Wait a bit for the validator to start up
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
         Self {
-            container,
-            internal_rpc_address,
-            external_rpc_address,
-            internal_ws_address,
-            external_ws_address,
+            process,
+            rpc_address,
+            ws_address,
             keypair,
+            rpc_port,
+            ws_port,
         }
+    }
+
+    async fn find_available_port(preferred: u16) -> u16 {
+        // Try preferred port first
+        if Self::is_port_available(preferred).await {
+            return preferred;
+        }
+
+        // Find any available port starting from preferred + 1
+        for port in (preferred + 1)..=65535 {
+            if Self::is_port_available(port).await {
+                return port;
+            }
+        }
+
+        // Fallback to preferred if nothing else works
+        preferred
+    }
+
+    async fn is_port_available(port: u16) -> bool {
+        std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok()
     }
 
     pub fn get_config(&self, program_address: String) -> mpc_node::indexer_sol::SolConfig {
         mpc_node::indexer_sol::SolConfig {
             account_sk: bs58::encode(self.keypair.to_bytes()).into_string(),
-            rpc_http_url: self.external_rpc_address.clone(),
-            rpc_ws_url: self.external_ws_address.clone(),
+            rpc_http_url: self.rpc_address.clone(),
+            rpc_ws_url: self.ws_address.clone(),
             program_address,
             total_timeout: 60, // Default timeout in seconds
         }
@@ -603,7 +616,7 @@ impl Solana {
                 "airdrop",
                 "10", // 10 SOL should be enough for deployment
                 "--url",
-                &self.internal_rpc_address,
+                &self.rpc_address,
                 "--keypair",
                 payer_keypair_path.to_str().unwrap(),
             ])
@@ -626,7 +639,7 @@ impl Solana {
                 "--program-id",
                 program_keypair_path.to_str().unwrap(),
                 "--url",
-                &self.internal_rpc_address,
+                &self.rpc_address,
                 "-v", // verbose output
             ])
             .output()
@@ -654,5 +667,15 @@ impl Solana {
         );
 
         Ok(program_address)
+    }
+}
+
+impl Drop for Solana {
+    fn drop(&mut self) {
+        if let Err(e) = self.process.kill() {
+            tracing::warn!("Failed to kill solana-test-validator process: {}", e);
+        } else {
+            tracing::info!("Solana Test Validator process terminated");
+        }
     }
 }
