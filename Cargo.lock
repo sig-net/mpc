@@ -5712,6 +5712,7 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "anchor-client",
  "anyhow",
  "async-process 1.8.1",
  "backon",
@@ -5747,6 +5748,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shell-escape",
+ "signet-program",
  "solana-client",
  "solana-sdk",
  "test-log",

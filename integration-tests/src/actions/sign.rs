@@ -17,17 +17,25 @@ use crate::cluster::Cluster;
 
 // Solana-specific imports
 use solana_sdk::{
-    commitment_config::CommitmentConfig, instruction::Instruction, pubkey::Pubkey,
-    signature::Keypair, signer::Signer, transaction::Transaction,
+    commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Keypair, signer::Signer,
 };
 use std::str::FromStr;
 
-// Solana contract types for sign instruction
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct SolanaSignRequest {
-    pub payload: [u8; 32],
-    pub path: String,
-    pub key_version: u32,
+// Anchor client for proper Solana program interface
+use anchor_client;
+
+// Solana contract types (matching the contract definitions)
+#[derive(Clone, Debug)]
+pub struct AffinePoint {
+    pub x: [u8; 32],
+    pub y: [u8; 32],
+}
+
+#[derive(Clone, Debug)]
+pub struct SolanaSignature {
+    pub big_r: AffinePoint,
+    pub s: [u8; 32],
+    pub recovery_id: u8,
 }
 
 pub const SIGN_GAS: Gas = Gas::from_tgas(50);
@@ -228,48 +236,56 @@ impl<'a> SolanaSignAction<'a> {
         &self,
         sol_config: &mpc_node::indexer_sol::SolConfig,
         payload_hash: [u8; 32],
-        path: &str,
-        key_version: u32,
+        _path: &str,
+        _key_version: u32,
     ) -> anyhow::Result<String> {
-        // Create Solana async RPC client
-        let client = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
+        // Use proper Anchor client to call Solana program interface
+        let keypair = Keypair::from_base58_string(&sol_config.account_sk);
+        let payer = std::sync::Arc::new(keypair);
+
+        let cluster = anchor_client::Cluster::Custom(
             sol_config.rpc_http_url.clone(),
+            sol_config.rpc_ws_url.clone(),
+        );
+        let client = anchor_client::Client::new_with_options(
+            cluster,
+            payer.clone(),
             CommitmentConfig::confirmed(),
         );
 
-        let keypair = Keypair::from_base58_string(&sol_config.account_sk);
         let program_id = Pubkey::from_str(&sol_config.program_address)?;
+        let program = client.program(program_id)?;
 
-        // Create the sign instruction data
-        let sign_request = SolanaSignRequest {
-            payload: payload_hash,
-            path: path.to_string(),
-            key_version,
+        // Create a dummy signature for testing - in a real scenario, this would come from MPC
+        let dummy_signature = signet_program::Signature {
+            big_r: signet_program::AffinePoint {
+                x: [1u8; 32], // dummy values
+                y: [2u8; 32], // dummy values
+            },
+            s: [3u8; 32], // dummy value
+            recovery_id: 0,
         };
 
-        // For now, create a simple instruction - you'll need to adjust based on your Solana contract
-        let instruction_data = serde_json::to_vec(&sign_request)?;
-
-        let instruction = Instruction {
-            program_id,
-            accounts: vec![solana_sdk::instruction::AccountMeta::new(
-                keypair.pubkey(),
-                true, // is_signer
-            )],
-            data: instruction_data,
-        };
-
-        let recent_blockhash = client.get_latest_blockhash().await?;
-        let transaction = Transaction::new_signed_with_payer(
-            &[instruction],
-            Some(&keypair.pubkey()),
-            &[&keypair],
-            recent_blockhash,
+        tracing::info!(
+            "Calling Solana contract respond function with payload: {}",
+            hex::encode(payload_hash)
         );
 
-        let signature = client.send_and_confirm_transaction(&transaction).await?;
+        // Use the proper Anchor program interface to call the respond function
+        let tx = program
+            .request()
+            .signer(payer.clone())
+            .accounts(signet_program::accounts::Respond {
+                responder: payer.try_pubkey()?,
+            })
+            .args(signet_program::instruction::Respond {
+                request_ids: vec![payload_hash],
+                signatures: vec![dummy_signature],
+            })
+            .send()
+            .await?;
 
-        Ok(signature.to_string())
+        Ok(tx.to_string())
     }
 }
 

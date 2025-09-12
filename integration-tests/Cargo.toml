@@ -35,6 +35,8 @@ web3.workspace = true
 # solana dependencies
 solana-sdk.workspace = true
 solana-client.workspace = true
+anchor-client = "0.31.0"
+signet-program = { path = "../chain-signatures/contract-sol" }
 
 # crypto dependencies
 ecdsa = "0.16.9"
