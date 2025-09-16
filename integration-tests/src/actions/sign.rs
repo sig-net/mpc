@@ -1,5 +1,6 @@
 use std::fmt;
 use std::future::IntoFuture;
+use std::time::Duration;
 
 use cait_sith::FullSignature;
 use k256::Secp256k1;
@@ -15,6 +16,7 @@ use solana_sdk::signer::Signer as _;
 
 use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
+use crate::containers;
 
 // Removed Solana-specific imports since we're now using the cluster's Solana instance directly
 
@@ -249,7 +251,7 @@ impl<'a> SolanaSignAction<'a> {
         );
 
         // Add a small delay to ensure the program is fully loaded
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         // First, let's verify the program exists by checking its account
         let program_id = solana.program_keypair.pubkey();
@@ -282,58 +284,18 @@ impl<'a> SolanaSignAction<'a> {
 
         // Step 2: Wait for the response event from MPC nodes
         tracing::info!("Waiting for MPC signature response event...");
-        let request_id = self.generate_request_id(&payload_hash, path, key_version);
-
-        let signature = self.wait_for_signature_response(solana, request_id).await?;
-
+        let signature = self.wait_for_signature_response(solana).await?;
         Ok(signature)
-    }
-
-    fn generate_request_id(&self, payload: &[u8; 32], path: &str, key_version: u32) -> [u8; 32] {
-        use sha3::{Digest, Keccak256};
-        use web3::ethabi::{encode, Token};
-
-        // Generate request ID using the same method as the Solana indexer
-        let sender = self
-            .inner
-            .nodes
-            .solana
-            .as_ref()
-            .unwrap()
-            .payer_keypair
-            .pubkey();
-        let encoded = encode(&[
-            Token::String(sender.to_string()),
-            Token::Bytes(payload.to_vec()),
-            Token::String(path.to_string()),
-            Token::Uint(key_version.into()),
-            Token::Uint(1u64.into()),               // chain_id: Solana
-            Token::String("secp256k1".to_string()), // algo
-            Token::String("integration_test".to_string()), // dest
-            Token::String("{}".to_string()),        // params
-        ]);
-
-        let mut hasher = Keccak256::new();
-        hasher.update(&encoded);
-        hasher.finalize().into()
     }
 
     async fn wait_for_signature_response(
         &self,
-        solana: &crate::containers::Solana,
-        request_id: [u8; 32],
+        solana: &containers::Solana,
     ) -> anyhow::Result<String> {
-        let request_id_hex = hex::encode(request_id);
-        tracing::info!(
-            "Waiting for signature response with request_id: {}",
-            request_id_hex
-        );
-
         // Listen for the actual SignatureRespondedEvent from the external Solana contract
         // The MPC network will call the 'respond' function which emits this event
         let program_id = solana.program_keypair.pubkey();
-        let timeout_duration = std::time::Duration::from_secs(30);
-        let poll_interval = std::time::Duration::from_millis(1000);
+        let timeout_duration = Duration::from_secs(30);
 
         // Get baseline signatures before we start waiting
         let baseline_signatures = solana
@@ -348,57 +310,69 @@ impl<'a> SolanaSignAction<'a> {
             baseline_count
         );
 
-        let start_time = std::time::Instant::now();
+        let polling_task = async {
+            let mut interval = tokio::time::interval(Duration::from_millis(1500));
+            loop {
+                interval.tick().await;
 
-        while start_time.elapsed() < timeout_duration {
-            // Poll for recent transactions to the program
-            if let Ok(signatures) = solana
-                .rpc_client
-                .get_signatures_for_address(&program_id)
-                .await
-            {
+                // Poll for recent transactions to the program
+                let Ok(signatures) = solana
+                    .rpc_client
+                    .get_signatures_for_address(&program_id)
+                    .await
+                else {
+                    continue;
+                };
                 // Check if there are new signatures since our baseline
-                if signatures.len() > baseline_count {
+                if signatures.len() < baseline_count {
+                    continue;
+                }
+                tracing::info!(
+                    "Found {} new signatures for program since sign request, checking for MPC response...",
+                    signatures.len() - baseline_count
+                );
+
+                // Check only the NEW signatures (those that happened after our request)
+                for signature_info in signatures.iter().take(signatures.len() - baseline_count) {
+                    if let Some(err) = &signature_info.err {
+                        tracing::warn!(
+                            ?err,
+                            signature = ?signature_info.signature,
+                            "Skipping transaction due to error",
+                        );
+                        continue;
+                    }
+
                     tracing::info!(
-                        "Found {} new signatures for program since sign request, checking for MPC response...",
-                        signatures.len() - baseline_count
+                        signature = ?signature_info.signature,
+                        "Found new successful transaction: checking if it's an MPC signature response",
                     );
 
-                    // Check only the NEW signatures (those that happened after our request)
-                    for signature_info in signatures.iter().take(signatures.len() - baseline_count)
-                    {
-                        if signature_info.err.is_none() {
-                            tracing::info!(
-                                "Found new successful transaction: {} - checking if it's an MPC signature response",
-                                signature_info.signature
-                            );
+                    // This represents an actual transaction that happened on the blockchain
+                    // after our sign request was sent - this could be the MPC network responding
+                    let signature_response = format!(
+                        "mpc_signature_from_blockchain_tx_{}",
+                        signature_info.signature
+                    );
 
-                            // This represents an actual transaction that happened on the blockchain
-                            // after our sign request was sent - this could be the MPC network responding
-                            let signature_response = format!(
-                                "mpc_signature_from_blockchain_tx_{}",
-                                signature_info.signature
-                            );
+                    tracing::info!(
+                        signature = ?signature_info.signature,
+                        "✅ Detected MPC signature response transaction",
+                    );
 
-                            tracing::info!(
-                                "✅ Detected MPC signature response transaction on blockchain: {}",
-                                signature_info.signature
-                            );
-
-                            return Ok(signature_response);
-                        }
-                    }
+                    return Ok(signature_response);
                 }
             }
+        };
 
-            // Wait before next poll
-            tokio::time::sleep(poll_interval).await;
-        }
-
-        Err(anyhow::anyhow!(
-            "Timeout waiting for SignatureRespondedEvent after {} seconds - MPC network may not have responded",
-            timeout_duration.as_secs()
-        ))
+        tokio::time::timeout(timeout_duration, polling_task)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Timeout waiting for SignatureRespondedEvent after {} seconds - MPC network may not have responded",
+                    timeout_duration.as_secs()
+                )
+            })?
     }
 }
 
