@@ -5717,6 +5717,7 @@ dependencies = [
  "async-process 1.8.1",
  "backon",
  "bollard",
+ "borsh 1.5.7",
  "bs58 0.5.1",
  "cait-sith",
  "clap",

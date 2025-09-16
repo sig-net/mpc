@@ -5,6 +5,7 @@ use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
 use crate::NodeConfig;
 
+use anchor_client::anchor_lang::prelude::borsh::{self, BorshDeserialize, BorshSerialize};
 use anyhow::anyhow;
 use async_process::{Child, Command};
 use bollard::container::LogsOptions;
@@ -23,7 +24,8 @@ use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
-use solana_sdk::signer::Signer;
+use solana_sdk::signature::Keypair as SolanaKeypair;
+use solana_sdk::signer::{SeedDerivable, Signer};
 use testcontainers::core::ExecCommand;
 use testcontainers::ContainerAsync;
 use testcontainers::{
@@ -432,13 +434,33 @@ pub struct Solana {
     pub process: Child,
     pub rpc_address: String,
     pub ws_address: String,
-    pub keypair: solana_sdk::signer::keypair::Keypair,
+    pub program_keypair: SolanaKeypair,
+    pub payer_keypair: SolanaKeypair,
     pub rpc_port: u16,
     pub ws_port: u16,
+    pub rpc_client: solana_client::nonblocking::rpc_client::RpcClient,
+}
+
+#[test]
+fn test_keypair() {
+    let keypair = Solana::program_keypair();
+    let program_pubkey = keypair.pubkey();
+    println!("Program Pubkey: {}", program_pubkey);
 }
 
 impl Solana {
-    pub async fn run(_spawner: &ClusterSpawner) -> Self {
+    /// Program ID hardcoded in the solana program/contract.
+    // pub const PROGRAM_ID: &str = "2iXtA8oeZqUU5pofxK971TCEvFGfems2AcDRaZHKD2pQ";
+    pub const PROGRAM_ID: &str = "FR5pWwinRBn35GNhg7bsvw8Q13kRept2pm561DwZCQzT";
+    pub const PROGRAM_PATH: &str = "chain-signatures/contract-sol/artifacts/chain_signatures.so";
+
+    /// Fixed keypair for deterministic program address/id. This is embedded in the declare_id!
+    /// macro of our Solana program/contract.
+    pub fn program_keypair() -> SolanaKeypair {
+        SolanaKeypair::from_seed(&[101u8; 64]).unwrap()
+    }
+
+    pub async fn run() -> Self {
         tracing::info!("Starting Solana Test Validator process...");
 
         // Check if solana-test-validator is available
@@ -449,20 +471,20 @@ impl Solana {
         {
             Err(_) => {
                 panic!(
-                    "solana-test-validator not found in PATH. Please install Solana CLI tools.\n\
-                     Install instructions: https://docs.solana.com/cli/install-solana-cli-tools"
+                    "solana-test-validator not found in PATH: install Solana CLI tools via
+                    https://docs.solana.com/cli/install-solana-cli-tools"
                 );
             }
             Ok(output) if !output.status.success() => {
                 panic!("solana-test-validator exists but returned error when checking --help");
             }
             Ok(_) => {
-                tracing::info!("Found solana-test-validator in PATH");
+                tracing::info!("found solana-test-validator in PATH");
             }
         }
 
         // Generate a new keypair for the test validator
-        let keypair = solana_sdk::signer::keypair::Keypair::new();
+        let program_keypair = Solana::program_keypair();
 
         // Find available ports for RPC and WebSocket
         // Find available ports (websocket is automatically rpc_port + 1)
@@ -483,22 +505,27 @@ impl Solana {
             .spawn()
             .expect("Failed to start solana-test-validator");
 
+        // Wait a bit for the validator to start up
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
         tracing::info!(
             rpc_address,
             ws_address,
             "Solana Test Validator process is running",
         );
 
-        // Wait a bit for the validator to start up
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        let payer_keypair = SolanaKeypair::from_seed(&[102u8; 64]).unwrap();
+        let rpc_client =
+            solana_client::nonblocking::rpc_client::RpcClient::new(rpc_address.clone());
 
         Self {
             process,
             rpc_address,
             ws_address,
-            keypair,
+            program_keypair,
+            payer_keypair,
             rpc_port,
             ws_port,
+            rpc_client,
         }
     }
 
@@ -525,7 +552,7 @@ impl Solana {
 
     pub fn get_config(&self, program_address: String) -> mpc_node::indexer_sol::SolConfig {
         mpc_node::indexer_sol::SolConfig {
-            account_sk: bs58::encode(self.keypair.to_bytes()).into_string(),
+            account_sk: bs58::encode(self.program_keypair.to_bytes()).into_string(),
             rpc_http_url: self.rpc_address.clone(),
             rpc_ws_url: self.ws_address.clone(),
             program_address,
@@ -534,66 +561,33 @@ impl Solana {
     }
 
     /// Deploy the Solana core contracts and return the program address
-    pub async fn deploy_core_contracts(&self) -> anyhow::Result<String> {
-        tracing::info!("Deploying Solana core contracts...");
-
-        // Path to the compiled contract
-        let contract_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("chain-signatures/contract-sol/artifacts/solana_core_contracts.so");
-
-        if !contract_path.exists() {
-            anyhow::bail!("Contract artifact not found at: {:?}", contract_path);
-        }
-
+    pub async fn deploy_contract(&self) -> anyhow::Result<String> {
         // Check if solana CLI is available
-        let solana_check = tokio::process::Command::new("solana")
+        if let Err(err) = tokio::process::Command::new("solana")
             .arg("--version")
             .output()
-            .await;
-
-        if solana_check.is_err() {
-            tracing::warn!("Solana CLI not available, using simulated deployment");
-            return self.deploy_core_contracts_simulated().await;
+            .await
+        {
+            anyhow::bail!("Solana CLI not available (error: {err})");
         }
 
-        // Attempt real deployment
-        match self.deploy_core_contracts_real().await {
+        match self.deploy().await {
             Ok(program_address) => Ok(program_address),
             Err(e) => {
-                tracing::warn!("Real deployment failed: {}, falling back to simulation", e);
-                self.deploy_core_contracts_simulated().await
+                anyhow::bail!("program deployment failed: {e}");
             }
         }
     }
 
-    /// Simulate contract deployment for testing when Solana CLI is not available
-    async fn deploy_core_contracts_simulated(&self) -> anyhow::Result<String> {
-        let contract_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("chain-signatures/contract-sol/artifacts/solana_core_contracts.so");
-
-        // Generate a deterministic program ID for simulation
-        let program_keypair = solana_sdk::signer::keypair::Keypair::new();
-        let program_address = program_keypair.pubkey().to_string();
-
-        tracing::info!(
-            program_address = %program_address,
-            contract_path = ?contract_path,
-            "Successfully simulated Solana core contracts deployment"
-        );
-
-        Ok(program_address)
-    }
-
     /// Perform real contract deployment using Solana CLI
-    async fn deploy_core_contracts_real(&self) -> anyhow::Result<String> {
+    async fn deploy(&self) -> anyhow::Result<String> {
         let contract_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("chain-signatures/contract-sol/artifacts/solana_core_contracts.so");
+            .join(Self::PROGRAM_PATH);
+        if !contract_path.exists() {
+            anyhow::bail!("contract artifact not found at: {contract_path:?}");
+        }
 
         // Create temporary files for keypairs
         let temp_dir = std::env::temp_dir();
@@ -603,43 +597,38 @@ impl Solana {
             temp_dir.join(format!("program-keypair-{}.json", uuid::Uuid::new_v4()));
 
         // Write the payer keypair to a file (solana CLI format)
-        let payer_keypair_bytes = self.keypair.to_bytes();
-        let payer_keypair_array: [u8; 64] = payer_keypair_bytes;
         std::fs::write(
             &payer_keypair_path,
-            serde_json::to_string(&payer_keypair_array.to_vec())?,
+            serde_json::to_string(&self.payer_keypair.to_bytes().to_vec())?,
         )?;
-
-        // Generate a new program keypair
-        let program_keypair = solana_sdk::signer::keypair::Keypair::new();
-        let program_keypair_bytes = program_keypair.to_bytes();
-        let program_keypair_array: [u8; 64] = program_keypair_bytes;
         std::fs::write(
             &program_keypair_path,
-            serde_json::to_string(&program_keypair_array.to_vec())?,
+            serde_json::to_string(&self.program_keypair.to_bytes().to_vec())?,
         )?;
 
-        let program_pubkey = program_keypair.pubkey();
-
         // Request airdrop for the payer to fund deployment
-        let airdrop_output = tokio::process::Command::new("solana")
-            .args([
-                "airdrop",
-                "10", // 10 SOL should be enough for deployment
-                "--url",
-                &self.rpc_address,
-                "--keypair",
-                payer_keypair_path.to_str().unwrap(),
-            ])
-            .output()
-            .await?;
+        for keypair_path in [&payer_keypair_path, &program_keypair_path] {
+            tracing::info!(?keypair_path, "requesting solana airdrop for deployment...");
+            let airdrop_output = tokio::process::Command::new("solana")
+                .args([
+                    "airdrop",
+                    "10", // 10 SOL should be enough for whatever action
+                    "--url",
+                    &self.rpc_address,
+                    "--keypair",
+                    keypair_path.to_str().unwrap(),
+                ])
+                .output()
+                .await?;
 
-        if !airdrop_output.status.success() {
-            let stderr = String::from_utf8_lossy(&airdrop_output.stderr);
-            tracing::warn!("Failed to airdrop SOL: {}", stderr);
+            if !airdrop_output.status.success() {
+                let stderr = String::from_utf8_lossy(&airdrop_output.stderr);
+                tracing::warn!(keypair = ?keypair_path, "failed to airdrop SOL: {stderr}",);
+            }
         }
 
         // Deploy the program using solana CLI
+        tracing::info!("deploying solana program via CLI...");
         let deploy_output = tokio::process::Command::new("solana")
             .args([
                 "program",
@@ -647,8 +636,6 @@ impl Solana {
                 contract_path.to_str().unwrap(),
                 "--keypair",
                 payer_keypair_path.to_str().unwrap(),
-                "--program-id",
-                program_keypair_path.to_str().unwrap(),
                 "--url",
                 &self.rpc_address,
                 "-v", // verbose output
@@ -664,24 +651,71 @@ impl Solana {
             let stderr = String::from_utf8_lossy(&deploy_output.stderr);
             let stdout = String::from_utf8_lossy(&deploy_output.stdout);
             anyhow::bail!(
-                "Failed to deploy Solana program. stdout: {}, stderr: {}",
+                "failed to deploy solana program. stdout: {}, stderr: {}",
                 stdout,
                 stderr
             );
         }
 
         let stdout = String::from_utf8_lossy(&deploy_output.stdout);
-        tracing::info!("Deploy output: {}", stdout);
+        tracing::info!("deploy output: {}", stdout);
 
-        let program_address = program_pubkey.to_string();
-
+        let program_address = self.program_keypair.pubkey().to_string();
         tracing::info!(
             program_address = %program_address,
             contract_path = ?contract_path,
-            "Successfully deployed Solana core contracts via CLI"
+            "successfully deployed solana program via CLI"
         );
 
         Ok(program_address)
+    }
+
+    pub async fn sign(&self) {
+        // Define the arguments to be passed to the function
+        let payload: [u8; 32] = [1; 32];
+        let key_version: u32 = 1;
+        let path = "my/path".to_string();
+        let algo = "my_algo".to_string();
+        let dest = "my_dest".to_string();
+        let params = "my_params".to_string();
+
+        // Serialize the instruction data
+        let instruction_data = ProgramInstruction::Sign {
+            payload,
+            key_version,
+            path,
+            algo,
+            dest,
+            params,
+        };
+
+        // Create the instruction
+        let instruction = solana_sdk::instruction::Instruction {
+            program_id: self.program_keypair.pubkey(),
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(self.payer_keypair.pubkey(), true),
+                solana_sdk::instruction::AccountMeta::new(self.program_keypair.pubkey(), false),
+            ],
+            data: instruction_data.try_to_vec().unwrap(),
+        };
+
+        let payer = &self.payer_keypair;
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await.unwrap();
+        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
+            &[instruction],
+            Some(&payer.pubkey()),
+        );
+
+        // Sign the transaction
+        transaction.sign(&[payer], recent_blockhash);
+
+        // Send the transaction and get the signature
+        let signature = self
+            .rpc_client
+            .send_and_confirm_transaction(&transaction)
+            .await;
+
+        tracing::info!("transaction outcome: {signature:?}");
     }
 }
 
@@ -693,4 +727,17 @@ impl Drop for Solana {
             tracing::info!("Solana Test Validator process terminated");
         }
     }
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+pub enum ProgramInstruction {
+    Initialize {},
+    Sign {
+        payload: [u8; 32],
+        key_version: u32,
+        path: String,
+        algo: String,
+        dest: String,
+        params: String,
+    },
 }

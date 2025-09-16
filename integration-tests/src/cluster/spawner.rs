@@ -189,7 +189,7 @@ impl ClusterSpawner {
     }
 
     pub async fn spawn_solana(&self) -> containers::Solana {
-        containers::Solana::run(self).await
+        containers::Solana::run().await
     }
 
     /// Prespawns a redis instance where we're able to make use of it before the nodes are spun
@@ -269,7 +269,7 @@ impl IntoFuture for ClusterSpawner {
                     addr
                 } else {
                     // Deploy the contract and use the deployed program address
-                    solana.deploy_core_contracts().await?
+                    solana.deploy_contract().await?
                 };
 
                 let sol_config = solana.get_config(program_address);
