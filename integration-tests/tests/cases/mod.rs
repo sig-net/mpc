@@ -13,6 +13,7 @@ pub mod mpc;
 pub mod nightly;
 pub mod store;
 pub mod sync;
+pub mod chains;
 
 #[test(tokio::test)]
 async fn test_multichain_reshare() -> anyhow::Result<()> {
