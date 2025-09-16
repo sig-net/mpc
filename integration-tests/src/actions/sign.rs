@@ -242,7 +242,7 @@ impl<'a> SolSignAction<'a> {
     ) -> anyhow::Result<FullSignature<Secp256k1>> {
         // Listen for SignatureRespondedEvent from the Solana contract
         let program_id = solana.program_keypair.pubkey();
-        let timeout_duration = Duration::from_secs(90);
+        let timeout = Duration::from_secs(90);
 
         let cluster = AnchorCluster::Custom(solana.rpc_address.clone(), solana.ws_address.clone());
         let client = Client::new_with_options(
@@ -251,7 +251,6 @@ impl<'a> SolSignAction<'a> {
             CommitmentConfig::confirmed(),
         );
         let program = client.program(program_id)?;
-
         let (tx, rx) = oneshot::channel();
         let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
 
@@ -277,19 +276,14 @@ impl<'a> SolSignAction<'a> {
             .await?;
 
         tracing::info!("subbed to SignatureRespondedEvent, waiting for MPC response...");
-        let result = tokio::time::timeout(timeout_duration, rx).await;
+        let result = tokio::time::timeout(timeout, rx).await;
         event_unsub.unsubscribe().await;
 
         match result {
-            Ok(Ok(Ok(full_signature))) => {
-                Ok(full_signature)
-            }
+            Ok(Ok(Ok(full_signature))) => Ok(full_signature),
             Ok(Ok(Err(e))) => anyhow::bail!("failed to parse sol signature: {e}"),
             Ok(Err(_)) => anyhow::bail!("sol event channel closed unexpectedly"),
-            Err(_) => anyhow::bail!(
-                "Timeout waiting for SignatureRespondedEvent after {} seconds - MPC network may not have responded",
-                timeout_duration.as_secs()
-            ),
+            Err(_) => anyhow::bail!("timeout waiting for respond on sol"),
         }
     }
 }
@@ -467,17 +461,4 @@ fn parse_sol_signature(
 
     // Create the FullSignature (note: FullSignature doesn't store recovery_id)
     Ok(FullSignature { big_r, s })
-}
-
-#[derive(Clone, Debug)]
-pub struct SolAffinePoint {
-    pub x: [u8; 32],
-    pub y: [u8; 32],
-}
-
-#[derive(Clone, Debug)]
-pub struct SolEcdsaSignature {
-    pub big_r: SolAffinePoint,
-    pub s: [u8; 32],
-    pub recovery_id: u8,
 }
