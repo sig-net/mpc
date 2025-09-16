@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
+use crate::utils::pick_preferred_or_unused_port;
 use crate::NodeConfig;
 
 use anyhow::anyhow;
@@ -482,7 +483,7 @@ impl Solana {
 
         // Find available ports for RPC and WebSocket
         // Find available ports (websocket is automatically rpc_port + 1)
-        let rpc_port = Self::find_available_port(8899).await;
+        let rpc_port = pick_preferred_or_unused_port(8899).await;
         let ws_port = rpc_port + 1;
 
         let rpc_address = format!("http://127.0.0.1:{}", rpc_port);
@@ -497,14 +498,14 @@ impl Solana {
             .arg("--reset")
             .arg("--quiet")
             .spawn()
-            .expect("Failed to start solana-test-validator");
+            .expect("failed to start solana-test-validator");
 
         // Wait a bit for the validator to start up
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
         tracing::info!(
             rpc_address,
             ws_address,
-            "Solana Test Validator process is running",
+            "solana-test-validator process is running",
         );
 
         let payer_keypair = SolKeypair::from_seed(&[102u8; 32]).unwrap();
@@ -525,27 +526,6 @@ impl Solana {
         }
     }
 
-    async fn find_available_port(preferred: u16) -> u16 {
-        // Try preferred port first
-        if Self::is_port_available(preferred).await {
-            return preferred;
-        }
-
-        // Find any available port starting from preferred + 1
-        for port in (preferred + 1)..=65535 {
-            if Self::is_port_available(port).await {
-                return port;
-            }
-        }
-
-        // Fallback to preferred if nothing else works
-        preferred
-    }
-
-    async fn is_port_available(port: u16) -> bool {
-        std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok()
-    }
-
     pub fn get_config(&self, program_address: String) -> mpc_node::indexer_sol::SolConfig {
         mpc_node::indexer_sol::SolConfig {
             account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
@@ -564,7 +544,7 @@ impl Solana {
             .output()
             .await
         {
-            anyhow::bail!("Solana CLI not available (error: {err})");
+            anyhow::bail!("Solana CLI not available: {err}");
         }
 
         let program_address = match self.deploy().await {
