@@ -18,6 +18,40 @@ use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
 use crate::containers;
 
+// Use the SignatureRespondedEvent from the contract crate
+use signet_program::SignatureRespondedEvent;
+
+/// Convert a Solana contract signature to FullSignature<Secp256k1>
+fn convert_solana_signature_to_full_signature(
+    solana_sig: &signet_program::Signature,
+) -> anyhow::Result<FullSignature<Secp256k1>> {
+    use k256::elliptic_curve::sec1::FromEncodedPoint;
+    use k256::{AffinePoint, Scalar};
+    use mpc_crypto::ScalarExt;
+
+    // Convert the AffinePoint from Solana contract format
+    // Create a 65-byte uncompressed point (0x04 || x_bytes || y_bytes)
+    let mut point_bytes = Vec::with_capacity(65);
+    point_bytes.push(0x04); // Uncompressed point prefix
+    point_bytes.extend_from_slice(&solana_sig.big_r.x);
+    point_bytes.extend_from_slice(&solana_sig.big_r.y);
+
+    // Parse the point from the encoded format
+    let encoded_point = k256::EncodedPoint::from_bytes(&point_bytes)?;
+    let big_r = AffinePoint::from_encoded_point(&encoded_point)
+        .into_option()
+        .ok_or_else(|| anyhow::anyhow!("Invalid point coordinates"))?;
+
+    // Convert s from bytes to Scalar using the ScalarExt trait
+    let s =
+        Scalar::from_bytes(solana_sig.s).ok_or_else(|| anyhow::anyhow!("Invalid scalar bytes"))?;
+
+    // Create the FullSignature (note: FullSignature doesn't store recovery_id)
+    let full_signature = FullSignature { big_r, s };
+
+    Ok(full_signature)
+}
+
 // Removed Solana-specific imports since we're now using the cluster's Solana instance directly
 
 // Solana contract types (matching the contract definitions)
@@ -189,10 +223,10 @@ impl<'a> IntoFuture for SolanaSignAction<'a> {
 }
 
 /// Result of a Solana contract sign call
-#[derive(Debug)]
 pub struct SolanaSignOutcome {
     pub transaction_signature: String,
     pub request_id: [u8; 32],
+    pub signature: FullSignature<Secp256k1>,
 }
 
 impl<'a> SolanaSignAction<'a> {
@@ -213,7 +247,7 @@ impl<'a> SolanaSignAction<'a> {
         let payload_hash = *alloy::primitives::keccak256(payload);
 
         // Call Solana contract's sign function (not respond!)
-        let transaction_signature = self
+        let (transaction_signature, signature) = self
             .call_solana_sign(
                 sol_config,
                 payload_hash,
@@ -225,6 +259,7 @@ impl<'a> SolanaSignAction<'a> {
         Ok(SolanaSignOutcome {
             transaction_signature,
             request_id: payload_hash,
+            signature,
         })
     }
 
@@ -234,7 +269,7 @@ impl<'a> SolanaSignAction<'a> {
         payload_hash: [u8; 32],
         path: &str,
         key_version: u32,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<(String, FullSignature<Secp256k1>)> {
         // Get the Solana instance from the cluster
         let solana = self
             .inner
@@ -277,102 +312,100 @@ impl<'a> SolanaSignAction<'a> {
 
         // Step 1: Initiate the sign request transaction
         tracing::info!("Initiating Solana sign request...");
-        let sign_tx_hash = solana
+        let sign_tx_signature = solana
             .sign_with_params(payload_hash, path, key_version)
             .await?;
+        let sign_tx_hash = sign_tx_signature.to_string();
         tracing::info!("Sign request transaction sent: {}", sign_tx_hash);
 
         // Step 2: Wait for the response event from MPC nodes
         tracing::info!("Waiting for MPC signature response event...");
         let signature = self.wait_for_signature_response(solana).await?;
-        Ok(signature)
+        Ok((sign_tx_hash, signature))
     }
 
     async fn wait_for_signature_response(
         &self,
         solana: &containers::Solana,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<FullSignature<Secp256k1>> {
+        use anchor_client::{Client, Cluster};
+        use solana_sdk::commitment_config::CommitmentConfig;
+        use std::sync::Arc;
+        use tokio::sync::oneshot;
+
         // Listen for the actual SignatureRespondedEvent from the external Solana contract
         // The MPC network will call the 'respond' function which emits this event
         let program_id = solana.program_keypair.pubkey();
-        let timeout_duration = Duration::from_secs(30);
+        let timeout_duration = Duration::from_secs(90);
 
-        // Get baseline signatures before we start waiting
-        let baseline_signatures = solana
-            .rpc_client
-            .get_signatures_for_address(&program_id)
-            .await
-            .unwrap_or_default();
-        let baseline_count = baseline_signatures.len();
+        tracing::info!("Setting up anchor client to subscribe to SignatureRespondedEvent");
 
-        tracing::info!(
-            "Starting to wait for MPC response. Baseline signature count: {}",
-            baseline_count
+        // Create anchor client using the same configuration as the MPC nodes
+        let cluster = Cluster::Custom(
+            format!("http://127.0.0.1:8899"), // RPC URL
+            format!("ws://127.0.0.1:8900"),   // WebSocket URL
         );
 
-        let polling_task = async {
-            let mut interval = tokio::time::interval(Duration::from_millis(1500));
-            loop {
-                interval.tick().await;
+        let client = Client::new_with_options(
+            cluster,
+            Arc::new(solana.payer_keypair.insecure_clone()),
+            CommitmentConfig::confirmed(),
+        );
 
-                // Poll for recent transactions to the program
-                let Ok(signatures) = solana
-                    .rpc_client
-                    .get_signatures_for_address(&program_id)
-                    .await
-                else {
-                    continue;
-                };
-                // Check if there are new signatures since our baseline
-                if signatures.len() < baseline_count {
-                    continue;
-                }
+        let program = client.program(program_id)?;
+
+        // Create a channel to receive the event
+        let (tx, rx) = oneshot::channel();
+        let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
+
+        tracing::info!("Subscribing to SignatureRespondedEvent...");
+
+        // Subscribe to SignatureRespondedEvent
+        let event_unsubscriber = program
+            .on(move |ctx, event: SignatureRespondedEvent| {
                 tracing::info!(
-                    "Found {} new signatures for program since sign request, checking for MPC response...",
-                    signatures.len() - baseline_count
+                    "✅ Received SignatureRespondedEvent: request_id={}, responder={}, signature_tx={}",
+                    hex::encode(event.request_id),
+                    event.responder,
+                    ctx.signature
                 );
 
-                // Check only the NEW signatures (those that happened after our request)
-                for signature_info in signatures.iter().take(signatures.len() - baseline_count) {
-                    if let Some(err) = &signature_info.err {
-                        tracing::warn!(
-                            ?err,
-                            signature = ?signature_info.signature,
-                            "Skipping transaction due to error",
-                        );
-                        continue;
+                // Convert the Solana contract signature to FullSignature<Secp256k1>
+                let signature_result = convert_solana_signature_to_full_signature(&event.signature);
+
+                // Send the signature through the channel
+                if let Ok(mut sender) = tx.lock() {
+                    if let Some(sender) = sender.take() {
+                        if sender.send(signature_result).is_err() {
+                            tracing::error!("Failed to send SignatureRespondedEvent result");
+                        }
                     }
-
-                    tracing::info!(
-                        signature = ?signature_info.signature,
-                        "Found new successful transaction: checking if it's an MPC signature response",
-                    );
-
-                    // This represents an actual transaction that happened on the blockchain
-                    // after our sign request was sent - this could be the MPC network responding
-                    let signature_response = format!(
-                        "mpc_signature_from_blockchain_tx_{}",
-                        signature_info.signature
-                    );
-
-                    tracing::info!(
-                        signature = ?signature_info.signature,
-                        "✅ Detected MPC signature response transaction",
-                    );
-
-                    return Ok(signature_response);
                 }
-            }
-        };
+            })
+            .await?;
 
-        tokio::time::timeout(timeout_duration, polling_task)
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "Timeout waiting for SignatureRespondedEvent after {} seconds - MPC network may not have responded",
-                    timeout_duration.as_secs()
-                )
-            })?
+        tracing::info!(
+            "Successfully subscribed to SignatureRespondedEvent, waiting for MPC response..."
+        );
+
+        // Wait for the event with timeout
+        let result = tokio::time::timeout(timeout_duration, rx).await;
+
+        // Clean up subscription
+        event_unsubscriber.unsubscribe().await;
+
+        match result {
+            Ok(Ok(Ok(full_signature))) => {
+                tracing::info!("✅ Successfully received and converted SignatureRespondedEvent");
+                Ok(full_signature)
+            }
+            Ok(Ok(Err(e))) => Err(anyhow::anyhow!("Failed to convert signature: {}", e)),
+            Ok(Err(_)) => Err(anyhow::anyhow!("Channel closed unexpectedly")),
+            Err(_) => Err(anyhow::anyhow!(
+                "Timeout waiting for SignatureRespondedEvent after {} seconds - MPC network may not have responded",
+                timeout_duration.as_secs()
+            )),
+        }
     }
 }
 

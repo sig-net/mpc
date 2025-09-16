@@ -1318,14 +1318,11 @@ async fn try_publish_sol(
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
 
     let request_ids = vec![action.request.indexed.id.request_id];
+    let big_r = signature.big_r.to_encoded_point(false);
     let signature = SolanaContractSignature {
         big_r: SolanaContractAffinePoint {
-            x: signature.big_r.to_encoded_point(false).as_bytes()[1..33]
-                .try_into()
-                .unwrap(),
-            y: signature.big_r.to_encoded_point(false).as_bytes()[33..65]
-                .try_into()
-                .unwrap(),
+            x: big_r.as_bytes()[1..33].try_into().unwrap(),
+            y: big_r.as_bytes()[33..65].try_into().unwrap(),
         },
         s: signature.s.to_bytes().into(),
         recovery_id: signature.recovery_id,
