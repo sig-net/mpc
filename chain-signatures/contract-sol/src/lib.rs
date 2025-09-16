@@ -72,16 +72,18 @@ pub mod signet_program {
         dest: String,
         params: String,
     ) -> Result<()> {
-        // Emit a sign request event
-        emit!(SignRequestEvent {
-            request_id: payload, // Using payload as request_id for simplicity
-            requester: *ctx.accounts.requester.key,
+        // Emit a sign request event that matches the MPC node's expected structure
+        emit!(SignatureRequestedEvent {
+            sender: *ctx.accounts.requester.key,
             payload,
             key_version,
+            deposit: ctx.accounts.program_state.signature_deposit,
+            chain_id: "solana".to_string(),
             path,
             algo,
             dest,
             params,
+            fee_payer: Some(*ctx.accounts.requester.key),
         });
 
         Ok(())
@@ -161,13 +163,15 @@ pub struct ReadRespondedEvent {
 }
 
 #[event]
-pub struct SignRequestEvent {
-    pub request_id: [u8; 32],
-    pub requester: Pubkey,
+pub struct SignatureRequestedEvent {
+    pub sender: Pubkey,
     pub payload: [u8; 32],
     pub key_version: u32,
+    pub deposit: u64,
+    pub chain_id: String,
     pub path: String,
     pub algo: String,
     pub dest: String,
     pub params: String,
+    pub fee_payer: Option<Pubkey>,
 }

@@ -14,14 +14,7 @@ async fn test_solana_sandbox() {
 #[test_log::test(tokio::test)]
 async fn test_solana_cluster_sign() {
     // Test the nodes.sign().sol() functionality that uses cluster's Solana instance
-    let cluster = cluster::spawn()
-        .sol()
-        .nodes(3)
-        .threshold(2)
-        .disable_wait_running() // Disable waiting for nodes to be fully running
-        .disable_prestockpile() // Disable prestockpiling to avoid timeout
-        .await
-        .unwrap();
+    let cluster = cluster::spawn().sol().await.unwrap();
 
     // Test the new Solana sign functionality with custom parameters
     let payload = [42u8; 32]; // Custom test payload
