@@ -1,7 +1,9 @@
 use std::fmt;
 use std::future::IntoFuture;
+use std::sync::Arc;
 use std::time::Duration;
 
+use anchor_client::{Client, Cluster as AnchorCluster};
 use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_contract::errors;
@@ -12,8 +14,10 @@ use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::{Account, AccountId};
 use rand::Rng;
-use solana_sdk::signature::Signature as SolanaSignature;
+use solana_sdk::commitment_config::CommitmentConfig;
+use solana_sdk::signature::Signature as SolSignature;
 use solana_sdk::signer::Signer as _;
+use tokio::sync::oneshot;
 
 use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
@@ -128,20 +132,20 @@ impl SignAction<'_> {
     }
 
     /// Create a Solana-specific sign action that calls the Solana contract's sign function
-    pub fn sol<'a>(self) -> SolanaSignAction<'a>
+    pub fn sol<'a>(self) -> SolSignAction<'a>
     where
         Self: 'a,
     {
-        SolanaSignAction::new(self)
+        SolSignAction::new(self)
     }
 }
 
 /// Solana-specific sign action that calls the Solana contract's respond function
-pub struct SolanaSignAction<'a> {
+pub struct SolSignAction<'a> {
     inner: SignAction<'a>,
 }
 
-impl<'a> SolanaSignAction<'a> {
+impl<'a> SolSignAction<'a> {
     fn new(inner: SignAction<'a>) -> Self {
         Self { inner }
     }
@@ -165,8 +169,8 @@ impl<'a> SolanaSignAction<'a> {
     }
 }
 
-impl<'a> IntoFuture for SolanaSignAction<'a> {
-    type Output = anyhow::Result<SolanaSignOutcome>;
+impl<'a> IntoFuture for SolSignAction<'a> {
+    type Output = anyhow::Result<SolSignOutcome>;
     type IntoFuture =
         std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'a>>;
 
@@ -175,14 +179,13 @@ impl<'a> IntoFuture for SolanaSignAction<'a> {
     }
 }
 
-/// Result of a Solana contract sign call
-pub struct SolanaSignOutcome {
-    pub tx_signature: SolanaSignature,
+pub struct SolSignOutcome {
+    pub tx_signature: SolSignature,
     pub signature: FullSignature<Secp256k1>,
 }
 
-impl<'a> SolanaSignAction<'a> {
-    async fn execute(self) -> anyhow::Result<SolanaSignOutcome> {
+impl<'a> SolSignAction<'a> {
+    async fn execute(self) -> anyhow::Result<SolSignOutcome> {
         let payload = self
             .inner
             .payload
@@ -194,7 +197,7 @@ impl<'a> SolanaSignAction<'a> {
             .sign(payload_hash, &self.inner.path, self.inner.key_version)
             .await?;
 
-        Ok(SolanaSignOutcome {
+        Ok(SolSignOutcome {
             tx_signature,
             signature,
         })
@@ -205,7 +208,7 @@ impl<'a> SolanaSignAction<'a> {
         payload_hash: [u8; 32],
         path: &str,
         key_version: u32,
-    ) -> anyhow::Result<(SolanaSignature, FullSignature<Secp256k1>)> {
+    ) -> anyhow::Result<(SolSignature, FullSignature<Secp256k1>)> {
         let solana = self
             .inner
             .nodes
@@ -237,72 +240,52 @@ impl<'a> SolanaSignAction<'a> {
         &self,
         solana: &containers::Solana,
     ) -> anyhow::Result<FullSignature<Secp256k1>> {
-        use anchor_client::{Client, Cluster};
-        use solana_sdk::commitment_config::CommitmentConfig;
-        use std::sync::Arc;
-        use tokio::sync::oneshot;
-
-        // Listen for the actual SignatureRespondedEvent from the external Solana contract
-        // The MPC network will call the 'respond' function which emits this event
+        // Listen for SignatureRespondedEvent from the Solana contract
         let program_id = solana.program_keypair.pubkey();
         let timeout_duration = Duration::from_secs(90);
 
-        tracing::info!("Setting up anchor client to subscribe to SignatureRespondedEvent");
-
-        // Create anchor client using the same configuration as the MPC nodes
-        let cluster = Cluster::Custom(solana.rpc_address.clone(), solana.ws_address.clone());
+        let cluster = AnchorCluster::Custom(solana.rpc_address.clone(), solana.ws_address.clone());
         let client = Client::new_with_options(
             cluster,
             Arc::new(solana.payer_keypair.insecure_clone()),
             CommitmentConfig::confirmed(),
         );
-
         let program = client.program(program_id)?;
 
-        // Create a channel to receive the event
         let (tx, rx) = oneshot::channel();
         let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
 
-        tracing::info!("Subscribing to SignatureRespondedEvent...");
-
         // Subscribe to SignatureRespondedEvent
-        let event_unsubscriber = program
+        let event_unsub = program
             .on(move |ctx, event: SignatureRespondedEvent| {
                 tracing::info!(
-                    "✅ Received SignatureRespondedEvent: request_id={}, responder={}, signature_tx={}",
-                    hex::encode(event.request_id),
-                    event.responder,
-                    ctx.signature
+                    request_id = %hex::encode(event.request_id),
+                    responder = ?event.responder,
+                    tx_signature = ?ctx.signature,
+                    "received SignatureRespondedEvent",
                 );
 
-                // Convert the Solana contract signature to FullSignature<Secp256k1>
-                let signature_result = parse_sol_signature(&event.signature);
-
-                // Send the signature through the channel
+                let signature = parse_sol_signature(&event.signature);
                 if let Ok(mut sender) = tx.lock() {
                     if let Some(sender) = sender.take() {
-                        if sender.send(signature_result).is_err() {
-                            tracing::error!("Failed to send SignatureRespondedEvent result");
+                        if sender.send(signature).is_err() {
+                            tracing::error!("failed to send SignatureRespondedEvent outcome");
                         }
                     }
                 }
             })
             .await?;
 
-        tracing::info!(
-            "Successfully subscribed to SignatureRespondedEvent, waiting for MPC response..."
-        );
-
-        // Wait for the event with timeout
+        tracing::info!("subbed to SignatureRespondedEvent, waiting for MPC response...");
         let result = tokio::time::timeout(timeout_duration, rx).await;
-        event_unsubscriber.unsubscribe().await;
+        event_unsub.unsubscribe().await;
 
         match result {
             Ok(Ok(Ok(full_signature))) => {
                 Ok(full_signature)
             }
-            Ok(Ok(Err(e))) => anyhow::bail!("failed to parse signature: {e}"),
-            Ok(Err(_)) => anyhow::bail!("channel closed unexpectedly"),
+            Ok(Ok(Err(e))) => anyhow::bail!("failed to parse sol signature: {e}"),
+            Ok(Err(_)) => anyhow::bail!("sol event channel closed unexpectedly"),
             Err(_) => anyhow::bail!(
                 "Timeout waiting for SignatureRespondedEvent after {} seconds - MPC network may not have responded",
                 timeout_duration.as_secs()
