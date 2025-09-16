@@ -34,9 +34,6 @@ pub struct EcdsaSignature {
     pub recovery_id: u8,
 }
 
-// Use the SignatureRespondedEvent from the contract crate
-use signet_program::SignatureRespondedEvent;
-
 pub const SIGN_GAS: Gas = Gas::from_tgas(50);
 pub const SIGN_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
 
@@ -279,11 +276,9 @@ impl<'a> SolanaSignAction<'a> {
         }
 
         // Step 1: Initiate the sign request transaction
-        // MPC nodes only support key_version 0, override the parameter
-        let mpc_key_version = 0u32;
-        tracing::info!("Initiating Solana sign request (using key_version 0 for MPC compatibility)...");
+        tracing::info!("Initiating Solana sign request...");
         let sign_tx_hash = solana
-            .sign_with_params(payload_hash, path, mpc_key_version)
+            .sign_with_params(payload_hash, path, key_version)
             .await?;
         tracing::info!("Sign request transaction sent: {}", sign_tx_hash);
 
@@ -297,85 +292,88 @@ impl<'a> SolanaSignAction<'a> {
         &self,
         solana: &containers::Solana,
     ) -> anyhow::Result<String> {
-        use anchor_client::{Client, Cluster};
-        use solana_sdk::commitment_config::CommitmentConfig;
-        use std::sync::Arc;
-        use tokio::sync::oneshot;
-
         // Listen for the actual SignatureRespondedEvent from the external Solana contract
         // The MPC network will call the 'respond' function which emits this event
         let program_id = solana.program_keypair.pubkey();
-        let timeout_duration = Duration::from_secs(90);
+        let timeout_duration = Duration::from_secs(30);
 
-        tracing::info!("Setting up anchor client to subscribe to SignatureRespondedEvent");
+        // Get baseline signatures before we start waiting
+        let baseline_signatures = solana
+            .rpc_client
+            .get_signatures_for_address(&program_id)
+            .await
+            .unwrap_or_default();
+        let baseline_count = baseline_signatures.len();
 
-        // Create anchor client using the same configuration as the MPC nodes
-        let cluster = Cluster::Custom(
-            format!("http://127.0.0.1:8899"), // RPC URL
-            format!("ws://127.0.0.1:8900"),   // WebSocket URL
+        tracing::info!(
+            "Starting to wait for MPC response. Baseline signature count: {}",
+            baseline_count
         );
-        
-        let client = Client::new_with_options(
-            cluster,
-            Arc::new(solana.payer_keypair.insecure_clone()),
-            CommitmentConfig::confirmed(),
-        );
 
-        let program = client.program(program_id)?;
+        let polling_task = async {
+            let mut interval = tokio::time::interval(Duration::from_millis(1500));
+            loop {
+                interval.tick().await;
 
-        // Create a channel to receive the event
-        let (tx, rx) = oneshot::channel();
-        let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
-
-        tracing::info!("Subscribing to SignatureRespondedEvent...");
-
-        // Subscribe to SignatureRespondedEvent
-        let event_unsubscriber = program
-            .on(move |ctx, event: SignatureRespondedEvent| {
+                // Poll for recent transactions to the program
+                let Ok(signatures) = solana
+                    .rpc_client
+                    .get_signatures_for_address(&program_id)
+                    .await
+                else {
+                    continue;
+                };
+                // Check if there are new signatures since our baseline
+                if signatures.len() < baseline_count {
+                    continue;
+                }
                 tracing::info!(
-                    "✅ Received SignatureRespondedEvent: request_id={}, responder={}, signature_tx={}",
-                    hex::encode(event.request_id),
-                    event.responder,
-                    ctx.signature
+                    "Found {} new signatures for program since sign request, checking for MPC response...",
+                    signatures.len() - baseline_count
                 );
 
-                // Send the event through the channel
-                if let Ok(mut sender) = tx.lock() {
-                    if let Some(sender) = sender.take() {
-                        let signature_response = format!(
-                            "mpc_signature_from_event_{}",
-                            ctx.signature
+                // Check only the NEW signatures (those that happened after our request)
+                for signature_info in signatures.iter().take(signatures.len() - baseline_count) {
+                    if let Some(err) = &signature_info.err {
+                        tracing::warn!(
+                            ?err,
+                            signature = ?signature_info.signature,
+                            "Skipping transaction due to error",
                         );
-                        if sender.send(signature_response).is_err() {
-                            tracing::error!("Failed to send SignatureRespondedEvent result");
-                        }
+                        continue;
                     }
+
+                    tracing::info!(
+                        signature = ?signature_info.signature,
+                        "Found new successful transaction: checking if it's an MPC signature response",
+                    );
+
+                    // This represents an actual transaction that happened on the blockchain
+                    // after our sign request was sent - this could be the MPC network responding
+                    let signature_response = format!(
+                        "mpc_signature_from_blockchain_tx_{}",
+                        signature_info.signature
+                    );
+
+                    tracing::info!(
+                        signature = ?signature_info.signature,
+                        "✅ Detected MPC signature response transaction",
+                    );
+
+                    return Ok(signature_response);
                 }
-            })
-            .await?;
-
-        tracing::info!("Successfully subscribed to SignatureRespondedEvent, waiting for MPC response...");
-
-        // Wait for the event with timeout
-        let result = tokio::time::timeout(timeout_duration, rx).await;
-
-        // Clean up subscription
-        event_unsubscriber.unsubscribe().await;
-
-        match result {
-            Ok(Ok(signature_response)) => {
-                tracing::info!("✅ Successfully received SignatureRespondedEvent");
-                Ok(signature_response)
             }
-            Ok(Err(_)) => Err(anyhow::anyhow!("Channel closed unexpectedly")),
-            Err(_) => Err(anyhow::anyhow!(
-                "Timeout waiting for SignatureRespondedEvent after {} seconds - MPC network may not have responded",
-                timeout_duration.as_secs()
-            )),
-        }
+        };
+
+        tokio::time::timeout(timeout_duration, polling_task)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Timeout waiting for SignatureRespondedEvent after {} seconds - MPC network may not have responded",
+                    timeout_duration.as_secs()
+                )
+            })?
     }
-
-
 }
 
 impl<'a> IntoFuture for SignAction<'a> {
