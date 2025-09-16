@@ -24,6 +24,7 @@ use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
+use solana_sdk::signature::EncodableKey as _;
 use solana_sdk::signature::Keypair as SolanaKeypair;
 use solana_sdk::signer::{SeedDerivable, Signer};
 use testcontainers::core::ExecCommand;
@@ -450,14 +451,13 @@ fn test_keypair() {
 
 impl Solana {
     /// Program ID hardcoded in the solana program/contract.
-    // pub const PROGRAM_ID: &str = "2iXtA8oeZqUU5pofxK971TCEvFGfems2AcDRaZHKD2pQ";
     pub const PROGRAM_ID: &str = "FR5pWwinRBn35GNhg7bsvw8Q13kRept2pm561DwZCQzT";
     pub const PROGRAM_PATH: &str = "chain-signatures/contract-sol/artifacts/chain_signatures.so";
 
     /// Fixed keypair for deterministic program address/id. This is embedded in the declare_id!
     /// macro of our Solana program/contract.
     pub fn program_keypair() -> SolanaKeypair {
-        SolanaKeypair::from_seed(&[101u8; 64]).unwrap()
+        SolanaKeypair::from_seed(&[101u8; 32]).unwrap()
     }
 
     pub async fn run() -> Self {
@@ -513,7 +513,7 @@ impl Solana {
             "Solana Test Validator process is running",
         );
 
-        let payer_keypair = SolanaKeypair::from_seed(&[102u8; 64]).unwrap();
+        let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
         let rpc_client =
             solana_client::nonblocking::rpc_client::RpcClient::new(rpc_address.clone());
 
@@ -603,35 +603,33 @@ impl Solana {
         let program_keypair_path =
             temp_dir.join(format!("program-keypair-{}.json", uuid::Uuid::new_v4()));
 
-        // Write the payer keypair to a file (solana CLI format)
-        std::fs::write(
-            &payer_keypair_path,
-            serde_json::to_string(&self.payer_keypair.to_bytes().to_vec())?,
-        )?;
-        std::fs::write(
-            &program_keypair_path,
-            serde_json::to_string(&self.program_keypair.to_bytes().to_vec())?,
-        )?;
+        self.payer_keypair
+            .write_to_file(&payer_keypair_path)
+            .unwrap();
+        self.program_keypair
+            .write_to_file(&program_keypair_path)
+            .unwrap();
 
         // Request airdrop for the payer to fund deployment
-        for keypair_path in [&payer_keypair_path, &program_keypair_path] {
-            tracing::info!(?keypair_path, "requesting solana airdrop for deployment...");
-            let airdrop_output = tokio::process::Command::new("solana")
-                .args([
-                    "airdrop",
-                    "10", // 10 SOL should be enough for whatever action
-                    "--url",
-                    &self.rpc_address,
-                    "--keypair",
-                    keypair_path.to_str().unwrap(),
-                ])
-                .output()
-                .await?;
+        tracing::info!(
+            ?payer_keypair_path,
+            "requesting solana airdrop for deployment..."
+        );
+        let airdrop_output = tokio::process::Command::new("solana")
+            .args([
+                "airdrop",
+                "10", // 10 SOL should be enough for whatever action
+                "--url",
+                &self.rpc_address,
+                "--keypair",
+                payer_keypair_path.to_str().unwrap(),
+            ])
+            .output()
+            .await?;
 
-            if !airdrop_output.status.success() {
-                let stderr = String::from_utf8_lossy(&airdrop_output.stderr);
-                tracing::warn!(keypair = ?keypair_path, "failed to airdrop SOL: {stderr}",);
-            }
+        if !airdrop_output.status.success() {
+            let stderr = String::from_utf8_lossy(&airdrop_output.stderr);
+            tracing::warn!(?payer_keypair_path, "failed to airdrop SOL: {stderr}",);
         }
 
         // Deploy the program using solana CLI
@@ -641,10 +639,10 @@ impl Solana {
                 "program",
                 "deploy",
                 contract_path.to_str().unwrap(),
-                "--keypair",
-                payer_keypair_path.to_str().unwrap(),
                 "--url",
                 &self.rpc_address,
+                "--program-id",
+                program_keypair_path.to_str().unwrap(),
                 "-v", // verbose output
             ])
             .output()
@@ -657,15 +655,11 @@ impl Solana {
         if !deploy_output.status.success() {
             let stderr = String::from_utf8_lossy(&deploy_output.stderr);
             let stdout = String::from_utf8_lossy(&deploy_output.stdout);
-            anyhow::bail!(
-                "failed to deploy solana program. stdout: {}, stderr: {}",
-                stdout,
-                stderr
-            );
+            anyhow::bail!("failed to deploy solana program. stdout: {stdout}, stderr: {stderr}",);
         }
 
         let stdout = String::from_utf8_lossy(&deploy_output.stdout);
-        tracing::info!("deploy output: {}", stdout);
+        tracing::info!(%stdout, "solana deploy successful");
 
         let program_address = self.program_keypair.pubkey().to_string();
         tracing::info!(
@@ -683,7 +677,6 @@ impl Solana {
 
         // Create payer keypair - recreate since it doesn't implement Clone
         let payer = std::sync::Arc::new(SolanaKeypair::from_bytes(&self.payer_keypair.to_bytes())?);
-
         let program_id = self.program_keypair.pubkey();
 
         // Define program state PDA
