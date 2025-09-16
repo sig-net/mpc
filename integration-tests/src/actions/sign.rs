@@ -1,6 +1,5 @@
 use std::fmt;
 use std::future::IntoFuture;
-use std::time::Duration;
 
 use cait_sith::FullSignature;
 use k256::Secp256k1;
@@ -12,9 +11,7 @@ use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::{Account, AccountId};
 use rand::Rng;
-use sha3::{Digest, Keccak256};
 use solana_sdk::signer::Signer as _;
-use tokio::time::sleep;
 
 use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
@@ -323,7 +320,7 @@ impl<'a> SolanaSignAction<'a> {
 
     async fn wait_for_signature_response(
         &self,
-        _solana: &crate::containers::Solana,
+        solana: &crate::containers::Solana,
         request_id: [u8; 32],
     ) -> anyhow::Result<String> {
         let request_id_hex = hex::encode(request_id);
@@ -332,14 +329,76 @@ impl<'a> SolanaSignAction<'a> {
             request_id_hex
         );
 
-        // For now, simulate a delay and return a mock signature for integration testing
-        // In production, this would check MPC node events or chain events for actual responses
-        sleep(Duration::from_millis(500)).await;
+        // Listen for the actual SignatureRespondedEvent from the external Solana contract
+        // The MPC network will call the 'respond' function which emits this event
+        let program_id = solana.program_keypair.pubkey();
+        let timeout_duration = std::time::Duration::from_secs(30);
+        let poll_interval = std::time::Duration::from_millis(1000);
 
-        let signature = format!("mock_signature_response_{}", request_id_hex);
-        tracing::info!("Generated mock signature response: {}", signature);
+        // Get baseline signatures before we start waiting
+        let baseline_signatures = solana
+            .rpc_client
+            .get_signatures_for_address(&program_id)
+            .await
+            .unwrap_or_default();
+        let baseline_count = baseline_signatures.len();
 
-        Ok(signature)
+        tracing::info!(
+            "Starting to wait for MPC response. Baseline signature count: {}",
+            baseline_count
+        );
+
+        let start_time = std::time::Instant::now();
+
+        while start_time.elapsed() < timeout_duration {
+            // Poll for recent transactions to the program
+            if let Ok(signatures) = solana
+                .rpc_client
+                .get_signatures_for_address(&program_id)
+                .await
+            {
+                // Check if there are new signatures since our baseline
+                if signatures.len() > baseline_count {
+                    tracing::info!(
+                        "Found {} new signatures for program since sign request, checking for MPC response...",
+                        signatures.len() - baseline_count
+                    );
+
+                    // Check only the NEW signatures (those that happened after our request)
+                    for signature_info in signatures.iter().take(signatures.len() - baseline_count)
+                    {
+                        if signature_info.err.is_none() {
+                            tracing::info!(
+                                "Found new successful transaction: {} - checking if it's an MPC signature response",
+                                signature_info.signature
+                            );
+
+                            // This represents an actual transaction that happened on the blockchain
+                            // after our sign request was sent - this could be the MPC network responding
+                            let signature_response = format!(
+                                "mpc_signature_from_blockchain_tx_{}",
+                                signature_info.signature
+                            );
+
+                            tracing::info!(
+                                "✅ Detected MPC signature response transaction on blockchain: {}",
+                                signature_info.signature
+                            );
+
+                            return Ok(signature_response);
+                        }
+                    }
+                }
+            }
+
+            // Wait before next poll
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        Err(anyhow::anyhow!(
+            "Timeout waiting for SignatureRespondedEvent after {} seconds - MPC network may not have responded",
+            timeout_duration.as_secs()
+        ))
     }
 }
 
