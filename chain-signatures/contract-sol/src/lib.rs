@@ -8,6 +8,20 @@ declare_id!("CMGYAEsqXw5z52R8fmMZwPYQARHPEkGbefJA2FmeHLMh");
 pub mod signet_program {
     use super::*;
 
+    /// Initialize the program state
+    pub fn initialize(
+        ctx: Context<Initialize>,
+        signature_deposit: u64,
+        chain_id: String,
+    ) -> Result<()> {
+        let program_state = &mut ctx.accounts.program_state;
+        program_state.admin = ctx.accounts.admin.key();
+        program_state.signature_deposit = signature_deposit;
+        program_state.chain_id = chain_id;
+
+        Ok(())
+    }
+
     // we need minimal implementation of the contract in order to import all the primitives
     pub fn respond(
         ctx: Context<Respond>,
@@ -61,6 +75,28 @@ pub struct Signature {
     pub big_r: AffinePoint,
     pub s: [u8; 32],
     pub recovery_id: u8,
+}
+
+#[account]
+pub struct ProgramState {
+    pub admin: Pubkey,
+    pub signature_deposit: u64,
+    pub chain_id: String,
+}
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(
+        init,
+        payer = admin,
+        space = 8 + 32 + 8 + 4 + 128, // discriminator + admin + deposit + string length + max chain_id length
+        seeds = [b"program-state"],
+        bump
+    )]
+    pub program_state: Account<'info, ProgramState>,
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]

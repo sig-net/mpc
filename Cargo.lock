@@ -5713,6 +5713,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "anchor-client",
+ "anchor-lang",
  "anyhow",
  "async-process 1.8.1",
  "backon",

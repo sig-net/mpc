@@ -571,12 +571,19 @@ impl Solana {
             anyhow::bail!("Solana CLI not available (error: {err})");
         }
 
-        match self.deploy().await {
-            Ok(program_address) => Ok(program_address),
+        let program_address = match self.deploy().await {
+            Ok(program_address) => program_address,
             Err(e) => {
                 anyhow::bail!("program deployment failed: {e}");
             }
+        };
+
+        // Initialize the program after deployment
+        if let Err(e) = self.initialize_program().await {
+            anyhow::bail!("program initialization failed: {e}");
         }
+
+        Ok(program_address)
     }
 
     /// Perform real contract deployment using Solana CLI
@@ -668,6 +675,83 @@ impl Solana {
         );
 
         Ok(program_address)
+    }
+
+    /// Initialize the deployed Solana program
+    async fn initialize_program(&self) -> anyhow::Result<()> {
+        tracing::info!("initializing solana program...");
+
+        // Create payer keypair - recreate since it doesn't implement Clone
+        let payer = std::sync::Arc::new(SolanaKeypair::from_bytes(&self.payer_keypair.to_bytes())?);
+
+        let program_id = self.program_keypair.pubkey();
+
+        // Define program state PDA
+        let (program_state_pda, _bump) =
+            solana_sdk::pubkey::Pubkey::find_program_address(&[b"program-state"], &program_id);
+
+        // Call initialize function
+        let signature_deposit = 1_000_000; // 0.001 SOL in lamports
+        let chain_id = "solana:localnet".to_string(); // CAIP-2 format for local testnet
+
+        tracing::info!(
+            program_id = %program_id,
+            program_state = %program_state_pda,
+            signature_deposit,
+            chain_id = %chain_id,
+            "calling initialize on solana program"
+        );
+
+        // Create initialize instruction manually
+        let mut data = Vec::new();
+        // Add discriminator for initialize function (first 8 bytes of sha256("global:initialize"))
+        let discriminator = solana_sdk::hash::hash(b"global:initialize").to_bytes();
+        data.extend_from_slice(&discriminator[..8]);
+
+        // Serialize arguments using borsh: signature_deposit (u64) and chain_id (String)
+        let mut args_data = Vec::new();
+        signature_deposit.serialize(&mut args_data)?;
+        chain_id.serialize(&mut args_data)?;
+        data.extend_from_slice(&args_data);
+
+        let instruction = solana_sdk::instruction::Instruction {
+            program_id,
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(program_state_pda, false),
+                solana_sdk::instruction::AccountMeta::new(payer.pubkey(), true),
+                solana_sdk::instruction::AccountMeta::new_readonly(
+                    solana_sdk::system_program::id(),
+                    false,
+                ),
+            ],
+            data,
+        };
+
+        // Create RPC client for transaction operations
+        let rpc_client = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
+            self.rpc_address.clone(),
+            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+        );
+
+        let recent_blockhash = rpc_client.get_latest_blockhash().await?;
+
+        let transaction = solana_sdk::transaction::Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&payer.pubkey()),
+            &[&*payer],
+            recent_blockhash,
+        );
+
+        let tx = rpc_client
+            .send_and_confirm_transaction(&transaction)
+            .await?;
+
+        tracing::info!(
+            transaction = %tx,
+            "successfully initialized solana program"
+        );
+
+        Ok(())
     }
 
     pub async fn sign(&self) {
