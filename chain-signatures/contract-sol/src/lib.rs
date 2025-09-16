@@ -62,6 +62,30 @@ pub mod signet_program {
 
         Ok(())
     }
+
+    pub fn sign(
+        ctx: Context<Sign>,
+        payload: [u8; 32],
+        key_version: u32,
+        path: String,
+        algo: String,
+        dest: String,
+        params: String,
+    ) -> Result<()> {
+        // Emit a sign request event
+        emit!(SignRequestEvent {
+            request_id: payload, // Using payload as request_id for simplicity
+            requester: *ctx.accounts.requester.key,
+            payload,
+            key_version,
+            path,
+            algo,
+            dest,
+            params,
+        });
+
+        Ok(())
+    }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
@@ -109,6 +133,18 @@ pub struct ReadRespond<'info> {
     pub responder: Signer<'info>,
 }
 
+#[derive(Accounts)]
+pub struct Sign<'info> {
+    #[account(
+        seeds = [b"program-state"],
+        bump
+    )]
+    pub program_state: Account<'info, ProgramState>,
+    #[account(mut)]
+    pub requester: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
 #[event]
 pub struct SignatureRespondedEvent {
     pub request_id: [u8; 32],
@@ -122,4 +158,16 @@ pub struct ReadRespondedEvent {
     pub responder: Pubkey,
     pub serialized_output: Vec<u8>,
     pub signature: Signature,
+}
+
+#[event]
+pub struct SignRequestEvent {
+    pub request_id: [u8; 32],
+    pub requester: Pubkey,
+    pub payload: [u8; 32],
+    pub key_version: u32,
+    pub path: String,
+    pub algo: String,
+    pub dest: String,
+    pub params: String,
 }

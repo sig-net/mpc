@@ -514,8 +514,10 @@ impl Solana {
         );
 
         let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
-        let rpc_client =
-            solana_client::nonblocking::rpc_client::RpcClient::new(rpc_address.clone());
+        let rpc_client = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
+            rpc_address.clone(),
+            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+        );
 
         Self {
             process,
@@ -787,10 +789,13 @@ impl Solana {
         let instruction_data = ProgramInstruction::Sign {
             payload,
             key_version,
+            deposit: 1000000, // 0.001 SOL deposit
+            chain_id: 1,      // Solana chain ID
             path,
             algo,
             dest,
             params,
+            fee_payer: None, // No specific fee payer
         };
 
         // Create the instruction with correct accounts based on the Solana program's Sign context
@@ -830,6 +835,93 @@ impl Solana {
         tracing::info!("sign transaction successful: {signature}");
         Ok(signature.to_string())
     }
+
+    /// Sign with custom parameters from SignAction
+    pub async fn sign_with_params(
+        &self,
+        payload: [u8; 32],
+        path: &str,
+        key_version: u32,
+    ) -> anyhow::Result<String> {
+        // Ensure payer has SOL for the transaction
+        let airdrop_result = tokio::process::Command::new("solana")
+            .args([
+                "airdrop",
+                "1", // 1 SOL for sign transaction
+                "--url",
+                &self.rpc_address,
+                &self.payer_keypair.pubkey().to_string(),
+            ])
+            .output()
+            .await?;
+
+        if !airdrop_result.status.success() {
+            tracing::warn!("Failed to airdrop SOL to payer for sign transaction");
+        }
+
+        let program_id = self.program_keypair.pubkey();
+        tracing::info!("Using program ID for sign: {}", program_id);
+
+        // Define program state PDA (required by the sign function)
+        let (program_state_pda, _bump) =
+            solana_sdk::pubkey::Pubkey::find_program_address(&[b"program-state"], &program_id);
+
+        // Serialize the instruction data with provided parameters
+        let instruction_data = ProgramInstruction::Sign {
+            payload,
+            key_version,
+            deposit: 1000000, // 0.001 SOL deposit
+            chain_id: 1,      // Solana chain ID
+            path: path.to_string(),
+            algo: "secp256k1".to_string(),        // Default algorithm
+            dest: "integration_test".to_string(), // Default destination
+            params: "{}".to_string(),             // Empty JSON params
+            fee_payer: None,                      // No specific fee payer
+        };
+
+        // Create the instruction with correct accounts based on the Solana program's Sign context
+        let instruction = solana_sdk::instruction::Instruction {
+            program_id,
+            accounts: vec![
+                // program_state account
+                solana_sdk::instruction::AccountMeta::new(program_state_pda, false),
+                // requester (signer)
+                solana_sdk::instruction::AccountMeta::new(self.payer_keypair.pubkey(), true),
+                // fee_payer is optional, using None for now
+                // system_program
+                solana_sdk::instruction::AccountMeta::new_readonly(
+                    solana_sdk::system_program::id(),
+                    false,
+                ),
+            ],
+            data: instruction_data.try_to_vec().unwrap(),
+        };
+
+        let payer = &self.payer_keypair;
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
+        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
+            &[instruction],
+            Some(&payer.pubkey()),
+        );
+
+        // Sign the transaction
+        transaction.sign(&[payer], recent_blockhash);
+
+        // Send the transaction and get the signature
+        let signature = self
+            .rpc_client
+            .send_and_confirm_transaction(&transaction)
+            .await?;
+
+        tracing::info!(
+            "sign_with_params transaction successful: {}, payload: {}, path: {}, key_version: {}",
+            signature,
+            hex::encode(payload),
+            path,
+            key_version
+        );
+        Ok(signature.to_string())
+    }
 }
 
 impl Drop for Solana {
@@ -848,9 +940,12 @@ pub enum ProgramInstruction {
     Sign {
         payload: [u8; 32],
         key_version: u32,
+        deposit: u64,
+        chain_id: u64,
         path: String,
         algo: String,
         dest: String,
         params: String,
+        fee_payer: Option<solana_sdk::pubkey::Pubkey>,
     },
 }
