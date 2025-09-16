@@ -61,6 +61,12 @@ jobs:
         with:
           node-version: '18'
 
+      - name: Setup Solana and Anchor
+        uses: metadaoproject/setup-anchor@v3.1
+        with:
+          solana-cli-version: '2.3.9'
+          anchor-version: '0.30.1'
+
       - uses: WarpBuilds/cache@v1
         with:
           path: |
