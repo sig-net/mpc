@@ -5,13 +5,13 @@ use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
 use crate::NodeConfig;
 
-use anchor_client::anchor_lang::prelude::borsh::{self, BorshDeserialize, BorshSerialize};
 use anyhow::anyhow;
 use async_process::{Child, Command};
 use bollard::container::LogsOptions;
 use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
 use bollard::Docker;
+use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use elliptic_curve::rand_core::OsRng;
@@ -754,109 +754,16 @@ impl Solana {
         Ok(())
     }
 
-    pub async fn sign(&self) -> anyhow::Result<String> {
-        // Ensure payer has SOL for the transaction
-        let airdrop_result = tokio::process::Command::new("solana")
-            .args([
-                "airdrop",
-                "1", // 1 SOL for sign transaction
-                "--url",
-                &self.rpc_address,
-                &self.payer_keypair.pubkey().to_string(),
-            ])
-            .output()
-            .await?;
-
-        if !airdrop_result.status.success() {
-            tracing::warn!("Failed to airdrop SOL to payer for sign transaction");
-        }
-
-        // Define the arguments to be passed to the function
-        let payload: [u8; 32] = [1; 32];
-        let key_version: u32 = 1;
-        let path = "my/path".to_string();
-        let algo = "my_algo".to_string();
-        let dest = "my_dest".to_string();
-        let params = "my_params".to_string();
-
-        let program_id = self.program_keypair.pubkey();
-
-        // Define program state PDA (required by the sign function)
-        let (program_state_pda, _bump) =
-            solana_sdk::pubkey::Pubkey::find_program_address(&[b"program-state"], &program_id);
-
-        // Serialize the instruction data
-        let instruction_data = ProgramInstruction::Sign {
-            payload,
-            key_version,
-            deposit: 1000000, // 0.001 SOL deposit
-            chain_id: 1,      // Solana chain ID
-            path,
-            algo,
-            dest,
-            params,
-            fee_payer: None, // No specific fee payer
-        };
-
-        // Create the instruction with correct accounts based on the Solana program's Sign context
-        let instruction = solana_sdk::instruction::Instruction {
-            program_id,
-            accounts: vec![
-                // program_state account
-                solana_sdk::instruction::AccountMeta::new(program_state_pda, false),
-                // requester (signer)
-                solana_sdk::instruction::AccountMeta::new(self.payer_keypair.pubkey(), true),
-                // fee_payer is optional, using None for now
-                // system_program
-                solana_sdk::instruction::AccountMeta::new_readonly(
-                    solana_sdk::system_program::id(),
-                    false,
-                ),
-            ],
-            data: instruction_data.try_to_vec().unwrap(),
-        };
-
-        let payer = &self.payer_keypair;
-        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
-        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
-            &[instruction],
-            Some(&payer.pubkey()),
-        );
-
-        // Sign the transaction
-        transaction.sign(&[payer], recent_blockhash);
-
-        // Send the transaction and get the signature
-        let signature = self
-            .rpc_client
-            .send_and_confirm_transaction(&transaction)
-            .await?;
-
-        tracing::info!("sign transaction successful: {signature}");
-        Ok(signature.to_string())
-    }
-
     /// Sign with custom parameters from SignAction
     pub async fn sign_with_params(
         &self,
         payload: [u8; 32],
         path: &str,
         key_version: u32,
-    ) -> anyhow::Result<String> {
-        // Ensure payer has SOL for the transaction
-        let airdrop_result = tokio::process::Command::new("solana")
-            .args([
-                "airdrop",
-                "1", // 1 SOL for sign transaction
-                "--url",
-                &self.rpc_address,
-                &self.payer_keypair.pubkey().to_string(),
-            ])
-            .output()
-            .await?;
-
-        if !airdrop_result.status.success() {
-            tracing::warn!("Failed to airdrop SOL to payer for sign transaction");
+    ) -> anyhow::Result<solana_sdk::signature::Signature> {
+        // Check if the RPC client can get the version (basic readiness check)
+        if let Err(_) = self.rpc_client.get_version().await {
+            return Err(anyhow::anyhow!("Solana container is not ready"));
         }
 
         let program_id = self.program_keypair.pubkey();
@@ -866,35 +773,52 @@ impl Solana {
         let (program_state_pda, _bump) =
             solana_sdk::pubkey::Pubkey::find_program_address(&[b"program-state"], &program_id);
 
-        // Serialize the instruction data with provided parameters
-        let instruction_data = ProgramInstruction::Sign {
+        // Define event authority PDA for CPI events
+        let (event_authority_pda, _bump) =
+            solana_sdk::pubkey::Pubkey::find_program_address(&[b"__event_authority"], &program_id);
+
+        // Manually construct the instruction data
+        // Anchor instructions start with an 8-byte discriminator
+        let mut instruction_data = Vec::new();
+
+        // Correct discriminator for "sign" function: first 8 bytes of sha256("global:sign")
+        let sign_discriminator: [u8; 8] = [5, 221, 155, 46, 237, 91, 28, 236];
+        instruction_data.extend_from_slice(&sign_discriminator);
+
+        // Serialize the arguments using Borsh
+        let args = SignArgs {
             payload,
             key_version,
-            deposit: 1000000, // 0.001 SOL deposit
-            chain_id: 1,      // Solana chain ID
             path: path.to_string(),
-            algo: "secp256k1".to_string(),        // Default algorithm
-            dest: "integration_test".to_string(), // Default destination
-            params: "{}".to_string(),             // Empty JSON params
-            fee_payer: None,                      // No specific fee payer
+            algo: "secp256k1".to_string(),
+            dest: "integration_test".to_string(),
+            params: "{}".to_string(),
         };
 
-        // Create the instruction with correct accounts based on the Solana program's Sign context
+        args.serialize(&mut instruction_data)?;
+
+        // Create the instruction with correct accounts matching the external contract
+        // The external contract uses #[event_cpi] which requires additional accounts
         let instruction = solana_sdk::instruction::Instruction {
             program_id,
             accounts: vec![
-                // program_state account
+                // program_state account (writable, not signer)
                 solana_sdk::instruction::AccountMeta::new(program_state_pda, false),
-                // requester (signer)
+                // requester (writable, signer)
                 solana_sdk::instruction::AccountMeta::new(self.payer_keypair.pubkey(), true),
-                // fee_payer is optional, using None for now
-                // system_program
+                // fee_payer (writable, signer) - same as requester for simplicity
+                solana_sdk::instruction::AccountMeta::new(self.payer_keypair.pubkey(), true),
+                // system_program (readonly, not signer)
                 solana_sdk::instruction::AccountMeta::new_readonly(
                     solana_sdk::system_program::id(),
                     false,
                 ),
+                // event_authority (readonly, not signer) - required for #[event_cpi]
+                solana_sdk::instruction::AccountMeta::new_readonly(event_authority_pda, false),
+                // program account (readonly, not signer) - required for #[event_cpi]
+                solana_sdk::instruction::AccountMeta::new_readonly(program_id, false),
             ],
-            data: instruction_data.try_to_vec().unwrap(),
+            data: instruction_data,
         };
 
         let payer = &self.payer_keypair;
@@ -920,7 +844,8 @@ impl Solana {
             path,
             key_version
         );
-        Ok(signature.to_string())
+
+        Ok(signature)
     }
 }
 
@@ -935,17 +860,11 @@ impl Drop for Solana {
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
-pub enum ProgramInstruction {
-    Initialize {},
-    Sign {
-        payload: [u8; 32],
-        key_version: u32,
-        deposit: u64,
-        chain_id: u64,
-        path: String,
-        algo: String,
-        dest: String,
-        params: String,
-        fee_payer: Option<solana_sdk::pubkey::Pubkey>,
-    },
+struct SignArgs {
+    payload: [u8; 32],
+    key_version: u32,
+    path: String,
+    algo: String,
+    dest: String,
+    params: String,
 }

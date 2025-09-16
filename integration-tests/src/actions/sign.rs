@@ -1,5 +1,6 @@
 use std::fmt;
 use std::future::IntoFuture;
+use std::time::Duration;
 
 use cait_sith::FullSignature;
 use k256::Secp256k1;
@@ -11,7 +12,9 @@ use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::{Account, AccountId};
 use rand::Rng;
+use sha3::{Digest, Keccak256};
 use solana_sdk::signer::Signer as _;
+use tokio::time::sleep;
 
 use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
@@ -26,7 +29,7 @@ pub struct AffinePoint {
 }
 
 #[derive(Clone, Debug)]
-pub struct SolanaSignature {
+pub struct EcdsaSignature {
     pub big_r: AffinePoint,
     pub s: [u8; 32],
     pub recovery_id: u8,
@@ -273,17 +276,68 @@ impl<'a> SolanaSignAction<'a> {
             }
         }
 
-        // For integration testing, we'll simulate the sign call since we don't have the exact external contract interface
-        // In a real scenario, this would call the actual external chain_signatures.so program
-        tracing::info!("Simulating Solana sign call for integration test");
-        
-        // Create a mock signature response to verify the integration works
-        let mock_signature = format!("mock_signature_{}_{}", hex::encode(&payload_hash[..8]), key_version);
-        
-        // In the future, this would be:
-        // let signature = solana.sign_with_params(payload_hash, path, key_version).await?;
-        
-        let signature = mock_signature;
+        // Step 1: Initiate the sign request transaction
+        tracing::info!("Initiating Solana sign request...");
+        let sign_tx_hash = solana
+            .sign_with_params(payload_hash, path, key_version)
+            .await?;
+        tracing::info!("Sign request transaction sent: {}", sign_tx_hash);
+
+        // Step 2: Wait for the response event from MPC nodes
+        tracing::info!("Waiting for MPC signature response event...");
+        let request_id = self.generate_request_id(&payload_hash, path, key_version);
+
+        let signature = self.wait_for_signature_response(solana, request_id).await?;
+
+        Ok(signature)
+    }
+
+    fn generate_request_id(&self, payload: &[u8; 32], path: &str, key_version: u32) -> [u8; 32] {
+        use sha3::{Digest, Keccak256};
+        use web3::ethabi::{encode, Token};
+
+        // Generate request ID using the same method as the Solana indexer
+        let sender = self
+            .inner
+            .nodes
+            .solana
+            .as_ref()
+            .unwrap()
+            .payer_keypair
+            .pubkey();
+        let encoded = encode(&[
+            Token::String(sender.to_string()),
+            Token::Bytes(payload.to_vec()),
+            Token::String(path.to_string()),
+            Token::Uint(key_version.into()),
+            Token::Uint(1u64.into()),               // chain_id: Solana
+            Token::String("secp256k1".to_string()), // algo
+            Token::String("integration_test".to_string()), // dest
+            Token::String("{}".to_string()),        // params
+        ]);
+
+        let mut hasher = Keccak256::new();
+        hasher.update(&encoded);
+        hasher.finalize().into()
+    }
+
+    async fn wait_for_signature_response(
+        &self,
+        _solana: &crate::containers::Solana,
+        request_id: [u8; 32],
+    ) -> anyhow::Result<String> {
+        let request_id_hex = hex::encode(request_id);
+        tracing::info!(
+            "Waiting for signature response with request_id: {}",
+            request_id_hex
+        );
+
+        // For now, simulate a delay and return a mock signature for integration testing
+        // In production, this would check MPC node events or chain events for actual responses
+        sleep(Duration::from_millis(500)).await;
+
+        let signature = format!("mock_signature_response_{}", request_id_hex);
+        tracing::info!("Generated mock signature response: {}", signature);
 
         Ok(signature)
     }

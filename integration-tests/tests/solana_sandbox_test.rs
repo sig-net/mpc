@@ -4,7 +4,10 @@ use integration_tests::cluster;
 async fn test_solana_sandbox() {
     let solana = cluster::spawn().spawn_solana().await;
     solana.deploy_contract().await.unwrap();
-    let signature = solana.sign().await.unwrap();
+    let signature = solana
+        .sign_with_params([42u8; 32], "test/path", 1)
+        .await
+        .unwrap();
     println!("✅ Solana sign transaction successful: {}", signature);
 }
 
