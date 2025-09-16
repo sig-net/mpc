@@ -18,7 +18,7 @@ const KEY_SHARE_FILE: &str = "tmp/key_shares.json";
 const TRIPLES_FILE: &str = "tmp/triples.json";
 const PRESIGNATURES_FILE: &str = "tmp/presignatures.json";
 
-#[tokio::test(flavor = "multi_thread")]
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_keys() {
     let network = MpcFixtureBuilder::new(5, 4).build().await;
 
@@ -65,7 +65,7 @@ async fn test_basic_generate_keys() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_triples() {
     let network = MpcFixtureBuilder::default()
         .with_preshared_key()
@@ -108,7 +108,7 @@ async fn test_basic_generate_triples() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_presignature() {
     let network = MpcFixtureBuilder::default()
         .with_preshared_key()
