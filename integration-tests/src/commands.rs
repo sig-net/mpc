@@ -6,7 +6,7 @@ use mpc_contract::{
     update::ProposeUpdateArgs,
 };
 use mpc_keys::hpke;
-use mpc_primitives::{SignId, Signature};
+use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use near_primitives::borsh;
 use near_sdk::PublicKey;
@@ -23,7 +23,7 @@ pub fn sign_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
     let sign_request = SignRequest {
         payload: PAYLOAD,
         path: "test".into(),
-        key_version: 0,
+        key_version: LATEST_MPC_KEY_VERSION,
     };
 
     let request_json = format!(
@@ -39,9 +39,8 @@ pub fn sign_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
 pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::Result<String> {
     let payload_hashed = alloy::primitives::keccak256(PAYLOAD);
     let path = "test";
-    let key_version = 0;
 
-    let sign_id = SignId::from_parts(caller_id, &payload_hashed, path, key_version);
+    let sign_id = SignId::from_parts(caller_id, &payload_hashed, path, LATEST_MPC_KEY_VERSION);
     let big_r = serde_json::from_value(
         "02EC7FA686BB430A4B700BDA07F2E07D6333D9E33AEEF270334EB2D00D0A6FEC6C".into(),
     )?; // Fake BigR

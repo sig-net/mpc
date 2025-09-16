@@ -5,7 +5,7 @@ use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_contract::errors;
 use mpc_contract::primitives::SignRequest;
-use mpc_primitives::{SignId, Signature};
+use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
@@ -64,7 +64,7 @@ impl<'a> SignAction<'a> {
             account: None,
             payload: None,
             path: "test".into(),
-            key_version: 0,
+            key_version: LATEST_MPC_KEY_VERSION,
             gas: SIGN_GAS,
             deposit: SIGN_DEPOSIT,
             execute_rogue: false,
@@ -234,7 +234,7 @@ impl SignAction<'_> {
         let rogue = self.nodes.worker().dev_create_account().await?;
         let signer = InMemorySigner {
             account_id: rogue.id().clone(),
-            public_key: rogue.secret_key().public_key().clone().into(),
+            public_key: rogue.secret_key().public_key().to_string().parse()?,
             secret_key: rogue.secret_key().to_string().parse()?,
         };
 

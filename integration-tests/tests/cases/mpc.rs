@@ -3,8 +3,9 @@ use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
+use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState};
-use mpc_primitives::{SignArgs, SignId};
+use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use std::collections::BTreeMap;
 use std::fs;
 use std::time::{Duration, Instant};
@@ -220,6 +221,8 @@ fn sign_request(seed: u8) -> IndexedSignRequest {
         unix_timestamp_indexed: 0,
         timestamp_sign_queue: None,
         total_timeout: Duration::from_secs(45),
+        participants: None,
+        sign_request_type: SignRequestType::Sign,
     }
 }
 
@@ -231,7 +234,7 @@ fn sign_arg(seed: u8) -> SignArgs {
         epsilon: k256::Scalar::default(),
         payload: k256::Scalar::default(),
         path: "test".to_owned(),
-        key_version: 0,
+        key_version: LATEST_MPC_KEY_VERSION,
     }
 }
 

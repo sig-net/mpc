@@ -22,11 +22,14 @@ pub use signature::{IndexedSignRequest, SignQueue};
 pub use state::{Node, NodeState};
 
 use crate::config::Config;
+use crate::indexer_sol::SignRespondRequestedEvent;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
+use crate::read_respond::ReadRespondedTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
+use crate::sign_respond_tx::SignRespondSignatureChannel;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -54,6 +57,7 @@ pub struct MpcSignProtocol {
     pub(crate) contract: ContractStateWatcher,
     pub(crate) config: watch::Receiver<Config>,
     pub(crate) mesh_state: watch::Receiver<MeshState>,
+    pub(crate) sign_respond_signature_channel: SignRespondSignatureChannel,
 }
 
 /// Interface required by the [`MpcSignProtocol`] to participate in the
@@ -235,6 +239,13 @@ pub enum Chain {
     NEAR,
     Ethereum,
     Solana,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SignRequestType {
+    Sign,
+    SignRespond(SignRespondRequestedEvent),
+    ReadRespond(ReadRespondedTx),
 }
 
 impl Chain {

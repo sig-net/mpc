@@ -3,7 +3,6 @@ pub mod wait;
 pub mod wait_for;
 
 use crate::cluster::Cluster;
-use crate::containers::LakeIndexer;
 
 use anyhow::Context as _;
 use cait_sith::FullSignature;
@@ -16,6 +15,7 @@ use mpc_contract::errors::SignError;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt;
 use mpc_crypto::{derive_epsilon_near, derive_key};
+use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_fetch::ops::Function;
@@ -31,7 +31,6 @@ use k256::{
     ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
     PublicKey as K256PublicKey,
 };
-use serde_json::json;
 
 pub async fn request_batch_random_sign(
     nodes: &Cluster,
@@ -52,7 +51,7 @@ pub async fn request_batch_random_sign(
         let request = SignRequest {
             payload: payload_hashed,
             path: "test".to_string(),
-            key_version: 0,
+            key_version: LATEST_MPC_KEY_VERSION,
         };
         let function = Function::new("sign")
             .args_json(serde_json::json!({
@@ -86,7 +85,7 @@ pub async fn request_batch_duplicate_sign(
         let request = SignRequest {
             payload: payload_hashed,
             path: "test".to_string(),
-            key_version: 0,
+            key_version: LATEST_MPC_KEY_VERSION,
         };
         let function = Function::new("sign")
             .args_json(serde_json::json!({
@@ -110,7 +109,7 @@ pub async fn validate_signature(
 ) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
-    let epsilon = derive_epsilon_near(account_id, "test");
+    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, account_id, "test");
     let user_pk = derive_key(mpc_pk, epsilon);
     signature
         .verify(
@@ -119,60 +118,6 @@ pub async fn validate_signature(
         )
         .then(|| Ok(()))
         .ok_or_else(|| anyhow::anyhow!("failed to validate signature"))?
-}
-
-// add one of toxic to the toxiproxy-server to make indexer rpc slow down, congested, or unstable
-// available toxics and params: https://github.com/Shopify/toxiproxy?tab=readme-ov-file#toxic-fields
-pub async fn add_toxic(proxy: &str, host: bool, toxic: serde_json::Value) -> anyhow::Result<()> {
-    let toxi_server_address = if host {
-        LakeIndexer::TOXI_SERVER_PROCESS_ADDRESS
-    } else {
-        LakeIndexer::TOXI_SERVER_EXPOSE_ADDRESS
-    };
-    let toxiproxy_client = reqwest::Client::default();
-    toxiproxy_client
-        .post(format!("{toxi_server_address}/proxies/{proxy}/toxics"))
-        .header("Content-Type", "application/json")
-        .body(toxic.to_string())
-        .send()
-        .await?;
-    Ok(())
-}
-
-// Add a delay to all data going through the proxy. The delay is equal to latency +/- jitter.
-pub async fn add_latency(
-    proxy: &str,
-    host: bool,
-    probability: f32,
-    latency: u32,
-    jitter: u32,
-) -> anyhow::Result<()> {
-    add_toxic(
-        proxy,
-        host,
-        json!({
-            "type": "latency",
-            "toxicity": probability,
-            "attributes": {
-                "latency": latency,
-                "jitter": jitter
-            }
-        }),
-    )
-    .await
-}
-
-// clear all toxics. Does not need to be called between tests since each test will drop toxiproxy-server
-// Only need if you want to clear all toxics in middle of a test
-#[allow(dead_code)]
-pub async fn clear_toxics() -> anyhow::Result<()> {
-    let toxi_server_address = "http://127.0.0.1:8474";
-    let toxiproxy_client = reqwest::Client::default();
-    toxiproxy_client
-        .post(format!("{toxi_server_address}/reset"))
-        .send()
-        .await?;
-    Ok(())
 }
 
 pub async fn batch_random_signature_production(nodes: &Cluster) -> anyhow::Result<()> {
@@ -291,6 +236,7 @@ mod tests {
     use k256::elliptic_curve::ProjectivePoint;
     use k256::{AffinePoint, EncodedPoint, Scalar};
     use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
+    use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
     use super::{public_key_to_address, recover, x_coordinate};
 
@@ -318,7 +264,8 @@ mod tests {
         let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
 
         let account_id = account_id.parse().unwrap();
-        let derivation_epsilon: k256::Scalar = derive_epsilon_near(&account_id, "test");
+        let derivation_epsilon: k256::Scalar =
+            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
         let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
         let user_pk_y_parity = match user_pk.y_is_odd().unwrap_u8() {
             0 => secp256k1::Parity::Even,
