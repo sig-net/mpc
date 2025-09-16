@@ -752,7 +752,23 @@ impl Solana {
         Ok(())
     }
 
-    pub async fn sign(&self) {
+    pub async fn sign(&self) -> anyhow::Result<String> {
+        // Ensure payer has SOL for the transaction
+        let airdrop_result = tokio::process::Command::new("solana")
+            .args([
+                "airdrop",
+                "1", // 1 SOL for sign transaction
+                "--url",
+                &self.rpc_address,
+                &self.payer_keypair.pubkey().to_string(),
+            ])
+            .output()
+            .await?;
+
+        if !airdrop_result.status.success() {
+            tracing::warn!("Failed to airdrop SOL to payer for sign transaction");
+        }
+
         // Define the arguments to be passed to the function
         let payload: [u8; 32] = [1; 32];
         let key_version: u32 = 1;
@@ -760,6 +776,12 @@ impl Solana {
         let algo = "my_algo".to_string();
         let dest = "my_dest".to_string();
         let params = "my_params".to_string();
+
+        let program_id = self.program_keypair.pubkey();
+
+        // Define program state PDA (required by the sign function)
+        let (program_state_pda, _bump) =
+            solana_sdk::pubkey::Pubkey::find_program_address(&[b"program-state"], &program_id);
 
         // Serialize the instruction data
         let instruction_data = ProgramInstruction::Sign {
@@ -771,18 +793,26 @@ impl Solana {
             params,
         };
 
-        // Create the instruction
+        // Create the instruction with correct accounts based on the Solana program's Sign context
         let instruction = solana_sdk::instruction::Instruction {
-            program_id: self.program_keypair.pubkey(),
+            program_id,
             accounts: vec![
+                // program_state account
+                solana_sdk::instruction::AccountMeta::new(program_state_pda, false),
+                // requester (signer)
                 solana_sdk::instruction::AccountMeta::new(self.payer_keypair.pubkey(), true),
-                solana_sdk::instruction::AccountMeta::new(self.program_keypair.pubkey(), false),
+                // fee_payer is optional, using None for now
+                // system_program
+                solana_sdk::instruction::AccountMeta::new_readonly(
+                    solana_sdk::system_program::id(),
+                    false,
+                ),
             ],
             data: instruction_data.try_to_vec().unwrap(),
         };
 
         let payer = &self.payer_keypair;
-        let recent_blockhash = self.rpc_client.get_latest_blockhash().await.unwrap();
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
         let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
             &[instruction],
             Some(&payer.pubkey()),
@@ -795,9 +825,10 @@ impl Solana {
         let signature = self
             .rpc_client
             .send_and_confirm_transaction(&transaction)
-            .await;
+            .await?;
 
-        tracing::info!("transaction outcome: {signature:?}");
+        tracing::info!("sign transaction successful: {signature}");
+        Ok(signature.to_string())
     }
 }
 
