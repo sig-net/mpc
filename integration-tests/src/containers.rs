@@ -578,6 +578,9 @@ impl Solana {
             }
         };
 
+        // Wait a bit for deployment to be fully processed
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
         // Initialize the program after deployment
         if let Err(e) = self.initialize_program().await {
             anyhow::bail!("program initialization failed: {e}");
@@ -639,6 +642,8 @@ impl Solana {
                 "program",
                 "deploy",
                 contract_path.to_str().unwrap(),
+                "--keypair",
+                payer_keypair_path.to_str().unwrap(),
                 "--url",
                 &self.rpc_address,
                 "--program-id",
@@ -684,7 +689,7 @@ impl Solana {
             solana_sdk::pubkey::Pubkey::find_program_address(&[b"program-state"], &program_id);
 
         // Call initialize function
-        let signature_deposit = 1_000_000; // 0.001 SOL in lamports
+        let signature_deposit = 1_000_000u64; // 0.001 SOL in lamports
         let chain_id = "solana:localnet".to_string(); // CAIP-2 format for local testnet
 
         tracing::info!(
