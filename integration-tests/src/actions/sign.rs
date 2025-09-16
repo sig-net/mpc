@@ -12,61 +12,14 @@ use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::{Account, AccountId};
 use rand::Rng;
+use solana_sdk::signature::Signature as SolanaSignature;
 use solana_sdk::signer::Signer as _;
 
 use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
 use crate::containers;
 
-// Use the SignatureRespondedEvent from the contract crate
 use signet_program::SignatureRespondedEvent;
-
-/// Convert a Solana contract signature to FullSignature<Secp256k1>
-fn convert_solana_signature_to_full_signature(
-    solana_sig: &signet_program::Signature,
-) -> anyhow::Result<FullSignature<Secp256k1>> {
-    use k256::elliptic_curve::sec1::FromEncodedPoint;
-    use k256::{AffinePoint, Scalar};
-    use mpc_crypto::ScalarExt;
-
-    // Convert the AffinePoint from Solana contract format
-    // Create a 65-byte uncompressed point (0x04 || x_bytes || y_bytes)
-    let mut point_bytes = Vec::with_capacity(65);
-    point_bytes.push(0x04); // Uncompressed point prefix
-    point_bytes.extend_from_slice(&solana_sig.big_r.x);
-    point_bytes.extend_from_slice(&solana_sig.big_r.y);
-
-    // Parse the point from the encoded format
-    let encoded_point = k256::EncodedPoint::from_bytes(&point_bytes)?;
-    let big_r = AffinePoint::from_encoded_point(&encoded_point)
-        .into_option()
-        .ok_or_else(|| anyhow::anyhow!("Invalid point coordinates"))?;
-
-    // Convert s from bytes to Scalar using the ScalarExt trait
-    let s =
-        Scalar::from_bytes(solana_sig.s).ok_or_else(|| anyhow::anyhow!("Invalid scalar bytes"))?;
-
-    // Create the FullSignature (note: FullSignature doesn't store recovery_id)
-    let full_signature = FullSignature { big_r, s };
-
-    Ok(full_signature)
-}
-
-// Removed Solana-specific imports since we're now using the cluster's Solana instance directly
-
-// Solana contract types (matching the contract definitions)
-#[derive(Clone, Debug)]
-pub struct AffinePoint {
-    pub x: [u8; 32],
-    pub y: [u8; 32],
-}
-
-#[derive(Clone, Debug)]
-pub struct EcdsaSignature {
-    pub big_r: AffinePoint,
-    pub s: [u8; 32],
-    pub recovery_id: u8,
-}
 
 pub const SIGN_GAS: Gas = Gas::from_tgas(50);
 pub const SIGN_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
@@ -218,28 +171,18 @@ impl<'a> IntoFuture for SolanaSignAction<'a> {
         std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(self.execute_solana())
+        Box::pin(self.execute())
     }
 }
 
 /// Result of a Solana contract sign call
 pub struct SolanaSignOutcome {
-    pub transaction_signature: String,
-    pub request_id: [u8; 32],
+    pub tx_signature: SolanaSignature,
     pub signature: FullSignature<Secp256k1>,
 }
 
 impl<'a> SolanaSignAction<'a> {
-    async fn execute_solana(self) -> anyhow::Result<SolanaSignOutcome> {
-        // Get Solana configuration from cluster
-        let sol_config = self
-            .inner
-            .nodes
-            .cfg
-            .sol
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Solana configuration not available"))?;
-
+    async fn execute(self) -> anyhow::Result<SolanaSignOutcome> {
         let payload = self
             .inner
             .payload
@@ -247,39 +190,31 @@ impl<'a> SolanaSignAction<'a> {
         let payload_hash = *alloy::primitives::keccak256(payload);
 
         // Call Solana contract's sign function (not respond!)
-        let (transaction_signature, signature) = self
-            .call_solana_sign(
-                sol_config,
-                payload_hash,
-                &self.inner.path,
-                self.inner.key_version,
-            )
+        let (tx_signature, signature) = self
+            .sign(payload_hash, &self.inner.path, self.inner.key_version)
             .await?;
 
         Ok(SolanaSignOutcome {
-            transaction_signature,
-            request_id: payload_hash,
+            tx_signature,
             signature,
         })
     }
 
-    async fn call_solana_sign(
+    async fn sign(
         &self,
-        _sol_config: &mpc_node::indexer_sol::SolConfig,
         payload_hash: [u8; 32],
         path: &str,
         key_version: u32,
-    ) -> anyhow::Result<(String, FullSignature<Secp256k1>)> {
-        // Get the Solana instance from the cluster
+    ) -> anyhow::Result<(SolanaSignature, FullSignature<Secp256k1>)> {
         let solana = self
             .inner
             .nodes
             .solana
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Solana instance not available in cluster"))?;
+            .ok_or_else(|| anyhow::anyhow!("solana instance not available in cluster"))?;
 
         tracing::info!(
-            "Calling Solana sign function with payload: {}, path: {}, key_version: {}",
+            "calling solana sign function with payload: {}, path: {}, key_version: {}",
             hex::encode(payload_hash),
             path,
             key_version
@@ -288,43 +223,17 @@ impl<'a> SolanaSignAction<'a> {
         // Add a small delay to ensure the program is fully loaded
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // First, let's verify the program exists by checking its account
-        let program_id = solana.program_keypair.pubkey();
-        tracing::info!("Verifying program exists: {}", program_id);
-
-        let account_info = solana.rpc_client.get_account(&program_id).await;
-        match account_info {
-            Ok(account) => {
-                tracing::info!(
-                    "Program account found, executable: {}, owner: {}",
-                    account.executable,
-                    account.owner
-                );
-            }
-            Err(e) => {
-                tracing::error!("Program account not found: {}", e);
-                return Err(anyhow::anyhow!(
-                    "Program account verification failed: {}",
-                    e
-                ));
-            }
-        }
-
         // Step 1: Initiate the sign request transaction
-        tracing::info!("Initiating Solana sign request...");
-        let sign_tx_signature = solana
-            .sign_with_params(payload_hash, path, key_version)
-            .await?;
-        let sign_tx_hash = sign_tx_signature.to_string();
-        tracing::info!("Sign request transaction sent: {}", sign_tx_hash);
+        tracing::info!("requesting solana signature...");
+        let tx_signature = solana.sign(payload_hash, path, key_version).await?;
 
         // Step 2: Wait for the response event from MPC nodes
         tracing::info!("Waiting for MPC signature response event...");
-        let signature = self.wait_for_signature_response(solana).await?;
-        Ok((sign_tx_hash, signature))
+        let signature = self.wait_for_respond(solana).await?;
+        Ok((tx_signature, signature))
     }
 
-    async fn wait_for_signature_response(
+    async fn wait_for_respond(
         &self,
         solana: &containers::Solana,
     ) -> anyhow::Result<FullSignature<Secp256k1>> {
@@ -341,11 +250,7 @@ impl<'a> SolanaSignAction<'a> {
         tracing::info!("Setting up anchor client to subscribe to SignatureRespondedEvent");
 
         // Create anchor client using the same configuration as the MPC nodes
-        let cluster = Cluster::Custom(
-            format!("http://127.0.0.1:8899"), // RPC URL
-            format!("ws://127.0.0.1:8900"),   // WebSocket URL
-        );
-
+        let cluster = Cluster::Custom(solana.rpc_address.clone(), solana.ws_address.clone());
         let client = Client::new_with_options(
             cluster,
             Arc::new(solana.payer_keypair.insecure_clone()),
@@ -371,7 +276,7 @@ impl<'a> SolanaSignAction<'a> {
                 );
 
                 // Convert the Solana contract signature to FullSignature<Secp256k1>
-                let signature_result = convert_solana_signature_to_full_signature(&event.signature);
+                let signature_result = parse_sol_signature(&event.signature);
 
                 // Send the signature through the channel
                 if let Ok(mut sender) = tx.lock() {
@@ -390,21 +295,18 @@ impl<'a> SolanaSignAction<'a> {
 
         // Wait for the event with timeout
         let result = tokio::time::timeout(timeout_duration, rx).await;
-
-        // Clean up subscription
         event_unsubscriber.unsubscribe().await;
 
         match result {
             Ok(Ok(Ok(full_signature))) => {
-                tracing::info!("✅ Successfully received and converted SignatureRespondedEvent");
                 Ok(full_signature)
             }
-            Ok(Ok(Err(e))) => Err(anyhow::anyhow!("Failed to convert signature: {}", e)),
-            Ok(Err(_)) => Err(anyhow::anyhow!("Channel closed unexpectedly")),
-            Err(_) => Err(anyhow::anyhow!(
+            Ok(Ok(Err(e))) => anyhow::bail!("failed to parse signature: {e}"),
+            Ok(Err(_)) => anyhow::bail!("channel closed unexpectedly"),
+            Err(_) => anyhow::bail!(
                 "Timeout waiting for SignatureRespondedEvent after {} seconds - MPC network may not have responded",
                 timeout_duration.as_secs()
-            )),
+            ),
         }
     }
 }
@@ -553,4 +455,46 @@ impl SignAction<'_> {
 
         Ok((rogue, status))
     }
+}
+
+/// Convert a Solana contract signature to FullSignature<Secp256k1>
+fn parse_sol_signature(
+    solana_sig: &signet_program::Signature,
+) -> anyhow::Result<FullSignature<Secp256k1>> {
+    use k256::elliptic_curve::sec1::FromEncodedPoint;
+    use k256::{AffinePoint, Scalar};
+    use mpc_crypto::ScalarExt;
+
+    // Convert the AffinePoint from Solana contract format
+    // Create a 65-byte uncompressed point (0x04 || x_bytes || y_bytes)
+    let mut point_bytes = Vec::with_capacity(65);
+    point_bytes.push(0x04); // Uncompressed point prefix
+    point_bytes.extend_from_slice(&solana_sig.big_r.x);
+    point_bytes.extend_from_slice(&solana_sig.big_r.y);
+
+    // Parse the point from the encoded format
+    let encoded_point = k256::EncodedPoint::from_bytes(&point_bytes)?;
+    let big_r = AffinePoint::from_encoded_point(&encoded_point)
+        .into_option()
+        .ok_or_else(|| anyhow::anyhow!("Invalid point coordinates"))?;
+
+    // Convert s from bytes to Scalar using the ScalarExt trait
+    let s =
+        Scalar::from_bytes(solana_sig.s).ok_or_else(|| anyhow::anyhow!("Invalid scalar bytes"))?;
+
+    // Create the FullSignature (note: FullSignature doesn't store recovery_id)
+    Ok(FullSignature { big_r, s })
+}
+
+#[derive(Clone, Debug)]
+pub struct SolAffinePoint {
+    pub x: [u8; 32],
+    pub y: [u8; 32],
+}
+
+#[derive(Clone, Debug)]
+pub struct SolEcdsaSignature {
+    pub big_r: SolAffinePoint,
+    pub s: [u8; 32],
+    pub recovery_id: u8,
 }

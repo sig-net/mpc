@@ -24,8 +24,9 @@ use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
+use solana_client::nonblocking::rpc_client::RpcClient as SolRpcClient;
 use solana_sdk::signature::EncodableKey as _;
-use solana_sdk::signature::Keypair as SolanaKeypair;
+use solana_sdk::signature::Keypair as SolKeypair;
 use solana_sdk::signer::{SeedDerivable, Signer};
 use testcontainers::core::ExecCommand;
 use testcontainers::ContainerAsync;
@@ -435,18 +436,11 @@ pub struct Solana {
     pub process: Child,
     pub rpc_address: String,
     pub ws_address: String,
-    pub program_keypair: SolanaKeypair,
-    pub payer_keypair: SolanaKeypair,
+    pub program_keypair: SolKeypair,
+    pub payer_keypair: SolKeypair,
     pub rpc_port: u16,
     pub ws_port: u16,
-    pub rpc_client: solana_client::nonblocking::rpc_client::RpcClient,
-}
-
-#[test]
-fn test_keypair() {
-    let keypair = Solana::program_keypair();
-    let program_pubkey = keypair.pubkey();
-    println!("Program Pubkey: {}", program_pubkey);
+    pub rpc_client: SolRpcClient,
 }
 
 impl Solana {
@@ -456,8 +450,8 @@ impl Solana {
 
     /// Fixed keypair for deterministic program address/id. This is embedded in the declare_id!
     /// macro of our Solana program/contract.
-    pub fn program_keypair() -> SolanaKeypair {
-        SolanaKeypair::from_seed(&[101u8; 32]).unwrap()
+    pub fn program_keypair() -> SolKeypair {
+        SolKeypair::from_seed(&[101u8; 32]).unwrap()
     }
 
     pub async fn run() -> Self {
@@ -513,8 +507,8 @@ impl Solana {
             "Solana Test Validator process is running",
         );
 
-        let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
-        let rpc_client = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
+        let payer_keypair = SolKeypair::from_seed(&[102u8; 32]).unwrap();
+        let rpc_client = SolRpcClient::new_with_commitment(
             rpc_address.clone(),
             solana_sdk::commitment_config::CommitmentConfig::confirmed(),
         );
@@ -683,7 +677,7 @@ impl Solana {
         tracing::info!("initializing solana program...");
 
         // Create payer keypair - recreate since it doesn't implement Clone
-        let payer = std::sync::Arc::new(SolanaKeypair::from_bytes(&self.payer_keypair.to_bytes())?);
+        let payer = std::sync::Arc::new(SolKeypair::from_bytes(&self.payer_keypair.to_bytes())?);
         let program_id = self.program_keypair.pubkey();
 
         // Define program state PDA
@@ -727,14 +721,7 @@ impl Solana {
             data,
         };
 
-        // Create RPC client for transaction operations
-        let rpc_client = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
-            self.rpc_address.clone(),
-            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
-        );
-
-        let recent_blockhash = rpc_client.get_latest_blockhash().await?;
-
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
         let transaction = solana_sdk::transaction::Transaction::new_signed_with_payer(
             &[instruction],
             Some(&payer.pubkey()),
@@ -742,7 +729,8 @@ impl Solana {
             recent_blockhash,
         );
 
-        let tx = rpc_client
+        let tx = self
+            .rpc_client
             .send_and_confirm_transaction(&transaction)
             .await?;
 
@@ -755,19 +743,19 @@ impl Solana {
     }
 
     /// Sign with custom parameters from SignAction
-    pub async fn sign_with_params(
+    pub async fn sign(
         &self,
         payload: [u8; 32],
         path: &str,
         key_version: u32,
     ) -> anyhow::Result<solana_sdk::signature::Signature> {
         // Check if the RPC client can get the version (basic readiness check)
-        if let Err(_) = self.rpc_client.get_version().await {
-            return Err(anyhow::anyhow!("Solana container is not ready"));
+        if self.rpc_client.get_version().await.is_err() {
+            anyhow::bail!("solana container is not ready");
         }
 
         let program_id = self.program_keypair.pubkey();
-        tracing::info!("Using program ID for sign: {}", program_id);
+        tracing::info!("using program_id for sign: {program_id}");
 
         // Define program state PDA (required by the sign function)
         let (program_state_pda, _bump) =
@@ -779,12 +767,9 @@ impl Solana {
 
         // Manually construct the instruction data
         // Anchor instructions start with an 8-byte discriminator
-        let mut instruction_data = Vec::new();
-
+        let mut data = Vec::new();
         // Correct discriminator for "sign" function: first 8 bytes of sha256("global:sign")
-        let sign_discriminator: [u8; 8] = [5, 221, 155, 46, 237, 91, 28, 236];
-        instruction_data.extend_from_slice(&sign_discriminator);
-
+        data.extend_from_slice(&[5, 221, 155, 46, 237, 91, 28, 236]);
         // Serialize the arguments using Borsh
         let args = SignArgs {
             payload,
@@ -794,11 +779,10 @@ impl Solana {
             dest: "integration_test".to_string(),
             params: "{}".to_string(),
         };
-
-        args.serialize(&mut instruction_data)?;
+        args.serialize(&mut data)?;
 
         // Create the instruction with correct accounts matching the external contract
-        // The external contract uses #[event_cpi] which requires additional accounts
+        // note that #[event_cpi] requires additional accounts
         let instruction = solana_sdk::instruction::Instruction {
             program_id,
             accounts: vec![
@@ -818,31 +802,27 @@ impl Solana {
                 // program account (readonly, not signer) - required for #[event_cpi]
                 solana_sdk::instruction::AccountMeta::new_readonly(program_id, false),
             ],
-            data: instruction_data,
+            data,
         };
 
-        let payer = &self.payer_keypair;
+        // Create and send the transaction to solana
         let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
         let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
             &[instruction],
-            Some(&payer.pubkey()),
+            Some(&self.payer_keypair.pubkey()),
         );
-
-        // Sign the transaction
-        transaction.sign(&[payer], recent_blockhash);
-
-        // Send the transaction and get the signature
+        transaction.sign(&[&self.payer_keypair], recent_blockhash);
         let signature = self
             .rpc_client
             .send_and_confirm_transaction(&transaction)
             .await?;
 
         tracing::info!(
-            "sign_with_params transaction successful: {}, payload: {}, path: {}, key_version: {}",
-            signature,
-            hex::encode(payload),
+            ?signature,
+            payload = hex::encode(payload),
             path,
-            key_version
+            key_version,
+            "sign transaction successful",
         );
 
         Ok(signature)
@@ -852,9 +832,9 @@ impl Solana {
 impl Drop for Solana {
     fn drop(&mut self) {
         if let Err(e) = self.process.kill() {
-            tracing::warn!("Failed to kill solana-test-validator process: {}", e);
+            tracing::warn!("failed to kill solana-test-validator process: {e}");
         } else {
-            tracing::info!("Solana Test Validator process terminated");
+            tracing::info!("solana-test-validator process terminated");
         }
     }
 }
