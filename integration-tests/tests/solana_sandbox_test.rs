@@ -22,13 +22,11 @@ async fn test_solana_cluster_sign() {
         .sign()
         .payload(payload)
         .path("test/integration/path")
-        .key_version(1)
         .sol()
         .await
         .unwrap();
 
     // Verify the result
-    println!("✅ Cluster Solana sign call successful:");
     println!("  Transaction signature: {}", result.transaction_signature);
     println!("  Request ID: {}", hex::encode(result.request_id));
 

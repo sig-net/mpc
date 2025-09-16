@@ -1337,7 +1337,7 @@ async fn try_publish_sol(
                 .request()
                 .signer(sol.payer.clone())
                 .accounts(SolanaRespondAccount {
-                    responder: sol.payer.clone().try_pubkey().unwrap(),
+                    responder: sol.payer.pubkey(),
                 })
                 .args(SolanaRespond {
                     request_ids,

@@ -554,7 +554,7 @@ impl Solana {
 
     pub fn get_config(&self, program_address: String) -> mpc_node::indexer_sol::SolConfig {
         mpc_node::indexer_sol::SolConfig {
-            account_sk: bs58::encode(self.program_keypair.to_bytes()).into_string(),
+            account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
             rpc_http_url: self.rpc_address.clone(),
             rpc_ws_url: self.ws_address.clone(),
             program_address,
