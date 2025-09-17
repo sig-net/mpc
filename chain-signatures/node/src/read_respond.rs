@@ -12,10 +12,8 @@ use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::SignArgs;
 use mpc_primitives::SignId;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
@@ -317,17 +315,12 @@ impl ReadRespondedTxProcessor {
 
     pub async fn run(
         mut self,
-        sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+        pending_requests: crate::pending_requests::PendingRequests,
         max_attempts: u8,
     ) {
         while let Some(sign_respond_tx_id) = self.read_responded_tx_rx.recv().await {
             for attempt in 1..=max_attempts {
-                if sign_respond_tx_map
-                    .write()
-                    .await
-                    .remove(&sign_respond_tx_id)
-                    .is_some()
-                {
+                if pending_requests.remove(&sign_respond_tx_id).await.is_some() {
                     tracing::info!(sign_id = ?sign_respond_tx_id, "removed sign respond tx from map");
                     break;
                 } else if attempt == max_attempts {

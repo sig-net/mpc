@@ -9,6 +9,7 @@ pub mod logs;
 pub mod mesh;
 pub mod metrics;
 pub mod node_client;
+pub mod pending_requests;
 pub mod protocol;
 pub mod read_respond;
 pub mod rpc;

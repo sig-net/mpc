@@ -15,9 +15,7 @@ use serde_json::Value;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Copy)]
 pub struct SignRespondTxId(pub B256);
@@ -578,7 +576,7 @@ impl SignRespondSignatureProcessor {
 
     pub async fn run(
         mut self,
-        sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+        pending_requests: crate::pending_requests::PendingRequests,
         max_attempts: u8,
     ) {
         while let Some(sign_respond_signature) = self.sign_respond_signature_rx.recv().await {
@@ -591,10 +589,9 @@ impl SignRespondSignatureProcessor {
             };
 
             for attempt in 1..=max_attempts {
-                if sign_respond_tx_map
-                    .write()
-                    .await
+                if pending_requests
                     .insert(sign_respond_tx.id, sign_respond_tx.clone())
+                    .await
                     .is_some()
                 {
                     tracing::info!(sign_id = ?sign_respond_tx.id, "inserted sign respond tx into map");

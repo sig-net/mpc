@@ -18,7 +18,6 @@ use local_ip_address::local_ip;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 use url::Url;
@@ -278,10 +277,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 synced_peer_tx,
             );
 
-            let sign_respond_tx_map = Arc::new(RwLock::new(HashMap::<
-                crate::sign_respond_tx::SignRespondTxId,
-                crate::sign_respond_tx::SignRespondTx,
-            >::new()));
+            let pending_requests = crate::pending_requests::PendingRequests::new();
 
             tracing::info!(
                 %digest,
@@ -336,10 +332,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 read_responded_tx_channel.clone(),
             ));
 
-            let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
-            tokio::spawn(sign_respond_signature_processor.run(sign_respond_tx_map_clone, 5));
-            let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
-            tokio::spawn(read_responded_tx_processor.run(sign_respond_tx_map_clone, 5));
+            tokio::spawn(sign_respond_signature_processor.run(pending_requests.clone(), 5));
+            tokio::spawn(read_responded_tx_processor.run(pending_requests.clone(), 5));
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
             let protocol_handle = tokio::spawn(protocol.run(
@@ -364,7 +358,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_tx.clone(),
                 app_data_storage.clone(),
                 account_id.clone(),
-                sign_respond_tx_map,
+                pending_requests,
             ));
             tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
             tracing::info!("protocol http server spawned");

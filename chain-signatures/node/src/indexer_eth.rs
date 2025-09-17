@@ -1,6 +1,4 @@
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
-use crate::sign_respond_tx::SignRespondTx;
-use crate::sign_respond_tx::SignRespondTxId;
 use crate::storage::app_data_storage::AppDataStorage;
 use alloy::consensus::BlockHeader;
 use alloy::eips::{BlockId, BlockNumberOrTag};
@@ -17,12 +15,10 @@ use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::{fmt, path::PathBuf, str::FromStr, sync::LazyLock, time::Instant};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
@@ -421,7 +417,7 @@ pub async fn run(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
-    sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+    pending_requests: crate::pending_requests::PendingRequests,
 ) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
@@ -533,22 +529,16 @@ pub async fn run(
     let near_account_id_clone = node_near_account_id.clone();
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let blocks_failed_send_clone = blocks_failed_send.clone();
-    let client_clone = Arc::clone(&client);
-    let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
-    tokio::spawn(async move {
-        tracing::info!("Spawned task to retry failed blocks");
-        retry_failed_blocks(
-            blocks_failed_recv,
-            blocks_failed_send_clone,
-            &client_clone,
-            eth_contract_addr,
-            near_account_id_clone,
-            requests_indexed_send_clone,
-            total_timeout,
-            sign_respond_tx_map_clone,
-        )
-        .await;
-    });
+    tokio::spawn(retry_failed_blocks(
+        blocks_failed_recv,
+        blocks_failed_send_clone,
+        Arc::clone(&client),
+        eth_contract_addr,
+        near_account_id_clone,
+        requests_indexed_send_clone,
+        total_timeout,
+        pending_requests.clone(),
+    ));
 
     let blocks_to_process_send_clone = blocks_to_process_send.clone();
     if let Some(last_processed_block) = last_processed_block {
@@ -597,7 +587,6 @@ pub async fn run(
                 (block_number, block_hash, false)
             }
         };
-        let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
         if let Err(err) = process_block(
             block_number,
             block_hash,
@@ -606,7 +595,7 @@ pub async fn run(
             node_near_account_id.clone(),
             requests_indexed_send_clone.clone(),
             total_timeout,
-            sign_respond_tx_map_clone,
+            pending_requests.clone(),
         )
         .await
         {
@@ -631,13 +620,14 @@ pub async fn run(
 async fn retry_failed_blocks(
     mut blocks_failed_rx: mpsc::Receiver<BlockNumberAndHash>,
     blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
-    client: &Arc<EthereumClient>,
+    client: Arc<EthereumClient>,
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
-    sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+    pending_requests: crate::pending_requests::PendingRequests,
 ) {
+    tracing::info!("Spawned task to retry failed blocks");
     loop {
         let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
             tracing::warn!("Failed to receive block and requests from requests_indexed");
@@ -646,12 +636,12 @@ async fn retry_failed_blocks(
         if let Err(err) = process_block(
             block_number,
             block_hash,
-            client,
+            &client,
             eth_contract_addr,
             node_near_account_id.clone(),
             requests_indexed.clone(),
             total_timeout,
-            sign_respond_tx_map.clone(),
+            pending_requests.clone(),
         )
         .await
         {
@@ -853,7 +843,7 @@ async fn process_block(
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
-    sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+    pending_requests: crate::pending_requests::PendingRequests,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -878,15 +868,7 @@ async fn process_block(
         return Ok(());
     };
 
-    let pending_txs: HashMap<SignRespondTxId, SignRespondTx> = {
-        sign_respond_tx_map
-            .read()
-            .await
-            .iter()
-            .filter(|(_, tx)| tx.status == SignRespondTxStatus::Pending)
-            .map(|(id, tx)| (*id, tx.clone()))
-            .collect()
-    };
+    let pending_txs = pending_requests.get_pending_txs().await;
     let mut read_respond_requests: Vec<IndexedSignRequest> = Vec::new();
     for receipt in &block_receipts {
         let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
@@ -914,10 +896,9 @@ async fn process_block(
             .await;
         if let Some(read_respond_request) = read_respond_request {
             read_respond_requests.push(read_respond_request);
-            sign_respond_tx_map
-                .write()
-                .await
-                .insert(receipt.transaction_hash.into(), pending_tx);
+            pending_requests
+                .insert(receipt.transaction_hash.into(), pending_tx)
+                .await;
         } else {
             // failed to create sign request from completed tx, remove the tx from the map
             // TODO: we need to implement a better solution for not finding such txs in helios. possible: https://github.com/sig-net/mpc/issues/499
@@ -925,23 +906,13 @@ async fn process_block(
                 "Failed to create sign request from completed tx, removing tx from map: {:?}",
                 receipt.transaction_hash
             );
-            sign_respond_tx_map
-                .write()
-                .await
-                .remove(&receipt.transaction_hash.into());
+            pending_requests
+                .remove(&receipt.transaction_hash.into())
+                .await;
         }
     }
 
-    let remaining_pending_txs: HashMap<SignRespondTxId, SignRespondTx> = {
-        sign_respond_tx_map
-            .read()
-            .await
-            .iter()
-            .filter(|(_, tx)| tx.status == SignRespondTxStatus::Pending)
-            .map(|(id, tx)| (*id, tx.clone()))
-            .collect()
-    };
-
+    let remaining_pending_txs = pending_requests.get_pending_txs().await;
     for (tx_id, mut tx) in remaining_pending_txs {
         let current_nonce = client
             .get_nonce(
@@ -973,14 +944,14 @@ async fn process_block(
                 .await;
             if let Some(read_respond_request) = read_respond_request {
                 read_respond_requests.push(read_respond_request);
-                sign_respond_tx_map.write().await.insert(tx_id, tx);
+                pending_requests.insert(tx_id, tx).await;
             } else {
                 // failed to create sign request from completed tx, remove the tx from the map
                 tracing::warn!(
                     "Failed to create sign request from completed tx, removing tx from map: {:?}",
                     tx_id
                 );
-                sign_respond_tx_map.write().await.remove(&tx_id);
+                pending_requests.remove(&tx_id).await;
             }
         }
     }
