@@ -4720,7 +4720,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "helios"
 version = "0.9.0"
-source = "git+https://github.com/a16z/helios?branch=simple-cache#748f06c5d33901e47a4504c0348b1bb534ab6ba7"
+source = "git+https://github.com/a16z/helios?rev=0a96f31125b7948bbe5c7ab73aa5699efae24902#0a96f31125b7948bbe5c7ab73aa5699efae24902"
 dependencies = [
  "helios-common",
  "helios-core",
@@ -4731,7 +4731,7 @@ dependencies = [
 [[package]]
 name = "helios-common"
 version = "0.9.0"
-source = "git+https://github.com/a16z/helios?branch=simple-cache#748f06c5d33901e47a4504c0348b1bb534ab6ba7"
+source = "git+https://github.com/a16z/helios?rev=0a96f31125b7948bbe5c7ab73aa5699efae24902#0a96f31125b7948bbe5c7ab73aa5699efae24902"
 dependencies = [
  "alloy",
  "async-trait",
@@ -4747,7 +4747,7 @@ dependencies = [
 [[package]]
 name = "helios-consensus-core"
 version = "0.9.0"
-source = "git+https://github.com/a16z/helios?branch=simple-cache#748f06c5d33901e47a4504c0348b1bb534ab6ba7"
+source = "git+https://github.com/a16z/helios?rev=0a96f31125b7948bbe5c7ab73aa5699efae24902#0a96f31125b7948bbe5c7ab73aa5699efae24902"
 dependencies = [
  "alloy",
  "alloy-rlp",
@@ -4772,7 +4772,7 @@ dependencies = [
 [[package]]
 name = "helios-core"
 version = "0.9.0"
-source = "git+https://github.com/a16z/helios?branch=simple-cache#748f06c5d33901e47a4504c0348b1bb534ab6ba7"
+source = "git+https://github.com/a16z/helios?rev=0a96f31125b7948bbe5c7ab73aa5699efae24902#0a96f31125b7948bbe5c7ab73aa5699efae24902"
 dependencies = [
  "alloy",
  "alloy-trie",
@@ -4802,7 +4802,7 @@ dependencies = [
 [[package]]
 name = "helios-ethereum"
 version = "0.9.0"
-source = "git+https://github.com/a16z/helios?branch=simple-cache#748f06c5d33901e47a4504c0348b1bb534ab6ba7"
+source = "git+https://github.com/a16z/helios?rev=0a96f31125b7948bbe5c7ab73aa5699efae24902#0a96f31125b7948bbe5c7ab73aa5699efae24902"
 dependencies = [
  "alloy",
  "alloy-trie",
@@ -4840,7 +4840,7 @@ dependencies = [
 [[package]]
 name = "helios-opstack"
 version = "0.9.0"
-source = "git+https://github.com/a16z/helios?branch=simple-cache#748f06c5d33901e47a4504c0348b1bb534ab6ba7"
+source = "git+https://github.com/a16z/helios?rev=0a96f31125b7948bbe5c7ab73aa5699efae24902#0a96f31125b7948bbe5c7ab73aa5699efae24902"
 dependencies = [
  "alloy",
  "alloy-rlp",
@@ -4886,7 +4886,7 @@ dependencies = [
 [[package]]
 name = "helios-revm-utils"
 version = "0.9.0"
-source = "git+https://github.com/a16z/helios?branch=simple-cache#748f06c5d33901e47a4504c0348b1bb534ab6ba7"
+source = "git+https://github.com/a16z/helios?rev=0a96f31125b7948bbe5c7ab73aa5699efae24902#0a96f31125b7948bbe5c7ab73aa5699efae24902"
 dependencies = [
  "alloy",
  "eyre",
@@ -4901,7 +4901,7 @@ dependencies = [
 [[package]]
 name = "helios-verifiable-api-client"
 version = "0.9.0"
-source = "git+https://github.com/a16z/helios?branch=simple-cache#748f06c5d33901e47a4504c0348b1bb534ab6ba7"
+source = "git+https://github.com/a16z/helios?rev=0a96f31125b7948bbe5c7ab73aa5699efae24902#0a96f31125b7948bbe5c7ab73aa5699efae24902"
 dependencies = [
  "alloy",
  "async-trait",
@@ -4920,7 +4920,7 @@ dependencies = [
 [[package]]
 name = "helios-verifiable-api-types"
 version = "0.9.0"
-source = "git+https://github.com/a16z/helios?branch=simple-cache#748f06c5d33901e47a4504c0348b1bb534ab6ba7"
+source = "git+https://github.com/a16z/helios?rev=0a96f31125b7948bbe5c7ab73aa5699efae24902#0a96f31125b7948bbe5c7ab73aa5699efae24902"
 dependencies = [
  "alloy",
  "helios-common",
