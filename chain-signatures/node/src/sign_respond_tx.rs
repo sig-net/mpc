@@ -45,6 +45,7 @@ pub enum SignRespondTxStatus {
 #[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SignRespondTx {
     pub id: SignRespondTxId,
+    pub chain: crate::protocol::Chain,
     pub sender: Pubkey,
     pub transaction_data: Vec<u8>,
     pub slip44_chain_id: u32,
@@ -92,6 +93,7 @@ impl SignRespondTx {
 
         Ok(Self {
             id: SignRespondTxId(signed_transaction_hash.into()),
+            chain: sign_respond_signature.request.indexed.chain,
             sender: sign_respond_event.sender,
             transaction_data: sign_respond_event.transaction_data,
             slip44_chain_id: sign_respond_event.slip44_chain_id,
@@ -590,7 +592,11 @@ impl SignRespondSignatureProcessor {
 
             for attempt in 1..=max_attempts {
                 if pending_requests
-                    .insert(sign_respond_tx.id, sign_respond_tx.clone())
+                    .insert(
+                        sign_respond_tx.chain,
+                        sign_respond_tx.id,
+                        sign_respond_tx.clone(),
+                    )
                     .await
                     .is_some()
                 {

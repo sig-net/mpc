@@ -868,7 +868,7 @@ async fn process_block(
         return Ok(());
     };
 
-    let pending_txs = pending_requests.get_pending_txs().await;
+    let pending_txs = pending_requests.get_pending_txs(Chain::Ethereum).await;
     let mut read_respond_requests: Vec<IndexedSignRequest> = Vec::new();
     for receipt in &block_receipts {
         let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
@@ -897,7 +897,7 @@ async fn process_block(
         if let Some(read_respond_request) = read_respond_request {
             read_respond_requests.push(read_respond_request);
             pending_requests
-                .insert(receipt.transaction_hash.into(), pending_tx)
+                .insert(Chain::Ethereum, receipt.transaction_hash.into(), pending_tx)
                 .await;
         } else {
             // failed to create sign request from completed tx, remove the tx from the map
@@ -907,12 +907,12 @@ async fn process_block(
                 receipt.transaction_hash
             );
             pending_requests
-                .remove(&receipt.transaction_hash.into())
+                .remove(Chain::Ethereum, &receipt.transaction_hash.into())
                 .await;
         }
     }
 
-    let remaining_pending_txs = pending_requests.get_pending_txs().await;
+    let remaining_pending_txs = pending_requests.get_pending_txs(Chain::Ethereum).await;
     for (tx_id, mut tx) in remaining_pending_txs {
         let current_nonce = client
             .get_nonce(
@@ -944,14 +944,14 @@ async fn process_block(
                 .await;
             if let Some(read_respond_request) = read_respond_request {
                 read_respond_requests.push(read_respond_request);
-                pending_requests.insert(tx_id, tx).await;
+                pending_requests.insert(Chain::Ethereum, tx_id, tx).await;
             } else {
                 // failed to create sign request from completed tx, remove the tx from the map
                 tracing::warn!(
                     "Failed to create sign request from completed tx, removing tx from map: {:?}",
                     tx_id
                 );
-                pending_requests.remove(&tx_id).await;
+                pending_requests.remove(Chain::Ethereum, &tx_id).await;
             }
         }
     }

@@ -27,6 +27,7 @@ pub struct CompletedTx {
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
 pub struct ReadRespondedTx {
     pub tx_id: SignRespondTxId,
+    pub chain: Chain,
     pub output: ReadRespondSerializedOutput,
 }
 
@@ -156,7 +157,7 @@ impl CompletedTx {
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest {
             id: SignId::new(request_id_bytes),
-            chain: Chain::Solana,
+            chain: self.tx.chain,
             args: SignArgs {
                 entropy: entropy.into(),
                 epsilon,
@@ -169,6 +170,7 @@ impl CompletedTx {
             total_timeout: signature_generation_total_timeout,
             sign_request_type: crate::protocol::SignRequestType::ReadRespond(ReadRespondedTx {
                 tx_id: self.tx.id,
+                chain: self.tx.chain,
                 output: serialized_output,
             }),
             participants: Some(self.tx.participants.clone()),
@@ -282,22 +284,22 @@ async fn fetch_tx_from_helios(
 
 #[derive(Clone)]
 pub struct ReadRespondedTxChannel {
-    tx: mpsc::Sender<SignRespondTxId>,
+    tx: mpsc::Sender<ReadRespondedTx>,
 }
 
 impl ReadRespondedTxChannel {
-    pub fn send(&self, tx_id: SignRespondTxId) {
+    pub fn send(&self, read_responded_tx: ReadRespondedTx) {
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Err(err) = tx.send(tx_id).await {
-                tracing::error!(%err, "failed to send read responded tx id");
+            if let Err(err) = tx.send(read_responded_tx).await {
+                tracing::error!(%err, "failed to send read responded tx");
             }
         });
     }
 }
 
 pub struct ReadRespondedTxProcessor {
-    read_responded_tx_rx: mpsc::Receiver<SignRespondTxId>,
+    read_responded_tx_rx: mpsc::Receiver<ReadRespondedTx>,
 }
 
 const MAX_CONCURRENT_READ_RESPONDED_TX_REQUESTS: usize = 1024;
@@ -318,13 +320,17 @@ impl ReadRespondedTxProcessor {
         pending_requests: crate::pending_requests::PendingRequests,
         max_attempts: u8,
     ) {
-        while let Some(sign_respond_tx_id) = self.read_responded_tx_rx.recv().await {
+        while let Some(read_responded_tx) = self.read_responded_tx_rx.recv().await {
             for attempt in 1..=max_attempts {
-                if pending_requests.remove(&sign_respond_tx_id).await.is_some() {
-                    tracing::info!(sign_id = ?sign_respond_tx_id, "removed sign respond tx from map");
+                if pending_requests
+                    .remove(read_responded_tx.chain, &read_responded_tx.tx_id)
+                    .await
+                    .is_some()
+                {
+                    tracing::info!(sign_id = ?read_responded_tx.tx_id, "removed sign respond tx from map");
                     break;
                 } else if attempt == max_attempts {
-                    tracing::error!(sign_id = ?sign_respond_tx_id, "failed to remove sign respond tx from map after {max_attempts} attempts");
+                    tracing::error!(sign_id = ?read_responded_tx.tx_id, "failed to remove sign respond tx from map after {max_attempts} attempts");
                 }
             }
         }

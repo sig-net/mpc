@@ -1395,7 +1395,7 @@ async fn try_publish_sol(
                 elapsed = ?timestamp.elapsed(),
                 "published read respond solana signature successfully"
             );
-            read_responded_tx_channel.send(read_responded_tx.tx_id);
+            read_responded_tx_channel.send(read_responded_tx.clone());
         }
     }
 
