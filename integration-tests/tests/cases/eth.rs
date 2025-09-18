@@ -7,6 +7,7 @@ use mpc_crypto::{
 };
 use mpc_node::indexer_eth::EthConfig;
 use mpc_node::util::NearPublicKeyExt;
+use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use test_log::test;
 
 const CONTRACT_ADDRESS: &str = "098Ed32aC23c75C5FB5b4Dc0C2BcF5F64ccd5E27";
@@ -74,7 +75,7 @@ async fn test_eth_signature_basic() -> anyhow::Result<()> {
 
     let mpc_pk: k256::AffinePoint = nodes.root_public_key().await?.into_affine_point();
     let signer_addr = format!("0x{:x}", outcome.signer_address);
-    let epsilon = derive_epsilon_eth(signer_addr, test_path);
+    let epsilon = derive_epsilon_eth(LATEST_MPC_KEY_VERSION, &signer_addr, test_path);
     let user_pk = derive_key(mpc_pk, epsilon);
     tracing::info!("derived user public key: {user_pk:?}");
 
