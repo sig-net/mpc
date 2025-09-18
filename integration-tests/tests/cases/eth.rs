@@ -27,7 +27,7 @@ async fn test_eth_signature_basic() -> anyhow::Result<()> {
         .trim()
         .to_string();
     let contract_address =
-        std::env::var("IT_ETH_CONTRACT_ADDR").unwrap_or_else(|e| CONTRACT_ADDRESS.to_string());
+        std::env::var("IT_ETH_CONTRACT_ADDR").unwrap_or_else(|_e| CONTRACT_ADDRESS.to_string());
 
     let nodes = cluster::spawn()
         .with_config(|config| {
@@ -50,7 +50,7 @@ async fn test_eth_signature_basic() -> anyhow::Result<()> {
     let test_payload = [1u8; 32]; // Simple test payload
     let test_path = "ethereum,1"; // ETH derivation path
     let test_payload_hash =
-        k256::Scalar::from_bytes(*alloy::primitives::keccak256(&test_payload)).unwrap();
+        k256::Scalar::from_bytes(*alloy::primitives::keccak256(test_payload)).unwrap();
     let outcome = nodes
         .sign()
         .eth()
@@ -85,10 +85,7 @@ async fn test_eth_signature_basic() -> anyhow::Result<()> {
     let mut validation_passed = false;
     for recovery_id in 0..=1 {
         if check_ec_signature(&user_pk, &big_r, &s, test_payload_hash, recovery_id).is_ok() {
-            tracing::info!(
-                "   ✅ Signature validation successful with recovery_id={}",
-                recovery_id
-            );
+            tracing::info!("signature validation successful with recovery_id={recovery_id}",);
             validation_passed = true;
             break;
         }
