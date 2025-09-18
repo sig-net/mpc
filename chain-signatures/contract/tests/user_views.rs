@@ -4,6 +4,7 @@ use common::{create_response, init_env};
 use mpc_contract::primitives::{PendingRequest, SignRequest};
 
 use mpc_primitives::SignId;
+use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_sdk::{CurveType, PublicKey};
 use near_workspaces::types::NearToken;
 use serde_json::json;
@@ -18,7 +19,7 @@ async fn test_key_version() -> anyhow::Result<()> {
         .unwrap()
         .json()
         .unwrap();
-    assert_eq!(version, 0);
+    assert_eq!(version, 1);
     Ok(())
 }
 
@@ -40,6 +41,7 @@ async fn test_derived_public_key() -> anyhow::Result<()> {
     let key: String = contract
         .view("derived_public_key")
         .args_json(json!({
+            "key_version": LATEST_MPC_KEY_VERSION,
             "path": "test",
             "predecessor": "alice.near"
         }))
@@ -75,7 +77,7 @@ async fn test_experimental_signature_deposit() -> anyhow::Result<()> {
         let request = SignRequest {
             payload: payload_hash,
             path: path.into(),
-            key_version: 0,
+            key_version: LATEST_MPC_KEY_VERSION,
         };
         let _status = alice
             .call(contract.id(), "sign")
