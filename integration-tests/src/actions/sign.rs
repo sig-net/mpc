@@ -132,7 +132,7 @@ impl SignAction<'_> {
     }
 
     /// Create a Solana-specific sign action that calls the Solana contract's sign function
-    pub fn sol<'a>(self) -> SolSignAction<'a>
+    pub fn solana<'a>(self) -> SolSignAction<'a>
     where
         Self: 'a,
     {

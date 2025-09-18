@@ -122,7 +122,7 @@ impl ClusterSpawner {
 
     /// Configures the cluster to spawn with Solana sandbox.
     /// This method sets up a Solana test validator and configures the SolConfig.
-    pub fn sol(mut self) -> Self {
+    pub fn solana(mut self) -> Self {
         // Enable Solana by setting a placeholder if not already configured
         if self.cfg.sol.is_none() {
             self.cfg.sol = Some(mpc_node::indexer_sol::SolConfig {
