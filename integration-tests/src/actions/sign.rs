@@ -182,6 +182,7 @@ impl<'a> IntoFuture for SolSignAction<'a> {
 pub struct SolSignOutcome {
     pub tx_signature: SolSignature,
     pub signature: FullSignature<Secp256k1>,
+    pub signer_account: String,
 }
 
 impl<'a> SolSignAction<'a> {
@@ -197,9 +198,19 @@ impl<'a> SolSignAction<'a> {
             .sign(payload_hash, &self.inner.path, self.inner.key_version)
             .await?;
 
+        // Get the signer account (payer) from the Solana container
+        let solana = self
+            .inner
+            .nodes
+            .solana
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("solana instance not available in cluster"))?;
+        let signer_account = solana.payer_keypair.pubkey().to_string();
+
         Ok(SolSignOutcome {
             tx_signature,
             signature,
+            signer_account,
         })
     }
 
@@ -222,9 +233,6 @@ impl<'a> SolSignAction<'a> {
             path,
             key_version
         );
-
-        // Add a small delay to ensure the program is fully loaded
-        tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Step 1: Initiate the sign request transaction
         tracing::info!("requesting solana signature...");
