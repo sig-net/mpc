@@ -150,7 +150,11 @@ impl CompletedTx {
             "requester to derive epsilon: {:?}",
             self.tx.sender.to_string()
         );
-        let epsilon = mpc_crypto::kdf::derive_epsilon_sol(&self.tx.sender.to_string(), &path);
+        let epsilon = mpc_crypto::kdf::derive_epsilon_sol(
+            self.tx.key_version,
+            &self.tx.sender.to_string(),
+            &path,
+        );
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest {
             id: SignId::new(request_id_bytes),

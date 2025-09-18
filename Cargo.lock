@@ -6835,7 +6835,7 @@ checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
 
 [[package]]
 name = "mpc-contract"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "borsh 1.5.7",
@@ -6857,7 +6857,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-crypto"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -6870,7 +6870,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-keys"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "borsh 1.5.7",
  "hex",
@@ -6881,7 +6881,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-node"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
@@ -6960,7 +6960,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-primitives"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "borsh 1.5.7",
  "ciborium",

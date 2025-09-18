@@ -14,7 +14,7 @@ use helios::common::types::{SubscriptionEvent, SubscriptionType};
 use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 use k256::Scalar;
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
-use mpc_primitives::{SignArgs, SignId};
+use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -280,7 +280,7 @@ fn sign_request_from_filtered_log(
         anyhow::bail!("deposit is 0");
     }
 
-    if event.key_version != 0 {
+    if event.key_version > LATEST_MPC_KEY_VERSION {
         tracing::warn!("unsupported key version: {}", event.key_version);
         anyhow::bail!("unsupported key version");
     }
@@ -299,7 +299,11 @@ fn sign_request_from_filtered_log(
         anyhow::bail!("payload exceeds secp256k1 curve order");
     }
 
-    let epsilon = derive_epsilon_eth(format!("0x{}", event.requester.encode_hex()), &event.path);
+    let epsilon = derive_epsilon_eth(
+        event.key_version,
+        format!("0x{}", event.requester.encode_hex()).as_str(),
+        &event.path,
+    );
 
     // Use transaction hash as entropy
     let entropy = log.transaction_hash.unwrap_or_default();
@@ -314,7 +318,7 @@ fn sign_request_from_filtered_log(
             epsilon,
             payload,
             path: event.path,
-            key_version: 0,
+            key_version: event.key_version,
         },
         chain: Chain::Ethereum,
         unix_timestamp_indexed: crate::util::current_unix_timestamp(),

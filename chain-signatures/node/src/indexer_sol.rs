@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use k256::Scalar;
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
-use mpc_primitives::{SignArgs, SignId};
+use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
@@ -207,7 +207,7 @@ impl SignatureEventTrait for SignatureRequestedEvent {
             anyhow::bail!("deposit is 0");
         }
 
-        if self.key_version != 0 {
+        if self.key_version > LATEST_MPC_KEY_VERSION {
             tracing::warn!("unsupported key version: {}", self.key_version);
             anyhow::bail!("unsupported key version");
         }
@@ -227,7 +227,7 @@ impl SignatureEventTrait for SignatureRequestedEvent {
 
         // Call the existing derive_epsilon_sol function with the correct parameters
         // to match the TypeScript implementation
-        let epsilon = derive_epsilon_sol(&self.sender.to_string(), &self.path);
+        let epsilon = derive_epsilon_sol(self.key_version, &self.sender.to_string(), &self.path);
 
         // Use transaction signature as entropy
         let mut entropy = [0u8; 32];
@@ -243,7 +243,7 @@ impl SignatureEventTrait for SignatureRequestedEvent {
                 epsilon,
                 payload,
                 path: self.path.clone(),
-                key_version: 0,
+                key_version: self.key_version,
             },
             chain: Chain::Solana,
             timestamp_sign_queue: Some(Instant::now()),
@@ -312,7 +312,7 @@ impl SignatureEventTrait for SignRespondRequestedEvent {
 
         // Call the existing derive_epsilon_sol function with the correct parameters
         // to match the TypeScript implementation
-        let epsilon = derive_epsilon_sol(&self.sender.to_string(), &self.path);
+        let epsilon = derive_epsilon_sol(self.key_version, &self.sender.to_string(), &self.path);
 
         // Use transaction signature as entropy
         let mut entropy = [0u8; 32];
