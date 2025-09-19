@@ -23,18 +23,8 @@ jobs:
       - name: Install near-cli
         run: 'npm install -g near-cli'
 
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-
-      - name: Install Rust (1.81.0)
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: 1.81.0
-          target: wasm32-unknown-unknown
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Build & Deploy Dev Contract
         run: ./build-contract.sh \
