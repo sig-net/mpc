@@ -7,6 +7,7 @@ use anchor_client::{Client, Cluster, Program};
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
+use ethabi::{encode, Token};
 use futures_util::StreamExt;
 use k256::Scalar;
 use mpc_crypto::kdf::derive_epsilon_sol;
@@ -28,7 +29,6 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use web3::ethabi::{encode, Token};
 
 // Needed for anchor_client/lang to operate well. They use a different version of borsh
 // than the one we use in MPC. This older version can have security implications but for

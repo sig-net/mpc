@@ -218,13 +218,33 @@ fn as_signature(
     Ok((signature, recovery_id))
 }
 
-pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> web3::types::Address {
+pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> ethers_core::types::Address {
     let public_key = public_key.serialize_uncompressed();
 
     debug_assert_eq!(public_key[0], 0x04);
     let hash: [u8; 32] = *alloy::primitives::keccak256(&public_key[1..]);
 
-    web3::types::Address::from_slice(&hash[12..])
+    ethers_core::types::Address::from_slice(&hash[12..])
+}
+
+pub fn recover_eth_address(
+    msg_hash: &[u8; 32],
+    signature_bytes: &[u8; 64],
+    recovery_id: u8,
+) -> ethers_core::types::H160 {
+    let r = k256::Scalar::from_bytes(signature_bytes[..32].try_into().unwrap()).unwrap();
+    let s = k256::Scalar::from_bytes(signature_bytes[32..].try_into().unwrap()).unwrap();
+    let signature = k256::ecdsa::Signature::from_scalars(r, s).expect("valid r,s");
+
+    let recid = k256::ecdsa::RecoveryId::from_byte(recovery_id).expect("invalid recovery id");
+    let verifying_key = VerifyingKey::recover_from_prehash(msg_hash, &signature, recid)
+        .expect("failed to recover pubkey");
+
+    let encoded = verifying_key.to_encoded_point(false);
+    let public_key =
+        secp256k1::PublicKey::from_slice(encoded.as_bytes()).expect("valid secp256k1 pubkey");
+
+    public_key_to_address(&public_key)
 }
 
 #[cfg(test)]
@@ -238,7 +258,7 @@ mod tests {
     use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
-    use super::{public_key_to_address, recover, x_coordinate};
+    use super::{public_key_to_address, recover, recover_eth_address, x_coordinate};
 
     // This test hardcodes the output of the signing process and checks that everything verifies as expected
     // If you find yourself changing the constants in this test you are likely breaking backwards compatibility
@@ -359,12 +379,11 @@ mod tests {
             signature
         };
 
-        let recovered_from_signature_address_web3 = web3::signing::recover(
+        let recovered_from_signature_address_web3 = recover_eth_address(
             &payload_hash,
             &signature_for_recovery,
-            multichain_sig.recovery_id as i32,
-        )
-        .unwrap();
+            multichain_sig.recovery_id,
+        );
         assert_eq!(user_address_from_pk, recovered_from_signature_address_web3);
 
         let recovered_from_signature_address_ethers = signature.recover(payload_hash).unwrap();
