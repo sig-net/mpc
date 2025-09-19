@@ -43,6 +43,7 @@ impl PositMessage {
                 participants.len() * std::mem::size_of::<Participant>()
             }
             PositAction::Accept => 0,
+            PositAction::Acknowledge => 0,
             PositAction::Reject => 0,
         }
     }

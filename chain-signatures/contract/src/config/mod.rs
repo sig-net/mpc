@@ -59,6 +59,10 @@ pub struct TripleConfig {
     pub max_triples: u32,
     /// Timeout for triple generation in milliseconds.
     pub generation_timeout: u64,
+    /// Timeout for a posit to be accepted in milliseconds.
+    pub posit_timeout: u64,
+    /// Extended timeout for a posit to be accepted in milliseconds after being acknowledged.
+    pub posit_extended_timeout: u64,
 
     /// The remaining entries that can be present in future forms of the configuration.
     #[serde(flatten)]
@@ -73,6 +77,10 @@ pub struct PresignatureConfig {
     pub max_presignatures: u32,
     /// Timeout for presignature generation in milliseconds.
     pub generation_timeout: u64,
+    /// Timeout for a posit to be accepted in milliseconds.
+    pub posit_timeout: u64,
+    /// Extended timeout for a posit to be accepted in milliseconds after being acknowledged.
+    pub posit_extended_timeout: u64,
 
     /// The remaining entries that can be present in future forms of the configuration.
     #[serde(flatten)]

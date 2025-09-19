@@ -27,6 +27,7 @@ use mpc_node::storage::{presignature_storage, secret_storage, triple_storage, Op
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 use tokio::sync::RwLock;
@@ -68,6 +69,8 @@ struct FixtureConfig {
     signature_timeout_ms: u64,
     presignature_timeout_ms: u64,
     triple_timeout_ms: u64,
+    posit_timeout_ms: u64,
+    posit_extended_timeout_ms: u64,
 }
 
 /// Context required to start a fixture node.
@@ -111,6 +114,8 @@ impl FixtureConfig {
             signature_timeout_ms: 10_000,
             presignature_timeout_ms: 10_000,
             triple_timeout_ms: min_to_ms(10),
+            posit_timeout_ms: 60_000,
+            posit_extended_timeout_ms: 120_000,
         }
     }
 }
@@ -209,9 +214,13 @@ impl MpcFixtureBuilder {
         config.presignature.max_presignatures = self.fixture_config.max_presignatures;
         config.presignature.min_presignatures = self.fixture_config.min_presignatures;
         config.presignature.generation_timeout = self.fixture_config.presignature_timeout_ms;
+        config.presignature.posit_timeout = self.fixture_config.posit_timeout_ms;
+        config.presignature.posit_extended_timeout = self.fixture_config.posit_extended_timeout_ms;
         config.triple.max_triples = self.fixture_config.max_triples;
         config.triple.min_triples = self.fixture_config.min_triples;
         config.triple.generation_timeout = self.fixture_config.triple_timeout_ms;
+        config.triple.posit_timeout = self.fixture_config.posit_timeout_ms;
+        config.triple.posit_extended_timeout = self.fixture_config.posit_extended_timeout_ms;
         config
     }
 
@@ -314,6 +323,16 @@ impl MpcFixtureBuilder {
     /// Set protocol config
     pub fn with_presignature_timeout_ms(mut self, ms: u64) -> Self {
         self.fixture_config.presignature_timeout_ms = ms;
+        self
+    }
+
+    pub fn with_posit_timeout(mut self, d: Duration) -> Self {
+        self.fixture_config.posit_timeout_ms = d.as_millis() as u64;
+        self
+    }
+
+    pub fn with_posit_extended_timeout(mut self, d: Duration) -> Self {
+        self.fixture_config.posit_extended_timeout_ms = d.as_millis() as u64;
         self
     }
 

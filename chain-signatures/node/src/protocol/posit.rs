@@ -34,6 +34,7 @@ pub enum PositAction {
     Propose,
     Start(Vec<Participant>),
     Accept,
+    Acknowledge,
     // TODO: Reject can also have a reason
     Reject,
 }
@@ -41,6 +42,10 @@ pub enum PositAction {
 impl PositAction {
     pub fn is_accept(&self) -> bool {
         matches!(self, PositAction::Accept)
+    }
+
+    pub fn is_acknowledge(&self) -> bool {
+        matches!(self, PositAction::Acknowledge)
     }
 }
 
@@ -52,27 +57,55 @@ pub enum PositInternalAction<S> {
     None,
 }
 
+///#[derive(Debug)]
+pub enum ParticipantState {
+    Acknowledged(Instant),
+    Accepted,
+    Rejected,
+}
+
 /// A counter for a posit. This is used to track the participants that have
 /// accepted the posit alongside storing an intermediary state for the protocol
 /// that the proposer needs to keep track of.
 pub struct PositCounter<S> {
     pub participants: HashSet<Participant>,
-    accepts: HashSet<Participant>,
-    rejects: HashSet<Participant>,
+    states: HashMap<Participant, ParticipantState>,
     store: S,
 }
 
 impl<T> PositCounter<T> {
+    pub fn new(participants: HashSet<Participant>, store: T) -> Self {
+        Self {
+            participants,
+            states: HashMap::new(),
+            store,
+        }
+    }
+
+    pub fn accepts(&self) -> impl Iterator<Item = &Participant> {
+        self.states.iter().filter_map(|(p, s)| match s {
+            ParticipantState::Accepted => Some(p),
+            _ => None,
+        })
+    }
+
+    pub fn rejects(&self) -> impl Iterator<Item = &Participant> {
+        self.states.iter().filter_map(|(p, s)| match s {
+            ParticipantState::Rejected => Some(p),
+            _ => None,
+        })
+    }
+
     pub fn enough_accepts(&self, threshold: usize) -> bool {
-        self.accepts.len() >= threshold
+        self.accepts().count() >= threshold
     }
 
     pub fn enough_rejects(&self, threshold: usize) -> bool {
-        self.rejects.len() > self.participants.len() - threshold
+        self.rejects().count() > self.participants.len() - threshold
     }
 
     pub fn meets_totality(&self) -> bool {
-        self.accepts.len() + self.rejects.len() == self.participants.len()
+        self.states.len() == self.participants.len()
     }
 }
 
@@ -103,17 +136,11 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
             }
         };
 
-        let mut accepts = HashSet::new();
-        accepts.insert(self.me);
-        let positor = Positor::Proposer(
-            self.me,
-            PositCounter {
-                participants: participants.iter().copied().collect(),
-                accepts,
-                rejects: HashSet::new(),
-                store,
-            },
-        );
+        let mut counter = PositCounter::new(participants.iter().copied().collect(), store);
+        counter
+            .states
+            .insert(self.me, ParticipantState::Accepted);
+        let positor = Positor::Proposer(self.me, counter);
         let timestamp = Instant::now();
         entry.insert((positor, timestamp));
 
@@ -198,7 +225,8 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                         self.posits.insert(id, (positor, timestamp));
                         return PositInternalAction::Reply(PositAction::Reject);
                     }
-                } else {
+                }
+                else {
                     tracing::warn!(?id, ?from, "received START on protocol we have no info for");
                     return PositInternalAction::Reply(PositAction::Reject);
                 }
@@ -208,7 +236,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                     Positor::Deliberator(from),
                 )
             }
-            PositAction::Accept | PositAction::Reject => {
+            PositAction::Acknowledge | PositAction::Accept | PositAction::Reject => {
                 let mut entry = match self.posits.entry(id) {
                     Entry::Occupied(entry) => entry,
                     Entry::Vacant(_) => {
@@ -243,14 +271,18 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                 }
 
                 if action.is_accept() {
-                    counter.accepts.insert(from);
+                    counter.states.insert(from, ParticipantState::Accepted);
+                } else if action.is_acknowledge() {
+                    counter
+                        .states
+                        .insert(from, ParticipantState::Acknowledged(Instant::now()));
                 } else {
-                    counter.rejects.insert(from);
+                    counter.states.insert(from, ParticipantState::Rejected);
                 }
 
                 // TODO: broadcast aborting the protocol if we have enough rejections
                 if counter.enough_rejects(threshold) {
-                    tracing::info!(?id, rejects = ?counter.rejects, "received enough REJECTs, aborting protocol");
+                    tracing::info!(?id, rejects = ?counter.rejects().collect::<Vec<_>>(), "received enough REJECTs, aborting protocol");
                     entry.remove();
                     return PositInternalAction::Abort;
                 }
@@ -259,17 +291,16 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                     return PositInternalAction::None;
                 }
 
-                tracing::info!(?id, ?counter.accepts, ?counter.rejects, "received enough ACCEPTs, starting protocol");
+                tracing::info!(?id, accepts = ?counter.accepts().collect::<Vec<_>>(), rejects = ?counter.rejects().collect::<Vec<_>>(), "received enough ACCEPTs, starting protocol");
                 let (Positor::Proposer(_, counter), _) = entry.remove() else {
                     unreachable!("we already checked that we are the proposer");
                 };
-                let participants = counter.accepts.into_iter().collect();
+                let participants = counter.accepts().copied().collect();
                 PositInternalAction::StartProtocol(
                     participants,
                     Positor::Proposer(self.me, counter.store),
                 )
-            }
-        }
+            }        }
     }
 
     pub fn len(&self) -> usize {
@@ -290,49 +321,83 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
     pub fn expire_and_start(
         &mut self,
         threshold: usize,
-        timeout: Duration,
+        initial_timeout: Duration,
+        extended_timeout: Duration,
     ) -> Vec<(Id, PositInternalAction<S>)> {
-        let mut expired = Vec::new();
-        for (id, (_, timestamp)) in &self.posits {
-            if timestamp.elapsed() > timeout {
-                expired.push(*id);
+        let mut actions = Vec::new();
+        let mut posits_to_finalize = Vec::new();
+        let mut deliberator_posits_to_remove = Vec::new();
+
+        for (id, (positor, created_at)) in &mut self.posits {
+            let Positor::Proposer(_, counter) = positor else {
+                if created_at.elapsed() > initial_timeout {
+                    deliberator_posits_to_remove.push(*id);
+                }
+                continue;
+            };
+
+            // Update participant states based on timeouts
+            for participant in counter.participants.clone() {
+                if participant == self.me {
+                    continue;
+                }
+
+                match counter.states.entry(participant) {
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        if let ParticipantState::Acknowledged(ack_time) = entry.get() {
+                            if ack_time.elapsed() > extended_timeout {
+                                entry.insert(ParticipantState::Rejected);
+                            }
+                        }
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        if created_at.elapsed() > initial_timeout {
+                            entry.insert(ParticipantState::Rejected);
+                        }
+                    }
+                }
+            }
+
+            if counter.enough_rejects(threshold) || counter.enough_accepts(threshold) {
+                posits_to_finalize.push(*id);
             }
         }
 
-        let mut expired_proposers = Vec::new();
-        let mut expired_deliberators = Vec::new();
-        let mut expired_and_accepted = Vec::new();
-        let mut actions = Vec::new();
-        for id in &expired {
-            let Some((positor, _)) = self.posits.remove(id) else {
-                continue;
-            };
+        for id in deliberator_posits_to_remove {
+            tracing::debug!(?id, "expiring deliberator posit");
+            self.posits.remove(&id);
+        }
+
+        for id in posits_to_finalize {
+            let (positor, _) = self.posits.remove(&id).unwrap();
             let Positor::Proposer(_, counter) = positor else {
-                expired_deliberators.push(*id);
-                continue;
+                unreachable!()
             };
-            if counter.enough_accepts(threshold) {
-                expired_and_accepted.push(*id);
+
+            if counter.enough_rejects(threshold) {
+                tracing::info!(
+                    ?id,
+                    rejects = ?counter.rejects().collect::<Vec<_>>(),
+                    "expiring posit due to rejections"
+                );
+                actions.push((id, PositInternalAction::Abort));
+            } else if counter.enough_accepts(threshold) {
+                tracing::info!(
+                    ?id,
+                    accepts = ?counter.accepts().collect::<Vec<_>>(),
+                    "expiring posit to start protocol"
+                );
+                let participants = counter.accepts().copied().collect();
                 actions.push((
-                    *id,
+                    id,
                     PositInternalAction::StartProtocol(
-                        counter.accepts.into_iter().collect(),
+                        participants,
                         Positor::Proposer(self.me, counter.store),
                     ),
                 ));
-            } else {
-                expired_proposers.push(*id);
             }
         }
 
-        if expired_proposers.len() + expired_deliberators.len() + expired_and_accepted.len() > 0 {
-            tracing::info!(
-                ?expired_deliberators,
-                ?expired_proposers,
-                ?expired_and_accepted,
-                "expiring posits"
-            );
-        }
         actions
     }
 }

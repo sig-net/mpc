@@ -298,7 +298,7 @@ impl TripleStorage {
             .unwrap_or_default()
     }
 
-    async fn insert(&self, triple: Triple, owner: Participant) -> bool {
+    pub async fn insert(&self, triple: Triple, owner: Participant) -> bool {
         const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local used_key = KEYS[2]

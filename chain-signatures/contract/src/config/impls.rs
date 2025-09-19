@@ -46,6 +46,8 @@ impl Default for TripleConfig {
             min_triples: 1024,
             max_triples: 1024 * MAX_EXPECTED_PARTICIPANTS * NETWORK_MULTIPLIER,
             generation_timeout: min_to_ms(10),
+            posit_timeout: min_to_ms(1),
+            posit_extended_timeout: min_to_ms(2),
 
             other: Default::default(),
         }
@@ -58,6 +60,8 @@ impl Default for PresignatureConfig {
             min_presignatures: 512,
             max_presignatures: 512 * MAX_EXPECTED_PARTICIPANTS * NETWORK_MULTIPLIER,
             generation_timeout: secs_to_ms(45),
+            posit_timeout: min_to_ms(1),
+            posit_extended_timeout: min_to_ms(2),
 
             other: Default::default(),
         }

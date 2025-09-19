@@ -526,12 +526,18 @@ impl TripleSpawner {
         loop {
             tokio::select! {
                 _ = expiration_interval.tick() => {
-                    for action in self.posits.expire_and_start(self.threshold, Duration::from_secs(60)) {
+                    let (initial_timeout, extended_timeout, generation_timeout) = {
+                        let cfg = &config.borrow().protocol.triple;
+                        let initial = Duration::from_millis(cfg.posit_timeout);
+                        let extended = Duration::from_millis(cfg.posit_extended_timeout);
+                        let generation = Duration::from_millis(cfg.generation_timeout);
+                        (initial, extended, generation)
+                    };
+                    for action in self.posits.expire_and_start(self.threshold, initial_timeout, extended_timeout) {
                         let (id, PositInternalAction::StartProtocol(participants, positor)) = action else {
                             continue;
                         };
-                        let timeout = config.borrow().protocol.triple.generation_timeout;
-                        self.start_generation(id, participants, positor, Duration::from_millis(timeout)).await;
+                        self.start_generation(id, participants, positor, generation_timeout).await;
                     }
                 }
                 Some((id, from, action)) = posits.recv() => {
@@ -551,12 +557,12 @@ impl TripleSpawner {
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
                 _ = stockpile_interval.tick() => {
-                    // TODO: eventually we should use all participants, and let nodes replying with
-                    // accept/reject determine who is a participant. The messaging layer should
-                    // rely more on active.
-                    let active = mesh_state.borrow().active.keys_vec();
-                    let protocol = config.borrow().protocol.clone();
-                    self.stockpile(&active, &protocol).await;
+                    let (active, protocol_cfg) = {
+                        let active = mesh_state.borrow().active.keys_vec();
+                        let protocol_cfg = config.borrow().protocol.clone();
+                        (active, protocol_cfg)
+                    };
+                    self.stockpile(&active, &protocol_cfg).await;
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 
                     crate::metrics::NUM_TRIPLES_MINE

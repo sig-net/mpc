@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::posit::PositInternalAction;
+use std::collections::HashMap;
 use crate::protocol::MpcSignProtocol;
 use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
 use crate::storage::triple_storage::{TriplesTaken, TriplesTakenDropper};
@@ -305,6 +306,8 @@ pub struct PresignatureSpawner {
     ongoing_owned: HashSet<PresignatureId>,
     /// The protocol posits that are currently in progress.
     posits: Posits<FullPresignatureId, TriplesTaken>,
+    /// Posits that we are waiting for triples to be available for.
+    pending_posits: HashMap<FullPresignatureId, Participant>,
 
     me: Participant,
     threshold: usize,
@@ -334,6 +337,7 @@ impl PresignatureSpawner {
             ongoing: JoinMap::new(),
             ongoing_owned: HashSet::new(),
             posits: Posits::new(me),
+            pending_posits: HashMap::new(),
             me,
             threshold,
             epoch,
@@ -405,20 +409,18 @@ impl PresignatureSpawner {
             );
             PositInternalAction::Reply(PositAction::Reject)
         } else if !{
-            // TODO: we can potentially wait for the triples to exist first to then be able to accept.
-            // whereas we just blatantly reject here. The problem with waiting is that the other side
-            // might expire their posit first.
             (self.triples.contains_reserved(id.t0).await || self.triples.contains(id.t0).await)
                 && (self.triples.contains_reserved(id.t1).await
                     || self.triples.contains(id.t1).await)
         } {
-            tracing::warn!(
+            tracing::debug!(
                 ?id,
                 ?from,
                 ?action,
-                "presignature required triples are not known"
+                "presignature required triples are not known, acknowledging"
             );
-            PositInternalAction::Reply(PositAction::Reject)
+            self.pending_posits.insert(id, from);
+            PositInternalAction::Reply(PositAction::Acknowledge)
         } else if self.contains_ongoing(id.id) {
             tracing::warn!(?id, ?from, ?action, "presignature already generating");
             PositInternalAction::Reply(PositAction::Reject)
@@ -667,6 +669,24 @@ impl PresignatureSpawner {
         }
     }
 
+    async fn check_pending_posits(&mut self) {
+        let mut ready_posits = Vec::new();
+        for (posit_id, proposer) in &self.pending_posits {
+            if (self.triples.contains_reserved(posit_id.t0).await || self.triples.contains(posit_id.t0).await)
+                && (self.triples.contains_reserved(posit_id.t1).await || self.triples.contains(posit_id.t1).await) {
+                ready_posits.push((*posit_id, *proposer));
+            }
+        }
+
+        for (posit_id, proposer) in ready_posits {
+            tracing::debug!(?posit_id, ?proposer, "pending posit is now ready, accepting");
+            self.pending_posits.remove(&posit_id);
+            // By calling `act` here, we are just telling the proposer that we are now ready.
+            // The proposer will eventually gather enough accepts and send a `Start` action.
+            let _ = self.posits.act(posit_id, proposer, self.threshold, &PositAction::Accept);
+        }
+    }
+
     async fn run(
         mut self,
         mesh_state: watch::Receiver<MeshState>,
@@ -675,17 +695,27 @@ impl PresignatureSpawner {
     ) {
         let mut stockpile_interval = time::interval(Duration::from_millis(100));
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(20));
+        let mut pending_check_interval = tokio::time::interval(Duration::from_secs(1));
         let mut posits = self.msg.subscribe_presignature_posit().await;
 
         loop {
             tokio::select! {
+                _ = pending_check_interval.tick() => {
+                    self.check_pending_posits().await;
+                }
                 _ = expiration_interval.tick() => {
-                    for (id, action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(60)) {
+                    let (initial_timeout, extended_timeout, generation_timeout) = {
+                        let cfg = &config.borrow().protocol.presignature;
+                        let initial = Duration::from_millis(cfg.posit_timeout);
+                        let extended = Duration::from_millis(cfg.posit_extended_timeout);
+                        let generation = Duration::from_millis(cfg.generation_timeout);
+                        (initial, extended, generation)
+                    };
+                    for (id, action) in self.posits.expire_and_start(self.threshold, initial_timeout, extended_timeout) {
                         let PositInternalAction::StartProtocol(participants, positor) = action else {
                             continue;
                         };
-                        let timeout = config.borrow().protocol.presignature.generation_timeout;
-                        self.start_generation(id, positor, participants, Duration::from_millis(timeout)).await;
+                        self.start_generation(id, positor, participants, generation_timeout).await;
                     }
                 }
                 Some((id, from, action)) = posits.recv() => {
@@ -705,8 +735,11 @@ impl PresignatureSpawner {
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
                 _ = stockpile_interval.tick() => {
-                    let active = mesh_state.borrow().active.keys_vec();
-                    let protocol_cfg = config.borrow().protocol.clone();
+                    let (active, protocol_cfg) = {
+                        let active = mesh_state.borrow().active.keys_vec();
+                        let protocol_cfg = config.borrow().protocol.clone();
+                        (active, protocol_cfg)
+                    };
                     self.stockpile(&active, &protocol_cfg).await;
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 

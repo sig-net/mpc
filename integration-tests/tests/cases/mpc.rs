@@ -278,3 +278,29 @@ async fn test_presignature_timeout() {
         .await
         .expect("should have enough presignatures eventually");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_presignature_acknowledge() {
+    // 1. Setup with 3 nodes, preshared key, but NO preshared triples.
+    // This will create a race condition where presignature are proposed before
+    // triples are ready, exercising the Acknowledge logic.
+    let n = 3;
+    let t = 2;
+    let network = MpcFixtureBuilder::new(n, t)
+        .with_preshared_key()
+        .with_min_triples_stockpile(2)
+        .with_min_presignatures_stockpile(1)
+        .with_posit_timeout(Duration::from_secs(5))
+        .with_posit_extended_timeout(Duration::from_secs(10))
+        .build()
+        .await;
+
+    // 2. Wait for the network to generate one presignature.
+    // This will only succeed if the Acknowledge logic works correctly.
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        network.wait_for_presignatures(1),
+    )
+    .await
+    .expect("should have enough presignatures eventually");
+}
