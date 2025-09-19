@@ -1,4 +1,4 @@
 [toolchain]
-channel = "1.86.0"
+channel = "1.86.0" # latest version supported by near-sdk-rs
 targets = ["wasm32-unknown-unknown"]
 components = ["rustfmt", "clippy", "rust-analyzer", "rust-src"]
