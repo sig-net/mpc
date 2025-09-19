@@ -25,10 +25,12 @@ use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
-use solana_client::nonblocking::rpc_client::RpcClient as SolRpcClient;
-use solana_sdk::signature::EncodableKey as _;
-use solana_sdk::signature::Keypair as SolKeypair;
-use solana_sdk::signer::{SeedDerivable, Signer};
+use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
+use solana_sdk::instruction::AccountMeta;
+use solana_sdk::pubkey::Pubkey as SolanaPubkey;
+use solana_sdk::signature::Keypair as SolanaKeypair;
+use solana_sdk::signature::{EncodableKey as _, Signature as SolanaSignature};
+use solana_sdk::signer::{SeedDerivable as _, Signer as _};
 use testcontainers::core::ExecCommand;
 use testcontainers::ContainerAsync;
 use testcontainers::{
@@ -437,11 +439,11 @@ pub struct Solana {
     pub process: Child,
     pub rpc_address: String,
     pub ws_address: String,
-    pub program_keypair: SolKeypair,
-    pub payer_keypair: SolKeypair,
+    pub program_keypair: SolanaKeypair,
+    pub payer_keypair: SolanaKeypair,
     pub rpc_port: u16,
     pub ws_port: u16,
-    pub rpc_client: SolRpcClient,
+    pub rpc_client: SolanaRpcClient,
 }
 
 impl Solana {
@@ -452,8 +454,8 @@ impl Solana {
 
     /// Fixed keypair for deterministic program address/id. This is embedded in the declare_id!
     /// macro of our Solana program/contract.
-    pub fn program_keypair() -> SolKeypair {
-        SolKeypair::from_seed(&[101u8; 32]).unwrap()
+    pub fn program_keypair() -> SolanaKeypair {
+        SolanaKeypair::from_seed(&[101u8; 32]).unwrap()
     }
 
     pub async fn run() -> Self {
@@ -509,8 +511,8 @@ impl Solana {
             "solana-test-validator process is running",
         );
 
-        let payer_keypair = SolKeypair::from_seed(&[102u8; 32]).unwrap();
-        let rpc_client = SolRpcClient::new_with_commitment(
+        let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
+        let rpc_client = SolanaRpcClient::new_with_commitment(
             rpc_address.clone(),
             solana_sdk::commitment_config::CommitmentConfig::confirmed(),
         );
@@ -658,12 +660,12 @@ impl Solana {
         tracing::info!("initializing solana program...");
 
         // Create payer keypair - recreate since it doesn't implement Clone
-        let payer = std::sync::Arc::new(SolKeypair::from_bytes(&self.payer_keypair.to_bytes())?);
+        let payer = std::sync::Arc::new(SolanaKeypair::from_bytes(&self.payer_keypair.to_bytes())?);
         let program_id = self.program_keypair.pubkey();
 
         // Define program state PDA
         let (program_state_pda, _bump) =
-            solana_sdk::pubkey::Pubkey::find_program_address(&[b"program-state"], &program_id);
+            SolanaPubkey::find_program_address(&[b"program-state"], &program_id);
 
         // Call initialize function
         let signature_deposit = 1_000_000u64; // 0.001 SOL in lamports
@@ -692,12 +694,9 @@ impl Solana {
         let instruction = solana_sdk::instruction::Instruction {
             program_id,
             accounts: vec![
-                solana_sdk::instruction::AccountMeta::new(program_state_pda, false),
-                solana_sdk::instruction::AccountMeta::new(payer.pubkey(), true),
-                solana_sdk::instruction::AccountMeta::new_readonly(
-                    solana_sdk::system_program::id(),
-                    false,
-                ),
+                AccountMeta::new(program_state_pda, false),
+                AccountMeta::new(payer.pubkey(), true),
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
             ],
             data,
         };
@@ -729,7 +728,7 @@ impl Solana {
         payload: [u8; 32],
         path: &str,
         key_version: u32,
-    ) -> anyhow::Result<solana_sdk::signature::Signature> {
+    ) -> anyhow::Result<SolanaSignature> {
         // Check if the RPC client can get the version (basic readiness check)
         if self.rpc_client.get_version().await.is_err() {
             anyhow::bail!("solana container is not ready");
@@ -740,11 +739,11 @@ impl Solana {
 
         // Define program state PDA (required by the sign function)
         let (program_state_pda, _bump) =
-            solana_sdk::pubkey::Pubkey::find_program_address(&[b"program-state"], &program_id);
+            SolanaPubkey::find_program_address(&[b"program-state"], &program_id);
 
         // Define event authority PDA for CPI events
         let (event_authority_pda, _bump) =
-            solana_sdk::pubkey::Pubkey::find_program_address(&[b"__event_authority"], &program_id);
+            SolanaPubkey::find_program_address(&[b"__event_authority"], &program_id);
 
         // Manually construct the instruction data
         // Anchor instructions start with an 8-byte discriminator
@@ -768,20 +767,17 @@ impl Solana {
             program_id,
             accounts: vec![
                 // program_state account (writable, not signer)
-                solana_sdk::instruction::AccountMeta::new(program_state_pda, false),
+                AccountMeta::new(program_state_pda, false),
                 // requester (writable, signer)
-                solana_sdk::instruction::AccountMeta::new(self.payer_keypair.pubkey(), true),
+                AccountMeta::new(self.payer_keypair.pubkey(), true),
                 // fee_payer (writable, signer) - same as requester for simplicity
-                solana_sdk::instruction::AccountMeta::new(self.payer_keypair.pubkey(), true),
+                AccountMeta::new(self.payer_keypair.pubkey(), true),
                 // system_program (readonly, not signer)
-                solana_sdk::instruction::AccountMeta::new_readonly(
-                    solana_sdk::system_program::id(),
-                    false,
-                ),
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
                 // event_authority (readonly, not signer) - required for #[event_cpi]
-                solana_sdk::instruction::AccountMeta::new_readonly(event_authority_pda, false),
+                AccountMeta::new_readonly(event_authority_pda, false),
                 // program account (readonly, not signer) - required for #[event_cpi]
-                solana_sdk::instruction::AccountMeta::new_readonly(program_id, false),
+                AccountMeta::new_readonly(program_id, false),
             ],
             data,
         };
