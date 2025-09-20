@@ -11,7 +11,7 @@ use tokio_stream::{StreamExt, StreamMap};
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::{ParticipantInfo, ProtocolState};
-use crate::web::StateView;
+use crate::web::StateStatus;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NodeStatus {
@@ -113,16 +113,18 @@ impl NodeConnection {
                         continue;
                     }
 
-                    match client.state(&url).await {
+                    match client.status(&url).await {
                         Ok(state) => {
                             // note: borrowing and sending later on `status_tx` can potentially deadlock,
                             // but since we are copying the status, this is not the case. Change this carefully.
                             let old_status = status_tx.borrow().0;
                             let mut new_status = match state {
-                                StateView::Running { .. } => NodeStatus::Active,
-                                StateView::Resharing { .. }
-                                | StateView::Joining { .. }
-                                | StateView::NotRunning => NodeStatus::Inactive,
+                                StateStatus::Running => NodeStatus::Active,
+                                StateStatus::Resharing
+                                | StateStatus::Joining
+                                | StateStatus::NotRunning
+                                | StateStatus::Generating
+                                | StateStatus::WaitingForConsensus => NodeStatus::Inactive,
                             };
                             if old_status == NodeStatus::Inactive && new_status == NodeStatus::Active {
                                 // Sync when we want to enter an active state
