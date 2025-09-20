@@ -32,7 +32,7 @@ impl Governance for MockGovernance {
         self.protocol_state_tx.send_if_modified(|protocol_state| {
             let mut modified;
             match protocol_state {
-                Some(ProtocolState::Initializing(ref mut state)) => {
+                Some(ProtocolState::Initializing(state)) => {
                     let entry = state
                         .pk_votes
                         .pk_votes

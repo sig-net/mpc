@@ -11,7 +11,7 @@ use mpc_contract::primitives::{CandidateInfo, ParticipantInfo, Participants, Sig
 use mpc_contract::update::UpdateId;
 use mpc_crypto::kdf::{check_ec_signature, derive_secret_key};
 use mpc_crypto::{derive_epsilon_near, derive_key};
-use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{LATEST_MPC_KEY_VERSION, SignId, Signature};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccountId, NearToken};
 use near_workspaces::{Account, Contract, Worker};

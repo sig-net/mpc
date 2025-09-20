@@ -1,11 +1,11 @@
 use deadpool_redis::redis::AsyncCommands;
-use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
+use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
+use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
-use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState};
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{LATEST_MPC_KEY_VERSION, SignArgs, SignId};
 use std::collections::BTreeMap;
 use std::fs;
 use std::time::Duration;

@@ -19,17 +19,17 @@ use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_fetch::ops::Function;
+use near_workspaces::Account;
 use near_workspaces::types::Gas;
 use near_workspaces::types::NearToken;
-use near_workspaces::Account;
 use rand::Rng;
 use wait_for::{SignatureError, WaitForError};
 
 use std::time::Duration;
 
 use k256::{
-    ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
     PublicKey as K256PublicKey,
+    ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
 };
 
 pub async fn request_batch_random_sign(
@@ -45,7 +45,7 @@ pub async fn request_batch_random_sign(
     let mut payloads: Vec<([u8; 32], [u8; 32])> = vec![];
     let mut tx = nodes.rpc_client.batch(&signer, nodes.contract().id());
     for _ in 0..3 {
-        let payload: [u8; 32] = rand::thread_rng().gen();
+        let payload: [u8; 32] = rand::thread_rng().r#gen();
         let payload_hashed: [u8; 32] = *alloy::primitives::keccak256(payload);
         payloads.push((payload, payload_hashed));
         let request = SignRequest {
@@ -78,7 +78,7 @@ pub async fn request_batch_duplicate_sign(
     };
 
     let mut tx = nodes.rpc_client.batch(&signer, nodes.contract().id());
-    let payload: [u8; 32] = rand::thread_rng().gen();
+    let payload: [u8; 32] = rand::thread_rng().r#gen();
     let payload_hashed: [u8; 32] = *alloy::primitives::keccak256(payload);
     let sign_call_cnt = 2;
     for _ in 0..sign_call_cnt {
@@ -251,11 +251,11 @@ pub fn recover_eth_address(
 mod tests {
     use elliptic_curve::sec1::FromEncodedPoint as _;
     use k256::ecdsa::VerifyingKey;
+    use k256::elliptic_curve::ProjectivePoint;
     use k256::elliptic_curve::ops::{Invert, Reduce};
     use k256::elliptic_curve::point::AffineCoordinates;
-    use k256::elliptic_curve::ProjectivePoint;
     use k256::{AffinePoint, EncodedPoint, Scalar};
-    use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
+    use mpc_crypto::{ScalarExt as _, derive_epsilon_near, derive_key};
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
     use super::{public_key_to_address, recover, recover_eth_address, x_coordinate};
@@ -448,11 +448,7 @@ mod tests {
 
         //println!("reduced {reduced:#?}");
 
-        if *r == reduced {
-            Ok(())
-        } else {
-            Err("error")
-        }
+        if *r == reduced { Ok(()) } else { Err("error") }
     }
 
     fn lincomb(

@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use cait_sith::PresignOutput;
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::PresignOutput;
 use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster;
 use k256::Secp256k1;
@@ -10,8 +10,8 @@ use k256::Secp256k1;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use mpc_node::mesh::Mesh;
 use mpc_node::node_client::{self, NodeClient};
-use mpc_node::protocol::contract::primitives::Participants;
 use mpc_node::protocol::contract::RunningContractState;
+use mpc_node::protocol::contract::primitives::Participants;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::sync::{SyncTask, SyncUpdate};
 use mpc_node::protocol::triple::Triple;

@@ -7,7 +7,7 @@ use crate::primitives::StorageKey;
 use borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::store::IterableMap;
-use near_sdk::{env, AccountId, Gas, NearToken, Promise};
+use near_sdk::{AccountId, Gas, NearToken, Promise, env};
 
 #[derive(
     Copy,

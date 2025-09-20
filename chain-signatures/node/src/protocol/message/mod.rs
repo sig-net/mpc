@@ -17,8 +17,8 @@ use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 use crate::node_client::NodeClient;
-use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::Config;
+use crate::protocol::message::filter::{MAX_FILTER_SIZE, MessageFilter};
 
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
@@ -1006,14 +1006,14 @@ mod tests {
     use cait_sith::protocol::Participant;
     use mpc_keys::hpke::{self, Ciphered};
     use mpc_primitives::SignId;
-    use serde::{de::DeserializeOwned, Deserialize, Serialize};
+    use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
     use crate::{
         config::{Config, LocalConfig, NetworkConfig, OverrideConfig},
         protocol::{
+            ParticipantInfo,
             contract::primitives::{ParticipantMap, Participants},
             message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
-            ParticipantInfo,
         },
         rpc::ContractStateWatcher,
         util::NearPublicKeyExt,

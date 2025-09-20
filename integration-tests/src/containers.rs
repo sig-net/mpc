@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::NodeConfig;
 use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
-use crate::NodeConfig;
 
 use anyhow::anyhow;
+use bollard::Docker;
 use bollard::container::LogsOptions;
 use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
-use bollard::Docker;
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use elliptic_curve::rand_core::OsRng;
@@ -22,12 +22,12 @@ use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
-use testcontainers::core::ExecCommand;
 use testcontainers::ContainerAsync;
+use testcontainers::core::ExecCommand;
 use testcontainers::{
+    GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
-    GenericImage, ImageExt,
 };
 use tokio::io::AsyncWriteExt;
 use tracing;

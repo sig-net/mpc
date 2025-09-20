@@ -9,20 +9,20 @@ use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::Log;
 
 use crate::sign_respond_tx::SignRespondTxStatus;
-use alloy::sol_types::{sol, SolEvent};
+use alloy::sol_types::{SolEvent, sol};
 use helios::common::types::{SubscriptionEvent, SubscriptionType};
-use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
+use helios::ethereum::{EthereumClient, EthereumClientBuilder, config::networks::Network};
 use k256::Scalar;
-use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_crypto::{ScalarExt as _, kdf::derive_epsilon_eth};
+use mpc_primitives::{LATEST_MPC_KEY_VERSION, SignArgs, SignId};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::{fmt, path::PathBuf, str::FromStr, sync::LazyLock, time::Instant};
+use tokio::sync::RwLock;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
@@ -1093,7 +1093,9 @@ async fn send_requests_when_final(
         .await;
 
         let Some(block) = block else {
-            tracing::warn!("Block {block_number} not found from Helios client, skipping this block and its requests");
+            tracing::warn!(
+                "Block {block_number} not found from Helios client, skipping this block and its requests"
+            );
             continue;
         };
 

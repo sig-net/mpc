@@ -1,19 +1,19 @@
 use std::fmt::{self, Display};
 use std::sync::OnceLock;
 
-use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
+use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, SpanExporter, WithExportConfig};
+use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::trace::{RandomIdGenerator, Sampler, SdkTracerProvider};
-use opentelemetry_sdk::Resource;
 use tracing::{Event, Subscriber};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_stackdriver::layer as stackdriver_layer;
 use tracing_subscriber::fmt::format::{Format, FormatEvent, Full};
 use tracing_subscriber::fmt::time::SystemTime;
-use tracing_subscriber::fmt::{format, FmtContext, FormatFields};
+use tracing_subscriber::fmt::{FmtContext, FormatFields, format};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;

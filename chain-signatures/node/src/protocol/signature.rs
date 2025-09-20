@@ -1,36 +1,36 @@
-use super::contract::primitives::intersect_vec;
 use super::MpcSignProtocol;
+use super::contract::primitives::intersect_vec;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
+use crate::protocol::Chain;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId, SignatureMessage};
 use crate::protocol::posit::{PositAction, PositInternalAction, Positor, Posits};
 use crate::protocol::presignature::PresignatureId;
-use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_respond_tx::SignRespondSignatureChannel;
-use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
+use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap};
 
 use crate::protocol::SignRequestType;
-use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;
+use cait_sith::protocol::{Action, InitializationError, Participant};
 use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
-use mpc_crypto::{derive_key, PublicKey};
+use mpc_crypto::{PublicKey, derive_key};
 use mpc_primitives::{SignArgs, SignId};
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
-use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::{mpsc, oneshot, watch, RwLock};
+use tokio::sync::{RwLock, mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use near_account_id::AccountId;
@@ -266,13 +266,13 @@ impl SignQueue {
                     .with_label_values(&[my_account_id.as_str()])
                     .inc();
             }
-            if let Some(pending) = self.pending.remove(&sign_id) {
-                if pending.send(request.clone()).is_err() {
-                    tracing::warn!(
-                        ?sign_id,
-                        "pending sign request channel closed before able to send request"
-                    );
-                }
+            if let Some(pending) = self.pending.remove(&sign_id)
+                && pending.send(request.clone()).is_err()
+            {
+                tracing::warn!(
+                    ?sign_id,
+                    "pending sign request channel closed before able to send request"
+                );
             }
 
             self.requests.insert(sign_id, request);

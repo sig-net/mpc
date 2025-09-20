@@ -1,8 +1,8 @@
 pub mod kdf;
 pub mod types;
 
-use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::EncodedPoint;
+use k256::elliptic_curve::sec1::FromEncodedPoint;
 pub use kdf::{derive_epsilon_near, derive_key, x_coordinate};
 pub use types::{PublicKey, ScalarExt};
 
@@ -10,7 +10,7 @@ pub use types::{PublicKey, ScalarExt};
 // We could use something VRF + pseudorandom here, but someone would likely shoot themselves in the foot with it.
 // Our crypto libraries should definately panic, because they normally expect randomness to be private
 #[cfg(target_arch = "wasm32")]
-use getrandom::{register_custom_getrandom, Error};
+use getrandom::{Error, register_custom_getrandom};
 #[cfg(target_arch = "wasm32")]
 pub fn randomness_unsupported(_: &mut [u8]) -> Result<(), Error> {
     Err(Error::UNSUPPORTED)

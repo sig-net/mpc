@@ -3,8 +3,8 @@ use axum::body::Bytes;
 use axum::extract::{FromRequest, Request};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use http::{header, HeaderMap};
-use serde::{de::DeserializeOwned, Serialize};
+use http::{HeaderMap, header};
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::protocol::message::cbor_to_bytes;
 
@@ -21,9 +21,8 @@ impl<T> Cbor<T> {
         let Ok(mime) = content_type.parse::<mime::Mime>() else {
             return false;
         };
-        let is_cbor_content_type = mime.type_() == "application"
-            && (mime.subtype() == "cbor" || mime.suffix().is_some_and(|name| name == "cbor"));
-        is_cbor_content_type
+        mime.type_() == "application"
+            && (mime.subtype() == "cbor" || mime.suffix().is_some_and(|name| name == "cbor"))
     }
 }
 

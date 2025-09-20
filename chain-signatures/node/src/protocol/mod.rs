@@ -14,8 +14,8 @@ pub mod triple;
 #[cfg(feature = "test-feature")]
 pub mod test_setup;
 
-pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
+pub use contract::primitives::ParticipantInfo;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
 pub use signature::{IndexedSignRequest, SignQueue};

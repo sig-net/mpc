@@ -5,7 +5,7 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
-use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
+use crate::protocol::{MpcSignProtocol, SignQueue, spawn_system_metrics};
 use crate::read_respond::ReadRespondedTxProcessor;
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::sign_respond_tx::SignRespondSignatureProcessor;
@@ -20,7 +20,7 @@ use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{RwLock, watch};
 use url::Url;
 
 use mpc_keys::hpke;

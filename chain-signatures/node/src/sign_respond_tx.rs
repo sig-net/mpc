@@ -1,11 +1,11 @@
-use crate::protocol::signature::SignRequest;
 use crate::protocol::SignRequestType;
-use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
+use crate::protocol::signature::SignRequest;
+use alloy::primitives::{Address, B256, Bytes, I256, U256, keccak256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use anchor_lang::prelude::Pubkey;
 use borsh::BorshSerialize;
-use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
+use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::{AffinePoint, Scalar, Secp256k1};
 use mpc_crypto::derive_key;
@@ -16,8 +16,8 @@ use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Copy)]
 pub struct SignRespondTxId(pub B256);
@@ -497,8 +497,10 @@ fn parse_borsh_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<Abi
             })
             .collect::<Result<Vec<_>, anyhow::Error>>()?,
         Value::Object(obj) => {
-            vec![serde_json::from_value(Value::Object(obj))
-                .map_err(|e| anyhow::anyhow!("invalid single object schema: {e:?}"))?]
+            vec![
+                serde_json::from_value(Value::Object(obj))
+                    .map_err(|e| anyhow::anyhow!("invalid single object schema: {e:?}"))?,
+            ]
         }
         Value::String(s) => vec![AbiField {
             name: String::new(),

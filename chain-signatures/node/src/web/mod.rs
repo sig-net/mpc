@@ -5,9 +5,9 @@ pub mod mock;
 
 use self::error::Error;
 use crate::indexer::NearIndexer;
+use crate::protocol::MessageChannel;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
-use crate::protocol::MessageChannel;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
 use crate::web::error::Result;

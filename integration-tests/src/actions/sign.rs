@@ -5,7 +5,7 @@ use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_contract::errors;
 use mpc_contract::primitives::SignRequest;
-use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{LATEST_MPC_KEY_VERSION, SignId, Signature};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
@@ -188,7 +188,7 @@ impl SignAction<'_> {
     }
 
     fn payload_or_random(&mut self) -> [u8; 32] {
-        let payload = self.payload.unwrap_or_else(|| rand::thread_rng().gen());
+        let payload = self.payload.unwrap_or_else(|| rand::thread_rng().r#gen());
         self.payload = Some(payload);
         payload
     }

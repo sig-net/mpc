@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
 pub struct MpcFixture {
     pub nodes: Vec<MpcFixtureNode>,

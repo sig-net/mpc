@@ -2,10 +2,10 @@ use std::{fmt, io};
 
 use borsh::{self, BorshDeserialize, BorshSerialize};
 use hpke::{
+    OpModeR,
     aead::{AeadTag, ChaCha20Poly1305},
     kdf::HkdfSha384,
     kem::X25519HkdfSha256,
-    OpModeR,
 };
 use serde::{Deserialize, Serialize};
 

@@ -3,7 +3,7 @@ use mockito::ServerGuard;
 
 use crate::{
     node_client::NodeClient,
-    protocol::{contract::primitives::Participants, ParticipantInfo},
+    protocol::{ParticipantInfo, contract::primitives::Participants},
 };
 
 use super::StateView;

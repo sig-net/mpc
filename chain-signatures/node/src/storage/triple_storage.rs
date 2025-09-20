@@ -9,7 +9,7 @@ use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
 use near_account_id::AccountId;
 
-use super::{owner_key, STORAGE_VERSION};
+use super::{STORAGE_VERSION, owner_key};
 
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
