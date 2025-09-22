@@ -67,7 +67,7 @@ near-account-id = "1.0.0"
 near-primitives = "0.26.0"
 near-crypto = "0.26.0"
 near-jsonrpc-client = "0.13.0"
-near-sdk = { version = "5.6.0", features = ["unit-testing", "unstable"] }
+near-sdk = "5.6.0"
 near-workspaces = "0.15.0"
 near-fetch = "0.6.0"
 
