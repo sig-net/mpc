@@ -22,7 +22,6 @@ serde_json = "1"
 thiserror = "1"
 
 near-sdk = { version = "5.2.1", features = ["legacy", "unit-testing"] }
-near-gas = { version = "0.3.0", features = ["serde", "borsh", "schemars"] }
 
 # Need to ignore root workspace
 [workspace]
