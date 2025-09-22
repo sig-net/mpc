@@ -42,7 +42,7 @@ secp256k1.workspace = true
 near-account-id.workspace = true
 near-crypto.workspace = true
 near-fetch.workspace = true
-near-sdk.workspace = true
+near-sdk = { workspace = true, features = ["non-contract-usage"] }
 near-jsonrpc-client.workspace = true
 near-primitives.workspace = true
 

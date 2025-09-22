@@ -253,7 +253,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tracing::info!(%my_address, "address detected");
 
             let client = NodeClient::new(&message_options);
-            let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
             let mesh = Mesh::new(&client, mesh_options, synced_peer_rx);
             let mesh_state = mesh.watch();
@@ -262,6 +261,11 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let eth = eth.into_config();
             let sol = sol.into_config();
             let network = NetworkConfig { cipher_sk, sign_sk };
+            let signer = InMemorySigner {
+                account_id: account_id.clone(),
+                public_key: account_sk.public_key(),
+                secret_key: account_sk,
+            };
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol);

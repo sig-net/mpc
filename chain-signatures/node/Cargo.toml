@@ -80,7 +80,7 @@ near-account-id.workspace = true
 near-crypto.workspace = true
 near-fetch.workspace = true
 near-primitives.workspace = true
-near-sdk.workspace = true
+near-sdk = { workspace = true, features = ["non-contract-usage"] }
 
 mpc-contract.workspace = true
 mpc-crypto.workspace = true
