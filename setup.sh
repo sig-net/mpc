@@ -9,12 +9,6 @@ CARGO_CMD_ARGS="$@"
 CARGO_BUILD_INDENT="            "
 echo "${CARGO_BUILD_INDENT} running MPC build script"
 
-# Check if cargo-near is installed
-if ! command -v cargo-near &> /dev/null; then
-    echo "cargo-near not found. Installing..."
-    cargo install cargo-near --locked
-fi
-
 # add additional features if we're benchmarking:
 if echo $CARGO_CMD_ARGS | grep -q "bench"; then
     FEATURES="--features bench"
