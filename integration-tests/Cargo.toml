@@ -40,15 +40,15 @@ secp256k1.workspace = true
 
 # near dependencies
 near-account-id.workspace = true
-near-crypto = "0.26.0"
-near-fetch = "0.6.0"
+near-crypto.workspace = true
+near-fetch.workspace = true
 near-sdk.workspace = true
-near-jsonrpc-client = "0.13.0"
-near-primitives = "0.26.0"
+near-jsonrpc-client.workspace = true
+near-primitives.workspace = true
 
 # if necessary, use the following branch for near related indexer hacking:
 # { git = "https://github.com/near/near-workspaces-rs", branch = "phuong/tmp-node-2.3.0" }
-near-workspaces = "0.15.0"
+near-workspaces.workspace = true
 
 # local chain-signatures dependencies
 mpc-crypto.workspace = true
