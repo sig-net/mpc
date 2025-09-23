@@ -69,7 +69,7 @@ near-crypto = "0.31.0"
 near-jsonrpc-client = "0.18.0"
 near-sdk = "5.17.2"
 near-workspaces = "0.21.0"
-near-fetch = { git = "https://github.com/volovyks/near-fetch.git", branch = "serhii/near-deps-0.31.0" } # TODO: merge and replace
+near-fetch = "0.9.0"
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
