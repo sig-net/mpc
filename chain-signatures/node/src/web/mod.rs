@@ -5,6 +5,7 @@ pub mod mock;
 
 use self::error::Error;
 use crate::indexer::NearIndexer;
+use crate::metrics::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::MessageChannel;
@@ -20,10 +21,12 @@ use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke::Ciphered;
+use near_account_id::AccountId;
 use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Instant;
 
 struct AxumState {
     node: NodeStateWatcher,
@@ -32,8 +35,10 @@ struct AxumState {
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     msg_channel: MessageChannel,
+    my_account_id: AccountId,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     port: u16,
     msg_channel: MessageChannel,
@@ -42,6 +47,7 @@ pub async fn run(
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
+    my_account_id: AccountId,
 ) {
     tracing::info!("starting web server");
     let axum_state = AxumState {
@@ -51,6 +57,7 @@ pub async fn run(
         triple_storage,
         presignature_storage,
         sync_channel,
+        my_account_id,
     };
 
     // Sync can be a large payload, so we set a higher limit for payload.
@@ -89,6 +96,7 @@ async fn msg(
     Extension(state): Extension<Arc<AxumState>>,
     WithRejection(Cbor(encrypted), _): WithRejection<Cbor<Vec<Ciphered>>, Error>,
 ) {
+    let start = Instant::now();
     for encrypted in encrypted.into_iter() {
         let msg_channel = state.msg_channel.clone();
         tokio::spawn(async move {
@@ -97,6 +105,9 @@ async fn msg(
             }
         });
     }
+    WEB_ENDPOINT_LATENCY
+        .with_label_values(&["msg", state.my_account_id.as_str()])
+        .observe(start.elapsed().as_millis() as f64);
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -128,6 +139,7 @@ pub enum StateView {
 
 #[tracing::instrument(level = "debug", skip_all)]
 async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
+    let start = Instant::now();
     tracing::debug!("fetching state");
 
     // TODO: remove once we have integration tests built using other chains
@@ -137,7 +149,7 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
         0
     };
 
-    match web.node.status() {
+    let result = match web.node.status() {
         NodeStatus::Running {
             me,
             participants,
@@ -181,7 +193,11 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
             tracing::debug!("not running, state unavailable");
             Ok(Json(StateView::NotRunning))
         }
-    }
+    };
+    WEB_ENDPOINT_LATENCY
+        .with_label_values(&["state", web.my_account_id.as_str()])
+        .observe(start.elapsed().as_millis() as f64);
+    result
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
@@ -232,6 +248,10 @@ async fn sync(
     Extension(state): Extension<Arc<AxumState>>,
     WithRejection(Cbor(update), _): WithRejection<Cbor<SyncUpdate>, Error>,
 ) -> Result<Json<()>> {
+    let start = Instant::now();
     state.sync_channel.request_update(update).await;
+    WEB_ENDPOINT_LATENCY
+        .with_label_values(&["sync", state.my_account_id.as_str()])
+        .observe(start.elapsed().as_millis() as f64);
     Ok(Json(()))
 }

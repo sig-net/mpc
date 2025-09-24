@@ -11,6 +11,7 @@ use mpc_node::protocol::{IndexedSignRequest, ProtocolState};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{watch, Mutex};
 
@@ -51,6 +52,21 @@ impl MpcFixture {
     pub async fn wait_for_presignatures(&self, threshold_per_node: usize) {
         for node in &self.nodes {
             node.wait_for_presignatures(threshold_per_node).await;
+        }
+    }
+
+    pub async fn wait_for_actions(&self, threshold: usize) -> HashSet<String> {
+        let interval = Duration::from_millis(100);
+
+        loop {
+            let actions = self.output.rpc_actions.lock().await;
+
+            if actions.len() >= threshold {
+                return actions.clone();
+            }
+
+            drop(actions);
+            tokio::time::sleep(interval).await;
         }
     }
 }

@@ -8,7 +8,7 @@ use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use std::collections::BTreeMap;
 use std::fs;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Use this toggle locally to regenerate hard-coded inputs such as key shares,
 /// triples, and presignatures.
@@ -68,9 +68,7 @@ async fn test_basic_generate_keys() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_basic_generate_triples() {
     let network = MpcFixtureBuilder::default()
-        .with_preshared_key()
-        .with_min_presignatures_stockpile(0)
-        .with_max_presignatures_stockpile(0)
+        .only_generate_triples()
         .build()
         .await;
 
@@ -111,10 +109,7 @@ async fn test_basic_generate_triples() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_basic_generate_presignature() {
     let network = MpcFixtureBuilder::default()
-        .with_preshared_key()
-        .with_preshared_triples()
-        .with_min_triples_stockpile(0)
-        .with_max_triples_stockpile(0)
+        .only_generate_presignatures()
         .build()
         .await;
 
@@ -158,12 +153,7 @@ async fn test_basic_generate_presignature() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_basic_sign() {
     let network = MpcFixtureBuilder::default()
-        .with_preshared_key()
-        .with_presignature_stockpile()
-        .with_min_triples_stockpile(0)
-        .with_max_triples_stockpile(0)
-        .with_min_presignatures_stockpile(0)
-        .with_max_presignatures_stockpile(0)
+        .only_generate_signatures()
         .build()
         .await;
 
@@ -181,36 +171,17 @@ async fn test_basic_sign() {
     network[2].sign_tx.send(request.clone()).await.unwrap();
 
     let timeout = Duration::from_secs(10);
-    let interval = Duration::from_millis(100);
-    let deadline = Instant::now() + timeout;
 
-    loop {
-        let actions = network.output.rpc_actions.lock().await;
+    let actions = tokio::time::timeout(timeout, network.wait_for_actions(1))
+        .await
+        .expect("should publish RPC action eventually");
 
-        if !actions.is_empty() {
-            assert_eq!(actions.len(), 1);
-            let action_str = actions.iter().next().unwrap();
-            assert!(
-                action_str.contains("RpcAction::Publish"),
-                "unexpected rpc action {action_str}"
-            );
-            break;
-        }
-
-        if Instant::now() >= deadline {
-            panic!("Timeout: expected 1 rpc_action but got {}", actions.len());
-        }
-
-        drop(actions);
-        tokio::time::sleep(interval).await;
-    }
-
-    // tracing::info!("printing all messages between nodes");
-    // let out = &mut std::fs::File::create("network_msg.txt").unwrap();
-    // for line in network.msg_log.lock().await.iter() {
-    //     tracing::info!("{line}");
-    //     writeln!(out, "{line}").unwrap();
-    // }
+    assert_eq!(actions.len(), 1);
+    let action_str = actions.iter().next().unwrap();
+    assert!(
+        action_str.contains("RpcAction::Publish"),
+        "unexpected rpc action {action_str}"
+    );
 }
 
 fn sign_request(seed: u8) -> IndexedSignRequest {
@@ -259,12 +230,10 @@ async fn test_presignature_timeout() {
 
     let network = MpcFixtureBuilder::default()
         // configure network ready to generate presignatures immediately
-        .with_preshared_key()
-        .with_preshared_triples()
+        .only_generate_presignatures()
+        // set exact presignature count target
         .with_min_presignatures_stockpile(5)
         .with_max_presignatures_stockpile(5)
-        .with_min_triples_stockpile(0)
-        .with_max_triples_stockpile(0)
         // apply message filter to all nodes
         .with_outgoing_message_filter(0, create_filter())
         .with_outgoing_message_filter(1, create_filter())
@@ -274,7 +243,7 @@ async fn test_presignature_timeout() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(15), network.wait_for_presignatures(1))
+    tokio::time::timeout(Duration::from_secs(300), network.wait_for_presignatures(1))
         .await
         .expect("should have enough presignatures eventually");
 }

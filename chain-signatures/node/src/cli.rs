@@ -358,6 +358,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage,
                 presignature_storage,
                 sync_channel,
+                account_id.clone(),
             ));
             tokio::spawn(indexer_eth::run(
                 eth,
