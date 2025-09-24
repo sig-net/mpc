@@ -98,6 +98,17 @@ pub(crate) static SIGN_QUEUE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     .unwrap()
 });
 
+// Redis operation metrics
+pub(crate) static REDIS_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
+    try_create_histogram_vec(
+        "multichain_redis_operation_latency_ms",
+        "Latency of Redis operations in storage layers",
+        &["protocol", "operation", "node_account_id"],
+        Some(exponential_buckets(1.0, 2.0, 15).unwrap()),
+    )
+    .unwrap()
+});
+
 pub(crate) static SIGN_QUEUE_MINE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec(
         "multichain_sign_queue_mine_size",

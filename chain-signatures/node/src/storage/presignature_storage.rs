@@ -3,6 +3,7 @@ use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
+use std::time::Instant;
 use tokio::task::JoinHandle;
 
 use crate::protocol::presignature::{Presignature, PresignatureId};
@@ -104,6 +105,7 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> PresignatureStorage {
         used_key,
         reserved_key,
         owner_keys,
+        account_id: account_id.clone(),
     }
 }
 
@@ -114,6 +116,7 @@ pub struct PresignatureStorage {
     used_key: String,
     reserved_key: String,
     owner_keys: String,
+    account_id: AccountId,
 }
 
 impl PresignatureStorage {
@@ -163,6 +166,7 @@ impl PresignatureStorage {
             end
         "#;
 
+        let start = Instant::now();
         let mut conn = self.connect().await?;
         let result: Result<(), _> = redis::Script::new(SCRIPT)
             .key(&self.presig_key)
@@ -172,6 +176,11 @@ impl PresignatureStorage {
             .invoke_async(&mut conn)
             .await;
 
+        let elapsed = start.elapsed();
+        crate::metrics::REDIS_LATENCY
+            .with_label_values(&["presignature", "reserve", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
+
         match result {
             Ok(_) => Some(PresignatureSlot {
                 id,
@@ -179,7 +188,12 @@ impl PresignatureStorage {
                 stored: false,
             }),
             Err(err) => {
-                tracing::warn!(id, ?err, "failed to reserve presignature");
+                tracing::warn!(
+                    id,
+                    ?err,
+                    elapsed_ms = elapsed.as_millis(),
+                    "failed to reserve presignature"
+                );
                 None
             }
         }
@@ -239,6 +253,7 @@ impl PresignatureStorage {
             return outdated
         "#;
 
+        let start = Instant::now();
         let Some(mut conn) = self.connect().await else {
             return Vec::new();
         };
@@ -251,15 +266,28 @@ impl PresignatureStorage {
             .invoke_async(&mut conn)
             .await;
 
+        let elapsed = start.elapsed();
+        crate::metrics::REDIS_LATENCY
+            .with_label_values(&["presignature", "remove_outdated", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
+
         match result {
             Ok(outdated) => {
                 if !outdated.is_empty() {
-                    tracing::info!(?outdated, "removed outdated presignatures");
+                    tracing::info!(
+                        ?outdated,
+                        elapsed_ms = elapsed.as_millis(),
+                        "removed outdated presignatures"
+                    );
                 }
                 outdated
             }
             Err(err) => {
-                tracing::warn!(?err, "failed to remove outdated presignatures");
+                tracing::warn!(
+                    ?err,
+                    elapsed_ms = elapsed.as_millis(),
+                    "failed to remove outdated presignatures"
+                );
                 Vec::new()
             }
         }
@@ -292,6 +320,7 @@ impl PresignatureStorage {
             redis.call("HSET", presig_key, presig_id, presig)
         "#;
 
+        let start = Instant::now();
         let id = presignature.id;
         let Some(mut conn) = self.connect().await else {
             tracing::warn!(id, "failed to insert presignature: connection failed");
@@ -308,10 +337,20 @@ impl PresignatureStorage {
             .invoke_async(&mut conn)
             .await;
 
+        let elapsed = start.elapsed();
+        crate::metrics::REDIS_LATENCY
+            .with_label_values(&["presignature", "insert", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
+
         match outcome {
             Ok(()) => true,
             Err(err) => {
-                tracing::warn!(id, ?err, "failed to insert presignature");
+                tracing::warn!(
+                    id,
+                    ?err,
+                    elapsed_ms = elapsed.as_millis(),
+                    "failed to insert presignature"
+                );
                 false
             }
         }
@@ -399,8 +438,9 @@ impl PresignatureStorage {
             return presig
         "#;
 
+        let start = Instant::now();
         let mut conn = self.connect().await?;
-        match redis::Script::new(SCRIPT)
+        let result = redis::Script::new(SCRIPT)
             .key(&self.presig_key)
             .key(&self.used_key)
             .key(owner_key(&self.owner_keys, owner))
@@ -409,11 +449,24 @@ impl PresignatureStorage {
             .arg(id)
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
-            .await
-        {
+            .await;
+
+        let elapsed = start.elapsed();
+        crate::metrics::REDIS_LATENCY
+            .with_label_values(&["presignature", "take", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
+
+        match result {
             Ok(presignature) => Some(PresignatureTaken::foreigner(presignature)),
             Err(err) => {
-                tracing::warn!(id, ?owner, ?me, ?err, "failed to take presignature");
+                tracing::warn!(
+                    id,
+                    ?owner,
+                    ?me,
+                    ?err,
+                    elapsed_ms = elapsed.as_millis(),
+                    "failed to take presignature"
+                );
                 None
             }
         }
@@ -444,20 +497,32 @@ impl PresignatureStorage {
             return presig
         "#;
 
+        let start = Instant::now();
         let mut conn = self.connect().await?;
-        match redis::Script::new(SCRIPT)
+        let result = redis::Script::new(SCRIPT)
             .key(&self.presig_key)
             .key(&self.used_key)
             .key(&self.reserved_key)
             .key(owner_key(&self.owner_keys, me))
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
-            .await
-        {
+            .await;
+
+        let elapsed = start.elapsed();
+        crate::metrics::REDIS_LATENCY
+            .with_label_values(&["presignature", "take_mine", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
+
+        match result {
             Ok(Some(presignature)) => Some(PresignatureTaken::owner(presignature, self.clone())),
             Ok(None) => None,
             Err(err) => {
-                tracing::warn!(?me, ?err, "failed to take my presignature");
+                tracing::warn!(
+                    ?me,
+                    ?err,
+                    elapsed_ms = elapsed.as_millis(),
+                    "failed to take my presignature"
+                );
                 None
             }
         }
@@ -508,6 +573,7 @@ impl PresignatureStorage {
             redis.call("DEL", unpack(del))
         "#;
 
+        let start = Instant::now();
         let Some(mut conn) = self.connect().await else {
             return false;
         };
@@ -519,9 +585,20 @@ impl PresignatureStorage {
             .invoke_async(&mut conn)
             .await
             .inspect_err(|err| {
-                tracing::warn!(?err, "failed to clear presignature storage");
+                let elapsed = start.elapsed();
+                tracing::warn!(
+                    ?err,
+                    elapsed_ms = elapsed.as_millis(),
+                    "failed to clear presignature storage"
+                );
             })
             .ok();
+
+        let elapsed = start.elapsed();
+        crate::metrics::REDIS_LATENCY
+            .with_label_values(&["presignature", "clear", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
+
         outcome.is_some()
     }
 }
