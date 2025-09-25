@@ -46,6 +46,11 @@ pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     .unwrap()
 });
 
+const CPI_EVENT_HINTS: &[&str] = &[
+    "Program log: Instruction: Sign",
+    "Program log: Instruction: SignRespond",
+];
+
 #[derive(Clone)]
 pub struct SolConfig {
     /// The solana account secret key used to sign solana respond txn.
@@ -654,10 +659,18 @@ where
     let mut seen: HashMap<Signature, Instant> = HashMap::new();
     let ttl = Duration::from_secs(30);
 
+    let target_program_str = program_id.to_string();
+    let program_invoke_str = format!("Program {} invoke [", target_program_str);
     while let Some(response) = stream.next().await {
         if response.value.err.is_some() {
             continue;
         }
+
+        let logs = &response.value.logs;
+        if !looks_like_cpi_sign_event(logs) || !has_log_starts_with(logs, &program_invoke_str) {
+            continue;
+        }
+
         let Ok(signature) = Signature::from_str(&response.value.signature) else {
             tracing::warn!("Invalid signature format");
             continue;
@@ -681,4 +694,13 @@ where
     }
 
     Ok(())
+}
+
+fn looks_like_cpi_sign_event(logs: &[String]) -> bool {
+    logs.iter()
+        .any(|l| CPI_EVENT_HINTS.iter().any(|h| l.contains(h)))
+}
+
+fn has_log_starts_with(logs: &[String], start_with: &str) -> bool {
+    logs.iter().any(|l| l.starts_with(start_with))
 }
