@@ -665,7 +665,7 @@ where
         let now = Instant::now();
         // Periodic cleanup of expired entries in the TTL cache
         seen.retain(|_, &mut timestamp| now.duration_since(timestamp) < ttl);
-        if seen.get(&signature).is_some() {
+        if seen.contains_key(&signature) {
             continue;
         }
         seen.insert(signature, now);
