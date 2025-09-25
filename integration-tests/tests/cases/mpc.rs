@@ -19,6 +19,9 @@ use std::time::Duration;
 /// Use this toggle locally to regenerate hard-coded inputs such as key shares,
 /// triples, and presignatures.
 /// You might have to create the directory `integrations-tests/tmp` first.
+/// Also make sure to set larger values for how many triples or presignatures to
+/// generate, max stockpile settings, as well as increase the timeout.
+/// Hint for performance: run it with `--release --workspace` to speed it up
 const WRITE_OUTPUT_TO_FILES: bool = false;
 const KEY_SHARE_FILE: &str = "tmp/key_shares.json";
 const TRIPLES_FILE: &str = "tmp/triples.json";
@@ -884,4 +887,55 @@ async fn test_signature_message_count() {
             }
         }
     }
+}
+
+/// Check if presignatures are produced normally when one of three nodes is offline.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn test_presignature_with_offline_node() {
+    let offline_node_filter: MessageFilter = Box::new(move |(_, _)| false);
+
+    // Must be small enough to work with fixture stockpile of triples.
+    // Each node has at least 8 triples in the fixture, so 4 presignatures should be possible.
+    let target_num = 4;
+
+    let network = MpcFixtureBuilder::new(7, 4)
+        .only_generate_presignatures()
+        .with_outgoing_message_filter(0, offline_node_filter)
+        // ensure the network tries to generate enough presigs
+        .with_min_presignatures_stockpile(target_num)
+        .build()
+        .await;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(100),
+        network.wait_for_presignatures(target_num as usize),
+    )
+    .await;
+
+    result.expect("should have enough presignatures eventually");
+}
+
+/// Check if triples are produced normally when one of three nodes is offline.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn test_triple_with_offline_node() {
+    let offline_node_filter: MessageFilter = Box::new(move |(_, _)| false);
+
+    // Must be small enough to not take too long. (generating triples is
+    // computationally heavy)
+    let target_num = 3;
+
+    let network = MpcFixtureBuilder::new(7, 4)
+        .only_generate_triples()
+        .with_outgoing_message_filter(0, offline_node_filter)
+        // ensure the network tries to generate enough triples
+        .with_min_triples_stockpile(target_num)
+        .build()
+        .await;
+
+    tokio::time::timeout(
+        Duration::from_secs(100),
+        network.wait_for_triples(target_num as usize),
+    )
+    .await
+    .expect("should have enough triples eventually");
 }
