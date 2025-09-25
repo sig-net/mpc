@@ -655,9 +655,6 @@ where
     let ttl = Duration::from_secs(30);
 
     while let Some(response) = stream.next().await {
-        // Periodic cleanup of expired entries in the TTL cache
-        let now = Instant::now();
-        seen.retain(|_, &mut timestamp| now.duration_since(timestamp) < ttl);
         if response.value.err.is_some() {
             continue;
         }
@@ -665,12 +662,11 @@ where
             tracing::warn!("Invalid signature format");
             continue;
         };
-
         let now = Instant::now();
-        if let Some(last) = seen.get(&signature) {
-            if now.duration_since(*last) < ttl {
-                continue; // Skip recently seen signatures
-            }
+        // Periodic cleanup of expired entries in the TTL cache
+        seen.retain(|_, &mut timestamp| now.duration_since(timestamp) < ttl);
+        if seen.get(&signature).is_some() {
+            continue;
         }
         seen.insert(signature, now);
 
