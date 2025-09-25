@@ -22,6 +22,7 @@ use solana_client::{
 };
 use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
+use std::collections::HashMap;
 use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -639,8 +640,6 @@ async fn subscribe_to_program_cpi_events<F>(
 where
     F: FnMut(SignatureEventBox, Signature, u64) + Send,
 {
-    use std::collections::HashMap;
-
     let rpc_client = RpcClient::new(rpc_url.to_string());
     let pubsub_client = PubsubClient::new(ws_url).await?;
 
@@ -656,6 +655,9 @@ where
     let ttl = Duration::from_secs(30);
 
     while let Some(response) = stream.next().await {
+        // Periodic cleanup of expired entries in the TTL cache
+        let now = Instant::now();
+        seen.retain(|_, &mut timestamp| now.duration_since(timestamp) < ttl);
         if response.value.err.is_some() {
             continue;
         }
