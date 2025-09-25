@@ -144,7 +144,7 @@ impl NodeConnection {
                             }
                         }
                         Err(err) => {
-                            tracing::warn!(?node, ?err, "checking /state failed");
+                            tracing::warn!(?node, ?err, "checking /status failed");
                             status_tx.send_if_modified(|(status, _)| {
                                 std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
                             });
