@@ -11,7 +11,6 @@ use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
 use tokio::signal;
-use tracing_subscriber::EnvFilter;
 
 mod commands;
 
@@ -51,10 +50,7 @@ enum Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let subscriber = tracing_subscriber::fmt()
-        .with_thread_ids(true)
-        .with_env_filter(EnvFilter::from_default_env());
-    subscriber.init();
+    integration_tests::utils::init_tracing_log();
 
     match Cli::parse() {
         Cli::SetupEnv {
@@ -101,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
             println!("  release:        {}", ctx.release);
 
             println!("\nExternal services:");
-            println!("  lake_indexer:  {}", ctx.lake_indexer.rpc_host_address);
+            println!("  near sandbox rpc:  {}", ctx.worker.rpc_addr());
             println!("  redis:  {}", ctx.redis.internal_address);
 
             println!("\nNodes:");

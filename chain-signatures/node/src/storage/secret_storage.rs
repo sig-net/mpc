@@ -156,3 +156,19 @@ pub fn init(
         }
     }
 }
+
+#[cfg(feature = "test-feature")]
+pub fn test_store(
+    epoch: u64,
+    private_share: crate::types::SecretKeyShare,
+    public_key: mpc_crypto::PublicKey,
+) -> SecretNodeStorageBox {
+    let store = MemoryNodeStorage {
+        node_data: Some(PersistentNodeData {
+            epoch,
+            private_share,
+            public_key,
+        }),
+    };
+    Box::new(store) as SecretNodeStorageBox
+}

@@ -2,7 +2,6 @@ use std::fmt;
 
 use crate::{execute, utils, NodeConfig};
 
-use crate::containers::LakeIndexer;
 use crate::execute::executable;
 use anyhow::Context;
 use async_process::Child;
@@ -62,15 +61,11 @@ impl Node {
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
         let indexer_options = mpc_node::indexer::Options {
-            s3_bucket: ctx.localstack.s3_bucket.clone(),
-            s3_region: ctx.localstack.s3_region.clone(),
-            s3_url: Some(ctx.localstack.s3_host_address.clone()),
             running_threshold: 120,
-            behind_threshold: 120,
         };
         let eth = mpc_node::indexer_eth::EthArgs::from_config(cfg.eth.clone());
         let sol = mpc_node::indexer_sol::SolArgs::from_config(cfg.sol.clone());
-        let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
+        let near_rpc = ctx.worker.rpc_addr();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: near_rpc.clone(),
@@ -127,25 +122,7 @@ impl Node {
         let (cipher_sk, _cipher_pk) = hpke::generate();
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
-        let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
-
-        let near_rpc = if ctx.toxiproxy {
-            let proxy_name = format!("rpc_from_node_{}", account.id());
-            let rpc_port_proxied = utils::pick_unused_port().await?;
-            let rpc_address_proxied = format!("http://127.0.0.1:{rpc_port_proxied}");
-            tracing::info!(
-                "Proxy RPC address {} accessed by node@{} to {}",
-                near_rpc,
-                account.id(),
-                rpc_address_proxied
-            );
-            LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc)
-                .await
-                .unwrap();
-            rpc_address_proxied
-        } else {
-            near_rpc
-        };
+        let near_rpc = ctx.worker.rpc_addr();
 
         let mut cfg = cfg.clone();
         if let Some(ref mut eth_config) = cfg.eth {
@@ -170,11 +147,7 @@ impl Node {
     pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
         let indexer_options = mpc_node::indexer::Options {
-            s3_bucket: ctx.localstack.s3_bucket.clone(),
-            s3_region: ctx.localstack.s3_region.clone(),
-            s3_url: Some(ctx.localstack.s3_host_address.clone()),
             running_threshold: 120,
-            behind_threshold: 120,
         };
 
         let eth = EthArgs::from_config(config.cfg.eth.clone());

@@ -6,6 +6,21 @@ use near_workspaces::{
     Account, AccountId, Worker,
 };
 use rand::Rng;
+use std::sync::Once;
+use tracing_subscriber::EnvFilter;
+
+static INIT: Once = Once::new();
+
+/// Call at least once in every test to see tracing output
+pub fn init_tracing_log() {
+    INIT.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_thread_ids(true)
+            .with_env_filter(EnvFilter::from_default_env());
+
+        subscriber.init();
+    });
+}
 
 pub async fn vote_join(
     accounts: &[&Account],
@@ -155,7 +170,7 @@ pub async fn dev_gen_indexed(worker: &Worker<Sandbox>, index: usize) -> anyhow::
             c as char
         })
         .collect();
-    let account_id = format!("{index}-{random_chars}.test.near");
+    let account_id = format!("{index}-{random_chars}");
     let account_id: AccountId = account_id.try_into().expect("Failed to create Acc ID");
     let sk = SecretKey::from_seed(KeyType::ED25519, "seed");
     let account = worker

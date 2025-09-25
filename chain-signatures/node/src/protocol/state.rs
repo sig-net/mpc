@@ -150,6 +150,8 @@ pub struct Node {
     pub state: NodeState,
     pub watcher_tx: watch::Sender<NodeStatus>,
     pub watcher: NodeStateWatcher,
+    #[cfg(feature = "test-feature")]
+    test_key_info_watcher_tx: watch::Sender<Option<NodeKeyInfo>>,
 }
 
 impl Default for Node {
@@ -161,13 +163,19 @@ impl Default for Node {
 impl Node {
     pub fn new() -> Self {
         let (watcher_tx, watcher_rx) = watch::channel(NodeStatus::Starting);
+        #[cfg(feature = "test-feature")]
+        let (test_key_info_watcher_tx, test_key_info_watcher) = watch::channel(None);
         let watcher = NodeStateWatcher {
             watcher: watcher_rx,
+            #[cfg(feature = "test-feature")]
+            test_key_info_watcher,
         };
         Self {
             state: NodeState::Starting,
             watcher_tx,
             watcher,
+            #[cfg(feature = "test-feature")]
+            test_key_info_watcher_tx,
         }
     }
 
@@ -213,12 +221,19 @@ impl Node {
                 });
             }
         }
+
+        #[cfg(feature = "test-feature")]
+        let _ = self.test_key_info_watcher_tx.send(self.state.key_info());
     }
 }
 
 #[derive(Clone)]
 pub struct NodeStateWatcher {
     watcher: watch::Receiver<NodeStatus>,
+    // Note: this gives access to the private key share and should not be
+    // exposed to other code outside of tests
+    #[cfg(feature = "test-feature")]
+    pub test_key_info_watcher: watch::Receiver<Option<NodeKeyInfo>>,
 }
 
 impl NodeStateWatcher {
@@ -244,6 +259,42 @@ impl NodeStateWatcher {
             } => new_participants,
             NodeStatus::Joining { participants } => participants,
             _ => Vec::new(),
+        }
+    }
+}
+
+#[cfg(feature = "test-feature")]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NodeKeyInfo {
+    pub private_share: SecretKeyShare,
+    pub public_key: PublicKey,
+}
+
+#[cfg(feature = "test-feature")]
+impl NodeState {
+    fn key_info(&self) -> Option<NodeKeyInfo> {
+        match &self {
+            NodeState::Started(state) => {
+                state
+                    .persistent_node_data
+                    .as_ref()
+                    .map(|stored| NodeKeyInfo {
+                        private_share: stored.private_share,
+                        public_key: stored.public_key,
+                    })
+            }
+            NodeState::Starting => None,
+            NodeState::Generating(_state) => None,
+            NodeState::WaitingForConsensus(state) => Some(NodeKeyInfo {
+                private_share: state.private_share,
+                public_key: state.public_key,
+            }),
+            NodeState::Running(state) => Some(NodeKeyInfo {
+                private_share: state.private_share,
+                public_key: state.public_key,
+            }),
+            NodeState::Resharing(_state) => None,
+            NodeState::Joining(_state) => None,
         }
     }
 }
