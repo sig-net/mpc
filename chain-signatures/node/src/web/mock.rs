@@ -39,7 +39,7 @@ impl MockServer {
         server
             .mock("GET", "/status")
             .with_status(201)
-            .with_header("content-type", "text/plain")
+            .with_header("content-type", "application/json")
             .with_body(
                 serde_json::to_vec(&NodeStatus::Running {
                     me: Participant::from(id),
