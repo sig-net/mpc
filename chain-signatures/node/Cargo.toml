@@ -49,7 +49,7 @@ helios = { git = "https://github.com/a16z/helios", rev = "0a96f31125b7948bbe5c7a
 alloy.workspace = true
 anyhow.workspace = true
 borsh.workspace = true
-borsh_sol = { package = "borsh", version = "0.10.4" } # solana anchor requires borsh 0.10
+borsh_sol.workspace = true
 cait-sith.workspace = true
 ciborium.workspace = true
 clap.workspace = true
