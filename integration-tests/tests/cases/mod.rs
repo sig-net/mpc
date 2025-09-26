@@ -146,12 +146,11 @@ async fn test_key_derivation() -> anyhow::Result<()> {
             signature[32..].copy_from_slice(&s.to_bytes());
             signature
         };
-        let recovered_addr = web3::signing::recover(
+        let recovered_addr = actions::recover_eth_address(
             &outcome.payload_hash,
             &signature_for_recovery,
-            multichain_sig.recovery_id as i32,
-        )
-        .unwrap();
+            multichain_sig.recovery_id,
+        );
         assert_eq!(user_addr, recovered_addr);
     }
 

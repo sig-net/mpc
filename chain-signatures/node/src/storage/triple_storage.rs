@@ -1,4 +1,5 @@
 use std::fmt;
+use std::time::Instant;
 
 use crate::protocol::triple::{Triple, TripleId};
 
@@ -135,6 +136,7 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
         used_key,
         reserved_key,
         owner_keys,
+        account_id: account_id.clone(),
     }
 }
 
@@ -145,6 +147,7 @@ pub struct TripleStorage {
     used_key: String,
     reserved_key: String,
     owner_keys: String,
+    account_id: AccountId,
 }
 
 impl TripleStorage {
@@ -159,6 +162,8 @@ impl TripleStorage {
     }
 
     pub async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
+        let start = Instant::now();
+
         const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local used_key = KEYS[2]
@@ -190,6 +195,11 @@ impl TripleStorage {
             .invoke_async(&mut conn)
             .await;
 
+        let elapsed = start.elapsed();
+        crate::metrics::REDIS_LATENCY
+            .with_label_values(&["triple", "reserve", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
+
         match result {
             Ok(_) => Some(TripleSlot {
                 id,
@@ -197,7 +207,11 @@ impl TripleStorage {
                 stored: false,
             }),
             Err(err) => {
-                tracing::warn!(?err, "failed to reserve triple");
+                tracing::warn!(
+                    ?err,
+                    elapsed_ms = elapsed.as_millis(),
+                    "failed to reserve triple"
+                );
                 None
             }
         }
@@ -218,6 +232,8 @@ impl TripleStorage {
         owner: Participant,
         owner_shares: &[TripleId],
     ) -> Vec<TripleId> {
+        let start = Instant::now();
+
         const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local reserved_key = KEYS[2]
@@ -270,15 +286,28 @@ impl TripleStorage {
             .invoke_async(&mut conn)
             .await;
 
+        let elapsed = start.elapsed();
+        crate::metrics::REDIS_LATENCY
+            .with_label_values(&["triple", "remove_outdated", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
+
         match result {
             Ok(outdated) => {
                 if !outdated.is_empty() {
-                    tracing::info!(?outdated, "removed outdated triples");
+                    tracing::info!(
+                        ?outdated,
+                        elapsed_ms = elapsed.as_millis(),
+                        "removed outdated triples"
+                    );
                 }
                 outdated
             }
             Err(err) => {
-                tracing::warn!(?err, "failed to remove outdated triples");
+                tracing::warn!(
+                    ?err,
+                    elapsed_ms = elapsed.as_millis(),
+                    "failed to remove outdated triples"
+                );
                 Vec::new()
             }
         }
@@ -299,6 +328,8 @@ impl TripleStorage {
     }
 
     async fn insert(&self, triple: Triple, owner: Participant) -> bool {
+        let start = Instant::now();
+
         const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local used_key = KEYS[2]
@@ -339,8 +370,18 @@ impl TripleStorage {
             .invoke_async(&mut conn)
             .await;
 
+        let elapsed = start.elapsed();
+        crate::metrics::REDIS_LATENCY
+            .with_label_values(&["triple", "insert", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
+
         if let Err(err) = result {
-            tracing::warn!(id, ?err, "failed to insert triple into storage");
+            tracing::warn!(
+                id,
+                ?err,
+                elapsed_ms = elapsed.as_millis(),
+                "failed to insert triple into storage"
+            );
             false
         } else {
             true
@@ -456,8 +497,9 @@ impl TripleStorage {
             return triples
         "#;
 
+        let start = Instant::now();
         let mut conn = self.connect().await?;
-        match redis::Script::new(SCRIPT)
+        let result = redis::Script::new(SCRIPT)
             .key(&self.triple_key)
             .key(&self.used_key)
             .key(owner_key(&self.owner_keys, owner))
@@ -467,14 +509,31 @@ impl TripleStorage {
             .arg(id2)
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
-            .await
-        {
+            .await;
+
+        let elapsed = start.elapsed();
+        crate::metrics::REDIS_LATENCY
+            .with_label_values(&["triple", "take_two", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
+
+        match result {
             Ok((triple0, triple1)) => {
-                tracing::debug!(id1, id2, "took two triples");
+                tracing::debug!(
+                    id1,
+                    id2,
+                    elapsed_ms = elapsed.as_millis(),
+                    "took two triples"
+                );
                 Some(TriplesTaken::foreigner(triple0, triple1))
             }
             Err(err) => {
-                tracing::warn!(id1, id2, ?err, "failed to take two triples from storage");
+                tracing::warn!(
+                    id1,
+                    id2,
+                    ?err,
+                    elapsed_ms = elapsed.as_millis(),
+                    "failed to take two triples from storage"
+                );
                 None
             }
         }
@@ -523,28 +582,40 @@ impl TripleStorage {
             return triples
         "#;
 
+        let start = Instant::now();
         let mut conn = self.connect().await?;
-        match redis::Script::new(SCRIPT)
+        let result = redis::Script::new(SCRIPT)
             .key(&self.triple_key)
             .key(&self.used_key)
             .key(owner_key(&self.owner_keys, me))
             .key(&self.reserved_key)
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
-            .await
-        {
+            .await;
+
+        let elapsed = start.elapsed();
+        crate::metrics::REDIS_LATENCY
+            .with_label_values(&["triple", "take_two_mine", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
+
+        match result {
             Ok(Some((triple0, triple1))) => {
                 let taken = TriplesTaken::owner(triple0, triple1, self.clone());
                 tracing::debug!(
                     id0 = taken.triple0.id,
                     id1 = taken.triple1.id,
+                    elapsed_ms = elapsed.as_millis(),
                     "took two mine triples"
                 );
                 Some(taken)
             }
             Ok(None) => None,
             Err(err) => {
-                tracing::warn!(?err, "failed to take two mine triples from storage");
+                tracing::warn!(
+                    ?err,
+                    elapsed_ms = elapsed.as_millis(),
+                    "failed to take two mine triples from storage"
+                );
                 None
             }
         }
@@ -597,6 +668,7 @@ impl TripleStorage {
             redis.call("DEL", unpack(del))
         "#;
 
+        let start = Instant::now();
         let Some(mut conn) = self.connect().await else {
             return false;
         };
@@ -608,9 +680,19 @@ impl TripleStorage {
             .invoke_async(&mut conn)
             .await
             .inspect_err(|err| {
-                tracing::warn!(?err, "failed to clear triple storage");
+                let elapsed = start.elapsed();
+                tracing::warn!(
+                    ?err,
+                    elapsed_ms = elapsed.as_millis(),
+                    "failed to clear triple storage"
+                );
             })
             .ok();
+
+        let elapsed = start.elapsed();
+        crate::metrics::REDIS_LATENCY
+            .with_label_values(&["triple", "clear", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
 
         // if the outcome is None, it means the script failed or there was an error.
         outcome.is_some()

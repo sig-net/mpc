@@ -144,20 +144,24 @@ mod tests {
         let mut watcher = pool.watch();
         pool.connect_nodes(&participants, &mut HashSet::new()).await;
 
-        // sleep a bit before trying to get the status.
-        tokio::time::sleep(PING_INTERVAL).await;
-
-        for i in 0..num_nodes {
-            match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
-                Ok((participant, status, _info)) => {
-                    tracing::info!(?participant, ?status, "got connection update");
-                    assert!(matches!(status, NodeStatus::Active));
-                }
-                Err(_) => {
-                    panic!("{i}: timeout waiting for connection update");
+        tokio::time::timeout(Duration::from_millis(1000), async {
+            let mut active_count = HashSet::new();
+            while active_count.len() < num_nodes {
+                match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
+                    Ok((participant, status, _info)) => {
+                        tracing::info!(?participant, ?status, "got connection update");
+                        if matches!(status, NodeStatus::Active) {
+                            active_count.insert(participant);
+                        }
+                    }
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
                 }
             }
-        }
+        })
+        .await
+        .unwrap();
     }
 
     #[test(tokio::test)]
@@ -189,33 +193,60 @@ mod tests {
 
         // check that the mesh state is updated.
         {
-            // give the mesh some time to run and update the connections.
-            tokio::time::sleep(PING_INTERVAL).await;
-            let state = mesh_state.borrow();
-            assert_eq!(state.active.len(), num_nodes);
-            assert_eq!(state.active, servers.participants());
+            let expected_participants = servers.participants();
+            tokio::time::timeout(Duration::from_millis(1000), async {
+                let mut interval = tokio::time::interval(Duration::from_millis(10));
+                loop {
+                    interval.tick().await;
+                    let state = mesh_state.borrow();
+                    if state.active.len() == num_nodes && state.active == expected_participants {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
         }
 
         // check that the mesh state is updated when a participant goes offline
         {
             servers[0].make_offline().await;
-            tokio::time::sleep(PING_INTERVAL).await;
 
-            let state = mesh_state.borrow();
-            assert_eq!(state.active.len(), num_nodes - 1);
-            assert!(state.active.contains_key(&servers[1].id()));
-            assert!(state.active.contains_key(&servers[2].id()));
-            assert!(state.stable.contains(&servers[1].id()));
-            assert!(state.stable.contains(&servers[2].id()));
+            tokio::time::timeout(Duration::from_millis(1000), async {
+                let mut interval = tokio::time::interval(Duration::from_millis(10));
+                loop {
+                    interval.tick().await;
+                    let state = mesh_state.borrow();
+                    if state.active.len() == num_nodes - 1
+                        && state.active.contains_key(&servers[1].id())
+                        && state.active.contains_key(&servers[2].id())
+                        && state.stable.contains(&servers[1].id())
+                        && state.stable.contains(&servers[2].id())
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
         }
 
         // check that the mesh state is updated when a participant goes back online.
         {
             servers[0].make_online().await;
-            tokio::time::sleep(PING_INTERVAL).await;
 
-            let state = mesh_state.borrow();
-            assert_eq!(state.active.len(), num_nodes);
+            tokio::time::timeout(Duration::from_millis(1000), async {
+                let mut interval = tokio::time::interval(Duration::from_millis(10));
+                loop {
+                    interval.tick().await;
+                    let state = mesh_state.borrow();
+                    if state.active.len() == num_nodes {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
         }
 
         mesh_task.abort();
@@ -261,19 +292,27 @@ mod tests {
                 tracing::info!(?contract, "updating contract with new participant");
             });
 
-            tokio::time::sleep(PING_INTERVAL).await;
-            let state = mesh_state.borrow();
-            assert_eq!(state.active.len(), num_nodes);
-            assert_eq!(state.active, servers.participants());
-            assert_eq!(state.stable.len(), num_nodes);
-            assert_eq!(
-                state.stable,
-                servers
-                    .participants()
-                    .keys()
-                    .copied()
-                    .collect::<BTreeSet<_>>()
-            );
+            // Wait for the mesh to process the contract update and connect the new participant
+            let expected_participants = servers.participants();
+            let expected_stable: BTreeSet<_> = expected_participants.keys().copied().collect();
+
+            tokio::time::timeout(Duration::from_millis(1000), async {
+                let mut interval = tokio::time::interval(Duration::from_millis(10));
+                loop {
+                    interval.tick().await;
+                    let state = mesh_state.borrow();
+                    if state.active.len() == num_nodes
+                        && state.active == expected_participants
+                        && state.stable.len() == num_nodes
+                        && state.stable == expected_stable
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("timeout waiting for contract update"))
+            .unwrap();
         }
 
         // check on node deletion with contract change.
@@ -288,19 +327,26 @@ mod tests {
                 _ => tracing::warn!("expected running contract"),
             });
 
-            tokio::time::sleep(PING_INTERVAL).await;
-            let state = mesh_state.borrow();
-            assert_eq!(state.active.len(), num_nodes);
-            assert_eq!(state.active, servers.participants());
-            assert_eq!(state.stable.len(), num_nodes);
-            assert_eq!(
-                state.stable,
-                servers
-                    .participants()
-                    .keys()
-                    .copied()
-                    .collect::<BTreeSet<_>>()
-            );
+            // Wait for the mesh to process the contract update and remove the participant
+            let expected_participants = servers.participants();
+            let expected_stable: BTreeSet<_> = expected_participants.keys().copied().collect();
+
+            tokio::time::timeout(Duration::from_millis(1000), async {
+                let mut interval = tokio::time::interval(Duration::from_millis(10));
+                loop {
+                    interval.tick().await;
+                    let state = mesh_state.borrow();
+                    if state.active.len() == num_nodes
+                        && state.active == expected_participants
+                        && state.stable.len() == num_nodes
+                        && state.stable == expected_stable
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
         }
 
         mesh_task.abort();
