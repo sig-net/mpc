@@ -333,6 +333,9 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                 ?expired_deliberators,
                 ?expired_proposers,
                 ?expired_and_accepted,
+                total_expired = expired_proposers.len()
+                    + expired_deliberators.len()
+                    + expired_and_accepted.len(),
                 "expiring posits"
             );
         }

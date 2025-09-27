@@ -431,7 +431,9 @@ impl PresignatureSpawner {
 
         match internal_action {
             PositInternalAction::None => {}
-            PositInternalAction::Abort => {}
+            PositInternalAction::Abort => {
+                tracing::warn!(?id, "presignature posit aborted due to too many rejections");
+            }
             PositInternalAction::Reply(action) => {
                 self.msg
                     .send(
@@ -682,6 +684,10 @@ impl PresignatureSpawner {
                 _ = expiration_interval.tick() => {
                     for (id, action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(60)) {
                         let PositInternalAction::StartProtocol(participants, positor) = action else {
+                            tracing::warn!(
+                                ?id,
+                                "presignature posit expired: insufficient accepts"
+                            );
                             continue;
                         };
                         let timeout = config.borrow().protocol.presignature.generation_timeout;
