@@ -404,6 +404,12 @@ impl PresignatureSpawner {
                 "presignature id does not match the expected hash"
             );
             PositInternalAction::Reply(PositAction::Reject)
+        } else if self.contains_ongoing(id.id) {
+            tracing::warn!(?id, ?from, ?action, "presignature already generating");
+            PositInternalAction::Reply(PositAction::Reject)
+        } else if self.contains(id.id).await {
+            tracing::warn!(?id, ?from, ?action, "presignature already generated");
+            PositInternalAction::Reply(PositAction::Reject)
         } else if !{
             // TODO: we can potentially wait for the triples to exist first to then be able to accept.
             // whereas we just blatantly reject here. The problem with waiting is that the other side
@@ -418,12 +424,6 @@ impl PresignatureSpawner {
                 ?action,
                 "presignature required triples are not known"
             );
-            PositInternalAction::Reply(PositAction::Reject)
-        } else if self.contains_ongoing(id.id) {
-            tracing::warn!(?id, ?from, ?action, "presignature already generating");
-            PositInternalAction::Reply(PositAction::Reject)
-        } else if self.contains(id.id).await {
-            tracing::warn!(?id, ?from, ?action, "presignature already generated");
             PositInternalAction::Reply(PositAction::Reject)
         } else {
             self.posits.act(id, from, self.threshold, &action)
