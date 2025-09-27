@@ -814,42 +814,8 @@ impl SignatureSpawner {
                     .await;
             }
             PositInternalAction::StartProtocol(participants, positor) => {
-                if positor.is_proposer() {
-                    for &p in &participants {
-                        if p == self.me {
-                            continue;
-                        }
-                        self.msg
-                            .send(
-                                self.me,
-                                p,
-                                PositMessage {
-                                    id: PositProtocolId::Signature(sign_id, presignature_id),
-                                    from: self.me,
-                                    action: PositAction::Start(participants.clone()),
-                                },
-                            )
-                            .await;
-                    }
-                }
-
-                let request = self.sign_queue.get_or_pending(&sign_id);
-                let presignature = match positor {
-                    Positor::Proposer(_proposer, taken) => PendingPresignature::Available(taken),
-                    Positor::Deliberator(proposer) => PendingPresignature::InStorage(
-                        presignature_id,
-                        proposer,
-                        self.presignatures.clone(),
-                    ),
-                };
-                self.generate(
-                    request,
-                    presignature,
-                    participants,
-                    cfg,
-                    self.sign_respond_signature_channel.clone(),
-                )
-                .await;
+                self.start_generation(positor, sign_id, presignature_id, participants, cfg)
+                    .await;
             }
         }
     }
@@ -905,6 +871,52 @@ impl SignatureSpawner {
         };
 
         self.ongoing.spawn((sign_id, presignature_id), task);
+    }
+
+    async fn start_generation(
+        &mut self,
+        positor: Positor<PresignatureTaken>,
+        sign_id: SignId,
+        presignature_id: PresignatureId,
+        participants: Vec<Participant>,
+        cfg: ProtocolConfig,
+    ) {
+        if positor.is_proposer() {
+            for &p in &participants {
+                if p == self.me {
+                    continue;
+                }
+                self.msg
+                    .send(
+                        self.me,
+                        p,
+                        PositMessage {
+                            id: PositProtocolId::Signature(sign_id, presignature_id),
+                            from: self.me,
+                            action: PositAction::Start(participants.clone()),
+                        },
+                    )
+                    .await;
+            }
+        }
+
+        let request = self.sign_queue.get_or_pending(&sign_id);
+        let presignature = match positor {
+            Positor::Proposer(_proposer, taken) => PendingPresignature::Available(taken),
+            Positor::Deliberator(proposer) => PendingPresignature::InStorage(
+                presignature_id,
+                proposer,
+                self.presignatures.clone(),
+            ),
+        };
+        self.generate(
+            request,
+            presignature,
+            participants,
+            cfg,
+            self.sign_respond_signature_channel.clone(),
+        )
+        .await;
     }
 
     async fn handle_requests(
@@ -1003,23 +1015,8 @@ impl SignatureSpawner {
                             },
                             _ => continue,
                         };
-                        let request = self.sign_queue.get_or_pending(&sign_id);
-                        let presignature = match positor {
-                            Positor::Proposer(_proposer, taken) => PendingPresignature::Available(taken),
-                            Positor::Deliberator(proposer) => PendingPresignature::InStorage(
-                                presignature_id,
-                                proposer,
-                                self.presignatures.clone(),
-                            ),
-                        };
-                        let cfg = cfg.borrow().protocol.clone();
-                        self.generate(
-                            request,
-                            presignature,
-                            participants,
-                            cfg,
-                            self.sign_respond_signature_channel.clone(),
-                        ).await;
+                        let protocol = cfg.borrow().protocol.clone();
+                        self.start_generation(positor, sign_id, presignature_id, participants, protocol).await;
                     }
                 }
                 Some((sign_id, presignature_id, from, action)) = posits.recv() => {
