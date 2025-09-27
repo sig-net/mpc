@@ -287,6 +287,8 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
         self.posits.is_empty()
     }
 
+    /// Expire and start protocols on enough accepted votes. Abort protocols action will be returned
+    /// if the posit has expired.
     pub fn expire_and_start(
         &mut self,
         threshold: usize,
@@ -322,6 +324,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                 ));
             } else {
                 expired_proposers.push(*id);
+                actions.push((*id, PositInternalAction::Abort));
             }
         }
 
