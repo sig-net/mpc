@@ -32,7 +32,7 @@ COPY --from=node-builder /usr/src/app/target/release/mpc-node /usr/local/bin/mpc
 COPY chain-signatures/node/redis.conf /etc/redis/redis.conf
 
 # Create a script to start both Redis and the Rust app
-RUN echo "#!/bin/bash\nredis-server /etc/redis/redis.conf &\nexec mpc-node start" > /start.sh \
+RUN echo "#!/bin/bash\nredis-server /etc/redis/redis.conf &\nexec env RUST_LOG=${RUST_LOG:-helios=info} mpc-node start" > /start.sh \
     && chmod +x /start.sh
 
 WORKDIR /usr/local/bin
