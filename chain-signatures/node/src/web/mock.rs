@@ -19,20 +19,8 @@ impl MockServer {
         server
             .mock("GET", "/state")
             .with_status(201)
-            .with_header("content-type", "text/plain")
-            .with_body(
-                serde_json::to_vec(&StateView::Running {
-                    participants: vec![Participant::from(0)],
-                    triple_count: 0,
-                    triple_mine_count: 0,
-                    triple_potential_count: 0,
-                    presignature_count: 0,
-                    presignature_mine_count: 0,
-                    presignature_potential_count: 0,
-                    latest_block_height: 0,
-                })
-                .unwrap(),
-            )
+            .with_header("content-type", "application/json")
+            .with_body(default_state_body())
             .create_async()
             .await;
 
@@ -40,15 +28,7 @@ impl MockServer {
             .mock("GET", "/status")
             .with_status(201)
             .with_header("content-type", "application/json")
-            .with_body(
-                serde_json::to_vec(&NodeStatus::Running {
-                    me: Participant::from(id),
-                    participants: vec![Participant::from(0)],
-                    ongoing_triple_gen: 0,
-                    ongoing_presignature_gen: 0,
-                })
-                .unwrap(),
-            )
+            .with_body(default_status_body(id))
             .create_async()
             .await;
 
@@ -79,7 +59,7 @@ impl MockServer {
 
     pub async fn make_offline(&mut self) {
         self.server
-            .mock("POST", "/msg")
+            .mock("GET", "/status")
             .with_status(404)
             .create_async()
             .await;
@@ -87,10 +67,10 @@ impl MockServer {
 
     pub async fn make_online(&mut self) {
         self.server
-            .mock("POST", "/msg")
+            .mock("GET", "/status")
             .with_status(201)
             .with_header("content-type", "application/json")
-            .with_body("{}")
+            .with_body(default_status_body(self.id))
             .create_async()
             .await;
     }
@@ -158,4 +138,28 @@ impl std::ops::IndexMut<usize> for MockServers {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.servers[index]
     }
+}
+
+fn default_state_body() -> Vec<u8> {
+    serde_json::to_vec(&StateView::Running {
+        participants: vec![Participant::from(0)],
+        triple_count: 0,
+        triple_mine_count: 0,
+        triple_potential_count: 0,
+        presignature_count: 0,
+        presignature_mine_count: 0,
+        presignature_potential_count: 0,
+        latest_block_height: 0,
+    })
+    .unwrap()
+}
+
+fn default_status_body(id: u32) -> Vec<u8> {
+    serde_json::to_vec(&NodeStatus::Running {
+        me: Participant::from(id),
+        participants: vec![Participant::from(0)],
+        ongoing_triple_gen: 0,
+        ongoing_presignature_gen: 0,
+    })
+    .unwrap()
 }
