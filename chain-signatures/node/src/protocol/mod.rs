@@ -20,6 +20,7 @@ pub use message::{Message, MessageChannel};
 pub use signature::{IndexedSignRequest, SignQueue};
 pub use state::{Node, NodeState};
 
+use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::indexer_sol::SignBidirectionalEvent;
 use crate::mesh::MeshState;
@@ -28,7 +29,6 @@ use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
 use crate::respond_bidirectional::RespondBidirectionalTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::sign_bidirectional::SignBidirectionalSignatureChannel;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -57,7 +57,7 @@ pub struct MpcSignProtocol {
     pub(crate) contract: ContractStateWatcher,
     pub(crate) config: watch::Receiver<Config>,
     pub(crate) mesh_state: watch::Receiver<MeshState>,
-    pub(crate) sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
+    pub(crate) backlog: Backlog,
 }
 
 /// Interface required by the [`MpcSignProtocol`] to participate in the
@@ -246,6 +246,19 @@ impl Chain {
             Chain::NEAR => "NEAR",
             Chain::Ethereum => "Ethereum",
             Chain::Solana => "Solana",
+        }
+    }
+}
+
+impl std::str::FromStr for Chain {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "NEAR" | "Near" | "near" => Ok(Chain::NEAR),
+            "Ethereum" | "ethereum" | "eth" => Ok(Chain::Ethereum),
+            "Solana" | "solana" | "sol" => Ok(Chain::Solana),
+            _ => Err(format!("unknown or unsupported chain {s}")),
         }
     }
 }

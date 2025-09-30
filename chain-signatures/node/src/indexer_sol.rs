@@ -1,3 +1,4 @@
+use crate::backlog::Backlog;
 use crate::protocol::SignRequestType;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
@@ -367,6 +368,7 @@ pub async fn run(
     sol: Option<SolConfig>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
+    backlog: Backlog,
 ) {
     let Some(sol) = sol else {
         tracing::warn!("solana indexer is disabled");
@@ -392,21 +394,15 @@ pub async fn run(
     );
 
     let total_timeout = Duration::from_secs(sol.total_timeout);
-    let sign_tx_clone = sign_tx.clone();
-    let node_near_account_id_clone = node_near_account_id.clone();
-    let rpc_http_url_clone = sol.rpc_http_url.clone();
-    let rpc_ws_url_clone = sol.rpc_ws_url.clone();
-    tokio::spawn(async move {
-        subscribe_and_process_sign_events(
-            program_id,
-            &rpc_http_url_clone,
-            &rpc_ws_url_clone,
-            sign_tx_clone,
-            node_near_account_id_clone,
-            total_timeout,
-        )
-        .await;
-    });
+    tokio::spawn(subscribe_and_process_sign_events(
+        program_id,
+        sol.rpc_http_url.clone(),
+        sol.rpc_ws_url.clone(),
+        sign_tx.clone(),
+        node_near_account_id.clone(),
+        total_timeout,
+        backlog,
+    ));
 
     // Subscribe to non-CPI sign events
     loop {
@@ -492,11 +488,12 @@ async fn process_anchor_sign_event(
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L31
 async fn subscribe_and_process_sign_events(
     program_id: Pubkey,
-    rpc_url: &str,
-    ws_url: &str,
+    rpc_url: String,
+    ws_url: String,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
+    backlog: Backlog,
 ) {
     loop {
         let sign_tx_clone = sign_tx.clone();
@@ -504,8 +501,9 @@ async fn subscribe_and_process_sign_events(
 
         let result = subscribe_to_program_cpi_events(
             program_id,
-            rpc_url,
-            ws_url,
+            &rpc_url,
+            &ws_url,
+            backlog.clone(),
             move |event, signature, _slot| {
                 tracing::info!("got event: {:?}", event);
                 let tx_sig: Vec<u8> = signature.as_ref().to_vec();
@@ -640,6 +638,7 @@ async fn subscribe_to_program_cpi_events<F>(
     program_id: Pubkey,
     rpc_url: &str,
     ws_url: &str,
+    backlog: Backlog,
     mut event_handler: F,
 ) -> Result<()>
 where
@@ -691,6 +690,10 @@ where
             }
             Err(e) => tracing::error!("Failed to parse tx {}: {}", signature, e),
         }
+
+        backlog
+            .set_processed_block(Chain::Solana, response.context.slot)
+            .await;
     }
 
     Ok(())

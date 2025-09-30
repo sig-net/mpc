@@ -1,5 +1,6 @@
 use super::contract::primitives::intersect_vec;
 use super::MpcSignProtocol;
+use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
@@ -9,7 +10,7 @@ use crate::protocol::posit::{PositAction, PositInternalAction, Positor, Posits};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::sign_bidirectional::SignBidirectionalSignatureChannel;
+use crate::sign_bidirectional::{BidirectionalTx, SignBidirectionalSignature};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
@@ -27,6 +28,7 @@ use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -388,8 +390,8 @@ struct SignatureGenerator {
     inbox: mpsc::Receiver<SignatureMessage>,
     msg: MessageChannel,
     rpc: RpcChannel,
+    backlog: Backlog,
 
-    sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
     #[cfg(feature = "debug-page")]
     debug_view: crate::web::debug::DebugPageTaskHandle,
 }
@@ -405,7 +407,7 @@ impl SignatureGenerator {
         cfg: ProtocolConfig,
         msg: MessageChannel,
         rpc: RpcChannel,
-        sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
+        backlog: Backlog,
         _my_account_id: &AccountId,
     ) -> Result<Self, InitializationError> {
         let sign_id = request.id();
@@ -465,7 +467,7 @@ impl SignatureGenerator {
             inbox,
             msg,
             rpc,
-            sign_bidirectional_signature_channel,
+            backlog,
             #[cfg(feature = "debug-page")]
             debug_view: crate::web::debug::register_task(
                 _my_account_id.to_string(),
@@ -622,12 +624,14 @@ impl SignatureGenerator {
                         .await;
                 }
                 Action::Return(output) => {
+                    let big_r = output.big_r;
+                    let s = output.s;
                     tracing::info!(
                         ?sign_id,
                         ?me,
                         presignature_id,
-                        big_r = ?output.big_r.to_base58(),
-                        s = ?output.s,
+                        big_r = ?big_r.to_base58(),
+                        ?s,
                         elapsed = ?self.created.elapsed(),
                         "completed signature generation"
                     );
@@ -645,15 +649,75 @@ impl SignatureGenerator {
                             output,
                             self.participants.clone(),
                         );
-                    } else if let SignRequestType::SignBidirectional(_) =
-                        self.request.indexed.sign_request_type
+                    }
+
+                    if let SignRequestType::SignBidirectional(event) =
+                        &self.request.indexed.sign_request_type
                     {
-                        self.sign_bidirectional_signature_channel.send(
+                        let source_chain = self.request.indexed.chain;
+                        let target_chain = match Chain::from_str(&event.dest) {
+                            Ok(chain) => chain,
+                            Err(err) => {
+                                tracing::error!(
+                                    ?sign_id,
+                                    ?source_chain,
+                                    ?err,
+                                    "invalid target chain: unable to proceed w/ SignRespond"
+                                );
+                                break Ok(());
+                            }
+                        };
+                        let expected_public_key = mpc_crypto::derive_key(
                             self.public_key,
-                            self.request.clone(),
-                            output,
-                            self.participants.clone(),
+                            self.request.indexed.args.epsilon,
                         );
+
+                        let signature = match crate::kdf::into_eth_sig(
+                            &expected_public_key,
+                            &big_r,
+                            &s,
+                            self.request.indexed.args.payload,
+                        ) {
+                            Ok(sig) => sig,
+                            Err(err) => {
+                                tracing::error!(
+                                    ?sign_id,
+                                    ?source_chain,
+                                    ?target_chain,
+                                    ?err,
+                                    "failed to generate a valid signature"
+                                );
+                                break Ok(());
+                            }
+                        };
+
+                        let signature = SignBidirectionalSignature {
+                            public_key: self.public_key,
+                            request: self.request.clone(),
+                            signature,
+                            participants: self.participants.clone(),
+                        };
+
+                        match BidirectionalTx::new(signature) {
+                            Ok(tx) => {
+                                self.backlog.insert(target_chain, sign_id, tx).await;
+                                tracing::info!(
+                                    ?sign_id,
+                                    ?source_chain,
+                                    ?target_chain,
+                                    "inserted SignRespond tx into backlog with Pending status"
+                                );
+                            }
+                            Err(err) => {
+                                tracing::error!(
+                                    ?sign_id,
+                                    ?source_chain,
+                                    ?target_chain,
+                                    ?err,
+                                    "failed to create SignRespondTx",
+                                );
+                            }
+                        }
                     }
 
                     break Ok(());
@@ -700,7 +764,7 @@ pub struct SignatureSpawner {
     epoch: u64,
     msg: MessageChannel,
     rpc: RpcChannel,
-    sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
+    backlog: Backlog,
 }
 
 impl SignatureSpawner {
@@ -715,7 +779,7 @@ impl SignatureSpawner {
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
         rpc: RpcChannel,
-        sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
+        backlog: Backlog,
     ) -> Self {
         Self {
             presignatures: presignatures.clone(),
@@ -729,7 +793,7 @@ impl SignatureSpawner {
             epoch,
             msg,
             rpc,
-            sign_bidirectional_signature_channel,
+            backlog,
         }
     }
 
@@ -863,7 +927,6 @@ impl SignatureSpawner {
         presignature: PendingPresignature,
         participants: Vec<Participant>,
         cfg: ProtocolConfig,
-        sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
     ) {
         let me = self.me;
         let epoch = self.epoch;
@@ -873,6 +936,7 @@ impl SignatureSpawner {
         let my_account_id = self.my_account_id.clone();
         let msg = self.msg.clone();
         let rpc = self.rpc.clone();
+        let backlog = self.backlog.clone();
         let task = async move {
             let generator = match SignatureGenerator::new(
                 me,
@@ -883,7 +947,7 @@ impl SignatureSpawner {
                 cfg,
                 msg,
                 rpc,
-                sign_bidirectional_signature_channel,
+                backlog,
                 &my_account_id,
             )
             .await
@@ -946,14 +1010,8 @@ impl SignatureSpawner {
                 self.presignatures.clone(),
             ),
         };
-        self.generate(
-            request,
-            presignature,
-            participants,
-            cfg,
-            self.sign_bidirectional_signature_channel.clone(),
-        )
-        .await;
+        self.generate(request, presignature, participants, cfg)
+            .await;
     }
 
     async fn handle_requests(
@@ -1137,7 +1195,7 @@ impl SignatureSpawnerTask {
             &ctx.presignature_storage,
             ctx.msg_channel.clone(),
             ctx.rpc_channel.clone(),
-            ctx.sign_bidirectional_signature_channel.clone(),
+            ctx.backlog.clone(),
         );
 
         Self {
