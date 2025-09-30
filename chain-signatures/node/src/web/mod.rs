@@ -76,6 +76,7 @@ pub async fn run(
         )
         .route("/msg", post(msg))
         .route("/state", get(state))
+        .route("/status", get(status))
         .route("/metrics", get(metrics))
         .merge(sync);
 
@@ -198,6 +199,11 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
         .with_label_values(&["state", web.my_account_id.as_str()])
         .observe(start.elapsed().as_millis() as f64);
     result
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn status(Extension(web): Extension<Arc<AxumState>>) -> Json<NodeStatus> {
+    Json(web.node.status())
 }
 
 #[tracing::instrument(level = "debug", skip_all)]

@@ -404,6 +404,12 @@ impl PresignatureSpawner {
                 "presignature id does not match the expected hash"
             );
             PositInternalAction::Reply(PositAction::Reject)
+        } else if self.contains_ongoing(id.id) {
+            tracing::warn!(?id, ?from, ?action, "presignature already generating");
+            PositInternalAction::Reply(PositAction::Reject)
+        } else if self.contains(id.id).await {
+            tracing::warn!(?id, ?from, ?action, "presignature already generated");
+            PositInternalAction::Reply(PositAction::Reject)
         } else if !{
             // TODO: we can potentially wait for the triples to exist first to then be able to accept.
             // whereas we just blatantly reject here. The problem with waiting is that the other side
@@ -419,19 +425,15 @@ impl PresignatureSpawner {
                 "presignature required triples are not known"
             );
             PositInternalAction::Reply(PositAction::Reject)
-        } else if self.contains_ongoing(id.id) {
-            tracing::warn!(?id, ?from, ?action, "presignature already generating");
-            PositInternalAction::Reply(PositAction::Reject)
-        } else if self.contains(id.id).await {
-            tracing::warn!(?id, ?from, ?action, "presignature already generated");
-            PositInternalAction::Reply(PositAction::Reject)
         } else {
             self.posits.act(id, from, self.threshold, &action)
         };
 
         match internal_action {
             PositInternalAction::None => {}
-            PositInternalAction::Abort => {}
+            PositInternalAction::Abort => {
+                tracing::warn!(?id, "presignature posit aborted due to too many rejections");
+            }
             PositInternalAction::Reply(action) => {
                 self.msg
                     .send(
@@ -682,6 +684,10 @@ impl PresignatureSpawner {
                 _ = expiration_interval.tick() => {
                     for (id, action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(60)) {
                         let PositInternalAction::StartProtocol(participants, positor) = action else {
+                            tracing::warn!(
+                                ?id,
+                                "presignature posit expired: insufficient accepts"
+                            );
                             continue;
                         };
                         let timeout = config.borrow().protocol.presignature.generation_timeout;

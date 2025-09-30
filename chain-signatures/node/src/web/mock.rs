@@ -3,7 +3,7 @@ use mockito::ServerGuard;
 
 use crate::{
     node_client::NodeClient,
-    protocol::{contract::primitives::Participants, ParticipantInfo},
+    protocol::{contract::primitives::Participants, state::NodeStatus, ParticipantInfo},
 };
 
 use super::StateView;
@@ -30,6 +30,22 @@ impl MockServer {
                     presignature_mine_count: 0,
                     presignature_potential_count: 0,
                     latest_block_height: 0,
+                })
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        server
+            .mock("GET", "/status")
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_vec(&NodeStatus::Running {
+                    me: Participant::from(id),
+                    participants: vec![Participant::from(0)],
+                    ongoing_triple_gen: 0,
+                    ongoing_presignature_gen: 0,
                 })
                 .unwrap(),
             )

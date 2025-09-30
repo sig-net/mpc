@@ -531,7 +531,6 @@ impl<G: Governance> ConsensusProtocol<G> for RunningState {
                         })
                     }
                     Ordering::Equal => {
-                        tracing::debug!("running(running): continuing to run as normal");
                         if contract_state.public_key != self.public_key {
                             tracing::warn!(
                                 node_pk = ?self.public_key,
