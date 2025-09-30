@@ -94,7 +94,10 @@ pub struct JoiningState {
     pub public_key: PublicKey,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum NodeStatus {
     Starting,
     Started,

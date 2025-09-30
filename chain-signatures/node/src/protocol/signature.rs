@@ -814,42 +814,8 @@ impl SignatureSpawner {
                     .await;
             }
             PositInternalAction::StartProtocol(participants, positor) => {
-                if positor.is_proposer() {
-                    for &p in &participants {
-                        if p == self.me {
-                            continue;
-                        }
-                        self.msg
-                            .send(
-                                self.me,
-                                p,
-                                PositMessage {
-                                    id: PositProtocolId::Signature(sign_id, presignature_id),
-                                    from: self.me,
-                                    action: PositAction::Start(participants.clone()),
-                                },
-                            )
-                            .await;
-                    }
-                }
-
-                let request = self.sign_queue.get_or_pending(&sign_id);
-                let presignature = match positor {
-                    Positor::Proposer(_proposer, taken) => PendingPresignature::Available(taken),
-                    Positor::Deliberator(proposer) => PendingPresignature::InStorage(
-                        presignature_id,
-                        proposer,
-                        self.presignatures.clone(),
-                    ),
-                };
-                self.generate(
-                    request,
-                    presignature,
-                    participants,
-                    cfg,
-                    self.sign_respond_signature_channel.clone(),
-                )
-                .await;
+                self.start_generation(positor, sign_id, presignature_id, participants, cfg)
+                    .await;
             }
         }
     }
@@ -905,6 +871,52 @@ impl SignatureSpawner {
         };
 
         self.ongoing.spawn((sign_id, presignature_id), task);
+    }
+
+    async fn start_generation(
+        &mut self,
+        positor: Positor<PresignatureTaken>,
+        sign_id: SignId,
+        presignature_id: PresignatureId,
+        participants: Vec<Participant>,
+        cfg: ProtocolConfig,
+    ) {
+        if positor.is_proposer() {
+            for &p in &participants {
+                if p == self.me {
+                    continue;
+                }
+                self.msg
+                    .send(
+                        self.me,
+                        p,
+                        PositMessage {
+                            id: PositProtocolId::Signature(sign_id, presignature_id),
+                            from: self.me,
+                            action: PositAction::Start(participants.clone()),
+                        },
+                    )
+                    .await;
+            }
+        }
+
+        let request = self.sign_queue.get_or_pending(&sign_id);
+        let presignature = match positor {
+            Positor::Proposer(_proposer, taken) => PendingPresignature::Available(taken),
+            Positor::Deliberator(proposer) => PendingPresignature::InStorage(
+                presignature_id,
+                proposer,
+                self.presignatures.clone(),
+            ),
+        };
+        self.generate(
+            request,
+            presignature,
+            participants,
+            cfg,
+            self.sign_respond_signature_channel.clone(),
+        )
+        .await;
     }
 
     async fn handle_requests(
@@ -982,11 +994,31 @@ impl SignatureSpawner {
         // then they are considered unstable and should not be a part of signature generation this round.
 
         let mut check_requests_interval = tokio::time::interval(Duration::from_millis(100));
+        let mut expiration_interval = tokio::time::interval(Duration::from_secs(20));
         let mut posits = self.msg.subscribe_signature_posit().await;
         let mut pending_posits = JoinSet::new();
 
         loop {
             tokio::select! {
+                _ = expiration_interval.tick() => {
+                    for ((sign_id, presignature_id), action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(60)) {
+                        let (participants, positor) = match action {
+                            PositInternalAction::StartProtocol(participants, positor) => (participants, positor),
+                            PositInternalAction::Abort => {
+                                tracing::warn!(
+                                    ?sign_id,
+                                    presignature_id,
+                                    "signature posit aborting on expiration, retrying..."
+                                );
+                                self.sign_queue.push_failed(sign_id);
+                                continue;
+                            },
+                            _ => continue,
+                        };
+                        let protocol = cfg.borrow().protocol.clone();
+                        self.start_generation(positor, sign_id, presignature_id, participants, protocol).await;
+                    }
+                }
                 Some((sign_id, presignature_id, from, action)) = posits.recv() => {
                     let request = self.sign_queue.get_or_pending(&sign_id);
                     let timeout = Duration::from_millis(cfg.borrow().protocol.signature.generation_timeout);

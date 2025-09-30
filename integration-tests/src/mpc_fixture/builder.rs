@@ -322,6 +322,37 @@ impl MpcFixtureBuilder {
         self.prepared_nodes[node_idx].messaging.filter = filter;
         self
     }
+
+    /// Short-hand for creating an MPC setup that's prepared to produce triples.
+    ///
+    /// This setup will not attempt to stockpile presignatures.
+    pub fn only_generate_triples(self) -> Self {
+        self.with_preshared_key()
+            .with_min_presignatures_stockpile(0)
+            .with_max_presignatures_stockpile(0)
+    }
+
+    /// Short-hand for creating an MPC setup that's prepared to produce presignatures.
+    ///
+    /// This setup will not attempt to stockpile triples.
+    pub fn only_generate_presignatures(self) -> Self {
+        self.with_preshared_key()
+            .with_preshared_triples()
+            .with_min_triples_stockpile(0)
+            .with_max_triples_stockpile(0)
+    }
+
+    /// Short-hand for creating an MPC setup that's prepared to produce signatures.
+    ///
+    /// This setup will not attempt to stockpile triples or presignatures.
+    pub fn only_generate_signatures(self) -> Self {
+        self.with_preshared_key()
+            .with_presignature_stockpile()
+            .with_min_triples_stockpile(0)
+            .with_max_triples_stockpile(0)
+            .with_min_presignatures_stockpile(0)
+            .with_max_presignatures_stockpile(0)
+    }
 }
 
 impl MpcFixtureNodeBuilder {

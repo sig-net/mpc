@@ -4,7 +4,6 @@ use mpc_contract::primitives::PendingRequest;
 use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
 use near_primitives::types::BlockHeight;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,16 +26,6 @@ impl Options {
             self.running_threshold.to_string(),
         ]
     }
-}
-
-/// What is received when extracting sign requests from pending_requests_data
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-struct ProcessedSignRequest {
-    pub id: SignId,
-    pub payload: [u8; 32],
-    pub path: String,
-    pub key_version: u32,
-    pub entropy: [u8; 32],
 }
 
 #[derive(Clone)]

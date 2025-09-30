@@ -287,6 +287,8 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
         self.posits.is_empty()
     }
 
+    /// Expire and start protocols on enough accepted votes. Abort protocols action will be returned
+    /// if the posit has expired.
     pub fn expire_and_start(
         &mut self,
         threshold: usize,
@@ -322,6 +324,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                 ));
             } else {
                 expired_proposers.push(*id);
+                actions.push((*id, PositInternalAction::Abort));
             }
         }
 
@@ -330,6 +333,9 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                 ?expired_deliberators,
                 ?expired_proposers,
                 ?expired_and_accepted,
+                total_expired = expired_proposers.len()
+                    + expired_deliberators.len()
+                    + expired_and_accepted.len(),
                 "expiring posits"
             );
         }
@@ -475,9 +481,11 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1100));
         // add a posit that will not expire yet
         posits0.propose(303, (), &participants);
-        let actions = posits0.expire_and_start(threshold, Duration::from_secs(1));
+        let mut actions = posits0.expire_and_start(threshold, Duration::from_secs(1));
+        actions.sort_by_key(|(id, _)| *id);
         assert_eq!(posits0.len(), 1);
-        assert_eq!(actions.len(), 1);
+        assert_eq!(actions.len(), 2);
+        println!("actions: {actions:?}");
         assert!(matches!(
             actions[0],
             (
@@ -485,6 +493,7 @@ mod tests {
                 PositInternalAction::StartProtocol(_, Positor::Proposer(_, _))
             ),
         ));
+        assert!(matches!(actions[1], (202, PositInternalAction::Abort)));
 
         // the posit for id101 should have expired after not receiving a start action.
         let mut posits1 = Posits::<Id, ()>::new(Participant::from(1));
