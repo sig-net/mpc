@@ -133,10 +133,6 @@ impl NodeClient {
         self.post_msg(&url, msg).await
     }
 
-    pub async fn msg_empty(&self, base: impl IntoUrl) -> Result<(), RequestError> {
-        self.msg(base, &[]).await
-    }
-
     pub async fn state(&self, base: impl IntoUrl) -> Result<StateView, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("state");

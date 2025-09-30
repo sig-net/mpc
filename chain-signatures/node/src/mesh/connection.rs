@@ -105,50 +105,43 @@ impl NodeConnection {
                     });
                 }
                 _ = interval.tick() => {
-                    if let Err(err) = client.msg_empty(&url).await {
-                        tracing::warn!(?node, ?err, "checking /msg (empty) failed");
-                        status_tx.send_if_modified(|(status, _)| {
-                            std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
-                        });
-                        continue;
-                    }
-
-                    match client.status(&url).await {
-                        Ok(state) => {
-                            // note: borrowing and sending later on `status_tx` can potentially deadlock,
-                            // but since we are copying the status, this is not the case. Change this carefully.
-                            let old_status = status_tx.borrow().0;
-                            let mut new_status = match state {
-                                OtherNodeStatus::Running { .. } => NodeStatus::Active,
-                                OtherNodeStatus::Resharing { .. }
-                                | OtherNodeStatus::Generating { .. }
-                                | OtherNodeStatus::Joining { .. }
-                                | OtherNodeStatus::Starting
-                                | OtherNodeStatus::Started
-                                | OtherNodeStatus::WaitingForConsensus { .. } => NodeStatus::Inactive,
-                            };
-                            if old_status == NodeStatus::Inactive && new_status == NodeStatus::Active {
-                                // Sync when we want to enter an active state
-                                //
-                                // The peer is running. But before we can reliably
-                                // use the connected node in protocols we initiate,
-                                // we need to ensure the peer has the up-to-date
-                                // data about out owned IDs.
-                                new_status = NodeStatus::Syncing;
-                            }
-                            if old_status != new_status {
-                                tracing::info!(?node, ?new_status, "updated with new status");
-                                status_tx.send_modify(|(status, _)| {
-                                    *status = new_status;
-                                });
-                            }
-                        }
+                    let status = match client.status(&url).await {
+                        Ok(status) => status,
                         Err(err) => {
                             tracing::warn!(?node, ?err, "checking /status failed");
                             status_tx.send_if_modified(|(status, _)| {
                                 std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
                             });
+                            continue;
                         }
+                    };
+
+                    // note: borrowing and sending later on `status_tx` can potentially deadlock,
+                    // but since we are copying the status, this is not the case. Change this carefully.
+                    let old_status = status_tx.borrow().0;
+                    let mut new_status = match status {
+                        OtherNodeStatus::Running { .. } => NodeStatus::Active,
+                        OtherNodeStatus::Resharing { .. }
+                        | OtherNodeStatus::Generating { .. }
+                        | OtherNodeStatus::Joining { .. }
+                        | OtherNodeStatus::Starting
+                        | OtherNodeStatus::Started
+                        | OtherNodeStatus::WaitingForConsensus { .. } => NodeStatus::Inactive,
+                    };
+                    if old_status == NodeStatus::Inactive && new_status == NodeStatus::Active {
+                        // Sync when we want to enter an active state
+                        //
+                        // The peer is running. But before we can reliably
+                        // use the connected node in protocols we initiate,
+                        // we need to ensure the peer has the up-to-date
+                        // data about out owned IDs.
+                        new_status = NodeStatus::Syncing;
+                    }
+                    if old_status != new_status {
+                        tracing::info!(?node, ?new_status, "updated with new status");
+                        status_tx.send_modify(|(status, _)| {
+                            *status = new_status;
+                        });
                     }
                 }
             }
