@@ -267,6 +267,7 @@ impl SignQueue {
                     .inc();
             }
             if let Some(pending) = self.pending.remove(&sign_id) {
+                tracing::info!(?sign_id, proposer = ?request.proposer, "sign queue received pending request");
                 if pending.send(request.clone()).is_err() {
                     tracing::warn!(
                         ?sign_id,
@@ -756,7 +757,7 @@ impl SignatureSpawner {
         &mut self,
         sign_id: SignId,
         presignature_id: PresignatureId,
-        request: Option<SignRequest>,
+        mut request: Option<SignRequest>,
         from: Participant,
         action: PositAction,
         cfg: ProtocolConfig,
@@ -769,15 +770,31 @@ impl SignatureSpawner {
             );
             PositInternalAction::Reply(PositAction::Reject)
         } else if matches!(action, PositAction::Propose) {
-            if let Some(request) = request {
-                if request.proposer == from {
-                    self.posits
-                        .act((sign_id, presignature_id), from, self.threshold, &action)
-                } else {
+            match request.take() {
+                Some(req) => {
+                    if req.proposer == from {
+                        self.posits
+                            .act((sign_id, presignature_id), from, self.threshold, &action)
+                    } else {
+                        tracing::warn!(
+                            ?sign_id,
+                            presignature_id,
+                            expected_proposer = ?req.proposer,
+                            actual_proposer = ?from,
+                            "rejecting signature posit: proposer mismatch",
+                        );
+                        PositInternalAction::Reply(PositAction::Reject)
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        ?sign_id,
+                        presignature_id,
+                        ?from,
+                        "rejecting signature posit: sign request not yet available locally",
+                    );
                     PositInternalAction::Reply(PositAction::Reject)
                 }
-            } else {
-                PositInternalAction::Reply(PositAction::Reject)
             }
         } else {
             self.posits
