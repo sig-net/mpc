@@ -157,7 +157,7 @@ impl TripleGenerator {
     }
 
     /// Handle a posit message. Returns true if we should start protocol generation.
-    async fn handle_posit(&mut self, from: Participant, action: &PositAction, epoch: u64) -> bool {
+    async fn handle_posit(&mut self, from: Participant, action: &PositAction, _epoch: u64) -> bool {
         let internal_action = self.posit_manager.act(from, action);
 
         match internal_action {
