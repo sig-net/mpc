@@ -343,6 +343,147 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
     }
 }
 
+/// Helper struct to manage a single posit's state machine.
+/// This is used by generator tasks to manage their own posit consensus.
+pub struct PositManager<S> {
+    me: Participant,
+    positor: Option<(Positor<PositCounter<S>>, Instant)>,
+    threshold: usize,
+}
+
+impl<S> PositManager<S> {
+    /// Create a new PositManager as the proposer.
+    pub fn new_proposer(me: Participant, store: S, participants: &[Participant]) -> Self {
+        let mut accepts = HashSet::new();
+        accepts.insert(me);
+        let positor = Positor::Proposer(
+            me,
+            PositCounter {
+                participants: participants.iter().copied().collect(),
+                accepts,
+                rejects: HashSet::new(),
+                store,
+            },
+        );
+        Self {
+            me,
+            positor: Some((positor, Instant::now())),
+            threshold: 0,
+        }
+    }
+
+    /// Create a new PositManager as a deliberator (waiting to receive Propose).
+    pub fn new_deliberator(me: Participant, threshold: usize) -> Self {
+        Self {
+            me,
+            positor: None,
+            threshold,
+        }
+    }
+
+    /// Process an incoming posit action.
+    /// Returns the internal action to take.
+    pub fn act(&mut self, from: Participant, action: &PositAction) -> PositInternalAction<S> {
+        match action {
+            PositAction::Propose => {
+                // We have no information about this posit, so we can just accept it.
+                let Some((positor, _)) = &self.positor else {
+                    self.positor = Some((Positor::Deliberator(from), Instant::now()));
+                    return PositInternalAction::Reply(PositAction::Accept);
+                };
+
+                // Check if we're the proposer or if there's a conflict
+                let proposer = positor.id();
+                if positor.is_proposer() {
+                    PositInternalAction::Reply(PositAction::Reject)
+                } else if proposer != from {
+                    PositInternalAction::Reply(PositAction::Reject)
+                } else {
+                    PositInternalAction::Reply(PositAction::Accept)
+                }
+            }
+            PositAction::Start(participants) => {
+                // Check if we're a participant
+                if !participants.contains(&self.me) {
+                    return PositInternalAction::Reply(PositAction::Reject);
+                }
+
+                if let Some((positor, timestamp)) = self.positor.take() {
+                    let proposer_id = positor.id();
+                    if positor.is_proposer() {
+                        self.positor = Some((positor, timestamp));
+                        return PositInternalAction::Reply(PositAction::Reject);
+                    } else if proposer_id != from {
+                        self.positor = Some((positor, timestamp));
+                        return PositInternalAction::Reply(PositAction::Reject);
+                    }
+
+                    // All checks passed - start the protocol
+                    // For deliberators, we just return the deliberator with proposer ID
+                    PositInternalAction::StartProtocol(participants.clone(), Positor::Deliberator(proposer_id))
+                } else {
+                    PositInternalAction::Reply(PositAction::Reject)
+                }
+            }
+            PositAction::Accept => {
+                if let Some((Positor::Proposer(_, counter), _)) = &mut self.positor {
+                    counter.accepts.insert(from);
+                    if counter.enough_accepts(self.threshold) {
+                        // We have enough accepts - extract the store and return StartProtocol
+                        if let Some((Positor::Proposer(proposer_id, counter), _)) = self.positor.take() {
+                            let participants: Vec<Participant> = counter.accepts.iter().copied().collect();
+                            return PositInternalAction::StartProtocol(
+                                participants,
+                                Positor::Proposer(proposer_id, counter.store),
+                            );
+                        }
+                    }
+                }
+                PositInternalAction::None
+            }
+            PositAction::Reject => {
+                if let Some((Positor::Proposer(_, counter), _)) = &mut self.positor {
+                    counter.rejects.insert(from);
+                    if counter.enough_rejects(self.threshold) {
+                        return PositInternalAction::Abort;
+                    }
+                }
+                PositInternalAction::None
+            }
+        }
+    }
+
+    /// Check if this posit has expired.
+    pub fn is_expired(&self, timeout: Duration) -> bool {
+        if let Some((_, timestamp)) = &self.positor {
+            timestamp.elapsed() > timeout
+        } else {
+            false
+        }
+    }
+
+    /// Get the proposer for this posit.
+    pub fn proposer(&self) -> Option<Participant> {
+        self.positor.as_ref().map(|(positor, _)| positor.id())
+    }
+
+    /// Check if we are the proposer.
+    pub fn is_proposer(&self) -> bool {
+        self.positor
+            .as_ref()
+            .map(|(positor, _)| positor.is_proposer())
+            .unwrap_or(false)
+    }
+
+    /// Get the store from the positor if we're the proposer.
+    pub fn take_store(self) -> Option<S> {
+        match self.positor {
+            Some((Positor::Proposer(_, counter), _)) => Some(counter.store),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

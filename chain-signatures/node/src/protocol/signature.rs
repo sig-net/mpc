@@ -761,28 +761,9 @@ impl SignatureSpawner {
         action: PositAction,
         cfg: ProtocolConfig,
     ) {
-        let internal_action = if self.ongoing.contains_key(&(sign_id, presignature_id)) {
-            tracing::warn!(
-                ?sign_id,
-                presignature_id,
-                "signature is already in the ongoing generation"
-            );
-            PositInternalAction::Reply(PositAction::Reject)
-        } else if matches!(action, PositAction::Propose) {
-            if let Some(request) = request {
-                if request.proposer == from {
-                    self.posits
-                        .act((sign_id, presignature_id), from, self.threshold, &action)
-                } else {
-                    PositInternalAction::Reply(PositAction::Reject)
-                }
-            } else {
-                PositInternalAction::Reply(PositAction::Reject)
-            }
-        } else {
-            self.posits
-                .act((sign_id, presignature_id), from, self.threshold, &action)
-        };
+        // Delegate directly to posit state machine - validation moved to start_generation
+        let internal_action = self.posits
+            .act((sign_id, presignature_id), from, self.threshold, &action);
 
         match internal_action {
             PositInternalAction::None => {}
@@ -814,7 +795,7 @@ impl SignatureSpawner {
                     .await;
             }
             PositInternalAction::StartProtocol(participants, positor) => {
-                self.start_generation(positor, sign_id, presignature_id, participants, cfg)
+                self.start_generation(positor, sign_id, presignature_id, request, participants, cfg)
                     .await;
             }
         }
@@ -878,9 +859,51 @@ impl SignatureSpawner {
         positor: Positor<PresignatureTaken>,
         sign_id: SignId,
         presignature_id: PresignatureId,
+        request: Option<SignRequest>,
         participants: Vec<Participant>,
         cfg: ProtocolConfig,
     ) {
+        // Validation 1: Check if already generating
+        if self.ongoing.contains_key(&(sign_id, presignature_id)) {
+            tracing::warn!(
+                ?sign_id,
+                presignature_id,
+                ?participants,
+                is_proposer = positor.is_proposer(),
+                "signature already in ongoing generation, aborting posit"
+            );
+            return;
+        }
+
+        // Validation 2: Verify request exists
+        let Some(request) = request else {
+            tracing::warn!(
+                ?sign_id,
+                presignature_id,
+                ?participants,
+                is_proposer = positor.is_proposer(),
+                "sign request not found, aborting posit"
+            );
+            self.sign_queue.push_failed(sign_id);
+            return;
+        };
+
+        // Validation 3: Verify proposer matches
+        let proposer_id = positor.id();
+        if request.proposer != proposer_id {
+            tracing::warn!(
+                ?sign_id,
+                presignature_id,
+                ?participants,
+                expected_proposer = ?request.proposer,
+                actual_proposer = ?proposer_id,
+                "proposer mismatch, aborting posit"
+            );
+            self.sign_queue.push_failed(sign_id);
+            return;
+        }
+
+        // Send START message if we're the proposer
         if positor.is_proposer() {
             for &p in &participants {
                 if p == self.me {
@@ -1016,7 +1039,9 @@ impl SignatureSpawner {
                             _ => continue,
                         };
                         let protocol = cfg.borrow().protocol.clone();
-                        self.start_generation(positor, sign_id, presignature_id, participants, protocol).await;
+                        // Fetch the request - it may not exist if it timed out
+                        let request = self.sign_queue.requests.get(&sign_id).cloned();
+                        self.start_generation(positor, sign_id, presignature_id, request, participants, protocol).await;
                     }
                 }
                 Some((sign_id, presignature_id, from, action)) = posits.recv() => {

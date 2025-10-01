@@ -1,9 +1,8 @@
 use super::message::{MessageChannel, PositMessage, PositProtocolId, TripleMessage};
-use super::posit::{PositAction, PositInternalAction, Posits};
+use super::posit::{PositAction, PositInternalAction, PositManager};
 use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
-use crate::protocol::posit::Positor;
 use crate::storage::triple_storage::{TripleSlot, TripleStorage};
 use crate::types::TripleProtocol;
 use crate::util::{AffinePointExt, JoinMap};
@@ -21,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -38,72 +37,241 @@ pub struct Triple {
     pub public: TriplePub<Secp256k1>,
 }
 
+enum GeneratorMessage {
+    Posit(Participant, PositAction),
+    Triple(TripleMessage),
+}
+
 struct TripleGenerator {
     id: TripleId,
     me: Participant,
+    threshold: usize,
     participants: Vec<Participant>,
-    protocol: TripleProtocol,
+    protocol: Option<TripleProtocol>,
     timeout: Duration,
-    slot: TripleSlot,
+    slot: Option<TripleSlot>,
     created: Instant,
-    inbox: mpsc::Receiver<TripleMessage>,
+    posit_manager: PositManager<()>,
+    inbox: mpsc::Receiver<GeneratorMessage>,
+    triple_inbox: Option<mpsc::Receiver<TripleMessage>>,
     msg: MessageChannel,
 }
 
 impl TripleGenerator {
-    pub async fn new(
+    pub async fn new_proposer(
         id: TripleId,
         me: Participant,
         threshold: usize,
         participants: &[Participant],
         timeout: Duration,
-        slot: TripleSlot,
         msg: &MessageChannel,
-    ) -> Result<Self, InitializationError> {
-        let mut participants = participants.to_vec();
-        // Participants can be out of order, so let's sort them before doing anything. Critical
-        // for the triple_is_mine check:
-        participants.sort();
+        inbox: mpsc::Receiver<GeneratorMessage>,
+    ) -> Self {
+        let mut sorted_participants = participants.to_vec();
+        sorted_participants.sort();
 
-        let protocol =
-            cait_sith::triples::generate_triple::<Secp256k1>(&participants, me, threshold)?;
+        let posit_manager = PositManager::new_proposer(me, (), participants);
 
-        let inbox = msg.subscribe_triple(id).await;
-        Ok(Self {
+        // Subscribe to triple protocol messages for this specific ID
+        let triple_inbox = msg.subscribe_triple(id).await;
+
+        Self {
             id,
             me,
-            participants,
-            protocol: Box::new(protocol),
+            threshold,
+            participants: sorted_participants,
+            protocol: None,
             timeout,
-            slot,
+            slot: None,
             created: Instant::now(),
+            posit_manager,
             inbox,
+            triple_inbox: Some(triple_inbox),
             msg: msg.clone(),
-        })
+        }
+    }
+
+    pub async fn new_deliberator(
+        id: TripleId,
+        me: Participant,
+        threshold: usize,
+        timeout: Duration,
+        msg: &MessageChannel,
+        inbox: mpsc::Receiver<GeneratorMessage>,
+    ) -> Self {
+        let posit_manager = PositManager::new_deliberator(me, threshold);
+
+        // Subscribe to triple protocol messages for this specific ID
+        let triple_inbox = msg.subscribe_triple(id).await;
+
+        Self {
+            id,
+            me,
+            threshold,
+            participants: Vec::new(),
+            protocol: None,
+            timeout,
+            slot: None,
+            created: Instant::now(),
+            posit_manager,
+            inbox,
+            triple_inbox: Some(triple_inbox),
+            msg: msg.clone(),
+        }
     }
 
     /// Receive the next message for the triple protocol; error out on the timeout being reached
     /// or the channel having been closed (aborted).
-    async fn recv(&mut self) -> Option<TripleMessage> {
-        match tokio::time::timeout(
-            self.timeout.saturating_sub(self.created.elapsed()),
-            self.inbox.recv(),
-        )
-        .await
-        {
-            Ok(Some(msg)) => Some(msg),
-            Ok(None) => {
-                tracing::warn!(id = self.id, "triple generation aborted");
-                None
+    async fn recv(&mut self) -> Option<GeneratorMessage> {
+        let timeout_duration = self.timeout.saturating_sub(self.created.elapsed());
+        
+        tokio::select! {
+            result = tokio::time::timeout(timeout_duration, self.inbox.recv()) => {
+                match result {
+                    Ok(Some(msg)) => Some(msg),
+                    Ok(None) => {
+                        tracing::warn!(id = self.id, "generator posit channel closed");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::warn!(id = self.id, "triple generation timeout");
+                        None
+                    }
+                }
             }
-            Err(_err) => {
-                tracing::warn!(id = self.id, "triple generation timeout");
-                None
+            result = async {
+                match &mut self.triple_inbox {
+                    Some(inbox) => inbox.recv().await.map(GeneratorMessage::Triple),
+                    None => std::future::pending().await,
+                }
+            } => {
+                match result {
+                    Some(msg) => Some(msg),
+                    None => {
+                        tracing::warn!(id = self.id, "generator triple channel closed");
+                        None
+                    }
+                }
             }
         }
     }
 
-    async fn run(mut self, my_account_id: AccountId, epoch: u64) {
+    /// Handle a posit message. Returns true if we should start protocol generation.
+    async fn handle_posit(&mut self, from: Participant, action: &PositAction, epoch: u64) -> bool {
+        let internal_action = self.posit_manager.act(from, action);
+
+        match internal_action {
+            PositInternalAction::None => false,
+            PositInternalAction::Abort => {
+                tracing::warn!(id = self.id, "triple posit aborted");
+                false
+            }
+            PositInternalAction::Reply(reply_action) => {
+                self.msg
+                    .send(
+                        self.me,
+                        from,
+                        PositMessage {
+                            id: PositProtocolId::Triple(self.id),
+                            from: self.me,
+                            action: reply_action,
+                        },
+                    )
+                    .await;
+                false
+            }
+            PositInternalAction::StartProtocol(participants, positor) => {
+                tracing::info!(
+                    id = self.id,
+                    is_proposer = positor.is_proposer(),
+                    "triple posit reached consensus, starting protocol"
+                );
+                
+                // If we're the proposer, send Start messages to all participants
+                if positor.is_proposer() {
+                    for &to in &participants {
+                        if to == self.me {
+                            continue;
+                        }
+                        self.msg
+                            .send(
+                                self.me,
+                                to,
+                                PositMessage {
+                                    id: PositProtocolId::Triple(self.id),
+                                    from: self.me,
+                                    action: PositAction::Start(participants.clone()),
+                                },
+                            )
+                            .await;
+                    }
+                }
+                
+                self.participants = participants;
+                self.participants.sort();
+                true
+            }
+        }
+    }
+
+    /// Initialize the cait-sith protocol and reserve a storage slot.
+    async fn initialize_protocol(&mut self, storage: &TripleStorage) -> Result<(), InitializationError> {
+        // Reserve storage slot
+        let Some(slot) = storage.reserve(self.id).await else {
+            return Err(InitializationError::BadParameters(format!(
+                "id collision: triple_id={}",
+                self.id
+            )));
+        };
+        self.slot = Some(slot);
+
+        // Initialize cait-sith protocol
+        let protocol = cait_sith::triples::generate_triple::<Secp256k1>(
+            &self.participants,
+            self.me,
+            self.threshold,
+        )?;
+        self.protocol = Some(Box::new(protocol));
+
+        tracing::info!(id = self.id, "initialized triple generation protocol");
+        Ok(())
+    }
+
+    async fn run(mut self, my_account_id: AccountId, epoch: u64, storage: TripleStorage) {
+        // Phase 1: Posit consensus
+        loop {
+            let Some(msg) = self.recv().await else {
+                tracing::warn!(id = self.id, "triple generator timeout during posit phase");
+                return;
+            };
+
+            match msg {
+                GeneratorMessage::Posit(from, action) => {
+                    if self.handle_posit(from, &action, epoch).await {
+                        // Posit consensus reached, move to protocol phase
+                        break;
+                    }
+                }
+                GeneratorMessage::Triple(_) => {
+                    tracing::warn!(
+                        id = self.id,
+                        "received triple message before posit consensus, ignoring"
+                    );
+                }
+            }
+        }
+
+        // Phase 2: Initialize protocol
+        if let Err(err) = self.initialize_protocol(&storage).await {
+            tracing::warn!(
+                id = self.id,
+                ?err,
+                "failed to initialize triple protocol after posit consensus"
+            );
+            return;
+        }
+
+        // Phase 3: Run cait-sith protocol
         let before_first_poke_delay =
             crate::metrics::TRIPLE_BEFORE_POKE_DELAY.with_label_values(&[my_account_id.as_str()]);
         let accrued_wait_delay =
@@ -132,8 +300,11 @@ impl TripleGenerator {
 
         loop {
             let poke_start_time = Instant::now();
-            let action = match self.protocol.poke() {
-                Ok(action) => action,
+            let action = match self.protocol.as_mut().expect("protocol initialized").poke() {
+                Ok(action) => {
+                    tracing::debug!(id = self.id, ?action, "protocol poke returned action");
+                    action
+                }
                 Err(err) => {
                     failure_counts.inc();
                     tracing::warn!(
@@ -158,7 +329,24 @@ impl TripleGenerator {
                         failure_counts.inc();
                         break;
                     };
-                    self.protocol.message(msg.from, msg.data);
+                    
+                    match msg {
+                        GeneratorMessage::Triple(triple_msg) => {
+                            tracing::debug!(
+                                id = self.id,
+                                from = ?triple_msg.from,
+                                "received triple protocol message"
+                            );
+                            self.protocol.as_mut().expect("protocol initialized").message(triple_msg.from, triple_msg.data);
+                        }
+                        GeneratorMessage::Posit(from, _) => {
+                            tracing::debug!(
+                                id = self.id,
+                                ?from,
+                                "received posit message during protocol execution, ignoring"
+                            );
+                        }
+                    }
                 }
                 Action::SendMany(data) => {
                     for to in &self.participants {
@@ -234,7 +422,8 @@ impl TripleGenerator {
                         success_owned_counts.inc();
                     }
 
-                    self.slot.insert(triple, triple_owner).await;
+                    let mut slot = self.slot.take().expect("slot initialized");
+                    slot.insert(triple, triple_owner).await;
                     break;
                 }
             }
@@ -268,8 +457,9 @@ pub struct TripleSpawner {
     /// The set of ongoing triples that were introduced to the system by the current node.
     ongoing_introduced: HashSet<TripleId>,
 
-    /// The protocol posits that are currently in progress.
-    posits: Posits<TripleId, ()>,
+    /// Generator message channels for routing posit and triple messages.
+    /// Each generator has a sender that we use to route messages to it.
+    generator_channels: HashMap<TripleId, mpsc::Sender<GeneratorMessage>>,
 
     me: Participant,
     threshold: usize,
@@ -306,7 +496,7 @@ impl TripleSpawner {
             triple_storage: storage.clone(),
             ongoing: JoinMap::new(),
             ongoing_introduced: HashSet::new(),
-            posits: Posits::new(me),
+            generator_channels: HashMap::new(),
             my_account_id: my_account_id.clone(),
             msg,
         }
@@ -342,149 +532,125 @@ impl TripleSpawner {
     }
 
     pub fn len_introduced(&self) -> usize {
-        self.posits.len_proposed() + self.ongoing_introduced.len()
+        self.ongoing_introduced.len()
+    }
+
+    /// Route a posit message to the appropriate generator, creating one if needed.
+    async fn route_posit_message(&mut self, id: TripleId, from: Participant, action: PositAction, timeout: Duration) {
+        // Get or create the generator channel
+        if !self.generator_channels.contains_key(&id) {
+            // First time seeing this triple ID - create a new generator
+            self.spawn_generator(id, from, &action, timeout).await;
+        }
+
+        // Route the message to the generator
+        if let Some(tx) = self.generator_channels.get(&id) {
+            if tx.send(GeneratorMessage::Posit(from, action)).await.is_err() {
+                tracing::warn!(id, "failed to route posit message, generator channel closed");
+                self.generator_channels.remove(&id);
+            }
+        }
+    }
+
+    /// Spawn a new generator task for this triple ID.
+    async fn spawn_generator(&mut self, id: TripleId, from: Participant, action: &PositAction, timeout: Duration) {
+        let (tx, rx) = mpsc::channel(128);
+        
+        let generator = if matches!(action, PositAction::Propose) && from == self.me {
+            // We're proposing this triple
+            tracing::info!(id, "spawning triple generator as proposer");
+            let participants: Vec<Participant> = match action {
+                PositAction::Start(parts) => parts.clone(),
+                _ => {
+                    tracing::warn!(id, "proposer received non-Start action, using empty participants");
+                    vec![]
+                }
+            };
+            
+            self.ongoing_introduced.insert(id);
+            TripleGenerator::new_proposer(
+                id,
+                self.me,
+                self.threshold,
+                &participants,
+                Duration::from_millis(timeout.as_millis() as u64),
+                &self.msg,
+                rx,
+            ).await
+        } else {
+            // We're a deliberator
+            tracing::info!(id, ?from, "spawning triple generator as deliberator");
+            TripleGenerator::new_deliberator(
+                id,
+                self.me,
+                self.threshold,
+                Duration::from_millis(timeout.as_millis() as u64),
+                &self.msg,
+                rx,
+            ).await
+        };
+
+        self.generator_channels.insert(id, tx);
+        self.ongoing.spawn(
+            id,
+            generator.run(self.my_account_id.clone(), self.epoch, self.triple_storage.clone()),
+        );
+        crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
+            .with_label_values(&[self.my_account_id.as_str()])
+            .inc();
+    }
+
+    /// Propose a new triple generation protocol to the network.
+    async fn propose_triple(&mut self, active: &[Participant], timeout: Duration) {
+        let id = rand::random();
+        
+        // Spawn proposer generator
+        let (tx, rx) = mpsc::channel(128);
+        let generator = TripleGenerator::new_proposer(
+            id,
+            self.me,
+            self.threshold,
+            active,
+            timeout,
+            &self.msg,
+            rx,
+        ).await;
+        
+        self.generator_channels.insert(id, tx.clone());
+        self.ongoing_introduced.insert(id);
+        self.ongoing.spawn(
+            id,
+            generator.run(self.my_account_id.clone(), self.epoch, self.triple_storage.clone()),
+        );
+        crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
+            .with_label_values(&[self.my_account_id.as_str()])
+            .inc();
+
+        // Send initial Propose messages to all participants
+        for &p in active.iter() {
+            if p == self.me {
+                // Send to ourselves through the channel
+                let _ = tx.send(GeneratorMessage::Posit(self.me, PositAction::Propose)).await;
+            } else {
+                self.msg
+                    .send(
+                        self.me,
+                        p,
+                        PositMessage {
+                            id: PositProtocolId::Triple(id),
+                            from: self.me,
+                            action: PositAction::Propose,
+                        },
+                    )
+                    .await;
+            }
+        }
     }
 
     /// Returns the number of unspent triples we will have in the manager once
     /// all ongoing generation protocols complete.
     pub async fn len_potential(&self) -> usize {
         self.triple_storage.len_generated().await + self.ongoing.len()
-    }
-
-    async fn process_posit(
-        &mut self,
-        id: TripleId,
-        from: Participant,
-        action: PositAction,
-        timeout: Duration,
-    ) {
-        let internal_action = if self.contains_ongoing(id) {
-            tracing::warn!(id, ?from, ?action, "triple already generating");
-            PositInternalAction::Reply(PositAction::Reject)
-        } else if self.contains(id).await {
-            tracing::warn!(id, ?from, ?action, "triple already generated");
-            PositInternalAction::Reply(PositAction::Reject)
-        } else {
-            self.posits.act(id, from, self.threshold, &action)
-        };
-
-        match internal_action {
-            PositInternalAction::None => {}
-            PositInternalAction::Abort => {}
-            PositInternalAction::Reply(action) => {
-                self.msg
-                    .send(
-                        self.me,
-                        from,
-                        PositMessage {
-                            id: PositProtocolId::Triple(id),
-                            from: self.me,
-                            action,
-                        },
-                    )
-                    .await;
-            }
-            PositInternalAction::StartProtocol(participants, positor) => {
-                self.start_generation(id, participants, positor, timeout)
-                    .await;
-            }
-        }
-    }
-
-    /// Propose a new triple generation protocol to the network.
-    async fn propose_posit(&mut self, active: &[Participant]) {
-        let id = rand::random();
-        self.posits.propose(id, (), active);
-        for &p in active.iter() {
-            if p == self.me {
-                continue;
-            }
-
-            self.msg
-                .send(
-                    self.me,
-                    p,
-                    PositMessage {
-                        id: PositProtocolId::Triple(id),
-                        from: self.me,
-                        action: PositAction::Propose,
-                    },
-                )
-                .await;
-        }
-    }
-
-    async fn start_generation(
-        &mut self,
-        id: TripleId,
-        participants: Vec<Participant>,
-        positor: Positor<()>,
-        timeout: Duration,
-    ) {
-        if positor.is_proposer() {
-            for &to in &participants {
-                if to == self.me {
-                    continue;
-                }
-                self.msg
-                    .send(
-                        self.me,
-                        to,
-                        PositMessage {
-                            id: PositProtocolId::Triple(id),
-                            from: self.me,
-                            action: PositAction::Start(participants.clone()),
-                        },
-                    )
-                    .await;
-            }
-            self.ongoing_introduced.insert(id);
-        }
-
-        if let Err(err) = self.generate_with_id(id, &participants, timeout).await {
-            self.ongoing_introduced.remove(&id);
-            tracing::warn!(
-                id,
-                ?participants,
-                is_proposer = positor.is_proposer(),
-                ?err,
-                "unable to start triple generation on START"
-            );
-        }
-    }
-
-    async fn generate_with_id(
-        &mut self,
-        id: TripleId,
-        participants: &[Participant],
-        timeout: Duration,
-    ) -> Result<(), InitializationError> {
-        // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        let Some(slot) = self.reserve(id).await else {
-            return Err(InitializationError::BadParameters(format!(
-                "id collision: triple_id={id}"
-            )));
-        };
-
-        tracing::info!(id, "starting protocol to generate a new triple");
-        let generator = TripleGenerator::new(
-            id,
-            self.me,
-            self.threshold,
-            participants,
-            timeout,
-            slot,
-            &self.msg,
-        )
-        .await?;
-
-        self.ongoing
-            .spawn(id, generator.run(self.my_account_id.clone(), self.epoch));
-        crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
-            .with_label_values(&[self.my_account_id.as_str()])
-            .inc();
-
-        Ok(())
     }
 
     /// Stockpile triples if the amount of unspent triples is below the minimum
@@ -509,7 +675,8 @@ impl TripleSpawner {
         };
 
         if not_enough_triples {
-            self.propose_posit(participants).await;
+            let timeout = Duration::from_millis(cfg.triple.generation_timeout);
+            self.propose_triple(participants, timeout).await;
         }
     }
 
@@ -520,40 +687,33 @@ impl TripleSpawner {
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
-        let mut expiration_interval = tokio::time::interval(Duration::from_secs(60));
-        let mut posits = self.msg.subscribe_triple_posit().await;
+        let mut posit_messages = self.msg.subscribe_triple_posit().await;
 
         loop {
             tokio::select! {
-                _ = expiration_interval.tick() => {
-                    for action in self.posits.expire_and_start(self.threshold, Duration::from_secs(60)) {
-                        let (id, PositInternalAction::StartProtocol(participants, positor)) = action else {
-                            continue;
-                        };
-                        let timeout = config.borrow().protocol.triple.generation_timeout;
-                        self.start_generation(id, participants, positor, Duration::from_millis(timeout)).await;
-                    }
-                }
-                Some((id, from, action)) = posits.recv() => {
+                // Route posit messages to generators
+                Some((id, from, action)) = posit_messages.recv() => {
                     let timeout = config.borrow().protocol.triple.generation_timeout;
-                    self.process_posit(id, from, action, Duration::from_millis(timeout)).await;
+                    self.route_posit_message(id, from, action, Duration::from_millis(timeout)).await;
                 }
-                // `join_next` returns None on the set being empty, so don't handle that case
+                // Handle completed generators
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
                     let id = match result {
-                        Ok((id, ())) => id,
+                        Ok((id, ())) => {
+                            tracing::info!(id, "triple generation completed successfully");
+                            id
+                        }
                         Err(id) => {
                             tracing::warn!(id, "triple generation task interrupted");
                             id
                         }
                     };
                     self.ongoing_introduced.remove(&id);
+                    self.generator_channels.remove(&id);
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
+                // Stockpile triples periodically
                 _ = stockpile_interval.tick() => {
-                    // TODO: eventually we should use all participants, and let nodes replying with
-                    // accept/reject determine who is a participant. The messaging layer should
-                    // rely more on active.
                     let active = mesh_state.borrow().active.keys_vec();
                     let protocol = config.borrow().protocol.clone();
                     self.stockpile(&active, &protocol).await;

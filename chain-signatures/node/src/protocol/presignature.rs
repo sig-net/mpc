@@ -396,38 +396,8 @@ impl PresignatureSpawner {
         action: PositAction,
         timeout: Duration,
     ) {
-        let internal_action = if !id.validate() {
-            tracing::error!(
-                ?id,
-                ?from,
-                ?action,
-                "presignature id does not match the expected hash"
-            );
-            PositInternalAction::Reply(PositAction::Reject)
-        } else if self.contains_ongoing(id.id) {
-            tracing::warn!(?id, ?from, ?action, "presignature already generating");
-            PositInternalAction::Reply(PositAction::Reject)
-        } else if self.contains(id.id).await {
-            tracing::warn!(?id, ?from, ?action, "presignature already generated");
-            PositInternalAction::Reply(PositAction::Reject)
-        } else if !{
-            // TODO: we can potentially wait for the triples to exist first to then be able to accept.
-            // whereas we just blatantly reject here. The problem with waiting is that the other side
-            // might expire their posit first.
-            (self.triples.contains_reserved(id.t0).await || self.triples.contains(id.t0).await)
-                && (self.triples.contains_reserved(id.t1).await
-                    || self.triples.contains(id.t1).await)
-        } {
-            tracing::warn!(
-                ?id,
-                ?from,
-                ?action,
-                "presignature required triples are not known"
-            );
-            PositInternalAction::Reply(PositAction::Reject)
-        } else {
-            self.posits.act(id, from, self.threshold, &action)
-        };
+        // Delegate directly to posit state machine - validation moved to start_generation
+        let internal_action = self.posits.act(id, from, self.threshold, &action);
 
         match internal_action {
             PositInternalAction::None => {}
@@ -637,6 +607,57 @@ impl PresignatureSpawner {
         participants: Vec<Participant>,
         timeout: Duration,
     ) {
+        // Validation 1: ID hash validation
+        if !id.validate() {
+            tracing::error!(
+                ?id,
+                ?participants,
+                is_proposer = positor.is_proposer(),
+                "presignature id does not match the expected hash, aborting posit"
+            );
+            return;
+        }
+
+        // Validation 2: Check if already generating
+        if self.contains_ongoing(id.id) {
+            tracing::warn!(
+                ?id,
+                ?participants,
+                is_proposer = positor.is_proposer(),
+                "presignature already generating, aborting posit"
+            );
+            return;
+        }
+
+        // Validation 3: Check if already exists
+        if self.contains(id.id).await {
+            tracing::warn!(
+                ?id,
+                ?participants,
+                is_proposer = positor.is_proposer(),
+                "presignature already generated, aborting posit"
+            );
+            return;
+        }
+
+        // Validation 4: Check required triples exist
+        let triples_available = (self.triples.contains_reserved(id.t0).await
+                || self.triples.contains(id.t0).await)
+            && (self.triples.contains_reserved(id.t1).await
+                || self.triples.contains(id.t1).await);
+
+        if !triples_available {
+            tracing::warn!(
+                ?id,
+                ?participants,
+                is_proposer = positor.is_proposer(),
+                "presignature required triples are not available, aborting posit"
+            );
+            // TODO: Could potentially retry or wait for triples
+            return;
+        }
+
+        // Send START message if we're the proposer
         if positor.is_proposer() {
             for &p in &participants {
                 if p == self.me {
