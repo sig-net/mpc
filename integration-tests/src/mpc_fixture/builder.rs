@@ -481,16 +481,21 @@ impl MpcFixtureNodeBuilder {
             self.messaging.filter,
         );
 
-        MpcFixtureNode {
+        let mut node = MpcFixtureNode {
             me: self.me,
             state: node_state,
             mesh: mesh_tx,
             config: config_tx,
             sign_tx,
-            msg_tx: self.messaging.channel.inbox,
+            msg_channel: self.messaging.channel,
             triple_storage,
             presignature_storage,
-        }
+            web_handle: None,
+        };
+
+        node.start_web_interface(self.participant_info.account_id);
+
+        node
     }
 
     /// Build a node's triple, presignature, and secret storage.
