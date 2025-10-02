@@ -1298,16 +1298,16 @@ pub trait EthereumIndexerTrait: Send + Sync + 'static {
                 return;
             };
 
-            if !optimistic_requests {
-                // Wait for finalized block if needed
-                while finalized_block_number.is_none_or(|n| block_number > n) {
-                    let Some(new_finalized_block) = finalized_block_rx.recv().await else {
-                        tracing::error!("Failed to receive finalized blocks");
-                        return;
-                    };
-                    finalized_block_number.replace(new_finalized_block);
-                }
-            }
+            // if !optimistic_requests {
+            //     // Wait for finalized block if needed
+            //     while finalized_block_number.is_none_or(|n| block_number > n) {
+            //         let Some(new_finalized_block) = finalized_block_rx.recv().await else {
+            //             tracing::error!("Failed to receive finalized blocks");
+            //             return;
+            //         };
+            //         finalized_block_number.replace(new_finalized_block);
+            //     }
+            // }
 
             // Verify block hash and send requests
             let block = client
