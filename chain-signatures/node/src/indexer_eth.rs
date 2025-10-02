@@ -57,6 +57,8 @@ pub struct EthConfig {
     pub refresh_finalized_interval: u64,
     /// total timeout for a sign request starting from indexed time in seconds
     pub total_timeout: u64,
+    /// Enable the indexer to just send requests optimistically instead waiting for final.
+    pub optimistic_requests: bool,
 }
 
 impl fmt::Debug for EthConfig {
@@ -73,6 +75,7 @@ impl fmt::Debug for EthConfig {
                 &self.refresh_finalized_interval,
             )
             .field("total_timeout", &self.total_timeout)
+            .field("optimistic_requests", &self.optimistic_requests)
             .finish()
     }
 }
@@ -128,6 +131,10 @@ pub struct EthArgs {
     /// total timeout for a sign request starting from indexed time in seconds
     #[clap(long, env("MPC_ETH_TOTAL_TIMEOUT"), default_value = "1500")]
     pub eth_total_timeout: Option<u64>,
+    /// Enable the indexer to just send requests optimistically instead waiting for final.
+    /// Useful for testing where we do not want to reach finality due to how long it takes.
+    #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
+    pub eth_optimistic_requests: bool,
 }
 
 impl EthArgs {
@@ -169,6 +176,9 @@ impl EthArgs {
                 eth_total_timeout.to_string(),
             ]);
         }
+        if self.eth_optimistic_requests {
+            args.push("--eth-optimistic-requests".to_string());
+        }
         args
     }
 
@@ -182,6 +192,7 @@ impl EthArgs {
             helios_data_path: self.eth_helios_data_path?,
             refresh_finalized_interval: self.eth_refresh_finalized_interval?,
             total_timeout: self.eth_total_timeout?,
+            optimistic_requests: self.eth_optimistic_requests,
         })
     }
 
@@ -196,6 +207,7 @@ impl EthArgs {
                 eth_helios_data_path: Some(config.helios_data_path),
                 eth_refresh_finalized_interval: Some(config.refresh_finalized_interval),
                 eth_total_timeout: Some(config.total_timeout),
+                eth_optimistic_requests: config.optimistic_requests,
             },
             _ => Self {
                 eth_account_sk: None,
@@ -206,6 +218,7 @@ impl EthArgs {
                 eth_helios_data_path: None,
                 eth_refresh_finalized_interval: None,
                 eth_total_timeout: None,
+                eth_optimistic_requests: false,
             },
         }
     }
@@ -526,6 +539,7 @@ pub async fn run(
             sign_tx.clone(),
             app_data_storage.clone(),
             near_account_id_clone.clone(),
+            eth.optimistic_requests,
         )
         .await;
     });
@@ -1053,6 +1067,7 @@ async fn send_requests_when_final(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
+    optimistic_requests: bool,
 ) {
     let mut finalized_block_number: Option<BlockNumber> = None;
     let mut last_processed_block: Option<BlockNumber> = app_data_storage
@@ -1074,13 +1089,15 @@ async fn send_requests_when_final(
             return;
         };
 
-        // Wait for finalized block if needed
-        while finalized_block_number.is_none_or(|n| block_number > n) {
-            let Some(new_finalized_block) = finalized_block_rx.recv().await else {
-                tracing::error!("Failed to receive finalized blocks");
-                return;
-            };
-            finalized_block_number.replace(new_finalized_block);
+        if !optimistic_requests {
+            // Wait for finalized block if needed
+            while finalized_block_number.is_none_or(|n| block_number > n) {
+                let Some(new_finalized_block) = finalized_block_rx.recv().await else {
+                    tracing::error!("Failed to receive finalized blocks");
+                    return;
+                };
+                finalized_block_number.replace(new_finalized_block);
+            }
         }
 
         // Verify block hash and send requests
@@ -1194,7 +1211,7 @@ impl SignatureRequestedEvent {
     fn encode_abi(&self) -> Vec<u8> {
         let signature_requested_event_encoding = SignatureRequestedEncoding {
             sender: self.requester,
-            payload: self.payload_hash.to_vec().into(),
+            payload: self.payload_hash.into(),
             path: self.path.clone(),
             keyVersion: self.key_version,
             chainId: self.chain_id,
