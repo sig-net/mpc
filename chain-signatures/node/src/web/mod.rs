@@ -3,6 +3,9 @@ mod error;
 #[cfg(test)]
 pub mod mock;
 
+#[cfg(feature = "debug-page")]
+pub mod debug;
+
 use self::error::Error;
 use crate::indexer::NearIndexer;
 use crate::metrics::WEB_ENDPOINT_LATENCY;
@@ -78,6 +81,7 @@ pub async fn run(
         .route("/state", get(state))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
+        .route("/debug", get(debug::page))
         .merge(sync);
 
     if cfg!(feature = "bench") {
@@ -260,4 +264,11 @@ async fn sync(
         .with_label_values(&["sync", state.my_account_id.as_str()])
         .observe(start.elapsed().as_millis() as f64);
     Ok(Json(()))
+}
+
+#[cfg(not(feature = "debug-page"))]
+mod debug {
+    pub async fn page() -> axum::response::Html<String> {
+        format!("<html><body>Debug page disabled. Compile the node with --features=debug-page to show useful information here.</bod></html>").into()
+    }
 }
