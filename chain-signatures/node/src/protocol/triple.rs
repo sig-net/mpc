@@ -124,7 +124,7 @@ impl TripleGenerator {
     /// or the channel having been closed (aborted).
     async fn recv(&mut self) -> Option<GeneratorMessage> {
         let timeout_duration = self.timeout.saturating_sub(self.created.elapsed());
-        
+
         tokio::select! {
             result = tokio::time::timeout(timeout_duration, self.inbox.recv()) => {
                 match result {
@@ -186,7 +186,7 @@ impl TripleGenerator {
                     is_proposer = positor.is_proposer(),
                     "triple posit reached consensus, starting protocol"
                 );
-                
+
                 // If we're the proposer, send Start messages to all participants
                 if positor.is_proposer() {
                     for &to in &participants {
@@ -206,7 +206,7 @@ impl TripleGenerator {
                             .await;
                     }
                 }
-                
+
                 self.participants = participants;
                 self.participants.sort();
                 true
@@ -215,7 +215,10 @@ impl TripleGenerator {
     }
 
     /// Initialize the cait-sith protocol and reserve a storage slot.
-    async fn initialize_protocol(&mut self, storage: &TripleStorage) -> Result<(), InitializationError> {
+    async fn initialize_protocol(
+        &mut self,
+        storage: &TripleStorage,
+    ) -> Result<(), InitializationError> {
         // Reserve storage slot
         let Some(slot) = storage.reserve(self.id).await else {
             return Err(InitializationError::BadParameters(format!(
@@ -329,7 +332,7 @@ impl TripleGenerator {
                         failure_counts.inc();
                         break;
                     };
-                    
+
                     match msg {
                         GeneratorMessage::Triple(triple_msg) => {
                             tracing::debug!(
@@ -337,7 +340,10 @@ impl TripleGenerator {
                                 from = ?triple_msg.from,
                                 "received triple protocol message"
                             );
-                            self.protocol.as_mut().expect("protocol initialized").message(triple_msg.from, triple_msg.data);
+                            self.protocol
+                                .as_mut()
+                                .expect("protocol initialized")
+                                .message(triple_msg.from, triple_msg.data);
                         }
                         GeneratorMessage::Posit(from, _) => {
                             tracing::debug!(
@@ -536,7 +542,13 @@ impl TripleSpawner {
     }
 
     /// Route a posit message to the appropriate generator, creating one if needed.
-    async fn route_posit_message(&mut self, id: TripleId, from: Participant, action: PositAction, timeout: Duration) {
+    async fn route_posit_message(
+        &mut self,
+        id: TripleId,
+        from: Participant,
+        action: PositAction,
+        timeout: Duration,
+    ) {
         // Get or create the generator channel
         if !self.generator_channels.contains_key(&id) {
             // First time seeing this triple ID - create a new generator
@@ -545,28 +557,44 @@ impl TripleSpawner {
 
         // Route the message to the generator
         if let Some(tx) = self.generator_channels.get(&id) {
-            if tx.send(GeneratorMessage::Posit(from, action)).await.is_err() {
-                tracing::warn!(id, "failed to route posit message, generator channel closed");
+            if tx
+                .send(GeneratorMessage::Posit(from, action))
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    id,
+                    "failed to route posit message, generator channel closed"
+                );
                 self.generator_channels.remove(&id);
             }
         }
     }
 
     /// Spawn a new generator task for this triple ID.
-    async fn spawn_generator(&mut self, id: TripleId, from: Participant, action: &PositAction, timeout: Duration) {
+    async fn spawn_generator(
+        &mut self,
+        id: TripleId,
+        from: Participant,
+        action: &PositAction,
+        timeout: Duration,
+    ) {
         let (tx, rx) = mpsc::channel(128);
-        
+
         let generator = if matches!(action, PositAction::Propose) && from == self.me {
             // We're proposing this triple
             tracing::info!(id, "spawning triple generator as proposer");
             let participants: Vec<Participant> = match action {
                 PositAction::Start(parts) => parts.clone(),
                 _ => {
-                    tracing::warn!(id, "proposer received non-Start action, using empty participants");
+                    tracing::warn!(
+                        id,
+                        "proposer received non-Start action, using empty participants"
+                    );
                     vec![]
                 }
             };
-            
+
             self.ongoing_introduced.insert(id);
             TripleGenerator::new_proposer(
                 id,
@@ -576,7 +604,8 @@ impl TripleSpawner {
                 Duration::from_millis(timeout.as_millis() as u64),
                 &self.msg,
                 rx,
-            ).await
+            )
+            .await
         } else {
             // We're a deliberator
             tracing::info!(id, ?from, "spawning triple generator as deliberator");
@@ -587,13 +616,18 @@ impl TripleSpawner {
                 Duration::from_millis(timeout.as_millis() as u64),
                 &self.msg,
                 rx,
-            ).await
+            )
+            .await
         };
 
         self.generator_channels.insert(id, tx);
         self.ongoing.spawn(
             id,
-            generator.run(self.my_account_id.clone(), self.epoch, self.triple_storage.clone()),
+            generator.run(
+                self.my_account_id.clone(),
+                self.epoch,
+                self.triple_storage.clone(),
+            ),
         );
         crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
             .with_label_values(&[self.my_account_id.as_str()])
@@ -603,7 +637,7 @@ impl TripleSpawner {
     /// Propose a new triple generation protocol to the network.
     async fn propose_triple(&mut self, active: &[Participant], timeout: Duration) {
         let id = rand::random();
-        
+
         // Spawn proposer generator
         let (tx, rx) = mpsc::channel(128);
         let generator = TripleGenerator::new_proposer(
@@ -614,13 +648,18 @@ impl TripleSpawner {
             timeout,
             &self.msg,
             rx,
-        ).await;
-        
+        )
+        .await;
+
         self.generator_channels.insert(id, tx.clone());
         self.ongoing_introduced.insert(id);
         self.ongoing.spawn(
             id,
-            generator.run(self.my_account_id.clone(), self.epoch, self.triple_storage.clone()),
+            generator.run(
+                self.my_account_id.clone(),
+                self.epoch,
+                self.triple_storage.clone(),
+            ),
         );
         crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
             .with_label_values(&[self.my_account_id.as_str()])
@@ -630,7 +669,9 @@ impl TripleSpawner {
         for &p in active.iter() {
             if p == self.me {
                 // Send to ourselves through the channel
-                let _ = tx.send(GeneratorMessage::Posit(self.me, PositAction::Propose)).await;
+                let _ = tx
+                    .send(GeneratorMessage::Posit(self.me, PositAction::Propose))
+                    .await;
             } else {
                 self.msg
                     .send(

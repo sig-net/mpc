@@ -198,7 +198,11 @@ impl PresignatureGenerator {
             threshold,
             participants: Vec::new(),
             protocol: None,
-            pending_triples: Some(PendingTriples::InStorage(full_id.t0, full_id.t1, triple_storage)),
+            pending_triples: Some(PendingTriples::InStorage(
+                full_id.t0,
+                full_id.t1,
+                triple_storage,
+            )),
             dropper: None,
             created: Instant::now(),
             timeout,
@@ -214,7 +218,7 @@ impl PresignatureGenerator {
     /// or the channel having been closed (aborted).
     async fn recv(&mut self) -> Option<GeneratorMessage> {
         let timeout_duration = self.timeout.saturating_sub(self.created.elapsed());
-        
+
         tokio::select! {
             result = tokio::time::timeout(timeout_duration, self.inbox.recv()) => {
                 match result {
@@ -280,7 +284,7 @@ impl PresignatureGenerator {
                     is_proposer = positor.is_proposer(),
                     "presignature posit reached consensus, starting protocol"
                 );
-                
+
                 // If we're the proposer, send Start messages to all participants
                 if positor.is_proposer() {
                     for &to in &participants {
@@ -304,7 +308,7 @@ impl PresignatureGenerator {
                             .await;
                     }
                 }
-                
+
                 self.participants = participants;
                 self.participants.sort();
                 true
@@ -347,11 +351,19 @@ impl PresignatureGenerator {
         Ok(())
     }
 
-    pub async fn run(mut self, my_account_id: AccountId, epoch: u64, keygen_out: KeygenOutput<Secp256k1>) {
+    pub async fn run(
+        mut self,
+        my_account_id: AccountId,
+        epoch: u64,
+        keygen_out: KeygenOutput<Secp256k1>,
+    ) {
         // Phase 1: Posit consensus
         loop {
             let Some(msg) = self.recv().await else {
-                tracing::warn!(id = self.id, "presignature generator timeout during posit phase");
+                tracing::warn!(
+                    id = self.id,
+                    "presignature generator timeout during posit phase"
+                );
                 return;
             };
 
@@ -381,7 +393,10 @@ impl PresignatureGenerator {
         };
 
         // Phase 3: Initialize protocol
-        if let Err(err) = self.initialize_protocol(triple0, triple1, dropper, keygen_out).await {
+        if let Err(err) = self
+            .initialize_protocol(triple0, triple1, dropper, keygen_out)
+            .await
+        {
             tracing::warn!(
                 id = self.id,
                 ?err,
@@ -446,10 +461,13 @@ impl PresignatureGenerator {
                         failure_counts.inc();
                         break;
                     };
-                    
+
                     match msg {
                         GeneratorMessage::Presignature(presig_msg) => {
-                            self.protocol.as_mut().expect("protocol initialized").message(presig_msg.from, presig_msg.data);
+                            self.protocol
+                                .as_mut()
+                                .expect("protocol initialized")
+                                .message(presig_msg.from, presig_msg.data);
                         }
                         GeneratorMessage::Posit(from, _) => {
                             tracing::debug!(
@@ -524,7 +542,11 @@ impl PresignatureGenerator {
                         tracing::info!(id = self.id, "assigning presignature to myself");
                         success_owned_counts.inc();
                     }
-                    self.slot.as_mut().expect("slot initialized").insert(presignature, self.owner).await;
+                    self.slot
+                        .as_mut()
+                        .expect("slot initialized")
+                        .insert(presignature, self.owner)
+                        .await;
                     break;
                 }
             }
@@ -651,7 +673,13 @@ impl PresignatureSpawner {
     }
 
     /// Route a posit message to the appropriate generator, creating one if needed.
-    async fn route_posit_message(&mut self, id: FullPresignatureId, from: Participant, action: PositAction, timeout: Duration) {
+    async fn route_posit_message(
+        &mut self,
+        id: FullPresignatureId,
+        from: Participant,
+        action: PositAction,
+        timeout: Duration,
+    ) {
         // Get or create the generator channel
         if !self.generator_channels.contains_key(&id.id) {
             // First time seeing this presignature ID - create a new generator
@@ -660,15 +688,28 @@ impl PresignatureSpawner {
 
         // Route the message to the generator
         if let Some(tx) = self.generator_channels.get(&id.id) {
-            if tx.send(GeneratorMessage::Posit(from, action)).await.is_err() {
-                tracing::warn!(id = id.id, "failed to route posit message, generator channel closed");
+            if tx
+                .send(GeneratorMessage::Posit(from, action))
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    id = id.id,
+                    "failed to route posit message, generator channel closed"
+                );
                 self.generator_channels.remove(&id.id);
             }
         }
     }
 
     /// Spawn a new generator task for this presignature ID.
-    async fn spawn_generator(&mut self, id: FullPresignatureId, from: Participant, action: &PositAction, timeout: Duration) {
+    async fn spawn_generator(
+        &mut self,
+        id: FullPresignatureId,
+        from: Participant,
+        action: &PositAction,
+        timeout: Duration,
+    ) {
         // Validation 1: ID hash validation
         if !id.validate() {
             tracing::error!(
@@ -680,27 +721,20 @@ impl PresignatureSpawner {
 
         // Validation 2: Check if already generating
         if self.contains_ongoing(id.id) {
-            tracing::warn!(
-                ?id,
-                "presignature already generating, ignoring"
-            );
+            tracing::warn!(?id, "presignature already generating, ignoring");
             return;
         }
 
         // Validation 3: Check if already exists
         if self.contains(id.id).await {
-            tracing::warn!(
-                ?id,
-                "presignature already generated, ignoring"
-            );
+            tracing::warn!(?id, "presignature already generated, ignoring");
             return;
         }
 
         // Validation 4: Check required triples exist
         let triples_available = (self.triples.contains_reserved(id.t0).await
-                || self.triples.contains(id.t0).await)
-            && (self.triples.contains_reserved(id.t1).await
-                || self.triples.contains(id.t1).await);
+            || self.triples.contains(id.t0).await)
+            && (self.triples.contains_reserved(id.t1).await || self.triples.contains(id.t1).await);
 
         if !triples_available {
             tracing::warn!(
@@ -711,11 +745,11 @@ impl PresignatureSpawner {
         }
 
         let (tx, rx) = mpsc::channel(128);
-        
+
         let generator = if matches!(action, PositAction::Propose) && from == self.me {
             // We're proposing this presignature - need to get the triples
             tracing::info!(id = id.id, "spawning presignature generator as proposer");
-            
+
             let Some(triples) = self.triples.take_two(id.t0, id.t1, self.me, self.me).await else {
                 tracing::warn!(id = id.id, "failed to take triples for presignature");
                 return;
@@ -724,16 +758,22 @@ impl PresignatureSpawner {
             let participants: Vec<Participant> = match action {
                 PositAction::Start(parts) => parts.clone(),
                 _ => {
-                    tracing::warn!(id = id.id, "proposer received non-Start action, using empty participants");
+                    tracing::warn!(
+                        id = id.id,
+                        "proposer received non-Start action, using empty participants"
+                    );
                     vec![]
                 }
             };
 
             let Some(slot) = self.presignatures.reserve(id.id).await else {
-                tracing::error!(id = id.id, "id collision: failed to reserve presignature slot");
+                tracing::error!(
+                    id = id.id,
+                    "id collision: failed to reserve presignature slot"
+                );
                 return;
             };
-            
+
             self.ongoing_owned.insert(id.id);
             PresignatureGenerator::new_proposer(
                 id.id,
@@ -745,13 +785,21 @@ impl PresignatureSpawner {
                 slot,
                 &self.msg,
                 rx,
-            ).await
+            )
+            .await
         } else {
             // We're a deliberator
-            tracing::info!(id = id.id, ?from, "spawning presignature generator as deliberator");
-            
+            tracing::info!(
+                id = id.id,
+                ?from,
+                "spawning presignature generator as deliberator"
+            );
+
             let Some(slot) = self.presignatures.reserve(id.id).await else {
-                tracing::error!(id = id.id, "id collision: failed to reserve presignature slot");
+                tracing::error!(
+                    id = id.id,
+                    "id collision: failed to reserve presignature slot"
+                );
                 return;
             };
 
@@ -760,13 +808,14 @@ impl PresignatureSpawner {
                 self.me,
                 self.threshold,
                 id,
-                from,  // owner is the proposer
+                from, // owner is the proposer
                 self.triples.clone(),
                 timeout,
                 slot,
                 &self.msg,
                 rx,
-            ).await
+            )
+            .await
         };
 
         let keygen_out = KeygenOutput {
@@ -826,9 +875,12 @@ impl PresignatureSpawner {
 
         // Create the generator channel and spawn the proposer
         let (tx, rx) = mpsc::channel(128);
-        
+
         let Some(slot) = self.presignatures.reserve(id.id).await else {
-            tracing::error!(id = id.id, "id collision: failed to reserve presignature slot");
+            tracing::error!(
+                id = id.id,
+                "id collision: failed to reserve presignature slot"
+            );
             return;
         };
 
@@ -842,7 +894,8 @@ impl PresignatureSpawner {
             slot,
             &self.msg,
             rx,
-        ).await;
+        )
+        .await;
 
         let keygen_out = KeygenOutput {
             private_share: self.private_share,
@@ -866,7 +919,9 @@ impl PresignatureSpawner {
         for &p in participants.iter() {
             if p == self.me {
                 // Send to ourselves through the channel
-                let _ = tx.send(GeneratorMessage::Posit(self.me, PositAction::Propose)).await;
+                let _ = tx
+                    .send(GeneratorMessage::Posit(self.me, PositAction::Propose))
+                    .await;
             } else {
                 self.msg
                     .send(
@@ -900,7 +955,11 @@ impl PresignatureSpawner {
 
         if not_enough_presignatures {
             tracing::debug!("not enough presignatures, generating");
-            self.propose_posit(active, Duration::from_millis(cfg.presignature.generation_timeout)).await;
+            self.propose_posit(
+                active,
+                Duration::from_millis(cfg.presignature.generation_timeout),
+            )
+            .await;
         }
     }
 

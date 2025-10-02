@@ -29,7 +29,7 @@ impl<T> Positor<T> {
 }
 
 /// All actions that can be taken when a new posit is introduced for a protocol.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PositAction {
     Propose,
     Start(Vec<Participant>),
@@ -420,7 +420,10 @@ impl<S> PositManager<S> {
 
                     // All checks passed - start the protocol
                     // For deliberators, we just return the deliberator with proposer ID
-                    PositInternalAction::StartProtocol(participants.clone(), Positor::Deliberator(proposer_id))
+                    PositInternalAction::StartProtocol(
+                        participants.clone(),
+                        Positor::Deliberator(proposer_id),
+                    )
                 } else {
                     PositInternalAction::Reply(PositAction::Reject)
                 }
@@ -430,8 +433,11 @@ impl<S> PositManager<S> {
                     counter.accepts.insert(from);
                     if counter.enough_accepts(self.threshold) {
                         // We have enough accepts - extract the store and return StartProtocol
-                        if let Some((Positor::Proposer(proposer_id, counter), _)) = self.positor.take() {
-                            let participants: Vec<Participant> = counter.accepts.iter().copied().collect();
+                        if let Some((Positor::Proposer(proposer_id, counter), _)) =
+                            self.positor.take()
+                        {
+                            let participants: Vec<Participant> =
+                                counter.accepts.iter().copied().collect();
                             return PositInternalAction::StartProtocol(
                                 participants,
                                 Positor::Proposer(proposer_id, counter.store),
