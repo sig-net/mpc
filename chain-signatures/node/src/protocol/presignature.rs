@@ -827,20 +827,9 @@ impl PendingTriples {
             Self::Available(triples) => return Some(triples),
         };
 
-        let triples = tokio::time::timeout(timeout, async {
-            let mut interval = tokio::time::interval(Duration::from_millis(200));
-            loop {
-                interval.tick().await;
-                if let Some(triples) = storage.take_two(id0, id1, owner, me).await {
-                    break triples;
-                };
-            }
-        })
-        .await;
-
-        match triples {
-            Ok(triples) => Some(triples),
-            Err(_) => {
+        match storage.wait_take_two(id0, id1, owner, me, timeout).await {
+            Some(triples) => Some(triples),
+            None => {
                 tracing::warn!(id0, id1, "timeout waiting for triples to be available");
                 None
             }

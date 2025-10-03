@@ -1146,21 +1146,9 @@ impl PendingPresignature {
             PendingPresignature::InStorage(id, owner, storage) => (id, storage, owner),
         };
 
-        let presignature = tokio::time::timeout(timeout, async {
-            // TODO: we can make storage wait for presignature to be available instead of here
-            let mut interval = tokio::time::interval(Duration::from_millis(50));
-            loop {
-                interval.tick().await;
-                if let Some(presignature) = storage.take(id, owner, me).await {
-                    break presignature;
-                };
-            }
-        })
-        .await;
-
-        match presignature {
-            Ok(presignature) => Some(presignature),
-            Err(_) => {
+        match storage.wait_take(id, owner, me, timeout).await {
+            Some(presignature) => Some(presignature),
+            None => {
                 tracing::warn!(
                     id,
                     ?timeout,

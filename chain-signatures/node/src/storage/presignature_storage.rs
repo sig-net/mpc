@@ -3,7 +3,7 @@ use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
-use std::time::Instant;
+use std::time::{Duration as StdDuration, Instant};
 use tokio::task::JoinHandle;
 
 use crate::protocol::presignature::{Presignature, PresignatureId};
@@ -11,6 +11,8 @@ use crate::protocol::presignature::{Presignature, PresignatureId};
 use super::{owner_key, STORAGE_VERSION};
 
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
+const WAIT_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
+const READY_KEY_TTL: StdDuration = StdDuration::from_secs(3600);
 
 /// A pre-reserved slot for a presignature that will eventually be inserted.
 pub struct PresignatureSlot {
@@ -94,10 +96,11 @@ impl PresignatureTaken {
 }
 
 pub fn init(pool: &Pool, account_id: &AccountId) -> PresignatureStorage {
-    let presig_key = format!("presignatures:{STORAGE_VERSION}:{account_id}",);
-    let used_key = format!("presignatures_used:{STORAGE_VERSION}:{account_id}",);
-    let reserved_key = format!("presingatures_reserved:{STORAGE_VERSION}:{account_id}",);
-    let owner_keys = format!("presignatures_owners:{STORAGE_VERSION}:{account_id}",);
+    let presig_key = format!("presignatures:{STORAGE_VERSION}:{account_id}");
+    let used_key = format!("presignatures_used:{STORAGE_VERSION}:{account_id}");
+    let reserved_key = format!("presingatures_reserved:{STORAGE_VERSION}:{account_id}");
+    let owner_keys = format!("presignatures_owners:{STORAGE_VERSION}:{account_id}");
+    let ready_prefix = format!("presignatures_ready:{STORAGE_VERSION}:{account_id}");
 
     PresignatureStorage {
         redis_pool: pool.clone(),
@@ -106,6 +109,7 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> PresignatureStorage {
         reserved_key,
         owner_keys,
         account_id: account_id.clone(),
+        ready_prefix,
     }
 }
 
@@ -117,6 +121,7 @@ pub struct PresignatureStorage {
     reserved_key: String,
     owner_keys: String,
     account_id: AccountId,
+    ready_prefix: String,
 }
 
 impl PresignatureStorage {
@@ -128,6 +133,10 @@ impl PresignatureStorage {
                 tracing::warn!(?err, "failed to connect to redis");
             })
             .ok()
+    }
+
+    fn ready_key(&self, id: PresignatureId) -> String {
+        format!("{}:{id}", self.ready_prefix)
     }
 
     pub async fn fetch_owned(&self, me: Participant) -> Vec<PresignatureId> {
@@ -302,8 +311,10 @@ impl PresignatureStorage {
             local reserved_key = KEYS[3]
             local owner_keys = KEYS[4]
             local owner_key = KEYS[5]
+            local ready_key = KEYS[6]
             local presig_id = ARGV[1]
             local presig = ARGV[2]
+            local ready_ttl = tonumber(ARGV[3])
 
             -- if the presignature has NOT been reserved, then something went wrong when acquiring the
             -- reservation for it via presignature slot.
@@ -318,6 +329,11 @@ impl PresignatureStorage {
             redis.call("SADD", owner_key, presig_id)
             redis.call("SADD", owner_keys, owner_key)
             redis.call("HSET", presig_key, presig_id, presig)
+            redis.call("DEL", ready_key)
+            redis.call("RPUSH", ready_key, presig_id)
+            if ready_ttl > 0 then
+                redis.call("EXPIRE", ready_key, ready_ttl)
+            end
         "#;
 
         let start = Instant::now();
@@ -332,8 +348,10 @@ impl PresignatureStorage {
             .key(&self.reserved_key)
             .key(&self.owner_keys)
             .key(owner_key(&self.owner_keys, owner))
+            .key(&self.ready_key(id))
             .arg(id)
             .arg(presignature)
+            .arg(READY_KEY_TTL.as_secs())
             .invoke_async(&mut conn)
             .await;
 
@@ -469,6 +487,93 @@ impl PresignatureStorage {
                 );
                 None
             }
+        }
+    }
+
+    pub async fn wait_take(
+        &self,
+        id: PresignatureId,
+        owner: Participant,
+        me: Participant,
+        timeout: StdDuration,
+    ) -> Option<PresignatureTaken> {
+        if let Some(presignature) = self.take(id, owner, me).await {
+            return Some(presignature);
+        }
+
+        if timeout.is_zero() {
+            return None;
+        }
+
+        let wait_secs = {
+            let secs = timeout.as_secs();
+            if secs == 0 {
+                1
+            } else {
+                secs as usize
+            }
+        };
+
+        let Some(mut conn) = self.connect().await else {
+            tracing::warn!(
+                "failed to connect to redis while waiting for presignature via brpop"
+            );
+            return self.wait_take_poll(id, owner, me, timeout).await;
+        };
+
+        let mut cmd = redis::cmd("BRPOP");
+        cmd.arg(self.ready_key(id));
+        cmd.arg(wait_secs);
+
+        let response: redis::RedisResult<Option<(String, PresignatureId)>> =
+            cmd.query_async(&mut conn).await;
+
+        drop(conn);
+
+        match response {
+            Ok(Some((_key, _value))) => {
+                if let Some(presignature) = self.take(id, owner, me).await {
+                    return Some(presignature);
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(?err, "failed waiting for presignature readiness");
+                return self.wait_take_poll(id, owner, me, timeout).await;
+            }
+        }
+
+        if let Some(presignature) = self.take(id, owner, me).await {
+            return Some(presignature);
+        }
+
+        self.wait_take_poll(id, owner, me, timeout).await
+    }
+
+    async fn wait_take_poll(
+        &self,
+        id: PresignatureId,
+        owner: Participant,
+        me: Participant,
+        timeout: StdDuration,
+    ) -> Option<PresignatureTaken> {
+        if timeout.is_zero() {
+            return None;
+        }
+
+        match tokio::time::timeout(timeout, async {
+            let mut interval = tokio::time::interval(WAIT_POLL_INTERVAL);
+            loop {
+                interval.tick().await;
+                if let Some(presignature) = self.take(id, owner, me).await {
+                    break presignature;
+                }
+            }
+        })
+        .await
+        {
+            Ok(presignature) => Some(presignature),
+            Err(_) => None,
         }
     }
 

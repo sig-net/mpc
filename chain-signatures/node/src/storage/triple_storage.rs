@@ -1,5 +1,5 @@
 use std::fmt;
-use std::time::Instant;
+use std::time::{Duration as StdDuration, Instant};
 
 use crate::protocol::triple::{Triple, TripleId};
 
@@ -13,6 +13,8 @@ use near_account_id::AccountId;
 use super::{owner_key, STORAGE_VERSION};
 
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
+const WAIT_POLL_INTERVAL: StdDuration = StdDuration::from_millis(200);
+const READY_KEY_TTL: StdDuration = StdDuration::from_secs(3600);
 
 /// A pre-reserved slot for a triple that will eventually be inserted.
 pub struct TripleSlot {
@@ -129,6 +131,7 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
     let used_key = format!("triples_used:{STORAGE_VERSION}:{account_id}");
     let reserved_key = format!("triples_reserved:{STORAGE_VERSION}:{account_id}");
     let owner_keys = format!("triples_owners:{STORAGE_VERSION}:{account_id}");
+    let ready_prefix = format!("triples_ready:{STORAGE_VERSION}:{{{account_id}}}");
 
     TripleStorage {
         redis_pool: pool.clone(),
@@ -137,6 +140,7 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
         reserved_key,
         owner_keys,
         account_id: account_id.clone(),
+        ready_prefix,
     }
 }
 
@@ -148,6 +152,7 @@ pub struct TripleStorage {
     reserved_key: String,
     owner_keys: String,
     account_id: AccountId,
+    ready_prefix: String,
 }
 
 impl TripleStorage {
@@ -159,6 +164,10 @@ impl TripleStorage {
                 tracing::warn!(?err, "failed to connect to redis");
             })
             .ok()
+    }
+
+    fn ready_key(&self, id: TripleId) -> String {
+        format!("{}:{id}", self.ready_prefix)
     }
 
     pub async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
@@ -336,8 +345,10 @@ impl TripleStorage {
             local reserved_key = KEYS[3]
             local owner_keys = KEYS[4]
             local owner_key = KEYS[5]
+            local ready_key = KEYS[6]
             local triple_id = ARGV[1]
             local triple = ARGV[2]
+            local ready_ttl = tonumber(ARGV[3])
 
             -- if the triple has not been reserved, then something went wrong when acquiring the
             -- reservation for it via triple slot.
@@ -352,6 +363,11 @@ impl TripleStorage {
             redis.call("SADD", owner_key, triple_id)
             redis.call("SADD", owner_keys, owner_key)
             redis.call("HSET", triple_key, triple_id, triple)
+            redis.call("DEL", ready_key)
+            redis.call("RPUSH", ready_key, triple_id)
+            if ready_ttl > 0 then
+                redis.call("EXPIRE", ready_key, ready_ttl)
+            end
         "#;
 
         let id = triple.id;
@@ -365,8 +381,10 @@ impl TripleStorage {
             .key(&self.reserved_key)
             .key(&self.owner_keys)
             .key(owner_key(&self.owner_keys, owner))
+            .key(&self.ready_key(id))
             .arg(id)
             .arg(triple)
+            .arg(READY_KEY_TTL.as_secs())
             .invoke_async(&mut conn)
             .await;
 
@@ -536,6 +554,139 @@ impl TripleStorage {
                 );
                 None
             }
+        }
+    }
+
+    pub async fn wait_take_two(
+        &self,
+        id1: TripleId,
+        id2: TripleId,
+        owner: Participant,
+        me: Participant,
+        timeout: StdDuration,
+    ) -> Option<TriplesTaken> {
+        if let Some(triples) = self.take_two(id1, id2, owner, me).await {
+            return Some(triples);
+        }
+
+        if timeout.is_zero() {
+            return None;
+        }
+
+        let start = Instant::now();
+        let mut pending = vec![(id1, self.ready_key(id1)), (id2, self.ready_key(id2))];
+
+        while !pending.is_empty() {
+            let Some(remaining) = timeout.checked_sub(start.elapsed()) else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
+            }
+
+            let wait_secs = {
+                let secs = remaining.as_secs();
+                if secs == 0 {
+                    1
+                } else {
+                    secs as usize
+                }
+            };
+
+            let Some(mut conn) = self.connect().await else {
+                tracing::warn!("failed to connect to redis while waiting for triples via brpop");
+                return self
+                    .wait_take_two_poll(
+                        id1,
+                        id2,
+                        owner,
+                        me,
+                        timeout
+                            .checked_sub(start.elapsed())
+                            .unwrap_or(StdDuration::ZERO),
+                    )
+                    .await;
+            };
+
+            let mut cmd = redis::cmd("BRPOP");
+            for (_, key) in &pending {
+                cmd.arg(key);
+            }
+            cmd.arg(wait_secs);
+
+            let response: redis::RedisResult<Option<(String, TripleId)>> =
+                cmd.query_async(&mut conn).await;
+
+            drop(conn);
+
+            match response {
+                Ok(Some((ready_key, _))) => {
+                    pending.retain(|(_, key)| key != &ready_key);
+                    if let Some(triples) = self.take_two(id1, id2, owner, me).await {
+                        return Some(triples);
+                    }
+                }
+                Ok(None) => {
+                    break;
+                }
+                Err(err) => {
+                    tracing::warn!(?err, "failed waiting for triple readiness");
+                    return self
+                        .wait_take_two_poll(
+                            id1,
+                            id2,
+                            owner,
+                            me,
+                            timeout
+                                .checked_sub(start.elapsed())
+                                .unwrap_or(StdDuration::ZERO),
+                        )
+                        .await;
+                }
+            }
+        }
+
+        if let Some(triples) = self.take_two(id1, id2, owner, me).await {
+            return Some(triples);
+        }
+
+        self.wait_take_two_poll(
+            id1,
+            id2,
+            owner,
+            me,
+            timeout
+                .checked_sub(start.elapsed())
+                .unwrap_or(StdDuration::ZERO),
+        )
+        .await
+    }
+
+    async fn wait_take_two_poll(
+        &self,
+        id1: TripleId,
+        id2: TripleId,
+        owner: Participant,
+        me: Participant,
+        timeout: StdDuration,
+    ) -> Option<TriplesTaken> {
+        if timeout.is_zero() {
+            return None;
+        }
+
+        match tokio::time::timeout(timeout, async {
+            let mut interval = tokio::time::interval(WAIT_POLL_INTERVAL);
+            loop {
+                interval.tick().await;
+                if let Some(triples) = self.take_two(id1, id2, owner, me).await {
+                    break triples;
+                }
+            }
+        })
+        .await
+        {
+            Ok(triples) => Some(triples),
+            Err(_) => None,
         }
     }
 
