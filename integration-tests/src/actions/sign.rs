@@ -33,7 +33,7 @@ use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
 use crate::containers;
 
-use signet_program::SignatureRespondedEvent;
+use signet_program::{ReadRespondedEvent, SignatureRespondedEvent};
 
 // ChainSignatures contract ABI
 alloy::sol! {
@@ -123,16 +123,31 @@ impl fmt::Debug for SignOutcome {
     }
 }
 
+#[derive(Clone, Default)]
+struct SolSignRespondConfig {
+    transaction_data: Option<Vec<u8>>,
+    slip44_chain_id: u32,
+    explorer_deserialization_format: u8,
+    explorer_deserialization_schema: Vec<u8>,
+    callback_serialization_format: u8,
+    callback_serialization_schema: Vec<u8>,
+}
+
 pub struct SignAction<'a> {
     nodes: &'a Cluster,
     count: usize,
     account: Option<Account>,
     payload: Option<[u8; 32]>,
+    payload_hash_override: Option<[u8; 32]>,
     path: String,
     key_version: u32,
     gas: Gas,
     deposit: NearToken,
     execute_rogue: bool,
+    algo: String,
+    dest: String,
+    params: String,
+    sol_sign_respond: SolSignRespondConfig,
 }
 
 impl<'a> SignAction<'a> {
@@ -142,11 +157,16 @@ impl<'a> SignAction<'a> {
             count: 1,
             account: None,
             payload: None,
+            payload_hash_override: None,
             path: "test".into(),
             key_version: LATEST_MPC_KEY_VERSION,
             gas: SIGN_GAS,
             deposit: SIGN_DEPOSIT,
             execute_rogue: false,
+            algo: "secp256k1".into(),
+            dest: "integration_test".into(),
+            params: "{}".into(),
+            sol_sign_respond: SolSignRespondConfig::default(),
         }
     }
 }
@@ -195,6 +215,31 @@ impl<'a> SignAction<'a> {
         self
     }
 
+    /// Override the payload hash that will be signed. When set, the supplied value will be used
+    /// directly instead of hashing the payload bytes again.
+    pub fn payload_hash(mut self, payload_hash: [u8; 32]) -> Self {
+        self.payload_hash_override = Some(payload_hash);
+        self
+    }
+
+    /// Set the signing algorithm metadata used by downstream chains.
+    pub fn algorithm(mut self, algo: &str) -> Self {
+        self.algo = algo.into();
+        self
+    }
+
+    /// Set the destination metadata used by downstream chains.
+    pub fn destination(mut self, dest: &str) -> Self {
+        self.dest = dest.into();
+        self
+    }
+
+    /// Set the additional parameter metadata used by downstream chains.
+    pub fn parameters(mut self, params: &str) -> Self {
+        self.params = params.into();
+        self
+    }
+
     pub fn rogue_responder(mut self) -> Self {
         self.execute_rogue = true;
         self
@@ -211,19 +256,48 @@ impl<'a> SignAction<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SolSignCall {
+    #[default]
+    Sign,
+    SignRespond,
+}
+
 /// Solana-specific sign action that calls the Solana contract's respond function
 pub struct SolSignAction<'a> {
     inner: SignAction<'a>,
+    call: SolSignCall,
 }
 
 impl<'a> SolSignAction<'a> {
     fn new(inner: SignAction<'a>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            call: SolSignCall::default(),
+        }
+    }
+
+    /// Execute the Solana sign + respond flow explicitly.
+    pub fn sign_respond(mut self) -> Self {
+        self.call = SolSignCall::SignRespond;
+        self
+    }
+
+    /// Execute only the Solana sign request without overriding the default mode.
+    pub fn sign_only(mut self) -> Self {
+        self.call = SolSignCall::Sign;
+        self
     }
 
     /// Set the payload of this sign call.
     pub fn payload(mut self, payload: [u8; 32]) -> Self {
         self.inner = self.inner.payload(payload);
+        self
+    }
+
+    /// Override the payload hash for this sign call.
+    pub fn payload_hash(mut self, payload_hash: [u8; 32]) -> Self {
+        self.inner = self.inner.payload_hash(payload_hash);
         self
     }
 
@@ -236,6 +310,50 @@ impl<'a> SolSignAction<'a> {
     /// Set the key version of this sign call.
     pub fn key_version(mut self, key_version: u32) -> Self {
         self.inner = self.inner.key_version(key_version);
+        self
+    }
+
+    /// Set the algorithm metadata for the sign request.
+    pub fn algorithm(mut self, algo: &str) -> Self {
+        self.inner = self.inner.algorithm(algo);
+        self
+    }
+
+    /// Set the destination metadata for the sign request.
+    pub fn destination(mut self, dest: &str) -> Self {
+        self.inner = self.inner.destination(dest);
+        self
+    }
+
+    /// Set the additional parameters metadata for the sign request.
+    pub fn parameters(mut self, params: &str) -> Self {
+        self.inner = self.inner.parameters(params);
+        self
+    }
+
+    /// Attach raw transaction data to be used with sign_respond flows.
+    pub fn transaction_data(mut self, data: Vec<u8>) -> Self {
+        self.inner.sol_sign_respond.transaction_data = Some(data);
+        self
+    }
+
+    /// Set the SLIP-0044 chain identifier for sign_respond flows.
+    pub fn slip44_chain_id(mut self, chain_id: u32) -> Self {
+        self.inner.sol_sign_respond.slip44_chain_id = chain_id;
+        self
+    }
+
+    /// Configure explorer deserialization metadata for sign_respond flows.
+    pub fn explorer_deserialization(mut self, format: u8, schema: Vec<u8>) -> Self {
+        self.inner.sol_sign_respond.explorer_deserialization_format = format;
+        self.inner.sol_sign_respond.explorer_deserialization_schema = schema;
+        self
+    }
+
+    /// Configure callback serialization metadata for sign_respond flows.
+    pub fn callback_serialization(mut self, format: u8, schema: Vec<u8>) -> Self {
+        self.inner.sol_sign_respond.callback_serialization_format = format;
+        self.inner.sol_sign_respond.callback_serialization_schema = schema;
         self
     }
 }
@@ -253,44 +371,63 @@ impl<'a> IntoFuture for SolSignAction<'a> {
 pub struct SolSignOutcome {
     pub tx_signature: SolSignature,
     pub signature: FullSignature<Secp256k1>,
+    pub recovery_id: u8,
     pub signer_account: String,
+    pub request_id: [u8; 32],
+    pub payload: [u8; 32],
+    pub payload_hash: [u8; 32],
+    pub path: String,
+    pub key_version: u32,
+    pub algo: String,
+    pub dest: String,
+    pub params: String,
+}
+
+impl fmt::Debug for SolSignOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SolSignOutcome")
+            .field("tx_signature", &self.tx_signature)
+            .field("signature_big_r", &self.signature.big_r)
+            .field("signature_s", &self.signature.s)
+            .field("recovery_id", &self.recovery_id)
+            .field("signer_account", &self.signer_account)
+            .field("request_id", &hex::encode(self.request_id))
+            .field("payload", &hex::encode(self.payload))
+            .field("payload_hash", &hex::encode(self.payload_hash))
+            .field("path", &self.path)
+            .field("key_version", &self.key_version)
+            .field("algo", &self.algo)
+            .field("dest", &self.dest)
+            .field("params", &self.params)
+            .finish()
+    }
+}
+
+struct SolSignatureResponse {
+    request_id: [u8; 32],
+    signature: FullSignature<Secp256k1>,
+    recovery_id: u8,
+}
+
+pub struct SolReadRespondOutcome {
+    pub request_id: [u8; 32],
+    pub responder: String,
+    pub serialized_output: Vec<u8>,
+    pub signature: FullSignature<Secp256k1>,
+    pub recovery_id: u8,
 }
 
 impl<'a> SolSignAction<'a> {
-    async fn execute(self) -> anyhow::Result<SolSignOutcome> {
-        let payload = self
-            .inner
-            .payload
-            .unwrap_or_else(|| rand::thread_rng().gen());
-        let payload_hash = *alloy::primitives::keccak256(payload);
+    async fn execute(mut self) -> anyhow::Result<SolSignOutcome> {
+        let payload = self.inner.payload_or_random();
+        let payload_hash = self.inner.compute_payload_hash();
+        let path = self.inner.path.clone();
+        let key_version = self.inner.key_version;
+        let algo = self.inner.algo.clone();
+        let dest = self.inner.dest.clone();
+        let params = self.inner.params.clone();
+        let operation = self.call.as_str();
 
-        // Call Solana contract's sign function (not respond!)
-        let (tx_signature, signature) = self
-            .sign(payload_hash, &self.inner.path, self.inner.key_version)
-            .await?;
-
-        // Get the signer account (payer) from the Solana container
-        let solana = self
-            .inner
-            .nodes
-            .solana
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("solana instance not available in cluster"))?;
-        let signer_account = solana.payer_keypair.pubkey().to_string();
-
-        Ok(SolSignOutcome {
-            tx_signature,
-            signature,
-            signer_account,
-        })
-    }
-
-    async fn sign(
-        &self,
-        payload_hash: [u8; 32],
-        path: &str,
-        key_version: u32,
-    ) -> anyhow::Result<(SolSignature, FullSignature<Secp256k1>)> {
         let solana = self
             .inner
             .nodes
@@ -299,30 +436,67 @@ impl<'a> SolSignAction<'a> {
             .ok_or_else(|| anyhow::anyhow!("solana instance not available in cluster"))?;
 
         tracing::info!(
-            "calling solana sign function with payload: {}, path: {}, key_version: {}",
-            hex::encode(payload_hash),
+            payload = %hex::encode(payload_hash),
             path,
-            key_version
+            key_version,
+            algo,
+            dest,
+            params,
+            operation,
+            "calling solana {operation} request",
         );
 
-        // Step 1: Initiate the sign request transaction
-        tracing::info!("requesting solana signature...");
-        let tx_signature = solana.sign(payload_hash, path, key_version).await?;
+        let (tx_signature, response) = self
+            .submit_contract_call(payload_hash, &path, key_version, &algo, &dest, &params)
+            .await?;
 
-        // Step 2: Wait for the response event from MPC nodes
-        tracing::info!("Waiting for MPC signature response event...");
-        let signature = self.wait_for_respond(solana).await?;
-        Ok((tx_signature, signature))
+        let signer_account = solana.payer_keypair.pubkey().to_string();
+
+        Ok(SolSignOutcome {
+            tx_signature,
+            signature: response.signature,
+            recovery_id: response.recovery_id,
+            signer_account,
+            request_id: response.request_id,
+            payload,
+            payload_hash,
+            path,
+            key_version,
+            algo,
+            dest,
+            params,
+        })
     }
 
-    async fn wait_for_respond(
+    async fn submit_contract_call(
         &self,
-        solana: &containers::Solana,
-    ) -> anyhow::Result<FullSignature<Secp256k1>> {
-        // Listen for SignatureRespondedEvent from the Solana contract
-        let program_id = solana.program_keypair.pubkey();
-        let timeout = Duration::from_secs(90);
+        payload_hash: [u8; 32],
+        path: &str,
+        key_version: u32,
+        algo: &str,
+        dest: &str,
+        params: &str,
+    ) -> anyhow::Result<(SolSignature, SolSignatureResponse)> {
+        let solana = self
+            .inner
+            .nodes
+            .solana
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("solana instance not available in cluster"))?;
+        let operation = self.call.as_str();
 
+        tracing::info!(
+            payload = %hex::encode(payload_hash),
+            path,
+            key_version,
+            algo,
+            dest,
+            params,
+            operation,
+            "initiating solana {operation} request",
+        );
+
+        let program_id = solana.program_keypair.pubkey();
         let cluster = AnchorCluster::Custom(solana.rpc_address.clone(), solana.ws_address.clone());
         let client = Client::new_with_options(
             cluster,
@@ -330,11 +504,10 @@ impl<'a> SolSignAction<'a> {
             CommitmentConfig::confirmed(),
         );
         let program = client.program(program_id)?;
-        let (tx, rx) = oneshot::channel();
+        let (tx, response_rx) = oneshot::channel();
         let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
 
-        // Subscribe to SignatureRespondedEvent
-        let event_unsub = program
+        let event_subscription = program
             .on(move |ctx, event: SignatureRespondedEvent| {
                 tracing::info!(
                     request_id = %hex::encode(event.request_id),
@@ -343,10 +516,16 @@ impl<'a> SolSignAction<'a> {
                     "received SignatureRespondedEvent",
                 );
 
-                let signature = parse_sol_signature(&event.signature);
+                let signature_result = parse_sol_signature(&event.signature);
                 if let Ok(mut sender) = tx.lock() {
                     if let Some(sender) = sender.take() {
-                        if sender.send(signature).is_err() {
+                        let result =
+                            signature_result.map(|(signature, recovery_id)| SolSignatureResponse {
+                                request_id: event.request_id,
+                                signature,
+                                recovery_id,
+                            });
+                        if sender.send(result).is_err() {
                             tracing::error!("failed to send SignatureRespondedEvent outcome");
                         }
                     }
@@ -354,16 +533,140 @@ impl<'a> SolSignAction<'a> {
             })
             .await?;
 
-        tracing::info!("subbed to SignatureRespondedEvent, waiting for MPC response...");
-        let result = tokio::time::timeout(timeout, rx).await;
-        event_unsub.unsubscribe().await;
+        tracing::info!("subscribed to SignatureRespondedEvent, waiting for MPC response...");
 
-        match result {
-            Ok(Ok(Ok(full_signature))) => Ok(full_signature),
+        let tx_signature = match self.call {
+            SolSignCall::Sign => match solana
+                .sign(payload_hash, path, key_version, algo, dest, params)
+                .await
+            {
+                Ok(sig) => sig,
+                Err(err) => {
+                    let _ = event_subscription.unsubscribe().await;
+                    return Err(err);
+                }
+            },
+            SolSignCall::SignRespond => {
+                let config = self.inner.sol_sign_respond.clone();
+                let transaction_data = match config.transaction_data.clone() {
+                    Some(data) => data,
+                    None => {
+                        let _ = event_subscription.unsubscribe().await;
+                        anyhow::bail!(
+                            "transaction data must be provided for solana sign_respond requests"
+                        );
+                    }
+                };
+
+                match solana
+                    .sign_respond(
+                        &transaction_data,
+                        config.slip44_chain_id,
+                        key_version,
+                        path,
+                        algo,
+                        dest,
+                        params,
+                        config.explorer_deserialization_format,
+                        &config.explorer_deserialization_schema,
+                        config.callback_serialization_format,
+                        &config.callback_serialization_schema,
+                    )
+                    .await
+                {
+                    Ok(sig) => sig,
+                    Err(err) => {
+                        let _ = event_subscription.unsubscribe().await;
+                        return Err(err);
+                    }
+                }
+            }
+        };
+
+        tracing::info!("waiting for MPC response event...");
+        let response_result = tokio::time::timeout(Duration::from_secs(90), response_rx).await;
+        event_subscription.unsubscribe().await;
+
+        let response = match response_result {
+            Ok(Ok(Ok(response))) => response,
             Ok(Ok(Err(e))) => anyhow::bail!("failed to parse sol signature: {e}"),
             Ok(Err(_)) => anyhow::bail!("sol event channel closed unexpectedly"),
             Err(_) => anyhow::bail!("timeout waiting for respond on sol"),
+        };
+        Ok((tx_signature, response))
+    }
+}
+
+impl SolSignCall {
+    fn as_str(self) -> &'static str {
+        match self {
+            SolSignCall::SignRespond => "sign_respond",
+            SolSignCall::Sign => "sign",
         }
+    }
+}
+
+pub async fn wait_for_read_respond(
+    solana: &containers::Solana,
+    expected_request_id: [u8; 32],
+    timeout: Duration,
+) -> anyhow::Result<SolReadRespondOutcome> {
+    let program_id = solana.program_keypair.pubkey();
+
+    let cluster = AnchorCluster::Custom(solana.rpc_address.clone(), solana.ws_address.clone());
+    let client = Client::new_with_options(
+        cluster,
+        Arc::new(solana.payer_keypair.insecure_clone()),
+        CommitmentConfig::confirmed(),
+    );
+    let program = client.program(program_id)?;
+    let (tx, rx) = oneshot::channel();
+    let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
+
+    let event_unsub = program
+        .on(move |_ctx, event: ReadRespondedEvent| {
+            tracing::info!(
+                request_id = %hex::encode(event.request_id),
+                responder = ?event.responder,
+                serialized_output_len = event.serialized_output.len(),
+                "received ReadRespondedEvent",
+            );
+
+            if event.request_id != expected_request_id {
+                return;
+            }
+
+            let signature_result = parse_sol_signature(&event.signature);
+            if let Ok(mut sender) = tx.lock() {
+                if let Some(sender) = sender.take() {
+                    let outcome =
+                        signature_result.map(|(signature, recovery_id)| SolReadRespondOutcome {
+                            request_id: event.request_id,
+                            responder: event.responder.to_string(),
+                            serialized_output: event.serialized_output.clone(),
+                            signature,
+                            recovery_id,
+                        });
+                    if sender.send(outcome).is_err() {
+                        tracing::error!("failed to send ReadRespondedEvent outcome");
+                    }
+                }
+            }
+        })
+        .await?;
+
+    tracing::info!(
+        request_id = %hex::encode(expected_request_id),
+        "subscribed to ReadRespondedEvent, waiting for MPC read respond...",
+    );
+    let result = tokio::time::timeout(timeout, rx).await;
+    event_unsub.unsubscribe().await;
+
+    match result {
+        Ok(Ok(Ok(outcome))) => Ok(outcome),
+        Ok(Ok(Err(e))) => anyhow::bail!("failed to parse sol read respond signature: {e}"),
+        Ok(Err(_)) => anyhow::bail!("sol read respond event channel closed unexpectedly"),
+        Err(_) => anyhow::bail!("timeout waiting for read respond on sol"),
     }
 }
 
@@ -383,7 +686,7 @@ impl SignAction<'_> {
         let state = self.nodes.expect_running().await?;
         let account = self.account_or_new().await;
         let payload = self.payload_or_random();
-        let payload_hash = self.payload_hash();
+        let payload_hash = self.compute_payload_hash();
         let status = self.transact_sign(&account, payload_hash).await?;
 
         // We have to use seperate transactions because one could fail.
@@ -438,8 +741,14 @@ impl SignAction<'_> {
         payload
     }
 
-    fn payload_hash(&mut self) -> [u8; 32] {
-        *alloy::primitives::keccak256(self.payload_or_random())
+    fn compute_payload_hash(&mut self) -> [u8; 32] {
+        if let Some(override_hash) = self.payload_hash_override {
+            // Ensure payload is initialised so callers can still inspect it.
+            let _ = self.payload_or_random();
+            override_hash
+        } else {
+            *alloy::primitives::keccak256(self.payload_or_random())
+        }
     }
 
     async fn transact_sign(
@@ -516,7 +825,7 @@ impl SignAction<'_> {
 /// Convert a Solana contract signature to FullSignature<Secp256k1>
 fn parse_sol_signature(
     solana_sig: &signet_program::Signature,
-) -> anyhow::Result<FullSignature<Secp256k1>> {
+) -> anyhow::Result<(FullSignature<Secp256k1>, u8)> {
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::{AffinePoint, Scalar};
     use mpc_crypto::ScalarExt;
@@ -539,7 +848,7 @@ fn parse_sol_signature(
         Scalar::from_bytes(solana_sig.s).ok_or_else(|| anyhow::anyhow!("Invalid scalar bytes"))?;
 
     // Create the FullSignature (note: FullSignature doesn't store recovery_id)
-    Ok(FullSignature { big_r, s })
+    Ok((FullSignature { big_r, s }, solana_sig.recovery_id))
 }
 
 /// Ethereum contract signature request outcome

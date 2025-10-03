@@ -903,7 +903,8 @@ async fn process_block(
     };
     let mut read_respond_requests: Vec<IndexedSignRequest> = Vec::new();
     for receipt in &block_receipts {
-        let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
+        let tx_id = receipt.transaction_hash.into();
+        let Some(pending_tx) = pending_txs.get(&tx_id) else {
             continue;
         };
         let status = receipt.status();
@@ -928,6 +929,7 @@ async fn process_block(
             .await;
         if let Some(read_respond_request) = read_respond_request {
             read_respond_requests.push(read_respond_request);
+            tracing::info!(?tx_id, "eth/inserting updated tx with new status into map");
             sign_respond_tx_map
                 .write()
                 .await
@@ -987,6 +989,10 @@ async fn process_block(
                 .await;
             if let Some(read_respond_request) = read_respond_request {
                 read_respond_requests.push(read_respond_request);
+                tracing::info!(
+                    ?tx_id,
+                    "eth/inserting updated tx with failed status into map"
+                );
                 sign_respond_tx_map.write().await.insert(tx_id, tx);
             } else {
                 // failed to create sign request from completed tx, remove the tx from the map

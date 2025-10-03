@@ -88,6 +88,39 @@ pub mod signet_program {
 
         Ok(())
     }
+
+    pub fn sign_respond(
+        ctx: Context<SignRespond>,
+        transaction_data: Vec<u8>,
+        slip44_chain_id: u32,
+        key_version: u32,
+        path: String,
+        algo: String,
+        dest: String,
+        params: String,
+        explorer_deserialization_format: u8,
+        explorer_deserialization_schema: Vec<u8>,
+        callback_serialization_format: u8,
+        callback_serialization_schema: Vec<u8>,
+    ) -> Result<()> {
+        emit!(SignRespondRequestedEvent {
+            sender: *ctx.accounts.requester.key,
+            transaction_data,
+            slip44_chain_id,
+            key_version,
+            deposit: ctx.accounts.program_state.signature_deposit,
+            path,
+            algo,
+            dest,
+            params,
+            explorer_deserialization_format,
+            explorer_deserialization_schema,
+            callback_serialization_format,
+            callback_serialization_schema,
+        });
+
+        Ok(())
+    }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
@@ -147,6 +180,18 @@ pub struct Sign<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct SignRespond<'info> {
+    #[account(mut, seeds = [b"program-state"], bump)]
+    pub program_state: Account<'info, ProgramState>,
+    #[account(mut)]
+    pub requester: Signer<'info>,
+    #[account(mut)]
+    pub fee_payer: Option<Signer<'info>>,
+    pub system_program: Program<'info, System>,
+    pub instructions: Option<AccountInfo<'info>>,
+}
+
 #[event]
 pub struct SignatureRespondedEvent {
     pub request_id: [u8; 32],
@@ -174,4 +219,21 @@ pub struct SignatureRequestedEvent {
     pub dest: String,
     pub params: String,
     pub fee_payer: Option<Pubkey>,
+}
+
+#[event]
+pub struct SignRespondRequestedEvent {
+    pub sender: Pubkey,
+    pub transaction_data: Vec<u8>,
+    pub slip44_chain_id: u32,
+    pub key_version: u32,
+    pub deposit: u64,
+    pub path: String,
+    pub algo: String,
+    pub dest: String,
+    pub params: String,
+    pub explorer_deserialization_format: u8,
+    pub explorer_deserialization_schema: Vec<u8>,
+    pub callback_serialization_format: u8,
+    pub callback_serialization_schema: Vec<u8>,
 }

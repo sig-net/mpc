@@ -1328,6 +1328,12 @@ async fn try_publish_sol(
         recovery_id: signature.recovery_id,
     };
 
+    tracing::debug!(
+        sign_id = ?action.request.indexed.id,
+        request_type = ?action.request.indexed.sign_request_type,
+        "try_publish_sol: dispatching request"
+    );
+
     match &action.request.indexed.sign_request_type {
         SignRequestType::Sign | SignRequestType::SignRespond(_) => {
             let tx = program
@@ -1361,8 +1367,14 @@ async fn try_publish_sol(
             );
         }
         SignRequestType::ReadRespond(read_responded_tx) => {
+            tracing::debug!(
+                sign_id = ?action.request.indexed.id,
+                request_id = ?request_ids[0],
+                serialized_output_len = read_responded_tx.output.len(),
+                "try_publish_sol: entering ReadRespond arm"
+            );
             let read_respond_serialized_output = read_responded_tx.output.clone();
-            let tx = program
+            let tx_result = program
                 .request()
                 .signer(sol.payer.clone())
                 .accounts(SolanaReadRespondAccount {
@@ -1374,25 +1386,30 @@ async fn try_publish_sol(
                     signature: signature.clone(),
                 })
                 .send()
-                .await
-                .map_err(|err| {
+                .await;
+            match tx_result {
+                Ok(tx) => {
+                    tracing::info!(
+                        sign_id = ?action.request.indexed.id,
+                        tx_hash = ?tx,
+                        elapsed = ?timestamp.elapsed(),
+                        "published read respond solana signature successfully"
+                    );
+                    read_responded_tx_channel.send(read_responded_tx.tx_id);
+                }
+                Err(err) => {
                     tracing::error!(
                         sign_id = ?action.request.indexed.id,
                         error = ?err,
-                        "failed to publish read respond solana signature"
+                        request_id = ?request_ids[0],
+                        serialized_output_len = read_responded_tx.output.len(),
+                        "failed to publish read respond solana signature (debug)"
                     );
                     crate::metrics::SIGNATURE_PUBLISH_FAILURES
                         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                         .inc();
-                })?;
-
-            tracing::info!(
-                sign_id = ?action.request.indexed.id,
-                tx_hash = ?tx,
-                elapsed = ?timestamp.elapsed(),
-                "published read respond solana signature successfully"
-            );
-            read_responded_tx_channel.send(read_responded_tx.tx_id);
+                }
+            }
         }
     }
 
