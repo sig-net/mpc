@@ -565,101 +565,101 @@ impl TripleStorage {
         me: Participant,
         timeout: StdDuration,
     ) -> Option<TriplesTaken> {
-        if let Some(triples) = self.take_two(id1, id2, owner, me).await {
-            return Some(triples);
-        }
-
         if timeout.is_zero() {
             return None;
         }
 
+        const SCRIPT: &str = r#"
+            local ready_key1 = KEYS[1]
+            local ready_key2 = KEYS[2]
+            local triple_key = KEYS[3]
+            local used_key = KEYS[4]
+            local owner_key = KEYS[5]
+            local mine_key = KEYS[6]
+            local reserved_key = KEYS[7]
+            local id1 = ARGV[1]
+            local id2 = ARGV[2]
+            local used_expire = tonumber(ARGV[3])
+            local wait_secs = tonumber(ARGV[4])
+
+            local brpop = redis.call('BRPOP', ready_key1, ready_key2, wait_secs)
+            if not brpop then
+                return nil
+            end
+
+            -- Ownership and state checks (same as take_two)
+            local reserved = redis.call("SMISMEMBER", reserved_key, id1, id2)
+            if reserved[1] == 1 or reserved[2] == 1 then
+                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " is generating or taken"}
+            end
+            local check_mine = redis.call("SMISMEMBER", mine_key, id1, id2)
+            if check_mine[1] == 1 or check_mine[2] == 1 then
+                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " cannot be taken as foreign owned"}
+            end
+            local check_owner = redis.call("SMISMEMBER", owner_key, id1, id2)
+            if check_owner[1] == 0 or check_owner[2] == 0 then
+                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " cannot be taken by incorrect owner " .. owner_key}
+            end
+
+            local triples = redis.call("HMGET", triple_key, id1, id2)
+            if not triples[1] then
+                return {err = "WARN unexpected, triple " .. id1 .. " is missing"}
+            end
+            if not triples[2] then
+                return {err = "WARN unexpected, triple " .. id2 .. " is missing"}
+            end
+            redis.call("HDEL", triple_key, id1, id2)
+            redis.call("SREM", owner_key, id1, id2)
+            redis.call("HSET", used_key, id1, "1", id2, "1")
+            redis.call("HEXPIRE", used_key, used_expire, "FIELDS", 2, id1, id2)
+
+            return triples
+        "#;
+
         let start = Instant::now();
-        let mut pending = vec![(id1, self.ready_key(id1)), (id2, self.ready_key(id2))];
+        let wait_secs = {
+            let secs = timeout.as_secs();
+            if secs == 0 { 1 } else { secs as usize }
+        };
 
-        while !pending.is_empty() {
-            let Some(remaining) = timeout.checked_sub(start.elapsed()) else {
-                break;
-            };
-            if remaining.is_zero() {
-                break;
+        let Some(mut conn) = self.connect().await else {
+            tracing::warn!("failed to connect to redis while waiting for triples via brpop");
+            return self.wait_take_two_poll(id1, id2, owner, me, timeout).await;
+        };
+
+        let result = redis::Script::new(SCRIPT)
+            .key(self.ready_key(id1))
+            .key(self.ready_key(id2))
+            .key(&self.triple_key)
+            .key(&self.used_key)
+            .key(owner_key(&self.owner_keys, owner))
+            .key(owner_key(&self.owner_keys, me))
+            .key(&self.reserved_key)
+            .arg(id1)
+            .arg(id2)
+            .arg(USED_EXPIRE_TIME.num_seconds())
+            .arg(wait_secs)
+            .invoke_async(&mut conn)
+            .await;
+
+        drop(conn);
+
+        let elapsed = start.elapsed();
+        match result {
+            Ok((triple0, triple1)) => {
+                tracing::debug!(
+                    id1,
+                    id2,
+                    elapsed_ms = elapsed.as_millis(),
+                    "took two triples"
+                );
+                Some(TriplesTaken::foreigner(triple0, triple1))
             }
-
-            let wait_secs = {
-                let secs = remaining.as_secs();
-                if secs == 0 {
-                    1
-                } else {
-                    secs as usize
-                }
-            };
-
-            let Some(mut conn) = self.connect().await else {
-                tracing::warn!("failed to connect to redis while waiting for triples via brpop");
-                return self
-                    .wait_take_two_poll(
-                        id1,
-                        id2,
-                        owner,
-                        me,
-                        timeout
-                            .checked_sub(start.elapsed())
-                            .unwrap_or(StdDuration::ZERO),
-                    )
-                    .await;
-            };
-
-            let mut cmd = redis::cmd("BRPOP");
-            for (_, key) in &pending {
-                cmd.arg(key);
-            }
-            cmd.arg(wait_secs);
-
-            let response: redis::RedisResult<Option<(String, TripleId)>> =
-                cmd.query_async(&mut conn).await;
-
-            drop(conn);
-
-            match response {
-                Ok(Some((ready_key, _))) => {
-                    pending.retain(|(_, key)| key != &ready_key);
-                    if let Some(triples) = self.take_two(id1, id2, owner, me).await {
-                        return Some(triples);
-                    }
-                }
-                Ok(None) => {
-                    break;
-                }
-                Err(err) => {
-                    tracing::warn!(?err, "failed waiting for triple readiness");
-                    return self
-                        .wait_take_two_poll(
-                            id1,
-                            id2,
-                            owner,
-                            me,
-                            timeout
-                                .checked_sub(start.elapsed())
-                                .unwrap_or(StdDuration::ZERO),
-                        )
-                        .await;
-                }
+            Err(err) => {
+                tracing::warn!(?err, "failed waiting for triple readiness (lua)");
+                self.wait_take_two_poll(id1, id2, owner, me, timeout).await
             }
         }
-
-        if let Some(triples) = self.take_two(id1, id2, owner, me).await {
-            return Some(triples);
-        }
-
-        self.wait_take_two_poll(
-            id1,
-            id2,
-            owner,
-            me,
-            timeout
-                .checked_sub(start.elapsed())
-                .unwrap_or(StdDuration::ZERO),
-        )
-        .await
     }
 
     async fn wait_take_two_poll(
