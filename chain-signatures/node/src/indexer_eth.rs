@@ -1,6 +1,6 @@
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
-use crate::sign_respond_tx::SignRespondTx;
-use crate::sign_respond_tx::SignRespondTxId;
+use crate::sign_bidirectional::BidirectionalTx;
+use crate::sign_bidirectional::BidirectionalTxId;
 use crate::storage::app_data_storage::AppDataStorage;
 use alloy::consensus::BlockHeader;
 use alloy::eips::{BlockId, BlockNumberOrTag};
@@ -8,7 +8,7 @@ use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::Log;
 
-use crate::sign_respond_tx::SignRespondTxStatus;
+use crate::sign_bidirectional::BidirectionalTxStatus;
 use alloy::sol_types::{sol, SolEvent};
 use helios::common::types::{SubscriptionEvent, SubscriptionType};
 use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
@@ -421,7 +421,7 @@ pub async fn run(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
-    sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+    bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
 ) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
@@ -534,7 +534,7 @@ pub async fn run(
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let blocks_failed_send_clone = blocks_failed_send.clone();
     let client_clone = Arc::clone(&client);
-    let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
+    let bidirectional_tx_map_clone = bidirectional_tx_map.clone();
     tokio::spawn(async move {
         tracing::info!("Spawned task to retry failed blocks");
         retry_failed_blocks(
@@ -545,7 +545,7 @@ pub async fn run(
             near_account_id_clone,
             requests_indexed_send_clone,
             total_timeout,
-            sign_respond_tx_map_clone,
+            bidirectional_tx_map_clone,
         )
         .await;
     });
@@ -597,7 +597,7 @@ pub async fn run(
                 (block_number, block_hash, false)
             }
         };
-        let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
+        let bidirectional_tx_map_clone = bidirectional_tx_map.clone();
         if let Err(err) = process_block(
             block_number,
             block_hash,
@@ -606,7 +606,7 @@ pub async fn run(
             node_near_account_id.clone(),
             requests_indexed_send_clone.clone(),
             total_timeout,
-            sign_respond_tx_map_clone,
+            bidirectional_tx_map_clone,
         )
         .await
         {
@@ -636,7 +636,7 @@ async fn retry_failed_blocks(
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
-    sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+    bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
 ) {
     loop {
         let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
@@ -651,7 +651,7 @@ async fn retry_failed_blocks(
             node_near_account_id.clone(),
             requests_indexed.clone(),
             total_timeout,
-            sign_respond_tx_map.clone(),
+            bidirectional_tx_map.clone(),
         )
         .await
         {
@@ -853,7 +853,7 @@ async fn process_block(
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
-    sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+    bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -878,16 +878,16 @@ async fn process_block(
         return Ok(());
     };
 
-    let pending_txs: HashMap<SignRespondTxId, SignRespondTx> = {
-        sign_respond_tx_map
+    let pending_txs: HashMap<BidirectionalTxId, BidirectionalTx> = {
+        bidirectional_tx_map
             .read()
             .await
             .iter()
-            .filter(|(_, tx)| tx.status == SignRespondTxStatus::Pending)
+            .filter(|(_, tx)| tx.status == BidirectionalTxStatus::Pending)
             .map(|(id, tx)| (*id, tx.clone()))
             .collect()
     };
-    let mut read_respond_requests: Vec<IndexedSignRequest> = Vec::new();
+    let mut respond_bidirectional_requests: Vec<IndexedSignRequest> = Vec::new();
     for receipt in &block_receipts {
         let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
             continue;
@@ -901,20 +901,21 @@ async fn process_block(
         let client_clone = client.clone();
         let mut pending_tx = pending_tx.clone();
         pending_tx.status = if status {
-            SignRespondTxStatus::Success
+            BidirectionalTxStatus::Success
         } else {
-            SignRespondTxStatus::Failed
+            BidirectionalTxStatus::Failed
         };
 
         let pending_tx_clone = pending_tx.clone();
-        let completed_tx = crate::read_respond::CompletedTx::new(pending_tx_clone, block_number);
+        let completed_tx =
+            crate::respond_bidirectional::CompletedTx::new(pending_tx_clone, block_number);
 
-        let read_respond_request: Option<IndexedSignRequest> = completed_tx
+        let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
             .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
             .await;
-        if let Some(read_respond_request) = read_respond_request {
-            read_respond_requests.push(read_respond_request);
-            sign_respond_tx_map
+        if let Some(respond_bidirectional_sign_request) = respond_bidirectional_sign_request {
+            respond_bidirectional_requests.push(respond_bidirectional_sign_request);
+            bidirectional_tx_map
                 .write()
                 .await
                 .insert(receipt.transaction_hash.into(), pending_tx);
@@ -925,19 +926,19 @@ async fn process_block(
                 "Failed to create sign request from completed tx, removing tx from map: {:?}",
                 receipt.transaction_hash
             );
-            sign_respond_tx_map
+            bidirectional_tx_map
                 .write()
                 .await
                 .remove(&receipt.transaction_hash.into());
         }
     }
 
-    let remaining_pending_txs: HashMap<SignRespondTxId, SignRespondTx> = {
-        sign_respond_tx_map
+    let remaining_pending_txs: HashMap<BidirectionalTxId, BidirectionalTx> = {
+        bidirectional_tx_map
             .read()
             .await
             .iter()
-            .filter(|(_, tx)| tx.status == SignRespondTxStatus::Pending)
+            .filter(|(_, tx)| tx.status == BidirectionalTxStatus::Pending)
             .map(|(id, tx)| (*id, tx.clone()))
             .collect()
     };
@@ -961,26 +962,27 @@ async fn process_block(
                 tx.nonce,
                 current_nonce
             );
-            tx.status = SignRespondTxStatus::Failed;
+            tx.status = BidirectionalTxStatus::Failed;
             let client_clone = client.clone();
 
             let pending_tx = tx.clone();
 
-            let completed_tx = crate::read_respond::CompletedTx::new(pending_tx, block_number);
+            let completed_tx =
+                crate::respond_bidirectional::CompletedTx::new(pending_tx, block_number);
 
-            let read_respond_request: Option<IndexedSignRequest> = completed_tx
+            let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
                 .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
                 .await;
-            if let Some(read_respond_request) = read_respond_request {
-                read_respond_requests.push(read_respond_request);
-                sign_respond_tx_map.write().await.insert(tx_id, tx);
+            if let Some(respond_bidirectional_sign_request) = respond_bidirectional_sign_request {
+                respond_bidirectional_requests.push(respond_bidirectional_sign_request);
+                bidirectional_tx_map.write().await.insert(tx_id, tx);
             } else {
                 // failed to create sign request from completed tx, remove the tx from the map
                 tracing::warn!(
                     "Failed to create sign request from completed tx, removing tx from map: {:?}",
                     tx_id
                 );
-                sign_respond_tx_map.write().await.remove(&tx_id);
+                bidirectional_tx_map.write().await.remove(&tx_id);
             }
         }
     }
@@ -1002,8 +1004,8 @@ async fn process_block(
     if !filtered_logs.is_empty() {
         all_sign_requests.extend(parse_filtered_logs(filtered_logs, total_timeout));
     }
-    if !read_respond_requests.is_empty() {
-        all_sign_requests.extend(read_respond_requests);
+    if !respond_bidirectional_requests.is_empty() {
+        all_sign_requests.extend(respond_bidirectional_requests);
     }
 
     if all_sign_requests.is_empty() {

@@ -22,14 +22,14 @@ pub use signature::{IndexedSignRequest, SignQueue};
 pub use state::{Node, NodeState};
 
 use crate::config::Config;
-use crate::indexer_sol::SignRespondRequestedEvent;
+use crate::indexer_sol::SignBidirectionalEvent;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
-use crate::read_respond::ReadRespondedTx;
+use crate::respond_bidirectional::RespondBidirectionalTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::sign_respond_tx::SignRespondSignatureChannel;
+use crate::sign_bidirectional::SignBidirectionalSignatureChannel;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -57,7 +57,7 @@ pub struct MpcSignProtocol {
     pub(crate) contract: ContractStateWatcher,
     pub(crate) config: watch::Receiver<Config>,
     pub(crate) mesh_state: watch::Receiver<MeshState>,
-    pub(crate) sign_respond_signature_channel: SignRespondSignatureChannel,
+    pub(crate) sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
 }
 
 /// Interface required by the [`MpcSignProtocol`] to participate in the
@@ -242,8 +242,8 @@ pub enum Chain {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SignRequestType {
     Sign,
-    SignRespond(SignRespondRequestedEvent),
-    ReadRespond(ReadRespondedTx),
+    SignBidirectional(SignBidirectionalEvent),
+    RespondBidirectional(RespondBidirectionalTx),
 }
 
 impl Chain {

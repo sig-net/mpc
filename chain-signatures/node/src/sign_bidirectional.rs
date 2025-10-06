@@ -20,13 +20,13 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Copy)]
-pub struct SignRespondTxId(pub B256);
+pub struct BidirectionalTxId(pub B256);
 
 pub type RequestId = [u8; 32];
 
-impl From<B256> for SignRespondTxId {
+impl From<B256> for BidirectionalTxId {
     fn from(b256: B256) -> Self {
-        SignRespondTxId(b256)
+        BidirectionalTxId(b256)
     }
 }
 
@@ -38,38 +38,36 @@ struct AbiField {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum SignRespondTxStatus {
+pub enum BidirectionalTxStatus {
     Pending,
     Failed,
     Success,
 }
 
 #[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
-pub struct SignRespondTx {
-    pub id: SignRespondTxId,
+pub struct BidirectionalTx {
+    pub id: BidirectionalTxId,
     pub sender: Pubkey,
     pub transaction_data: Vec<u8>,
-    pub slip44_chain_id: u32,
+    pub caip2_id: String,
     pub key_version: u32,
     pub deposit: u64,
     pub path: String,
     pub algo: String,
     pub dest: String,
     pub params: String,
-    pub explorer_deserialization_format: u8,
-    pub explorer_deserialization_schema: Vec<u8>,
-    pub callback_serialization_format: u8,
-    pub callback_serialization_schema: Vec<u8>,
+    pub output_deserialization_schema: Vec<u8>,
+    pub respond_serialization_schema: Vec<u8>,
     pub request_id: [u8; 32],
     pub from_address: Address,
     pub nonce: u64,
     pub participants: Vec<Participant>,
-    pub status: SignRespondTxStatus,
+    pub status: BidirectionalTxStatus,
 }
 
-impl SignRespondTx {
-    pub fn new(sign_respond_signature: SignRespondSignature) -> anyhow::Result<Self> {
-        let SignRequestType::SignRespond(sign_respond_event) = sign_respond_signature
+impl BidirectionalTx {
+    pub fn new(sign_respond_signature: SignBidirectionalSignature) -> anyhow::Result<Self> {
+        let SignRequestType::SignBidirectional(sign_respond_event) = sign_respond_signature
             .request
             .indexed
             .sign_request_type
@@ -93,25 +91,23 @@ impl SignRespondTx {
         tracing::info!(from_address = ?from_address, "from_address");
 
         Ok(Self {
-            id: SignRespondTxId(signed_transaction_hash.into()),
+            id: BidirectionalTxId(signed_transaction_hash.into()),
             sender: sign_respond_event.sender,
             transaction_data: sign_respond_event.transaction_data,
-            slip44_chain_id: sign_respond_event.slip44_chain_id,
+            caip2_id: sign_respond_event.caip2_id,
             key_version: sign_respond_event.key_version,
             deposit: sign_respond_event.deposit,
             path: sign_respond_event.path,
             algo: sign_respond_event.algo,
             dest: sign_respond_event.dest,
             params: sign_respond_event.params,
-            explorer_deserialization_format: sign_respond_event.explorer_deserialization_format,
-            explorer_deserialization_schema: sign_respond_event.explorer_deserialization_schema,
-            callback_serialization_format: sign_respond_event.callback_serialization_format,
-            callback_serialization_schema: sign_respond_event.callback_serialization_schema,
+            output_deserialization_schema: sign_respond_event.output_deserialization_schema,
+            respond_serialization_schema: sign_respond_event.respond_serialization_schema,
             request_id: sign_respond_signature.request.indexed.id.request_id,
             from_address,
             nonce,
             participants: sign_respond_signature.participants,
-            status: SignRespondTxStatus::Pending,
+            status: BidirectionalTxStatus::Pending,
         })
     }
 }
@@ -509,7 +505,7 @@ fn parse_borsh_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<Abi
 }
 
 #[derive(Clone)]
-pub struct SignRespondSignature {
+pub struct SignBidirectionalSignature {
     pub public_key: mpc_crypto::PublicKey,
     pub request: SignRequest,
     pub signature: Signature,
@@ -517,11 +513,11 @@ pub struct SignRespondSignature {
 }
 
 #[derive(Clone)]
-pub struct SignRespondSignatureChannel {
-    tx: mpsc::Sender<SignRespondSignature>,
+pub struct SignBidirectionalSignatureChannel {
+    tx: mpsc::Sender<SignBidirectionalSignature>,
 }
 
-impl SignRespondSignatureChannel {
+impl SignBidirectionalSignatureChannel {
     pub fn send(
         &self,
         public_key: mpc_crypto::PublicKey,
@@ -545,7 +541,7 @@ impl SignRespondSignatureChannel {
         };
         tokio::spawn(async move {
             if let Err(err) = tx
-                .send(SignRespondSignature {
+                .send(SignBidirectionalSignature {
                     public_key,
                     request,
                     signature,
@@ -559,33 +555,36 @@ impl SignRespondSignatureChannel {
     }
 }
 
-pub struct SignRespondSignatureProcessor {
-    sign_respond_signature_rx: mpsc::Receiver<SignRespondSignature>,
+pub struct SignBidirectionalSignatureProcessor {
+    sign_bidirectional_signature_rx: mpsc::Receiver<SignBidirectionalSignature>,
 }
 
 const MAX_CONCURRENT_SIGN_RESPOND_SIGNATURE_REQUESTS: usize = 1024;
 
-impl SignRespondSignatureProcessor {
-    pub fn new() -> (SignRespondSignatureChannel, Self) {
+impl SignBidirectionalSignatureProcessor {
+    pub fn new() -> (SignBidirectionalSignatureChannel, Self) {
         let (tx, rx) = mpsc::channel(MAX_CONCURRENT_SIGN_RESPOND_SIGNATURE_REQUESTS);
         (
-            SignRespondSignatureChannel { tx },
+            SignBidirectionalSignatureChannel { tx },
             Self {
-                sign_respond_signature_rx: rx,
+                sign_bidirectional_signature_rx: rx,
             },
         )
     }
 
     pub async fn run(
         mut self,
-        sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
+        sign_respond_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
         max_attempts: u8,
     ) {
-        while let Some(sign_respond_signature) = self.sign_respond_signature_rx.recv().await {
-            let sign_respond_tx = match SignRespondTx::new(sign_respond_signature.clone()) {
+        while let Some(sign_bidirectional_signature) =
+            self.sign_bidirectional_signature_rx.recv().await
+        {
+            let bidirectional_tx = match BidirectionalTx::new(sign_bidirectional_signature.clone())
+            {
                 Ok(tx) => tx,
                 Err(err) => {
-                    tracing::error!(sign_id = ?sign_respond_signature.request.indexed.id, "failed to create sign respond tx: {err:?}");
+                    tracing::error!(sign_id = ?sign_bidirectional_signature.request.indexed.id, "failed to create sign respond tx: {err:?}");
                     continue;
                 }
             };
@@ -594,13 +593,13 @@ impl SignRespondSignatureProcessor {
                 if sign_respond_tx_map
                     .write()
                     .await
-                    .insert(sign_respond_tx.id, sign_respond_tx.clone())
+                    .insert(bidirectional_tx.id, bidirectional_tx.clone())
                     .is_some()
                 {
-                    tracing::info!(sign_id = ?sign_respond_tx.id, "inserted sign respond tx into map");
+                    tracing::info!(sign_id = ?bidirectional_tx.id, "inserted sign respond tx into map");
                     break;
                 } else if attempt == max_attempts {
-                    tracing::error!(sign_id = ?sign_respond_tx.id, "failed to insert sign respond tx into map after {max_attempts} attempts");
+                    tracing::error!(sign_id = ?bidirectional_tx.id, "failed to insert sign respond tx into map after {max_attempts} attempts");
                 }
             }
         }

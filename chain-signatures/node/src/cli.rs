@@ -6,9 +6,9 @@ use crate::protocol::message::MessageChannel;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
-use crate::read_respond::ReadRespondedTxProcessor;
+use crate::respond_bidirectional::RespondBidirectionalTxProcessor;
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
-use crate::sign_respond_tx::SignRespondSignatureProcessor;
+use crate::sign_bidirectional::SignBidirectionalSignatureProcessor;
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 use clap::Parser;
@@ -265,10 +265,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol);
-            let (sign_respond_signature_channel, sign_respond_signature_processor) =
-                SignRespondSignatureProcessor::new();
-            let (read_responded_tx_channel, read_responded_tx_processor) =
-                ReadRespondedTxProcessor::new();
+            let (sign_bidirectional_signature_channel, sign_bidirectional_signature_processor) =
+                SignBidirectionalSignatureProcessor::new();
+            let (respond_bidirectional_tx_channel, respond_bidirectional_tx_processor) =
+                RespondBidirectionalTxProcessor::new();
             let (sync_channel, sync) = SyncTask::new(
                 &client,
                 triple_storage.clone(),
@@ -278,9 +278,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 synced_peer_tx,
             );
 
-            let sign_respond_tx_map = Arc::new(RwLock::new(HashMap::<
-                crate::sign_respond_tx::SignRespondTxId,
-                crate::sign_respond_tx::SignRespondTx,
+            let bidirectional_tx_map = Arc::new(RwLock::new(HashMap::<
+                crate::sign_bidirectional::BidirectionalTxId,
+                crate::sign_bidirectional::BidirectionalTx,
             >::new()));
 
             tracing::info!(
@@ -324,7 +324,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract: contract_watcher.clone(),
                 config: config_rx.clone(),
                 mesh_state: mesh_state.clone(),
-                sign_respond_signature_channel: sign_respond_signature_channel.clone(),
+                sign_bidirectional_signature_channel: sign_bidirectional_signature_channel.clone(),
             };
 
             tracing::info!("protocol initialized");
@@ -332,14 +332,14 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tokio::spawn(rpc.run(
                 contract_state_tx,
                 config_tx.clone(),
-                sign_respond_signature_channel.clone(),
-                read_responded_tx_channel.clone(),
+                sign_bidirectional_signature_channel.clone(),
+                respond_bidirectional_tx_channel.clone(),
             ));
 
-            let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
-            tokio::spawn(sign_respond_signature_processor.run(sign_respond_tx_map_clone, 5));
-            let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
-            tokio::spawn(read_responded_tx_processor.run(sign_respond_tx_map_clone, 5));
+            let bidirectional_tx_map_clone = bidirectional_tx_map.clone();
+            tokio::spawn(sign_bidirectional_signature_processor.run(bidirectional_tx_map_clone, 5));
+            let bidirectional_tx_map_clone = bidirectional_tx_map.clone();
+            tokio::spawn(respond_bidirectional_tx_processor.run(bidirectional_tx_map_clone, 5));
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
             let protocol_handle = tokio::spawn(protocol.run(
@@ -365,7 +365,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_tx.clone(),
                 app_data_storage.clone(),
                 account_id.clone(),
-                sign_respond_tx_map,
+                bidirectional_tx_map,
             ));
             tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
             tracing::info!("protocol http server spawned");

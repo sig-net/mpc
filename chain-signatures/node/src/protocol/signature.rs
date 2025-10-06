@@ -9,7 +9,7 @@ use crate::protocol::posit::{PositAction, PositInternalAction, Positor, Posits};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::sign_respond_tx::SignRespondSignatureChannel;
+use crate::sign_bidirectional::SignBidirectionalSignatureChannel;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
@@ -388,7 +388,7 @@ struct SignatureGenerator {
     inbox: mpsc::Receiver<SignatureMessage>,
     msg: MessageChannel,
     rpc: RpcChannel,
-    sign_respond_signature_channel: SignRespondSignatureChannel,
+    sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
 }
 
 impl SignatureGenerator {
@@ -402,7 +402,7 @@ impl SignatureGenerator {
         cfg: ProtocolConfig,
         msg: MessageChannel,
         rpc: RpcChannel,
-        sign_respond_signature_channel: SignRespondSignatureChannel,
+        sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
     ) -> Result<Self, InitializationError> {
         let sign_id = request.id();
         let request = request
@@ -461,7 +461,7 @@ impl SignatureGenerator {
             inbox,
             msg,
             rpc,
-            sign_respond_signature_channel,
+            sign_bidirectional_signature_channel,
         })
     }
 
@@ -634,10 +634,10 @@ impl SignatureGenerator {
                             output,
                             self.participants.clone(),
                         );
-                    } else if let SignRequestType::SignRespond(_) =
+                    } else if let SignRequestType::SignBidirectional(_) =
                         self.request.indexed.sign_request_type
                     {
-                        self.sign_respond_signature_channel.send(
+                        self.sign_bidirectional_signature_channel.send(
                             self.public_key,
                             self.request.clone(),
                             output,
@@ -681,7 +681,7 @@ pub struct SignatureSpawner {
     epoch: u64,
     msg: MessageChannel,
     rpc: RpcChannel,
-    sign_respond_signature_channel: SignRespondSignatureChannel,
+    sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
 }
 
 impl SignatureSpawner {
@@ -696,7 +696,7 @@ impl SignatureSpawner {
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
         rpc: RpcChannel,
-        sign_respond_signature_channel: SignRespondSignatureChannel,
+        sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
     ) -> Self {
         Self {
             presignatures: presignatures.clone(),
@@ -710,7 +710,7 @@ impl SignatureSpawner {
             epoch,
             msg,
             rpc,
-            sign_respond_signature_channel,
+            sign_bidirectional_signature_channel,
         }
     }
 
@@ -844,7 +844,7 @@ impl SignatureSpawner {
         presignature: PendingPresignature,
         participants: Vec<Participant>,
         cfg: ProtocolConfig,
-        sign_respond_signature_channel: SignRespondSignatureChannel,
+        sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
     ) {
         let me = self.me;
         let epoch = self.epoch;
@@ -864,7 +864,7 @@ impl SignatureSpawner {
                 cfg,
                 msg,
                 rpc,
-                sign_respond_signature_channel,
+                sign_bidirectional_signature_channel,
             )
             .await
             {
@@ -931,7 +931,7 @@ impl SignatureSpawner {
             presignature,
             participants,
             cfg,
-            self.sign_respond_signature_channel.clone(),
+            self.sign_bidirectional_signature_channel.clone(),
         )
         .await;
     }
@@ -1117,7 +1117,7 @@ impl SignatureSpawnerTask {
             &ctx.presignature_storage,
             ctx.msg_channel.clone(),
             ctx.rpc_channel.clone(),
-            ctx.sign_respond_signature_channel.clone(),
+            ctx.sign_bidirectional_signature_channel.clone(),
         );
 
         Self {
