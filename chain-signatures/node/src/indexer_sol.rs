@@ -48,7 +48,7 @@ pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
 
 const CPI_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: Sign",
-    "Program log: Instruction: SignRespond",
+    "Program log: Instruction: SignBidirectional",
 ];
 
 #[derive(Clone)]
@@ -589,7 +589,9 @@ async fn parse_cpi_events(
         } else if event_discriminator == SignBidirectionalEvent::DISCRIMINATOR {
             match SignBidirectionalEvent::deserialize(&mut &event_data[..]) {
                 Ok(ev) => acc.push(Box::new(ev) as SignatureEventBox),
-                Err(e) => tracing::warn!("Failed to deserialize SignRespondRequestedEvent: {e}"),
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize SignBidirectionalEvent: {e}")
+                }
             }
         }
 
