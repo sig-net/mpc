@@ -310,7 +310,7 @@ impl RespondBidirectionalTxChannel {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             if let Err(err) = tx.send(tx_id).await {
-                tracing::error!(%err, "failed to send read responded tx id");
+                tracing::error!(%err, "failed to send respond bidirectional tx id");
             }
         });
     }

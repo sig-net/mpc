@@ -73,7 +73,7 @@ impl BidirectionalTx {
             .sign_request_type
             .clone()
         else {
-            anyhow::bail!("sign request is not a sign respond");
+            anyhow::bail!("sign request is not a sign bidirectional");
         };
 
         let unsigned_rlp_data = &sign_respond_event.transaction_data;
@@ -549,7 +549,7 @@ impl SignBidirectionalSignatureChannel {
                 })
                 .await
             {
-                tracing::error!(%err, "failed to send sign respond signature");
+                tracing::error!(%err, "failed to send sign bidirectional signature");
             }
         });
     }
@@ -584,7 +584,7 @@ impl SignBidirectionalSignatureProcessor {
             {
                 Ok(tx) => tx,
                 Err(err) => {
-                    tracing::error!(sign_id = ?sign_bidirectional_signature.request.indexed.id, "failed to create sign respond tx: {err:?}");
+                    tracing::error!(sign_id = ?sign_bidirectional_signature.request.indexed.id, "failed to create sign bidirectional tx: {err:?}");
                     continue;
                 }
             };
@@ -596,10 +596,10 @@ impl SignBidirectionalSignatureProcessor {
                     .insert(bidirectional_tx.id, bidirectional_tx.clone())
                     .is_some()
                 {
-                    tracing::info!(sign_id = ?bidirectional_tx.id, "inserted sign respond tx into map");
+                    tracing::info!(sign_id = ?bidirectional_tx.id, "inserted sign bidirectional tx into map");
                     break;
                 } else if attempt == max_attempts {
-                    tracing::error!(sign_id = ?bidirectional_tx.id, "failed to insert sign respond tx into map after {max_attempts} attempts");
+                    tracing::error!(sign_id = ?bidirectional_tx.id, "failed to insert sign bidirectional tx into map after {max_attempts} attempts");
                 }
             }
         }
