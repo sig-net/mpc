@@ -20,6 +20,10 @@ use tokio::time::Duration;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
+// hardcode to 0 as this is what we are using for solana
+const RESPOND_SERIALIZATION_FORMAT: u8 = 0;
+// hardcode to 1 as this is what we are using for ethereum
+const OUTPUT_DESERIALIZATION_FORMAT: u8 = 1;
 
 pub struct CompletedTx {
     tx: BidirectionalTx,
@@ -94,12 +98,11 @@ impl CompletedTx {
         total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("Tx failed: {:?}", self.tx.id);
-        // hardcode to 0 as this is what we are using for solana
-        let callback_serialization_format = 0;
 
+        let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
         let mut output = Vec::new();
         output.extend_from_slice(&MAGIC_ERROR_PREFIX);
-        let serialized_output: Vec<u8> = if callback_serialization_format == 0 {
+        let serialized_output: Vec<u8> = if respond_serialization_format == 0 {
             let borsh_data = [1u8]; // Simple serialization: 1 = true
             output.extend_from_slice(&borsh_data);
             Bytes::from(output).into()
@@ -126,8 +129,7 @@ impl CompletedTx {
             .extract_success_tx_output(helios_client, max_attempts)
             .await?;
         tracing::info!("Tx succeeded: {tx_output:?}");
-        // hardcode to 0 as this is what we are using for solana
-        let respond_serialization_format = 0;
+        let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
         let respond_serialization_schema = &self.tx.respond_serialization_schema;
         let serialized_output = tx_output
             .output
@@ -200,8 +202,7 @@ impl CompletedTx {
         let Some(tx) = tx else {
             anyhow::bail!("Failed to fetch tx from helios, tx id: {:?}", self.tx.id);
         };
-        // hardcode to 1 as this is what we are using for ethereum
-        let output_deserialization_format = 1;
+        let output_deserialization_format = OUTPUT_DESERIALIZATION_FORMAT;
         let output_deserialization_schema = &self.tx.output_deserialization_schema;
         let from_address = self.tx.from_address;
 
