@@ -196,7 +196,7 @@ mod tests {
     #[test(tokio::test)]
     async fn test_pool_update() {
         let num_nodes = 3;
-        let servers = MockServers::new(num_nodes).await;
+        let servers = MockServers::run(num_nodes).await;
         let participants = servers.participants();
         let my_id = servers[0].account_id().clone();
 
@@ -246,7 +246,7 @@ mod tests {
         let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
         let num_nodes = 3;
 
-        let mut servers = MockServers::new(num_nodes).await;
+        let mut servers = MockServers::run(num_nodes).await;
 
         let participants = servers.participants();
         let me = servers[0].id();
@@ -337,7 +337,7 @@ mod tests {
     async fn test_mesh_contract_update() {
         let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
         let mut num_nodes = 3;
-        let mut servers = MockServers::new(num_nodes).await;
+        let mut servers = MockServers::run(num_nodes).await;
         let node_id = servers[0].account_id().clone();
 
         let (contract_watcher, contract_tx) = ContractStateWatcher::with_running(
@@ -401,7 +401,7 @@ mod tests {
         // check on node deletion with contract change.
         {
             num_nodes -= 1;
-            servers.swap_remove_front().await;
+            servers.remove_back();
             // update the contract after removing the participant.
             contract_tx.send_modify(|contract| match contract.as_mut().unwrap() {
                 ProtocolState::Running(RunningContractState { participants, .. }) => {
