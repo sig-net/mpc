@@ -1,5 +1,6 @@
 use cait_sith::protocol::Participant;
 use mockito::ServerGuard;
+use near_sdk::AccountId;
 
 use crate::{
     node_client::NodeClient,
@@ -10,6 +11,7 @@ use super::StateView;
 
 pub struct MockServer {
     id: u32,
+    node_id: AccountId,
     server: ServerGuard,
 }
 
@@ -40,7 +42,12 @@ impl MockServer {
             .create_async()
             .await;
 
-        Self { id, server }
+        let node_id = format!("p{id}.test").parse().unwrap();
+        Self {
+            id,
+            node_id,
+            server,
+        }
     }
 
     pub fn id(&self) -> Participant {
@@ -50,11 +57,15 @@ impl MockServer {
     pub fn info(&self) -> ParticipantInfo {
         ParticipantInfo {
             id: self.id,
-            account_id: format!("p{}.test", self.id).parse().unwrap(),
+            account_id: self.node_id.clone(),
             url: self.server.url(),
             cipher_pk: mpc_keys::hpke::PublicKey::from_bytes(&[0; 32]),
             sign_pk: near_crypto::PublicKey::empty(near_crypto::KeyType::ED25519),
         }
+    }
+
+    pub fn account_id(&self) -> &AccountId {
+        &self.node_id
     }
 
     pub async fn make_offline(&mut self) {

@@ -102,6 +102,7 @@ fn env() -> (Runtime, SyncEnv) {
             mpc_node::mesh::Options {
                 ping_interval: 1000,
             },
+            &node_id,
             synced_peer_rx,
         );
 

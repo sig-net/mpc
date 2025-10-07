@@ -197,6 +197,10 @@ impl Participants {
             participants: intersect,
         }
     }
+
+    pub fn clear(&mut self) {
+        self.participants.clear();
+    }
 }
 
 /// ParticipantMap used to find a participant by specific amount of participants.

@@ -255,7 +255,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let client = NodeClient::new(&message_options);
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
-            let mesh = Mesh::new(&client, mesh_options, synced_peer_rx);
+            let mesh = Mesh::new(&client, mesh_options, &account_id, synced_peer_rx);
             let mesh_state = mesh.watch();
             let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(&account_id);
 
