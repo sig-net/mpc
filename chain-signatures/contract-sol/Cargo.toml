@@ -9,4 +9,4 @@ crate-type = ["lib"]
 name = "signet_program"
 
 [dependencies]
-anchor-lang = "0.31.0"
+anchor-lang = { version = "0.31.1", features = ["event-cpi"] }

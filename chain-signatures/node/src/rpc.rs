@@ -1334,11 +1334,15 @@ async fn try_publish_sol(
 
     match &action.request.indexed.sign_request_type {
         SignRequestType::Sign | SignRequestType::SignBidirectional(_) => {
+            let (event_authority, _) =
+                Pubkey::find_program_address(&[b"__event_authority"], &sol.program_id);
             let tx = program
                 .request()
                 .signer(sol.payer.clone())
                 .accounts(SolanaRespondAccount {
                     responder: sol.payer.clone().try_pubkey().unwrap(),
+                    event_authority,
+                    program: sol.program_id,
                 })
                 .args(SolanaRespond {
                     request_ids,
