@@ -209,7 +209,7 @@ async fn test_eth_signature_basic() -> anyhow::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
-    let key_version = 0; // LATEST_MPC_KEY_VERSION;
+    let key_version = LATEST_MPC_KEY_VERSION;
     let account_sk = std::env::var("IT_ETH_ACCOUNT_SK")
         .context("IT_ETH_ACCOUNT_SK not set")?
         .trim()

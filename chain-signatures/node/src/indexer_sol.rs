@@ -302,7 +302,7 @@ impl SignatureEventTrait for SignRespondRequestedEvent {
             anyhow::bail!("deposit is 0");
         }
 
-        if self.key_version != 0 {
+        if self.key_version > LATEST_MPC_KEY_VERSION {
             tracing::warn!("unsupported key version: {}", self.key_version);
             anyhow::bail!("unsupported key version");
         }
