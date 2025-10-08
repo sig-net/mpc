@@ -89,6 +89,7 @@ pub mod signet_program {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn sign_respond(
         ctx: Context<SignRespond>,
         transaction_data: Vec<u8>,

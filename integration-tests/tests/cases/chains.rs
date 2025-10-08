@@ -96,6 +96,7 @@ async fn test_solana_signature_first_phase_bidirectional() -> anyhow::Result<()>
     let outcome = cluster
         .sign()
         .solana()
+        .bidirectional()
         .transaction_data(unsigned_rlp)
         .slip44_chain_id(60)
         .explorer_deserialization(0, Vec::new())
@@ -103,7 +104,6 @@ async fn test_solana_signature_first_phase_bidirectional() -> anyhow::Result<()>
         .payload(payload)
         .path(path)
         .key_version(key_version)
-        .sign_respond()
         .await?;
 
     let root_pk_near = cluster.root_public_key().await.unwrap();
@@ -292,6 +292,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let sol_outcome = nodes
         .sign()
         .solana()
+        .bidirectional()
         .transaction_data(unsigned_rlp.clone())
         .slip44_chain_id(60)
         .explorer_deserialization(0, Vec::new())
@@ -303,7 +304,6 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         .algorithm("ECDSA")
         .destination("ethereum")
         .parameters("{\"network\":\"sepolia\"}")
-        .sign_respond()
         .await?;
 
     assert_eq!(

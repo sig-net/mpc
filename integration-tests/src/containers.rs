@@ -811,7 +811,8 @@ impl Solana {
         Ok(signature)
     }
 
-    pub async fn sign_respond(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn sign_bidirectional(
         &self,
         transaction_data: &[u8],
         slip44_chain_id: u32,
@@ -843,7 +844,7 @@ impl Solana {
         let discriminator = hasher.finalize();
         data.extend_from_slice(&discriminator[..8]);
 
-        let args = SignRespondArgs {
+        let args = SignBidirectionalArgs {
             transaction_data: transaction_data.to_vec(),
             slip44_chain_id,
             key_version,
@@ -983,7 +984,7 @@ struct SignArgs {
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
-struct SignRespondArgs {
+struct SignBidirectionalArgs {
     transaction_data: Vec<u8>,
     slip44_chain_id: u32,
     key_version: u32,

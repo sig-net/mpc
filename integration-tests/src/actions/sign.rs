@@ -124,7 +124,7 @@ impl fmt::Debug for SignOutcome {
 }
 
 #[derive(Clone, Default)]
-struct SolSignRespondConfig {
+struct SolanaSignArgs {
     transaction_data: Option<Vec<u8>>,
     slip44_chain_id: u32,
     explorer_deserialization_format: u8,
@@ -147,7 +147,6 @@ pub struct SignAction<'a> {
     algo: String,
     dest: String,
     params: String,
-    sol_sign_respond: SolSignRespondConfig,
 }
 
 impl<'a> SignAction<'a> {
@@ -166,7 +165,6 @@ impl<'a> SignAction<'a> {
             algo: "secp256k1".into(),
             dest: "integration_test".into(),
             params: "{}".into(),
-            sol_sign_respond: SolSignRespondConfig::default(),
         }
     }
 }
@@ -257,35 +255,31 @@ impl<'a> SignAction<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum SolSignCall {
+enum SignCall {
     #[default]
     Sign,
-    SignRespond,
+    Bidirectional,
 }
 
 /// Solana-specific sign action that calls the Solana contract's respond function
 pub struct SolSignAction<'a> {
     inner: SignAction<'a>,
-    call: SolSignCall,
+    call: SignCall,
+    args: SolanaSignArgs,
 }
 
 impl<'a> SolSignAction<'a> {
     fn new(inner: SignAction<'a>) -> Self {
         Self {
             inner,
-            call: SolSignCall::default(),
+            call: SignCall::default(),
+            args: SolanaSignArgs::default(),
         }
     }
 
     /// Execute the Solana sign + respond flow explicitly.
-    pub fn sign_respond(mut self) -> Self {
-        self.call = SolSignCall::SignRespond;
-        self
-    }
-
-    /// Execute only the Solana sign request without overriding the default mode.
-    pub fn sign_only(mut self) -> Self {
-        self.call = SolSignCall::Sign;
+    pub fn bidirectional(mut self) -> Self {
+        self.call = SignCall::Bidirectional;
         self
     }
 
@@ -333,27 +327,27 @@ impl<'a> SolSignAction<'a> {
 
     /// Attach raw transaction data to be used with sign_respond flows.
     pub fn transaction_data(mut self, data: Vec<u8>) -> Self {
-        self.inner.sol_sign_respond.transaction_data = Some(data);
+        self.args.transaction_data = Some(data);
         self
     }
 
     /// Set the SLIP-0044 chain identifier for sign_respond flows.
     pub fn slip44_chain_id(mut self, chain_id: u32) -> Self {
-        self.inner.sol_sign_respond.slip44_chain_id = chain_id;
+        self.args.slip44_chain_id = chain_id;
         self
     }
 
     /// Configure explorer deserialization metadata for sign_respond flows.
     pub fn explorer_deserialization(mut self, format: u8, schema: Vec<u8>) -> Self {
-        self.inner.sol_sign_respond.explorer_deserialization_format = format;
-        self.inner.sol_sign_respond.explorer_deserialization_schema = schema;
+        self.args.explorer_deserialization_format = format;
+        self.args.explorer_deserialization_schema = schema;
         self
     }
 
     /// Configure callback serialization metadata for sign_respond flows.
     pub fn callback_serialization(mut self, format: u8, schema: Vec<u8>) -> Self {
-        self.inner.sol_sign_respond.callback_serialization_format = format;
-        self.inner.sol_sign_respond.callback_serialization_schema = schema;
+        self.args.callback_serialization_format = format;
+        self.args.callback_serialization_schema = schema;
         self
     }
 }
@@ -536,7 +530,7 @@ impl<'a> SolSignAction<'a> {
         tracing::info!("subscribed to SignatureRespondedEvent, waiting for MPC response...");
 
         let tx_signature = match self.call {
-            SolSignCall::Sign => match solana
+            SignCall::Sign => match solana
                 .sign(payload_hash, path, key_version, algo, dest, params)
                 .await
             {
@@ -546,8 +540,8 @@ impl<'a> SolSignAction<'a> {
                     return Err(err);
                 }
             },
-            SolSignCall::SignRespond => {
-                let config = self.inner.sol_sign_respond.clone();
+            SignCall::Bidirectional => {
+                let config = self.args.clone();
                 let transaction_data = match config.transaction_data.clone() {
                     Some(data) => data,
                     None => {
@@ -559,7 +553,7 @@ impl<'a> SolSignAction<'a> {
                 };
 
                 match solana
-                    .sign_respond(
+                    .sign_bidirectional(
                         &transaction_data,
                         config.slip44_chain_id,
                         key_version,
@@ -597,11 +591,11 @@ impl<'a> SolSignAction<'a> {
     }
 }
 
-impl SolSignCall {
-    fn as_str(self) -> &'static str {
+impl SignCall {
+    const fn as_str(self) -> &'static str {
         match self {
-            SolSignCall::SignRespond => "sign_respond",
-            SolSignCall::Sign => "sign",
+            SignCall::Bidirectional => "sign_respond",
+            SignCall::Sign => "sign",
         }
     }
 }
