@@ -2,7 +2,7 @@
 use anchor_lang::prelude::*;
 
 // fake address
-declare_id!("85hZuPHErQ6y1o59oMGjVCjHz4xgzKzjVCpgPm6kdBTV");
+declare_id!("CMGYAEsqXw5z52R8fmMZwPYQARHPEkGbefJA2FmeHLMh");
 
 #[program]
 pub mod signet_program {
@@ -14,11 +14,6 @@ pub mod signet_program {
         request_ids: Vec<[u8; 32]>,
         signatures: Vec<Signature>,
     ) -> Result<()> {
-        require!(
-            request_ids.len() == signatures.len(),
-            ChainSignaturesError::InvalidInputLength
-        );
-
         for i in 0..request_ids.len() {
             emit_cpi!(SignatureRespondedEvent {
                 request_id: request_ids[i],
@@ -88,22 +83,4 @@ pub struct RespondBidirectionalEvent {
     pub responder: Pubkey,
     pub serialized_output: Vec<u8>,
     pub signature: Signature,
-}
-
-#[error_code]
-pub enum ChainSignaturesError {
-    #[msg("Insufficient deposit amount")]
-    InsufficientDeposit,
-    #[msg("Arrays must have the same length")]
-    InvalidInputLength,
-    #[msg("Unauthorized access")]
-    Unauthorized,
-    #[msg("Insufficient funds for withdrawal")]
-    InsufficientFunds,
-    #[msg("Invalid recipient address")]
-    InvalidRecipient,
-    #[msg("Invalid transaction data")]
-    InvalidTransaction,
-    #[msg("Missing instruction sysvar")]
-    MissingInstructionSysvar,
 }
