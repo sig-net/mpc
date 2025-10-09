@@ -20,9 +20,9 @@ use tokio::time::Duration;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
-// hardcode to 0 as this is what we are using for solana
+// Use Borsh as this is what we are using for solana
 const RESPOND_SERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Borsh;
-// hardcode to 1 as this is what we are using for ethereum
+// Use Abi as this is what we are using for ethereum
 const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
 
 #[derive(PartialEq)]
