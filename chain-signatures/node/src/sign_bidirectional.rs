@@ -1,5 +1,6 @@
 use crate::protocol::signature::SignRequest;
 use crate::protocol::SignRequestType;
+use crate::respond_bidirectional::SerDeserFormat;
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use anchor_lang::prelude::Pubkey;
@@ -122,8 +123,8 @@ impl Output {
             .is_some_and(|v| v.as_bool().unwrap_or(false))
     }
 
-    pub fn serialize(&self, format: u8, schema: &[u8]) -> anyhow::Result<Vec<u8>> {
-        if format == 1 {
+    pub fn serialize(&self, format: SerDeserFormat, schema: &[u8]) -> anyhow::Result<Vec<u8>> {
+        if format == SerDeserFormat::Abi {
             self.serialize_abi(schema)
         } else {
             self.serialize_borsh(schema)

@@ -21,9 +21,15 @@ use tokio::time::Duration;
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 // hardcode to 0 as this is what we are using for solana
-const RESPOND_SERIALIZATION_FORMAT: u8 = 0;
+const RESPOND_SERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Borsh;
 // hardcode to 1 as this is what we are using for ethereum
-const OUTPUT_DESERIALIZATION_FORMAT: u8 = 1;
+const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
+
+#[derive(PartialEq)]
+pub enum SerDeserFormat {
+    Borsh,
+    Abi,
+}
 
 pub struct CompletedTx {
     tx: BidirectionalTx,
@@ -102,7 +108,7 @@ impl CompletedTx {
         let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
         let mut output = Vec::new();
         output.extend_from_slice(&MAGIC_ERROR_PREFIX);
-        let serialized_output: Vec<u8> = if respond_serialization_format == 0 {
+        let serialized_output: Vec<u8> = if respond_serialization_format == SerDeserFormat::Borsh {
             let borsh_data = [1u8]; // Simple serialization: 1 = true
             output.extend_from_slice(&borsh_data);
             Bytes::from(output).into()
@@ -208,7 +214,7 @@ impl CompletedTx {
 
         let data = tx.inner.input();
         let is_contract_call = data.len() > 2 && *data != Bytes::from("0x");
-        if is_contract_call && output_deserialization_format == 1 {
+        if is_contract_call && output_deserialization_format == SerDeserFormat::Abi {
             let to_address = tx.inner.to().unwrap();
             let call_result = fetch_call_result(
                 helios_client,
