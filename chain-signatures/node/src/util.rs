@@ -148,14 +148,14 @@ where
     pub fn spawn_and_map(
         &mut self,
         key: T,
-        data: V,
+        value: V,
         task: impl Future<Output = U> + Send + 'static,
     ) {
         let handle = self.tasks.spawn(task);
         let task_id = handle.id();
         self.mapping.insert(key, handle);
         self.mapping_id.insert(task_id, key);
-        self.values.insert(key, data);
+        self.values.insert(key, value);
     }
 
     pub fn get(&self, key: &T) -> Option<&V> {
