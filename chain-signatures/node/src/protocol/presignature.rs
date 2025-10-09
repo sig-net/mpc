@@ -115,7 +115,7 @@ impl<'de> Deserialize<'de> for Presignature {
 }
 
 #[derive(Debug)]
-enum PresignatureTaskCommand {
+enum PresignatureTaskAction {
     Initiate {
         triples: TriplesTaken,
         participants: Vec<Participant>,
@@ -129,13 +129,13 @@ enum PresignatureTaskCommand {
 }
 
 #[derive(Clone)]
-struct PresignatureTaskHandle {
+struct PresignatureTaskChannel {
     id: PresignatureId,
-    tx: mpsc::Sender<PresignatureTaskCommand>,
+    tx: mpsc::Sender<PresignatureTaskAction>,
 }
 
-impl PresignatureTaskHandle {
-    async fn send(&self, cmd: PresignatureTaskCommand) {
+impl PresignatureTaskChannel {
+    async fn send(&self, cmd: PresignatureTaskAction) {
         if self.tx.send(cmd).await.is_err() {
             tracing::debug!(id = self.id, "presignature task aborted or channel dropped");
         }
@@ -143,6 +143,7 @@ impl PresignatureTaskHandle {
 }
 
 enum PresignatureTaskStep {
+    Generate(PresignatureGenerator),
     Continue,
     Complete,
 }
@@ -211,7 +212,7 @@ struct PresignatureTask {
     triples: TripleStorage,
     presignatures: PresignatureStorage,
     msg: MessageChannel,
-    command_rx: mpsc::Receiver<PresignatureTaskCommand>,
+    action_rx: mpsc::Receiver<PresignatureTaskAction>,
     posits: Posits<FullPresignatureId, TriplesTaken>,
     generation_timeout: Option<Duration>,
     generation_started: bool,
@@ -231,11 +232,11 @@ impl PresignatureTask {
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
     ) -> (
-        PresignatureTaskHandle,
+        PresignatureTaskChannel,
         impl std::future::Future<Output = ()>,
     ) {
         let (tx, rx) = mpsc::channel(32);
-        let handle = PresignatureTaskHandle { id: id.id, tx };
+        let handle = PresignatureTaskChannel { id: id.id, tx };
         let task = Self {
             id,
             me,
@@ -247,7 +248,7 @@ impl PresignatureTask {
             triples: triples.clone(),
             presignatures: presignatures.clone(),
             msg,
-            command_rx: rx,
+            action_rx: rx,
             posits: Posits::new(me),
             generation_timeout: None,
             generation_started: false,
@@ -258,11 +259,14 @@ impl PresignatureTask {
 
     async fn run(mut self) {
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(20));
-        loop {
+        let generator = loop {
             let step = tokio::select! {
-                cmd = self.command_rx.recv() => match cmd {
-                    Some(cmd) => self.handle_command(cmd).await,
-                    None => PresignatureTaskStep::Complete,
+                action = self.action_rx.recv() => match action {
+                    Some(action) => self.handle_action(action).await,
+                    None => {
+                        tracing::warn!(id = ?self.id, "presignature task aborted");
+                        return
+                    },
                 },
                 _ = expiration_interval.tick(), if !self.posits.is_empty() => {
                     self.handle_expiration().await
@@ -270,15 +274,23 @@ impl PresignatureTask {
             };
 
             match step {
+                PresignatureTaskStep::Generate(generator) => {
+                    break generator;
+                }
                 PresignatureTaskStep::Continue => continue,
-                PresignatureTaskStep::Complete => break,
+                PresignatureTaskStep::Complete => return,
             }
-        }
+        };
+
+        self.generation_started = true;
+        generator
+            .run(&self.my_account_id, self.me, self.epoch)
+            .await;
     }
 
-    async fn handle_command(&mut self, cmd: PresignatureTaskCommand) -> PresignatureTaskStep {
-        match cmd {
-            PresignatureTaskCommand::Initiate {
+    async fn handle_action(&mut self, action: PresignatureTaskAction) -> PresignatureTaskStep {
+        match action {
+            PresignatureTaskAction::Initiate {
                 triples,
                 participants,
                 timeout,
@@ -286,7 +298,7 @@ impl PresignatureTask {
                 self.generation_timeout = Some(timeout);
                 self.handle_initiate(triples, participants, timeout).await
             }
-            PresignatureTaskCommand::Posit {
+            PresignatureTaskAction::Posit {
                 from,
                 action,
                 timeout,
@@ -463,13 +475,7 @@ impl PresignatureTask {
             .prepare_generation(owner, &participants, pending, timeout)
             .await
         {
-            Some(generator) => {
-                self.generation_started = true;
-                generator
-                    .run(&self.my_account_id, self.me, self.epoch)
-                    .await;
-                PresignatureTaskStep::Complete
-            }
+            Some(generator) => PresignatureTaskStep::Generate(generator),
             None => {
                 tracing::warn!(
                     id = self.id.id,
@@ -765,7 +771,7 @@ pub struct PresignatureSpawner {
     triples: TripleStorage,
     presignatures: PresignatureStorage,
     /// Ongoing presignature generation protocols.
-    ongoing: JoinMap<PresignatureId, (), PresignatureTaskHandle>,
+    ongoing: JoinMap<PresignatureId, (), PresignatureTaskChannel>,
     /// Presignatures introduced by the current node (pending or running).
     ongoing_introduced: HashSet<PresignatureId>,
 
@@ -851,7 +857,8 @@ impl PresignatureSpawner {
         complete_presignatures + ongoing_generators
     }
 
-    fn ensure_task(&mut self, id: FullPresignatureId) -> PresignatureTaskHandle {
+    /// Gets an existing presignature task or spawns a new one if it doesn't exist.
+    fn get_or_spawn(&mut self, id: FullPresignatureId) -> PresignatureTaskChannel {
         if let Some(handle) = self.ongoing.get(&id.id) {
             return handle.clone();
         }
@@ -907,9 +914,9 @@ impl PresignatureSpawner {
             return;
         }
 
-        let handle = self.ensure_task(id);
+        let handle = self.get_or_spawn(id);
         handle
-            .send(PresignatureTaskCommand::Posit {
+            .send(PresignatureTaskAction::Posit {
                 from,
                 action,
                 timeout,
@@ -967,10 +974,10 @@ impl PresignatureSpawner {
             "proposing protocol to generate a new presignature"
         );
 
-        let handle = self.ensure_task(id);
+        let handle = self.get_or_spawn(id);
         self.ongoing_introduced.insert(id.id);
         handle
-            .send(PresignatureTaskCommand::Initiate {
+            .send(PresignatureTaskAction::Initiate {
                 triples,
                 participants: participants.clone(),
                 timeout,

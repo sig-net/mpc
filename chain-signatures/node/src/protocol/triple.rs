@@ -39,7 +39,7 @@ pub struct Triple {
 }
 
 #[derive(Debug)]
-enum TripleTaskCommand {
+enum TripleTaskAction {
     Initiate {
         participants: Vec<Participant>,
         timeout: Duration,
@@ -52,22 +52,22 @@ enum TripleTaskCommand {
 }
 
 #[derive(Debug, Clone)]
-struct TripleTaskHandle {
+struct TripleTaskChannel {
     id: TripleId,
-    tx: mpsc::Sender<TripleTaskCommand>,
+    tx: mpsc::Sender<TripleTaskAction>,
 }
 
-impl TripleTaskHandle {
-    async fn send(&self, cmd: TripleTaskCommand) {
-        if self.tx.send(cmd).await.is_err() {
+impl TripleTaskChannel {
+    async fn send(&self, action: TripleTaskAction) {
+        if self.tx.send(action).await.is_err() {
             tracing::debug!(id = self.id, "triple task aborted or channel dropped");
         }
     }
 }
 
 enum TripleTaskStep {
+    Generate(TripleGenerator),
     Continue,
-    Generate(TripleProtocolDriver),
     Complete,
 }
 
@@ -79,7 +79,7 @@ struct TripleTask {
     my_account_id: AccountId,
     msg: MessageChannel,
     triple_storage: TripleStorage,
-    command_rx: mpsc::Receiver<TripleTaskCommand>,
+    action_rx: mpsc::Receiver<TripleTaskAction>,
     posits: Posits<TripleId, ()>,
     generation_timeout: Option<Duration>,
     generation_started: bool,
@@ -94,9 +94,9 @@ impl TripleTask {
         my_account_id: &AccountId,
         triple_storage: &TripleStorage,
         msg: MessageChannel,
-    ) -> (TripleTaskHandle, impl std::future::Future<Output = ()>) {
+    ) -> (TripleTaskChannel, impl std::future::Future<Output = ()>) {
         let (tx, rx) = mpsc::channel(32);
-        let handle = TripleTaskHandle { id, tx };
+        let handle = TripleTaskChannel { id, tx };
         let task = Self {
             id,
             me,
@@ -105,7 +105,7 @@ impl TripleTask {
             my_account_id: my_account_id.clone(),
             msg,
             triple_storage: triple_storage.clone(),
-            command_rx: rx,
+            action_rx: rx,
             posits: Posits::new(me),
             generation_timeout: None,
             generation_started: false,
@@ -115,11 +115,14 @@ impl TripleTask {
 
     async fn run(mut self) {
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
+        let generator = loop {
             let step = tokio::select! {
-                cmd = self.command_rx.recv() => match cmd {
-                    Some(cmd) => self.handle_command(cmd).await,
-                    None => TripleTaskStep::Complete,
+                action = self.action_rx.recv() => match action {
+                    Some(action) => self.handle_action(action).await,
+                    None => {
+                        tracing::warn!(id = self.id, "triple task aborted");
+                        return;
+                    },
                 },
                 _ = expiration_interval.tick(), if !self.posits.is_empty() => {
                     self.handle_expiration().await
@@ -128,25 +131,27 @@ impl TripleTask {
 
             match step {
                 TripleTaskStep::Continue => continue,
-                TripleTaskStep::Generate(driver) => {
-                    self.run_generation(driver).await;
-                    break;
+                TripleTaskStep::Generate(generator) => {
+                    break generator;
                 }
-                TripleTaskStep::Complete => break,
+                TripleTaskStep::Complete => return,
             }
-        }
+        };
+
+        self.generation_started = true;
+        generator.run(self.my_account_id.clone(), self.epoch).await;
     }
 
-    async fn handle_command(&mut self, cmd: TripleTaskCommand) -> TripleTaskStep {
-        match cmd {
-            TripleTaskCommand::Initiate {
+    async fn handle_action(&mut self, action: TripleTaskAction) -> TripleTaskStep {
+        match action {
+            TripleTaskAction::Initiate {
                 participants,
                 timeout,
             } => {
                 self.generation_timeout = Some(timeout);
                 self.handle_initiate(participants).await
             }
-            TripleTaskCommand::Posit {
+            TripleTaskAction::Posit {
                 from,
                 action,
                 timeout,
@@ -272,20 +277,47 @@ impl TripleTask {
             return TripleTaskStep::Continue;
         }
 
-        let timeout = self
-            .generation_timeout
-            .unwrap_or(timeout)
-            .max(Duration::from_millis(1));
+        // TODO: We should try to reserve when positing; if we can't reserve a slot, we should reject.
+        let Some(slot) = self.triple_storage.reserve(self.id).await else {
+            tracing::warn!(
+                phase = "generation",
+                id = self.id,
+                "unable to reserve triple slot",
+            );
+            return TripleTaskStep::Complete;
+        };
 
         if positor.is_proposer() {
             self.broadcast_posit(&participants, PositAction::Start(participants.clone()))
                 .await;
         }
 
-        match self.prepare_generation(&participants, timeout).await {
-            Ok(driver) => {
-                self.generation_started = true;
-                TripleTaskStep::Generate(driver)
+        tracing::info!(
+            phase = "generation",
+            id = self.id,
+            "starting triple generation protocol"
+        );
+        let timeout = self
+            .generation_timeout
+            .unwrap_or(timeout)
+            .max(Duration::from_secs(10 * 60));
+        let generator = TripleGenerator::new(
+            self.id,
+            self.me,
+            self.threshold,
+            &participants,
+            timeout,
+            slot,
+            &self.msg,
+        )
+        .await;
+
+        match generator {
+            Ok(generator) => {
+                crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
+                    .with_label_values(&[self.my_account_id.as_str()])
+                    .inc();
+                TripleTaskStep::Generate(generator)
             }
             Err(err) => {
                 tracing::warn!(
@@ -299,58 +331,12 @@ impl TripleTask {
         }
     }
 
-    async fn prepare_generation(
-        &self,
-        participants: &[Participant],
-        timeout: Duration,
-    ) -> Result<TripleProtocolDriver, InitializationError> {
-        let Some(slot) = self.triple_storage.reserve(self.id).await else {
-            return Err(InitializationError::BadParameters(format!(
-                "id collision: triple_id={}",
-                self.id
-            )));
-        };
-
-        tracing::info!(
-            phase = "generation",
-            id = self.id,
-            "starting triple generation protocol"
-        );
-
-        let driver = TripleProtocolDriver::new(
-            self.id,
-            self.me,
-            self.threshold,
-            participants,
-            timeout,
-            slot,
-            &self.msg,
-        )
-        .await?;
-
-        crate::metrics::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
-            .with_label_values(&[self.my_account_id.as_str()])
-            .inc();
-
-        Ok(driver)
-    }
-
-    async fn run_generation(&self, driver: TripleProtocolDriver) {
-        driver.run(self.my_account_id.clone(), self.epoch).await;
-    }
-
     async fn broadcast_posit(&self, participants: &[Participant], action: PositAction) {
         for &to in participants {
             if to == self.me {
                 continue;
             }
-            let action_to_send = match &action {
-                PositAction::Propose => PositAction::Propose,
-                PositAction::Start(participants) => PositAction::Start(participants.clone()),
-                PositAction::Accept => PositAction::Accept,
-                PositAction::Reject => PositAction::Reject,
-            };
-            self.send_posit(to, action_to_send).await;
+            self.send_posit(to, action.clone()).await;
         }
     }
 
@@ -369,7 +355,7 @@ impl TripleTask {
     }
 }
 
-struct TripleProtocolDriver {
+struct TripleGenerator {
     id: TripleId,
     me: Participant,
     participants: Vec<Participant>,
@@ -381,7 +367,7 @@ struct TripleProtocolDriver {
     msg: MessageChannel,
 }
 
-impl TripleProtocolDriver {
+impl TripleGenerator {
     pub async fn new(
         id: TripleId,
         me: Participant,
@@ -583,7 +569,7 @@ impl TripleProtocolDriver {
     }
 }
 
-impl Drop for TripleProtocolDriver {
+impl Drop for TripleGenerator {
     fn drop(&mut self) {
         let id = self.id;
         let msg = self.msg.clone();
@@ -604,7 +590,7 @@ pub struct TripleSpawner {
     /// the `JoinHandle` of the triple generation task. Calling `join_next` will wait on
     /// the next task to complete and return the result of the task. This is only restricted
     /// through max introduction and concurrent generation in the system.
-    ongoing: JoinMap<TripleId, (), TripleTaskHandle>,
+    ongoing: JoinMap<TripleId, (), TripleTaskChannel>,
 
     /// The set of ongoing triples that were introduced to the system by the current node.
     ongoing_introduced: HashSet<TripleId>,
@@ -684,7 +670,8 @@ impl TripleSpawner {
         self.triple_storage.len_generated().await + self.ongoing.len()
     }
 
-    fn ensure_task(&mut self, id: TripleId) -> TripleTaskHandle {
+    /// Get an existing triple task or spawn a new one if it doesn't exist.
+    fn get_or_spawn(&mut self, id: TripleId) -> TripleTaskChannel {
         if let Some(handle) = self.ongoing.get(&id) {
             return handle.clone();
         }
@@ -721,9 +708,9 @@ impl TripleSpawner {
             return;
         }
 
-        let handle = self.ensure_task(id);
+        let handle = self.get_or_spawn(id);
         handle
-            .send(TripleTaskCommand::Posit {
+            .send(TripleTaskAction::Posit {
                 from,
                 action,
                 timeout,
@@ -749,10 +736,10 @@ impl TripleSpawner {
     async fn propose_posit(&mut self, active: &[Participant], timeout: Duration) {
         let id = rand::random();
         tracing::info!(phase = "posit", id, "proposing triple posit");
-        let handle = self.ensure_task(id);
+        let handle = self.get_or_spawn(id);
         self.ongoing_introduced.insert(id);
         handle
-            .send(TripleTaskCommand::Initiate {
+            .send(TripleTaskAction::Initiate {
                 participants: active.to_vec(),
                 timeout,
             })

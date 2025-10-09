@@ -29,7 +29,7 @@ impl<T> Positor<T> {
 }
 
 /// All actions that can be taken when a new posit is introduced for a protocol.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PositAction {
     Propose,
     Start(Vec<Participant>),

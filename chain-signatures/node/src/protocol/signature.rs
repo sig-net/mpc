@@ -648,7 +648,7 @@ impl Drop for SignatureGenerator {
 
 type SignatureTaskId = (SignId, PresignatureId);
 
-enum SignatureTaskCommand {
+enum SignatureTaskAction {
     Initiate {
         request: SignRequest,
         presignature: PresignatureTaken,
@@ -664,13 +664,13 @@ enum SignatureTaskCommand {
 }
 
 #[derive(Clone)]
-struct SignatureTaskHandle {
+struct SignatureTaskChannel {
     id: SignatureTaskId,
-    tx: mpsc::Sender<SignatureTaskCommand>,
+    tx: mpsc::Sender<SignatureTaskAction>,
 }
 
-impl SignatureTaskHandle {
-    async fn send(&self, cmd: SignatureTaskCommand) {
+impl SignatureTaskChannel {
+    async fn send(&self, cmd: SignatureTaskAction) {
         if self.tx.send(cmd).await.is_err() {
             tracing::debug!(?self.id, "signature task aborted or channel dropped");
         }
@@ -694,7 +694,7 @@ struct SignatureTask {
     rpc: RpcChannel,
     sign_respond_signature_channel: SignRespondSignatureChannel,
     presignatures: PresignatureStorage,
-    command_rx: mpsc::Receiver<SignatureTaskCommand>,
+    action_rx: mpsc::Receiver<SignatureTaskAction>,
     posits: Posits<SignatureTaskId, PresignatureTaken>,
     request: Option<SignRequest>,
     generation_timeout: Option<Duration>,
@@ -717,11 +717,11 @@ impl SignatureTask {
         sign_respond_signature_channel: SignRespondSignatureChannel,
         protocol_cfg: ProtocolConfig,
     ) -> (
-        SignatureTaskHandle,
+        SignatureTaskChannel,
         impl std::future::Future<Output = Result<(), SignError>>,
     ) {
         let (tx, rx) = mpsc::channel(64);
-        let handle = SignatureTaskHandle { id, tx };
+        let handle = SignatureTaskChannel { id, tx };
         let task = Self {
             id,
             me,
@@ -733,7 +733,7 @@ impl SignatureTask {
             rpc,
             sign_respond_signature_channel,
             presignatures: presignatures.clone(),
-            command_rx: rx,
+            action_rx: rx,
             posits: Posits::new(me),
             request: None,
             generation_timeout: None,
@@ -746,11 +746,14 @@ impl SignatureTask {
 
     async fn run(mut self) -> Result<(), SignError> {
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(20));
-        loop {
+        let generator = loop {
             let step = tokio::select! {
-                cmd = self.command_rx.recv() => match cmd {
-                    Some(cmd) => self.handle_command(cmd).await,
-                    None => SignatureTaskStep::Complete(Err(SignError::Aborted)),
+                action = self.action_rx.recv() => match action {
+                    Some(action) => self.handle_action(action).await,
+                    None => {
+                        tracing::warn!(sign_id = ?self.id, "signature task aborted");
+                        return Err(SignError::Aborted);
+                    },
                 },
                 _ = expiration_interval.tick(), if !self.posits.is_empty() => {
                     self.handle_expiration().await
@@ -758,20 +761,23 @@ impl SignatureTask {
             };
 
             match step {
-                SignatureTaskStep::Continue => continue,
                 SignatureTaskStep::Start(generator) => {
-                    return generator
-                        .run(self.me, self.epoch, self.my_account_id.clone())
-                        .await;
+                    break generator;
                 }
+                SignatureTaskStep::Continue => continue,
                 SignatureTaskStep::Complete(result) => return result,
             }
-        }
+        };
+
+        self.generation_started = true;
+        generator
+            .run(self.me, self.epoch, self.my_account_id.clone())
+            .await
     }
 
-    async fn handle_command(&mut self, cmd: SignatureTaskCommand) -> SignatureTaskStep {
+    async fn handle_action(&mut self, cmd: SignatureTaskAction) -> SignatureTaskStep {
         match cmd {
-            SignatureTaskCommand::Initiate {
+            SignatureTaskAction::Initiate {
                 request,
                 presignature,
                 participants,
@@ -783,7 +789,7 @@ impl SignatureTask {
                 self.handle_initiate(request, presignature, participants)
                     .await
             }
-            SignatureTaskCommand::Posit {
+            SignatureTaskAction::Posit {
                 from,
                 action,
                 request,
@@ -1012,7 +1018,6 @@ impl SignatureTask {
                 crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
                     .with_label_values(&[self.my_account_id.as_str()])
                     .inc();
-                self.generation_started = true;
                 SignatureTaskStep::Start(generator)
             }
             Err(err) => SignatureTaskStep::Complete(Err(err)),
@@ -1130,7 +1135,7 @@ pub struct SignatureSpawner {
     /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
     /// Ongoing signature generation protocols.
-    ongoing: JoinMap<SignatureTaskId, Result<(), SignError>, SignatureTaskHandle>,
+    ongoing: JoinMap<SignatureTaskId, Result<(), SignError>, SignatureTaskChannel>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
 
@@ -1173,7 +1178,8 @@ impl SignatureSpawner {
         }
     }
 
-    fn ensure_task(&mut self, id: SignatureTaskId, cfg: &ProtocolConfig) -> SignatureTaskHandle {
+    /// Get an existing signature task or spawn a new one if it doesn't exist.
+    fn get_or_spawn(&mut self, id: SignatureTaskId, cfg: &ProtocolConfig) -> SignatureTaskChannel {
         if let Some(handle) = self.ongoing.get(&id) {
             return handle.clone();
         }
@@ -1209,9 +1215,9 @@ impl SignatureSpawner {
             None
         };
 
-        let handle = self.ensure_task((sign_id, presignature_id), cfg);
+        let handle = self.get_or_spawn((sign_id, presignature_id), cfg);
         handle
-            .send(SignatureTaskCommand::Posit {
+            .send(SignatureTaskAction::Posit {
                 from,
                 action,
                 request,
@@ -1275,9 +1281,9 @@ impl SignatureSpawner {
                 continue;
             }
 
-            let handle = self.ensure_task((my_request.indexed.id, taken.presignature.id), cfg);
+            let handle = self.get_or_spawn((my_request.indexed.id, taken.presignature.id), cfg);
             handle
-                .send(SignatureTaskCommand::Initiate {
+                .send(SignatureTaskAction::Initiate {
                     request: my_request,
                     presignature: taken,
                     participants: participants.clone(),
