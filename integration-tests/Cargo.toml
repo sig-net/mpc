@@ -77,6 +77,11 @@ path = "benches/presignatures.rs"
 harness = false
 
 [[bench]]
+name = "signatures"
+path = "benches/signatures.rs"
+harness = false
+
+[[bench]]
 name = "sign"
 path = "benches/sign.rs"
 harness = false
