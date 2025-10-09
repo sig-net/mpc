@@ -11,6 +11,7 @@ use mpc_node::protocol::triple::{Triple, TripleSpawner};
 use mpc_node::protocol::MessageChannel;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
+use tokio::time::{sleep, Duration};
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {
@@ -29,6 +30,15 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
 
     let triple_id1: u64 = 1;
     let triple_id2: u64 = 2;
+
+    // Reserve without inserting to ensure reserved tracking is exposed through contains_reserved and fetch_owned
+    let reserved_probe = 50;
+    let reserved_slot = triple_storage.reserve(reserved_probe).await.unwrap();
+    assert!(triple_storage.contains_reserved(reserved_probe).await);
+    let owned_with_reserved = triple_storage.fetch_owned(node0).await;
+    assert!(owned_with_reserved.contains(&reserved_probe));
+    reserved_slot.unreserve().await;
+    assert!(!triple_storage.contains_reserved(reserved_probe).await);
 
     // Check that the storage is empty at the start
     assert!(!triple_storage.contains(triple_id1).await);
@@ -87,6 +97,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     // check that reserve and unreserve works:
     let slot = triple_storage.reserve(id3).await.unwrap();
     slot.unreserve().await;
+    assert!(!triple_storage.contains_reserved(id3).await);
 
     // Add mine triple and check that it is in the storage
     triple_storage
@@ -108,9 +119,19 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_storage.len_generated().await, 2);
     assert_eq!(triple_spawner.len_mine().await, 2);
     assert_eq!(triple_spawner.len_potential().await, 2);
+    let owned_after_insert = triple_storage.fetch_owned(node0).await;
+    assert!(owned_after_insert.contains(&id3));
+    assert!(owned_after_insert.contains(&id4));
 
     // Take mine triple and check that it is removed from the storage and added to used set
-    triple_storage.take_two_mine(node0).await.unwrap();
+    let taken_mine = triple_storage.take_two_mine(node0).await.unwrap();
+    let taken_ids = [taken_mine.triple0.id, taken_mine.triple1.id];
+    assert!(triple_storage.contains_reserved(taken_ids[0]).await);
+    assert!(triple_storage.contains_reserved(taken_ids[1]).await);
+    drop(taken_mine);
+    sleep(Duration::from_millis(50)).await;
+    assert!(!triple_storage.contains_reserved(taken_ids[0]).await);
+    assert!(!triple_storage.contains_reserved(taken_ids[1]).await);
     assert!(!triple_spawner.contains(id3).await);
     assert!(!triple_spawner.contains(id4).await);
     assert!(!triple_spawner.contains_mine(id3).await);
@@ -129,6 +150,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(!triple_spawner.contains(id4).await);
 
     assert!(triple_storage.clear().await);
+    assert!(triple_storage.is_empty().await);
+    assert_eq!(triple_storage.len_by_owner(node0).await, 0);
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
         triple_storage
@@ -148,6 +171,14 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
             .insert(dummy_triple(id), node0)
             .await;
     }
+
+    // Attempting to take triples with the wrong owner should fail and leave storage untouched.
+    assert!(triple_storage
+        .take_two(10, 11, node0, node0)
+        .await
+        .is_none());
+    assert!(triple_storage.contains(10).await);
+    assert!(triple_storage.contains(11).await);
 
     // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
     let mut outdated = triple_storage.remove_outdated(node1, &[13, 14, 15]).await;
@@ -204,6 +235,16 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         task.await.unwrap();
     }
 
+    let reserved_probe = 99;
+    let temp_slot = presignature_storage.reserve(reserved_probe).await.unwrap();
+    let owned_with_reserved = presignature_storage.fetch_owned(node0).await;
+    assert!(owned_with_reserved.contains(&reserved_probe));
+    if let Some(task) = temp_slot.unreserve() {
+        task.await.unwrap();
+    }
+    let owned_after_unreserve = presignature_storage.fetch_owned(node0).await;
+    assert!(!owned_after_unreserve.contains(&reserved_probe));
+
     // Insert presignature owned by node1, with our node0 view being that it is a foreign presignature
     assert!(
         presignature_storage
@@ -254,7 +295,18 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_potential().await, 1);
 
     // Take mine presignature and check that it is removed from the storage and added to used set
-    presignature_storage.take_mine(node0).await.unwrap();
+    let taken_mine = presignature_storage.take_mine(node0).await.unwrap();
+    let taken_id = taken_mine.presignature.id;
+    assert!(presignature_storage
+        .fetch_owned(node0)
+        .await
+        .contains(&taken_id));
+    drop(taken_mine);
+    sleep(Duration::from_millis(50)).await;
+    assert!(!presignature_storage
+        .fetch_owned(node0)
+        .await
+        .contains(&taken_id));
     assert!(!presignature_storage.contains(id2).await);
     assert!(!presignature_spawner.contains_mine(id2).await);
     assert_eq!(presignature_storage.len_generated().await, 0);
@@ -268,6 +320,8 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert!(!presignature_spawner.contains(id2).await);
 
     presignature_storage.clear().await;
+    assert!(presignature_storage.is_empty().await);
+    assert_eq!(presignature_storage.len_by_owner(node0).await, 0);
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
         presignature_storage
@@ -287,6 +341,9 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
             .insert(dummy_presignature(id), node0)
             .await;
     }
+
+    assert!(presignature_storage.take(10, node0, node0).await.is_none());
+    assert!(presignature_storage.contains(10).await);
 
     // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
     let mut outdated = presignature_storage

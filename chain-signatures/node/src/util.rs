@@ -104,29 +104,31 @@ pub const fn first_8_bytes(input: [u8; 32]) -> [u8; 8] {
     output
 }
 
-pub struct JoinMap<T, U> {
+pub struct JoinMap<T, U, V = ()> {
     mapping: HashMap<T, AbortHandle>,
     mapping_id: HashMap<tokio::task::Id, T>,
+    values: HashMap<T, V>,
     tasks: JoinSet<U>,
 }
 
-impl<T, U> Default for JoinMap<T, U> {
+impl<T, U, V> Default for JoinMap<T, U, V> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T, U> JoinMap<T, U> {
+impl<T, U, V> JoinMap<T, U, V> {
     pub fn new() -> Self {
         Self {
             mapping: HashMap::new(),
             mapping_id: HashMap::new(),
+            values: HashMap::new(),
             tasks: JoinSet::new(),
         }
     }
 }
 
-impl<T, U> JoinMap<T, U>
+impl<T, U, V> JoinMap<T, U, V>
 where
     T: Copy + Hash + Eq,
     U: Send + 'static,
@@ -143,11 +145,21 @@ where
         self.mapping.contains_key(key)
     }
 
-    pub fn spawn(&mut self, key: T, task: impl Future<Output = U> + Send + 'static) {
+    pub fn spawn_and_map(
+        &mut self,
+        key: T,
+        value: V,
+        task: impl Future<Output = U> + Send + 'static,
+    ) {
         let handle = self.tasks.spawn(task);
         let task_id = handle.id();
         self.mapping.insert(key, handle);
         self.mapping_id.insert(task_id, key);
+        self.values.insert(key, value);
+    }
+
+    pub fn get(&self, key: &T) -> Option<&V> {
+        self.values.get(key)
     }
 
     pub async fn join_next(&mut self) -> Option<Result<(T, U), T>> {
@@ -159,6 +171,7 @@ where
 
         let key = self.mapping_id.remove(&id)?;
         self.mapping.remove(&key);
+        self.values.remove(&key);
         match outcome {
             Some(outcome) => Some(Ok((key, outcome))),
             None => Some(Err(key)),
@@ -166,7 +179,17 @@ where
     }
 }
 
-impl<T, U> Drop for JoinMap<T, U> {
+impl<T, U> JoinMap<T, U, ()>
+where
+    T: Copy + Hash + Eq,
+    U: Send + 'static,
+{
+    pub fn spawn(&mut self, key: T, task: impl Future<Output = U> + Send + 'static) {
+        self.spawn_and_map(key, (), task);
+    }
+}
+
+impl<T, U, V> Drop for JoinMap<T, U, V> {
     fn drop(&mut self) {
         for handle in self.mapping.values() {
             handle.abort();
