@@ -66,6 +66,10 @@ anyhow.workspace = true
 async-process = "1"
 tokio.workspace = true
 
+[[bench]]
+name = "triples"
+path = "benches/triples.rs"
+harness = false
 
 [[bench]]
 name = "sign"
