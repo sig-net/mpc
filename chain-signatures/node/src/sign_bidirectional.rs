@@ -124,10 +124,9 @@ impl Output {
     }
 
     pub fn serialize(&self, format: SerDeserFormat, schema: &[u8]) -> anyhow::Result<Vec<u8>> {
-        if format == SerDeserFormat::Abi {
-            self.serialize_abi(schema)
-        } else {
-            self.serialize_borsh(schema)
+        match format {
+            SerDeserFormat::Abi => self.serialize_abi(schema),
+            SerDeserFormat::Borsh => self.serialize_borsh(schema),
         }
     }
 

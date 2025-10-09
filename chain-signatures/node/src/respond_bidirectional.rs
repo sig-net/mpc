@@ -108,17 +108,20 @@ impl CompletedTx {
         let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
         let mut output = Vec::new();
         output.extend_from_slice(&MAGIC_ERROR_PREFIX);
-        let serialized_output: Vec<u8> = if respond_serialization_format == SerDeserFormat::Borsh {
-            let borsh_data = [1u8]; // Simple serialization: 1 = true
-            output.extend_from_slice(&borsh_data);
-            Bytes::from(output).into()
-        } else {
-            // Encode boolean as ABI: true = 0x0000000000000000000000000000000000000000000000000000000000000001
-            let abi_encoded = [0u8; 32];
-            let mut encoded = abi_encoded;
-            encoded[31] = 1; // Set last byte to 1 for true
-            output.extend_from_slice(&encoded);
-            Bytes::from(output).into()
+        let serialized_output: Vec<u8> = match respond_serialization_format {
+            SerDeserFormat::Borsh => {
+                let borsh_data = [1u8]; // Simple serialization: 1 = true
+                output.extend_from_slice(&borsh_data);
+                Bytes::from(output).into()
+            }
+            SerDeserFormat::Abi => {
+                // Encode boolean as ABI: true = 0x0000000000000000000000000000000000000000000000000000000000000001
+                let abi_encoded = [0u8; 32];
+                let mut encoded = abi_encoded;
+                encoded[31] = 1; // Set last byte to 1 for true
+                output.extend_from_slice(&encoded);
+                Bytes::from(output).into()
+            }
         };
         let sign_request =
             self.create_respond_bidirectional_sign_request(serialized_output, total_timeout)?;
@@ -214,20 +217,21 @@ impl CompletedTx {
 
         let data = tx.inner.input();
         let is_contract_call = data.len() > 2 && *data != Bytes::from("0x");
-        if is_contract_call && output_deserialization_format == SerDeserFormat::Abi {
-            let to_address = tx.inner.to().unwrap();
-            let call_result = fetch_call_result(
-                helios_client,
-                from_address,
-                to_address,
-                data.clone(),
-                self.block_number - 1,
-                5,
-            )
-            .await?;
-            TransactionOutput::from_call_result(output_deserialization_schema, &call_result)
-        } else {
-            Ok(TransactionOutput::non_function_call_output())
+        match output_deserialization_format {
+            SerDeserFormat::Abi if is_contract_call => {
+                let to_address = tx.inner.to().unwrap();
+                let call_result = fetch_call_result(
+                    helios_client,
+                    from_address,
+                    to_address,
+                    data.clone(),
+                    self.block_number - 1,
+                    5,
+                )
+                .await?;
+                TransactionOutput::from_call_result(output_deserialization_schema, &call_result)
+            }
+            _ => Ok(TransactionOutput::non_function_call_output()),
         }
     }
 }
