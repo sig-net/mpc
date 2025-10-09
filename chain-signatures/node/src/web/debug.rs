@@ -28,10 +28,11 @@ use crate::web::AxumState;
 /// The outer RwLock should only be used in write mode once per node to
 /// initialize. All future calls are read-only and therefore will not create
 /// cross-node lock contention.
-static TASK_REGISTRY: LazyLock<RwLock<HashMap<String, Arc<Mutex<Vec<DebugPageTask>>>>>> =
-    LazyLock::new(|| Default::default());
+static TASK_REGISTRY: LazyLock<RwLock<HashMap<String, LocalTaskRegistry>>> =
+    LazyLock::new(Default::default);
+type LocalTaskRegistry = Arc<Mutex<Vec<DebugPageTask>>>;
 
-async fn read_registry(account_id: &str) -> Arc<Mutex<Vec<DebugPageTask>>> {
+async fn read_registry(account_id: &str) -> LocalTaskRegistry {
     // first try a read lock - this should be the common case
     {
         let map = TASK_REGISTRY.read().await;

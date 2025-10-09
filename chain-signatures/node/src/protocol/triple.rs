@@ -53,6 +53,7 @@ struct TripleGenerator {
 }
 
 impl TripleGenerator {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         id: TripleId,
         me: Participant,
