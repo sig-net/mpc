@@ -18,6 +18,7 @@ use mpc_node::protocol::{ParticipantInfo, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 
+
 /// Test syncing a very large state to ensure we don't hit networking or Redis limits.
 /// This tests the scenario where a node has accumulated a large number of triples and
 /// presignatures that need to be synced with other nodes.
@@ -443,6 +444,524 @@ async fn test_state_sync_concurrent_updates() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Test syncing with inconsistent storage states where different nodes have different views
+/// of who owns what shares. This simulates real-world scenarios where nodes may have lost
+/// or gained shares inconsistently.
+///
+/// The test creates random, inconsistent states across multiple nodes and then verifies that
+/// after syncing, all nodes converge to a consistent state based on the authoritative owner's view.
+#[test_log::test(tokio::test)]
+async fn test_state_sync_inconsistent_triple_storage() -> anyhow::Result<()> {
+    use rand::Rng;
+    
+    let spawner = ClusterSpawner::default()
+        .network("protocol-sync-inconsistent")
+        .init_network()
+        .await
+        .unwrap();
+
+    let redis = spawner.spawn_redis().await;
+    let num_nodes = 1; // We're simulating on one node's storage
+    let threshold = 2;
+    let node0_account_id = "p0_test.near".parse().unwrap();
+    
+    // Define multiple participants that will own different shares
+    let owner1 = Participant::from(1);
+    let owner2 = Participant::from(2);
+    let owner3 = Participant::from(3);
+
+    let sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let pk = sk.public_key();
+    let ping_interval = Duration::from_millis(300);
+    let client = NodeClient::new(&node_client::Options::default());
+    let participants = participants(num_nodes);
+    let node0_triples = redis.triple_storage(&node0_account_id);
+    let node0_presignatures = redis.presignature_storage(&node0_account_id);
+
+    let (contract_watcher, _contract_tx) = ContractStateWatcher::with(
+        &node0_account_id,
+        ProtocolState::Running(RunningContractState {
+            epoch: 0,
+            public_key: *pk.as_affine(),
+            participants: participants.clone(),
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold,
+        }),
+    );
+
+    let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
+    let mesh = Mesh::new(
+        &client,
+        mpc_node::mesh::Options {
+            ping_interval: ping_interval.as_millis() as u64,
+        },
+        synced_peer_rx,
+    );
+    let (sync_channel, sync) = SyncTask::new(
+        &client,
+        node0_triples.clone(),
+        node0_presignatures.clone(),
+        mesh.watch(),
+        contract_watcher,
+        synced_peer_tx,
+    );
+    tokio::spawn(sync.run());
+
+    let mut rng = rand::thread_rng();
+    let num_triples_per_owner = 50;
+
+    // Step 1: Create inconsistent initial state
+    // Each owner should have certain triples, but node0 has a random, inconsistent view
+    tracing::info!("Creating inconsistent initial state...");
+    
+    let mut owner1_should_have = Vec::new();
+    let mut owner2_should_have = Vec::new();
+    let mut owner3_should_have = Vec::new();
+
+    // Owner 1's triples: IDs 0-49
+    for id in 0..num_triples_per_owner {
+        owner1_should_have.push(id);
+    }
+
+    // Owner 2's triples: IDs 100-149
+    for id in 100..(100 + num_triples_per_owner) {
+        owner2_should_have.push(id);
+    }
+
+    // Owner 3's triples: IDs 200-249
+    for id in 200..(200 + num_triples_per_owner) {
+        owner3_should_have.push(id);
+    }
+
+    // Create inconsistent state: node0 has ALL of what owner claims PLUS random extras
+    // After sync, the extras should be removed but the claimed ones should remain
+    // This simulates stale data where the node has outdated shares
+    
+    // For owner1: insert ALL their triples + extra invalid ones
+    let owner1_extra_count = 15;
+    let mut owner1_stored: Vec<u64> = owner1_should_have.clone();
+    
+    // Add some extras that owner1 doesn't actually have
+    for _ in 0..owner1_extra_count {
+        let extra_id = rng.gen_range(1000..1100);
+        owner1_stored.push(extra_id);
+    }
+    
+    tracing::info!(
+        "Owner1 should have {} triples, but node0 has {} (including {} extras)",
+        owner1_should_have.len(),
+        owner1_stored.len(),
+        owner1_extra_count
+    );
+    
+    for &id in &owner1_stored {
+        insert_triples(&node0_triples, owner1, [id]).await;
+    }
+
+    // For owner2: insert ALL their triples + some extras
+    let mut owner2_stored: Vec<u64> = owner2_should_have.clone();
+    
+    // Add random extras
+    for _ in 0..10 {
+        let extra_id = rng.gen_range(2000..2100);
+        owner2_stored.push(extra_id);
+    }
+    
+    tracing::info!(
+        "Owner2 should have {} triples, but node0 has {} (including extras)",
+        owner2_should_have.len(),
+        owner2_stored.len()
+    );
+    
+    for &id in &owner2_stored {
+        insert_triples(&node0_triples, owner2, [id]).await;
+    }
+
+    // For owner3: insert ALL their triples + lots of extras
+    let mut owner3_stored: Vec<u64> = owner3_should_have.clone();
+    
+    // Add many extras
+    for _ in 0..30 {
+        let extra_id = rng.gen_range(3000..3200);
+        owner3_stored.push(extra_id);
+    }
+    
+    tracing::info!(
+        "Owner3 should have {} triples, but node0 has {} (including {} extras)",
+        owner3_should_have.len(),
+        owner3_stored.len(),
+        30
+    );
+    
+    for &id in &owner3_stored {
+        insert_triples(&node0_triples, owner3, [id]).await;
+    }
+
+    // Step 2: Verify inconsistent state exists
+    tracing::info!("Verifying inconsistent initial state...");
+    
+    let owner1_before = node0_triples.fetch_owned(owner1).await;
+    let owner2_before = node0_triples.fetch_owned(owner2).await;
+    let owner3_before = node0_triples.fetch_owned(owner3).await;
+    
+    tracing::info!(
+        "Before sync - Owner1: {} items, Owner2: {} items, Owner3: {} items",
+        owner1_before.len(),
+        owner2_before.len(),
+        owner3_before.len()
+    );
+    
+    // Verify inconsistency exists
+    assert_ne!(
+        owner1_before.len(),
+        owner1_should_have.len(),
+        "Initial state should be inconsistent for owner1"
+    );
+
+    // Step 3: Send sync updates with the authoritative state
+    // In reality, each owner would send their own state
+    tracing::info!("Sending sync updates with authoritative state...");
+    
+    let update1 = SyncUpdate {
+        from: owner1,
+        triples: owner1_should_have.clone(),
+        presignatures: vec![],
+    };
+    
+    let update2 = SyncUpdate {
+        from: owner2,
+        triples: owner2_should_have.clone(),
+        presignatures: vec![],
+    };
+    
+    let update3 = SyncUpdate {
+        from: owner3,
+        triples: owner3_should_have.clone(),
+        presignatures: vec![],
+    };
+
+    sync_channel.request_update(update1).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    
+    sync_channel.request_update(update2).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    
+    sync_channel.request_update(update3).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Step 4: Verify convergence - all nodes should now have consistent state
+    tracing::info!("Verifying convergence after sync...");
+    
+    let owner1_after = node0_triples.fetch_owned(owner1).await;
+    let owner2_after = node0_triples.fetch_owned(owner2).await;
+    let owner3_after = node0_triples.fetch_owned(owner3).await;
+    
+    tracing::info!(
+        "After sync - Owner1: {} items, Owner2: {} items, Owner3: {} items",
+        owner1_after.len(),
+        owner2_after.len(),
+        owner3_after.len()
+    );
+    
+    // Verify that the state has converged to what each owner claims to have
+    assert_eq!(
+        owner1_after.len(),
+        owner1_should_have.len(),
+        "Owner1 should have exactly {} triples after sync",
+        owner1_should_have.len()
+    );
+    
+    assert_eq!(
+        owner2_after.len(),
+        owner2_should_have.len(),
+        "Owner2 should have exactly {} triples after sync",
+        owner2_should_have.len()
+    );
+    
+    assert_eq!(
+        owner3_after.len(),
+        owner3_should_have.len(),
+        "Owner3 should have exactly {} triples after sync",
+        owner3_should_have.len()
+    );
+    
+    // Verify that the actual IDs match
+    let owner1_after_set: std::collections::HashSet<_> = owner1_after.into_iter().collect();
+    let owner1_should_set: std::collections::HashSet<_> = owner1_should_have.into_iter().collect();
+    assert_eq!(
+        owner1_after_set, owner1_should_set,
+        "Owner1's triples should match exactly"
+    );
+    
+    let owner2_after_set: std::collections::HashSet<_> = owner2_after.into_iter().collect();
+    let owner2_should_set: std::collections::HashSet<_> = owner2_should_have.into_iter().collect();
+    assert_eq!(
+        owner2_after_set, owner2_should_set,
+        "Owner2's triples should match exactly"
+    );
+    
+    let owner3_after_set: std::collections::HashSet<_> = owner3_after.into_iter().collect();
+    let owner3_should_set: std::collections::HashSet<_> = owner3_should_have.into_iter().collect();
+    assert_eq!(
+        owner3_after_set, owner3_should_set,
+        "Owner3's triples should match exactly"
+    );
+
+    tracing::info!("✅ Inconsistent triple storage sync test completed successfully");
+    Ok(())
+}
+
+/// Test syncing with inconsistent presignature storage where different nodes have different
+/// views of who owns what presignatures. This is similar to the triple test but focuses on
+/// presignature synchronization.
+#[test_log::test(tokio::test)]
+async fn test_state_sync_inconsistent_presignature_storage() -> anyhow::Result<()> {
+    use rand::Rng;
+    
+    let spawner = ClusterSpawner::default()
+        .network("protocol-sync-inconsistent-presig")
+        .init_network()
+        .await
+        .unwrap();
+
+    let redis = spawner.spawn_redis().await;
+    let num_nodes = 1;
+    let threshold = 2;
+    let node0_account_id = "p0_test.near".parse().unwrap();
+    
+    let owner1 = Participant::from(1);
+    let owner2 = Participant::from(2);
+    let owner3 = Participant::from(3);
+
+    let sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let pk = sk.public_key();
+    let ping_interval = Duration::from_millis(300);
+    let client = NodeClient::new(&node_client::Options::default());
+    let participants = participants(num_nodes);
+    let node0_triples = redis.triple_storage(&node0_account_id);
+    let node0_presignatures = redis.presignature_storage(&node0_account_id);
+
+    let (contract_watcher, _contract_tx) = ContractStateWatcher::with(
+        &node0_account_id,
+        ProtocolState::Running(RunningContractState {
+            epoch: 0,
+            public_key: *pk.as_affine(),
+            participants: participants.clone(),
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold,
+        }),
+    );
+
+    let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
+    let mesh = Mesh::new(
+        &client,
+        mpc_node::mesh::Options {
+            ping_interval: ping_interval.as_millis() as u64,
+        },
+        synced_peer_rx,
+    );
+    let (sync_channel, sync) = SyncTask::new(
+        &client,
+        node0_triples.clone(),
+        node0_presignatures.clone(),
+        mesh.watch(),
+        contract_watcher,
+        synced_peer_tx,
+    );
+    tokio::spawn(sync.run());
+
+    let mut rng = rand::thread_rng();
+    let num_presigs_per_owner = 40;
+
+    tracing::info!("Creating inconsistent presignature state...");
+    
+    // Define what each owner should have
+    let mut owner1_should_have = Vec::new();
+    for id in 0..num_presigs_per_owner {
+        owner1_should_have.push(id);
+    }
+
+    let mut owner2_should_have = Vec::new();
+    for id in 500..(500 + num_presigs_per_owner) {
+        owner2_should_have.push(id);
+    }
+
+    let mut owner3_should_have = Vec::new();
+    for id in 1000..(1000 + num_presigs_per_owner) {
+        owner3_should_have.push(id);
+    }
+
+    // Create inconsistent state: store ALL claimed presignatures + extras
+    // Sync should remove only the extras
+    
+    // Owner1: ALL presignatures + some extras
+    let mut owner1_stored: Vec<u64> = owner1_should_have.clone();
+    
+    for _ in 0..15 {
+        let extra_id = rng.gen_range(5000..5100);
+        owner1_stored.push(extra_id);
+    }
+    
+    tracing::info!(
+        "Owner1 should have {} presignatures, but node0 has {}",
+        owner1_should_have.len(),
+        owner1_stored.len()
+    );
+    
+    for &id in &owner1_stored {
+        insert_presignatures(&node0_presignatures, owner1, [id]).await;
+    }
+
+    // Owner2: ALL presignatures + few extras
+    let mut owner2_stored: Vec<u64> = owner2_should_have.clone();
+    
+    for _ in 0..5 {
+        let extra_id = rng.gen_range(6000..6100);
+        owner2_stored.push(extra_id);
+    }
+    
+    tracing::info!(
+        "Owner2 should have {} presignatures, but node0 has {}",
+        owner2_should_have.len(),
+        owner2_stored.len()
+    );
+    
+    for &id in &owner2_stored {
+        insert_presignatures(&node0_presignatures, owner2, [id]).await;
+    }
+
+    // Owner3: ALL presignatures + many extras
+    let mut owner3_stored: Vec<u64> = owner3_should_have.clone();
+    
+    for _ in 0..25 {
+        let extra_id = rng.gen_range(7000..7200);
+        owner3_stored.push(extra_id);
+    }
+    
+    tracing::info!(
+        "Owner3 should have {} presignatures, but node0 has {}",
+        owner3_should_have.len(),
+        owner3_stored.len()
+    );
+    
+    for &id in &owner3_stored {
+        insert_presignatures(&node0_presignatures, owner3, [id]).await;
+    }
+
+    // Verify inconsistent state
+    tracing::info!("Verifying inconsistent initial state...");
+    
+    let owner1_before = node0_presignatures.fetch_owned(owner1).await;
+    let owner2_before = node0_presignatures.fetch_owned(owner2).await;
+    let owner3_before = node0_presignatures.fetch_owned(owner3).await;
+    
+    tracing::info!(
+        "Before sync - Owner1: {} presigs, Owner2: {} presigs, Owner3: {} presigs",
+        owner1_before.len(),
+        owner2_before.len(),
+        owner3_before.len()
+    );
+    
+    assert!(
+        owner1_before.len() > owner1_should_have.len(),
+        "Initial state should have extras for owner1 presignatures"
+    );
+
+    // Send sync updates with authoritative state
+    tracing::info!("Sending sync updates with authoritative presignature state...");
+    
+    let update1 = SyncUpdate {
+        from: owner1,
+        triples: vec![],
+        presignatures: owner1_should_have.clone(),
+    };
+    
+    let update2 = SyncUpdate {
+        from: owner2,
+        triples: vec![],
+        presignatures: owner2_should_have.clone(),
+    };
+    
+    let update3 = SyncUpdate {
+        from: owner3,
+        triples: vec![],
+        presignatures: owner3_should_have.clone(),
+    };
+
+    sync_channel.request_update(update1).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    
+    sync_channel.request_update(update2).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    
+    sync_channel.request_update(update3).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Verify convergence
+    tracing::info!("Verifying convergence after sync...");
+    
+    let owner1_after = node0_presignatures.fetch_owned(owner1).await;
+    let owner2_after = node0_presignatures.fetch_owned(owner2).await;
+    let owner3_after = node0_presignatures.fetch_owned(owner3).await;
+    
+    tracing::info!(
+        "After sync - Owner1: {} presigs, Owner2: {} presigs, Owner3: {} presigs",
+        owner1_after.len(),
+        owner2_after.len(),
+        owner3_after.len()
+    );
+    
+    assert_eq!(
+        owner1_after.len(),
+        owner1_should_have.len(),
+        "Owner1 should have exactly {} presignatures after sync",
+        owner1_should_have.len()
+    );
+    
+    assert_eq!(
+        owner2_after.len(),
+        owner2_should_have.len(),
+        "Owner2 should have exactly {} presignatures after sync",
+        owner2_should_have.len()
+    );
+    
+    assert_eq!(
+        owner3_after.len(),
+        owner3_should_have.len(),
+        "Owner3 should have exactly {} presignatures after sync",
+        owner3_should_have.len()
+    );
+    
+    // Verify exact ID matches
+    let owner1_after_set: std::collections::HashSet<_> = owner1_after.into_iter().collect();
+    let owner1_should_set: std::collections::HashSet<_> = owner1_should_have.into_iter().collect();
+    assert_eq!(
+        owner1_after_set, owner1_should_set,
+        "Owner1's presignatures should match exactly"
+    );
+    
+    let owner2_after_set: std::collections::HashSet<_> = owner2_after.into_iter().collect();
+    let owner2_should_set: std::collections::HashSet<_> = owner2_should_have.into_iter().collect();
+    assert_eq!(
+        owner2_after_set, owner2_should_set,
+        "Owner2's presignatures should match exactly"
+    );
+    
+    let owner3_after_set: std::collections::HashSet<_> = owner3_after.into_iter().collect();
+    let owner3_should_set: std::collections::HashSet<_> = owner3_should_have.into_iter().collect();
+    assert_eq!(
+        owner3_after_set, owner3_should_set,
+        "Owner3's presignatures should match exactly"
+    );
+
+    tracing::info!("✅ Inconsistent presignature storage sync test completed successfully");
+    Ok(())
+}
+
 /// Test that SyncUpdate can handle very large data structures.
 /// This is a unit test to verify large updates don't cause panics or issues.
 #[test]
@@ -485,12 +1004,10 @@ async fn insert_triples(
     range: impl IntoIterator<Item = u64>,
 ) {
     for id in range {
-        triples
-            .reserve(id)
-            .await
-            .unwrap()
-            .insert(dummy_triple(id), node)
-            .await;
+        if let Some(mut slot) = triples.reserve(id).await {
+            slot.insert(dummy_triple(id), node).await;
+        }
+        // If reservation fails (already exists), that's ok - skip it
     }
 }
 
@@ -521,12 +1038,10 @@ async fn insert_presignatures(
     range: impl IntoIterator<Item = u64>,
 ) {
     for id in range {
-        presignatures
-            .reserve(id)
-            .await
-            .unwrap()
-            .insert(dummy_presignature(id), node)
-            .await;
+        if let Some(mut slot) = presignatures.reserve(id).await {
+            slot.insert(dummy_presignature(id), node).await;
+        }
+        // If reservation fails (already exists), that's ok - skip it
     }
 }
 
