@@ -213,6 +213,9 @@ impl PresignatureStorage {
         owner: Participant,
         owner_shares: &[PresignatureId],
     ) -> Vec<PresignatureId> {
+        // NOTE: Similar to triple storage, this Lua script processes large arrays.
+        // See triple_storage.rs for detailed discussion of potential size limits.
+        // For 50,000 presignatures: ~400KB-500KB argument size, which should be safe.
         const SCRIPT: &str = r#"
             local presig_key = KEYS[1]
             local reserved_key = KEYS[2]

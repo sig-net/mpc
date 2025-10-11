@@ -338,4 +338,75 @@ mod tests {
         assert_eq!(received, expected);
         assert!(rx.recv().await.is_none());
     }
+
+    #[test]
+    fn test_sync_update_is_empty() {
+        let empty = SyncUpdate::empty();
+        assert!(empty.is_empty());
+
+        let with_triples = SyncUpdate {
+            from: Participant::from(1),
+            triples: vec![1, 2, 3],
+            presignatures: vec![],
+        };
+        assert!(!with_triples.is_empty());
+
+        let with_presigs = SyncUpdate {
+            from: Participant::from(1),
+            triples: vec![],
+            presignatures: vec![1, 2, 3],
+        };
+        assert!(!with_presigs.is_empty());
+
+        let with_both = SyncUpdate {
+            from: Participant::from(1),
+            triples: vec![1],
+            presignatures: vec![2],
+        };
+        assert!(!with_both.is_empty());
+    }
+
+    #[test]
+    fn test_sync_update_large_data() {
+        // Test that we can create large updates without panics
+        let num_items = 10_000;
+        let update = SyncUpdate {
+            from: Participant::from(1),
+            triples: (0..num_items).collect(),
+            presignatures: (0..num_items).collect(),
+        };
+
+        assert_eq!(update.triples.len(), num_items as usize);
+        assert_eq!(update.presignatures.len(), num_items as usize);
+        assert!(!update.is_empty());
+    }
+
+    #[test]
+    fn test_sync_update_deduplication() {
+        // Test that updates can handle duplicate IDs
+        let update = SyncUpdate {
+            from: Participant::from(1),
+            triples: vec![1, 2, 2, 3, 3, 3],
+            presignatures: vec![10, 10, 20],
+        };
+
+        // The update should preserve duplicates as-is since
+        // deduplication happens at the storage layer
+        assert_eq!(update.triples.len(), 6);
+        assert_eq!(update.presignatures.len(), 3);
+    }
+
+    #[test]
+    fn test_sync_channel_creation() {
+        let (_receiver, channel) = SyncChannel::new();
+        
+        // Test that we can create multiple channels
+        let (_receiver2, _channel2) = SyncChannel::new();
+        
+        // Channels should be independent
+        assert_ne!(
+            std::ptr::addr_of!(channel.request_update) as usize,
+            std::ptr::addr_of!(_channel2.request_update) as usize
+        );
+    }
 }

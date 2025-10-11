@@ -234,6 +234,15 @@ impl TripleStorage {
     ) -> Vec<TripleId> {
         let start = Instant::now();
 
+        // NOTE: This Lua script processes the owner_shares array which can be very large
+        // (potentially 50,000+ items during sync). Redis has limits on script arguments:
+        // - ARGV array size is typically limited to a few MB
+        // - Each u64 ID takes ~8 bytes plus overhead
+        // - For 50,000 items: ~400KB-500KB, which should be well within limits
+        // However, if we encounter issues with very large arrays, we may need to:
+        // 1. Batch the owner_shares into smaller chunks
+        // 2. Store the owner_shares temporarily in Redis and reference it
+        // 3. Use a different sync strategy that doesn't require sending full state
         const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local reserved_key = KEYS[2]
