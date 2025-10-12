@@ -5,6 +5,8 @@ use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
 use elliptic_curve::CurveArithmetic;
 use k256::Secp256k1;
+use rand::Rng;
+use tokio::time::Instant;
 
 use integration_tests::cluster::spawner::ClusterSpawner;
 use mpc_node::mesh::Mesh;
@@ -959,6 +961,334 @@ async fn test_state_sync_inconsistent_presignature_storage() -> anyhow::Result<(
     );
 
     tracing::info!("✅ Inconsistent presignature storage sync test completed successfully");
+    Ok(())
+}
+
+/// Test sync with very large inconsistent storage state (scale test).
+/// This combines large-scale storage (10K+ items per owner) with randomized inconsistencies.
+/// Tests that sync can handle massive cleanup operations efficiently.
+#[test_log::test(tokio::test)]
+#[ignore] // Expensive test, run explicitly with --ignored
+async fn test_state_sync_very_large_inconsistent_storage() -> anyhow::Result<()> {
+    let spawner = ClusterSpawner::default()
+        .network("protocol-sync-very-large-inconsistent")
+        .init_network()
+        .await
+        .unwrap();
+
+    let redis = spawner.spawn_redis().await;
+    let num_nodes = 1;
+    let threshold = 2;
+    let node0_account_id = "p0_test.near".parse().unwrap();
+    
+    let mut rng = rand::thread_rng();
+    
+    // Scale parameters - much larger than normal tests
+    let num_triples_per_owner = 10_000;
+    let num_presigs_per_owner = 10_000;
+    
+    let sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let pk = sk.public_key();
+    let ping_interval = Duration::from_millis(300);
+    let client = NodeClient::new(&node_client::Options::default());
+    let participants = participants(num_nodes);
+    let node0_triples = redis.triple_storage(&node0_account_id);
+    let node0_presignatures = redis.presignature_storage(&node0_account_id);
+
+    let (contract_watcher, _contract_tx) = ContractStateWatcher::with(
+        &node0_account_id,
+        ProtocolState::Running(RunningContractState {
+            epoch: 0,
+            public_key: *pk.as_affine(),
+            participants: participants.clone(),
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold,
+        }),
+    );
+
+    let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
+    let mesh = Mesh::new(
+        &client,
+        mpc_node::mesh::Options {
+            ping_interval: ping_interval.as_millis() as u64,
+        },
+        synced_peer_rx,
+    );
+    let (sync_channel, sync) = SyncTask::new(
+        &client,
+        node0_triples.clone(),
+        node0_presignatures.clone(),
+        mesh.watch(),
+        contract_watcher,
+        synced_peer_tx,
+    );
+    tokio::spawn(sync.run());
+    
+    tracing::info!("Creating very large inconsistent storage state with randomization...");
+    
+    // Define owners and their ID ranges (disjoint to avoid conflicts)
+    let owner1 = Participant::from(1);
+    let owner2 = Participant::from(2);
+    let owner3 = Participant::from(3);
+    
+    // === TRIPLES: Large-scale inconsistent state ===
+    
+    // Generate base triple IDs for each owner (what they should have)
+    let owner1_triple_should_have: Vec<u64> = (1..=num_triples_per_owner as u64).collect();
+    let owner2_triple_should_have: Vec<u64> = ((num_triples_per_owner as u64 + 1)..=(2 * num_triples_per_owner as u64)).collect();
+    let owner3_triple_should_have: Vec<u64> = ((2 * num_triples_per_owner as u64 + 1)..=(3 * num_triples_per_owner as u64)).collect();
+    
+    tracing::info!(
+        "Generated triple claims - Owner1: {}, Owner2: {}, Owner3: {}",
+        owner1_triple_should_have.len(),
+        owner2_triple_should_have.len(),
+        owner3_triple_should_have.len()
+    );
+    
+    // Owner1 triples: ALL claimed + 1000 random extras
+    let mut owner1_triples_stored = owner1_triple_should_have.clone();
+    for _ in 0..1000 {
+        let extra_id = rng.gen_range(100_000..110_000);
+        owner1_triples_stored.push(extra_id);
+    }
+    
+    tracing::info!(
+        "Inserting {} triples for Owner1 (including {} extras)...",
+        owner1_triples_stored.len(),
+        1000
+    );
+    insert_triples(&node0_triples, owner1, owner1_triples_stored.clone()).await;
+    
+    // Owner2 triples: ALL claimed + 500 random extras
+    let mut owner2_triples_stored = owner2_triple_should_have.clone();
+    for _ in 0..500 {
+        let extra_id = rng.gen_range(110_000..115_000);
+        owner2_triples_stored.push(extra_id);
+    }
+    
+    tracing::info!(
+        "Inserting {} triples for Owner2 (including {} extras)...",
+        owner2_triples_stored.len(),
+        500
+    );
+    insert_triples(&node0_triples, owner2, owner2_triples_stored.clone()).await;
+    
+    // Owner3 triples: ALL claimed + 2000 random extras (most inconsistent)
+    let mut owner3_triples_stored = owner3_triple_should_have.clone();
+    for _ in 0..2000 {
+        let extra_id = rng.gen_range(115_000..125_000);
+        owner3_triples_stored.push(extra_id);
+    }
+    
+    tracing::info!(
+        "Inserting {} triples for Owner3 (including {} extras)...",
+        owner3_triples_stored.len(),
+        2000
+    );
+    insert_triples(&node0_triples, owner3, owner3_triples_stored.clone()).await;
+    
+    // === PRESIGNATURES: Large-scale inconsistent state ===
+    
+    // Generate base presignature IDs for each owner
+    let owner1_presig_should_have: Vec<u64> = (1..=num_presigs_per_owner as u64).collect();
+    let owner2_presig_should_have: Vec<u64> = ((num_presigs_per_owner as u64 + 1)..=(2 * num_presigs_per_owner as u64)).collect();
+    let owner3_presig_should_have: Vec<u64> = ((2 * num_presigs_per_owner as u64 + 1)..=(3 * num_presigs_per_owner as u64)).collect();
+    
+    tracing::info!(
+        "Generated presignature claims - Owner1: {}, Owner2: {}, Owner3: {}",
+        owner1_presig_should_have.len(),
+        owner2_presig_should_have.len(),
+        owner3_presig_should_have.len()
+    );
+    
+    // Owner1 presignatures: ALL claimed + 800 random extras
+    let mut owner1_presigs_stored = owner1_presig_should_have.clone();
+    for _ in 0..800 {
+        let extra_id = rng.gen_range(200_000..210_000);
+        owner1_presigs_stored.push(extra_id);
+    }
+    
+    tracing::info!(
+        "Inserting {} presignatures for Owner1 (including {} extras)...",
+        owner1_presigs_stored.len(),
+        800
+    );
+    insert_presignatures(&node0_presignatures, owner1, owner1_presigs_stored.clone()).await;
+    
+    // Owner2 presignatures: ALL claimed + 400 random extras
+    let mut owner2_presigs_stored = owner2_presig_should_have.clone();
+    for _ in 0..400 {
+        let extra_id = rng.gen_range(210_000..215_000);
+        owner2_presigs_stored.push(extra_id);
+    }
+    
+    tracing::info!(
+        "Inserting {} presignatures for Owner2 (including {} extras)...",
+        owner2_presigs_stored.len(),
+        400
+    );
+    insert_presignatures(&node0_presignatures, owner2, owner2_presigs_stored.clone()).await;
+    
+    // Owner3 presignatures: ALL claimed + 1500 random extras (most inconsistent)
+    let mut owner3_presigs_stored = owner3_presig_should_have.clone();
+    for _ in 0..1500 {
+        let extra_id = rng.gen_range(215_000..230_000);
+        owner3_presigs_stored.push(extra_id);
+    }
+    
+    tracing::info!(
+        "Inserting {} presignatures for Owner3 (including {} extras)...",
+        owner3_presigs_stored.len(),
+        1500
+    );
+    insert_presignatures(&node0_presignatures, owner3, owner3_presigs_stored.clone()).await;
+    
+    // Verify inconsistent initial state
+    tracing::info!("Verifying very large inconsistent initial state...");
+    
+    let owner1_triples_before = node0_triples.fetch_owned(owner1).await;
+    let owner2_triples_before = node0_triples.fetch_owned(owner2).await;
+    let owner3_triples_before = node0_triples.fetch_owned(owner3).await;
+    
+    let owner1_presigs_before = node0_presignatures.fetch_owned(owner1).await;
+    let owner2_presigs_before = node0_presignatures.fetch_owned(owner2).await;
+    let owner3_presigs_before = node0_presignatures.fetch_owned(owner3).await;
+    
+    tracing::info!(
+        "Before sync - Triples: Owner1={}, Owner2={}, Owner3={}",
+        owner1_triples_before.len(),
+        owner2_triples_before.len(),
+        owner3_triples_before.len()
+    );
+    
+    tracing::info!(
+        "Before sync - Presigs: Owner1={}, Owner2={}, Owner3={}",
+        owner1_presigs_before.len(),
+        owner2_presigs_before.len(),
+        owner3_presigs_before.len()
+    );
+    
+    // Verify we have extras
+    assert!(
+        owner1_triples_before.len() > owner1_triple_should_have.len(),
+        "Owner1 should have extra triples"
+    );
+    assert!(
+        owner3_presigs_before.len() > owner3_presig_should_have.len(),
+        "Owner3 should have extra presignatures"
+    );
+    
+    // Send sync updates with authoritative state
+    tracing::info!("Sending sync updates with very large authoritative state...");
+    let start = Instant::now();
+    
+    let update1 = SyncUpdate {
+        from: owner1,
+        triples: owner1_triple_should_have.clone(),
+        presignatures: owner1_presig_should_have.clone(),
+    };
+    
+    let update2 = SyncUpdate {
+        from: owner2,
+        triples: owner2_triple_should_have.clone(),
+        presignatures: owner2_presig_should_have.clone(),
+    };
+    
+    let update3 = SyncUpdate {
+        from: owner3,
+        triples: owner3_triple_should_have.clone(),
+        presignatures: owner3_presig_should_have.clone(),
+    };
+    
+    sync_channel.request_update(update1).await;
+    sync_channel.request_update(update2).await;
+    sync_channel.request_update(update3).await;
+    
+    let sync_duration = start.elapsed();
+    tracing::info!("Sync updates processed in {:?}", sync_duration);
+    
+    // Wait for sync to complete (longer for large-scale test)
+    tracing::info!("Waiting for very large sync to complete...");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    
+    // Verify convergence after large-scale sync
+    tracing::info!("Verifying convergence after very large sync...");
+    
+    let owner1_triples_after = node0_triples.fetch_owned(owner1).await;
+    let owner2_triples_after = node0_triples.fetch_owned(owner2).await;
+    let owner3_triples_after = node0_triples.fetch_owned(owner3).await;
+    
+    let owner1_presigs_after = node0_presignatures.fetch_owned(owner1).await;
+    let owner2_presigs_after = node0_presignatures.fetch_owned(owner2).await;
+    let owner3_presigs_after = node0_presignatures.fetch_owned(owner3).await;
+    
+    tracing::info!(
+        "After sync - Triples: Owner1={}, Owner2={}, Owner3={}",
+        owner1_triples_after.len(),
+        owner2_triples_after.len(),
+        owner3_triples_after.len()
+    );
+    
+    tracing::info!(
+        "After sync - Presigs: Owner1={}, Owner2={}, Owner3={}",
+        owner1_presigs_after.len(),
+        owner2_presigs_after.len(),
+        owner3_presigs_after.len()
+    );
+    
+    // Verify exact counts after sync
+    assert_eq!(
+        owner1_triples_after.len(),
+        owner1_triple_should_have.len(),
+        "Owner1 should have exactly {} triples after large-scale sync",
+        owner1_triple_should_have.len()
+    );
+    
+    assert_eq!(
+        owner2_triples_after.len(),
+        owner2_triple_should_have.len(),
+        "Owner2 should have exactly {} triples after large-scale sync",
+        owner2_triple_should_have.len()
+    );
+    
+    assert_eq!(
+        owner3_triples_after.len(),
+        owner3_triple_should_have.len(),
+        "Owner3 should have exactly {} triples after large-scale sync",
+        owner3_triple_should_have.len()
+    );
+    
+    assert_eq!(
+        owner1_presigs_after.len(),
+        owner1_presig_should_have.len(),
+        "Owner1 should have exactly {} presignatures after large-scale sync",
+        owner1_presig_should_have.len()
+    );
+    
+    assert_eq!(
+        owner2_presigs_after.len(),
+        owner2_presig_should_have.len(),
+        "Owner2 should have exactly {} presignatures after large-scale sync",
+        owner2_presig_should_have.len()
+    );
+    
+    assert_eq!(
+        owner3_presigs_after.len(),
+        owner3_presig_should_have.len(),
+        "Owner3 should have exactly {} presignatures after large-scale sync",
+        owner3_presig_should_have.len()
+    );
+    
+    tracing::info!("✅ Very large inconsistent storage sync test completed successfully");
+    tracing::info!(
+        "📊 Performance: Cleaned up {} extra triples and {} extra presignatures across 3 owners in {:?}",
+        1000 + 500 + 2000,
+        800 + 400 + 1500,
+        sync_duration
+    );
+    
     Ok(())
 }
 
