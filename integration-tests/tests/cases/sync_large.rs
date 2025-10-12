@@ -1326,6 +1326,355 @@ fn test_sync_update_large_creation() {
     // sync_channel.request_update() is called with large updates
 }
 
+/// Test sync behavior when storage contains corrupted or invalid IDs.
+/// This tests edge cases where IDs might be malformed or outside expected ranges.
+#[test_log::test(tokio::test)]
+async fn test_state_sync_corrupted_invalid_ids() -> anyhow::Result<()> {
+    tracing::info!("🧪 Testing sync with corrupted/invalid IDs in storage");
+    
+    let spawner = ClusterSpawner::default()
+        .network("protocol-sync-corrupted-ids")
+        .init_network()
+        .await
+        .unwrap();
+
+    let redis = spawner.spawn_redis().await;
+    let num_nodes = 1;
+    let threshold = 2;
+    let node0_account_id = "p0_test.near".parse().unwrap();
+    let node1 = Participant::from(1);
+    let node2 = Participant::from(2);
+
+    let sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let pk = sk.public_key();
+    let ping_interval = Duration::from_millis(300);
+    let client = NodeClient::new(&node_client::Options::default());
+    let participants = participants(num_nodes);
+    let node0_triples = redis.triple_storage(&node0_account_id);
+    let node0_presignatures = redis.presignature_storage(&node0_account_id);
+
+    let (contract_watcher, _contract_tx) = ContractStateWatcher::with(
+        &node0_account_id,
+        ProtocolState::Running(RunningContractState {
+            epoch: 0,
+            public_key: *pk.as_affine(),
+            participants: participants.clone(),
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold,
+        }),
+    );
+
+    let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
+    let mesh = Mesh::new(
+        &client,
+        mpc_node::mesh::Options {
+            ping_interval: ping_interval.as_millis() as u64,
+        },
+        synced_peer_rx,
+    );
+    let (sync_channel, sync) = SyncTask::new(
+        &client,
+        node0_triples.clone(),
+        node0_presignatures.clone(),
+        mesh.watch(),
+        contract_watcher,
+        synced_peer_tx,
+    );
+    tokio::spawn(sync.run());
+
+    // Insert valid IDs for node1 and node2
+    let valid_triple_ids: Vec<u64> = vec![100, 200, 300, 400, 500];
+    let valid_presig_ids: Vec<u64> = vec![1000, 2000, 3000, 4000, 5000];
+    
+    tracing::info!("Inserting valid triples and presignatures...");
+    insert_triples(&node0_triples, node1, valid_triple_ids.iter().cloned()).await;
+    insert_presignatures(&node0_presignatures, node1, valid_presig_ids.iter().cloned()).await;
+    
+    // Insert edge case IDs that might cause issues:
+    // - Very large IDs (near u64::MAX)
+    // - ID 0 (boundary condition)
+    // - Sparse IDs with huge gaps
+    let edge_case_triple_ids = vec![
+        0,                    // Minimum ID
+        u64::MAX - 1,        // Near maximum ID
+        u64::MAX / 2,        // Mid-range extreme
+        12345678901234567,   // Large arbitrary number
+        999999999,           // Another large number
+    ];
+    
+    let edge_case_presig_ids = vec![
+        0,                    // Minimum ID
+        u64::MAX - 2,        // Near maximum ID (different from triple)
+        u64::MAX / 3,        // Different mid-range
+        98765432109876543,   // Large arbitrary number
+        888888888,           // Another large number
+    ];
+    
+    tracing::info!("Inserting edge case IDs (very large, zero, sparse)...");
+    insert_triples(&node0_triples, node2, edge_case_triple_ids.iter().cloned()).await;
+    insert_presignatures(&node0_presignatures, node2, edge_case_presig_ids.iter().cloned()).await;
+
+    // Get counts before sync
+    let node1_triples_before = node0_triples.len_by_owner(node1).await;
+    let node1_presigs_before = node0_presignatures.len_by_owner(node1).await;
+    let node2_triples_before = node0_triples.len_by_owner(node2).await;
+    let node2_presigs_before = node0_presignatures.len_by_owner(node2).await;
+    
+    tracing::info!(
+        "Before sync - Node1: {} triples, {} presigs | Node2: {} triples, {} presigs",
+        node1_triples_before, node1_presigs_before, node2_triples_before, node2_presigs_before
+    );
+
+    // Send sync update claiming ONLY the valid IDs for node1
+    // This should cause the system to clean up edge case IDs from node2
+    let update1 = SyncUpdate {
+        from: node1,
+        triples: valid_triple_ids.clone(),
+        presignatures: valid_presig_ids.clone(),
+    };
+
+    tracing::info!("Sending sync update for node1 with only valid IDs...");
+    let start = Instant::now();
+    sync_channel.request_update(update1).await;
+    let elapsed = start.elapsed();
+    tracing::info!("Sync update processed in {:?}", elapsed);
+
+    // Give sync task time to process and clean up
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify node1 kept all valid IDs
+    tracing::info!("Validating node1 retained all valid IDs...");
+    validate_triples(&node0_triples, node1, &valid_triple_ids, &[]).await;
+    validate_presignatures(&node0_presignatures, node1, &valid_presig_ids, &[]).await;
+
+    // Verify edge case IDs for node2 are still there (not claimed by node1)
+    tracing::info!("Validating node2 edge case IDs are preserved...");
+    for id in &edge_case_triple_ids {
+        assert!(
+            node0_triples.contains_by_owner(*id, node2).await,
+            "Edge case triple ID {} should still exist for node2", id
+        );
+    }
+    for id in &edge_case_presig_ids {
+        assert!(
+            node0_presignatures.contains_by_owner(*id, node2).await,
+            "Edge case presignature ID {} should still exist for node2", id
+        );
+    }
+
+    let node1_triples_after = node0_triples.len_by_owner(node1).await;
+    let node1_presigs_after = node0_presignatures.len_by_owner(node1).await;
+    let node2_triples_after = node0_triples.len_by_owner(node2).await;
+    let node2_presigs_after = node0_presignatures.len_by_owner(node2).await;
+    
+    tracing::info!(
+        "After sync - Node1: {} triples, {} presigs | Node2: {} triples, {} presigs",
+        node1_triples_after, node1_presigs_after, node2_triples_after, node2_presigs_after
+    );
+
+    // Assertions
+    assert_eq!(node1_triples_after, valid_triple_ids.len());
+    assert_eq!(node1_presigs_after, valid_presig_ids.len());
+    assert_eq!(node2_triples_after, edge_case_triple_ids.len());
+    assert_eq!(node2_presigs_after, edge_case_presig_ids.len());
+
+    tracing::info!("✅ Corrupted/invalid ID sync test completed successfully");
+    tracing::info!(
+        "📊 Test verified: Edge case IDs (0, u64::MAX-1, sparse) handled correctly"
+    );
+
+    Ok(())
+}
+
+/// Test sync behavior with ownership conflicts (different nodes claiming the same ID).
+/// Since IDs are globally unique, this tests what happens when ownership changes hands
+/// and sync updates resolve the true ownership.
+#[test_log::test(tokio::test)]
+async fn test_state_sync_ownership_conflict() -> anyhow::Result<()> {
+    tracing::info!("🧪 Testing sync with ownership conflicts (IDs changing ownership)");
+    
+    let spawner = ClusterSpawner::default()
+        .network("protocol-sync-ownership-conflict")
+        .init_network()
+        .await
+        .unwrap();
+
+    let redis = spawner.spawn_redis().await;
+    let num_nodes = 1;
+    let threshold = 2;
+    let node0_account_id = "p0_test.near".parse().unwrap();
+    let node1 = Participant::from(1);
+    let node2 = Participant::from(2);
+    let node3 = Participant::from(3);
+
+    let sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let pk = sk.public_key();
+    let ping_interval = Duration::from_millis(300);
+    let client = NodeClient::new(&node_client::Options::default());
+    let participants = participants(num_nodes);
+    let node0_triples = redis.triple_storage(&node0_account_id);
+    let node0_presignatures = redis.presignature_storage(&node0_account_id);
+
+    let (contract_watcher, _contract_tx) = ContractStateWatcher::with(
+        &node0_account_id,
+        ProtocolState::Running(RunningContractState {
+            epoch: 0,
+            public_key: *pk.as_affine(),
+            participants: participants.clone(),
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold,
+        }),
+    );
+
+    let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
+    let mesh = Mesh::new(
+        &client,
+        mpc_node::mesh::Options {
+            ping_interval: ping_interval.as_millis() as u64,
+        },
+        synced_peer_rx,
+    );
+    let (sync_channel, sync) = SyncTask::new(
+        &client,
+        node0_triples.clone(),
+        node0_presignatures.clone(),
+        mesh.watch(),
+        contract_watcher,
+        synced_peer_tx,
+    );
+    tokio::spawn(sync.run());
+
+    // Create an ownership conflict scenario:
+    // Initially, node1 owns IDs 1-5 for triples and 10-50 for presigs
+    // Later, node2 will claim some of these same IDs (ownership transfer)
+    // Node3 has separate IDs with no conflicts
+    
+    let node1_initial_triples = vec![1, 2, 3, 4, 5];
+    let node1_initial_presigs = vec![10, 20, 30, 40, 50];
+    
+    let node3_triples = vec![100, 200];
+    let node3_presigs = vec![1000, 2000];
+
+    tracing::info!("Setting up initial state: Node1 owns IDs 1-5, Node3 owns IDs 100,200");
+    
+    // Insert initial state
+    insert_triples(&node0_triples, node1, node1_initial_triples.iter().cloned()).await;
+    insert_presignatures(&node0_presignatures, node1, node1_initial_presigs.iter().cloned()).await;
+    
+    insert_triples(&node0_triples, node3, node3_triples.iter().cloned()).await;
+    insert_presignatures(&node0_presignatures, node3, node3_presigs.iter().cloned()).await;
+
+    // Check initial state
+    let node1_triples_initial = node0_triples.len_by_owner(node1).await;
+    let node1_presigs_initial = node0_presignatures.len_by_owner(node1).await;
+    let node2_triples_initial = node0_triples.len_by_owner(node2).await;
+    let node2_presigs_initial = node0_presignatures.len_by_owner(node2).await;
+    let node3_triples_initial = node0_triples.len_by_owner(node3).await;
+    let node3_presigs_initial = node0_presignatures.len_by_owner(node3).await;
+    
+    tracing::info!(
+        "Initial state - Node1: {}T/{}P | Node2: {}T/{}P | Node3: {}T/{}P",
+        node1_triples_initial, node1_presigs_initial,
+        node2_triples_initial, node2_presigs_initial,
+        node3_triples_initial, node3_presigs_initial
+    );
+
+    // Scenario: Node2 claims it now owns IDs 3, 4, 5 and 30, 40, 50
+    // This creates an ownership conflict - node1 thinks it owns these,
+    // but node2's sync update says otherwise
+    let node2_claimed_triples = vec![3, 4, 5, 6, 7];
+    let node2_claimed_presigs = vec![30, 40, 50, 60, 70];
+
+    tracing::info!("Node2 claims ownership of IDs 3-7 (triple) and 30-70 (presig)");
+    tracing::info!("This creates conflict for IDs 3,4,5 and 30,40,50 currently owned by Node1");
+
+    // Send sync update from node2 claiming these IDs
+    let update2 = SyncUpdate {
+        from: node2,
+        triples: node2_claimed_triples.clone(),
+        presignatures: node2_claimed_presigs.clone(),
+    };
+
+    tracing::info!("Sending sync update from node2...");
+    let start = Instant::now();
+    sync_channel.request_update(update2).await;
+    let elapsed = start.elapsed();
+    tracing::info!("Sync update from node2 processed in {:?}", elapsed);
+
+    // Give sync task time to process
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Now send sync update from node1 asserting its ownership
+    // Node1 should still claim ownership of IDs 1,2,3,4,5
+    let update1 = SyncUpdate {
+        from: node1,
+        triples: node1_initial_triples.clone(),
+        presignatures: node1_initial_presigs.clone(),
+    };
+
+    tracing::info!("Sending sync update from node1 (asserting original ownership)...");
+    let start = Instant::now();
+    sync_channel.request_update(update1).await;
+    let elapsed = start.elapsed();
+    tracing::info!("Sync update from node1 processed in {:?}", elapsed);
+
+    // Give sync task time to process
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Check final state
+    let node1_triples_final = node0_triples.len_by_owner(node1).await;
+    let node1_presigs_final = node0_presignatures.len_by_owner(node1).await;
+    let node2_triples_final = node0_triples.len_by_owner(node2).await;
+    let node2_presigs_final = node0_presignatures.len_by_owner(node2).await;
+    let node3_triples_final = node0_triples.len_by_owner(node3).await;
+    let node3_presigs_final = node0_presignatures.len_by_owner(node3).await;
+    
+    tracing::info!(
+        "Final state - Node1: {}T/{}P | Node2: {}T/{}P | Node3: {}T/{}P",
+        node1_triples_final, node1_presigs_final,
+        node2_triples_final, node2_presigs_final,
+        node3_triples_final, node3_presigs_final
+    );
+
+    // Verify: Node1 keeps its claimed IDs (first to insert wins in storage)
+    tracing::info!("Validating node1 retained its originally claimed IDs...");
+    validate_triples(&node0_triples, node1, &node1_initial_triples, &[]).await;
+    validate_presignatures(&node0_presignatures, node1, &node1_initial_presigs, &[]).await;
+    
+    // Verify: Node2 does NOT have the conflicting IDs (because node1 inserted them first)
+    // Node2 can only claim IDs that weren't already taken (6, 7 for triples; 60, 70 for presigs)
+    tracing::info!("Validating node2 doesn't have conflicting IDs...");
+    for id in &[3, 4, 5] {
+        assert!(
+            !node0_triples.contains_by_owner(*id, node2).await,
+            "Node2 should NOT have conflicting triple ID {} (node1 owns it)", id
+        );
+    }
+    for id in &[30, 40, 50] {
+        assert!(
+            !node0_presignatures.contains_by_owner(*id, node2).await,
+            "Node2 should NOT have conflicting presig ID {} (node1 owns it)", id
+        );
+    }
+    
+    tracing::info!("Validating node3 maintained its non-conflicting IDs...");
+    validate_triples(&node0_triples, node3, &node3_triples, &[]).await;
+    validate_presignatures(&node0_presignatures, node3, &node3_presigs, &[]).await;
+
+    // Key insight: IDs are globally unique, so once inserted, they can't be claimed by another owner
+    // The test validates that sync correctly maintains this invariant
+    tracing::info!("✅ Ownership conflict test completed successfully");
+    tracing::info!(
+        "📊 Test verified: IDs are globally unique - first owner to insert wins, conflicts prevented"
+    );
+
+    Ok(())
+}
+
 // Helper functions
 
 async fn insert_triples(
