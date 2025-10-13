@@ -14,6 +14,7 @@ pub mod signet_program {
         request_ids: Vec<[u8; 32]>,
         signatures: Vec<Signature>,
     ) -> Result<()> {
+        // Minimal implementation - just emit the event
         for i in 0..request_ids.len() {
             emit_cpi!(SignatureRespondedEvent {
                 request_id: request_ids[i],
