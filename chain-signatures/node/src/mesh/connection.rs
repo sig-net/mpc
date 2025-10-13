@@ -128,7 +128,8 @@ impl NodeConnection {
                         | OtherNodeStatus::Started
                         | OtherNodeStatus::WaitingForConsensus { .. } => NodeStatus::Inactive,
                     };
-                    if old_status == NodeStatus::Inactive && new_status == NodeStatus::Active {
+                    if matches!(old_status, NodeStatus::Inactive | NodeStatus::Offline | NodeStatus::Syncing)
+                        && new_status == NodeStatus::Active {
                         // Sync when we want to enter an active state
                         //
                         // The peer is running. But before we can reliably
@@ -138,7 +139,7 @@ impl NodeConnection {
                         new_status = NodeStatus::Syncing;
                     }
                     if old_status != new_status {
-                        tracing::info!(?node, ?new_status, "updated with new status");
+                        tracing::info!(?node, ?old_status, ?new_status, "updated with new status");
                         status_tx.send_modify(|(status, _)| {
                             *status = new_status;
                         });
@@ -279,6 +280,7 @@ impl Pool {
     /// Update the node state after synchronization was successful.
     pub async fn report_node_synced(&self, participant: Participant) {
         if let Some(conn) = self.connections.get(&participant) {
+            tracing::info!(?participant, "reporting node synced");
             conn.status_tx.send_if_modified(|(status, _)| {
                 if *status == NodeStatus::Syncing {
                     *status = NodeStatus::Active;

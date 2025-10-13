@@ -48,9 +48,12 @@ struct TripleGenerator {
     created: Instant,
     inbox: mpsc::Receiver<TripleMessage>,
     msg: MessageChannel,
+    #[cfg(feature = "debug-page")]
+    debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
 impl TripleGenerator {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         id: TripleId,
         me: Participant,
@@ -59,6 +62,7 @@ impl TripleGenerator {
         timeout: Duration,
         slot: TripleSlot,
         msg: &MessageChannel,
+        _my_account_id: &AccountId,
     ) -> Result<Self, InitializationError> {
         let mut participants = participants.to_vec();
         // Participants can be out of order, so let's sort them before doing anything. Critical
@@ -79,6 +83,11 @@ impl TripleGenerator {
             created: Instant::now(),
             inbox,
             msg: msg.clone(),
+            #[cfg(feature = "debug-page")]
+            debug_view: crate::web::debug::register_task(
+                _my_account_id.to_string(),
+                format!("TripleGenerator {id:#?}"),
+            ),
         })
     }
 
@@ -150,6 +159,8 @@ impl TripleGenerator {
             total_pokes += 1;
             poke_last_time = Instant::now();
             poke_latency.observe(poke_start_time.elapsed().as_millis() as f64);
+            #[cfg(feature = "debug-page")]
+            self.render_debug(total_pokes);
 
             match action {
                 Action::Wait => {
@@ -239,6 +250,14 @@ impl TripleGenerator {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "debug-page")]
+    fn render_debug(&self, total_pokes: i32) {
+        let markup = maud::html! {
+            p { (format!("{total_pokes} pokes")) }
+        };
+        self.debug_view.send(markup);
     }
 }
 
@@ -475,6 +494,7 @@ impl TripleSpawner {
             timeout,
             slot,
             &self.msg,
+            &self.my_account_id,
         )
         .await?;
 

@@ -388,7 +388,10 @@ struct SignatureGenerator {
     inbox: mpsc::Receiver<SignatureMessage>,
     msg: MessageChannel,
     rpc: RpcChannel,
+
     sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
+    #[cfg(feature = "debug-page")]
+    debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
 impl SignatureGenerator {
@@ -403,6 +406,7 @@ impl SignatureGenerator {
         msg: MessageChannel,
         rpc: RpcChannel,
         sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
+        _my_account_id: &AccountId,
     ) -> Result<Self, InitializationError> {
         let sign_id = request.id();
         let request = request
@@ -462,6 +466,11 @@ impl SignatureGenerator {
             msg,
             rpc,
             sign_bidirectional_signature_channel,
+            #[cfg(feature = "debug-page")]
+            debug_view: crate::web::debug::register_task(
+                _my_account_id.to_string(),
+                format!("SignatureGenerator {sign_id:#?}"),
+            ),
         })
     }
 
@@ -560,6 +569,8 @@ impl SignatureGenerator {
             total_pokes += 1;
             poke_last_time = Instant::now();
             poke_latency.observe(poke_start_time.elapsed().as_millis() as f64);
+            #[cfg(feature = "debug-page")]
+            self.render_debug(total_pokes);
 
             match action {
                 Action::Wait => {
@@ -649,6 +660,14 @@ impl SignatureGenerator {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "debug-page")]
+    fn render_debug(&self, total_pokes: i32) {
+        let markup = maud::html! {
+            p { (format!("{total_pokes} pokes")) }
+        };
+        self.debug_view.send(markup);
     }
 }
 
@@ -865,6 +884,7 @@ impl SignatureSpawner {
                 msg,
                 rpc,
                 sign_bidirectional_signature_channel,
+                &my_account_id,
             )
             .await
             {

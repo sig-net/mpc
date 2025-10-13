@@ -126,6 +126,8 @@ pub struct PresignatureGenerator {
     slot: PresignatureSlot,
     inbox: mpsc::Receiver<PresignatureMessage>,
     msg: MessageChannel,
+    #[cfg(feature = "debug-page")]
+    debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
 impl PresignatureGenerator {
@@ -204,6 +206,8 @@ impl PresignatureGenerator {
             total_pokes += 1;
             poke_last_time = Instant::now();
             poke_latency.observe(poke_start_time.elapsed().as_millis() as f64);
+            #[cfg(feature = "debug-page")]
+            self.render_debug(total_pokes);
 
             match action {
                 Action::Wait => {
@@ -281,6 +285,14 @@ impl PresignatureGenerator {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "debug-page")]
+    fn render_debug(&self, total_pokes: i32) {
+        let markup = maud::html! {
+            p { (format!("{total_pokes} pokes")) }
+        };
+        self.debug_view.send(markup);
     }
 }
 
@@ -618,6 +630,11 @@ impl PresignatureSpawner {
                 slot,
                 inbox,
                 msg,
+                #[cfg(feature = "debug-page")]
+                debug_view: crate::web::debug::register_task(
+                    my_account_id.to_string(),
+                    format!("PresignatureGenerator {id:#?}"),
+                ),
             };
             generator.run(&my_account_id, me, epoch).await;
         };
