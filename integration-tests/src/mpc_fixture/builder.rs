@@ -89,7 +89,7 @@ struct NodeMessagingBuilder {
     outbox: MessageOutbox,
 
     /// allows dropping specific messages sent by this node
-    filter: MessageFilter,
+    filter: Vec<MessageFilter>,
 }
 
 impl Default for MpcFixtureBuilder {
@@ -319,7 +319,7 @@ impl MpcFixtureBuilder {
 
     /// Specify a method that acts as message filter for all sent messages the given node.
     pub fn with_outgoing_message_filter(mut self, node_idx: usize, filter: MessageFilter) -> Self {
-        self.prepared_nodes[node_idx].messaging.filter = filter;
+        self.prepared_nodes[node_idx].messaging.filter.push(filter);
         self
     }
 
@@ -390,7 +390,7 @@ impl MpcFixtureNodeBuilder {
             inbox,
             outbox,
             channel,
-            filter: Box::new(|_| true),
+            filter: vec![Box::new(|_| true)],
         };
 
         MpcFixtureNodeBuilder {
@@ -440,7 +440,7 @@ impl MpcFixtureNodeBuilder {
         // We have to start the inbox job before calling
         // `MpcSignProtocol::new_test` or else subscribing to messages will
         // await the subscription response forever.
-        let _inbox_handle = tokio::spawn(
+        let inbox_handle = tokio::spawn(
             self.messaging
                 .inbox
                 .run(config_rx.clone(), context.contract_state.clone()),
@@ -458,7 +458,7 @@ impl MpcFixtureNodeBuilder {
         let account_id = protocol.my_account_id().clone();
         let node = protocol::Node::new();
         let node_state = node.watch();
-        let _protocol_handle = tokio::spawn(protocol.run(
+        let protocol_handle = tokio::spawn(protocol.run(
             node,
             MockGovernance {
                 me: account_id.clone(),
@@ -471,7 +471,7 @@ impl MpcFixtureNodeBuilder {
 
         // handle outbox messages manually, we want them before they are
         // encrypted and we want to send them directly to other node's inboxes
-        let _mock_network_handle = fixture_tasks::test_mock_network(
+        let mock_network_handle = fixture_tasks::test_mock_network(
             context.routing_table,
             shared_output,
             self.messaging.outbox,
@@ -491,6 +491,7 @@ impl MpcFixtureNodeBuilder {
             triple_storage,
             presignature_storage,
             web_handle: None,
+            tasks: vec![inbox_handle, protocol_handle, mock_network_handle],
         };
 
         node.start_web_interface(self.participant_info.account_id);

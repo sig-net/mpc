@@ -33,6 +33,9 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
+#[cfg(feature = "test-feature")]
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
 use near_account_id::AccountId;
 
 /// This is the maximum amount of sign requests that we can accept in the network.
@@ -101,6 +104,7 @@ pub struct SignRequest {
     pub proposer: Participant,
     pub stable: BTreeSet<Participant>,
     pub round: usize,
+    attempts: Attempts,
 }
 
 pub struct SignQueue {
@@ -117,6 +121,54 @@ pub struct SignQueue {
     /// The set of pending request listeners that are waiting for a sign request to be indexed.
     /// They will be notified when a sign request is available.
     pending: HashMap<SignId, oneshot::Sender<SignRequest>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attempts {
+    attempts: u32,
+    next_retry_at: Instant,
+}
+
+impl Default for Attempts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Attempts {
+    pub fn new() -> Self {
+        Self {
+            attempts: 0,
+            next_retry_at: Instant::now(),
+        }
+    }
+
+    pub fn schedule_next_attempt(&mut self) {
+        self.attempts = self.attempts.saturating_add(1);
+        self.next_retry_at = Instant::now() + self.compute_retry_delay();
+    }
+
+    pub fn is_ready(&self, now: Instant) -> bool {
+        self.next_retry_at <= now
+    }
+
+    pub fn is_ready_now(&self) -> bool {
+        self.is_ready(Instant::now())
+    }
+
+    pub fn mark_ready(&mut self, now: Instant) {
+        self.next_retry_at = now;
+    }
+
+    fn compute_retry_delay(&self) -> Duration {
+        let base_ms = retry_backoff_base_ms();
+        let exponent = self.attempts.saturating_sub(1).min(6);
+        let multiplier = 1u32 << exponent;
+        let delay_ms = base_ms
+            .saturating_mul(u64::from(multiplier))
+            .min(retry_backoff_max_ms());
+        Duration::from_millis(delay_ms)
+    }
 }
 
 impl SignQueue {
@@ -226,6 +278,7 @@ impl SignQueue {
             proposer,
             stable: stable.clone(),
             round,
+            attempts: Attempts::new(),
         }
     }
 
@@ -258,10 +311,13 @@ impl SignQueue {
                 .with_label_values(&[indexed.chain.as_str(), my_account_id.as_str()])
                 .inc();
 
-            let request = self.organize_request(stable, participants, indexed, 0);
+            let mut request = self.organize_request(stable, participants, indexed, 0);
+            if request.indexed.timestamp_sign_queue.is_none() {
+                request.indexed.timestamp_sign_queue = Some(Instant::now());
+            }
             let is_mine = request.proposer == self.me;
             if is_mine {
-                self.my_requests.push_back(sign_id);
+                self.my_requests.push_front(sign_id);
                 crate::metrics::NUM_SIGN_REQUESTS_MINE
                     .with_label_values(&[my_account_id.as_str()])
                     .inc();
@@ -286,26 +342,43 @@ impl SignQueue {
         participants: &Participants,
         my_account_id: &AccountId,
     ) {
-        while let Some(id) = self.failed_requests.pop_front() {
-            let Some(request) = self.requests.remove(&id) else {
+        let now = Instant::now();
+        let len = self.failed_requests.len();
+        for _ in 0..len {
+            let Some(id) = self.failed_requests.pop_front() else {
+                break;
+            };
+
+            let Some(mut request) = self.requests.remove(&id) else {
                 continue;
             };
 
-            let (reorganized, request) = if &request.stable == stable {
-                // just use the same request if the participants are the same
-                (false, request)
-            } else {
-                let request =
-                    self.organize_request(stable, participants, request.indexed, request.round);
-                (true, request)
-            };
+            if !request.attempts.is_ready(now) {
+                self.requests.insert(id, request);
+                self.failed_requests.push_back(id);
+                continue;
+            }
 
-            // NOTE: this prioritizes old requests first then tries to do new ones if there's enough presignatures.
-            // TODO: we need to decide how to prioritize certain requests over others such as with gas or time of
-            // when the request made it into the NEAR network.
-            // issue: https://github.com/near/mpc-recovery/issues/596
+            let mut reorganized = false;
+            if &request.stable != stable {
+                let attempts = request.attempts;
+                request =
+                    self.organize_request(stable, participants, request.indexed, request.round);
+                request.attempts = attempts;
+                reorganized = true;
+            }
+
+            // Delay information is reset since we're ready to try again now that the
+            // backoff window has elapsed.
+            request.attempts.mark_ready(now);
+
+            if request.indexed.timestamp_sign_queue.is_none() {
+                request.indexed.timestamp_sign_queue = Some(now);
+            }
+
             if request.proposer == self.me {
-                self.my_requests.push_front(request.indexed.id);
+                // Older retries are appended to the back so newly indexed requests run first.
+                self.my_requests.push_back(request.indexed.id);
                 if reorganized {
                     crate::metrics::NUM_SIGN_REQUESTS_MINE
                         .with_label_values(&[my_account_id.as_str()])
@@ -318,7 +391,15 @@ impl SignQueue {
     }
 
     pub fn push_failed(&mut self, sign_id: SignId) {
-        self.failed_requests.push_back(sign_id);
+        if let Some(request) = self.requests.get_mut(&sign_id) {
+            request.attempts.schedule_next_attempt();
+
+            if !self.failed_requests.contains(&sign_id) {
+                self.failed_requests.push_back(sign_id);
+            }
+        } else {
+            tracing::warn!(?sign_id, "failed sign request missing from queue");
+        }
     }
 
     pub fn take_mine(&mut self) -> Option<SignRequest> {
@@ -336,42 +417,22 @@ impl SignQueue {
         }
     }
 
-    pub fn expire(&mut self, cfg: &ProtocolConfig) {
-        self.requests.retain(|_, request| {
-            request.indexed.timestamp_sign_queue.is_none_or(|t| {
-                t.elapsed() < Duration::from_millis(cfg.signature.generation_timeout_total)
-            })
-        });
-        self.my_requests.retain(|id| {
-            let Some(request) = self.requests.get(id) else {
-                // if we are unable to find the corresponding request, we can remove it.
-                return false;
-            };
-            crate::util::duration_between_unix(
-                request.indexed.unix_timestamp_indexed,
-                crate::util::current_unix_timestamp(),
-            ) < request.indexed.total_timeout
-        });
-        self.failed_requests.retain(|id| {
-            let Some(request) = self.requests.get(id) else {
-                // if we are unable to find the corresponding request, we can remove it.
-                return false;
-            };
-            crate::util::duration_between_unix(
-                request.indexed.unix_timestamp_indexed,
-                crate::util::current_unix_timestamp(),
-            ) < request.indexed.total_timeout
-        });
+    pub fn expire(&mut self, _cfg: &ProtocolConfig) {
+        self.my_requests.retain(|id| self.requests.contains_key(id));
+        self.failed_requests
+            .retain(|id| self.requests.contains_key(id));
     }
 
     pub fn remove(&mut self, sign_id: SignId) -> Option<SignRequest> {
+        self.pending.remove(&sign_id);
+        self.my_requests.retain(|id| id != &sign_id);
+        self.failed_requests.retain(|id| id != &sign_id);
         self.requests.remove(&sign_id)
     }
 }
 
 enum SignError {
     Retry,
-    TotalTimeout,
     Aborted,
 }
 
@@ -380,11 +441,11 @@ struct SignatureGenerator {
     protocol: SignatureProtocol,
     dropper: PresignatureTakenDropper,
     participants: Vec<Participant>,
+    me: Participant,
     request: SignRequest,
     public_key: PublicKey,
     created: Instant,
     timeout: Duration,
-    timeout_total: Duration,
     inbox: mpsc::Receiver<SignatureMessage>,
     msg: MessageChannel,
     rpc: RpcChannel,
@@ -457,11 +518,11 @@ impl SignatureGenerator {
             protocol,
             dropper,
             participants,
+            me,
             request,
             public_key,
             created: Instant::now(),
             timeout: Duration::from_millis(cfg.signature.generation_timeout),
-            timeout_total: Duration::from_millis(cfg.signature.generation_timeout_total),
             inbox,
             msg,
             rpc,
@@ -472,16 +533,6 @@ impl SignatureGenerator {
                 format!("SignatureGenerator {sign_id:#?}"),
             ),
         })
-    }
-
-    fn timeout_total(&self) -> bool {
-        let timestamp = self
-            .request
-            .indexed
-            .timestamp_sign_queue
-            .as_ref()
-            .unwrap_or(&self.created);
-        timestamp.elapsed() >= self.timeout_total
     }
 
     /// Receive the next message for the signature protocol; error out on the timeout being reached
@@ -497,13 +548,21 @@ impl SignatureGenerator {
         {
             Ok(Some(msg)) => Ok(msg),
             Ok(None) => {
-                tracing::warn!(?sign_id, presignature_id, "signature generation aborted");
+                tracing::warn!(
+                    ?sign_id,
+                    presignature_id,
+                    proposer = ?self.request.proposer,
+                    me = ?self.me,
+                    "signature generation aborted",
+                );
                 Err(SignError::Aborted)
             }
             Err(_err) => {
                 tracing::warn!(
                     ?sign_id,
                     presignature_id,
+                    proposer = ?self.request.proposer,
+                    me = ?self.me,
                     "signature generation timeout, retrying..."
                 );
                 Err(SignError::Retry)
@@ -523,8 +582,6 @@ impl SignatureGenerator {
             crate::metrics::SIGNATURE_POKES_CNT.with_label_values(&[my_account_id.as_str()]);
         let signature_generator_failures_metric = crate::metrics::SIGNATURE_GENERATOR_FAILURES
             .with_label_values(&[my_account_id.as_str()]);
-        let signature_failures_metric =
-            crate::metrics::SIGNATURE_FAILURES.with_label_values(&[my_account_id.as_str()]);
         let poke_latency =
             crate::metrics::SIGNATURE_POKE_CPU_TIME.with_label_values(&[my_account_id.as_str()]);
 
@@ -539,19 +596,6 @@ impl SignatureGenerator {
             .observe(self.created.elapsed().as_millis() as f64);
 
         loop {
-            if self.timeout_total() {
-                tracing::warn!(
-                    ?sign_id,
-                    presignature_id,
-                    "signature generation timeout, exhausted all attempts"
-                );
-                if self.request.proposer == me {
-                    signature_generator_failures_metric.inc();
-                    signature_failures_metric.inc();
-                }
-                break Err(SignError::TotalTimeout);
-            }
-
             let poke_start_time = Instant::now();
             let action = match self.protocol.poke() {
                 Ok(action) => action,
@@ -561,6 +605,9 @@ impl SignatureGenerator {
                         ?err,
                         "signature generation failed on protocol advancement",
                     );
+                    if self.request.proposer == me {
+                        signature_generator_failures_metric.inc();
+                    }
                     break Err(SignError::Retry);
                 }
             };
@@ -1088,9 +1135,12 @@ impl SignatureSpawner {
 
                     match result {
                         Err(SignError::Retry) => {
+                            crate::metrics::SIGNATURE_FAILURES
+                                .with_label_values(&[self.my_account_id.as_str()])
+                                .inc();
                             self.sign_queue.push_failed(sign_id);
                         }
-                        Ok(()) | Err(SignError::TotalTimeout) | Err(SignError::Aborted) => {
+                        Ok(()) | Err(SignError::Aborted) => {
                             self.sign_queue.remove(sign_id);
                         }
                     }
@@ -1206,5 +1256,191 @@ impl PendingPresignature {
                 None
             }
         }
+    }
+}
+
+#[cfg(feature = "test-feature")]
+static RETRY_BACKOFF_BASE_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "test-feature")]
+static RETRY_BACKOFF_MAX_MS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "test-feature")]
+pub fn set_signature_retry_backoff(base_ms: u64, max_ms: u64) {
+    RETRY_BACKOFF_BASE_MS.store(base_ms, AtomicOrdering::SeqCst);
+    RETRY_BACKOFF_MAX_MS.store(max_ms, AtomicOrdering::SeqCst);
+}
+
+#[cfg(feature = "test-feature")]
+pub fn reset_signature_retry_backoff() {
+    RETRY_BACKOFF_BASE_MS.store(0, AtomicOrdering::SeqCst);
+    RETRY_BACKOFF_MAX_MS.store(0, AtomicOrdering::SeqCst);
+}
+
+fn retry_backoff_base_ms() -> u64 {
+    #[cfg(feature = "test-feature")]
+    match RETRY_BACKOFF_BASE_MS.load(AtomicOrdering::SeqCst) {
+        0 => 1_000,
+        value => value,
+    }
+
+    #[cfg(not(feature = "test-feature"))]
+    1_000
+}
+
+fn retry_backoff_max_ms() -> u64 {
+    #[cfg(feature = "test-feature")]
+    match RETRY_BACKOFF_MAX_MS.load(AtomicOrdering::SeqCst) {
+        0 => 60_000,
+        value => value,
+    }
+    #[cfg(not(feature = "test-feature"))]
+    60_000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::ParticipantInfo;
+    use k256::Scalar;
+    use near_account_id::AccountId;
+    use std::str::FromStr;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn make_indexed_request(id: SignId) -> IndexedSignRequest {
+        IndexedSignRequest {
+            id,
+            args: SignArgs {
+                entropy: id.request_id,
+                epsilon: Scalar::ONE,
+                payload: Scalar::ONE,
+                path: "test".to_string(),
+                key_version: 0,
+            },
+            chain: Chain::Ethereum,
+            unix_timestamp_indexed: 0,
+            timestamp_sign_queue: None,
+            total_timeout: Duration::from_secs(60),
+            sign_request_type: SignRequestType::Sign,
+            participants: None,
+        }
+    }
+
+    fn setup_queue() -> (
+        Participant,
+        BTreeSet<Participant>,
+        Participants,
+        SignQueue,
+        AccountId,
+        mpsc::Sender<IndexedSignRequest>,
+    ) {
+        let (tx, rx) = SignQueue::channel();
+        let me = Participant::from(0u32);
+        let other = Participant::from(1u32);
+        let mut stable = BTreeSet::new();
+        stable.insert(me);
+        stable.insert(other);
+
+        let mut participants_map = Participants::default();
+        participants_map.insert(&me, ParticipantInfo::new(0));
+        participants_map.insert(&other, ParticipantInfo::new(1));
+
+        let account_id = AccountId::from_str("me.near").unwrap();
+        let queue = SignQueue::new(me, Arc::new(RwLock::new(rx)));
+
+        (me, stable, participants_map, queue, account_id, tx)
+    }
+
+    #[tokio::test]
+    async fn retries_wait_until_ready() {
+        let (me, stable, participants, mut queue, account_id, _tx) = setup_queue();
+
+        let sign_id = SignId::new([1; 32]);
+        let mut indexed = make_indexed_request(sign_id);
+        indexed.participants = Some(vec![me]);
+        let request = queue.organize_request(&stable, &participants, indexed, 0);
+        queue.requests.insert(sign_id, request);
+        queue.push_failed(sign_id);
+
+        {
+            let request = queue.requests.get_mut(&sign_id).unwrap();
+            request.attempts.next_retry_at = Instant::now() + Duration::from_secs(10);
+        }
+
+        queue.organize_failed(&stable, &participants, &account_id);
+        assert!(queue.my_requests.is_empty());
+        assert!(queue.failed_requests.contains(&sign_id));
+
+        {
+            let request = queue.requests.get_mut(&sign_id).unwrap();
+            request.attempts.next_retry_at = Instant::now() - Duration::from_secs(1);
+        }
+
+        queue.organize_failed(&stable, &participants, &account_id);
+        assert_eq!(queue.my_requests.len(), 1);
+        assert_eq!(queue.my_requests.front(), Some(&sign_id));
+        assert!(queue
+            .requests
+            .get(&sign_id)
+            .unwrap()
+            .attempts
+            .is_ready_now());
+        assert!(!queue.failed_requests.contains(&sign_id));
+    }
+
+    #[tokio::test]
+    async fn prioritizes_new_requests_over_old_retries() {
+        let (me, stable, participants, mut queue, account_id, tx) = setup_queue();
+
+        let old_id = SignId::new([5; 32]);
+        let mut old_indexed = make_indexed_request(old_id);
+        old_indexed.participants = Some(vec![me]);
+        let old_request = queue.organize_request(&stable, &participants, old_indexed, 0);
+        queue.requests.insert(old_id, old_request);
+        queue.push_failed(old_id);
+        queue
+            .requests
+            .get_mut(&old_id)
+            .unwrap()
+            .attempts
+            .next_retry_at = Instant::now() - Duration::from_millis(100);
+
+        let new_id = SignId::new([9; 32]);
+        let mut new_indexed = make_indexed_request(new_id);
+        new_indexed.participants = Some(vec![me]);
+        tx.try_send(new_indexed).unwrap();
+
+        queue.organize(&stable, &participants, &account_id).await;
+
+        let first = queue.take_mine().expect("new request present");
+        assert_eq!(first.indexed.id, new_id);
+        let second = queue.take_mine().expect("old request present");
+        assert_eq!(second.indexed.id, old_id);
+        assert!(queue.my_requests.is_empty());
+    }
+
+    #[test]
+    fn push_failed_respects_backoff() {
+        let (me, stable, participants, mut queue, _account_id, _tx) = setup_queue();
+
+        let sign_id = SignId::new([3; 32]);
+        let mut indexed = make_indexed_request(sign_id);
+        indexed.participants = Some(vec![me]);
+        let request = queue.organize_request(&stable, &participants, indexed, 0);
+        queue.requests.insert(sign_id, request);
+
+        let before = Instant::now();
+        queue.push_failed(sign_id);
+        assert_eq!(queue.failed_requests.len(), 1);
+        let attempts = &queue.requests.get(&sign_id).unwrap().attempts;
+        assert_eq!(attempts.attempts, 1);
+        assert!(attempts.next_retry_at > before);
+
+        queue.push_failed(sign_id);
+        let attempts = &queue.requests.get(&sign_id).unwrap().attempts;
+        assert_eq!(attempts.attempts, 2);
+        assert_eq!(queue.failed_requests.len(), 1);
+        assert!(attempts.next_retry_at > before);
+        assert!(!attempts.is_ready(Instant::now()));
     }
 }

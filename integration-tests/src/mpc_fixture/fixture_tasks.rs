@@ -24,7 +24,7 @@ pub(super) fn test_mock_network(
     mut rpc_rx: Receiver<RpcAction>,
     mesh: watch::Sender<MeshState>,
     config: watch::Sender<Config>,
-    mut filter: MessageFilter,
+    mut filters: Vec<MessageFilter>,
 ) -> JoinHandle<()> {
     let msg_log = Arc::clone(&shared_output.msg_log);
     let rpc_actions = Arc::clone(&shared_output.rpc_actions);
@@ -49,9 +49,11 @@ pub(super) fn test_mock_network(
                     };
                     msg_log.lock().await.push(format!("{log_msg} from {from:?} to {to:?}"));
 
-                    if !filter(&send_message) {
-                        tracing::info!("Dropping a message because it didn't pass the test's filter");
-                        continue;
+                    for filter in filters.iter_mut() {
+                        if !filter(&send_message) {
+                            tracing::info!(?from, ?to, log_msg, "Dropping a message because it didn't pass the test's filter");
+                            continue;
+                        }
                     }
 
 
@@ -90,7 +92,7 @@ pub(super) fn test_mock_network(
                             )
                         },
                     };
-                    tracing::error!(target: "mock_network", ?action_str, "Received RPC action");
+                    tracing::info!(target: "mock_network", ?action_str, "Received RPC action");
                     let mut actions_log = rpc_actions.lock().await;
                     actions_log.insert(action_str);
                 }

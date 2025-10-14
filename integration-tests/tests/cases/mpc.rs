@@ -1,12 +1,15 @@
+use cait_sith::protocol::Participant;
 use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
-use integration_tests::mpc_fixture::MpcFixtureBuilder;
+use integration_tests::mpc_fixture::{MpcFixtureBuilder, SignatureDropper};
 use mpc_node::protocol::presignature::Presignature;
+use mpc_node::protocol::signature::{reset_signature_retry_backoff, set_signature_retry_backoff};
 use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
-use std::collections::BTreeMap;
+use rand::{rngs::StdRng, seq::IteratorRandom, SeedableRng};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::time::Duration;
 
@@ -184,6 +187,190 @@ async fn test_basic_sign() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sign_request_retries_after_failure() {
+    const NUM_NODES: usize = 3;
+
+    let mut droppers = Vec::with_capacity(NUM_NODES);
+
+    let mut builder = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .with_signature_timeout_ms(1_000);
+
+    for idx in 0..NUM_NODES {
+        let participant = Participant::from(idx as u32);
+        let (dropper, filter) = SignatureDropper::new(participant);
+        builder = builder.with_outgoing_message_filter(idx, filter);
+        droppers.push(dropper);
+    }
+
+    let network = builder.build().await;
+
+    for dropper in &droppers {
+        dropper.enable();
+    }
+
+    // Signature timeout should abort the task in 1seconds.
+    let drop_handle = {
+        let droppers = droppers.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            for dropper in &droppers {
+                dropper.disable();
+            }
+        })
+    };
+
+    tokio::time::timeout(
+        Duration::from_millis(300),
+        network.wait_for_presignatures(2),
+    )
+    .await
+    .expect("should start with enough presignatures");
+
+    let request = sign_request(1);
+    for node in &network.nodes {
+        node.sign_tx.send(request.clone()).await.unwrap();
+    }
+
+    let start = std::time::Instant::now();
+    let actions = tokio::time::timeout(Duration::from_secs(20), network.wait_for_actions(1))
+        .await
+        .expect("should publish RPC action eventually");
+
+    drop_handle.await.unwrap();
+
+    let dropped_messages: usize = droppers.iter().map(SignatureDropper::dropped).sum();
+    assert!(
+        actions
+            .iter()
+            .any(|action| action.contains("RpcAction::Publish")),
+        "unexpected rpc actions: {actions:?}"
+    );
+    assert!(
+        dropped_messages > 0,
+        "expected test filter to drop at least one signature message"
+    );
+    assert!(
+        start.elapsed() >= Duration::from_secs(2),
+        "signature completed too quickly, expected a retry delay"
+    );
+}
+
+struct RetryBackoffGuard;
+
+impl Drop for RetryBackoffGuard {
+    fn drop(&mut self) {
+        reset_signature_retry_backoff();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sign_request_retries_multiple_times() {
+    let _guard = RetryBackoffGuard;
+    set_signature_retry_backoff(10, 100);
+
+    const NUM_NODES: usize = 3;
+    const TARGET_ATTEMPTS: usize = 10;
+
+    let mut signature_droppers = Vec::with_capacity(NUM_NODES);
+
+    let mut builder = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .with_signature_timeout_ms(200);
+
+    for idx in 0..NUM_NODES {
+        let participant = Participant::from(idx as u32);
+        let (dropper, filter) = SignatureDropper::new(participant);
+        builder = builder.with_outgoing_message_filter(idx, filter);
+        signature_droppers.push(dropper);
+    }
+
+    let network = builder.build().await;
+
+    tokio::time::timeout(
+        Duration::from_millis(300),
+        network.wait_for_presignatures(2),
+    )
+    .await
+    .expect("should start with enough presignatures");
+
+    {
+        let mut log = network.output.msg_log.lock().await;
+        log.clear();
+    }
+
+    for dropper in &signature_droppers {
+        dropper.enable();
+    }
+
+    let request = sign_request(3);
+    for node in &network.nodes {
+        node.sign_tx.send(request.clone()).await.unwrap();
+    }
+
+    let required_messages = TARGET_ATTEMPTS * (network.nodes.len() - 1);
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let signature_messages = {
+                let log = network.output.msg_log.lock().await;
+                log.iter()
+                    .filter(|entry| entry.starts_with("Signature"))
+                    .count()
+            };
+
+            if signature_messages >= required_messages {
+                break signature_messages;
+            }
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("expected at least ten signature retries before timeout");
+
+    for dropper in &signature_droppers {
+        dropper.disable();
+    }
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let dropped_messages: usize = signature_droppers
+        .iter()
+        .map(SignatureDropper::dropped)
+        .sum();
+
+    assert!(
+        dropped_messages > 0,
+        "expected to drop at least one signature message before retries succeeded"
+    );
+
+    let actions = tokio::time::timeout(Duration::from_secs(10), network.wait_for_actions(1))
+        .await
+        .expect("signature should eventually publish after retries");
+
+    assert!(
+        actions
+            .iter()
+            .any(|action| action.contains("RpcAction::Publish")),
+        "unexpected rpc actions: {actions:?}"
+    );
+
+    let signature_messages = {
+        let log = network.output.msg_log.lock().await;
+        log.iter()
+            .filter(|entry| entry.starts_with("Signature"))
+            .count()
+    };
+
+    let attempts = signature_messages / (network.nodes.len() - 1);
+    assert!(
+        attempts >= TARGET_ATTEMPTS,
+        "expected at least {TARGET_ATTEMPTS} retries, observed {attempts}"
+    );
+}
+
 fn sign_request(seed: u8) -> IndexedSignRequest {
     IndexedSignRequest {
         id: SignId::new([seed; 32]),
@@ -195,6 +382,37 @@ fn sign_request(seed: u8) -> IndexedSignRequest {
         participants: None,
         sign_request_type: SignRequestType::Sign,
     }
+}
+
+fn initial_proposer_for_request(
+    request: &IndexedSignRequest,
+    participants: &[Participant],
+    stable: &BTreeSet<Participant>,
+) -> Participant {
+    assert!(
+        !participants.is_empty(),
+        "expected at least one participant in the mesh snapshot"
+    );
+
+    let mut ordered_participants = participants.to_vec();
+    ordered_participants.sort();
+
+    let entropy = request.args.entropy;
+    let offset = entropy[0] as usize;
+
+    for round in 0..512 {
+        let idx = (offset + round) % ordered_participants.len();
+        let candidate = ordered_participants[idx];
+        if stable.contains(&candidate) {
+            return candidate;
+        }
+    }
+
+    let mut rng = StdRng::from_seed(entropy);
+    *stable
+        .iter()
+        .choose(&mut rng)
+        .expect("stable set should not be empty")
 }
 
 fn sign_arg(seed: u8) -> SignArgs {

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{watch, Mutex};
+use tokio::task::JoinHandle;
 
 pub struct MpcFixture {
     pub nodes: Vec<MpcFixtureNode>,
@@ -36,6 +37,7 @@ pub struct MpcFixtureNode {
     pub presignature_storage: PresignatureStorage,
 
     pub web_handle: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) tasks: Vec<JoinHandle<()>>,
 }
 
 /// Logs for reading outputs after a test run for assertions and debugging.
@@ -109,6 +111,18 @@ impl MpcFixtureNode {
         );
         self.web_handle = Some(tokio::spawn(task));
     }
+
+    pub async fn shutdown(&mut self) {
+        let tasks = std::mem::take(&mut self.tasks);
+
+        for handle in &tasks {
+            handle.abort();
+        }
+
+        for handle in tasks {
+            let _ = handle.await;
+        }
+    }
 }
 
 impl std::ops::Index<usize> for MpcFixture {
@@ -116,6 +130,14 @@ impl std::ops::Index<usize> for MpcFixture {
 
     fn index(&self, index: usize) -> &MpcFixtureNode {
         &self.nodes[index]
+    }
+}
+
+impl Drop for MpcFixtureNode {
+    fn drop(&mut self) {
+        for handle in std::mem::take(&mut self.tasks) {
+            handle.abort();
+        }
     }
 }
 
