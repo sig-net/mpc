@@ -1,4 +1,5 @@
 use deadpool_redis::redis::AsyncCommands;
+use futures::future::join_all;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
@@ -182,6 +183,72 @@ async fn test_basic_sign() {
         action_str.contains("RpcAction::Publish"),
         "unexpected rpc action {action_str}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_sign_requests() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let request_count: usize = 4;
+    let presignature_buffer: usize = request_count;
+
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        network.wait_for_presignatures(presignature_buffer),
+    )
+    .await
+    .expect("network should start with enough presignatures");
+
+    let sign_channels: Vec<_> = network
+        .nodes
+        .iter()
+        .map(|node| node.sign_tx.clone())
+        .collect();
+
+    let requests: Vec<_> = (10..10 + request_count as u8).map(sign_request).collect();
+
+    join_all(requests.iter().cloned().map(|request| {
+        let senders = sign_channels.clone();
+        async move {
+            for tx in senders {
+                tx.send(request.clone())
+                    .await
+                    .expect("failed to send sign request");
+            }
+        }
+    }))
+    .await;
+
+    let actions = tokio::time::timeout(
+        Duration::from_secs(30),
+        network.wait_for_actions(request_count),
+    )
+    .await
+    .expect("failed waiting for publish actions");
+
+    assert!(
+        actions.len() >= request_count,
+        "expected at least {request_count} publish actions, got {}",
+        actions.len()
+    );
+
+    assert!(
+        actions
+            .iter()
+            .all(|action| action.contains("RpcAction::Publish")),
+        "found unexpected rpc actions: {actions:?}"
+    );
+
+    for request in &requests {
+        let sign_id_hex = hex::encode(request.id.request_id);
+        assert!(
+            actions.iter().any(|action| action.contains(&sign_id_hex)),
+            "missing publish action for request {sign_id_hex}"
+        );
+    }
 }
 
 fn sign_request(seed: u8) -> IndexedSignRequest {
