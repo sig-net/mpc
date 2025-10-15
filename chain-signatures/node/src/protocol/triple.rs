@@ -1,9 +1,8 @@
 use super::message::{MessageChannel, PositMessage, PositProtocolId, TripleMessage};
-use super::posit::{PositAction, PositInternalAction, Posits};
+use super::posit::{Posit, PositAction, PositInternalAction, Positor};
 use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
-use crate::protocol::posit::Positor;
 use crate::storage::triple_storage::{TripleSlot, TripleStorage};
 use crate::types::TripleProtocol;
 use crate::util::{AffinePointExt, JoinMap};
@@ -80,7 +79,7 @@ struct TripleTask {
     msg: MessageChannel,
     triple_storage: TripleStorage,
     action_rx: mpsc::Receiver<TripleTaskAction>,
-    posits: Posits<TripleId, ()>,
+    posit: Posit<TripleId, ()>,
     generation_timeout: Option<Duration>,
     generation_started: bool,
 }
@@ -106,7 +105,7 @@ impl TripleTask {
             msg,
             triple_storage: triple_storage.clone(),
             action_rx: rx,
-            posits: Posits::new(me),
+            posit: Posit::new(me),
             generation_timeout: None,
             generation_started: false,
         };
@@ -124,7 +123,7 @@ impl TripleTask {
                         return;
                     },
                 },
-                _ = expiration_interval.tick(), if !self.posits.is_empty() => {
+                _ = expiration_interval.tick(), if !self.posit.is_empty() => {
                     self.handle_expiration().await
                 }
             };
@@ -169,7 +168,7 @@ impl TripleTask {
             ?participants,
             "initiating triple posit"
         );
-        let action = self.posits.propose(self.id, (), &participants);
+        let action = self.posit.propose(self.id, (), &participants);
         if matches!(action, PositAction::Reject) {
             tracing::warn!(
                 phase = "posit",
@@ -197,7 +196,7 @@ impl TripleTask {
             ?action,
             "processing triple posit"
         );
-        let internal = self.posits.act(self.id, from, self.threshold, &action);
+        let internal = self.posit.act(self.id, from, self.threshold, &action);
         self.handle_internal_action(from, internal, timeout).await
     }
 
@@ -224,42 +223,37 @@ impl TripleTask {
     }
 
     async fn handle_expiration(&mut self) -> TripleTaskStep {
-        let mut result = TripleTaskStep::Continue;
-        for (id, action) in self
-            .posits
+        let Some((id, action)) = self
+            .posit
             .expire_and_start(self.threshold, Duration::from_secs(60))
-        {
-            if id != self.id {
-                continue;
-            }
+        else {
+            return TripleTaskStep::Continue;
+        };
 
-            result = match action {
-                PositInternalAction::None => TripleTaskStep::Continue,
-                PositInternalAction::Abort => {
-                    tracing::warn!(phase = "posit", id = self.id, "triple posit expired");
-                    TripleTaskStep::Complete
-                }
-                PositInternalAction::Reply(reply) => {
-                    tracing::debug!(
-                        phase = "posit",
-                        id = self.id,
-                        ?reply,
-                        "posit expiration produced reply without participant"
-                    );
-                    TripleTaskStep::Continue
-                }
-                PositInternalAction::StartProtocol(participants, positor) => {
-                    let timeout = self.generation_timeout.unwrap_or(Duration::from_millis(1));
-                    self.start_generation(participants, positor, timeout).await
-                }
-            };
-
-            if !matches!(result, TripleTaskStep::Continue) {
-                break;
-            }
+        if id != self.id {
+            return TripleTaskStep::Continue;
         }
 
-        result
+        match action {
+            PositInternalAction::None => TripleTaskStep::Continue,
+            PositInternalAction::Abort => {
+                tracing::warn!(phase = "posit", id = self.id, "triple posit expired");
+                TripleTaskStep::Complete
+            }
+            PositInternalAction::Reply(reply) => {
+                tracing::debug!(
+                    phase = "posit",
+                    id = self.id,
+                    ?reply,
+                    "posit expiration produced reply without participant"
+                );
+                TripleTaskStep::Continue
+            }
+            PositInternalAction::StartProtocol(participants, positor) => {
+                let timeout = self.generation_timeout.unwrap_or(Duration::from_millis(1));
+                self.start_generation(participants, positor, timeout).await
+            }
+        }
     }
 
     async fn start_generation(

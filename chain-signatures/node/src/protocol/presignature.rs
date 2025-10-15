@@ -1,5 +1,5 @@
 use super::message::{MessageChannel, PositMessage, PositProtocolId, PresignatureMessage};
-use super::posit::{PositAction, Positor, Posits};
+use super::posit::{Posit, PositAction, Positor};
 use super::triple::TripleId;
 use crate::config::Config;
 use crate::mesh::MeshState;
@@ -213,7 +213,7 @@ struct PresignatureTask {
     presignatures: PresignatureStorage,
     msg: MessageChannel,
     action_rx: mpsc::Receiver<PresignatureTaskAction>,
-    posits: Posits<FullPresignatureId, TriplesTaken>,
+    posit: Posit<FullPresignatureId, TriplesTaken>,
     generation_timeout: Option<Duration>,
     generation_started: bool,
 }
@@ -249,7 +249,7 @@ impl PresignatureTask {
             presignatures: presignatures.clone(),
             msg,
             action_rx: rx,
-            posits: Posits::new(me),
+            posit: Posit::new(me),
             generation_timeout: None,
             generation_started: false,
         };
@@ -268,7 +268,7 @@ impl PresignatureTask {
                         return
                     },
                 },
-                _ = expiration_interval.tick(), if !self.posits.is_empty() => {
+                _ = expiration_interval.tick(), if !self.posit.is_empty() => {
                     self.handle_expiration().await
                 }
             };
@@ -322,7 +322,7 @@ impl PresignatureTask {
             "initiating presignature posit"
         );
 
-        let action = self.posits.propose(self.id, triples, &participants);
+        let action = self.posit.propose(self.id, triples, &participants);
         if matches!(action, PositAction::Reject) {
             tracing::warn!(
                 id = self.id.id,
@@ -378,7 +378,7 @@ impl PresignatureTask {
             }
         }
 
-        let internal = self.posits.act(self.id, from, self.threshold, &action);
+        let internal = self.posit.act(self.id, from, self.threshold, &action);
         self.handle_internal_action(from, internal, timeout).await
     }
 
@@ -405,41 +405,36 @@ impl PresignatureTask {
     }
 
     async fn handle_expiration(&mut self) -> PresignatureTaskStep {
-        let mut result = PresignatureTaskStep::Continue;
-        for (id, action) in self
-            .posits
+        let Some((id, action)) = self
+            .posit
             .expire_and_start(self.threshold, Duration::from_secs(60))
-        {
-            if id != self.id {
-                continue;
-            }
+        else {
+            return PresignatureTaskStep::Continue;
+        };
 
-            result = match action {
-                PositInternalAction::None => PresignatureTaskStep::Continue,
-                PositInternalAction::Abort => {
-                    tracing::warn!(id = self.id.id, "presignature posit expired");
-                    PresignatureTaskStep::Complete
-                }
-                PositInternalAction::Reply(reply) => {
-                    tracing::debug!(
-                        id = self.id.id,
-                        ?reply,
-                        "posit expiration produced reply without participant"
-                    );
-                    PresignatureTaskStep::Continue
-                }
-                PositInternalAction::StartProtocol(participants, positor) => {
-                    let timeout = self.generation_timeout.unwrap_or(Duration::from_millis(1));
-                    self.start_generation(participants, positor, timeout).await
-                }
-            };
-
-            if !matches!(result, PresignatureTaskStep::Continue) {
-                break;
-            }
+        if id != self.id {
+            return PresignatureTaskStep::Continue;
         }
 
-        result
+        match action {
+            PositInternalAction::None => PresignatureTaskStep::Continue,
+            PositInternalAction::Abort => {
+                tracing::warn!(id = self.id.id, "presignature posit expired");
+                PresignatureTaskStep::Complete
+            }
+            PositInternalAction::Reply(reply) => {
+                tracing::debug!(
+                    id = self.id.id,
+                    ?reply,
+                    "posit expiration produced reply without participant"
+                );
+                PresignatureTaskStep::Continue
+            }
+            PositInternalAction::StartProtocol(participants, positor) => {
+                let timeout = self.generation_timeout.unwrap_or(Duration::from_millis(1));
+                self.start_generation(participants, positor, timeout).await
+            }
+        }
     }
 
     async fn start_generation(

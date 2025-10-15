@@ -5,7 +5,7 @@ use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId, SignatureMessage};
-use crate::protocol::posit::{PositAction, PositInternalAction, Positor, Posits};
+use crate::protocol::posit::{Posit, PositAction, PositInternalAction, Positor};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
@@ -695,7 +695,7 @@ struct SignatureTask {
     sign_respond_signature_channel: SignRespondSignatureChannel,
     presignatures: PresignatureStorage,
     action_rx: mpsc::Receiver<SignatureTaskAction>,
-    posits: Posits<SignatureTaskId, PresignatureTaken>,
+    posit: Posit<SignatureTaskId, PresignatureTaken>,
     request: Option<SignRequest>,
     generation_timeout: Option<Duration>,
     protocol_cfg: ProtocolConfig,
@@ -734,7 +734,7 @@ impl SignatureTask {
             sign_respond_signature_channel,
             presignatures: presignatures.clone(),
             action_rx: rx,
-            posits: Posits::new(me),
+            posit: Posit::new(me),
             request: None,
             generation_timeout: None,
             protocol_cfg,
@@ -755,7 +755,7 @@ impl SignatureTask {
                         return Err(SignError::Aborted);
                     },
                 },
-                _ = expiration_interval.tick(), if !self.posits.is_empty() => {
+                _ = expiration_interval.tick(), if !self.posit.is_empty() => {
                     self.handle_expiration().await
                 }
             };
@@ -820,7 +820,7 @@ impl SignatureTask {
         );
 
         self.request = Some(request);
-        let action = self.posits.propose(self.id, presignature, &participants);
+        let action = self.posit.propose(self.id, presignature, &participants);
         if matches!(action, PositAction::Reject) {
             tracing::warn!(
                 phase = "posit",
@@ -908,7 +908,7 @@ impl SignatureTask {
             }
         }
 
-        let internal = self.posits.act(self.id, from, self.threshold, &action);
+        let internal = self.posit.act(self.id, from, self.threshold, &action);
         self.handle_internal_action(from, internal).await
     }
 
@@ -950,47 +950,42 @@ impl SignatureTask {
     }
 
     async fn handle_expiration(&mut self) -> SignatureTaskStep {
-        let mut result = SignatureTaskStep::Continue;
-        for (id, action) in self
-            .posits
+        let Some((id, action)) = self
+            .posit
             .expire_and_start(self.threshold, Duration::from_secs(60))
-        {
-            if id != self.id {
-                continue;
-            }
+        else {
+            return SignatureTaskStep::Continue;
+        };
 
-            result = match action {
-                PositInternalAction::None => SignatureTaskStep::Continue,
-                PositInternalAction::Abort => {
-                    tracing::warn!(
-                        phase = "posit",
-                        sign_id = ?self.id.0,
-                        presignature_id = self.id.1,
-                        "signature posit expired"
-                    );
-                    SignatureTaskStep::Complete(Err(SignError::Retry))
-                }
-                PositInternalAction::Reply(reply) => {
-                    tracing::debug!(
-                        phase = "posit",
-                        sign_id = ?self.id.0,
-                        presignature_id = self.id.1,
-                        ?reply,
-                        "signature posit expiration produced reply"
-                    );
-                    SignatureTaskStep::Continue
-                }
-                PositInternalAction::StartProtocol(participants, positor) => {
-                    self.start_generation(participants, positor).await
-                }
-            };
-
-            if !matches!(result, SignatureTaskStep::Continue) {
-                break;
-            }
+        if id != self.id {
+            return SignatureTaskStep::Continue;
         }
 
-        result
+        match action {
+            PositInternalAction::None => SignatureTaskStep::Continue,
+            PositInternalAction::Abort => {
+                tracing::warn!(
+                    phase = "posit",
+                    sign_id = ?self.id.0,
+                    presignature_id = self.id.1,
+                    "signature posit aborted"
+                );
+                SignatureTaskStep::Complete(Err(SignError::Retry))
+            }
+            PositInternalAction::Reply(reply) => {
+                tracing::debug!(
+                    phase = "posit",
+                    sign_id = ?self.id.0,
+                    presignature_id = self.id.1,
+                    ?reply,
+                    "signature posit expiration produced reply"
+                );
+                SignatureTaskStep::Continue
+            }
+            PositInternalAction::StartProtocol(participants, positor) => {
+                self.start_generation(participants, positor).await
+            }
+        }
     }
 
     async fn start_generation(
