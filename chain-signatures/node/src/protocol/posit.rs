@@ -93,6 +93,28 @@ impl<Id: Copy + Eq + fmt::Debug, S> Posit<Id, S> {
         Self { me, active: None }
     }
 
+    /// Create a posit in deliberator mode based on an incoming action.
+    /// Returns `None` when the provided action is not a posit proposal.
+    pub fn deliberate(
+        me: Participant,
+        id: Id,
+        from: Participant,
+        action: &PositAction,
+    ) -> Option<Self> {
+        if !matches!(action, PositAction::Propose) {
+            return None;
+        }
+
+        Some(Self {
+            me,
+            active: Some(ActivePosit {
+                id,
+                positor: Positor::Deliberator(from),
+                timestamp: Instant::now(),
+            }),
+        })
+    }
+
     pub fn propose(&mut self, id: Id, store: S, participants: &[Participant]) -> PositAction {
         if let Some(active) = &self.active {
             tracing::warn!(

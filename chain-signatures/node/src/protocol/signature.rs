@@ -704,7 +704,7 @@ struct SignatureTask {
 
 impl SignatureTask {
     #[allow(clippy::too_many_arguments)]
-    fn spawn(
+    fn spawn_proposer(
         id: SignatureTaskId,
         me: Participant,
         threshold: usize,
@@ -741,22 +741,84 @@ impl SignatureTask {
             generation_started: false,
         };
 
-        (handle, task.run())
+        (handle, task.run(None))
     }
 
-    async fn run(mut self) -> Result<(), SignError> {
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_deliberator(
+        id: SignatureTaskId,
+        me: Participant,
+        threshold: usize,
+        epoch: u64,
+        my_account_id: &AccountId,
+        public_key: PublicKey,
+        presignatures: &PresignatureStorage,
+        msg: MessageChannel,
+        rpc: RpcChannel,
+        sign_respond_signature_channel: SignRespondSignatureChannel,
+        from: Participant,
+        action: PositAction,
+        request: Option<PendingRequest>,
+        cfg: ProtocolConfig,
+    ) -> Option<(
+        SignatureTaskChannel,
+        impl std::future::Future<Output = Result<(), SignError>>,
+    )> {
+        let posit = Posit::deliberate(me, id, from, &action)?;
+
+        let (tx, rx) = mpsc::channel(64);
+        let handle = SignatureTaskChannel { id, tx };
+        let generation_timeout = Duration::from_millis(cfg.signature.generation_timeout);
+        let task = Self {
+            id,
+            me,
+            threshold,
+            epoch,
+            my_account_id: my_account_id.clone(),
+            public_key,
+            msg,
+            rpc,
+            sign_respond_signature_channel,
+            presignatures: presignatures.clone(),
+            action_rx: rx,
+            posit,
+            request: None,
+            generation_timeout: Some(generation_timeout),
+            protocol_cfg: cfg.clone(),
+            generation_started: false,
+        };
+        let initial = SignatureTaskAction::Posit {
+            from,
+            action,
+            request,
+            cfg,
+        };
+        Some((handle, task.run(Some(initial))))
+    }
+
+    async fn run(mut self, initial: Option<SignatureTaskAction>) -> Result<(), SignError> {
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(20));
+        let mut pending = if let Some(action) = initial {
+            Some(self.handle_action(action).await)
+        } else {
+            None
+        };
+
         let generator = loop {
-            let step = tokio::select! {
-                action = self.action_rx.recv() => match action {
-                    Some(action) => self.handle_action(action).await,
-                    None => {
-                        tracing::warn!(sign_id = ?self.id, "signature task aborted");
-                        return Err(SignError::Aborted);
+            let step = if let Some(step) = pending.take() {
+                step
+            } else {
+                tokio::select! {
+                    action = self.action_rx.recv() => match action {
+                        Some(action) => self.handle_action(action).await,
+                        None => {
+                            tracing::warn!(sign_id = ?self.id, "signature task aborted");
+                            return Err(SignError::Aborted);
+                        },
                     },
-                },
-                _ = expiration_interval.tick(), if !self.posit.is_empty() => {
-                    self.handle_expiration().await
+                    _ = expiration_interval.tick(), if !self.posit.is_empty() => {
+                        self.handle_expiration().await
+                    }
                 }
             };
 
@@ -1174,12 +1236,16 @@ impl SignatureSpawner {
     }
 
     /// Get an existing signature task or spawn a new one if it doesn't exist.
-    fn get_or_spawn(&mut self, id: SignatureTaskId, cfg: &ProtocolConfig) -> SignatureTaskChannel {
+    fn get_or_spawn_proposer(
+        &mut self,
+        id: SignatureTaskId,
+        cfg: &ProtocolConfig,
+    ) -> SignatureTaskChannel {
         if let Some(handle) = self.ongoing.get(&id) {
             return handle.clone();
         }
 
-        let (handle, fut) = SignatureTask::spawn(
+        let (handle, fut) = SignatureTask::spawn_proposer(
             id,
             self.me,
             self.threshold,
@@ -1196,6 +1262,39 @@ impl SignatureSpawner {
         handle
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_deliberator_task(
+        &mut self,
+        id: SignatureTaskId,
+        from: Participant,
+        action: PositAction,
+        request: Option<PendingRequest>,
+        cfg: &ProtocolConfig,
+    ) -> Option<SignatureTaskChannel> {
+        if let Some(handle) = self.ongoing.get(&id) {
+            return Some(handle.clone());
+        }
+
+        let (handle, fut) = SignatureTask::spawn_deliberator(
+            id,
+            self.me,
+            self.threshold,
+            self.epoch,
+            &self.my_account_id,
+            self.public_key,
+            &self.presignatures,
+            self.msg.clone(),
+            self.rpc.clone(),
+            self.sign_respond_signature_channel.clone(),
+            from,
+            action,
+            request,
+            cfg.clone(),
+        )?;
+        self.ongoing.spawn_and_map(id, handle.clone(), fut);
+        Some(handle)
+    }
+
     async fn forward_posit(
         &mut self,
         sign_id: SignId,
@@ -1204,20 +1303,57 @@ impl SignatureSpawner {
         action: PositAction,
         cfg: &ProtocolConfig,
     ) {
+        let id = (sign_id, presignature_id);
+        if let Some(handle) = self.ongoing.get(&id) {
+            let request = if matches!(action, PositAction::Propose) {
+                Some(self.sign_queue.get_or_pending(&sign_id))
+            } else {
+                None
+            };
+
+            handle
+                .send(SignatureTaskAction::Posit {
+                    from,
+                    action,
+                    request,
+                    cfg: cfg.clone(),
+                })
+                .await;
+            return;
+        }
+
         let request = if matches!(action, PositAction::Propose) {
             Some(self.sign_queue.get_or_pending(&sign_id))
         } else {
             None
         };
 
-        let handle = self.get_or_spawn((sign_id, presignature_id), cfg);
-        handle
-            .send(SignatureTaskAction::Posit {
+        if matches!(action, PositAction::Propose) {
+            if self
+                .spawn_deliberator_task(id, from, action.clone(), request, cfg)
+                .is_some()
+            {
+                return;
+            }
+        }
+
+        tracing::warn!(
+            sign_id = ?sign_id,
+            presignature_id = ?presignature_id,
+            ?from,
+            ?action,
+            "unable to spawn signature task for incoming posit"
+        );
+        self.msg
+            .send(
+                self.me,
                 from,
-                action,
-                request,
-                cfg: cfg.clone(),
-            })
+                PositMessage {
+                    id: PositProtocolId::Signature(sign_id, presignature_id),
+                    from: self.me,
+                    action: PositAction::Reject,
+                },
+            )
             .await;
     }
 
@@ -1276,7 +1412,8 @@ impl SignatureSpawner {
                 continue;
             }
 
-            let handle = self.get_or_spawn((my_request.indexed.id, taken.presignature.id), cfg);
+            let handle =
+                self.get_or_spawn_proposer((my_request.indexed.id, taken.presignature.id), cfg);
             handle
                 .send(SignatureTaskAction::Initiate {
                     request: my_request,

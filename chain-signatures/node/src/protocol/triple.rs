@@ -85,7 +85,7 @@ struct TripleTask {
 }
 
 impl TripleTask {
-    fn spawn(
+    fn spawn_proposer(
         id: TripleId,
         me: Participant,
         threshold: usize,
@@ -109,13 +109,59 @@ impl TripleTask {
             generation_timeout: None,
             generation_started: false,
         };
-        (handle, task.run())
+        (handle, task.run(None))
     }
 
-    async fn run(mut self) {
+    fn spawn_deliberator(
+        id: TripleId,
+        me: Participant,
+        threshold: usize,
+        epoch: u64,
+        my_account_id: &AccountId,
+        triple_storage: &TripleStorage,
+        msg: MessageChannel,
+        from: Participant,
+        action: PositAction,
+        timeout: Duration,
+    ) -> Option<(TripleTaskChannel, impl std::future::Future<Output = ()>)> {
+        let posit = Posit::deliberate(me, id, from, &action)?;
+
+        let (tx, rx) = mpsc::channel(32);
+        let handle = TripleTaskChannel { id, tx };
+        let task = Self {
+            id,
+            me,
+            threshold,
+            epoch,
+            my_account_id: my_account_id.clone(),
+            msg,
+            triple_storage: triple_storage.clone(),
+            action_rx: rx,
+            posit,
+            generation_timeout: Some(timeout),
+            generation_started: false,
+        };
+        let initial = TripleTaskAction::Posit {
+            from,
+            action,
+            timeout,
+        };
+        Some((handle, task.run(Some(initial))))
+    }
+
+    async fn run(mut self, initial: Option<TripleTaskAction>) {
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(60));
+        let mut pending = if let Some(action) = initial {
+            Some(self.handle_action(action).await)
+        } else {
+            None
+        };
+
         let generator = loop {
-            let step = tokio::select! {
+            let step = if let Some(step) = pending.take() {
+                step
+            } else {
+                let step = tokio::select! {
                 action = self.action_rx.recv() => match action {
                     Some(action) => self.handle_action(action).await,
                     None => {
@@ -123,9 +169,11 @@ impl TripleTask {
                         return;
                     },
                 },
-                _ = expiration_interval.tick(), if !self.posit.is_empty() => {
-                    self.handle_expiration().await
-                }
+                    _ = expiration_interval.tick(), if !self.posit.is_empty() => {
+                        self.handle_expiration().await
+                    }
+                };
+                step
             };
 
             match step {
@@ -664,13 +712,13 @@ impl TripleSpawner {
         self.triple_storage.len_generated().await + self.ongoing.len()
     }
 
-    /// Get an existing triple task or spawn a new one if it doesn't exist.
-    fn get_or_spawn(&mut self, id: TripleId) -> TripleTaskChannel {
+    /// Get an existing triple task or spawn a new proposer task if it doesn't exist.
+    fn get_or_spawn_proposer(&mut self, id: TripleId) -> TripleTaskChannel {
         if let Some(handle) = self.ongoing.get(&id) {
             return handle.clone();
         }
 
-        let (handle, fut) = TripleTask::spawn(
+        let (handle, fut) = TripleTask::spawn_proposer(
             id,
             self.me,
             self.threshold,
@@ -681,6 +729,33 @@ impl TripleSpawner {
         );
         self.ongoing.spawn_and_map(id, handle.clone(), fut);
         handle
+    }
+
+    fn spawn_deliberator_task(
+        &mut self,
+        id: TripleId,
+        from: Participant,
+        action: PositAction,
+        timeout: Duration,
+    ) -> Option<TripleTaskChannel> {
+        if let Some(handle) = self.ongoing.get(&id) {
+            return Some(handle.clone());
+        }
+
+        let (handle, fut) = TripleTask::spawn_deliberator(
+            id,
+            self.me,
+            self.threshold,
+            self.epoch,
+            &self.my_account_id,
+            &self.triple_storage,
+            self.msg.clone(),
+            from,
+            action,
+            timeout,
+        )?;
+        self.ongoing.spawn_and_map(id, handle.clone(), fut);
+        Some(handle)
     }
 
     async fn forward_posit(
@@ -702,14 +777,34 @@ impl TripleSpawner {
             return;
         }
 
-        let handle = self.get_or_spawn(id);
-        handle
-            .send(TripleTaskAction::Posit {
-                from,
-                action,
-                timeout,
-            })
-            .await;
+        if let Some(handle) = self.ongoing.get(&id) {
+            handle
+                .send(TripleTaskAction::Posit {
+                    from,
+                    action: action.clone(),
+                    timeout,
+                })
+                .await;
+            return;
+        }
+
+        if matches!(action, PositAction::Propose) {
+            if self
+                .spawn_deliberator_task(id, from, action.clone(), timeout)
+                .is_some()
+            {
+                return;
+            }
+        }
+
+        tracing::warn!(
+            phase = "posit",
+            id,
+            ?from,
+            ?action,
+            "unable to spawn triple task for incoming posit"
+        );
+        self.send_reject(id, from).await;
     }
 
     async fn send_reject(&self, id: TripleId, to: Participant) {
@@ -730,7 +825,7 @@ impl TripleSpawner {
     async fn propose_posit(&mut self, active: &[Participant], timeout: Duration) {
         let id = rand::random();
         tracing::info!(phase = "posit", id, "proposing triple posit");
-        let handle = self.get_or_spawn(id);
+        let handle = self.get_or_spawn_proposer(id);
         self.ongoing_introduced.insert(id);
         handle
             .send(TripleTaskAction::Initiate {
