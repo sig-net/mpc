@@ -247,3 +247,82 @@ async fn test_presignature_timeout() {
         .await
         .expect("should have enough presignatures eventually");
 }
+
+/// Test that sign requests are processed immediately when received (event-driven)
+/// instead of waiting for a polling interval
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sign_immediate_processing() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    tokio::time::timeout(
+        Duration::from_millis(300),
+        network.wait_for_presignatures(2),
+    )
+    .await
+    .expect("should start with enough presignatures");
+
+    tracing::info!("sending sign request");
+    let request = sign_request(100);
+    let start = std::time::Instant::now();
+
+    // Send request to all nodes
+    network[0].sign_tx.send(request.clone()).await.unwrap();
+    network[1].sign_tx.send(request.clone()).await.unwrap();
+    network[2].sign_tx.send(request.clone()).await.unwrap();
+
+    // With event-driven processing, the request should be handled immediately
+    // instead of waiting up to 100ms for the next poll interval
+    let timeout = Duration::from_secs(10);
+    let actions = tokio::time::timeout(timeout, network.wait_for_actions(1))
+        .await
+        .expect("should publish RPC action quickly with event-driven processing");
+
+    let elapsed = start.elapsed();
+    tracing::info!("request processed in {:?}", elapsed);
+
+    assert_eq!(actions.len(), 1);
+    let action_str = actions.iter().next().unwrap();
+    assert!(
+        action_str.contains("RpcAction::Publish"),
+        "unexpected rpc action {action_str}"
+    );
+}
+
+/// Test that multiple sign requests are processed in sequence
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sign_multiple_requests() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(10), network.wait_for_presignatures(3))
+        .await
+        .expect("should start with enough presignatures");
+
+    tracing::info!("sending multiple sign requests");
+
+    // Send 2 requests (we have 3 presignatures, but may only have 2 available)
+    for seed in 0..2 {
+        let request = sign_request(seed);
+        network[0].sign_tx.send(request.clone()).await.unwrap();
+        network[1].sign_tx.send(request.clone()).await.unwrap();
+        network[2].sign_tx.send(request.clone()).await.unwrap();
+    }
+
+    let timeout = Duration::from_secs(30);
+    let actions = tokio::time::timeout(timeout, network.wait_for_actions(2))
+        .await
+        .expect("should publish all RPC actions");
+
+    assert_eq!(actions.len(), 2);
+    for action_str in &actions {
+        assert!(
+            action_str.contains("RpcAction::Publish"),
+            "unexpected rpc action {action_str}"
+        );
+    }
+}

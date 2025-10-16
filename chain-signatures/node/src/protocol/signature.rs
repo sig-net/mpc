@@ -29,7 +29,6 @@ use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -105,7 +104,6 @@ pub struct SignRequest {
 
 pub struct SignQueue {
     me: Participant,
-    sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     /// The requests that belong to us where we will the propose the signature to the chain.
     my_requests: VecDeque<SignId>,
     /// Set of requests that failed to be processed during signature generation and need to
@@ -127,10 +125,9 @@ impl SignQueue {
         mpsc::channel(MAX_SIGN_REQUESTS)
     }
 
-    pub fn new(me: Participant, sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>) -> Self {
+    pub fn new(me: Participant) -> Self {
         Self {
             me,
-            sign_rx,
             my_requests: VecDeque::new(),
             requests: HashMap::new(),
             failed_requests: VecDeque::new(),
@@ -229,58 +226,46 @@ impl SignQueue {
         }
     }
 
-    pub async fn organize(
+    pub fn add_request(
         &mut self,
         stable: &BTreeSet<Participant>,
         participants: &Participants,
+        indexed: IndexedSignRequest,
         my_account_id: &AccountId,
     ) {
-        // Reorganize the failed requests with a potentially newer list of stable participants.
-        self.organize_failed(stable, participants, my_account_id);
-
-        // try and organize the new incoming requests.
-        let mut sign_rx = self.sign_rx.write().await;
-        while let Ok(indexed) = {
-            match sign_rx.try_recv() {
-                err @ Err(TryRecvError::Disconnected) => {
-                    tracing::error!("sign queue channel disconnected");
-                    err
-                }
-                other => other,
-            }
-        } {
-            let sign_id = indexed.id;
-            if self.contains(&sign_id) {
-                tracing::info!(?sign_id, "skipping sign request: already in the sign queue");
-                continue;
-            }
-            crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
-                .with_label_values(&[indexed.chain.as_str(), my_account_id.as_str()])
-                .inc();
-
-            let request = self.organize_request(stable, participants, indexed, 0);
-            let is_mine = request.proposer == self.me;
-            if is_mine {
-                self.my_requests.push_back(sign_id);
-                crate::metrics::NUM_SIGN_REQUESTS_MINE
-                    .with_label_values(&[my_account_id.as_str()])
-                    .inc();
-            }
-            if let Some(pending) = self.pending.remove(&sign_id) {
-                tracing::info!(?sign_id, proposer = ?request.proposer, "sign queue received pending request");
-                if pending.send(request.clone()).is_err() {
-                    tracing::warn!(
-                        ?sign_id,
-                        "pending sign request channel closed before able to send request"
-                    );
-                }
-            }
-
-            self.requests.insert(sign_id, request);
+        let sign_id = indexed.id;
+        if self.contains(&sign_id) {
+            tracing::info!(?sign_id, "skipping sign request: already in the sign queue");
+            return;
         }
+
+        crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
+            .with_label_values(&[indexed.chain.as_str(), my_account_id.as_str()])
+            .inc();
+
+        let request = self.organize_request(stable, participants, indexed, 0);
+        let is_mine = request.proposer == self.me;
+        if is_mine {
+            self.my_requests.push_back(sign_id);
+            crate::metrics::NUM_SIGN_REQUESTS_MINE
+                .with_label_values(&[my_account_id.as_str()])
+                .inc();
+        }
+
+        if let Some(pending) = self.pending.remove(&sign_id) {
+            tracing::info!(?sign_id, proposer = ?request.proposer, "sign queue received pending request");
+            if pending.send(request.clone()).is_err() {
+                tracing::warn!(
+                    ?sign_id,
+                    "pending sign request channel closed before able to send request"
+                );
+            }
+        }
+
+        self.requests.insert(sign_id, request);
     }
 
-    fn organize_failed(
+    pub fn organize_failed(
         &mut self,
         stable: &BTreeSet<Participant>,
         participants: &Participants,
@@ -690,6 +675,8 @@ pub struct SignatureSpawner {
     ongoing: JoinMap<(SignId, PresignatureId), Result<(), SignError>>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
+    /// Receiver for incoming sign requests (shared across resharing events)
+    sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     /// The protocol posits that are currently in progress.
     posits: Posits<(SignId, PresignatureId), PresignatureTaken>,
 
@@ -720,7 +707,8 @@ impl SignatureSpawner {
         Self {
             presignatures: presignatures.clone(),
             ongoing: JoinMap::new(),
-            sign_queue: SignQueue::new(me, sign_rx),
+            sign_queue: SignQueue::new(me),
+            sign_rx,
             posits: Posits::new(me),
             me,
             my_account_id: my_account_id.clone(),
@@ -956,67 +944,42 @@ impl SignatureSpawner {
         .await;
     }
 
-    async fn handle_requests(
+    async fn try_handle_my_request(
         &mut self,
         stable: &BTreeSet<Participant>,
-        participants: &Participants,
-        cfg: &ProtocolConfig,
-    ) {
-        if stable.len() < self.threshold {
+        _cfg: &ProtocolConfig,
+    ) -> bool {
+        if self.sign_queue.is_empty_mine() {
+            return false;
+        }
+
+        let Some(taken) = self.presignatures.take_mine(self.me).await else {
+            return false;
+        };
+
+        let Some(my_request) = self.sign_queue.take_mine() else {
             tracing::warn!(
-                ?stable,
-                threshold = self.threshold,
-                "not enough stable participants to handle requests"
+                presignature = ?taken.presignature,
+                "unexpected, no more requests to handle. presignature will be removed",
             );
-            return;
+            return false;
+        };
+
+        let stable = stable.iter().copied().collect::<Vec<_>>();
+        let participants = intersect_vec(&[&stable, &taken.presignature.participants]);
+        if participants.len() < self.threshold {
+            tracing::warn!(
+                sign_id = ?my_request.indexed.id,
+                presignature_id = ?taken.presignature.id,
+                ?participants,
+                "intersection < threshold, trashing presignature"
+            );
+            self.sign_queue.push_failed(my_request.indexed.id);
+            return false;
         }
 
-        self.sign_queue.expire(cfg);
-        self.sign_queue
-            .organize(stable, participants, &self.my_account_id)
-            .await;
-        crate::metrics::SIGN_QUEUE_SIZE
-            .with_label_values(&[self.my_account_id.as_str()])
-            .set(self.sign_queue.len() as i64);
-        crate::metrics::SIGN_QUEUE_MINE_SIZE
-            .with_label_values(&[self.my_account_id.as_str()])
-            .set(self.sign_queue.len_mine() as i64);
-
-        let mut retry = Vec::new();
-        while let Some(taken) = {
-            if self.sign_queue.is_empty_mine() {
-                None
-            } else {
-                self.presignatures.take_mine(self.me).await
-            }
-        } {
-            let Some(my_request) = self.sign_queue.take_mine() else {
-                tracing::warn!(
-                    presignature = ?taken.presignature,
-                    "unexpected, no more requests to handle. presignature will be removed",
-                );
-                continue;
-            };
-
-            let stable = stable.iter().copied().collect::<Vec<_>>();
-            let participants = intersect_vec(&[&stable, &taken.presignature.participants]);
-            if participants.len() < self.threshold {
-                tracing::warn!(
-                    sign_id = ?my_request.indexed.id,
-                    presignature_id = ?taken.presignature.id,
-                    ?participants,
-                    "intersection < threshold, trashing presignature"
-                );
-                retry.push(my_request.indexed.id);
-                continue;
-            }
-
-            self.propose_posit(&my_request, taken, &participants).await;
-        }
-
-        for sign_id in retry {
-            self.sign_queue.push_failed(sign_id);
-        }
+        self.propose_posit(&my_request, taken, &participants).await;
+        true
     }
 
     async fn run(
@@ -1030,14 +993,24 @@ impl SignatureSpawner {
         // block height is up to date, such that they too can process signature requests. If they cannot
         // then they are considered unstable and should not be a part of signature generation this round.
 
-        let mut check_requests_interval = tokio::time::interval(Duration::from_millis(100));
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(20));
         let mut posits = self.msg.subscribe_signature_posit().await;
         let mut pending_posits = JoinSet::new();
+        let mut retry_queue = JoinSet::new();
 
         loop {
             tokio::select! {
                 _ = expiration_interval.tick() => {
+                    // Expire old requests
+                    self.sign_queue.expire(&cfg.borrow().protocol);
+                    crate::metrics::SIGN_QUEUE_SIZE
+                        .with_label_values(&[self.my_account_id.as_str()])
+                        .set(self.sign_queue.len() as i64);
+                    crate::metrics::SIGN_QUEUE_MINE_SIZE
+                        .with_label_values(&[self.my_account_id.as_str()])
+                        .set(self.sign_queue.len_mine() as i64);
+
+                    // Handle posit expirations
                     for ((sign_id, presignature_id), action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(60)) {
                         let (participants, positor) = match action {
                             PositInternalAction::StartProtocol(participants, positor) => (participants, positor),
@@ -1054,6 +1027,85 @@ impl SignatureSpawner {
                         };
                         let protocol = cfg.borrow().protocol.clone();
                         self.start_generation(positor, sign_id, presignature_id, participants, protocol).await;
+                    }
+                }
+                indexed = async {
+                    // Receive from the shared channel - acquire lock only for recv
+                    self.sign_rx.write().await.recv().await
+                } => {
+                    // New sign request received - process it immediately
+                    let Some(indexed) = indexed else {
+                        tracing::error!("sign request channel closed, terminating signature spawner");
+                        break;
+                    };
+
+                    let Some(participants) = contract.participants() else {
+                        tracing::warn!("contract participants not available, skipping sign request");
+                        continue;
+                    };
+                    let stable = mesh_state.borrow().stable.clone();
+
+                    if stable.len() < self.threshold {
+                        tracing::warn!(
+                            ?stable,
+                            threshold = self.threshold,
+                            "not enough stable participants to handle new request"
+                        );
+                        continue;
+                    }
+
+                    self.sign_queue.add_request(&stable, &participants, indexed, &self.my_account_id);
+
+                    crate::metrics::SIGN_QUEUE_SIZE
+                        .with_label_values(&[self.my_account_id.as_str()])
+                        .set(self.sign_queue.len() as i64);
+                    crate::metrics::SIGN_QUEUE_MINE_SIZE
+                        .with_label_values(&[self.my_account_id.as_str()])
+                        .set(self.sign_queue.len_mine() as i64);
+
+                    // Immediately try to process if it's our request
+                    let stable = mesh_state.borrow().stable.clone();
+                    let protocol = cfg.borrow().protocol.clone();
+                    while self.try_handle_my_request(&stable, &protocol).await {
+                        // Keep processing while we have requests and presignatures
+                    }
+                }
+                Some(sign_id) = retry_queue.join_next() => {
+                    // Failed request retry after delay
+                    let Ok(sign_id) = sign_id else {
+                        continue;
+                    };
+
+                    let Some(participants) = contract.participants() else {
+                        tracing::warn!(?sign_id, "contract participants not available for retry");
+                        continue;
+                    };
+                    let stable = mesh_state.borrow().stable.clone();
+
+                    if stable.len() < self.threshold {
+                        tracing::warn!(
+                            ?sign_id,
+                            ?stable,
+                            threshold = self.threshold,
+                            "not enough stable participants to handle retry"
+                        );
+                        continue;
+                    }
+
+                    self.sign_queue.organize_failed(&stable, &participants, &self.my_account_id);
+
+                    crate::metrics::SIGN_QUEUE_SIZE
+                        .with_label_values(&[self.my_account_id.as_str()])
+                        .set(self.sign_queue.len() as i64);
+                    crate::metrics::SIGN_QUEUE_MINE_SIZE
+                        .with_label_values(&[self.my_account_id.as_str()])
+                        .set(self.sign_queue.len_mine() as i64);
+
+                    // Try to process the retried request
+                    let stable = mesh_state.borrow().stable.clone();
+                    let protocol = cfg.borrow().protocol.clone();
+                    while self.try_handle_my_request(&stable, &protocol).await {
+                        // Keep processing while we have requests and presignatures
                     }
                 }
                 Some((sign_id, presignature_id, from, action)) = posits.recv() => {
@@ -1088,20 +1140,16 @@ impl SignatureSpawner {
 
                     match result {
                         Err(SignError::Retry) => {
-                            self.sign_queue.push_failed(sign_id);
+                            // Schedule retry with 300ms delay
+                            retry_queue.spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(300)).await;
+                                sign_id
+                            });
                         }
                         Ok(()) | Err(SignError::TotalTimeout) | Err(SignError::Aborted) => {
                             self.sign_queue.remove(sign_id);
                         }
                     }
-                }
-                _ = check_requests_interval.tick() => {
-                    let Some(participants) = contract.participants() else {
-                        continue;
-                    };
-                    let stable = mesh_state.borrow().stable.clone();
-                    let protocol = cfg.borrow().protocol.clone();
-                    self.handle_requests(&stable, &participants, &protocol).await;
                 }
             }
         }
