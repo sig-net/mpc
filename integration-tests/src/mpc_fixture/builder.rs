@@ -26,10 +26,8 @@ use mpc_node::sign_bidirectional::SignBidirectionalSignatureProcessor;
 use mpc_node::storage::{presignature_storage, secret_storage, triple_storage, Options};
 use near_sdk::AccountId;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
-use tokio::sync::RwLock;
 
 pub struct MpcFixtureBuilder {
     prepared_nodes: Vec<MpcFixtureNodeBuilder>,
@@ -429,7 +427,6 @@ impl MpcFixtureNodeBuilder {
             SignBidirectionalSignatureProcessor::new();
 
         let channels = protocol::test_setup::TestProtocolChannels {
-            sign_rx: Arc::new(RwLock::new(sign_rx)),
             msg_channel: self.messaging.channel.clone(),
             rpc_channel,
             config: config_rx.clone(),
@@ -456,7 +453,7 @@ impl MpcFixtureNodeBuilder {
 
         // start task running the protocol
         let account_id = protocol.my_account_id().clone();
-        let node = protocol::Node::new();
+        let node = protocol::Node::new(sign_rx);
         let node_state = node.watch();
         let _protocol_handle = tokio::spawn(protocol.run(
             node,
@@ -464,9 +461,6 @@ impl MpcFixtureNodeBuilder {
                 me: account_id.clone(),
                 protocol_state_tx,
             },
-            context.contract_state,
-            config_rx.clone(),
-            mesh_rx.clone(),
         ));
 
         // handle outbox messages manually, we want them before they are

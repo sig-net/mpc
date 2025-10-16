@@ -1,14 +1,12 @@
-use std::sync::Arc;
-
 use crate::config::Config;
 use crate::mesh::MeshState;
-use crate::protocol::{IndexedSignRequest, MessageChannel, MpcSignProtocol};
+use crate::protocol::{MessageChannel, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::SignBidirectionalSignatureChannel;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use near_sdk::AccountId;
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::watch;
 
 pub struct TestProtocolStorage {
     pub secret_storage: SecretNodeStorageBox,
@@ -17,7 +15,6 @@ pub struct TestProtocolStorage {
 }
 
 pub struct TestProtocolChannels {
-    pub sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     pub msg_channel: MessageChannel,
     pub rpc_channel: RpcChannel,
     pub config: watch::Receiver<Config>,
@@ -39,7 +36,6 @@ impl MpcSignProtocol {
             secret_storage: storage.secret_storage,
             triple_storage: storage.triple_storage,
             presignature_storage: storage.presignature_storage,
-            sign_rx: channels.sign_rx,
             msg_channel: channels.msg_channel,
             generating,
             resharing,

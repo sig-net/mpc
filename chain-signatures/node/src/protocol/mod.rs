@@ -38,10 +38,8 @@ use near_account_id::AccountId;
 use semver::Version;
 use std::fmt;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
-use tokio::sync::RwLock;
 use tokio::sync::{mpsc, watch};
 
 pub struct MpcSignProtocol {
@@ -49,7 +47,6 @@ pub struct MpcSignProtocol {
     pub(crate) secret_storage: SecretNodeStorageBox,
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
-    pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
     pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
     pub(crate) msg_channel: MessageChannel,
@@ -77,14 +74,7 @@ pub trait Governance {
 }
 
 impl MpcSignProtocol {
-    pub async fn run<G: Governance>(
-        mut self,
-        mut node: Node,
-        mut gov_client: G,
-        contract_state: ContractStateWatcher,
-        config: watch::Receiver<Config>,
-        mesh_state: watch::Receiver<MeshState>,
-    ) {
+    pub async fn run<G: Governance>(mut self, mut node: Node, mut gov_client: G) {
         let my_account_id = self.my_account_id.as_str();
         let _span = tracing::info_span!("running", my_account_id);
         let my_account_id = self.my_account_id.clone();
@@ -102,20 +92,20 @@ impl MpcSignProtocol {
                 .with_label_values(&[my_account_id.as_str()])
                 .inc();
 
-            let cfg = config.borrow().clone();
-            let mesh_state = mesh_state.borrow().clone();
+            let cfg = self.config.borrow().clone();
+            let mesh_state_snapshot = self.mesh_state.borrow().clone();
 
             let crypto_time = Instant::now();
             node.state = node
                 .state
-                .progress(&mut self, cfg.clone(), mesh_state.clone())
+                .progress(&mut self, cfg.clone(), mesh_state_snapshot.clone())
                 .await;
             node.update_watchers().await;
             crate::metrics::PROTOCOL_LATENCY_ITER_CRYPTO
                 .with_label_values(&[my_account_id.as_str()])
                 .observe(crypto_time.elapsed().as_secs_f64());
 
-            if let Some(contract_state) = contract_state.state() {
+            if let Some(contract_state) = self.contract.state() {
                 let consensus_time = Instant::now();
                 node.state = node
                     .state
@@ -132,7 +122,7 @@ impl MpcSignProtocol {
                 NodeState::Resharing(_) => 500,
                 NodeState::Running(_) => 100,
 
-                NodeState::Starting => 1000,
+                NodeState::Starting(_) => 1000,
                 NodeState::Started(_) => 1000,
                 NodeState::WaitingForConsensus(_) => 1000,
                 NodeState::Joining(_) => 1000,

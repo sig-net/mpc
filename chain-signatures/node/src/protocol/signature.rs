@@ -27,9 +27,8 @@ use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot, watch, RwLock};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use near_account_id::AccountId;
@@ -668,6 +667,71 @@ impl Drop for SignatureGenerator {
     }
 }
 
+struct SignRxGuard {
+    sign_rx: Option<mpsc::Receiver<IndexedSignRequest>>,
+    sender: Option<oneshot::Sender<mpsc::Receiver<IndexedSignRequest>>>,
+    returned: bool,
+}
+
+impl SignRxGuard {
+    fn new(
+        sign_rx: mpsc::Receiver<IndexedSignRequest>,
+        sender: Option<oneshot::Sender<mpsc::Receiver<IndexedSignRequest>>>,
+    ) -> Self {
+        Self {
+            sign_rx: Some(sign_rx),
+            sender,
+            returned: false,
+        }
+    }
+
+    async fn recv(&mut self) -> Option<IndexedSignRequest> {
+        match self.sign_rx.as_mut() {
+            Some(rx) => rx.recv().await,
+            None => None,
+        }
+    }
+
+    fn send_back(&mut self) {
+        if self.returned {
+            return;
+        }
+
+        let Some(sign_rx) = self.sign_rx.take().or_else(|| {
+            tracing::error!("sign_rx guard missing receiver when returning");
+            None
+        }) else {
+            self.returned = true;
+            return;
+        };
+
+        match self.sender.take() {
+            Some(sender) => match sender.send(sign_rx) {
+                Ok(()) => {
+                    self.returned = true;
+                }
+                Err(sign_rx) => {
+                    tracing::warn!(
+                        "sign_rx return channel dropped before delivering receiver; retaining receiver on guard"
+                    );
+                    self.sign_rx = Some(sign_rx);
+                }
+            },
+            None => {
+                // No return channel; restore receiver to avoid dropping it.
+                self.sign_rx = Some(sign_rx);
+                self.returned = true;
+            }
+        }
+    }
+}
+
+impl Drop for SignRxGuard {
+    fn drop(&mut self) {
+        self.send_back();
+    }
+}
+
 pub struct SignatureSpawner {
     /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
@@ -675,8 +739,10 @@ pub struct SignatureSpawner {
     ongoing: JoinMap<(SignId, PresignatureId), Result<(), SignError>>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
-    /// Receiver for incoming sign requests (shared across resharing events)
-    sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+    /// Receiver for incoming sign requests (owned directly, passed between resharing)
+    sign_rx: Option<mpsc::Receiver<IndexedSignRequest>>,
+    /// Channel used to hand the sign receiver back to the task owner when shutting down
+    return_sign_rx: Option<oneshot::Sender<mpsc::Receiver<IndexedSignRequest>>>,
     /// The protocol posits that are currently in progress.
     posits: Posits<(SignId, PresignatureId), PresignatureTaken>,
 
@@ -698,17 +764,19 @@ impl SignatureSpawner {
         threshold: usize,
         public_key: PublicKey,
         epoch: u64,
-        sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+        sign_rx: mpsc::Receiver<IndexedSignRequest>,
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
         rpc: RpcChannel,
         sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
+        return_sign_rx: oneshot::Sender<mpsc::Receiver<IndexedSignRequest>>,
     ) -> Self {
         Self {
             presignatures: presignatures.clone(),
             ongoing: JoinMap::new(),
             sign_queue: SignQueue::new(me),
-            sign_rx,
+            sign_rx: Some(sign_rx),
+            return_sign_rx: Some(return_sign_rx),
             posits: Posits::new(me),
             me,
             my_account_id: my_account_id.clone(),
@@ -987,11 +1055,16 @@ impl SignatureSpawner {
         contract: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
         cfg: watch::Receiver<Config>,
+        mut shutdown_rx: oneshot::Receiver<()>,
     ) {
         // NOTE: signatures should only use stable and not active participants. The difference here is that
         // stable participants utilizes more than the online status of a node, such as whether or not their
         // block height is up to date, such that they too can process signature requests. If they cannot
         // then they are considered unstable and should not be a part of signature generation this round.
+
+        // Take ownership of the receiver
+        let sign_rx = self.sign_rx.take().expect("sign_rx must be Some");
+        let mut sign_rx_guard = SignRxGuard::new(sign_rx, self.return_sign_rx.take());
 
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(20));
         let mut posits = self.msg.subscribe_signature_posit().await;
@@ -1000,6 +1073,10 @@ impl SignatureSpawner {
 
         loop {
             tokio::select! {
+                _ = &mut shutdown_rx => {
+                    tracing::info!("SignatureSpawner shutting down gracefully");
+                    break;
+                }
                 _ = expiration_interval.tick() => {
                     // Expire old requests
                     self.sign_queue.expire(&cfg.borrow().protocol);
@@ -1029,15 +1106,13 @@ impl SignatureSpawner {
                         self.start_generation(positor, sign_id, presignature_id, participants, protocol).await;
                     }
                 }
-                indexed = async {
-                    // Receive from the shared channel - acquire lock only for recv
-                    self.sign_rx.write().await.recv().await
-                } => {
-                    // New sign request received - process it immediately
-                    let Some(indexed) = indexed else {
-                        tracing::error!("sign request channel closed, terminating signature spawner");
+                recv_result = sign_rx_guard.recv() => {
+                    let Some(indexed) = recv_result else {
+                        tracing::info!("signature spawner receiver closed; exiting run loop");
                         break;
                     };
+
+                    // New sign request received - process it immediately
 
                     let Some(participants) = contract.participants() else {
                         tracing::warn!("contract participants not available, skipping sign request");
@@ -1153,6 +1228,9 @@ impl SignatureSpawner {
                 }
             }
         }
+
+        // Return the receiver when shutting down (even if select loop exits normally)
+        sign_rx_guard.send_back();
     }
 }
 
@@ -1164,7 +1242,9 @@ impl Drop for SignatureSpawner {
 }
 
 pub struct SignatureSpawnerTask {
-    handle: JoinHandle<()>,
+    handle: Option<JoinHandle<()>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    receiver_rx: Option<oneshot::Receiver<mpsc::Receiver<IndexedSignRequest>>>,
 }
 
 impl SignatureSpawnerTask {
@@ -1172,29 +1252,65 @@ impl SignatureSpawnerTask {
         me: Participant,
         threshold: usize,
         epoch: u64,
+        sign_rx: mpsc::Receiver<IndexedSignRequest>,
         ctx: &MpcSignProtocol,
         public_key: PublicKey,
     ) -> Self {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (receiver_tx, receiver_rx) = oneshot::channel();
+
         let spawner = SignatureSpawner::new(
             me,
             &ctx.my_account_id,
             threshold,
             public_key,
             epoch,
-            ctx.sign_rx.clone(),
+            sign_rx,
             &ctx.presignature_storage,
             ctx.msg_channel.clone(),
             ctx.rpc_channel.clone(),
             ctx.sign_bidirectional_signature_channel.clone(),
+            receiver_tx,
         );
 
+        let handle = tokio::spawn(spawner.run(
+            ctx.contract.clone(),
+            ctx.mesh_state.clone(),
+            ctx.config.clone(),
+            shutdown_rx,
+        ));
+
         Self {
-            handle: tokio::spawn(spawner.run(
-                ctx.contract.clone(),
-                ctx.mesh_state.clone(),
-                ctx.config.clone(),
-            )),
+            handle: Some(handle),
+            shutdown_tx: Some(shutdown_tx),
+            receiver_rx: Some(receiver_rx),
         }
+    }
+
+    /// Gracefully shut down the spawner and return the receiver for reuse during resharing
+    pub async fn shutdown_and_return_receiver(mut self) -> mpsc::Receiver<IndexedSignRequest> {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+
+        if let Some(handle) = self.handle.take() {
+            if let Err(e) = handle.await {
+                if !e.is_cancelled() {
+                    tracing::error!("failed to shutdown signature spawner gracefully: {}", e);
+                } else {
+                    tracing::warn!("signature spawner task cancelled during shutdown");
+                }
+            }
+        }
+
+        let receiver_rx = self
+            .receiver_rx
+            .take()
+            .expect("signature spawner receiver channel must exist");
+
+        receiver_rx
+            .await
+            .expect("sign_rx return channel dropped before delivering receiver")
     }
 
     pub fn abort(&self) {
@@ -1202,7 +1318,9 @@ impl SignatureSpawnerTask {
         // which will also abort all ongoing presignature generation tasks. This is important to note
         // since we do not want to leak any presignature generation tasks when we are resharing, and
         // potentially wasting compute.
-        self.handle.abort();
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
     }
 }
 

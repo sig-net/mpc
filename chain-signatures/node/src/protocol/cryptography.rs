@@ -155,6 +155,7 @@ impl GeneratingState {
             threshold: self.threshold,
             private_share,
             public_key,
+            sign_rx: self.sign_rx,
         })
     }
 }
@@ -302,6 +303,7 @@ impl ResharingState {
             threshold: self.threshold,
             private_share,
             public_key: self.public_key,
+            sign_rx: self.sign_rx,
         })
     }
 }

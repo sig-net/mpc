@@ -1,17 +1,15 @@
 use super::contract::{ProtocolState, ResharingContractState};
-use super::state::{
-    JoiningState, NodeState, PersistentNodeData, RunningState, StartedState,
-    WaitingForConsensusState,
-};
+use super::state::{JoiningState, NodeState, RunningState, StartedState, WaitingForConsensusState};
 use super::MpcSignProtocol;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::presignature::PresignatureSpawnerTask;
-use crate::protocol::signature::SignatureSpawnerTask;
-use crate::protocol::state::{GeneratingState, ResharingState};
+use crate::protocol::signature::{IndexedSignRequest, SignatureSpawnerTask};
+use crate::protocol::state::{GeneratingState, PersistentNodeData, ResharingState};
 use crate::protocol::triple::TripleSpawnerTask;
 use crate::protocol::Governance;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
+use tokio::sync::mpsc;
 
 use std::cmp::Ordering;
 
@@ -54,6 +52,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                         return NodeState::Joining(JoiningState {
                             participants: contract_state.participants,
                             public_key,
+                            sign_rx: self.sign_rx,
                         });
                     }
                     match contract_state.epoch.cmp(&epoch) {
@@ -66,6 +65,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                             NodeState::Joining(JoiningState {
                                 participants: contract_state.participants,
                                 public_key,
+                                sign_rx: self.sign_rx,
                             })
                         }
                         Ordering::Less => {
@@ -77,6 +77,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                             NodeState::Joining(JoiningState {
                                 participants: contract_state.participants,
                                 public_key,
+                                sign_rx: self.sign_rx,
                             })
                         }
                         Ordering::Equal => {
@@ -87,6 +88,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                                 return NodeState::Joining(JoiningState {
                                     participants: contract_state.participants,
                                     public_key,
+                                    sign_rx: self.sign_rx,
                                 });
                             };
 
@@ -109,6 +111,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                                 me,
                                 contract_state.threshold,
                                 epoch,
+                                self.sign_rx,
                                 ctx,
                                 public_key,
                             );
@@ -137,6 +140,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                         return NodeState::Joining(JoiningState {
                             participants: contract_state.old_participants,
                             public_key,
+                            sign_rx: self.sign_rx,
                         });
                     }
                     match contract_state.old_epoch.cmp(&epoch) {
@@ -149,6 +153,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                             NodeState::Joining(JoiningState {
                                 participants: contract_state.old_participants,
                                 public_key,
+                                sign_rx: self.sign_rx,
                             })
                         }
                         Ordering::Less => {
@@ -160,13 +165,15 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                             NodeState::Joining(JoiningState {
                                 participants: contract_state.old_participants,
                                 public_key,
+                                sign_rx: self.sign_rx,
                             })
                         }
                         Ordering::Equal => {
                             tracing::info!(
                                 "started(resharing): contract state is resharing with us, joining as a participant"
                             );
-                            start_resharing(Some(private_share), ctx, contract_state).await
+                            start_resharing(Some(private_share), self.sign_rx, ctx, contract_state)
+                                .await
                         }
                     }
                 }
@@ -202,15 +209,18 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                         threshold: contract_state.threshold,
                         protocol,
                         failed_store: Default::default(),
+                        sign_rx: self.sign_rx,
                     })
                 }
                 ProtocolState::Running(contract_state) => NodeState::Joining(JoiningState {
                     participants: contract_state.participants,
                     public_key: contract_state.public_key,
+                    sign_rx: self.sign_rx,
                 }),
                 ProtocolState::Resharing(contract_state) => NodeState::Joining(JoiningState {
                     participants: contract_state.old_participants,
                     public_key: contract_state.public_key,
+                    sign_rx: self.sign_rx,
                 }),
             },
         }
@@ -238,6 +248,7 @@ impl<G: Governance> ConsensusProtocol<G> for GeneratingState {
                     return NodeState::Joining(JoiningState {
                         participants: contract_state.participants,
                         public_key: contract_state.public_key,
+                        sign_rx: self.sign_rx,
                     });
                 }
                 if self.participants != contract_state.participants {
@@ -249,6 +260,7 @@ impl<G: Governance> ConsensusProtocol<G> for GeneratingState {
                     return NodeState::Joining(JoiningState {
                         participants: contract_state.participants,
                         public_key: contract_state.public_key,
+                        sign_rx: self.sign_rx,
                     });
                 }
                 if self.threshold != contract_state.threshold {
@@ -260,6 +272,7 @@ impl<G: Governance> ConsensusProtocol<G> for GeneratingState {
                     return NodeState::Joining(JoiningState {
                         participants: contract_state.participants,
                         public_key: contract_state.public_key,
+                        sign_rx: self.sign_rx,
                     });
                 }
                 NodeState::Generating(self)
@@ -273,6 +286,7 @@ impl<G: Governance> ConsensusProtocol<G> for GeneratingState {
                     return NodeState::Joining(JoiningState {
                         participants: contract_state.old_participants,
                         public_key: contract_state.public_key,
+                        sign_rx: self.sign_rx,
                     });
                 }
                 if self.participants != contract_state.old_participants {
@@ -284,6 +298,7 @@ impl<G: Governance> ConsensusProtocol<G> for GeneratingState {
                     return NodeState::Joining(JoiningState {
                         participants: contract_state.old_participants,
                         public_key: contract_state.public_key,
+                        sign_rx: self.sign_rx,
                     });
                 }
                 if self.threshold != contract_state.threshold {
@@ -295,6 +310,7 @@ impl<G: Governance> ConsensusProtocol<G> for GeneratingState {
                     return NodeState::Joining(JoiningState {
                         participants: contract_state.old_participants,
                         public_key: contract_state.public_key,
+                        sign_rx: self.sign_rx,
                     });
                 }
                 NodeState::Generating(self)
@@ -340,6 +356,7 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                     NodeState::Joining(JoiningState {
                         participants: contract_state.participants,
                         public_key: contract_state.public_key,
+                        sign_rx: self.sign_rx,
                     })
                 }
                 Ordering::Less => {
@@ -351,6 +368,7 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                     NodeState::Joining(JoiningState {
                         participants: contract_state.participants,
                         public_key: contract_state.public_key,
+                        sign_rx: self.sign_rx,
                     })
                 }
                 Ordering::Equal => {
@@ -364,6 +382,7 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         return NodeState::Joining(JoiningState {
                             participants: contract_state.participants,
                             public_key: contract_state.public_key,
+                            sign_rx: self.sign_rx,
                         });
                     }
                     if contract_state.threshold != self.threshold {
@@ -375,6 +394,7 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         return NodeState::Joining(JoiningState {
                             participants: contract_state.participants,
                             public_key: contract_state.public_key,
+                            sign_rx: self.sign_rx,
                         });
                     }
                     if contract_state.public_key != self.public_key {
@@ -386,6 +406,7 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         return NodeState::Joining(JoiningState {
                             participants: contract_state.participants,
                             public_key: contract_state.public_key,
+                            sign_rx: self.sign_rx,
                         });
                     }
 
@@ -410,6 +431,7 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         me,
                         self.threshold,
                         self.epoch,
+                        self.sign_rx,
                         ctx,
                         self.public_key,
                     );
@@ -439,6 +461,7 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         NodeState::Joining(JoiningState {
                             participants: contract_state.old_participants,
                             public_key: contract_state.public_key,
+                            sign_rx: self.sign_rx,
                         })
                     }
                     Ordering::Less => {
@@ -450,6 +473,7 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         NodeState::Joining(JoiningState {
                             participants: contract_state.old_participants,
                             public_key: contract_state.public_key,
+                            sign_rx: self.sign_rx,
                         })
                     }
                     Ordering::Equal => {
@@ -514,9 +538,12 @@ impl<G: Governance> ConsensusProtocol<G> for RunningState {
                             "running: running contract has epoch ahead, rejoining...",
                         );
 
+                        let RunningState { sign_task, .. } = self;
+                        let sign_rx = sign_task.shutdown_and_return_receiver().await;
                         NodeState::Joining(JoiningState {
                             participants: contract_state.participants,
                             public_key: contract_state.public_key,
+                            sign_rx,
                         })
                     }
                     Ordering::Less => {
@@ -525,9 +552,12 @@ impl<G: Governance> ConsensusProtocol<G> for RunningState {
                             contract_epoch = contract_state.epoch,
                             "running(unexpected): our current epoch is ahead of contract, rejoining...",
                         );
+                        let RunningState { sign_task, .. } = self;
+                        let sign_rx = sign_task.shutdown_and_return_receiver().await;
                         NodeState::Joining(JoiningState {
                             participants: contract_state.participants,
                             public_key: contract_state.public_key,
+                            sign_rx,
                         })
                     }
                     Ordering::Equal => {
@@ -537,9 +567,12 @@ impl<G: Governance> ConsensusProtocol<G> for RunningState {
                                 contract_pk = ?contract_state.public_key,
                                 "running(running): our public key does not match contract, rejoining...",
                             );
+                            let RunningState { sign_task, .. } = self;
+                            let sign_rx = sign_task.shutdown_and_return_receiver().await;
                             return NodeState::Joining(JoiningState {
                                 participants: contract_state.participants,
                                 public_key: contract_state.public_key,
+                                sign_rx,
                             });
                         }
                         if contract_state.participants != self.participants {
@@ -555,9 +588,12 @@ impl<G: Governance> ConsensusProtocol<G> for RunningState {
                                 tracing::warn!(
                                     "running(running): ... but we are not a participant anymore, rejoining...",
                                 );
+                                let RunningState { sign_task, .. } = self;
+                                let sign_rx = sign_task.shutdown_and_return_receiver().await;
                                 return NodeState::Joining(JoiningState {
                                     participants: contract_state.participants,
                                     public_key: contract_state.public_key,
+                                    sign_rx,
                                 });
                             }
                         }
@@ -581,9 +617,12 @@ impl<G: Governance> ConsensusProtocol<G> for RunningState {
                             contract_epoch = contract_state.old_epoch,
                             "running(resharing): our current epoch is behind contract, rejoining...",
                         );
+                        let RunningState { sign_task, .. } = self;
+                        let sign_rx = sign_task.shutdown_and_return_receiver().await;
                         NodeState::Joining(JoiningState {
                             participants: contract_state.old_participants,
                             public_key: contract_state.public_key,
+                            sign_rx,
                         })
                     }
                     Ordering::Less => {
@@ -592,9 +631,12 @@ impl<G: Governance> ConsensusProtocol<G> for RunningState {
                             contract_epoch = contract_state.old_epoch,
                             "running(resharing, unexpected): our current epoch is ahead of contract, rejoining...",
                         );
+                        let RunningState { sign_task, .. } = self;
+                        let sign_rx = sign_task.shutdown_and_return_receiver().await;
                         NodeState::Joining(JoiningState {
                             participants: contract_state.old_participants,
                             public_key: contract_state.public_key,
+                            sign_rx,
                         })
                     }
                     Ordering::Equal => {
@@ -609,9 +651,12 @@ impl<G: Governance> ConsensusProtocol<G> for RunningState {
                             tracing::error!(
                                 "running(resharing): we have been kicked, rejoining..."
                             );
+                            let RunningState { sign_task, .. } = self;
+                            let sign_rx = sign_task.shutdown_and_return_receiver().await;
                             return NodeState::Joining(JoiningState {
                                 participants: contract_state.old_participants,
                                 public_key: contract_state.public_key,
+                                sign_rx,
                             });
                         }
                         if contract_state.public_key != self.public_key {
@@ -620,12 +665,21 @@ impl<G: Governance> ConsensusProtocol<G> for RunningState {
                                 contract_pk = ?contract_state.public_key,
                                 "running(resharing): our public key does not match contract, rejoining...",
                             );
+                            let RunningState { sign_task, .. } = self;
+                            let sign_rx = sign_task.shutdown_and_return_receiver().await;
                             return NodeState::Joining(JoiningState {
                                 participants: contract_state.new_participants,
                                 public_key: contract_state.public_key,
+                                sign_rx,
                             });
                         }
-                        start_resharing(Some(self.private_share), ctx, contract_state).await
+                        let RunningState {
+                            private_share,
+                            sign_task,
+                            ..
+                        } = self;
+                        let sign_rx = sign_task.shutdown_and_return_receiver().await;
+                        start_resharing(Some(private_share), sign_rx, ctx, contract_state).await
                     }
                 }
             }
@@ -658,6 +712,7 @@ impl<G: Governance> ConsensusProtocol<G> for ResharingState {
                         NodeState::Joining(JoiningState {
                             participants: contract_state.participants,
                             public_key: contract_state.public_key,
+                            sign_rx: self.sign_rx,
                         })
                     }
                     Ordering::Less => {
@@ -669,6 +724,7 @@ impl<G: Governance> ConsensusProtocol<G> for ResharingState {
                         NodeState::Joining(JoiningState {
                             participants: contract_state.participants,
                             public_key: contract_state.public_key,
+                            sign_rx: self.sign_rx,
                         })
                     }
                     Ordering::Equal => {
@@ -682,6 +738,7 @@ impl<G: Governance> ConsensusProtocol<G> for ResharingState {
                             return NodeState::Joining(JoiningState {
                                 participants: contract_state.participants,
                                 public_key: contract_state.public_key,
+                                sign_rx: self.sign_rx,
                             });
                         }
                         if contract_state.participants != self.new_participants {
@@ -693,6 +750,7 @@ impl<G: Governance> ConsensusProtocol<G> for ResharingState {
                             return NodeState::Joining(JoiningState {
                                 participants: contract_state.participants,
                                 public_key: contract_state.public_key,
+                                sign_rx: self.sign_rx,
                             });
                         }
                         if contract_state.threshold != self.threshold {
@@ -704,6 +762,7 @@ impl<G: Governance> ConsensusProtocol<G> for ResharingState {
                             return NodeState::Joining(JoiningState {
                                 participants: contract_state.participants,
                                 public_key: contract_state.public_key,
+                                sign_rx: self.sign_rx,
                             });
                         }
                         NodeState::Resharing(self)
@@ -721,6 +780,7 @@ impl<G: Governance> ConsensusProtocol<G> for ResharingState {
                         NodeState::Joining(JoiningState {
                             participants: contract_state.old_participants,
                             public_key: contract_state.public_key,
+                            sign_rx: self.sign_rx,
                         })
                     }
                     Ordering::Less => {
@@ -732,6 +792,7 @@ impl<G: Governance> ConsensusProtocol<G> for ResharingState {
                         NodeState::Joining(JoiningState {
                             participants: contract_state.old_participants,
                             public_key: contract_state.public_key,
+                            sign_rx: self.sign_rx,
                         })
                     }
                     Ordering::Equal => {
@@ -745,6 +806,7 @@ impl<G: Governance> ConsensusProtocol<G> for ResharingState {
                             return NodeState::Joining(JoiningState {
                                 participants: contract_state.old_participants,
                                 public_key: contract_state.public_key,
+                                sign_rx: self.sign_rx,
                             });
                         }
                         if contract_state.old_participants != self.old_participants {
@@ -756,6 +818,7 @@ impl<G: Governance> ConsensusProtocol<G> for ResharingState {
                             return NodeState::Joining(JoiningState {
                                 participants: contract_state.old_participants,
                                 public_key: contract_state.public_key,
+                                sign_rx: self.sign_rx,
                             });
                         }
                         if contract_state.new_participants != self.new_participants {
@@ -767,6 +830,7 @@ impl<G: Governance> ConsensusProtocol<G> for ResharingState {
                             return NodeState::Joining(JoiningState {
                                 participants: contract_state.old_participants,
                                 public_key: contract_state.public_key,
+                                sign_rx: self.sign_rx,
                             });
                         }
                         if contract_state.threshold != self.threshold {
@@ -778,6 +842,7 @@ impl<G: Governance> ConsensusProtocol<G> for ResharingState {
                             return NodeState::Joining(JoiningState {
                                 participants: contract_state.old_participants,
                                 public_key: contract_state.public_key,
+                                sign_rx: self.sign_rx,
                             });
                         }
                         NodeState::Resharing(self)
@@ -823,6 +888,7 @@ impl<G: Governance> ConsensusProtocol<G> for JoiningState {
                     threshold: contract_state.threshold,
                     protocol,
                     failed_store: Default::default(),
+                    sign_rx: self.sign_rx,
                 })
             }
             ProtocolState::Running(contract_state) => {
@@ -860,7 +926,7 @@ impl<G: Governance> ConsensusProtocol<G> for JoiningState {
                     .contains_account_id(&ctx.my_account_id)
                 {
                     tracing::info!("joining(resharing): joining as a new participant");
-                    start_resharing(None, ctx, contract_state).await
+                    start_resharing(None, self.sign_rx, ctx, contract_state).await
                 } else {
                     tracing::info!("joining(resharing): network is resharing without us, waiting for them to finish");
                     NodeState::Joining(self)
@@ -878,16 +944,17 @@ impl<G: Governance> ConsensusProtocol<G> for NodeState {
         contract_state: ProtocolState,
     ) -> NodeState {
         match self {
-            NodeState::Starting => {
+            NodeState::Starting(state) => {
                 let persistent_node_data = match ctx.secret_storage.load().await {
                     Ok(data) => data,
                     Err(err) => {
                         tracing::error!(?err, "failed to load persistent node data, retrying...");
-                        return NodeState::Starting;
+                        return NodeState::Starting(state);
                     }
                 };
                 NodeState::Started(StartedState {
                     persistent_node_data,
+                    sign_rx: state.sign_rx,
                 })
             }
             NodeState::Started(state) => state.advance(ctx, gov, contract_state).await,
@@ -902,6 +969,7 @@ impl<G: Governance> ConsensusProtocol<G> for NodeState {
 
 async fn start_resharing(
     private_share: Option<SecretKeyShare>,
+    sign_rx: mpsc::Receiver<IndexedSignRequest>,
     ctx: &MpcSignProtocol,
     contract_state: ResharingContractState,
 ) -> NodeState {
@@ -912,6 +980,7 @@ async fn start_resharing(
         return NodeState::Joining(JoiningState {
             participants: contract_state.new_participants,
             public_key: contract_state.public_key,
+            sign_rx,
         });
     };
     let protocol = match ReshareProtocol::new(private_share, me, &contract_state) {
@@ -921,6 +990,7 @@ async fn start_resharing(
             return NodeState::Joining(JoiningState {
                 participants: contract_state.new_participants,
                 public_key: contract_state.public_key,
+                sign_rx,
             });
         }
     };
@@ -933,5 +1003,6 @@ async fn start_resharing(
         public_key: contract_state.public_key,
         protocol,
         failed_store: Default::default(),
+        sign_rx,
     })
 }

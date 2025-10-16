@@ -1,4 +1,5 @@
 use super::contract::primitives::Participants;
+use super::signature::IndexedSignRequest;
 use super::triple::TripleSpawnerTask;
 use crate::protocol::presignature::PresignatureSpawnerTask;
 use crate::protocol::signature::SignatureSpawnerTask;
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PersistentNodeData {
@@ -29,8 +30,14 @@ impl fmt::Debug for PersistentNodeData {
 }
 
 #[derive(Debug)]
+pub struct StartingState {
+    pub sign_rx: mpsc::Receiver<IndexedSignRequest>,
+}
+
+#[derive(Debug)]
 pub struct StartedState {
     pub persistent_node_data: Option<PersistentNodeData>,
+    pub sign_rx: mpsc::Receiver<IndexedSignRequest>,
 }
 
 pub struct GeneratingState {
@@ -42,6 +49,7 @@ pub struct GeneratingState {
     /// If the generating state fails to store data after generating, it gets temporarily
     /// stored here and retried later.
     pub failed_store: Option<(PublicKey, SecretKeyShare)>,
+    pub sign_rx: mpsc::Receiver<IndexedSignRequest>,
 }
 
 pub struct WaitingForConsensusState {
@@ -50,6 +58,8 @@ pub struct WaitingForConsensusState {
     pub threshold: usize,
     pub private_share: SecretKeyShare,
     pub public_key: PublicKey,
+    /// Sign request receiver - kept here during consensus waiting to pass to next RunningState
+    pub sign_rx: mpsc::Receiver<IndexedSignRequest>,
 }
 
 impl fmt::Debug for WaitingForConsensusState {
@@ -87,11 +97,14 @@ pub struct ResharingState {
     /// If the resharing state fails to store data after generating, it gets temporarily
     /// stored here and retried later.
     pub failed_store: Option<SecretKeyShare>,
+    /// Sign request receiver - kept here during resharing to pass to next RunningState
+    pub sign_rx: mpsc::Receiver<IndexedSignRequest>,
 }
 
 pub struct JoiningState {
     pub participants: Participants,
     pub public_key: PublicKey,
+    pub sign_rx: mpsc::Receiver<IndexedSignRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,11 +135,9 @@ pub enum NodeStatus {
     },
 }
 
-#[derive(Default)]
 #[allow(clippy::large_enum_variant)]
 pub enum NodeState {
-    #[default]
-    Starting,
+    Starting(StartingState),
     Started(StartedState),
     Generating(GeneratingState),
     WaitingForConsensus(WaitingForConsensusState),
@@ -138,7 +149,7 @@ pub enum NodeState {
 impl Display for NodeState {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match *self {
-            NodeState::Starting => write!(f, "Starting"),
+            NodeState::Starting(_) => write!(f, "Starting"),
             NodeState::Started(_) => write!(f, "Started"),
             NodeState::Generating(_) => write!(f, "Generating"),
             NodeState::WaitingForConsensus(_) => write!(f, "WaitingForConsensus"),
@@ -157,14 +168,8 @@ pub struct Node {
     test_key_info_watcher_tx: watch::Sender<Option<NodeKeyInfo>>,
 }
 
-impl Default for Node {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Node {
-    pub fn new() -> Self {
+    pub fn new(sign_rx: mpsc::Receiver<IndexedSignRequest>) -> Self {
         let (watcher_tx, watcher_rx) = watch::channel(NodeStatus::Starting);
         #[cfg(feature = "test-feature")]
         let (test_key_info_watcher_tx, test_key_info_watcher) = watch::channel(None);
@@ -174,7 +179,7 @@ impl Node {
             test_key_info_watcher,
         };
         Self {
-            state: NodeState::Starting,
+            state: NodeState::Starting(StartingState { sign_rx }),
             watcher_tx,
             watcher,
             #[cfg(feature = "test-feature")]
@@ -191,7 +196,7 @@ impl Node {
             NodeState::Started(_) => {
                 let _ = self.watcher_tx.send(NodeStatus::Started);
             }
-            NodeState::Starting => {
+            NodeState::Starting(_) => {
                 let _ = self.watcher_tx.send(NodeStatus::Starting);
             }
             NodeState::Generating(state) => {
@@ -286,7 +291,7 @@ impl NodeState {
                         public_key: stored.public_key,
                     })
             }
-            NodeState::Starting => None,
+            NodeState::Starting(_) => None,
             NodeState::Generating(_state) => None,
             NodeState::WaitingForConsensus(state) => Some(NodeKeyInfo {
                 private_share: state.private_share,
