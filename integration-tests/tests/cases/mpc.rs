@@ -1,3 +1,4 @@
+use cait_sith::protocol::Participant;
 use deadpool_redis::redis::AsyncCommands;
 use futures::future::join_all;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
@@ -6,10 +7,12 @@ use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState};
+use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use std::collections::BTreeMap;
 use std::fs;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Use this toggle locally to regenerate hard-coded inputs such as key shares,
 /// triples, and presignatures.
@@ -187,20 +190,147 @@ async fn test_basic_sign() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_concurrent_sign_requests() {
+    const REQUEST_COUNT: usize = 20;
+    const PRESIGNATURE_STOCKPILE_TARGET: u32 = REQUEST_COUNT as u32;
+    const PRESIGNATURE_BUFFER: u32 = REQUEST_COUNT as u32;
+    const TRIPLE_WARMUP_MARGIN: usize = if REQUEST_COUNT / 4 > 4 {
+        REQUEST_COUNT / 4
+    } else {
+        4
+    };
+    const TRIPLE_BUFFER: u32 = PRESIGNATURE_BUFFER;
+    const PRESIGNATURE_MIN_INITIAL: u32 = 0;
+    const STOCKPILE_CAPACITY_MULTIPLIER: u32 = 4;
+
+    let triple_warmup_min = PRESIGNATURE_STOCKPILE_TARGET + TRIPLE_WARMUP_MARGIN as u32;
+    let triple_capacity = TRIPLE_BUFFER.saturating_mul(STOCKPILE_CAPACITY_MULTIPLIER);
+    let triple_warmup_max = triple_warmup_min + triple_capacity;
+    let triple_post_min = PRESIGNATURE_STOCKPILE_TARGET;
+    let triple_post_max = triple_warmup_max;
+    let presignature_min = PRESIGNATURE_STOCKPILE_TARGET;
+    let presignature_capacity = PRESIGNATURE_BUFFER.saturating_mul(STOCKPILE_CAPACITY_MULTIPLIER);
+    let presignature_max = presignature_min + presignature_capacity;
+
     let network = MpcFixtureBuilder::default()
-        .only_generate_signatures()
+        .with_preshared_key()
+        .with_preshared_triples()
+        .with_presignature_stockpile()
+        .with_min_triples_stockpile(triple_warmup_min)
+        .with_max_triples_stockpile(triple_warmup_max)
+        .with_min_presignatures_stockpile(PRESIGNATURE_MIN_INITIAL)
+        .with_max_presignatures_stockpile(presignature_max)
         .build()
         .await;
 
-    let request_count: usize = 4;
-    let presignature_buffer: usize = request_count;
+    let storage_handles: Vec<_> = network
+        .nodes
+        .iter()
+        .map(|node| (node.triple_storage.clone(), node.me))
+        .collect();
 
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        network.wait_for_presignatures(presignature_buffer),
-    )
-    .await
-    .expect("network should start with enough presignatures");
+    let presignature_handles: Vec<_> = network
+        .nodes
+        .iter()
+        .map(|node| (node.presignature_storage.clone(), node.me))
+        .collect();
+
+    let fetch_triple_counts = |handles: &Vec<(TripleStorage, Participant)>| {
+        join_all(handles.iter().cloned().map(|(storage, owner)| async move {
+            storage.len_by_owner(owner).await
+        }))
+    };
+
+    let fetch_presignature_counts =
+        |handles: &Vec<(PresignatureStorage, Participant)>| {
+        join_all(handles.iter().cloned().map(|(storage, owner)| async move {
+            storage.len_by_owner(owner).await
+        }))
+    };
+
+    let initial_triple_counts: Vec<usize> = fetch_triple_counts(&storage_handles).await;
+
+    tokio::time::sleep(Duration::from_secs(30)).await;
+
+    let post_warmup_counts: Vec<usize> = fetch_triple_counts(&storage_handles).await;
+
+    assert!(
+        post_warmup_counts
+            .iter()
+            .zip(initial_triple_counts.iter())
+            .all(|(after, before)| *after >= *before + 1),
+        "triple stockpile did not grow during warm-up. before={initial_triple_counts:?} after={post_warmup_counts:?}"
+    );
+
+    let triple_target = triple_post_min as usize;
+    let mut triple_counts = post_warmup_counts.clone();
+    let triple_deadline = Instant::now() + Duration::from_secs(120);
+
+    while !triple_counts.iter().all(|count| *count >= triple_target) {
+        if Instant::now() >= triple_deadline {
+            panic!(
+                "triple stockpile did not reach baseline. target={triple_target} counts={triple_counts:?}"
+            );
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let next_counts = fetch_triple_counts(&storage_handles).await;
+
+        if !next_counts
+            .iter()
+            .zip(triple_counts.iter())
+            .any(|(next, prev)| next > prev)
+        {
+            tracing::info!(?next_counts, "triple stockpile stagnant while waiting for baseline");
+        }
+
+        triple_counts = next_counts;
+    }
+
+    tracing::info!(?triple_counts, triple_target, "triple baseline reached");
+
+    for node in &network.nodes {
+        node.config.send_modify(|config| {
+            config.protocol.triple.min_triples = triple_post_min;
+            config.protocol.triple.max_triples = triple_post_max;
+            config.protocol.presignature.min_presignatures = presignature_min;
+            config.protocol.presignature.max_presignatures = presignature_max;
+        });
+    }
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let presignature_target = presignature_min as usize;
+    let mut presignature_counts = fetch_presignature_counts(&presignature_handles).await;
+    let presignature_deadline = Instant::now() + Duration::from_secs(180);
+
+    while !presignature_counts
+        .iter()
+        .all(|count| *count >= presignature_target)
+    {
+        if Instant::now() >= presignature_deadline {
+            panic!(
+                "presignature stockpile did not reach baseline. target={presignature_target} counts={presignature_counts:?}"
+            );
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let next_counts = fetch_presignature_counts(&presignature_handles).await;
+
+        if !next_counts
+            .iter()
+            .zip(presignature_counts.iter())
+            .any(|(next, prev)| next > prev)
+        {
+            tracing::info!(
+                ?next_counts,
+                "presignature stockpile stagnant while waiting for baseline"
+            );
+        }
+
+        presignature_counts = next_counts;
+    }
+
+    tracing::info!(?presignature_counts, presignature_target, "presignature baseline reached");
 
     let sign_channels: Vec<_> = network
         .nodes
@@ -208,7 +338,7 @@ async fn test_concurrent_sign_requests() {
         .map(|node| node.sign_tx.clone())
         .collect();
 
-    let requests: Vec<_> = (10..10 + request_count as u8).map(sign_request).collect();
+    let requests: Vec<_> = (10..10 + REQUEST_COUNT as u8).map(sign_request).collect();
 
     join_all(requests.iter().cloned().map(|request| {
         let senders = sign_channels.clone();
@@ -222,16 +352,42 @@ async fn test_concurrent_sign_requests() {
     }))
     .await;
 
-    let actions = tokio::time::timeout(
-        Duration::from_secs(30),
-        network.wait_for_actions(request_count),
-    )
-    .await
-    .expect("failed waiting for publish actions");
+    let rpc_actions = Arc::clone(&network.output.rpc_actions);
+    let actions = {
+        let timeout = Duration::from_secs(60);
+        let start = Instant::now();
+
+        loop {
+            let actions_snapshot = { rpc_actions.lock().await.clone() };
+
+            let missing: Vec<_> = requests
+                .iter()
+                .map(|request| hex::encode(request.id.request_id))
+                .filter(|sign_id_hex| {
+                    !actions_snapshot
+                        .iter()
+                        .any(|action| action.contains(sign_id_hex))
+                })
+                .collect();
+
+            if missing.is_empty() {
+                break actions_snapshot;
+            }
+
+            if start.elapsed() >= timeout {
+                panic!(
+                    "timed out waiting for publish actions. missing ids: {:?}",
+                    missing
+                );
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
 
     assert!(
-        actions.len() >= request_count,
-        "expected at least {request_count} publish actions, got {}",
+        actions.len() >= REQUEST_COUNT,
+        "expected at least {REQUEST_COUNT} publish actions, got {}",
         actions.len()
     );
 
@@ -258,7 +414,7 @@ fn sign_request(seed: u8) -> IndexedSignRequest {
         chain: Chain::NEAR,
         unix_timestamp_indexed: 0,
         timestamp_sign_queue: None,
-        total_timeout: Duration::from_secs(45),
+        total_timeout: Duration::from_secs(120),
         participants: None,
         sign_request_type: SignRequestType::Sign,
     }
