@@ -93,7 +93,7 @@ jobs:
           LT_CHECK_SIGNATURE: ${{ steps.normalized.outputs.lt_check_signature == 'true' }}
           LT_STRATEGY: ${{ steps.normalized.outputs.lt_strategy }}
         with:
-          path: ./infra/loadtests/k6-load-test.js
+          path: ./infra/k6-load-test.js
           cloud-run-locally: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
           cloud-comment-on-pr: false
           flags: >-
