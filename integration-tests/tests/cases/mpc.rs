@@ -384,37 +384,6 @@ fn sign_request(seed: u8) -> IndexedSignRequest {
     }
 }
 
-fn initial_proposer_for_request(
-    request: &IndexedSignRequest,
-    participants: &[Participant],
-    stable: &BTreeSet<Participant>,
-) -> Participant {
-    assert!(
-        !participants.is_empty(),
-        "expected at least one participant in the mesh snapshot"
-    );
-
-    let mut ordered_participants = participants.to_vec();
-    ordered_participants.sort();
-
-    let entropy = request.args.entropy;
-    let offset = entropy[0] as usize;
-
-    for round in 0..512 {
-        let idx = (offset + round) % ordered_participants.len();
-        let candidate = ordered_participants[idx];
-        if stable.contains(&candidate) {
-            return candidate;
-        }
-    }
-
-    let mut rng = StdRng::from_seed(entropy);
-    *stable
-        .iter()
-        .choose(&mut rng)
-        .expect("stable set should not be empty")
-}
-
 fn sign_arg(seed: u8) -> SignArgs {
     let mut entropy = [1; 32];
     entropy[0] = seed;
