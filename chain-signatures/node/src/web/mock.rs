@@ -1,5 +1,6 @@
 use cait_sith::protocol::Participant;
 use mockito::ServerGuard;
+use near_sdk::AccountId;
 
 use crate::{
     node_client::NodeClient,
@@ -10,11 +11,12 @@ use super::StateView;
 
 pub struct MockServer {
     id: u32,
+    node_id: AccountId,
     server: ServerGuard,
 }
 
 impl MockServer {
-    async fn new(id: u32) -> Self {
+    async fn run(id: u32) -> Self {
         let mut server = mockito::Server::new_async().await;
         server
             .mock("GET", "/state")
@@ -40,7 +42,12 @@ impl MockServer {
             .create_async()
             .await;
 
-        Self { id, server }
+        let node_id = format!("p{id}.test").parse().unwrap();
+        Self {
+            id,
+            node_id,
+            server,
+        }
     }
 
     pub fn id(&self) -> Participant {
@@ -50,11 +57,15 @@ impl MockServer {
     pub fn info(&self) -> ParticipantInfo {
         ParticipantInfo {
             id: self.id,
-            account_id: format!("p{}.test", self.id).parse().unwrap(),
+            account_id: self.node_id.clone(),
             url: self.server.url(),
             cipher_pk: mpc_keys::hpke::PublicKey::from_bytes(&[0; 32]),
             sign_pk: near_crypto::PublicKey::empty(near_crypto::KeyType::ED25519),
         }
+    }
+
+    pub fn account_id(&self) -> &AccountId {
+        &self.node_id
     }
 
     pub async fn make_offline(&mut self) {
@@ -81,7 +92,7 @@ pub struct MockServers {
 }
 
 impl MockServers {
-    pub async fn new(nodes: usize) -> Self {
+    pub async fn run(nodes: usize) -> Self {
         let mut servers = Self {
             servers: Vec::new(),
         };
@@ -104,7 +115,7 @@ impl MockServers {
     }
 
     pub async fn push(&mut self, id: u32) {
-        self.servers.push(MockServer::new(id).await);
+        self.servers.push(MockServer::run(id).await);
     }
 
     pub async fn push_next(&mut self) -> Participant {
@@ -113,15 +124,15 @@ impl MockServers {
         Participant::from(id)
     }
 
-    pub async fn remove(&mut self, id: u32) {
+    pub fn remove(&mut self, id: u32) {
         self.servers.retain(|server| server.id != id);
     }
 
-    pub async fn remove_back(&mut self) {
+    pub fn remove_back(&mut self) {
         self.servers.pop();
     }
 
-    pub async fn swap_remove_front(&mut self) {
+    pub fn swap_remove_front(&mut self) {
         self.servers.swap_remove(0);
     }
 }

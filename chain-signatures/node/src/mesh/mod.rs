@@ -5,8 +5,10 @@ use crate::mesh::connection::NodeStatus;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ParticipantInfo;
+use crate::protocol::ProtocolState;
 use crate::rpc::ContractStateWatcher;
 use cait_sith::protocol::Participant;
+use near_account_id::AccountId;
 use tokio::sync::{mpsc, watch};
 
 pub mod connection;
@@ -70,22 +72,27 @@ pub struct Mesh {
     state_tx: watch::Sender<MeshState>,
     state_rx: watch::Receiver<MeshState>,
     synced_peer_rx: mpsc::Receiver<Participant>,
+    my_id: AccountId,
+    me: Option<Participant>,
 }
 
 impl Mesh {
     pub fn new(
         client: &NodeClient,
         options: Options,
+        my_id: &AccountId,
         synced_peer_rx: mpsc::Receiver<Participant>,
     ) -> Self {
         let ping_interval = Duration::from_millis(options.ping_interval);
         let (state_tx, state_rx) = watch::channel(MeshState::default());
-        let connections = connection::Pool::new(client, ping_interval);
+        let connections = connection::Pool::new(client, my_id, ping_interval);
         Self {
             connections,
             state_tx,
             state_rx,
             synced_peer_rx,
+            my_id: my_id.clone(),
+            me: None,
         }
     }
 
@@ -110,12 +117,63 @@ impl Mesh {
             tokio::select! {
                 Some(contract) = contract.next_state() => {
                     tracing::info!(?contract, "new contract state received");
-                    self.connections.connect(contract).await;
+                    let my_info = self.find_myself(&contract);
+                    let previous_me = self.me.take();
+                    self.me = my_info.as_ref().map(|(participant, _)| *participant);
+
+                    // Check that we are indeed part of the contract participants.
+                    if let Some((participant, info)) = my_info {
+                        let new_status = match &contract {
+                            ProtocolState::Initializing(_) | ProtocolState::Resharing(_) => NodeStatus::Inactive,
+                            ProtocolState::Running(_) => NodeStatus::Active,
+                        };
+                        self.connections.connect(contract).await;
+                        self.state_tx.send_modify(|state| {
+                            // if the previous me is different from the current me, remove the
+                            // previous me from the MeshState.
+                            if let Some(previous_me) = previous_me.filter(|old| *old != participant) {
+                                state.active.remove(&previous_me);
+                                state.need_sync.remove(&previous_me);
+                                state.stable.remove(&previous_me);
+                            }
+                            state.update(participant, new_status, info);
+                        });
+                    } else {
+                        tracing::warn!(?previous_me, ?contract, "we are no longer part of the MPC network");
+                        self.state_tx.send_modify(|state| {
+                            state.active.clear();
+                            state.need_sync.clear();
+                            state.stable.clear();
+                        });
+                    }
                 }
                 Some(participant) = self.synced_peer_rx.recv() => {
+                    if self.me == Some(participant) {
+                        tracing::warn!(?participant, "ignoring self sync report");
+                        continue;
+                    }
                     self.connections.report_node_synced(participant).await;
                 }
             }
+        }
+    }
+
+    fn find_myself(&self, contract: &ProtocolState) -> Option<(Participant, ParticipantInfo)> {
+        match contract {
+            ProtocolState::Initializing(init) => {
+                let participants: Participants = init.candidates.clone().into();
+                participants
+                    .find(&self.my_id)
+                    .map(|(p, info)| (*p, info.clone()))
+            }
+            ProtocolState::Running(running) => running
+                .participants
+                .find(&self.my_id)
+                .map(|(p, info)| (*p, info.clone())),
+            ProtocolState::Resharing(resharing) => resharing
+                .new_participants
+                .find(&self.my_id)
+                .map(|(p, info)| (*p, info.clone())),
         }
     }
 }
@@ -138,16 +196,18 @@ mod tests {
     #[test(tokio::test)]
     async fn test_pool_update() {
         let num_nodes = 3;
-        let servers = MockServers::new(num_nodes).await;
+        let servers = MockServers::run(num_nodes).await;
         let participants = servers.participants();
+        let my_id = servers[0].account_id().clone();
 
-        let mut pool = Pool::new(&servers.client(), PING_INTERVAL);
+        let mut pool = Pool::new(&servers.client(), &my_id, PING_INTERVAL);
         let mut watcher = pool.watch();
         pool.connect_nodes(&participants, &mut HashSet::new()).await;
 
+        // We do not sync with ourselves, so only expect 1..num_nodes
         tokio::time::sleep(PING_INTERVAL * 3).await;
         let mut syncing = HashSet::new();
-        for i in 0..num_nodes {
+        for i in 1..num_nodes {
             match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
                 Ok((participant, status, _info)) => {
                     tracing::info!(?participant, ?status, "got connection update for syncing");
@@ -160,13 +220,13 @@ mod tests {
                 }
             }
         }
-
-        for i in 0..num_nodes {
+        for i in 1..num_nodes {
             pool.report_node_synced(servers[i].id()).await;
         }
 
+        // Same with active. We only expect 1..num_nodes for new statuses
         tokio::time::sleep(PING_INTERVAL * 3).await;
-        for i in 0..num_nodes {
+        for i in 1..num_nodes {
             match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
                 Ok((participant, status, _info)) => {
                     tracing::info!(?participant, ?status, "got connection update for active");
@@ -183,17 +243,21 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_mesh_update() {
-        let node_id = "node0.testnet".parse().unwrap();
         let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
         let num_nodes = 3;
 
-        let mut servers = MockServers::new(num_nodes).await;
+        let mut servers = MockServers::run(num_nodes).await;
+
+        let participants = servers.participants();
+        let me = servers[0].id();
+        let node_id = servers[0].account_id().clone();
+        let expected_participants = participants.clone();
 
         let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
             &node_id,
             root_sk.public_key().into_affine_point(),
             2,
-            servers.participants().clone(),
+            participants.clone(),
         );
 
         let (sync_tx, sync_rx) = mpsc::channel(16);
@@ -202,6 +266,7 @@ mod tests {
             Options {
                 ping_interval: PING_INTERVAL.as_millis() as u64,
             },
+            &node_id,
             sync_rx,
         );
 
@@ -210,56 +275,59 @@ mod tests {
 
         // check that the mesh state is updated.
         {
-            let expected_participants = servers.participants();
             tokio::time::sleep(PING_INTERVAL * 3).await;
+            let state = mesh_state.borrow();
+            assert!(state.active.contains_key(&me));
+            assert!(state.stable.contains(&me));
+            drop(state);
 
-            sync_tx.send(servers[0].id()).await.unwrap();
-            sync_tx.send(servers[1].id()).await.unwrap();
-            sync_tx.send(servers[2].id()).await.unwrap();
+            for idx in 0..num_nodes {
+                sync_tx.send(servers[idx].id()).await.unwrap();
+            }
             tokio::time::sleep(PING_INTERVAL * 3).await;
 
             let state = mesh_state.borrow();
             assert_eq!(state.active.len(), num_nodes);
             assert_eq!(state.active, expected_participants);
             assert!(state.need_sync.is_empty());
-            assert!(state.active.contains_key(&servers[0].id()));
-            assert!(state.active.contains_key(&servers[1].id()));
-            assert!(state.active.contains_key(&servers[2].id()));
+            for idx in 0..num_nodes {
+                assert!(state.active.contains_key(&servers[idx].id()));
+            }
+            assert!(state.active.contains_key(&me));
         }
 
         // check that the mesh state is updated when a participant goes offline
         {
-            servers[0].make_offline().await;
+            servers[1].make_offline().await;
             tokio::time::sleep(PING_INTERVAL * 3).await;
 
             let state = mesh_state.borrow();
             assert_eq!(state.active.len(), num_nodes - 1);
-            assert!(state.active.contains_key(&servers[1].id()));
+            assert!(state.active.contains_key(&me));
+            assert!(state.active.contains_key(&servers[0].id()));
+            assert!(!state.active.contains_key(&servers[1].id()));
             assert!(state.active.contains_key(&servers[2].id()));
-            assert!(state.stable.contains(&servers[1].id()));
-            assert!(state.stable.contains(&servers[2].id()));
         }
 
         // check that the mesh state is updated when a participant goes back online.
         {
-            servers[0].make_online().await;
+            servers[1].make_online().await;
             tokio::time::sleep(PING_INTERVAL * 3).await;
 
             let state = mesh_state.borrow_and_update().clone();
-            // We're still in syncing, make sure we report node 0 and mark it as synced.
             assert_eq!(state.active.len(), num_nodes - 1);
-            sync_tx.send(servers[0].id()).await.unwrap();
+            sync_tx.send(servers[1].id()).await.unwrap();
             tokio::time::sleep(PING_INTERVAL).await;
 
             let state = mesh_state.borrow_and_update().clone();
             assert_eq!(state.active.len(), num_nodes);
             assert!(state.need_sync.is_empty());
-            assert!(state.active.contains_key(&servers[0].id()));
-            assert!(state.active.contains_key(&servers[1].id()));
-            assert!(state.active.contains_key(&servers[2].id()));
-            assert!(state.stable.contains(&servers[0].id()));
-            assert!(state.stable.contains(&servers[1].id()));
-            assert!(state.stable.contains(&servers[2].id()));
+            for idx in 0..num_nodes {
+                assert!(state.active.contains_key(&servers[idx].id()));
+                assert!(state.stable.contains(&servers[idx].id()));
+            }
+            assert!(state.active.contains_key(&me));
+            assert!(state.stable.contains(&me));
         }
 
         mesh_task.abort();
@@ -267,10 +335,10 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_mesh_contract_update() {
-        let node_id = "node0.testnet".parse().unwrap();
         let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
         let mut num_nodes = 3;
-        let mut servers = MockServers::new(num_nodes).await;
+        let mut servers = MockServers::run(num_nodes).await;
+        let node_id = servers[0].account_id().clone();
 
         let (contract_watcher, contract_tx) = ContractStateWatcher::with_running(
             &node_id,
@@ -285,6 +353,7 @@ mod tests {
             Options {
                 ping_interval: PING_INTERVAL.as_millis() as u64,
             },
+            &node_id,
             synced_peer_rx,
         );
         let mesh_state = mesh.watch();
@@ -332,7 +401,7 @@ mod tests {
         // check on node deletion with contract change.
         {
             num_nodes -= 1;
-            servers.swap_remove_front().await;
+            servers.remove_back();
             // update the contract after removing the participant.
             contract_tx.send_modify(|contract| match contract.as_mut().unwrap() {
                 ProtocolState::Running(RunningContractState { participants, .. }) => {

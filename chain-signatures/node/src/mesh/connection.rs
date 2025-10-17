@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use cait_sith::protocol::Participant;
+use near_account_id::AccountId;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::WatchStream;
@@ -174,18 +175,22 @@ pub struct Pool {
     /// to join the network within the next epoch.
     connections: HashMap<Participant, NodeConnection>,
 
+    /// Account id of this node. Used to avoid creating self connections.
+    node_account_id: AccountId,
+
     conn_update_tx: broadcast::Sender<ConnectionUpdate>,
     conn_update_rx: broadcast::Receiver<ConnectionUpdate>,
 }
 
 impl Pool {
-    pub fn new(client: &NodeClient, ping_interval: Duration) -> Self {
+    pub fn new(client: &NodeClient, node_account_id: &AccountId, ping_interval: Duration) -> Self {
         tracing::info!("creating new connection pool");
         let (conn_update_tx, conn_update_rx) = broadcast::channel(256);
         Self {
             client: client.clone(),
             ping_interval,
             connections: HashMap::new(),
+            node_account_id: node_account_id.clone(),
 
             conn_update_tx,
             conn_update_rx,
@@ -222,6 +227,19 @@ impl Pool {
         seen: &mut HashSet<Participant>,
     ) {
         for (&participant, info) in participants.iter() {
+            if info.account_id == self.node_account_id {
+                tracing::debug!(?participant, "skipping self connection");
+                if self.connections.remove(&participant).is_some()
+                    && self
+                        .conn_update_tx
+                        .send(ConnectionUpdate::Drop(participant))
+                        .is_err()
+                {
+                    tracing::warn!(?participant, "unable to send drop for self connection");
+                }
+                continue;
+            }
+
             seen.insert(participant);
 
             let node = (participant, &info.url);

@@ -60,6 +60,7 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
         mpc_node::mesh::Options {
             ping_interval: ping_interval.as_millis() as u64,
         },
+        &node0_account_id,
         synced_peer_rx,
     );
     let (sync_channel, sync) = SyncTask::new(

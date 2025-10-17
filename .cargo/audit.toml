@@ -1,0 +1,13 @@
+# cargo-audit configuration
+# Track outstanding advisories that are presently blocked on upstream updates.
+
+[advisories]
+ignore = [
+	"RUSTSEC-2024-0344",  # curve25519-dalek pinned via Solana 2.x; upgrade blocked until Solana adopts dalek 4.x
+	"RUSTSEC-2022-0093",  # ed25519-dalek 2.x unavailable in Solana 2.x dependency tree
+	"RUSTSEC-2024-0421",  # idna >=1.0 incompatible with google-apis + libp2p stacks we cannot yet bump
+	"RUSTSEC-2025-0009",  # ring 0.17+ incompatible with rustls 0.20 required by libp2p
+	"RUSTSEC-2024-0336",  # rustls >=0.21 not yet adopted in libp2p-quic 0.7 alpha series
+	"RUSTSEC-2025-0055",  # tracing-subscriber 0.3 requires arkworks 0.5+ updates upstream
+	"RUSTSEC-2021-0145",  # atty removed from our binaries but still pulled in by solana-logger transitively
+]

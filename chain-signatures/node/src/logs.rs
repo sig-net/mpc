@@ -1,4 +1,5 @@
 use std::fmt::{self, Display};
+use std::io::IsTerminal;
 use std::sync::OnceLock;
 
 use opentelemetry::trace::TracerProvider as _;
@@ -212,7 +213,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
     let log_otlp_layer = OpenTelemetryTracingBridge::new(&log_otlp_provider);
 
     let log_fmt_layer = tracing_subscriber::fmt::layer()
-        .with_ansi(atty::is(atty::Stream::Stderr))
+        .with_ansi(std::io::stderr().is_terminal())
         .with_line_number(true)
         .with_thread_names(true)
         .event_format(NodeIdFormatter::new(node_id))

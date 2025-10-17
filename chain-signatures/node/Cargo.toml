@@ -9,7 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"
-atty = "0.2"
 axum = "0.7.9"
 axum-extra = "0.9.6"
 chrono = "0.4.24"
@@ -40,8 +39,8 @@ opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
     "rt-tokio",
 ] }
 opentelemetry-appender-tracing = "0.29.1"
-alloy-signer-local = "1.0.9"
-alloy-sol-types = "1.2.0"
+alloy-signer-local = "1.0.38"
+alloy-sol-types = "1.4.1"
 helios = { git = "https://github.com/a16z/helios", rev = "0a96f31125b7948bbe5c7ab73aa5699efae24902"} 
 
 

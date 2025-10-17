@@ -1,6 +1,6 @@
 use crate::protocol::SignRequestType;
 use crate::protocol::{Chain, IndexedSignRequest};
-use crate::sign_respond_tx::hash_rlp_data;
+use crate::sign_bidirectional::hash_rlp_data;
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::{AnchorDeserialize, AnchorSerialize};
 use anchor_client::{Client, Cluster, Program};
@@ -48,7 +48,7 @@ pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
 
 const CPI_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: Sign",
-    "Program log: Instruction: SignRespond",
+    "Program log: Instruction: SignBidirectional",
 ];
 
 #[derive(Clone)]
@@ -269,31 +269,29 @@ impl SignatureEventTrait for SignatureRequestedEvent {
 
 #[event]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SignRespondRequestedEvent {
+pub struct SignBidirectionalEvent {
     pub sender: Pubkey,
     pub transaction_data: Vec<u8>,
-    pub slip44_chain_id: u32,
+    pub caip2_id: String,
     pub key_version: u32,
     pub deposit: u64,
     pub path: String,
     pub algo: String,
     pub dest: String,
     pub params: String,
-    pub explorer_deserialization_format: u8,
-    pub explorer_deserialization_schema: Vec<u8>,
-    pub callback_serialization_format: u8,
-    pub callback_serialization_schema: Vec<u8>,
+    pub output_deserialization_schema: Vec<u8>,
+    pub respond_serialization_schema: Vec<u8>,
 }
 
-impl SignatureEvent for SignRespondRequestedEvent {}
+impl SignatureEvent for SignBidirectionalEvent {}
 
-impl SignatureEventTrait for SignRespondRequestedEvent {
+impl SignatureEventTrait for SignBidirectionalEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         // Match TypeScript implementation using ABI encoding
         let encoded = (
             self.sender.to_string(),
             self.transaction_data.clone(),
-            self.slip44_chain_id,
+            self.caip2_id.clone(),
             self.key_version,
             self.path.clone(),
             self.algo.clone(),
@@ -357,7 +355,7 @@ impl SignatureEventTrait for SignRespondRequestedEvent {
             timestamp_sign_queue: Some(Instant::now()),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
-            sign_request_type: SignRequestType::SignRespond(self.clone()),
+            sign_request_type: SignRequestType::SignBidirectional(self.clone()),
             participants: None,
         })
     }
@@ -588,10 +586,12 @@ async fn parse_cpi_events(
                 Ok(ev) => acc.push(Box::new(ev) as SignatureEventBox),
                 Err(e) => tracing::warn!("Failed to deserialize SignatureRequestedEvent: {e}"),
             }
-        } else if event_discriminator == SignRespondRequestedEvent::DISCRIMINATOR {
-            match SignRespondRequestedEvent::deserialize(&mut &event_data[..]) {
+        } else if event_discriminator == SignBidirectionalEvent::DISCRIMINATOR {
+            match SignBidirectionalEvent::deserialize(&mut &event_data[..]) {
                 Ok(ev) => acc.push(Box::new(ev) as SignatureEventBox),
-                Err(e) => tracing::warn!("Failed to deserialize SignRespondRequestedEvent: {e}"),
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize SignBidirectionalEvent: {e}")
+                }
             }
         }
 

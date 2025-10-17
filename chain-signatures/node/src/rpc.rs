@@ -11,8 +11,8 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::keypair::Keypair;
 
 use crate::protocol::SignRequestType;
-use crate::read_respond::ReadRespondedTxChannel;
-use crate::sign_respond_tx::SignRespondSignatureChannel;
+use crate::respond_bidirectional::RespondBidirectionalTxChannel;
+use crate::sign_bidirectional::SignBidirectionalSignatureChannel;
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, RootProvider, WalletProvider};
@@ -310,8 +310,8 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
-        sign_respond_signature_channel: SignRespondSignatureChannel,
-        read_responded_tx_channel: ReadRespondedTxChannel,
+        sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
+        respond_bidirectional_tx_channel: RespondBidirectionalTxChannel,
     ) {
         // spin up update task for updating contract state and config
         let near = self.near.clone();
@@ -350,8 +350,9 @@ impl RpcExecutor {
             let near_account_id = self.near.my_account_id.clone();
             let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
 
-            let sign_respond_signature_channel_clone = sign_respond_signature_channel.clone();
-            let read_responded_tx_channel_clone = read_responded_tx_channel.clone();
+            let sign_bidirectional_signature_channel_clone =
+                sign_bidirectional_signature_channel.clone();
+            let respond_bidirectional_tx_channel_clone = respond_bidirectional_tx_channel.clone();
             tokio::spawn(async move {
                 match chain {
                     Chain::NEAR | Chain::Solana => {
@@ -359,8 +360,8 @@ impl RpcExecutor {
                             client,
                             action,
                             near_account_id,
-                            sign_respond_signature_channel_clone,
-                            read_responded_tx_channel_clone,
+                            sign_bidirectional_signature_channel_clone,
+                            respond_bidirectional_tx_channel_clone,
                         )
                         .await;
                     }
@@ -655,8 +656,8 @@ async fn execute_publish(
     client: ChainClient,
     mut action: PublishAction,
     near_account_id: AccountId,
-    sign_respond_signature_channel: SignRespondSignatureChannel,
-    read_responded_tx_channel: ReadRespondedTxChannel,
+    sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
+    respond_bidirectional_tx_channel: RespondBidirectionalTxChannel,
 ) {
     let chain = action.request.indexed.chain;
     tracing::info!(
@@ -705,8 +706,8 @@ async fn execute_publish(
                 &action.timestamp,
                 &signature,
                 &near_account_id,
-                sign_respond_signature_channel.clone(),
-                read_responded_tx_channel.clone(),
+                sign_bidirectional_signature_channel.clone(),
+                respond_bidirectional_tx_channel.clone(),
             )
             .await
             .map_err(|_| ()),
@@ -1300,8 +1301,8 @@ async fn execute_batch_publish(
 
 use signet_program::accounts::ReadRespond as SolanaReadRespondAccount;
 use signet_program::accounts::Respond as SolanaRespondAccount;
-use signet_program::instruction::ReadRespond as SolanaReadRespond;
 use signet_program::instruction::Respond as SolanaRespond;
+use signet_program::instruction::RespondBidirectional as SolanaRespondBidirectional;
 use signet_program::AffinePoint as SolanaContractAffinePoint;
 use signet_program::Signature as SolanaContractSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
@@ -1311,8 +1312,8 @@ async fn try_publish_sol(
     timestamp: &Instant,
     signature: &Signature,
     near_account_id: &AccountId,
-    sign_respond_signature_channel: SignRespondSignatureChannel,
-    read_responded_tx_channel: ReadRespondedTxChannel,
+    sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
+    respond_bidirectional_tx_channel: RespondBidirectionalTxChannel,
 ) -> Result<(), ()> {
     let chain = action.request.indexed.chain;
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
@@ -1332,12 +1333,16 @@ async fn try_publish_sol(
     };
 
     match &action.request.indexed.sign_request_type {
-        SignRequestType::Sign | SignRequestType::SignRespond(_) => {
+        SignRequestType::Sign | SignRequestType::SignBidirectional(_) => {
+            let (event_authority, _) =
+                Pubkey::find_program_address(&[b"__event_authority"], &sol.program_id);
             let tx = program
                 .request()
                 .signer(sol.payer.clone())
                 .accounts(SolanaRespondAccount {
                     responder: sol.payer.clone().try_pubkey().unwrap(),
+                    event_authority,
+                    program: sol.program_id,
                 })
                 .args(SolanaRespond {
                     request_ids,
@@ -1363,17 +1368,17 @@ async fn try_publish_sol(
                 "published solana signature successfully"
             );
         }
-        SignRequestType::ReadRespond(read_responded_tx) => {
-            let read_respond_serialized_output = read_responded_tx.output.clone();
+        SignRequestType::RespondBidirectional(respond_bidirectional_tx) => {
+            let respond_bidirectional_serialized_output = respond_bidirectional_tx.output.clone();
             let tx = program
                 .request()
                 .signer(sol.payer.clone())
                 .accounts(SolanaReadRespondAccount {
                     responder: sol.payer.clone().try_pubkey().unwrap(),
                 })
-                .args(SolanaReadRespond {
+                .args(SolanaRespondBidirectional {
                     request_id: request_ids[0],
-                    serialized_output: read_respond_serialized_output.clone(),
+                    serialized_output: respond_bidirectional_serialized_output.clone(),
                     signature: signature.clone(),
                 })
                 .send()
@@ -1382,7 +1387,7 @@ async fn try_publish_sol(
                     tracing::error!(
                         sign_id = ?action.request.indexed.id,
                         error = ?err,
-                        "failed to publish read respond solana signature"
+                        "failed to publish respond bidirectional solana signature"
                     );
                     crate::metrics::SIGNATURE_PUBLISH_FAILURES
                         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
@@ -1393,14 +1398,14 @@ async fn try_publish_sol(
                 sign_id = ?action.request.indexed.id,
                 tx_hash = ?tx,
                 elapsed = ?timestamp.elapsed(),
-                "published read respond solana signature successfully"
+                "published respond bidirectional solana signature successfully"
             );
-            read_responded_tx_channel.send(read_responded_tx.tx_id);
+            respond_bidirectional_tx_channel.send(respond_bidirectional_tx.tx_id);
         }
     }
 
-    if let SignRequestType::SignRespond(_) = action.request.indexed.sign_request_type {
-        sign_respond_signature_channel.send(
+    if let SignRequestType::SignBidirectional(_) = action.request.indexed.sign_request_type {
+        sign_bidirectional_signature_channel.send(
             action.public_key,
             action.request.clone(),
             action.output.clone(),
