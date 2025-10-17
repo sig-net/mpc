@@ -15,6 +15,7 @@ use mpc_primitives::SignId;
 pub enum Protocols {
     Generating,
     Resharing,
+    ResharingReady,
     Triple,
     Presignature,
     Signature,
@@ -82,6 +83,18 @@ impl From<ResharingMessage> for Message {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct ResharingReadyMessage {
+    pub epoch: Epoch,
+    pub from: Participant,
+}
+
+impl From<ResharingReadyMessage> for Message {
+    fn from(msg: ResharingReadyMessage) -> Self {
+        Message::ResharingReady(msg)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct TripleMessage {
     pub id: u64,
     pub epoch: Epoch,
@@ -141,6 +154,7 @@ pub enum Message {
     Posit(PositMessage),
     Generating(GeneratingMessage),
     Resharing(ResharingMessage),
+    ResharingReady(ResharingReadyMessage),
     Triple(TripleMessage),
     Presignature(PresignatureMessage),
     Signature(SignatureMessage),
@@ -157,6 +171,7 @@ impl Message {
             Message::Posit(_) => "Proposal",
             Message::Generating(_) => "Generating",
             Message::Resharing(_) => "Resharing",
+            Message::ResharingReady(_) => "ResharingReady",
             Message::Triple(_) => "Triple",
             Message::Presignature(_) => "Presignature",
             Message::Signature(_) => "Signature",
@@ -170,6 +185,7 @@ impl Message {
             Message::Posit(proposal) => std::mem::size_of::<PositMessage>() + proposal.data_len(),
             Message::Generating(msg) => std::mem::size_of::<GeneratingMessage>() + msg.data.len(),
             Message::Resharing(msg) => std::mem::size_of::<ResharingMessage>() + msg.data.len(),
+            Message::ResharingReady(_) => std::mem::size_of::<ResharingReadyMessage>(),
             Message::Triple(msg) => std::mem::size_of::<TripleMessage>() + msg.data.len(),
             Message::Presignature(msg) => {
                 std::mem::size_of::<PresignatureMessage>() + msg.data.len()
@@ -206,6 +222,10 @@ impl ProtocolType for GeneratingMessage {
 
 impl ProtocolType for ResharingMessage {
     const PROTOCOL: Protocols = Protocols::Resharing;
+}
+
+impl ProtocolType for ResharingReadyMessage {
+    const PROTOCOL: Protocols = Protocols::ResharingReady;
 }
 
 impl ProtocolType for TripleMessage {

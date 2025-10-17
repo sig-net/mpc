@@ -1,4 +1,4 @@
-use super::contract::primitives::Participants;
+use super::contract::{primitives::Participants, ResharingContractState};
 use super::triple::TripleSpawnerTask;
 use crate::protocol::presignature::PresignatureSpawnerTask;
 use crate::protocol::signature::SignatureSpawnerTask;
@@ -7,8 +7,10 @@ use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 use cait_sith::protocol::Participant;
 use mpc_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fmt::{Display, Formatter};
+use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
@@ -77,17 +79,31 @@ pub struct RunningState {
 
 pub struct ResharingState {
     pub me: Participant,
-    pub old_epoch: u64,
-    pub old_participants: Participants,
-    pub new_participants: Participants,
-    pub threshold: usize,
-    pub public_key: PublicKey,
-    pub protocol: ReshareProtocol,
+    pub contract: ResharingContractState,
+    pub local_private_share: Option<SecretKeyShare>,
+    pub phase: ResharingPhase,
+}
 
+pub struct ResharingReadyState {
+    pub ready: BTreeSet<Participant>,
+    pub last_broadcast: Instant,
+}
+
+pub struct ResharingRunningState {
+    pub protocol: ReshareProtocol,
     /// If the resharing state fails to store data after generating, it gets temporarily
     /// stored here and retried later.
     pub failed_store: Option<SecretKeyShare>,
+    pub started_at: Instant,
+    pub last_activity: Instant,
 }
+
+pub enum ResharingPhase {
+    AwaitingReady(ResharingReadyState),
+    Running(ResharingRunningState),
+}
+
+pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct JoiningState {
     pub participants: Participants,
@@ -214,8 +230,8 @@ impl Node {
             }
             NodeState::Resharing(state) => {
                 let _ = self.watcher_tx.send(NodeStatus::Resharing {
-                    old_participants: state.old_participants.keys_vec(),
-                    new_participants: state.new_participants.keys_vec(),
+                    old_participants: state.contract.old_participants.keys_vec(),
+                    new_participants: state.contract.new_participants.keys_vec(),
                 });
             }
             NodeState::Joining(state) => {

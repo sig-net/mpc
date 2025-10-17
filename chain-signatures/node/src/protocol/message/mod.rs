@@ -7,7 +7,8 @@ use crate::protocol::message::sub::{
 };
 pub use crate::protocol::message::types::{
     GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
-    PresignatureMessage, Protocols, ResharingMessage, SignatureMessage, TripleMessage,
+    PresignatureMessage, Protocols, ResharingMessage, ResharingReadyMessage, SignatureMessage,
+    TripleMessage,
 };
 use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::FullPresignatureId;
@@ -59,6 +60,7 @@ pub struct MessageInbox {
 
     generating: Subscriber<GeneratingMessage>,
     resharing: Subscriber<ResharingMessage>,
+    resharing_ready: Subscriber<ResharingReadyMessage>,
     triple: HashMap<TripleId, Subscriber<TripleMessage>>,
     triple_init: Subscriber<(TripleId, Participant, PositAction)>,
     presignature: HashMap<PresignatureId, Subscriber<PresignatureMessage>>,
@@ -81,6 +83,7 @@ impl MessageInbox {
             subscribe_rx,
             generating: Subscriber::unsubscribed(),
             resharing: Subscriber::unsubscribed(),
+            resharing_ready: Subscriber::unsubscribed(),
             triple: HashMap::new(),
             triple_init: Subscriber::unsubscribed(),
             presignature: HashMap::new(),
@@ -117,6 +120,9 @@ impl MessageInbox {
             }
             Message::Resharing(message) => {
                 let _ = self.resharing.send(message).await;
+            }
+            Message::ResharingReady(message) => {
+                let _ = self.resharing_ready.send(message).await;
             }
             Message::Triple(message) => {
                 // NOTE: not logging the error because this is simply just channel closure.
@@ -281,6 +287,15 @@ impl MessageInbox {
                             "trying to unsub from an unknown signature subscription"
                         );
                     }
+                }
+            },
+            SubscribeId::ResharingReady => match sub.action {
+                SubscribeRequestAction::Subscribe(resp) => {
+                    let rx = self.resharing_ready.subscribe();
+                    let _ = resp.send(SubscribeResponse::ResharingReady(rx));
+                }
+                SubscribeRequestAction::Unsubscribe => {
+                    self.resharing_ready.unsubscribe();
                 }
             },
             SubscribeId::Triples => match sub.action {
@@ -635,6 +650,18 @@ impl MessageChannel {
             SubscribeResponse::Resharing(rx) => rx,
             _ => {
                 panic!("received unexpected subscribe response for resharing");
+            }
+        }
+    }
+
+    pub async fn subscribe_resharing_ready(&self) -> mpsc::Receiver<ResharingReadyMessage> {
+        let Some(subscription) = self.subscribe(SubscribeId::ResharingReady).await else {
+            panic!("failed to subscribe for resharing readiness");
+        };
+        match subscription {
+            SubscribeResponse::ResharingReady(rx) => rx,
+            _ => {
+                panic!("received unexpected subscribe response for resharing readiness");
             }
         }
     }
