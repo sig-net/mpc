@@ -1,5 +1,6 @@
 use integration_tests::actions;
 use integration_tests::cluster;
+use integration_tests::utils;
 
 use k256::elliptic_curve::point::AffineCoordinates;
 use mpc_contract::config::Config;
@@ -8,6 +9,7 @@ use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt}
 use mpc_node::kdf::into_eth_sig;
 use mpc_node::util::NearPublicKeyExt as _;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
+use std::time::Duration;
 use test_log::test;
 
 pub mod mpc;
@@ -215,5 +217,56 @@ async fn test_batch_random_signature() -> anyhow::Result<()> {
 async fn test_batch_duplicate_signature() -> anyhow::Result<()> {
     let nodes = cluster::spawn().await?;
     actions::batch_duplicate_signature_production(&nodes).await?;
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_resharing_offline_participant_recovers() -> anyhow::Result<()> {
+    let mut nodes = cluster::spawn().disable_prestockpile().await?;
+    nodes.wait().signable().await?;
+    let initial_state = nodes.expect_running().await?;
+    let initial_epoch = initial_state.epoch;
+
+    // Shutdown the node that will be offline during the resharing initially.
+    let offline_account = nodes.account_id(0).clone();
+    let offline_config = nodes.kill_node(&offline_account).await;
+
+    let new_account = nodes.start(None).await?;
+
+    // Voting in the new participant with threshold number of online participants
+    let participant_accounts = nodes.participant_accounts().await?;
+    let voters = participant_accounts
+        .into_iter()
+        .filter(|account| account.id() != &offline_account)
+        .take(nodes.cfg.threshold)
+        .collect::<Vec<_>>();
+    utils::vote_join(&voters, nodes.contract().id(), new_account.id()).await?;
+
+    nodes.wait().node_resharing(0).node_resharing(1).await?;
+
+    // Now we should wait to see that we are still in the resharing state for a bit
+    tokio::time::sleep(Duration::from_secs(90)).await;
+
+    assert!(matches!(
+        nodes.contract_state().await?,
+        mpc_contract::ProtocolContractState::Resharing(_)
+    ));
+
+    // Restart the node that was offline during the resharing.
+    nodes.restart_node(offline_config).await?;
+
+    // We should now be able to complete the resharing.
+    let final_state = nodes
+        .wait()
+        .running_on_epoch(initial_epoch + 1)
+        .nodes_running()
+        .await?;
+
+    assert_eq!(
+        final_state.participants.len(),
+        initial_state.participants.len() + 1
+    );
+    assert!(final_state.participants.contains_key(new_account.id()));
+
     Ok(())
 }

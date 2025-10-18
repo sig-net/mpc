@@ -381,14 +381,11 @@ impl ResharingState {
         self.contract.new_participants.len()
     }
 
-    fn ready_count(&self, ready_state: &ResharingReadyState, mesh_state: &MeshState) -> usize {
+    fn ready_count(&self, ready_state: &ResharingReadyState, _mesh_state: &MeshState) -> usize {
         ready_state
             .ready
             .iter()
-            .filter(|participant| {
-                self.contract.new_participants.contains_key(participant)
-                    && mesh_state.stable.contains(participant)
-            })
+            .filter(|participant| self.contract.new_participants.contains_key(participant))
             .count()
     }
 
@@ -487,6 +484,22 @@ impl ResharingState {
     }
 }
 
+impl CryptographicProtocol for NodeState {
+    async fn progress(
+        self,
+        ctx: &mut MpcSignProtocol,
+        cfg: Config,
+        mesh_state: MeshState,
+    ) -> NodeState {
+        match self {
+            NodeState::Generating(state) => state.progress(ctx, cfg, mesh_state).await,
+            NodeState::Resharing(state) => state.progress(ctx, cfg, mesh_state).await,
+            NodeState::WaitingForConsensus(state) => state.progress(ctx, cfg, mesh_state).await,
+            _ => self,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,21 +568,5 @@ mod tests {
 
         mesh_state.stable.insert(other);
         assert_eq!(state.ready_count(&ready, &mesh_state), 2);
-    }
-}
-
-impl CryptographicProtocol for NodeState {
-    async fn progress(
-        self,
-        ctx: &mut MpcSignProtocol,
-        cfg: Config,
-        mesh_state: MeshState,
-    ) -> NodeState {
-        match self {
-            NodeState::Generating(state) => state.progress(ctx, cfg, mesh_state).await,
-            NodeState::Resharing(state) => state.progress(ctx, cfg, mesh_state).await,
-            NodeState::WaitingForConsensus(state) => state.progress(ctx, cfg, mesh_state).await,
-            _ => self,
-        }
     }
 }
