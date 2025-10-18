@@ -6,7 +6,6 @@ use super::state::{
     ResharingState, RESHARING_READY_BROADCAST_INTERVAL,
 };
 use super::MpcSignProtocol;
-use crate::config::Config;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage, ResharingReadyMessage};
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
@@ -28,21 +27,11 @@ pub enum CryptographicError {
 }
 
 pub(crate) trait CryptographicProtocol {
-    async fn progress(
-        self,
-        ctx: &mut MpcSignProtocol,
-        cfg: Config,
-        mesh_state: MeshState,
-    ) -> NodeState;
+    async fn progress(self, ctx: &mut MpcSignProtocol, mesh_state: MeshState) -> NodeState;
 }
 
 impl CryptographicProtocol for GeneratingState {
-    async fn progress(
-        mut self,
-        ctx: &mut MpcSignProtocol,
-        _cfg: Config,
-        mesh_state: MeshState,
-    ) -> NodeState {
+    async fn progress(mut self, ctx: &mut MpcSignProtocol, mesh_state: MeshState) -> NodeState {
         // Previous save to secret storage failed, try again until successful.
         if let Some((pk, sk_share)) = self.failed_store.take() {
             return self.finalize(pk, sk_share, ctx).await;
@@ -166,24 +155,14 @@ impl GeneratingState {
 }
 
 impl CryptographicProtocol for WaitingForConsensusState {
-    async fn progress(
-        self,
-        _ctx: &mut MpcSignProtocol,
-        _cfg: Config,
-        _mesh_state: MeshState,
-    ) -> NodeState {
+    async fn progress(self, _ctx: &mut MpcSignProtocol, _mesh_state: MeshState) -> NodeState {
         // Wait for ConsensusProtocol step to advance state
         NodeState::WaitingForConsensus(self)
     }
 }
 
 impl CryptographicProtocol for ResharingState {
-    async fn progress(
-        mut self,
-        ctx: &mut MpcSignProtocol,
-        _cfg: Config,
-        mesh_state: MeshState,
-    ) -> NodeState {
+    async fn progress(mut self, ctx: &mut MpcSignProtocol, mesh_state: MeshState) -> NodeState {
         tracing::info!(active = ?mesh_state.active.keys_vec(), "progressing key reshare");
 
         loop {
@@ -194,7 +173,6 @@ impl CryptographicProtocol for ResharingState {
                 ResharingPhase::AwaitingReady(mut ready_state) => {
                     ready_state.ready.insert(self.me);
                     let updated = self.drain_ready_messages(ctx, &mut ready_state);
-
                     if updated {
                         tracing::debug!(?ready_state.ready, "resharing: readiness updated");
                     }
@@ -205,9 +183,10 @@ impl CryptographicProtocol for ResharingState {
                     }
 
                     let ready_count = self.ready_count(&ready_state, &mesh_state);
-                    let total = self.expected_ready_count();
+                    let total = self.contract.new_participants.len();
+                    let threshold = self.contract.threshold;
 
-                    if total > 0 && ready_count == total {
+                    if total >= threshold && ready_count == total {
                         match self.begin_running_phase() {
                             Ok(running_state) => {
                                 tracing::info!(
@@ -377,10 +356,6 @@ impl ResharingState {
         }
     }
 
-    fn expected_ready_count(&self) -> usize {
-        self.contract.new_participants.len()
-    }
-
     fn ready_count(&self, ready_state: &ResharingReadyState, _mesh_state: &MeshState) -> usize {
         ready_state
             .ready
@@ -457,7 +432,7 @@ impl ResharingState {
             .store(&PersistentNodeData {
                 epoch: self.contract.old_epoch + 1,
                 private_share,
-                public_key: self.contract.public_key.clone(),
+                public_key: self.contract.public_key,
             })
             .await
         {
@@ -479,22 +454,17 @@ impl ResharingState {
             participants: self.contract.new_participants.clone(),
             threshold: self.contract.threshold,
             private_share,
-            public_key: self.contract.public_key.clone(),
+            public_key: self.contract.public_key,
         }))
     }
 }
 
 impl CryptographicProtocol for NodeState {
-    async fn progress(
-        self,
-        ctx: &mut MpcSignProtocol,
-        cfg: Config,
-        mesh_state: MeshState,
-    ) -> NodeState {
+    async fn progress(self, ctx: &mut MpcSignProtocol, mesh_state: MeshState) -> NodeState {
         match self {
-            NodeState::Generating(state) => state.progress(ctx, cfg, mesh_state).await,
-            NodeState::Resharing(state) => state.progress(ctx, cfg, mesh_state).await,
-            NodeState::WaitingForConsensus(state) => state.progress(ctx, cfg, mesh_state).await,
+            NodeState::Generating(state) => state.progress(ctx, mesh_state).await,
+            NodeState::Resharing(state) => state.progress(ctx, mesh_state).await,
+            NodeState::WaitingForConsensus(state) => state.progress(ctx, mesh_state).await,
             _ => self,
         }
     }

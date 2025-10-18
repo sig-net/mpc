@@ -83,7 +83,6 @@ impl MpcSignProtocol {
         mut node: Node,
         mut gov_client: G,
         contract_state: ContractStateWatcher,
-        config: watch::Receiver<Config>,
         mesh_state: watch::Receiver<MeshState>,
     ) {
         let my_account_id = self.my_account_id.as_str();
@@ -103,14 +102,9 @@ impl MpcSignProtocol {
                 .with_label_values(&[my_account_id.as_str()])
                 .inc();
 
-            let cfg = config.borrow().clone();
             let mesh_state = mesh_state.borrow().clone();
-
             let crypto_time = Instant::now();
-            node.state = node
-                .state
-                .progress(&mut self, cfg.clone(), mesh_state.clone())
-                .await;
+            node.state = node.state.progress(&mut self, mesh_state).await;
             node.update_watchers().await;
             crate::metrics::PROTOCOL_LATENCY_ITER_CRYPTO
                 .with_label_values(&[my_account_id.as_str()])

@@ -98,12 +98,13 @@ pub struct ResharingRunningState {
     pub last_activity: Instant,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum ResharingPhase {
     AwaitingReady(ResharingReadyState),
     Running(ResharingRunningState),
 }
 
-pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(5);
+pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct JoiningState {
     pub participants: Participants,

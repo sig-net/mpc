@@ -465,7 +465,6 @@ impl MpcFixtureNodeBuilder {
                 protocol_state_tx,
             },
             context.contract_state,
-            config_rx.clone(),
             mesh_rx.clone(),
         ));
 

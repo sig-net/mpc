@@ -323,7 +323,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage: triple_storage.clone(),
                 presignature_storage: presignature_storage.clone(),
                 contract: contract_watcher.clone(),
-                config: config_rx.clone(),
+                config: config_rx,
                 mesh_state: mesh_state.clone(),
                 sign_bidirectional_signature_channel: sign_bidirectional_signature_channel.clone(),
             };
@@ -343,13 +343,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tokio::spawn(respond_bidirectional_tx_processor.run(bidirectional_tx_map_clone, 5));
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
-            let protocol_handle = tokio::spawn(protocol.run(
-                node,
-                near_client,
-                contract_watcher,
-                config_rx,
-                mesh_state,
-            ));
+            let protocol_handle =
+                tokio::spawn(protocol.run(node, near_client, contract_watcher, mesh_state));
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
                 web_port,
