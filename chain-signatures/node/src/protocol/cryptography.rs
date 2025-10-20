@@ -172,11 +172,14 @@ impl CryptographicProtocol for ResharingState {
             match phase {
                 ResharingPhase::AwaitingReady(mut state) => {
                     state.ready.insert(self.me);
-                    let updated = self.drain_ready_messages(ctx, &mut state);
-                    if updated {
+                    if self.update_readiness(ctx, &mut state) {
                         tracing::debug!(?state.ready, "resharing: readiness updated");
                     }
 
+                    // We will constantly broadcast our readiness until the running phase begins.
+                    // This is to ensure that all participants are aware of our readiness state.
+                    // Everyone maintains a set of ready participants, so repeatedly broadcasting
+                    // will not affect correctness and ensures liveness in case of message loss.
                     if state.last_broadcast.elapsed() >= RESHARING_READY_BROADCAST_INTERVAL {
                         self.broadcast_ready(ctx).await;
                         state.last_broadcast = Instant::now();
@@ -187,7 +190,7 @@ impl CryptographicProtocol for ResharingState {
                     let threshold = self.contract.threshold;
 
                     if total >= threshold && ready == total {
-                        match self.begin_running_phase() {
+                        match self.start_resharing() {
                             Ok(running_state) => {
                                 tracing::info!(
                                     "resharing: all participants ready, starting protocol"
@@ -364,7 +367,7 @@ impl ResharingState {
             .count()
     }
 
-    fn drain_ready_messages(
+    fn update_readiness(
         &self,
         ctx: &mut MpcSignProtocol,
         ready_state: &mut ResharingReadyState,
@@ -413,7 +416,7 @@ impl ResharingState {
         }
     }
 
-    fn begin_running_phase(&mut self) -> Result<ResharingRunningState, InitializationError> {
+    fn start_resharing(&mut self) -> Result<ResharingRunningState, InitializationError> {
         let protocol = ReshareProtocol::new(self.local_private_share, self.me, &self.contract)?;
         let now = Instant::now();
         Ok(ResharingRunningState {
