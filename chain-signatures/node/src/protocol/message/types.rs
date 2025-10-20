@@ -86,6 +86,10 @@ impl From<ResharingMessage> for Message {
 pub struct ResharingReadyMessage {
     pub epoch: Epoch,
     pub from: Participant,
+    /// Monotonic nonce attached by the sender so repeated ready broadcasts have distinct
+    /// ciphertexts/signatures and aren’t removed by the inbox idempotent filter. Receivers
+    /// ignore the value—it exists purely to defeat deduplication.
+    pub nonce: u64,
 }
 
 impl From<ResharingReadyMessage> for Message {

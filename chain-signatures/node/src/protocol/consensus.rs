@@ -927,5 +927,6 @@ async fn start_resharing(
             ready,
             last_broadcast: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,
         }),
+        ready_nonce: 0,
     })
 }

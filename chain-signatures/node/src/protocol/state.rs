@@ -82,6 +82,7 @@ pub struct ResharingState {
     pub contract: ResharingContractState,
     pub local_private_share: Option<SecretKeyShare>,
     pub phase: ResharingPhase,
+    pub ready_nonce: u64,
 }
 
 pub struct ResharingReadyState {

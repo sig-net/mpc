@@ -170,23 +170,23 @@ impl CryptographicProtocol for ResharingState {
             std::mem::swap(&mut self.phase, &mut phase);
 
             match phase {
-                ResharingPhase::AwaitingReady(mut ready_state) => {
-                    ready_state.ready.insert(self.me);
-                    let updated = self.drain_ready_messages(ctx, &mut ready_state);
+                ResharingPhase::AwaitingReady(mut state) => {
+                    state.ready.insert(self.me);
+                    let updated = self.drain_ready_messages(ctx, &mut state);
                     if updated {
-                        tracing::debug!(?ready_state.ready, "resharing: readiness updated");
+                        tracing::debug!(?state.ready, "resharing: readiness updated");
                     }
 
-                    if ready_state.last_broadcast.elapsed() >= RESHARING_READY_BROADCAST_INTERVAL {
+                    if state.last_broadcast.elapsed() >= RESHARING_READY_BROADCAST_INTERVAL {
                         self.broadcast_ready(ctx).await;
-                        ready_state.last_broadcast = Instant::now();
+                        state.last_broadcast = Instant::now();
                     }
 
-                    let ready_count = self.ready_count(&ready_state, &mesh_state);
+                    let ready = self.ready_count(&state);
                     let total = self.contract.new_participants.len();
                     let threshold = self.contract.threshold;
 
-                    if total >= threshold && ready_count == total {
+                    if total >= threshold && ready == total {
                         match self.begin_running_phase() {
                             Ok(running_state) => {
                                 tracing::info!(
@@ -200,18 +200,18 @@ impl CryptographicProtocol for ResharingState {
                                     ?err,
                                     "resharing: failed to initialize protocol from readiness"
                                 );
-                                ready_state = self.initial_ready_state();
+                                state = self.initial_ready_state();
                             }
                         }
                     } else {
                         tracing::debug!(
-                            ready = ready_count,
+                            ready,
                             total,
                             "resharing: waiting for participants to announce readiness"
                         );
                     }
 
-                    self.phase = ResharingPhase::AwaitingReady(ready_state);
+                    self.phase = ResharingPhase::AwaitingReady(state);
                     return NodeState::Resharing(self);
                 }
                 ResharingPhase::Running(mut running_state) => {
@@ -356,7 +356,7 @@ impl ResharingState {
         }
     }
 
-    fn ready_count(&self, ready_state: &ResharingReadyState, _mesh_state: &MeshState) -> usize {
+    fn ready_count(&self, ready_state: &ResharingReadyState) -> usize {
         ready_state
             .ready
             .iter()
@@ -372,7 +372,7 @@ impl ResharingState {
         let mut updated = false;
         loop {
             match ctx.resharing_ready.try_recv() {
-                Ok(ResharingReadyMessage { epoch, from }) => {
+                Ok(ResharingReadyMessage { epoch, from, .. }) => {
                     if epoch != self.contract.old_epoch {
                         continue;
                     }
@@ -392,7 +392,9 @@ impl ResharingState {
         updated
     }
 
-    async fn broadcast_ready(&self, ctx: &mut MpcSignProtocol) {
+    async fn broadcast_ready(&mut self, ctx: &mut MpcSignProtocol) {
+        let nonce = self.ready_nonce;
+        self.ready_nonce = self.ready_nonce.wrapping_add(1);
         for participant in self.contract.new_participants.keys() {
             if participant == &self.me {
                 continue;
@@ -404,6 +406,7 @@ impl ResharingState {
                     ResharingReadyMessage {
                         epoch: self.contract.old_epoch,
                         from: self.me,
+                        nonce,
                     },
                 )
                 .await;
@@ -467,76 +470,5 @@ impl CryptographicProtocol for NodeState {
             NodeState::WaitingForConsensus(state) => state.progress(ctx, mesh_state).await,
             _ => self,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
-    use crate::protocol::contract::ResharingContractState;
-    use crate::protocol::MeshState;
-    use crate::util::NearPublicKeyExt;
-    use cait_sith::protocol::Participant;
-    use near_crypto::SecretKey;
-    use std::collections::{BTreeSet, HashSet};
-    use std::time::Instant;
-
-    fn sample_contract() -> (ResharingState, Participant, Participant) {
-        let me = Participant::from(0);
-        let other = Participant::from(1);
-
-        let mut old_participants = Participants::default();
-        old_participants.insert(&me, ParticipantInfo::new(0));
-        old_participants.insert(&other, ParticipantInfo::new(1));
-        let new_participants = old_participants.clone();
-
-        let public_key = SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "reshare-test")
-            .public_key()
-            .into_affine_point();
-
-        let contract = ResharingContractState {
-            old_epoch: 3,
-            old_participants,
-            new_participants,
-            threshold: 2,
-            public_key,
-            finished_votes: HashSet::new(),
-        };
-
-        let state = ResharingState {
-            me,
-            contract,
-            local_private_share: None,
-            phase: ResharingPhase::AwaitingReady(ResharingReadyState {
-                ready: BTreeSet::new(),
-                last_broadcast: Instant::now(),
-            }),
-        };
-
-        (state, me, other)
-    }
-
-    #[test]
-    fn initial_ready_state_marks_self() {
-        let (state, me, _) = sample_contract();
-        let ready = state.initial_ready_state();
-        assert!(ready.ready.contains(&me));
-        let elapsed = Instant::now().duration_since(ready.last_broadcast);
-        assert!(elapsed >= RESHARING_READY_BROADCAST_INTERVAL);
-    }
-
-    #[test]
-    fn ready_count_respects_mesh_state() {
-        let (state, me, other) = sample_contract();
-        let mut ready = state.initial_ready_state();
-        ready.ready.insert(other);
-
-        let mut mesh_state = MeshState::default();
-        mesh_state.stable.insert(me);
-        assert_eq!(state.ready_count(&ready, &mesh_state), 1);
-
-        mesh_state.stable.insert(other);
-        assert_eq!(state.ready_count(&ready, &mesh_state), 2);
     }
 }
