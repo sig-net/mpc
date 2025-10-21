@@ -33,9 +33,6 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
-#[cfg(feature = "test-feature")]
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-
 use near_account_id::AccountId;
 
 /// This is the maximum amount of sign requests that we can accept in the network.
@@ -161,13 +158,7 @@ impl Attempts {
     }
 
     fn compute_retry_delay(&self) -> Duration {
-        let base_ms = retry_backoff_base_ms();
-        let exponent = self.attempts.saturating_sub(1).min(6);
-        let multiplier = 1u32 << exponent;
-        let delay_ms = base_ms
-            .saturating_mul(u64::from(multiplier))
-            .min(retry_backoff_max_ms());
-        Duration::from_millis(delay_ms)
+        Duration::ZERO
     }
 }
 
@@ -368,8 +359,7 @@ impl SignQueue {
                 reorganized = true;
             }
 
-            // Delay information is reset since we're ready to try again now that the
-            // backoff window has elapsed.
+            // Ensure the request is marked ready before requeueing it.
             request.attempts.mark_ready(now);
 
             if request.indexed.timestamp_sign_queue.is_none() {
@@ -1259,44 +1249,6 @@ impl PendingPresignature {
     }
 }
 
-#[cfg(feature = "test-feature")]
-static RETRY_BACKOFF_BASE_MS: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "test-feature")]
-static RETRY_BACKOFF_MAX_MS: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(feature = "test-feature")]
-pub fn set_signature_retry_backoff(base_ms: u64, max_ms: u64) {
-    RETRY_BACKOFF_BASE_MS.store(base_ms, AtomicOrdering::SeqCst);
-    RETRY_BACKOFF_MAX_MS.store(max_ms, AtomicOrdering::SeqCst);
-}
-
-#[cfg(feature = "test-feature")]
-pub fn reset_signature_retry_backoff() {
-    RETRY_BACKOFF_BASE_MS.store(0, AtomicOrdering::SeqCst);
-    RETRY_BACKOFF_MAX_MS.store(0, AtomicOrdering::SeqCst);
-}
-
-fn retry_backoff_base_ms() -> u64 {
-    #[cfg(feature = "test-feature")]
-    match RETRY_BACKOFF_BASE_MS.load(AtomicOrdering::SeqCst) {
-        0 => 1_000,
-        value => value,
-    }
-
-    #[cfg(not(feature = "test-feature"))]
-    1_000
-}
-
-fn retry_backoff_max_ms() -> u64 {
-    #[cfg(feature = "test-feature")]
-    match RETRY_BACKOFF_MAX_MS.load(AtomicOrdering::SeqCst) {
-        0 => 60_000,
-        value => value,
-    }
-    #[cfg(not(feature = "test-feature"))]
-    60_000
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1420,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    fn push_failed_respects_backoff() {
+    fn push_failed_is_ready_immediately() {
         let (me, stable, participants, mut queue, _account_id, _tx) = setup_queue();
 
         let sign_id = SignId::new([3; 32]);
@@ -1429,18 +1381,18 @@ mod tests {
         let request = queue.organize_request(&stable, &participants, indexed, 0);
         queue.requests.insert(sign_id, request);
 
-        let before = Instant::now();
         queue.push_failed(sign_id);
         assert_eq!(queue.failed_requests.len(), 1);
         let attempts = &queue.requests.get(&sign_id).unwrap().attempts;
         assert_eq!(attempts.attempts, 1);
-        assert!(attempts.next_retry_at > before);
+        assert!(attempts.next_retry_at <= Instant::now());
+        assert!(attempts.is_ready(Instant::now()));
 
         queue.push_failed(sign_id);
         let attempts = &queue.requests.get(&sign_id).unwrap().attempts;
         assert_eq!(attempts.attempts, 2);
         assert_eq!(queue.failed_requests.len(), 1);
-        assert!(attempts.next_retry_at > before);
-        assert!(!attempts.is_ready(Instant::now()));
+        assert!(attempts.next_retry_at <= Instant::now());
+        assert!(attempts.is_ready(Instant::now()));
     }
 }

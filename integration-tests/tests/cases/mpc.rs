@@ -3,13 +3,11 @@ use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::{MpcFixtureBuilder, SignatureDropper};
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::signature::{reset_signature_retry_backoff, set_signature_retry_backoff};
 use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
-use rand::{rngs::StdRng, seq::IteratorRandom, SeedableRng};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::time::Duration;
 
@@ -257,19 +255,8 @@ async fn test_sign_request_retries_after_failure() {
     );
 }
 
-struct RetryBackoffGuard;
-
-impl Drop for RetryBackoffGuard {
-    fn drop(&mut self) {
-        reset_signature_retry_backoff();
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn test_sign_request_retries_multiple_times() {
-    let _guard = RetryBackoffGuard;
-    set_signature_retry_backoff(10, 100);
-
     const NUM_NODES: usize = 3;
     const TARGET_ATTEMPTS: usize = 10;
 
