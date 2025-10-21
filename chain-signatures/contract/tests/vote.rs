@@ -349,3 +349,104 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_cancel_resharing() -> anyhow::Result<()> {
+    let (worker, contract, accounts, _) = init_env().await;
+
+    let initial_state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    let original_running_state = match initial_state {
+        mpc_contract::ProtocolContractState::Running(state) => state,
+        _ => panic!("expected running state"),
+    };
+
+    let alice = worker.dev_create_account().await?;
+    let execution = alice
+        .call(contract.id(), "join")
+        .args_json(json!({
+            "url": "127.0.0.1",
+            "cipher_pk": vec![1u8; 32],
+            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    let execution = accounts[0]
+        .call(contract.id(), "vote_join")
+        .args_json(json!({
+            "candidate": alice.id()
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let vote_pass: bool = execution.json().unwrap();
+    assert!(!vote_pass);
+
+    let execution = accounts[1]
+        .call(contract.id(), "vote_join")
+        .args_json(json!({
+            "candidate": alice.id()
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let vote_pass: bool = execution.json().unwrap();
+    assert!(vote_pass);
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    assert!(
+        matches!(state, mpc_contract::ProtocolContractState::Resharing(_)),
+        "should be in resharing state",
+    );
+
+    let execution = accounts[0]
+        .call(contract.id(), "vote_cancel_resharing")
+        .args_json(json!({}))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let cancel_pass: bool = execution.json().unwrap();
+    assert!(!cancel_pass);
+
+    let execution = accounts[1]
+        .call(contract.id(), "vote_cancel_resharing")
+        .args_json(json!({}))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let cancel_pass: bool = execution.json().unwrap();
+    assert!(cancel_pass);
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractState::Running(running_state) => {
+            assert_eq!(running_state.epoch, original_running_state.epoch);
+            assert_eq!(running_state.threshold, original_running_state.threshold);
+            assert_eq!(running_state.public_key, original_running_state.public_key);
+            assert_eq!(
+                running_state.participants.participants,
+                original_running_state.participants.participants
+            );
+            assert!(running_state.candidates.candidates.contains_key(alice.id()));
+            let join_votes = running_state
+                .join_votes
+                .votes
+                .get(alice.id())
+                .expect("join votes should contain candidate");
+            assert_eq!(join_votes.len(), 2);
+            assert!(join_votes.contains(accounts[0].id()));
+            assert!(join_votes.contains(accounts[1].id()));
+            assert_eq!(
+                running_state.leave_votes.votes,
+                original_running_state.leave_votes.votes
+            );
+        }
+        _ => panic!("should be back in running state"),
+    }
+
+    Ok(())
+}

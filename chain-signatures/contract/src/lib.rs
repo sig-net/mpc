@@ -365,6 +365,7 @@ impl VersionedMpcContract {
                         threshold: *threshold,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
+                        cancel_votes: HashSet::new(),
                     });
                     Ok(true)
                 } else {
@@ -411,6 +412,7 @@ impl VersionedMpcContract {
                         threshold: *threshold,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
+                        cancel_votes: HashSet::new(),
                     });
                     Ok(true)
                 } else {
@@ -471,11 +473,11 @@ impl VersionedMpcContract {
         match protocol_state {
             ProtocolContractState::Resharing(ResharingContractState {
                 old_epoch,
-                old_participants: _,
                 new_participants,
                 threshold,
                 public_key,
                 finished_votes,
+                ..
             }) => {
                 if *old_epoch + 1 != epoch {
                     return Err(InvalidState::EpochMismatch.into());
@@ -501,6 +503,40 @@ impl VersionedMpcContract {
                     Ok(true)
                 } else {
                     Err(InvalidState::UnexpectedProtocolState.message("Running: invalid epoch"))
+                }
+            }
+            _ => Err(InvalidState::UnexpectedProtocolState.message(protocol_state.name())),
+        }
+    }
+
+    #[handle_result]
+    pub fn vote_cancel_resharing(&mut self) -> Result<bool, Error> {
+        let voter = self.voter()?;
+        log!("vote_cancel_resharing: signer={voter:?}");
+        let protocol_state = self.mutable_state();
+        match protocol_state {
+            ProtocolContractState::Resharing(ResharingContractState {
+                old_epoch,
+                old_participants,
+                threshold,
+                public_key,
+                cancel_votes,
+                ..
+            }) => {
+                cancel_votes.insert(voter);
+                if cancel_votes.len() >= *threshold {
+                    *protocol_state = ProtocolContractState::Running(RunningContractState {
+                        epoch: *old_epoch,
+                        participants: old_participants.clone(),
+                        threshold: *threshold,
+                        public_key: public_key.clone(),
+                        candidates: Candidates::new(),
+                        join_votes: Votes::new(),
+                        leave_votes: Votes::new(),
+                    });
+                    Ok(true)
+                } else {
+                    Ok(false)
                 }
             }
             _ => Err(InvalidState::UnexpectedProtocolState.message(protocol_state.name())),
