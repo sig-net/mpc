@@ -236,6 +236,14 @@ impl Candidates {
     pub fn iter_mut(&mut self) -> btree_map::IterMut<'_, AccountId, CandidateInfo> {
         self.candidates.iter_mut()
     }
+
+    pub fn len(&self) -> usize {
+        self.candidates.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.candidates.is_empty()
+    }
 }
 
 impl<'a> IntoIterator for &'a Candidates {
@@ -285,6 +293,14 @@ impl Votes {
 
     pub fn entry(&mut self, account_id: AccountId) -> &mut HashSet<AccountId> {
         self.votes.entry(account_id).or_default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.votes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.votes.is_empty()
     }
 }
 

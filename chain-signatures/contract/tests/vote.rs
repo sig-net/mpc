@@ -356,9 +356,8 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
 
     let initial_state: mpc_contract::ProtocolContractState =
         contract.view("state").await.unwrap().json().unwrap();
-    let original_running_state = match initial_state {
-        mpc_contract::ProtocolContractState::Running(state) => state,
-        _ => panic!("expected running state"),
+    let mpc_contract::ProtocolContractState::Running(initial_state) = initial_state else {
+        panic!("expected running state");
     };
 
     let alice = worker.dev_create_account().await?;
@@ -424,26 +423,17 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
         contract.view("state").await.unwrap().json().unwrap();
     match state {
         mpc_contract::ProtocolContractState::Running(running_state) => {
-            assert_eq!(running_state.epoch, original_running_state.epoch);
-            assert_eq!(running_state.threshold, original_running_state.threshold);
-            assert_eq!(running_state.public_key, original_running_state.public_key);
+            assert_eq!(running_state.epoch, initial_state.epoch);
+            assert_eq!(running_state.threshold, initial_state.threshold);
+            assert_eq!(running_state.public_key, initial_state.public_key);
             assert_eq!(
                 running_state.participants.participants,
-                original_running_state.participants.participants
+                initial_state.participants.participants
             );
-            assert!(running_state.candidates.candidates.contains_key(alice.id()));
-            let join_votes = running_state
-                .join_votes
-                .votes
-                .get(alice.id())
-                .expect("join votes should contain candidate");
-            assert_eq!(join_votes.len(), 2);
-            assert!(join_votes.contains(accounts[0].id()));
-            assert!(join_votes.contains(accounts[1].id()));
-            assert_eq!(
-                running_state.leave_votes.votes,
-                original_running_state.leave_votes.votes
-            );
+            // the rest should be reset to empty
+            assert!(running_state.candidates.is_empty());
+            assert!(running_state.join_votes.is_empty());
+            assert!(running_state.leave_votes.is_empty());
         }
         _ => panic!("should be back in running state"),
     }
