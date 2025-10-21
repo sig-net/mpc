@@ -228,9 +228,13 @@ async fn test_resharing_offline_participant_recovers() -> anyhow::Result<()> {
     let initial_epoch = initial_state.epoch;
 
     // Shutdown the node that will be offline during the resharing initially.
+    // This node will not appear in our local cluster list but still be a part of the
+    // contract participants. Meaning they're not kicked, just offline for resharing.
+    // They will have to restart later for resharing to complete.
     let offline_account = nodes.account_id(0).clone();
     let offline_config = nodes.kill_node(&offline_account).await;
 
+    // Start a new node that will be added during the resharing.
     let new_account = nodes.start(None).await?;
 
     // Voting in the new participant with threshold number of online participants
@@ -242,11 +246,12 @@ async fn test_resharing_offline_participant_recovers() -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     utils::vote_join(&voters, nodes.contract().id(), new_account.id()).await?;
 
-    nodes.wait().node_resharing(0).node_resharing(1).await?;
+    // Wait for all online nodes to move to resharing state.
+    nodes.wait().nodes_resharing().await?;
 
-    // Now we should wait to see that we are still in the resharing state for a bit
+    // Now we should wait to see that we are still in the resharing state even after
+    // a long time, since one participant is offline and cannot complete the resharing.
     tokio::time::sleep(Duration::from_secs(90)).await;
-
     assert!(matches!(
         nodes.contract_state().await?,
         mpc_contract::ProtocolContractState::Resharing(_)
@@ -267,6 +272,10 @@ async fn test_resharing_offline_participant_recovers() -> anyhow::Result<()> {
         initial_state.participants.len() + 1
     );
     assert!(final_state.participants.contains_key(new_account.id()));
+
+    // sign to ensure everything is working
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
 
     Ok(())
 }

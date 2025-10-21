@@ -169,7 +169,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                             tracing::info!(
                                 "started(resharing): contract state is resharing with us, joining as a participant"
                             );
-                            start_resharing(Some(private_share), ctx, contract_state).await
+                            resharing(Some(private_share), ctx, contract_state).await
                         }
                     }
                 }
@@ -628,7 +628,7 @@ impl<G: Governance> ConsensusProtocol<G> for RunningState {
                                 public_key: contract_state.public_key,
                             });
                         }
-                        start_resharing(Some(self.private_share), ctx, contract_state).await
+                        resharing(Some(self.private_share), ctx, contract_state).await
                     }
                 }
             }
@@ -863,7 +863,7 @@ impl<G: Governance> ConsensusProtocol<G> for JoiningState {
                     .contains_account_id(&ctx.my_account_id)
                 {
                     tracing::info!("joining(resharing): joining as a new participant");
-                    start_resharing(None, ctx, contract_state).await
+                    resharing(None, ctx, contract_state).await
                 } else {
                     tracing::info!("joining(resharing): network is resharing without us, waiting for them to finish");
                     NodeState::Joining(self)
@@ -903,7 +903,7 @@ impl<G: Governance> ConsensusProtocol<G> for NodeState {
     }
 }
 
-async fn start_resharing(
+async fn resharing(
     private_share: Option<SecretKeyShare>,
     ctx: &MpcSignProtocol,
     contract_state: ResharingContractState,
@@ -925,7 +925,7 @@ async fn start_resharing(
         local_private_share: private_share,
         phase: ResharingPhase::AwaitingReady(ResharingReadyState {
             ready,
-            last_broadcast: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,
+            broadcast_interval: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,
         }),
         ready_nonce: 0,
     })

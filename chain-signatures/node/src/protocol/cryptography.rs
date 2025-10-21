@@ -6,6 +6,7 @@ use super::state::{
     ResharingState, RESHARING_READY_BROADCAST_INTERVAL,
 };
 use super::MpcSignProtocol;
+use crate::protocol::contract::ResharingContractState;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage, ResharingReadyMessage};
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
@@ -165,184 +166,160 @@ impl CryptographicProtocol for ResharingState {
     async fn progress(mut self, ctx: &mut MpcSignProtocol, mesh_state: MeshState) -> NodeState {
         tracing::info!(active = ?mesh_state.active.keys_vec(), "progressing key reshare");
 
-        loop {
-            let mut phase = ResharingPhase::AwaitingReady(self.initial_ready_state());
-            std::mem::swap(&mut self.phase, &mut phase);
+        let mut resharing = match self.phase {
+            ResharingPhase::Resharing(running_state) => running_state,
+            ResharingPhase::AwaitingReady(mut state) => {
+                state.ready.insert(self.me);
+                if state.update(ctx, &self.contract) {
+                    tracing::debug!(?state.ready, "resharing: readiness updated");
+                }
 
-            match phase {
-                ResharingPhase::AwaitingReady(mut state) => {
-                    state.ready.insert(self.me);
-                    if self.update_readiness(ctx, &mut state) {
-                        tracing::debug!(?state.ready, "resharing: readiness updated");
-                    }
+                self.ready_nonce = state
+                    .broadcast_ready(self.me, ctx, &self.contract, self.ready_nonce)
+                    .await;
 
-                    // We will constantly broadcast our readiness until the running phase begins.
-                    // This is to ensure that all participants are aware of our readiness state.
-                    // Everyone maintains a set of ready participants, so repeatedly broadcasting
-                    // will not affect correctness and ensures liveness in case of message loss.
-                    if state.last_broadcast.elapsed() >= RESHARING_READY_BROADCAST_INTERVAL {
-                        self.broadcast_ready(ctx).await;
-                        state.last_broadcast = Instant::now();
-                    }
-
-                    let ready = self.ready_count(&state);
-                    let total = self.contract.new_participants.len();
-                    let threshold = self.contract.threshold;
-
-                    if total >= threshold && ready == total {
-                        match self.start_resharing() {
-                            Ok(running_state) => {
-                                tracing::info!(
-                                    "resharing: all participants ready, starting protocol"
-                                );
-                                self.phase = ResharingPhase::Running(running_state);
-                                continue;
-                            }
-                            Err(err) => {
-                                tracing::error!(
-                                    ?err,
-                                    "resharing: failed to initialize protocol from readiness"
-                                );
-                                state = self.initial_ready_state();
-                            }
-                        }
-                    } else {
-                        tracing::debug!(
-                            ready,
-                            total,
-                            "resharing: waiting for participants to announce readiness"
-                        );
-                    }
-
+                if !state.startable(&self.contract) {
                     self.phase = ResharingPhase::AwaitingReady(state);
                     return NodeState::Resharing(self);
                 }
-                ResharingPhase::Running(mut running_state) => {
-                    if let Some(sk_share) = running_state.failed_store.take() {
-                        match self.try_finalize(ctx, &mut running_state, sk_share).await {
-                            Ok(next_state) => return next_state,
-                            Err(()) => {
-                                self.phase = ResharingPhase::Running(running_state);
-                                return NodeState::Resharing(self);
-                            }
+
+                let protocol =
+                    match ReshareProtocol::new(self.local_private_share, self.me, &self.contract) {
+                        Ok(protocol) => protocol,
+                        Err(err) => {
+                            tracing::error!(?err, "resharing: failed to initialize/start protocol");
+                            state = Self::initial_awaiting(self.me);
+                            self.phase = ResharingPhase::AwaitingReady(state);
+                            return NodeState::Resharing(self);
                         }
-                    }
+                    };
 
-                    if running_state.last_activity.elapsed() > RESHARING_RUNNING_TIMEOUT {
-                        tracing::warn!(
-                            elapsed = ?running_state.last_activity.elapsed(),
-                            "resharing: protocol timed out, restarting readiness phase",
-                        );
-                        self.phase = ResharingPhase::AwaitingReady(self.initial_ready_state());
-                        return NodeState::Resharing(self);
-                    }
+                tracing::info!("resharing: all participants ready, starting protocol");
+                let now = Instant::now();
+                self.phase = ResharingPhase::Resharing(ResharingRunningState {
+                    protocol,
+                    failed_store: None,
+                    started_at: now,
+                    last_activity: now,
+                });
+                return NodeState::Resharing(self);
+            }
+        };
 
+        if let Some(sk_share) = resharing.failed_store.take() {
+            match Self::try_finalize(ctx, &mut resharing, sk_share, &self.contract).await {
+                Ok(next_state) => return next_state,
+                Err(()) => {
+                    self.phase = ResharingPhase::Resharing(resharing);
+                    return NodeState::Resharing(self);
+                }
+            }
+        }
+
+        if resharing.last_activity.elapsed() > RESHARING_RUNNING_TIMEOUT {
+            tracing::warn!(
+                elapsed = ?resharing.last_activity.elapsed(),
+                "resharing: protocol timed out, restarting readiness phase",
+            );
+            self.phase = ResharingPhase::AwaitingReady(Self::initial_awaiting(self.me));
+            return NodeState::Resharing(self);
+        }
+
+        loop {
+            let action = match resharing.protocol.poke() {
+                Ok(action) => action,
+                Err(err) => {
+                    tracing::warn!(?err, "resharing failed: refreshing...");
+                    if let Err(refresh_err) = resharing.protocol.refresh().await {
+                        tracing::warn!(?refresh_err, "unable to refresh reshare protocol");
+                    }
+                    self.phase = ResharingPhase::Resharing(resharing);
+                    return NodeState::Resharing(self);
+                }
+            };
+
+            match action {
+                Action::Wait => {
+                    tracing::debug!("resharing: waiting");
+                    let mut counts = HashMap::<Participant, usize>::new();
                     loop {
-                        let action = match running_state.protocol.poke() {
-                            Ok(action) => action,
-                            Err(err) => {
-                                tracing::warn!(?err, "resharing failed: refreshing...");
-                                if let Err(refresh_err) = running_state.protocol.refresh().await {
-                                    tracing::warn!(
-                                        ?refresh_err,
-                                        "unable to refresh reshare protocol"
-                                    );
-                                }
-                                self.phase = ResharingPhase::Running(running_state);
-                                return NodeState::Resharing(self);
+                        let msg = match ctx.resharing.try_recv() {
+                            Ok(msg) => msg,
+                            Err(mpsc::error::TryRecvError::Empty) => break,
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                tracing::warn!("resharing: unexpected channel closure, stopping");
+                                break;
                             }
                         };
 
-                        match action {
-                            Action::Wait => {
-                                tracing::debug!("resharing: waiting");
-                                let mut counts = HashMap::<Participant, usize>::new();
-                                loop {
-                                    let msg = match ctx.resharing.try_recv() {
-                                        Ok(msg) => msg,
-                                        Err(mpsc::error::TryRecvError::Empty) => break,
-                                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                                            tracing::warn!(
-                                                "resharing: unexpected channel closure, stopping"
-                                            );
-                                            break;
-                                        }
-                                    };
+                        if msg.epoch != self.contract.old_epoch {
+                            tracing::debug!(
+                                expected = self.contract.old_epoch,
+                                actual = msg.epoch,
+                                "resharing: ignoring message for other epoch",
+                            );
+                            continue;
+                        }
 
-                                    if msg.epoch != self.contract.old_epoch {
-                                        tracing::debug!(
-                                            expected = self.contract.old_epoch,
-                                            actual = msg.epoch,
-                                            "resharing: ignoring message for other epoch",
-                                        );
-                                        continue;
-                                    }
-
-                                    counts.entry(msg.from).and_modify(|c| *c += 1).or_insert(1);
-                                    running_state.protocol.message(msg.from, msg.data);
-                                }
-                                if !counts.is_empty() {
-                                    running_state.last_activity = Instant::now();
-                                    tracing::info!(?counts, "resharing: handling new messages");
-                                }
-                                self.phase = ResharingPhase::Running(running_state);
-                                return NodeState::Resharing(self);
-                            }
-                            Action::SendMany(data) => {
-                                tracing::debug!("resharing: sending a message to all participants");
-                                running_state.last_activity = Instant::now();
-                                for p in self.contract.new_participants.keys() {
-                                    if p == &self.me {
-                                        continue;
-                                    }
-                                    ctx.msg_channel
-                                        .send(
-                                            self.me,
-                                            *p,
-                                            ResharingMessage {
-                                                epoch: self.contract.old_epoch,
-                                                from: self.me,
-                                                data: data.clone(),
-                                            },
-                                        )
-                                        .await;
-                                }
-                            }
-                            Action::SendPrivate(to, data) => {
-                                tracing::debug!("resharing: sending a private message to {to:?}");
-                                if self.contract.new_participants.get(&to).is_none() {
-                                    tracing::error!(
-                                        "resharing: send_private unknown participant {to:?}"
-                                    );
-                                } else {
-                                    running_state.last_activity = Instant::now();
-                                    ctx.msg_channel
-                                        .send(
-                                            self.me,
-                                            to,
-                                            ResharingMessage {
-                                                epoch: self.contract.old_epoch,
-                                                from: self.me,
-                                                data,
-                                            },
-                                        )
-                                        .await;
-                                }
-                            }
-                            Action::Return(private_share) => {
-                                tracing::info!("resharing: successfully completed key reshare");
-                                running_state.last_activity = Instant::now();
-                                match self
-                                    .try_finalize(ctx, &mut running_state, private_share)
-                                    .await
-                                {
-                                    Ok(next_state) => return next_state,
-                                    Err(()) => {
-                                        self.phase = ResharingPhase::Running(running_state);
-                                        return NodeState::Resharing(self);
-                                    }
-                                }
-                            }
+                        counts.entry(msg.from).and_modify(|c| *c += 1).or_insert(1);
+                        resharing.protocol.message(msg.from, msg.data);
+                    }
+                    if !counts.is_empty() {
+                        resharing.last_activity = Instant::now();
+                        tracing::info!(?counts, "resharing: handling new messages");
+                    }
+                    self.phase = ResharingPhase::Resharing(resharing);
+                    return NodeState::Resharing(self);
+                }
+                Action::SendMany(data) => {
+                    tracing::debug!("resharing: sending a message to all participants");
+                    resharing.last_activity = Instant::now();
+                    for p in self.contract.new_participants.keys() {
+                        if p == &self.me {
+                            continue;
+                        }
+                        ctx.msg_channel
+                            .send(
+                                self.me,
+                                *p,
+                                ResharingMessage {
+                                    epoch: self.contract.old_epoch,
+                                    from: self.me,
+                                    data: data.clone(),
+                                },
+                            )
+                            .await;
+                    }
+                }
+                Action::SendPrivate(to, data) => {
+                    tracing::debug!("resharing: sending a private message to {to:?}");
+                    if self.contract.new_participants.get(&to).is_none() {
+                        tracing::error!("resharing: send_private unknown participant {to:?}");
+                    } else {
+                        resharing.last_activity = Instant::now();
+                        ctx.msg_channel
+                            .send(
+                                self.me,
+                                to,
+                                ResharingMessage {
+                                    epoch: self.contract.old_epoch,
+                                    from: self.me,
+                                    data,
+                                },
+                            )
+                            .await;
+                    }
+                }
+                Action::Return(private_share) => {
+                    tracing::info!("resharing: successfully completed key reshare");
+                    resharing.last_activity = Instant::now();
+                    match Self::try_finalize(ctx, &mut resharing, private_share, &self.contract)
+                        .await
+                    {
+                        Ok(next_state) => return next_state,
+                        Err(()) => {
+                            self.phase = ResharingPhase::Resharing(resharing);
+                            return NodeState::Resharing(self);
                         }
                     }
                 }
@@ -352,93 +329,26 @@ impl CryptographicProtocol for ResharingState {
 }
 
 impl ResharingState {
-    fn initial_ready_state(&self) -> ResharingReadyState {
+    fn initial_awaiting(me: Participant) -> ResharingReadyState {
         ResharingReadyState {
-            ready: std::iter::once(self.me).collect(),
-            last_broadcast: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,
+            ready: std::iter::once(me).collect(),
+            // ready to broadcast immediately
+            broadcast_interval: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,
         }
-    }
-
-    fn ready_count(&self, ready_state: &ResharingReadyState) -> usize {
-        ready_state
-            .ready
-            .iter()
-            .filter(|participant| self.contract.new_participants.contains_key(participant))
-            .count()
-    }
-
-    fn update_readiness(
-        &self,
-        ctx: &mut MpcSignProtocol,
-        ready_state: &mut ResharingReadyState,
-    ) -> bool {
-        let mut updated = false;
-        loop {
-            match ctx.resharing_ready.try_recv() {
-                Ok(ResharingReadyMessage { epoch, from, .. }) => {
-                    if epoch != self.contract.old_epoch {
-                        continue;
-                    }
-                    if self.contract.new_participants.contains_key(&from)
-                        && ready_state.ready.insert(from)
-                    {
-                        updated = true;
-                    }
-                }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    tracing::warn!("resharing: readiness channel closed unexpectedly");
-                    break;
-                }
-            }
-        }
-        updated
-    }
-
-    async fn broadcast_ready(&mut self, ctx: &mut MpcSignProtocol) {
-        let nonce = self.ready_nonce;
-        self.ready_nonce = self.ready_nonce.wrapping_add(1);
-        for participant in self.contract.new_participants.keys() {
-            if participant == &self.me {
-                continue;
-            }
-            ctx.msg_channel
-                .send(
-                    self.me,
-                    *participant,
-                    ResharingReadyMessage {
-                        epoch: self.contract.old_epoch,
-                        from: self.me,
-                        nonce,
-                    },
-                )
-                .await;
-        }
-    }
-
-    fn start_resharing(&mut self) -> Result<ResharingRunningState, InitializationError> {
-        let protocol = ReshareProtocol::new(self.local_private_share, self.me, &self.contract)?;
-        let now = Instant::now();
-        Ok(ResharingRunningState {
-            protocol,
-            failed_store: None,
-            started_at: now,
-            last_activity: now,
-        })
     }
 
     async fn try_finalize(
-        &mut self,
         ctx: &mut MpcSignProtocol,
         running_state: &mut ResharingRunningState,
         private_share: SecretKeyShare,
+        contract: &ResharingContractState,
     ) -> Result<NodeState, ()> {
         if let Err(err) = ctx
             .secret_storage
             .store(&PersistentNodeData {
-                epoch: self.contract.old_epoch + 1,
+                epoch: contract.old_epoch + 1,
                 private_share,
-                public_key: self.contract.public_key,
+                public_key: contract.public_key,
             })
             .await
         {
@@ -456,12 +366,87 @@ impl ResharingState {
         }
 
         Ok(NodeState::WaitingForConsensus(WaitingForConsensusState {
-            epoch: self.contract.old_epoch + 1,
-            participants: self.contract.new_participants.clone(),
-            threshold: self.contract.threshold,
+            epoch: contract.old_epoch + 1,
+            participants: contract.new_participants.clone(),
+            threshold: contract.threshold,
             private_share,
-            public_key: self.contract.public_key,
+            public_key: contract.public_key,
         }))
+    }
+}
+
+impl ResharingReadyState {
+    fn startable(&self, contract: &ResharingContractState) -> bool {
+        let ready = self.ready_count(contract);
+        let total = contract.new_participants.len();
+        let threshold = contract.threshold;
+
+        total >= threshold && ready == total
+    }
+
+    fn update(&mut self, ctx: &mut MpcSignProtocol, contract: &ResharingContractState) -> bool {
+        let mut updated = false;
+        loop {
+            match ctx.resharing_ready.try_recv() {
+                Ok(ResharingReadyMessage { epoch, from, .. }) => {
+                    if epoch != contract.old_epoch {
+                        continue;
+                    }
+                    if contract.new_participants.contains_key(&from) && self.ready.insert(from) {
+                        updated = true;
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    tracing::warn!("resharing: readiness channel closed unexpectedly");
+                    break;
+                }
+            }
+        }
+        updated
+    }
+
+    async fn broadcast_ready(
+        &mut self,
+        me: Participant,
+        ctx: &mut MpcSignProtocol,
+        contract: &ResharingContractState,
+        nonce: u64,
+    ) -> u64 {
+        // We will constantly broadcast our readiness until the running phase begins.
+        // This is to ensure that all participants are aware of our readiness state.
+        // Everyone maintains a set of ready participants, so repeatedly broadcasting
+        // will not affect correctness and ensures liveness in case of message loss.
+        if self.broadcast_interval.elapsed() < RESHARING_READY_BROADCAST_INTERVAL {
+            return nonce;
+        }
+        self.broadcast_interval = Instant::now();
+
+        for &participant in contract.new_participants.keys() {
+            if participant == me {
+                continue;
+            }
+            ctx.msg_channel
+                .send(
+                    me,
+                    participant,
+                    ResharingReadyMessage {
+                        epoch: contract.old_epoch,
+                        from: me,
+                        nonce,
+                    },
+                )
+                .await;
+        }
+
+        nonce.wrapping_add(1)
+    }
+
+    fn ready_count(&self, contract: &ResharingContractState) -> usize {
+        self.ready
+            .iter()
+            .filter(|participant| contract.new_participants.contains_key(participant))
+            .count()
     }
 }
 

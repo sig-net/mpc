@@ -87,7 +87,10 @@ pub struct ResharingState {
 
 pub struct ResharingReadyState {
     pub ready: BTreeSet<Participant>,
-    pub last_broadcast: Instant,
+    /// Interval to control broadcasting readiness messages.
+    // NOTE: this is an Instant for now since generating/resharing tasks are not async
+    // and happen in main protocol loop. once it becomes async we can make this an interval.
+    pub broadcast_interval: Instant,
 }
 
 pub struct ResharingRunningState {
@@ -102,10 +105,10 @@ pub struct ResharingRunningState {
 #[allow(clippy::large_enum_variant)]
 pub enum ResharingPhase {
     AwaitingReady(ResharingReadyState),
-    Running(ResharingRunningState),
+    Resharing(ResharingRunningState),
 }
 
-pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(30);
+pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct JoiningState {
     pub participants: Participants,
