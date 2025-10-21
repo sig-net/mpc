@@ -1,8 +1,7 @@
 use super::contract::{ProtocolState, ResharingContractState};
 use super::state::{
-    JoiningState, NodeState, PersistentNodeData, ResharingPhase, ResharingReadyState,
-    ResharingState, RunningState, StartedState, WaitingForConsensusState,
-    RESHARING_READY_BROADCAST_INTERVAL,
+    JoiningState, NodeState, PersistentNodeData, ResharingPhase, ResharingState, RunningState,
+    StartedState, WaitingForConsensusState,
 };
 use super::MpcSignProtocol;
 use crate::protocol::contract::primitives::Participants;
@@ -15,8 +14,6 @@ use crate::types::{KeygenProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
-use std::time::Instant;
 
 pub(crate) trait ConsensusProtocol<G> {
     async fn advance(
@@ -917,16 +914,11 @@ async fn resharing(
             public_key: contract_state.public_key,
         });
     };
-    let mut ready = BTreeSet::new();
-    ready.insert(me);
     NodeState::Resharing(ResharingState {
         me,
         contract: contract_state,
         local_private_share: private_share,
-        phase: ResharingPhase::AwaitingReady(ResharingReadyState {
-            ready,
-            broadcast_interval: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,
-        }),
+        phase: ResharingPhase::awaiting(me),
         ready_nonce: 0,
     })
 }

@@ -17,7 +17,7 @@ use k256::elliptic_curve::group::GroupEncoding;
 use mpc_crypto::PublicKey;
 use tokio::sync::mpsc;
 
-const RESHARING_RUNNING_TIMEOUT: Duration = Duration::from_secs(60);
+pub const RESHARING_RUNNING_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(thiserror::Error, Debug)]
 pub enum CryptographicError {
@@ -167,7 +167,7 @@ impl CryptographicProtocol for ResharingState {
         tracing::info!(active = ?mesh_state.active.keys_vec(), "progressing key reshare");
 
         let mut resharing = match self.phase {
-            ResharingPhase::Resharing(running_state) => running_state,
+            ResharingPhase::Resharing(resharing) => resharing,
             ResharingPhase::AwaitingReady(mut state) => {
                 state.ready.insert(self.me);
                 if state.update(ctx, &self.contract) {
@@ -188,8 +188,7 @@ impl CryptographicProtocol for ResharingState {
                         Ok(protocol) => protocol,
                         Err(err) => {
                             tracing::error!(?err, "resharing: failed to initialize/start protocol");
-                            state = Self::initial_awaiting(self.me);
-                            self.phase = ResharingPhase::AwaitingReady(state);
+                            self.phase = ResharingPhase::awaiting(self.me);
                             return NodeState::Resharing(self);
                         }
                     };
@@ -221,7 +220,7 @@ impl CryptographicProtocol for ResharingState {
                 elapsed = ?resharing.last_activity.elapsed(),
                 "resharing: protocol timed out, restarting readiness phase",
             );
-            self.phase = ResharingPhase::AwaitingReady(Self::initial_awaiting(self.me));
+            self.phase = ResharingPhase::awaiting(self.me);
             return NodeState::Resharing(self);
         }
 
@@ -329,14 +328,6 @@ impl CryptographicProtocol for ResharingState {
 }
 
 impl ResharingState {
-    fn initial_awaiting(me: Participant) -> ResharingReadyState {
-        ResharingReadyState {
-            ready: std::iter::once(me).collect(),
-            // ready to broadcast immediately
-            broadcast_interval: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,
-        }
-    }
-
     async fn try_finalize(
         ctx: &mut MpcSignProtocol,
         running_state: &mut ResharingRunningState,
@@ -390,6 +381,11 @@ impl ResharingReadyState {
             match ctx.resharing_ready.try_recv() {
                 Ok(ResharingReadyMessage { epoch, from, .. }) => {
                     if epoch != contract.old_epoch {
+                        tracing::warn!(
+                            message_epoch = epoch,
+                            contract_epoch = contract.old_epoch,
+                            "resharing: ignoring readiness message for other epoch",
+                        );
                         continue;
                     }
                     if contract.new_participants.contains_key(&from) && self.ready.insert(from) {

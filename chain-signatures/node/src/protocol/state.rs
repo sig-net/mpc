@@ -108,6 +108,16 @@ pub enum ResharingPhase {
     Resharing(ResharingRunningState),
 }
 
+impl ResharingPhase {
+    pub fn awaiting(me: Participant) -> Self {
+        Self::AwaitingReady(ResharingReadyState {
+            ready: std::iter::once(me).collect(),
+            // ready to broadcast immediately
+            broadcast_interval: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,
+        })
+    }
+}
+
 pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct JoiningState {
