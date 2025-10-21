@@ -101,7 +101,6 @@ pub struct SignRequest {
     pub proposer: Participant,
     pub stable: BTreeSet<Participant>,
     pub round: usize,
-    attempts: Attempts,
 }
 
 pub struct SignQueue {
@@ -118,48 +117,6 @@ pub struct SignQueue {
     /// The set of pending request listeners that are waiting for a sign request to be indexed.
     /// They will be notified when a sign request is available.
     pending: HashMap<SignId, oneshot::Sender<SignRequest>>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Attempts {
-    attempts: u32,
-    next_retry_at: Instant,
-}
-
-impl Default for Attempts {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Attempts {
-    pub fn new() -> Self {
-        Self {
-            attempts: 0,
-            next_retry_at: Instant::now(),
-        }
-    }
-
-    pub fn schedule_next_attempt(&mut self) {
-        self.attempts = self.attempts.saturating_add(1);
-        self.next_retry_at = Instant::now() + self.compute_retry_delay();
-    }
-
-    pub fn is_ready(&self, now: Instant) -> bool {
-        self.next_retry_at <= now
-    }
-
-    pub fn is_ready_now(&self) -> bool {
-        self.is_ready(Instant::now())
-    }
-
-    pub fn mark_ready(&mut self, now: Instant) {
-        self.next_retry_at = now;
-    }
-
-    fn compute_retry_delay(&self) -> Duration {
-        Duration::ZERO
-    }
 }
 
 impl SignQueue {
@@ -269,7 +226,6 @@ impl SignQueue {
             proposer,
             stable: stable.clone(),
             round,
-            attempts: Attempts::new(),
         }
     }
 
@@ -344,23 +300,12 @@ impl SignQueue {
                 continue;
             };
 
-            if !request.attempts.is_ready(now) {
-                self.requests.insert(id, request);
-                self.failed_requests.push_back(id);
-                continue;
-            }
-
             let mut reorganized = false;
             if &request.stable != stable {
-                let attempts = request.attempts;
                 request =
                     self.organize_request(stable, participants, request.indexed, request.round);
-                request.attempts = attempts;
                 reorganized = true;
             }
-
-            // Ensure the request is marked ready before requeueing it.
-            request.attempts.mark_ready(now);
 
             if request.indexed.timestamp_sign_queue.is_none() {
                 request.indexed.timestamp_sign_queue = Some(now);
@@ -381,9 +326,7 @@ impl SignQueue {
     }
 
     pub fn push_failed(&mut self, sign_id: SignId) {
-        if let Some(request) = self.requests.get_mut(&sign_id) {
-            request.attempts.schedule_next_attempt();
-
+        if self.requests.contains_key(&sign_id) {
             if !self.failed_requests.contains(&sign_id) {
                 self.failed_requests.push_back(sign_id);
             }
@@ -1304,43 +1247,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retries_wait_until_ready() {
-        let (me, stable, participants, mut queue, account_id, _tx) = setup_queue();
-
-        let sign_id = SignId::new([1; 32]);
-        let mut indexed = make_indexed_request(sign_id);
-        indexed.participants = Some(vec![me]);
-        let request = queue.organize_request(&stable, &participants, indexed, 0);
-        queue.requests.insert(sign_id, request);
-        queue.push_failed(sign_id);
-
-        {
-            let request = queue.requests.get_mut(&sign_id).unwrap();
-            request.attempts.next_retry_at = Instant::now() + Duration::from_secs(10);
-        }
-
-        queue.organize_failed(&stable, &participants, &account_id);
-        assert!(queue.my_requests.is_empty());
-        assert!(queue.failed_requests.contains(&sign_id));
-
-        {
-            let request = queue.requests.get_mut(&sign_id).unwrap();
-            request.attempts.next_retry_at = Instant::now() - Duration::from_secs(1);
-        }
-
-        queue.organize_failed(&stable, &participants, &account_id);
-        assert_eq!(queue.my_requests.len(), 1);
-        assert_eq!(queue.my_requests.front(), Some(&sign_id));
-        assert!(queue
-            .requests
-            .get(&sign_id)
-            .unwrap()
-            .attempts
-            .is_ready_now());
-        assert!(!queue.failed_requests.contains(&sign_id));
-    }
-
-    #[tokio::test]
     async fn prioritizes_new_requests_over_old_retries() {
         let (me, stable, participants, mut queue, account_id, tx) = setup_queue();
 
@@ -1350,12 +1256,6 @@ mod tests {
         let old_request = queue.organize_request(&stable, &participants, old_indexed, 0);
         queue.requests.insert(old_id, old_request);
         queue.push_failed(old_id);
-        queue
-            .requests
-            .get_mut(&old_id)
-            .unwrap()
-            .attempts
-            .next_retry_at = Instant::now() - Duration::from_millis(100);
 
         let new_id = SignId::new([9; 32]);
         let mut new_indexed = make_indexed_request(new_id);
@@ -1369,30 +1269,5 @@ mod tests {
         let second = queue.take_mine().expect("old request present");
         assert_eq!(second.indexed.id, old_id);
         assert!(queue.my_requests.is_empty());
-    }
-
-    #[test]
-    fn push_failed_is_ready_immediately() {
-        let (me, stable, participants, mut queue, _account_id, _tx) = setup_queue();
-
-        let sign_id = SignId::new([3; 32]);
-        let mut indexed = make_indexed_request(sign_id);
-        indexed.participants = Some(vec![me]);
-        let request = queue.organize_request(&stable, &participants, indexed, 0);
-        queue.requests.insert(sign_id, request);
-
-        queue.push_failed(sign_id);
-        assert_eq!(queue.failed_requests.len(), 1);
-        let attempts = &queue.requests.get(&sign_id).unwrap().attempts;
-        assert_eq!(attempts.attempts, 1);
-        assert!(attempts.next_retry_at <= Instant::now());
-        assert!(attempts.is_ready(Instant::now()));
-
-        queue.push_failed(sign_id);
-        let attempts = &queue.requests.get(&sign_id).unwrap().attempts;
-        assert_eq!(attempts.attempts, 2);
-        assert_eq!(queue.failed_requests.len(), 1);
-        assert!(attempts.next_retry_at <= Instant::now());
-        assert!(attempts.is_ready(Instant::now()));
     }
 }
