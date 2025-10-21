@@ -237,11 +237,8 @@ impl CryptographicProtocol for ResharingState {
             let action = match resharing.protocol.poke() {
                 Ok(action) => action,
                 Err(err) => {
-                    tracing::warn!(?err, "resharing failed: refreshing...");
-                    if let Err(refresh_err) = resharing.protocol.refresh().await {
-                        tracing::warn!(?refresh_err, "unable to refresh reshare protocol");
-                    }
-                    self.phase = ResharingPhase::Resharing(resharing);
+                    tracing::warn!(?err, "resharing failed, going back to awaiting phase");
+                    self.phase = ResharingPhase::awaiting(self.me);
                     return NodeState::Resharing(self);
                 }
             };
