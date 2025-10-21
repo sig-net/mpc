@@ -1,7 +1,6 @@
-mod cryptography;
-
 pub mod consensus;
 pub mod contract;
+pub mod cryptography;
 pub mod error;
 pub mod message;
 pub mod posit;

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use super::state::{
@@ -17,7 +18,15 @@ use k256::elliptic_curve::group::GroupEncoding;
 use mpc_crypto::PublicKey;
 use tokio::sync::mpsc;
 
-pub const RESHARING_RUNNING_TIMEOUT: Duration = Duration::from_secs(300);
+pub static RESHARING_RUNNING_TIMEOUT_SECS: AtomicU64 = AtomicU64::new(300);
+
+pub fn resharing_running_timeout() -> Duration {
+    Duration::from_secs(RESHARING_RUNNING_TIMEOUT_SECS.load(Ordering::SeqCst))
+}
+
+pub fn set_resharing_running_timeout(duration: Duration) {
+    RESHARING_RUNNING_TIMEOUT_SECS.swap(duration.as_secs(), Ordering::SeqCst);
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum CryptographicError {
@@ -215,7 +224,7 @@ impl CryptographicProtocol for ResharingState {
             }
         }
 
-        if resharing.last_activity.elapsed() > RESHARING_RUNNING_TIMEOUT {
+        if resharing.last_activity.elapsed() > resharing_running_timeout() {
             tracing::warn!(
                 elapsed = ?resharing.last_activity.elapsed(),
                 "resharing: protocol timed out, restarting readiness phase",

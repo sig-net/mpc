@@ -7,6 +7,7 @@ use mpc_contract::config::Config;
 use mpc_contract::update::ProposeUpdateArgs;
 use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt};
 use mpc_node::kdf::into_eth_sig;
+use mpc_node::protocol::cryptography::set_resharing_running_timeout;
 use mpc_node::util::NearPublicKeyExt as _;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use std::time::Duration;
@@ -222,6 +223,9 @@ async fn test_batch_duplicate_signature() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_resharing_offline_participant_recovers() -> anyhow::Result<()> {
+    // have a short timeout for the resharing to complete in tests
+    set_resharing_running_timeout(Duration::from_secs(20));
+
     let mut nodes = cluster::spawn().disable_prestockpile().await?;
     nodes.wait().signable().await?;
     let initial_state = nodes.expect_running().await?;
@@ -251,7 +255,7 @@ async fn test_resharing_offline_participant_recovers() -> anyhow::Result<()> {
 
     // Now we should wait to see that we are still in the resharing state even after
     // a long time, since one participant is offline and cannot complete the resharing.
-    tokio::time::sleep(Duration::from_secs(90)).await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
     assert!(matches!(
         nodes.contract_state().await?,
         mpc_contract::ProtocolContractState::Resharing(_)
