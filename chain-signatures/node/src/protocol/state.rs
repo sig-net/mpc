@@ -7,12 +7,12 @@ use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 use cait_sith::protocol::Participant;
 use mpc_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use tokio::sync::watch;
+
+use std::collections::HashSet;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::time::{Duration, Instant};
-
-use tokio::sync::watch;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PersistentNodeData {
@@ -86,7 +86,7 @@ pub struct ResharingState {
 }
 
 pub struct ReshareAwaiting {
-    pub ready: BTreeSet<Participant>,
+    pub ready: HashSet<Participant>,
     /// Interval to control broadcasting readiness messages.
     // NOTE: this is an Instant for now since generating/resharing tasks are not async
     // and happen in main protocol loop. once it becomes async we can make this an interval.
