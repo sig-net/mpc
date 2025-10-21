@@ -25,7 +25,7 @@ use crate::indexer_sol::SignBidirectionalEvent;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
-use crate::protocol::message::{GeneratingMessage, ResharingMessage, ResharingReadyMessage};
+use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
 use crate::respond_bidirectional::RespondBidirectionalTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::SignBidirectionalSignatureChannel;
@@ -51,7 +51,7 @@ pub struct MpcSignProtocol {
     pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
     pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
-    pub(crate) resharing_ready: mpsc::Receiver<ResharingReadyMessage>,
+    pub(crate) ready: mpsc::Receiver<ReadyMessage>,
     pub(crate) msg_channel: MessageChannel,
     pub(crate) rpc_channel: RpcChannel,
     pub(crate) contract: ContractStateWatcher,

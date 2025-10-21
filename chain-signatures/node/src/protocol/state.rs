@@ -85,7 +85,7 @@ pub struct ResharingState {
     pub ready_nonce: u64,
 }
 
-pub struct ResharingReadyState {
+pub struct ReshareAwaiting {
     pub ready: BTreeSet<Participant>,
     /// Interval to control broadcasting readiness messages.
     // NOTE: this is an Instant for now since generating/resharing tasks are not async
@@ -93,7 +93,7 @@ pub struct ResharingReadyState {
     pub broadcast_interval: Instant,
 }
 
-pub struct ResharingRunningState {
+pub struct ReshareRunning {
     pub protocol: ReshareProtocol,
     /// If the resharing state fails to store data after generating, it gets temporarily
     /// stored here and retried later.
@@ -104,13 +104,13 @@ pub struct ResharingRunningState {
 
 #[allow(clippy::large_enum_variant)]
 pub enum ResharingPhase {
-    AwaitingReady(ResharingReadyState),
-    Resharing(ResharingRunningState),
+    Awaiting(ReshareAwaiting),
+    Resharing(ReshareRunning),
 }
 
 impl ResharingPhase {
     pub fn awaiting(me: Participant) -> Self {
-        Self::AwaitingReady(ResharingReadyState {
+        Self::Awaiting(ReshareAwaiting {
             ready: std::iter::once(me).collect(),
             // ready to broadcast immediately
             broadcast_interval: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,

@@ -3,12 +3,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use super::state::{
-    GeneratingState, NodeState, ResharingPhase, ResharingReadyState, ResharingRunningState,
-    ResharingState, RESHARING_READY_BROADCAST_INTERVAL,
+    GeneratingState, NodeState, ReshareAwaiting, ReshareRunning, ResharingPhase, ResharingState,
+    RESHARING_READY_BROADCAST_INTERVAL,
 };
 use super::MpcSignProtocol;
 use crate::protocol::contract::ResharingContractState;
-use crate::protocol::message::{GeneratingMessage, ResharingMessage, ResharingReadyMessage};
+use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::types::{ReshareProtocol, SecretKeyShare};
@@ -177,7 +177,7 @@ impl CryptographicProtocol for ResharingState {
 
         let mut resharing = match self.phase {
             ResharingPhase::Resharing(resharing) => resharing,
-            ResharingPhase::AwaitingReady(mut state) => {
+            ResharingPhase::Awaiting(mut state) => {
                 state.ready.insert(self.me);
                 if state.update(ctx, &self.contract) {
                     tracing::debug!(?state.ready, "resharing: readiness updated");
@@ -188,7 +188,7 @@ impl CryptographicProtocol for ResharingState {
                     .await;
 
                 if !state.startable(&self.contract) {
-                    self.phase = ResharingPhase::AwaitingReady(state);
+                    self.phase = ResharingPhase::Awaiting(state);
                     return NodeState::Resharing(self);
                 }
 
@@ -204,7 +204,7 @@ impl CryptographicProtocol for ResharingState {
 
                 tracing::info!("resharing: all participants ready, starting protocol");
                 let now = Instant::now();
-                self.phase = ResharingPhase::Resharing(ResharingRunningState {
+                self.phase = ResharingPhase::Resharing(ReshareRunning {
                     protocol,
                     failed_store: None,
                     started_at: now,
@@ -336,7 +336,7 @@ impl CryptographicProtocol for ResharingState {
 impl ResharingState {
     async fn try_finalize(
         ctx: &mut MpcSignProtocol,
-        running_state: &mut ResharingRunningState,
+        running_state: &mut ReshareRunning,
         private_share: SecretKeyShare,
         contract: &ResharingContractState,
     ) -> Result<NodeState, ()> {
@@ -372,7 +372,7 @@ impl ResharingState {
     }
 }
 
-impl ResharingReadyState {
+impl ReshareAwaiting {
     fn startable(&self, contract: &ResharingContractState) -> bool {
         let ready = self.ready_count(contract);
         let total = contract.new_participants.len();
@@ -384,8 +384,8 @@ impl ResharingReadyState {
     fn update(&mut self, ctx: &mut MpcSignProtocol, contract: &ResharingContractState) -> bool {
         let mut updated = false;
         loop {
-            match ctx.resharing_ready.try_recv() {
-                Ok(ResharingReadyMessage { epoch, from, .. }) => {
+            match ctx.ready.try_recv() {
+                Ok(ReadyMessage { epoch, from, .. }) => {
                     if epoch != contract.old_epoch {
                         tracing::warn!(
                             message_epoch = epoch,
@@ -432,7 +432,7 @@ impl ResharingReadyState {
                 .send(
                     me,
                     participant,
-                    ResharingReadyMessage {
+                    ReadyMessage {
                         epoch: contract.old_epoch,
                         from: me,
                         nonce,

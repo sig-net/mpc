@@ -15,7 +15,7 @@ use mpc_primitives::SignId;
 pub enum Protocols {
     Generating,
     Resharing,
-    ResharingReady,
+    Ready,
     Triple,
     Presignature,
     Signature,
@@ -82,19 +82,19 @@ impl From<ResharingMessage> for Message {
     }
 }
 
+// TODO: make it work alongside generating
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct ResharingReadyMessage {
+pub struct ReadyMessage {
     pub epoch: Epoch,
     pub from: Participant,
     /// Monotonic nonce attached by the sender so repeated ready broadcasts have distinct
-    /// ciphertexts/signatures and aren’t removed by the inbox idempotent filter. Receivers
-    /// ignore the value—it exists purely to defeat deduplication.
+    /// ciphertexts/signatures and aren’t removed by the inbox idempotent filter.
     pub nonce: u64,
 }
 
-impl From<ResharingReadyMessage> for Message {
-    fn from(msg: ResharingReadyMessage) -> Self {
-        Message::ResharingReady(msg)
+impl From<ReadyMessage> for Message {
+    fn from(msg: ReadyMessage) -> Self {
+        Message::Ready(msg)
     }
 }
 
@@ -158,7 +158,7 @@ pub enum Message {
     Posit(PositMessage),
     Generating(GeneratingMessage),
     Resharing(ResharingMessage),
-    ResharingReady(ResharingReadyMessage),
+    Ready(ReadyMessage),
     Triple(TripleMessage),
     Presignature(PresignatureMessage),
     Signature(SignatureMessage),
@@ -175,7 +175,7 @@ impl Message {
             Message::Posit(_) => "Proposal",
             Message::Generating(_) => "Generating",
             Message::Resharing(_) => "Resharing",
-            Message::ResharingReady(_) => "ResharingReady",
+            Message::Ready(_) => "Ready",
             Message::Triple(_) => "Triple",
             Message::Presignature(_) => "Presignature",
             Message::Signature(_) => "Signature",
@@ -189,7 +189,7 @@ impl Message {
             Message::Posit(proposal) => std::mem::size_of::<PositMessage>() + proposal.data_len(),
             Message::Generating(msg) => std::mem::size_of::<GeneratingMessage>() + msg.data.len(),
             Message::Resharing(msg) => std::mem::size_of::<ResharingMessage>() + msg.data.len(),
-            Message::ResharingReady(_) => std::mem::size_of::<ResharingReadyMessage>(),
+            Message::Ready(_) => std::mem::size_of::<ReadyMessage>(),
             Message::Triple(msg) => std::mem::size_of::<TripleMessage>() + msg.data.len(),
             Message::Presignature(msg) => {
                 std::mem::size_of::<PresignatureMessage>() + msg.data.len()
@@ -228,8 +228,8 @@ impl ProtocolType for ResharingMessage {
     const PROTOCOL: Protocols = Protocols::Resharing;
 }
 
-impl ProtocolType for ResharingReadyMessage {
-    const PROTOCOL: Protocols = Protocols::ResharingReady;
+impl ProtocolType for ReadyMessage {
+    const PROTOCOL: Protocols = Protocols::Ready;
 }
 
 impl ProtocolType for TripleMessage {
