@@ -117,11 +117,6 @@ impl FixtureConfig {
 
 impl MpcFixtureBuilder {
     pub fn new(num_nodes: u32, threshold: usize) -> Self {
-        // This is a bit of a weird place to install the subscriber but every
-        // test needs to call it somewhere. Since tests will usually call this
-        // before doing anything interesting, might as well do it here.
-        crate::utils::init_tracing_log();
-
         let prepared_nodes: Vec<_> = (0..num_nodes).map(MpcFixtureNodeBuilder::new).collect();
 
         // construct full list of participants and candidates (same set)

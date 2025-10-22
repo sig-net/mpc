@@ -71,7 +71,7 @@ async fn test_signature_ethereum() -> Result<()> {
             .query()
             .await?;
         if let Some(event) = events.into_iter().find(|event| {
-            event.request_id == &expected_request_id[..] && event.responder == requester
+            event.request_id == expected_request_id[..] && event.responder == requester
         }) {
             matching_event = Some(event);
             break;
