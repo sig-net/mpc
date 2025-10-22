@@ -183,6 +183,39 @@ impl CryptographicProtocol for ResharingState {
                     tracing::debug!(?state.ready, "resharing: readiness updated");
                 }
 
+                let mut buffered = HashMap::<Participant, usize>::new();
+                loop {
+                    match ctx.resharing.try_recv() {
+                        Ok(msg) => {
+                            if msg.epoch != self.contract.old_epoch {
+                                tracing::debug!(
+                                    expected = self.contract.old_epoch,
+                                    actual = msg.epoch,
+                                    "resharing: ignoring protocol message for other epoch",
+                                );
+                                continue;
+                            }
+                            state.ready.insert(msg.from);
+                            buffered
+                                .entry(msg.from)
+                                .and_modify(|count| *count += 1)
+                                .or_insert(1);
+                            self.pending.push_back(msg);
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            tracing::warn!("resharing: resharing channel closed unexpectedly");
+                            break;
+                        }
+                    }
+                }
+                if !buffered.is_empty() {
+                    tracing::info!(
+                        ?buffered,
+                        "resharing: buffered protocol messages while awaiting readiness"
+                    );
+                }
+
                 self.ready_nonce = state
                     .broadcast_ready(self.me, ctx, &self.contract, self.ready_nonce)
                     .await;
@@ -192,24 +225,44 @@ impl CryptographicProtocol for ResharingState {
                     return NodeState::Resharing(self);
                 }
 
-                let protocol =
+                let mut protocol =
                     match ReshareProtocol::new(self.local_private_share, self.me, &self.contract) {
                         Ok(protocol) => protocol,
                         Err(err) => {
                             tracing::error!(?err, "resharing: failed to initialize/start protocol");
                             self.phase = ResharingPhase::awaiting(self.me);
+                            self.pending.clear();
                             return NodeState::Resharing(self);
                         }
                     };
 
+                let mut replayed = HashMap::<Participant, usize>::new();
+                while let Some(msg) = self.pending.pop_front() {
+                    replayed
+                        .entry(msg.from)
+                        .and_modify(|count| *count += 1)
+                        .or_insert(1);
+                    protocol.message(msg.from, msg.data);
+                }
+                if !replayed.is_empty() {
+                    tracing::info!(
+                        ?replayed,
+                        "resharing: replayed buffered protocol messages after starting"
+                    );
+                }
+
                 tracing::info!("resharing: all participants ready, starting protocol");
                 let now = Instant::now();
-                self.phase = ResharingPhase::Resharing(ReshareRunning {
+                let mut running = ReshareRunning {
                     protocol,
                     failed_store: None,
                     started_at: now,
                     last_activity: now,
-                });
+                };
+                // if !replayed.is_empty() {
+                //     running.last_activity = Instant::now();
+                // }
+                self.phase = ResharingPhase::Resharing(running);
                 return NodeState::Resharing(self);
             }
         };
@@ -230,6 +283,7 @@ impl CryptographicProtocol for ResharingState {
                 "resharing: protocol timed out, restarting readiness phase",
             );
             self.phase = ResharingPhase::awaiting(self.me);
+            self.pending.clear();
             return NodeState::Resharing(self);
         }
 
@@ -239,6 +293,7 @@ impl CryptographicProtocol for ResharingState {
                 Err(err) => {
                     tracing::warn!(?err, "resharing failed, going back to awaiting phase");
                     self.phase = ResharingPhase::awaiting(self.me);
+                    self.pending.clear();
                     return NodeState::Resharing(self);
                 }
             };

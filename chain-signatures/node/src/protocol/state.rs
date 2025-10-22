@@ -1,5 +1,6 @@
 use super::contract::{primitives::Participants, ResharingContractState};
 use super::triple::TripleSpawnerTask;
+use crate::protocol::message::ResharingMessage;
 use crate::protocol::presignature::PresignatureSpawnerTask;
 use crate::protocol::signature::SignatureSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
@@ -9,7 +10,7 @@ use mpc_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::time::{Duration, Instant};
@@ -83,6 +84,7 @@ pub struct ResharingState {
     pub local_private_share: Option<SecretKeyShare>,
     pub phase: ResharingPhase,
     pub ready_nonce: u64,
+    pub pending: VecDeque<ResharingMessage>,
 }
 
 pub struct ReshareAwaiting {
@@ -118,6 +120,14 @@ impl ResharingPhase {
     }
 }
 
+#[cfg(feature = "test-feature")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResharingPhaseStatus {
+    Awaiting,
+    Running,
+}
+
 pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct JoiningState {
@@ -147,6 +157,8 @@ pub enum NodeStatus {
     Resharing {
         old_participants: Vec<Participant>,
         new_participants: Vec<Participant>,
+        #[cfg(feature = "test-feature")]
+        phase: ResharingPhaseStatus,
     },
     Joining {
         participants: Vec<Participant>,
@@ -244,9 +256,16 @@ impl Node {
                 });
             }
             NodeState::Resharing(state) => {
+                #[cfg(feature = "test-feature")]
+                let phase = match &state.phase {
+                    ResharingPhase::Awaiting(_) => ResharingPhaseStatus::Awaiting,
+                    ResharingPhase::Resharing(_) => ResharingPhaseStatus::Running,
+                };
                 let _ = self.watcher_tx.send(NodeStatus::Resharing {
                     old_participants: state.contract.old_participants.keys_vec(),
                     new_participants: state.contract.new_participants.keys_vec(),
+                    #[cfg(feature = "test-feature")]
+                    phase,
                 });
             }
             NodeState::Joining(state) => {

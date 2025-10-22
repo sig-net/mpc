@@ -9,14 +9,26 @@ CARGO_CMD_ARGS="$@"
 CARGO_BUILD_INDENT="            "
 echo "${CARGO_BUILD_INDENT} running MPC build script"
 
-# add additional features if we're benchmarking:
-if echo $CARGO_CMD_ARGS | grep -q "bench"; then
-    FEATURES="--features bench"
+# Default feature set for building local binaries used by tests.
+NODE_FEATURES="test-feature,debug-page"
+CONTRACT_FEATURES=""
+
+# Add additional features if we're benchmarking.
+if echo "$CARGO_CMD_ARGS" | grep -q "bench"; then
+    CONTRACT_FEATURES="--features bench"
+    NODE_FEATURES="${NODE_FEATURES},bench"
 fi
+
+NODE_FEATURE_ARGS="--features ${NODE_FEATURES}"
 
 set --
 set -e
-. $ROOT_DIR/build-contract.sh $FEATURES
-cargo build -p mpc-node --release $FEATURES
+if [ -n "$CONTRACT_FEATURES" ]; then
+    . $ROOT_DIR/build-contract.sh $CONTRACT_FEATURES
+else
+    . $ROOT_DIR/build-contract.sh
+fi
+
+cargo build -p mpc-node --release $NODE_FEATURE_ARGS
 
 exec $CARGO_CMD_ARGS

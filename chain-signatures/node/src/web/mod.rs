@@ -9,6 +9,8 @@ pub mod debug;
 use self::error::Error;
 use crate::indexer::NearIndexer;
 use crate::metrics::WEB_ENDPOINT_LATENCY;
+#[cfg(feature = "test-feature")]
+use crate::protocol::state::ResharingPhaseStatus;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::MessageChannel;
@@ -134,6 +136,8 @@ pub enum StateView {
         old_participants: Vec<Participant>,
         new_participants: Vec<Participant>,
         latest_block_height: BlockHeight,
+        #[cfg(feature = "test-feature")]
+        phase: ResharingPhaseStatus,
     },
     Joining {
         participants: Vec<Participant>,
@@ -182,10 +186,14 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
         NodeStatus::Resharing {
             old_participants,
             new_participants,
+            #[cfg(feature = "test-feature")]
+            phase,
         } => Ok(Json(StateView::Resharing {
             old_participants: old_participants.clone(),
             new_participants: new_participants.clone(),
             latest_block_height,
+            #[cfg(feature = "test-feature")]
+            phase,
         })),
         NodeStatus::Joining { participants } => Ok(Json(StateView::Joining {
             participants: participants.clone(),

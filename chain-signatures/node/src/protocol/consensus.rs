@@ -13,6 +13,9 @@ use crate::protocol::Governance;
 use crate::types::{KeygenProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 
+use rand::random;
+
+use std::collections::VecDeque;
 use std::cmp::Ordering;
 
 pub(crate) trait ConsensusProtocol<G> {
@@ -919,6 +922,7 @@ async fn resharing(
         contract: contract_state,
         local_private_share: private_share,
         phase: ResharingPhase::awaiting(me),
-        ready_nonce: 0,
+        ready_nonce: random(),
+        pending: VecDeque::new(),
     })
 }
