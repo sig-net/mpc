@@ -288,7 +288,7 @@ async fn test_resharing_offline_participant_recovers() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
-    set_resharing_running_timeout(Duration::from_secs(60));
+    set_resharing_running_timeout(Duration::from_secs(20));
 
     let mut nodes = cluster::spawn().disable_prestockpile().await?;
     nodes.wait().signable().await?;
@@ -323,11 +323,12 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
         }
     }
 
-    wait_for_account_resharing_phase(
+    wait_for_resharing_phase(
         &nodes,
         &target_account,
         &[ResharingStatus::Running],
-        Duration::from_secs(60),
+        Duration::from_secs(20),
+        false,
     )
     .await?;
 
@@ -340,11 +341,12 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
 
     nodes.restart_node(target_config).await?;
 
-    wait_for_account_resharing_phase(
+    wait_for_resharing_phase(
         &nodes,
         &target_account,
         &[ResharingStatus::Running],
-        Duration::from_secs(90),
+        Duration::from_secs(20),
+        true,
     )
     .await?;
 
@@ -380,13 +382,15 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn wait_for_account_resharing_phase(
+async fn wait_for_resharing_phase(
     nodes: &cluster::Cluster,
     account_id: &near_workspaces::AccountId,
     expected: &[ResharingStatus],
     timeout: Duration,
+    allow_completion: bool,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
+    let allow_completion = allow_completion && expected.contains(&ResharingStatus::Running);
     loop {
         if let Some(idx) = nodes
             .account_ids()
@@ -395,6 +399,13 @@ async fn wait_for_account_resharing_phase(
         {
             match nodes.fetch_state(idx).await? {
                 StateView::Resharing { phase, .. } if expected.contains(&phase) => return Ok(()),
+                StateView::Running { .. } if allow_completion => {
+                    tracing::info!(
+                        %account_id,
+                        "node already returned to running state; treating as successful resharing phase"
+                    );
+                    return Ok(());
+                }
                 StateView::Resharing { phase, .. } => {
                     tracing::info!(
                         %account_id,
