@@ -8,7 +8,7 @@ use mpc_contract::update::ProposeUpdateArgs;
 use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt};
 use mpc_node::kdf::into_eth_sig;
 use mpc_node::protocol::cryptography::set_resharing_running_timeout;
-use mpc_node::protocol::state::ResharingPhaseStatus;
+use mpc_node::protocol::state::ResharingStatus;
 use mpc_node::util::NearPublicKeyExt as _;
 use mpc_node::web::StateView;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
@@ -326,7 +326,7 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
     wait_for_account_resharing_phase(
         &nodes,
         &target_account,
-        &[ResharingPhaseStatus::Running],
+        &[ResharingStatus::Running],
         Duration::from_secs(60),
     )
     .await?;
@@ -343,7 +343,7 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
     wait_for_account_resharing_phase(
         &nodes,
         &target_account,
-        &[ResharingPhaseStatus::Running],
+        &[ResharingStatus::Running],
         Duration::from_secs(90),
     )
     .await?;
@@ -383,7 +383,7 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
 async fn wait_for_account_resharing_phase(
     nodes: &cluster::Cluster,
     account_id: &near_workspaces::AccountId,
-    expected: &[ResharingPhaseStatus],
+    expected: &[ResharingStatus],
     timeout: Duration,
 ) -> anyhow::Result<()> {
     let start = Instant::now();

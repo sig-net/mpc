@@ -96,7 +96,7 @@ pub struct ReadyMessage {
     pub nonce: u64,
     /// Participant-scoped random identifier combined into a cluster-wide attempt identifier.
     #[serde(default)]
-    pub attempt: u64,
+    pub token: u64,
 }
 
 impl From<ReadyMessage> for Message {

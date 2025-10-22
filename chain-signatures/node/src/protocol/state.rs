@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use rand::random;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::time::{Duration, Instant};
+
+pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PersistentNodeData {
@@ -87,9 +89,8 @@ pub struct ResharingState {
 }
 
 pub struct ReshareAwaiting {
-    pub ready: HashSet<Participant>,
     pub ready_tokens: HashMap<Participant, u64>,
-    pub local_attempt: u64,
+    pub my_token: u64,
     /// Interval to control broadcasting readiness messages.
     // NOTE: this is an Instant for now since generating/resharing tasks are not async
     // and happen in main protocol loop. once it becomes async we can make this an interval.
@@ -124,26 +125,22 @@ pub enum ResharingPhase {
 
 impl ResharingPhase {
     pub fn awaiting(me: Participant) -> Self {
-        let local_attempt = random::<u64>();
+        let my_token = random::<u64>();
         Self::Awaiting(ReshareAwaiting {
-            ready: std::iter::once(me).collect(),
-            ready_tokens: std::iter::once((me, local_attempt)).collect(),
-            local_attempt,
+            ready_tokens: std::iter::once((me, my_token)).collect(),
+            my_token,
             // ready to broadcast immediately
             broadcast_interval: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,
         })
     }
 }
 
-#[cfg(feature = "test-feature")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ResharingPhaseStatus {
+pub enum ResharingStatus {
     Awaiting,
     Running,
 }
-
-pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct JoiningState {
     pub participants: Participants,
@@ -172,8 +169,7 @@ pub enum NodeStatus {
     Resharing {
         old_participants: Vec<Participant>,
         new_participants: Vec<Participant>,
-        #[cfg(feature = "test-feature")]
-        phase: ResharingPhaseStatus,
+        phase: ResharingStatus,
     },
     Joining {
         participants: Vec<Participant>,
@@ -271,15 +267,13 @@ impl Node {
                 });
             }
             NodeState::Resharing(state) => {
-                #[cfg(feature = "test-feature")]
                 let phase = match &state.phase {
-                    ResharingPhase::Awaiting(_) => ResharingPhaseStatus::Awaiting,
-                    ResharingPhase::Resharing(_) => ResharingPhaseStatus::Running,
+                    ResharingPhase::Awaiting(_) => ResharingStatus::Awaiting,
+                    ResharingPhase::Resharing(_) => ResharingStatus::Running,
                 };
                 let _ = self.watcher_tx.send(NodeStatus::Resharing {
                     old_participants: state.contract.old_participants.keys_vec(),
                     new_participants: state.contract.new_participants.keys_vec(),
-                    #[cfg(feature = "test-feature")]
                     phase,
                 });
             }

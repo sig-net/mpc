@@ -180,7 +180,7 @@ impl CryptographicProtocol for ResharingState {
             ResharingPhase::Resharing(resharing) => resharing,
             ResharingPhase::Awaiting(mut state) => {
                 if state.update(ctx, &self.contract) {
-                    tracing::debug!(?state.ready, "resharing: readiness updated");
+                    tracing::debug!(?state.ready_tokens, "resharing: readiness updated");
                 }
 
                 self.ready_nonce = state
@@ -234,7 +234,6 @@ impl CryptographicProtocol for ResharingState {
             if let ResharingPhase::Awaiting(state) = &mut self.phase {
                 for (participant, token) in new_tokens {
                     if self.contract.new_participants.contains_key(&participant) {
-                        state.ready.insert(participant);
                         state.ready_tokens.insert(participant, token);
                     }
                 }
@@ -408,12 +407,7 @@ impl ReshareAwaiting {
         let total = contract.new_participants.len();
         let threshold = contract.threshold;
 
-        total >= threshold
-            && ready == total
-            && contract
-                .new_participants
-                .keys()
-                .all(|participant| self.ready_tokens.contains_key(participant))
+        total >= threshold && ready == total
     }
 
     fn update(&mut self, ctx: &mut MpcSignProtocol, contract: &ResharingContractState) -> bool {
@@ -421,10 +415,7 @@ impl ReshareAwaiting {
         loop {
             match ctx.ready.try_recv() {
                 Ok(ReadyMessage {
-                    epoch,
-                    from,
-                    attempt,
-                    ..
+                    epoch, from, token, ..
                 }) => {
                     if epoch != contract.old_epoch {
                         tracing::warn!(
@@ -435,10 +426,8 @@ impl ReshareAwaiting {
                         continue;
                     }
                     if contract.new_participants.contains_key(&from) {
-                        if self.ready.insert(from) {
-                            updated = true;
-                        }
-                        self.ready_tokens.insert(from, attempt);
+                        self.ready_tokens.insert(from, token);
+                        updated = true;
                     }
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,
@@ -479,7 +468,7 @@ impl ReshareAwaiting {
                         epoch: contract.old_epoch,
                         from: me,
                         nonce,
-                        attempt: self.local_attempt,
+                        token: self.my_token,
                     },
                 )
                 .await;
@@ -489,8 +478,8 @@ impl ReshareAwaiting {
     }
 
     fn ready_count(&self, contract: &ResharingContractState) -> usize {
-        self.ready
-            .iter()
+        self.ready_tokens
+            .keys()
             .filter(|participant| contract.new_participants.contains_key(participant))
             .count()
     }
@@ -528,7 +517,7 @@ impl ReshareRunning {
                 Ok(ReadyMessage {
                     epoch,
                     from,
-                    attempt,
+                    token: attempt,
                     ..
                 }) => {
                     if epoch != contract.old_epoch {
