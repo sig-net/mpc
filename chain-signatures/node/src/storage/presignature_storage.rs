@@ -497,85 +497,93 @@ impl PresignatureStorage {
         me: Participant,
         timeout: StdDuration,
     ) -> Option<PresignatureTaken> {
+        if let Some(presignature) = self.take(id, owner, me).await {
+            return Some(presignature);
+        }
+
         if timeout.is_zero() {
             return None;
         }
 
-        const SCRIPT: &str = r#"
-            local ready_key = KEYS[1]
-            local presig_key = KEYS[2]
-            local used_key = KEYS[3]
-            local owner_key = KEYS[4]
-            local mine_key = KEYS[5]
-            local reserved_key = KEYS[6]
-            local presig_id = ARGV[1]
-            local used_expire = tonumber(ARGV[2])
-            local wait_secs = tonumber(ARGV[3])
-
-            local brpop = redis.call('BRPOP', ready_key, wait_secs)
-            if not brpop then
-                return nil
-            end
-
-            -- Ownership and state checks (same as take)
-            if redis.call("SMISMEMBER", reserved_key, presig_id) == 1 then
-                return {err = 'WARN presignature ' .. presig_id .. ' is generating or taken'}
-            end
-            if redis.call("SISMEMBER", mine_key, presig_id) == 1 then
-                return {err = 'WARN presignature ' .. presig_id ..' cannot be taken as foreign owned'}
-            end
-            if redis.call("SISMEMBER", owner_key, presig_id) == 0 then
-                return {err = 'WARN presignature ' .. presig_id .. ' cannot be taken by incorrect owner ' .. owner_key }
-            end
-
-            local presig = redis.call("HGET", presig_key, presig_id)
-            if not presig then
-                return {err = "WARN presignature " .. presig_id .. " is missing"}
-            end
-
-            redis.call("SREM", owner_key, presig_id)
-            redis.call("HDEL", presig_key, presig_id)
-            redis.call("HSET", used_key, presig_id, "1")
-            redis.call("HEXPIRE", used_key, used_expire, "FIELDS", "1", presig_id)
-
-            return presig
-        "#;
-
-        let wait_secs = {
-            let secs = timeout.as_secs();
-            if secs == 0 { 1 } else { secs as usize }
-        };
-
-        let Some(mut conn) = self.connect().await else {
-            tracing::warn!("failed to connect to redis while waiting for presignature via brpop");
-            return self.wait_take_poll(id, owner, me, timeout).await;
-        };
-
-        let result = redis::Script::new(SCRIPT)
-            .key(self.ready_key(id))
-            .key(&self.presig_key)
-            .key(&self.used_key)
-            .key(owner_key(&self.owner_keys, owner))
-            .key(owner_key(&self.owner_keys, me))
-            .key(&self.reserved_key)
-            .arg(id)
-            .arg(USED_EXPIRE_TIME.num_seconds())
-            .arg(wait_secs)
-            .invoke_async(&mut conn)
-            .await;
-
-        drop(conn);
-
-        match result {
-            Ok(presignature) => {
-                tracing::debug!(?presignature, "took presignature");
-                Some(PresignatureTaken::foreigner(presignature))
+        let start = Instant::now();
+        loop {
+            let Some(remaining) = timeout.checked_sub(start.elapsed()) else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
             }
-            Err(err) => {
-                tracing::warn!(?err, "failed waiting for presignature readiness (lua)");
-                self.wait_take_poll(id, owner, me, timeout).await
+
+            let wait_secs = {
+                let secs = remaining.as_secs();
+                if secs == 0 {
+                    1
+                } else {
+                    secs as usize
+                }
+            };
+
+            let Some(mut conn) = self.connect().await else {
+                tracing::warn!(
+                    "failed to connect to redis while waiting for presignature via brpop"
+                );
+                return self
+                    .wait_take_poll(
+                        id,
+                        owner,
+                        me,
+                        timeout
+                            .checked_sub(start.elapsed())
+                            .unwrap_or(StdDuration::ZERO),
+                    )
+                    .await;
+            };
+
+            let mut cmd = redis::cmd("BRPOP");
+            cmd.arg(self.ready_key(id));
+            cmd.arg(wait_secs);
+
+            let response: redis::RedisResult<Option<(String, PresignatureId)>> =
+                cmd.query_async(&mut conn).await;
+
+            drop(conn);
+
+            match response {
+                Ok(Some((_key, _value))) => {
+                    if let Some(presignature) = self.take(id, owner, me).await {
+                        return Some(presignature);
+                    }
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    tracing::warn!(?err, "failed waiting for presignature readiness");
+                    return self
+                        .wait_take_poll(
+                            id,
+                            owner,
+                            me,
+                            timeout
+                                .checked_sub(start.elapsed())
+                                .unwrap_or(StdDuration::ZERO),
+                        )
+                        .await;
+                }
             }
         }
+
+        if let Some(presignature) = self.take(id, owner, me).await {
+            return Some(presignature);
+        }
+
+        self.wait_take_poll(
+            id,
+            owner,
+            me,
+            timeout
+                .checked_sub(start.elapsed())
+                .unwrap_or(StdDuration::ZERO),
+        )
+        .await
     }
 
     async fn wait_take_poll(

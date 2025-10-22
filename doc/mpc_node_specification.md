@@ -369,3 +369,23 @@ states.
 Provably impossible states are key for correctness. The `Prepare` phase
 specifically allows to mark all cases impossible where one node would still be
 in `init` while others are already `Running`.
+
+### Redis-backed readiness notifications
+
+Triples and pre-signatures are persisted in Redis. To avoid busy polling for
+new material, the node pushes a readiness marker into a short-lived list key
+every time an item transitions to `Available`:
+
+- Triples use a key of the form `triples_ready:{version}:{account}:{id}`.
+- Pre-signatures use `presignatures_ready:{version}:{account}:{id}`.
+
+The storage layer deletes any stale list, `RPUSH`es the identifier, and applies
+an expiry. Consumers issue a single `BRPOP` against the relevant keys, letting
+Redis block until the producer has inserted the data. Once `BRPOP` unblocks, we
+fetch the item from the hash map and proceed. If Redis drops the connection, we
+fall back to the legacy polling loop so the protocol continues making progress
+under degraded conditions.
+
+This mechanism keeps the hot path fully asynchronous, removes the need for
+tokio timers in the common case, and drastically lowers the load the MPC node
+places on Redis during heavy signing traffic.
