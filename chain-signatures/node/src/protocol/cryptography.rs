@@ -187,69 +187,6 @@ impl CryptographicProtocol for ResharingState {
 
                 let ready_tokens_snapshot = state.ready_tokens.clone();
 
-                let mut buffered = HashMap::<Participant, usize>::new();
-                let mut skipped = HashMap::<Participant, usize>::new();
-                loop {
-                    match ctx.resharing.try_recv() {
-                        Ok(msg) => {
-                            if msg.epoch != self.contract.old_epoch {
-                                tracing::debug!(
-                                    expected = self.contract.old_epoch,
-                                    actual = msg.epoch,
-                                    "resharing: ignoring protocol message for other epoch",
-                                );
-                                continue;
-                            }
-                            if let Some(last) = self.last_attempt_id {
-                                if msg.attempt == last {
-                                    tracing::debug!(
-                                        participant = ?msg.from,
-                                        attempt = ?msg.attempt,
-                                        "resharing: skipping buffered message from previous attempt"
-                                    );
-                                    continue;
-                                }
-                            }
-                            if let Some(current) = self.attempt_id {
-                                if msg.attempt != current {
-                                    skipped
-                                        .entry(msg.from)
-                                        .and_modify(|count| *count += 1)
-                                        .or_insert(1);
-                                    tracing::debug!(
-                                        expected = ?current,
-                                        actual = ?msg.attempt,
-                                        participant = ?msg.from,
-                                        "resharing: buffered message does not match current attempt"
-                                    );
-                                    continue;
-                                }
-                            }
-                            buffered
-                                .entry(msg.from)
-                                .and_modify(|count| *count += 1)
-                                .or_insert(1);
-                            self.pending.push_back(msg);
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            tracing::warn!("resharing: resharing channel closed unexpectedly");
-                            break;
-                        }
-                    }
-                }
-                if !buffered.is_empty() {
-                    tracing::info!(
-                        ?buffered,
-                        "resharing: buffered protocol messages while awaiting readiness"
-                    );
-                }
-                if !skipped.is_empty() {
-                    tracing::info!(
-                        ?skipped,
-                        "resharing: skipped protocol messages for different attempt while awaiting"
-                    );
-                }
 
                 self.ready_nonce = state
                     .broadcast_ready(self.me, ctx, &self.contract, self.ready_nonce)
@@ -299,25 +236,6 @@ impl CryptographicProtocol for ResharingState {
                 self.last_attempt_id = self.attempt_id;
                 self.attempt_id = Some(attempt_id);
                 self.active_ready_tokens = ready_tokens_snapshot;
-
-                let mut dropped = HashMap::<Participant, usize>::new();
-                self.pending.retain(|msg| {
-                    if msg.attempt == attempt_id {
-                        true
-                    } else {
-                        dropped
-                            .entry(msg.from)
-                            .and_modify(|count| *count += 1)
-                            .or_insert(1);
-                        false
-                    }
-                });
-                if !dropped.is_empty() {
-                    tracing::info!(
-                        ?dropped,
-                        "resharing: discarded buffered messages for non-matching attempt before starting"
-                    );
-                }
 
                 let mut protocol =
                     match ReshareProtocol::new(self.local_private_share, self.me, &self.contract) {
