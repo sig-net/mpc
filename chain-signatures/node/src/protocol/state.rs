@@ -1,6 +1,5 @@
 use super::contract::{primitives::Participants, ResharingContractState};
 use super::triple::TripleSpawnerTask;
-use crate::protocol::message::ResharingMessage;
 use crate::protocol::presignature::PresignatureSpawnerTask;
 use crate::protocol::signature::SignatureSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
@@ -11,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use rand::random;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::time::{Duration, Instant};
@@ -85,10 +84,6 @@ pub struct ResharingState {
     pub local_private_share: Option<SecretKeyShare>,
     pub phase: ResharingPhase,
     pub ready_nonce: u64,
-    pub pending: VecDeque<ResharingMessage>,
-    pub attempt_id: Option<u64>,
-    pub last_attempt_id: Option<u64>,
-    pub active_ready_tokens: HashMap<Participant, u64>,
 }
 
 pub struct ReshareAwaiting {
@@ -103,6 +98,17 @@ pub struct ReshareAwaiting {
 
 pub struct ReshareRunning {
     pub protocol: ReshareProtocol,
+
+    /// Participants that have sent readiness messages along with their tokens. These
+    /// are retained for the duration of the resharing protocol until either completion
+    /// or restart. They will be combined to form the singular token for all resharing
+    /// messages.
+    pub ready_tokens: HashMap<Participant, u64>,
+
+    /// Unique identifier for the current resharing attempt. Messages that do not match
+    /// this token are discarded and ignored from processing.
+    pub token: u64,
+
     /// If the resharing state fails to store data after generating, it gets temporarily
     /// stored here and retried later.
     pub failed_store: Option<SecretKeyShare>,

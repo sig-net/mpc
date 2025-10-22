@@ -179,167 +179,43 @@ impl CryptographicProtocol for ResharingState {
         let mut resharing = match self.phase {
             ResharingPhase::Resharing(resharing) => resharing,
             ResharingPhase::Awaiting(mut state) => {
-                state.ready.insert(self.me);
-                state.ready_tokens.insert(self.me, state.local_attempt);
                 if state.update(ctx, &self.contract) {
                     tracing::debug!(?state.ready, "resharing: readiness updated");
                 }
-
-                let ready_tokens_snapshot = state.ready_tokens.clone();
-
 
                 self.ready_nonce = state
                     .broadcast_ready(self.me, ctx, &self.contract, self.ready_nonce)
                     .await;
 
                 if !state.startable(&self.contract) {
-                    if tracing::enabled!(tracing::Level::DEBUG) {
-                        let missing_ready: Vec<_> = self
-                            .contract
-                            .new_participants
-                            .keys()
-                            .filter(|participant| !state.ready.contains(participant))
-                            .copied()
-                            .collect();
-                        let missing_tokens: Vec<_> = self
-                            .contract
-                            .new_participants
-                            .keys()
-                            .filter(|participant| !state.ready_tokens.contains_key(participant))
-                            .copied()
-                            .collect();
-                        tracing::debug!(
-                            ?missing_ready,
-                            ?missing_tokens,
-                            ready = ?state.ready,
-                            ready_tokens = ?state.ready_tokens,
-                            "resharing: not all participants ready yet"
-                        );
-                    }
-                    self.active_ready_tokens = ready_tokens_snapshot;
                     self.phase = ResharingPhase::Awaiting(state);
                     return NodeState::Resharing(self);
                 }
 
-                let attempt_id = match state.combined_attempt_id(&self.contract) {
-                    Some(attempt_id) => attempt_id,
-                    None => {
-                        tracing::debug!(
-                            "resharing: waiting for attempt identifiers from all participants"
-                        );
-                        self.active_ready_tokens = ready_tokens_snapshot;
-                        self.phase = ResharingPhase::Awaiting(state);
-                        return NodeState::Resharing(self);
-                    }
-                };
-
-                self.last_attempt_id = self.attempt_id;
-                self.attempt_id = Some(attempt_id);
-                self.active_ready_tokens = ready_tokens_snapshot;
-
-                let mut protocol =
+                let protocol =
                     match ReshareProtocol::new(self.local_private_share, self.me, &self.contract) {
                         Ok(protocol) => protocol,
                         Err(err) => {
                             tracing::error!(?err, "resharing: failed to initialize/start protocol");
-                            self.last_attempt_id = self.attempt_id;
-                            self.attempt_id = None;
-                            self.active_ready_tokens.clear();
                             self.phase = ResharingPhase::awaiting(self.me);
-                            self.pending.clear();
                             return NodeState::Resharing(self);
                         }
                     };
 
-                let mut replayed = HashMap::<Participant, usize>::new();
-                while let Some(msg) = self.pending.pop_front() {
-                    replayed
-                        .entry(msg.from)
-                        .and_modify(|count| *count += 1)
-                        .or_insert(1);
-                    protocol.message(msg.from, msg.data);
-                }
-                if !replayed.is_empty() {
-                    tracing::info!(
-                        ?replayed,
-                        "resharing: replayed buffered protocol messages after starting"
-                    );
-                }
-
                 tracing::info!("resharing: all participants ready, starting protocol");
+                let token = state.combine_tokens();
                 let now = Instant::now();
-                let mut running = ReshareRunning {
+                self.phase = ResharingPhase::Resharing(ReshareRunning {
                     protocol,
+                    ready_tokens: state.ready_tokens,
+                    token,
                     failed_store: None,
                     started_at: now,
                     last_activity: now,
-                };
-                if !replayed.is_empty() {
-                    running.last_activity = Instant::now();
-                }
-                self.phase = ResharingPhase::Resharing(running);
+                });
                 return NodeState::Resharing(self);
             }
         };
-
-        let mut restart_ready = HashMap::<Participant, u64>::new();
-        loop {
-            match ctx.ready.try_recv() {
-                Ok(ReadyMessage {
-                    epoch,
-                    from,
-                    attempt,
-                    ..
-                }) => {
-                    if epoch != self.contract.old_epoch {
-                        tracing::debug!(
-                            message_epoch = epoch,
-                            contract_epoch = self.contract.old_epoch,
-                            "resharing: ignoring readiness message for other epoch while running",
-                        );
-                        continue;
-                    }
-                    if from == self.me {
-                        continue;
-                    }
-                    match self.active_ready_tokens.get(&from) {
-                        Some(current) if *current == attempt => {}
-                        _ => {
-                            restart_ready.insert(from, attempt);
-                        }
-                    }
-                }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    tracing::warn!(
-                        "resharing: readiness channel closed unexpectedly while running"
-                    );
-                    break;
-                }
-            }
-        }
-
-        if !restart_ready.is_empty() {
-            let participants: Vec<_> = restart_ready.keys().copied().collect();
-            tracing::info!(
-                ?participants,
-                "resharing: received readiness for new attempt while running, restarting"
-            );
-            self.last_attempt_id = self.attempt_id;
-            self.attempt_id = None;
-            self.active_ready_tokens.clear();
-            self.phase = ResharingPhase::awaiting(self.me);
-            self.pending.clear();
-            if let ResharingPhase::Awaiting(state) = &mut self.phase {
-                for (participant, attempt) in restart_ready {
-                    if self.contract.new_participants.contains_key(&participant) {
-                        state.ready.insert(participant);
-                        state.ready_tokens.insert(participant, attempt);
-                    }
-                }
-            }
-            return NodeState::Resharing(self);
-        }
 
         if let Some(sk_share) = resharing.failed_store.take() {
             match Self::try_finalize(ctx, &mut resharing, sk_share, &self.contract).await {
@@ -351,16 +227,27 @@ impl CryptographicProtocol for ResharingState {
             }
         }
 
+        // If we have received new tokens while running (i.e. node restart while in the midst),
+        // short-circuit and restart the whole resharing protocol.
+        if let Some(new_tokens) = resharing.restartable(self.me, ctx, &self.contract) {
+            self.phase = ResharingPhase::awaiting(self.me);
+            if let ResharingPhase::Awaiting(state) = &mut self.phase {
+                for (participant, token) in new_tokens {
+                    if self.contract.new_participants.contains_key(&participant) {
+                        state.ready.insert(participant);
+                        state.ready_tokens.insert(participant, token);
+                    }
+                }
+            }
+            return NodeState::Resharing(self);
+        }
+
         if resharing.last_activity.elapsed() > resharing_running_timeout() {
             tracing::warn!(
                 elapsed = ?resharing.last_activity.elapsed(),
                 "resharing: protocol timed out, restarting readiness phase",
             );
-            self.last_attempt_id = self.attempt_id;
-            self.attempt_id = None;
-            self.active_ready_tokens.clear();
             self.phase = ResharingPhase::awaiting(self.me);
-            self.pending.clear();
             return NodeState::Resharing(self);
         }
 
@@ -369,11 +256,7 @@ impl CryptographicProtocol for ResharingState {
                 Ok(action) => action,
                 Err(err) => {
                     tracing::warn!(?err, "resharing failed, going back to awaiting phase");
-                    self.last_attempt_id = self.attempt_id;
-                    self.attempt_id = None;
-                    self.active_ready_tokens.clear();
                     self.phase = ResharingPhase::awaiting(self.me);
-                    self.pending.clear();
                     return NodeState::Resharing(self);
                 }
             };
@@ -401,17 +284,10 @@ impl CryptographicProtocol for ResharingState {
                             continue;
                         }
 
-                        let Some(current_attempt) = self.attempt_id else {
-                            tracing::warn!(
-                                participant = ?msg.from,
-                                "resharing: received protocol message without active attempt id"
-                            );
-                            continue;
-                        };
-                        if msg.attempt != current_attempt {
+                        if msg.token != resharing.token {
                             tracing::debug!(
-                                expected = ?current_attempt,
-                                actual = ?msg.attempt,
+                                expected = ?resharing.token,
+                                actual = ?msg.token,
                                 participant = ?msg.from,
                                 "resharing: ignoring message for different resharing attempt",
                             );
@@ -431,12 +307,6 @@ impl CryptographicProtocol for ResharingState {
                 Action::SendMany(data) => {
                     tracing::debug!("resharing: sending a message to all participants");
                     resharing.last_activity = Instant::now();
-                    let Some(attempt_id) = self.attempt_id else {
-                        tracing::error!(
-                            "resharing: unable to send broadcast without active attempt identifier"
-                        );
-                        continue;
-                    };
                     for p in self.contract.new_participants.keys() {
                         if p == &self.me {
                             continue;
@@ -448,7 +318,7 @@ impl CryptographicProtocol for ResharingState {
                                 ResharingMessage {
                                     epoch: self.contract.old_epoch,
                                     from: self.me,
-                                    attempt: attempt_id,
+                                    token: resharing.token,
                                     data: data.clone(),
                                 },
                             )
@@ -461,12 +331,6 @@ impl CryptographicProtocol for ResharingState {
                         tracing::error!("resharing: send_private unknown participant {to:?}");
                     } else {
                         resharing.last_activity = Instant::now();
-                        let Some(attempt_id) = self.attempt_id else {
-                            tracing::error!(
-                                "resharing: unable to send private message without active attempt identifier"
-                            );
-                            continue;
-                        };
                         ctx.msg_channel
                             .send(
                                 self.me,
@@ -474,7 +338,7 @@ impl CryptographicProtocol for ResharingState {
                                 ResharingMessage {
                                     epoch: self.contract.old_epoch,
                                     from: self.me,
-                                    attempt: attempt_id,
+                                    token: resharing.token,
                                     data,
                                 },
                             )
@@ -631,12 +495,13 @@ impl ReshareAwaiting {
             .count()
     }
 
-    fn combined_attempt_id(&self, contract: &ResharingContractState) -> Option<u64> {
-        let mut tokens = Vec::with_capacity(contract.new_participants.len());
-        for participant in contract.new_participants.keys() {
-            tokens.push(*self.ready_tokens.get(participant)?);
-        }
-        tokens.sort_unstable();
+    /// Combines all received readiness attempt identifiers into a single identifier
+    /// that will be used to identify the current resharing attempt. This is guaranteed
+    /// to be the same for all honest participants starting the protocol. If the ID differs
+    /// during resharing, we can just restart since a party had restarted.
+    fn combine_tokens(&self) -> u64 {
+        let mut tokens = self.ready_tokens.values().collect::<Vec<_>>();
+        tokens.sort();
 
         let mut hasher = Sha256::new();
         for token in tokens {
@@ -645,7 +510,64 @@ impl ReshareAwaiting {
         let digest = hasher.finalize();
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&digest[..8]);
-        Some(u64::from_le_bytes(bytes))
+        u64::from_le_bytes(bytes)
+    }
+}
+
+impl ReshareRunning {
+    /// Checks if while running we have received readiness messages for a new attempt,
+    fn restartable(
+        &self,
+        me: Participant,
+        ctx: &mut MpcSignProtocol,
+        contract: &ResharingContractState,
+    ) -> Option<Vec<(Participant, u64)>> {
+        let mut new_tokens = HashMap::<Participant, u64>::new();
+        loop {
+            match ctx.ready.try_recv() {
+                Ok(ReadyMessage {
+                    epoch,
+                    from,
+                    attempt,
+                    ..
+                }) => {
+                    if epoch != contract.old_epoch {
+                        tracing::debug!(
+                            message_epoch = epoch,
+                            contract_epoch = contract.old_epoch,
+                            "resharing: ignoring readiness message for other epoch while running",
+                        );
+                        continue;
+                    }
+                    if from == me {
+                        continue;
+                    }
+                    match self.ready_tokens.get(&from) {
+                        Some(current) if *current == attempt => {}
+                        _ => {
+                            new_tokens.insert(from, attempt);
+                        }
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    tracing::warn!(
+                        "resharing: readiness channel closed unexpectedly while running"
+                    );
+                    break;
+                }
+            }
+        }
+
+        if !new_tokens.is_empty() {
+            tracing::info!(
+                ?new_tokens,
+                "resharing: received readiness for new attempt while running, restarting"
+            );
+            Some(new_tokens.into_iter().collect())
+        } else {
+            None
+        }
     }
 }
 

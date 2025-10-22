@@ -16,7 +16,6 @@ use crate::util::AffinePointExt;
 use rand::random;
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
 
 pub(crate) trait ConsensusProtocol<G> {
     async fn advance(
@@ -923,9 +922,5 @@ async fn resharing(
         local_private_share: private_share,
         phase: ResharingPhase::awaiting(me),
         ready_nonce: random(),
-        pending: VecDeque::new(),
-        attempt_id: None,
-        last_attempt_id: None,
-        active_ready_tokens: HashMap::new(),
     })
 }

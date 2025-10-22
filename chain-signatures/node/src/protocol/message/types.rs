@@ -75,7 +75,7 @@ pub struct ResharingMessage {
     /// Unique identifier for the current resharing attempt. Messages belonging to earlier
     /// attempts are discarded so nodes can safely restart readiness.
     #[serde(default)]
-    pub attempt: u64,
+    pub token: u64,
     #[serde(with = "serde_bytes")]
     pub data: MessageData,
 }
