@@ -18,11 +18,11 @@ pub type SandboxMiddleware = SignerMiddleware<Provider<Http>, LocalWallet>;
 
 pub fn client(
     endpoint: &str,
-    private_key: &str,
+    secret_key: &str,
     chain_id: u64,
 ) -> Result<(Arc<SandboxMiddleware>, Address)> {
     let provider = Provider::<Http>::try_from(endpoint)?;
-    let wallet = LocalWallet::from_str(private_key)?;
+    let wallet = LocalWallet::from_str(secret_key)?;
     let address = wallet.address();
     let wallet = wallet.with_chain_id(chain_id);
     let client = Arc::new(SignerMiddleware::new(provider, wallet));

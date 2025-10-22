@@ -418,7 +418,7 @@ pub struct EthereumSandbox {
     pub container: Container,
     pub internal_http_endpoint: String,
     pub external_http_endpoint: String,
-    pub private_key: String,
+    pub secret_key: String,
     pub chain_id: u64,
 }
 
@@ -453,7 +453,7 @@ impl EthereumSandbox {
 
         let container = request.start().await?;
 
-        let private_key = extract_private_key(&spawner.docker, container.id()).await?;
+        let secret_key = extract_secret_key(&spawner.docker, container.id()).await?;
 
         let (internal_http_endpoint, external_http_endpoint) = if cfg!(feature = "docker-test") {
             let network_ip = spawner
@@ -481,7 +481,7 @@ impl EthereumSandbox {
         Ok(Self {
             internal_http_endpoint,
             external_http_endpoint,
-            private_key,
+            secret_key,
             chain_id: Self::DEFAULT_CHAIN_ID,
             container,
         })
@@ -531,7 +531,7 @@ async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {
     ))
 }
 
-async fn extract_private_key(docker: &DockerClient, container_id: &str) -> anyhow::Result<String> {
+async fn extract_secret_key(docker: &DockerClient, container_id: &str) -> anyhow::Result<String> {
     let mut logs = docker.docker.logs::<String>(
         container_id,
         Some(LogsOptions {
@@ -542,7 +542,7 @@ async fn extract_private_key(docker: &DockerClient, container_id: &str) -> anyho
         }),
     );
 
-    let mut in_private_keys = false;
+    let mut in_secret_keys = false;
     while let Some(Ok(entry)) = logs.next().await {
         let line = match entry {
             LogOutput::StdOut { message } | LogOutput::StdErr { message } => {
@@ -552,11 +552,11 @@ async fn extract_private_key(docker: &DockerClient, container_id: &str) -> anyho
             _ => continue,
         };
         if line.contains("Private Keys") {
-            in_private_keys = true;
+            in_secret_keys = true;
             continue;
         }
 
-        if in_private_keys {
+        if in_secret_keys {
             if let Some(key) = line.split_whitespace().nth(1) {
                 if key.starts_with("0x") {
                     return Ok(key.to_string());

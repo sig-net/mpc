@@ -21,17 +21,17 @@ async fn test_signature_ethereum() -> Result<()> {
         .as_ref()
         .context("ethereum sandbox not initialized")?;
     let endpoint = eth_ctx.sandbox.external_http_endpoint.clone();
-    let private_key = eth_ctx.sandbox.private_key.clone();
+    let secret_key = eth_ctx.sandbox.secret_key.clone();
     let chain_id = eth_ctx.sandbox.chain_id;
     let contract_address = eth_ctx.contract_address;
 
-    let (client, requester) = eth::client(&endpoint, &private_key, chain_id)?;
+    let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
     let contract = eth::ChainSignaturesContract::new(contract_address, client.clone());
 
     let payload = [7u8; 32];
-    let path = "m/44'/60'/0'/0/0";
+    let path = "test";
     let algo = "secp256k1";
-    let dest = "http://localhost/callback";
+    let dest = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
     let params = "{}";
 
     let request = eth::SignRequest {
@@ -107,10 +107,10 @@ async fn test_signature_ethereum() -> Result<()> {
         actions::recover_eth_address(&payload, &signature_bytes, event.signature.recovery_id);
 
     let network_public_key = cluster.root_public_key().await?;
-    let mut network_pk_bytes = vec![0x04];
-    network_pk_bytes.extend_from_slice(&network_public_key.as_bytes()[1..]);
-    let encoded_network_pk = EncodedPoint::from_bytes(&network_pk_bytes)
-        .context("invalid network public key encoding")?;
+    let mut network_pk = vec![0x04];
+    network_pk.extend_from_slice(&network_public_key.as_bytes()[1..]);
+    let encoded_network_pk =
+        EncodedPoint::from_bytes(&network_pk).context("invalid network public key encoding")?;
     let network_affine = AffinePoint::from_encoded_point(&encoded_network_pk)
         .into_option()
         .ok_or_else(|| anyhow!("invalid network public key"))?;

@@ -294,7 +294,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
         let (client, deployer_address) = eth::client(
             &sandbox.external_http_endpoint,
-            &sandbox.private_key,
+            &sandbox.secret_key,
             sandbox.chain_id,
         )?;
         let contract_address =
@@ -308,7 +308,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
         let contract_address_hex = hex::encode(contract_address);
         spawner.cfg.eth = Some(EthConfig {
-            account_sk: sandbox.private_key.clone(),
+            account_sk: sandbox.secret_key.clone(),
             consensus_rpc_http_url: rpc_endpoint.clone(),
             execution_rpc_http_url: rpc_endpoint,
             contract_address: contract_address_hex.clone(),
