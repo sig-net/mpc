@@ -1388,9 +1388,14 @@ async fn process_block(
         sign_requests.extend(parse_filtered_logs(logs, total_timeout));
     }
 
-    let mut respond_requests =
-        process_bidirectional_requests(client, block_number, total_timeout, bidirectional_tx_map)
-            .await?;
+    let mut respond_requests = process_bidirectional_requests(
+        client,
+        block_number,
+        total_timeout,
+        bidirectional_tx_map,
+        &node_near_account_id,
+    )
+    .await?;
 
     sign_requests.append(&mut respond_requests);
 
@@ -1422,6 +1427,7 @@ async fn process_bidirectional_requests(
     block_number: u64,
     total_timeout: Duration,
     bidirectional_tx_map: &Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
+    node_near_account_id: &AccountId,
 ) -> anyhow::Result<Vec<IndexedSignRequest>> {
     let pending_txs: HashMap<BidirectionalTxId, BidirectionalTx> = {
         bidirectional_tx_map
@@ -1436,7 +1442,13 @@ async fn process_bidirectional_requests(
     let mut respond_requests = Vec::new();
 
     for (tx_id, pending_tx) in pending_txs {
-        let Some(receipt) = client.transaction_receipt(tx_id).await? else {
+        let start = Instant::now();
+        let receipt = client.transaction_receipt(tx_id).await;
+        crate::metrics::ETH_BLOCK_RECEIPT_LATENCY
+            .with_label_values(&[node_near_account_id.as_str()])
+            .observe(start.elapsed().as_millis() as f64);
+
+        let Some(receipt) = receipt? else {
             continue;
         };
 

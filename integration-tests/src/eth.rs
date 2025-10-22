@@ -41,6 +41,7 @@ pub async fn deploy_chain_signatures(
     Ok(contract.address())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn compute_request_id(
     requester: Address,
     payload: [u8; 32],

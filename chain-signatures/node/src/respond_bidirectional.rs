@@ -41,6 +41,7 @@ pub enum SerDeserFormat {
 
 pub struct CompletedTx {
     tx: BidirectionalTx,
+    #[cfg(feature = "light_client")]
     block_number: u64,
 }
 
@@ -53,8 +54,13 @@ pub struct RespondBidirectionalTx {
 pub type RespondBidirectionalSerializedOutput = Vec<u8>;
 
 impl CompletedTx {
+    #[cfg_attr(not(feature = "light_client"), allow(unused_variables))]
     pub fn new(tx: BidirectionalTx, block_number: u64) -> Self {
-        Self { tx, block_number }
+        Self {
+            tx,
+            #[cfg(feature = "light_client")]
+            block_number,
+        }
     }
 
     #[cfg(not(feature = "light_client"))]
