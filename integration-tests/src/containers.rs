@@ -5,8 +5,8 @@ use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
 use crate::NodeConfig;
 
-use anyhow::anyhow;
-use bollard::container::LogsOptions;
+use anyhow::{anyhow, Context};
+use bollard::container::{LogOutput, LogsOptions};
 use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
 use bollard::Docker;
@@ -22,6 +22,8 @@ use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::triple::Triple;
 use near_account_id::AccountId;
 use near_workspaces::Account;
+use reqwest::Client;
+use serde_json::json;
 use testcontainers::core::ExecCommand;
 use testcontainers::ContainerAsync;
 use testcontainers::{
@@ -30,6 +32,7 @@ use testcontainers::{
     GenericImage, ImageExt,
 };
 use tokio::io::AsyncWriteExt;
+use tokio::time::{sleep, Duration};
 use tracing;
 
 pub type Container = ContainerAsync<GenericImage>;
@@ -409,6 +412,143 @@ impl Redis {
 
         tracing::info!("stockpiled {num_triples} triples");
     }
+}
+
+pub struct EthereumSandbox {
+    pub container: Container,
+    pub internal_http_endpoint: String,
+    pub external_http_endpoint: String,
+    pub private_key: String,
+    pub chain_id: u64,
+}
+
+impl EthereumSandbox {
+    const RPC_PORT: u16 = 8545;
+    const DEFAULT_CHAIN_ID: u64 = 31337;
+    const DEFAULT_MNEMONIC: &'static str =
+        "test test test test test test test test test test test junk";
+
+    pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Self> {
+        let chain_id_arg = Self::DEFAULT_CHAIN_ID.to_string();
+        let container = GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
+            .with_exposed_port(Self::RPC_PORT.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Listening on"))
+            .with_network(&spawner.network)
+            .with_cmd(vec![
+                "anvil".to_string(),
+                "--host".to_string(),
+                "0.0.0.0".to_string(),
+                "--chain-id".to_string(),
+                chain_id_arg,
+                "--mnemonic".to_string(),
+                Self::DEFAULT_MNEMONIC.to_string(),
+            ])
+            .start()
+            .await?;
+
+        let private_key = extract_private_key(&spawner.docker, container.id()).await?;
+
+        let network_ip = spawner
+            .docker
+            .get_network_ip_address(&container, &spawner.network)
+            .await?;
+
+        let external_port = container
+            .get_host_port_ipv4(Self::RPC_PORT)
+            .await
+            .context("ethereum sandbox port mapping")?;
+
+        let external_http_endpoint = format!("http://127.0.0.1:{external_port}");
+        wait_for_rpc(&external_http_endpoint).await?;
+
+        Ok(Self {
+            internal_http_endpoint: format!("http://{}:{}", network_ip, Self::RPC_PORT),
+            external_http_endpoint,
+            private_key,
+            chain_id: Self::DEFAULT_CHAIN_ID,
+            container,
+        })
+    }
+}
+
+async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {
+    const MAX_ATTEMPTS: usize = 120;
+    let client = Client::new();
+    let mut last_err: Option<String> = None;
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_chainId",
+        "params": []
+    });
+
+    for _ in 0..MAX_ATTEMPTS {
+        match client.post(endpoint).json(&payload).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.json::<serde_json::Value>().await {
+                        Ok(body) if body.get("result").is_some() => return Ok(()),
+                        Ok(body) => {
+                            last_err = Some(format!("missing result in response: {body:?}"));
+                        }
+                        Err(err) => {
+                            last_err = Some(format!("json parse error: {err}"));
+                        }
+                    }
+                } else {
+                    last_err = Some(format!("status {}", response.status()));
+                }
+            }
+            Err(err) => {
+                last_err = Some(err.to_string());
+            }
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    Err(anyhow!(
+        "ethereum sandbox rpc '{}' did not become ready: {:?}",
+        endpoint,
+        last_err
+    ))
+}
+
+async fn extract_private_key(docker: &DockerClient, container_id: &str) -> anyhow::Result<String> {
+    let mut logs = docker.docker.logs::<String>(
+        container_id,
+        Some(LogsOptions {
+            follow: false,
+            stdout: true,
+            stderr: true,
+            ..Default::default()
+        }),
+    );
+
+    let mut in_private_keys = false;
+    while let Some(Ok(entry)) = logs.next().await {
+        let line = match entry {
+            LogOutput::StdOut { message } | LogOutput::StdErr { message } => {
+                String::from_utf8_lossy(&message).trim().to_owned()
+            }
+            LogOutput::Console { message } => String::from_utf8_lossy(&message).trim().to_owned(),
+            _ => continue,
+        };
+        if line.contains("Private Keys") {
+            in_private_keys = true;
+            continue;
+        }
+
+        if in_private_keys {
+            if let Some(key) = line.split_whitespace().nth(1) {
+                if key.starts_with("0x") {
+                    return Ok(key.to_string());
+                }
+            }
+        }
+    }
+
+    anyhow::bail!("failed to read private key from anvil logs")
 }
 
 fn shares_to_triples(

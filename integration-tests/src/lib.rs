@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod cluster;
 pub mod containers;
+pub mod eth;
 pub mod execute;
 pub mod local;
 pub mod mpc_fixture;
@@ -14,8 +15,8 @@ use std::collections::HashMap;
 
 use self::local::NodeEnvConfig;
 use crate::containers::DockerClient;
-
 use anyhow::Context as _;
+use ethers::types::{Address, U256};
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
@@ -248,6 +249,12 @@ impl Drop for Nodes {
     }
 }
 
+pub struct EthereumContext {
+    pub sandbox: containers::EthereumSandbox,
+    pub contract_address: Address,
+    pub deployer_address: Address,
+}
+
 pub struct Context {
     pub docker_client: DockerClient,
     pub docker_network: String,
@@ -260,6 +267,7 @@ pub struct Context {
     pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
     pub message_options: node_client::Options,
+    pub ethereum: Option<EthereumContext>,
 }
 
 pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
@@ -279,6 +287,43 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let sk_share_local_path = spawner.tmp_dir.join("secrets");
     std::fs::create_dir_all(&sk_share_local_path).expect("could not create secrets dir");
     let sk_share_local_path = sk_share_local_path.to_string_lossy().to_string();
+
+    let mut ethereum = None;
+    if spawner.use_ethereum {
+        let sandbox = containers::EthereumSandbox::run(spawner).await?;
+
+        let (client, deployer_address) = eth::client(
+            &sandbox.external_http_endpoint,
+            &sandbox.private_key,
+            sandbox.chain_id,
+        )?;
+        let contract_address =
+            eth::deploy_chain_signatures(client, deployer_address, U256::zero()).await?;
+
+        let rpc_endpoint = if cfg!(feature = "docker-test") {
+            sandbox.internal_http_endpoint.clone()
+        } else {
+            sandbox.external_http_endpoint.clone()
+        };
+
+        let contract_address_hex = hex::encode(contract_address);
+        spawner.cfg.eth = Some(EthConfig {
+            account_sk: sandbox.private_key.clone(),
+            consensus_rpc_http_url: rpc_endpoint.clone(),
+            execution_rpc_http_url: rpc_endpoint,
+            contract_address: contract_address_hex.clone(),
+            network: "sepolia".to_string(),
+            helios_data_path: format!("/tmp/helios-{}", contract_address_hex),
+            refresh_finalized_interval: 1_000,
+            total_timeout: 600,
+        });
+
+        ethereum = Some(EthereumContext {
+            sandbox,
+            contract_address,
+            deployer_address,
+        });
+    }
 
     let storage_options = mpc_node::storage::Options {
         env: spawner.env.clone(),
@@ -310,6 +355,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         log_options,
         mesh_options,
         message_options,
+        ethereum,
     })
 }
 

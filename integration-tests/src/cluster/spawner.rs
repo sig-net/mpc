@@ -38,6 +38,7 @@ pub struct ClusterSpawner {
     pub redis: Option<containers::Redis>,
     pub worker: Option<Worker<Sandbox>>,
     prestockpile: Option<Prestockpile>,
+    pub use_ethereum: bool,
 }
 
 impl Default for ClusterSpawner {
@@ -65,6 +66,7 @@ impl Default for ClusterSpawner {
             redis: None,
             worker: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
+            use_ethereum: false,
         }
     }
 }
@@ -128,6 +130,11 @@ impl ClusterSpawner {
 
     pub fn network(mut self, network: &str) -> Self {
         self.network = network.to_string();
+        self
+    }
+
+    pub fn ethereum(mut self) -> Self {
+        self.use_ethereum = true;
         self
     }
 
