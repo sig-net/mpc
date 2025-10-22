@@ -430,39 +430,56 @@ impl EthereumSandbox {
 
     pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Self> {
         let chain_id_arg = Self::DEFAULT_CHAIN_ID.to_string();
-        let container = GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
-            .with_exposed_port(Self::RPC_PORT.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("Listening on"))
-            .with_network(&spawner.network)
-            .with_cmd(vec![
-                "anvil".to_string(),
-                "--host".to_string(),
-                "0.0.0.0".to_string(),
-                "--chain-id".to_string(),
-                chain_id_arg,
-                "--mnemonic".to_string(),
-                Self::DEFAULT_MNEMONIC.to_string(),
-            ])
-            .start()
-            .await?;
+        let command = vec![
+            "anvil".to_string(),
+            "--host".to_string(),
+            "0.0.0.0".to_string(),
+            "--chain-id".to_string(),
+            chain_id_arg,
+            "--mnemonic".to_string(),
+            Self::DEFAULT_MNEMONIC.to_string(),
+        ];
+
+        let request = if cfg!(feature = "docker-test") {
+            GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
+                .with_exposed_port(Self::RPC_PORT.tcp())
+                .with_network(&spawner.network)
+                .with_cmd(command.clone())
+        } else {
+            GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
+                .with_network("host")
+                .with_cmd(command)
+        };
+
+        let container = request.start().await?;
 
         let private_key = extract_private_key(&spawner.docker, container.id()).await?;
 
-        let network_ip = spawner
-            .docker
-            .get_network_ip_address(&container, &spawner.network)
-            .await?;
+        let (internal_http_endpoint, external_http_endpoint) = if cfg!(feature = "docker-test") {
+            let network_ip = spawner
+                .docker
+                .get_network_ip_address(&container, &spawner.network)
+                .await?;
 
-        let external_port = container
-            .get_host_port_ipv4(Self::RPC_PORT)
-            .await
-            .context("ethereum sandbox port mapping")?;
+            let external_port = container
+                .get_host_port_ipv4(Self::RPC_PORT)
+                .await
+                .context("ethereum sandbox port mapping")?;
 
-        let external_http_endpoint = format!("http://127.0.0.1:{external_port}");
+            let external_http_endpoint = format!("http://127.0.0.1:{external_port}");
+            (
+                format!("http://{}:{}", network_ip, Self::RPC_PORT),
+                external_http_endpoint,
+            )
+        } else {
+            let endpoint = format!("http://127.0.0.1:{}", Self::RPC_PORT);
+            (endpoint.clone(), endpoint)
+        };
+
         wait_for_rpc(&external_http_endpoint).await?;
 
         Ok(Self {
-            internal_http_endpoint: format!("http://{}:{}", network_ip, Self::RPC_PORT),
+            internal_http_endpoint,
             external_http_endpoint,
             private_key,
             chain_id: Self::DEFAULT_CHAIN_ID,
@@ -518,7 +535,7 @@ async fn extract_private_key(docker: &DockerClient, container_id: &str) -> anyho
     let mut logs = docker.docker.logs::<String>(
         container_id,
         Some(LogsOptions {
-            follow: false,
+            follow: true,
             stdout: true,
             stderr: true,
             ..Default::default()
