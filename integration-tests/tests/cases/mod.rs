@@ -1,3 +1,4 @@
+use anyhow::ensure;
 use integration_tests::actions;
 use integration_tests::cluster;
 use integration_tests::utils;
@@ -8,7 +9,7 @@ use mpc_contract::update::ProposeUpdateArgs;
 use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt};
 use mpc_node::kdf::into_eth_sig;
 use mpc_node::protocol::cryptography::set_resharing_running_timeout;
-use mpc_node::protocol::state::ResharingStatus;
+use mpc_node::protocol::state::{NodeStatus, ResharingStatus};
 use mpc_node::util::NearPublicKeyExt as _;
 use mpc_node::web::StateView;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
@@ -380,6 +381,101 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test(tokio::test)]
+async fn test_generating_offline_participant_recovers() -> anyhow::Result<()> {
+    let mut nodes = cluster::spawn()
+        .disable_wait_running()
+        .disable_prestockpile()
+        .await?;
+
+    let participant_count = nodes.cfg.nodes;
+    let target_account = nodes.account_id(0).clone();
+    let witness_account = nodes.account_id(1).clone();
+
+    let offline_config = nodes.kill_node(&target_account).await;
+
+    wait_for_account_generating(
+        &nodes,
+        &witness_account,
+        participant_count,
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    ensure!(
+        matches!(
+            nodes.contract_state().await?,
+            mpc_contract::ProtocolContractState::Initializing(_)
+        ),
+        "contract unexpectedly left initializing state while participant offline"
+    );
+
+    nodes.restart_node(offline_config).await?;
+
+    wait_for_account_generating(
+        &nodes,
+        &target_account,
+        participant_count,
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    nodes.wait().running().nodes_running().await?;
+
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_generating_running_participant_restart() -> anyhow::Result<()> {
+    let mut nodes = cluster::spawn()
+        .disable_wait_running()
+        .disable_prestockpile()
+        .await?;
+
+    let participant_count = nodes.cfg.nodes;
+    let target_account = nodes.account_id(0).clone();
+
+    wait_for_account_generating(
+        &nodes,
+        &target_account,
+        participant_count,
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    let target_config = nodes.kill_node(&target_account).await;
+
+    ensure!(
+        matches!(
+            nodes.contract_state().await?,
+            mpc_contract::ProtocolContractState::Initializing(_)
+        ),
+        "contract unexpectedly left initializing state before restart"
+    );
+
+    nodes.restart_node(target_config).await?;
+
+    wait_for_account_generating(
+        &nodes,
+        &target_account,
+        participant_count,
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    nodes.wait().running().nodes_running().await?;
+
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
+
+    Ok(())
+}
+
 async fn wait_for_account_resharing_phase(
     nodes: &cluster::Cluster,
     account_id: &near_workspaces::AccountId,
@@ -414,6 +510,50 @@ async fn wait_for_account_resharing_phase(
         if start.elapsed() > timeout {
             anyhow::bail!(
                 "timed out waiting for {account_id} to reach resharing phase in {expected:?}"
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn wait_for_account_generating(
+    nodes: &cluster::Cluster,
+    account_id: &near_workspaces::AccountId,
+    expected_participants: usize,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let start = Instant::now();
+    loop {
+        if let Some(idx) = nodes
+            .account_ids()
+            .iter()
+            .position(|current| *current == account_id)
+        {
+            match nodes.fetch_status(idx).await? {
+                NodeStatus::Generating { participants } => {
+                    if participants.len() == expected_participants {
+                        return Ok(());
+                    }
+
+                    tracing::info!(
+                        %account_id,
+                        count = participants.len(),
+                        expected = expected_participants,
+                        "node in generating with unexpected participant count"
+                    );
+                }
+                other => {
+                    tracing::info!(%account_id, ?other, "node not yet in generating state");
+                }
+            }
+        } else {
+            tracing::info!(%account_id, "account not currently tracked in cluster while waiting for generating state");
+        }
+
+        if start.elapsed() > timeout {
+            anyhow::bail!(
+                "timed out waiting for {account_id} to enter generating with {expected_participants} participants"
             );
         }
 

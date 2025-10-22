@@ -106,6 +106,11 @@ impl ClusterSpawner {
         self
     }
 
+    pub fn wait_running(mut self, wait: bool) -> Self {
+        self.wait_for_running = wait;
+        self
+    }
+
     pub fn disable_prestockpile(mut self) -> Self {
         self.prestockpile = None;
         self

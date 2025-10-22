@@ -3,6 +3,7 @@ pub mod spawner;
 use std::collections::HashSet;
 
 use mpc_contract::primitives::Participants;
+use mpc_node::protocol::state::NodeStatus;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{Finality, NearToken};
@@ -70,6 +71,12 @@ impl Cluster {
     pub async fn fetch_states(&self) -> anyhow::Result<Vec<StateView>> {
         let tasks = (0..self.len()).map(|id| self.fetch_state(id));
         futures::future::try_join_all(tasks).await
+    }
+
+    pub async fn fetch_status(&self, id: usize) -> anyhow::Result<NodeStatus> {
+        let url = self.url(id).join("/status").unwrap();
+        let status: NodeStatus = self.http_client.get(url).send().await?.json().await?;
+        Ok(status)
     }
 
     pub async fn fetch_bench_metrics(&self, id: usize) -> anyhow::Result<BenchMetrics> {
