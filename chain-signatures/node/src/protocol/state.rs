@@ -10,7 +10,8 @@ use mpc_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use std::collections::{HashSet, VecDeque};
+use rand::random;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::time::{Duration, Instant};
@@ -85,10 +86,15 @@ pub struct ResharingState {
     pub phase: ResharingPhase,
     pub ready_nonce: u64,
     pub pending: VecDeque<ResharingMessage>,
+    pub attempt_id: Option<u64>,
+    pub last_attempt_id: Option<u64>,
+    pub active_ready_tokens: HashMap<Participant, u64>,
 }
 
 pub struct ReshareAwaiting {
     pub ready: HashSet<Participant>,
+    pub ready_tokens: HashMap<Participant, u64>,
+    pub local_attempt: u64,
     /// Interval to control broadcasting readiness messages.
     // NOTE: this is an Instant for now since generating/resharing tasks are not async
     // and happen in main protocol loop. once it becomes async we can make this an interval.
@@ -112,8 +118,11 @@ pub enum ResharingPhase {
 
 impl ResharingPhase {
     pub fn awaiting(me: Participant) -> Self {
+        let local_attempt = random::<u64>();
         Self::Awaiting(ReshareAwaiting {
             ready: std::iter::once(me).collect(),
+            ready_tokens: std::iter::once((me, local_attempt)).collect(),
+            local_attempt,
             // ready to broadcast immediately
             broadcast_interval: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,
         })

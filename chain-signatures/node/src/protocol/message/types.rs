@@ -72,6 +72,10 @@ impl From<GeneratingMessage> for Message {
 pub struct ResharingMessage {
     pub epoch: Epoch,
     pub from: Participant,
+    /// Unique identifier for the current resharing attempt. Messages belonging to earlier
+    /// attempts are discarded so nodes can safely restart readiness.
+    #[serde(default)]
+    pub attempt: u64,
     #[serde(with = "serde_bytes")]
     pub data: MessageData,
 }
@@ -90,6 +94,9 @@ pub struct ReadyMessage {
     /// Monotonic nonce attached by the sender so repeated ready broadcasts have distinct
     /// ciphertexts/signatures and aren’t removed by the inbox idempotent filter.
     pub nonce: u64,
+    /// Participant-scoped random identifier combined into a cluster-wide attempt identifier.
+    #[serde(default)]
+    pub attempt: u64,
 }
 
 impl From<ReadyMessage> for Message {
