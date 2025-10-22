@@ -49,11 +49,17 @@ pub(super) fn test_mock_network(
                     };
                     msg_log.lock().await.push(format!("{log_msg} from {from:?} to {to:?}"));
 
+                    let mut should_filter = true;
                     for filter in filters.iter_mut() {
                         if !filter(&send_message) {
                             tracing::info!(?from, ?to, log_msg, "Dropping a message because it didn't pass the test's filter");
-                            continue;
+                            should_filter = false;
+                            break;
                         }
+                    }
+
+                    if !should_filter {
+                        continue;
                     }
 
 
