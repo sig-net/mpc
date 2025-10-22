@@ -1053,7 +1053,9 @@ mod tests {
         let associated_data = b"";
         let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
         let starting_message = Message::Generating(GeneratingMessage {
+            epoch: 0,
             from: cait_sith::protocol::Participant::from(0),
+            token: 0,
             data: vec![],
         });
 
@@ -1217,7 +1219,9 @@ mod tests {
                 timestamp: 1234567,
             }),
             Message::Generating(GeneratingMessage {
+                epoch: 0,
                 from,
+                token: 0,
                 data: vec![8; 512],
             }),
             Message::Signature(SignatureMessage {

@@ -1,7 +1,7 @@
 use super::contract::{ProtocolState, ResharingContractState};
 use super::state::{
-    JoiningState, NodeState, PersistentNodeData, ResharingPhase, ResharingState, RunningState,
-    StartedState, WaitingForConsensusState,
+    GeneratingPhase, JoiningState, NodeState, PersistentNodeData, ResharingPhase, ResharingState,
+    RunningState, StartedState, WaitingForConsensusState,
 };
 use super::MpcSignProtocol;
 use crate::protocol::contract::primitives::Participants;
@@ -203,6 +203,8 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                         participants,
                         threshold: contract_state.threshold,
                         protocol,
+                        phase: GeneratingPhase::awaiting(me),
+                        ready_nonce: 0,
                         failed_store: Default::default(),
                     })
                 }
@@ -824,6 +826,8 @@ impl<G: Governance> ConsensusProtocol<G> for JoiningState {
                     participants,
                     threshold: contract_state.threshold,
                     protocol,
+                    phase: GeneratingPhase::awaiting(me),
+                    ready_nonce: 0,
                     failed_store: Default::default(),
                 })
             }

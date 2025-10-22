@@ -3,11 +3,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use super::state::{
-    GeneratingState, NodeState, ReshareAwaiting, ReshareRunning, ResharingPhase, ResharingState,
-    RESHARING_READY_BROADCAST_INTERVAL,
+    GenerateAwaiting, GenerateRunning, GeneratingPhase, GeneratingState, NodeState,
+    ReshareAwaiting, ReshareRunning, ResharingPhase, ResharingState, GENERATING_INITIAL_EPOCH,
+    GENERATING_READY_BROADCAST_INTERVAL, RESHARING_READY_BROADCAST_INTERVAL,
 };
 use super::MpcSignProtocol;
-use crate::protocol::contract::ResharingContractState;
+use crate::protocol::contract::{primitives::Participants, ResharingContractState};
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
@@ -43,91 +44,162 @@ pub(crate) trait CryptographicProtocol {
 
 impl CryptographicProtocol for GeneratingState {
     async fn progress(mut self, ctx: &mut MpcSignProtocol, mesh_state: MeshState) -> NodeState {
-        // Previous save to secret storage failed, try again until successful.
-        if let Some((pk, sk_share)) = self.failed_store.take() {
-            return self.finalize(pk, sk_share, ctx).await;
-        }
+        match &mut self.phase {
+            GeneratingPhase::Awaiting(state) => {
+                if state.update(ctx, &self.participants) {
+                    tracing::debug!(?state.ready_tokens, "generating: readiness updated");
+                }
 
-        let participants = self.participants.keys_vec();
-        tracing::info!(
-            ?participants,
-            active = ?mesh_state.active,
-            "generating: progressing key generation",
-        );
-        loop {
-            let action = match self.protocol.poke() {
-                Ok(action) => action,
-                Err(err) => {
-                    tracing::error!(?err, "generating failed: refreshing...");
-                    if let Err(refresh_err) = self.protocol.refresh().await {
-                        tracing::warn!(?refresh_err, "unable to refresh keygen protocol");
-                    }
+                self.ready_nonce = state
+                    .broadcast_ready(self.me, ctx, &self.participants, self.ready_nonce)
+                    .await;
+
+                if !state.startable(&self.participants) {
                     return NodeState::Generating(self);
                 }
-            };
-            match action {
-                Action::Wait => {
-                    tracing::debug!("generating: waiting");
-                    let mut counts = HashMap::<Participant, usize>::new();
-                    loop {
-                        let msg = match ctx.generating.try_recv() {
-                            Ok(msg) => msg,
-                            Err(mpsc::error::TryRecvError::Empty) => {
-                                break;
-                            }
-                            Err(mpsc::error::TryRecvError::Disconnected) => {
-                                tracing::warn!("generating: unexpected channel closure, stopping");
-                                break;
-                            }
-                        };
 
-                        counts.entry(msg.from).and_modify(|c| *c += 1).or_insert(1);
-                        self.protocol.message(msg.from, msg.data);
-                    }
-                    if !counts.is_empty() {
-                        tracing::info!(?counts, "generating: handling new messages");
-                    }
-                    return NodeState::Generating(self);
-                }
-                Action::SendMany(data) => {
-                    tracing::debug!("generating: sending a message to many participants");
-                    for p in &participants {
-                        if p == &self.me {
-                            // Skip yourself, cait-sith never sends messages to oneself
-                            continue;
-                        }
+                tracing::info!("generating: all participants ready, starting protocol");
+                let token = state.combine_tokens();
+                let ready_tokens = state.ready_tokens.clone();
+                self.phase = GeneratingPhase::Running(GenerateRunning {
+                    ready_tokens,
+                    token,
+                });
 
-                        ctx.msg_channel
-                            .send(
-                                self.me,
-                                *p,
-                                GeneratingMessage {
-                                    from: self.me,
-                                    data: data.clone(),
-                                },
-                            )
-                            .await;
-                    }
+                NodeState::Generating(self)
+            }
+            GeneratingPhase::Running(running) => {
+                // Previous save to secret storage failed, try again until successful.
+                if let Some((pk, sk_share)) = self.failed_store.take() {
+                    return self.finalize(pk, sk_share, ctx).await;
                 }
-                Action::SendPrivate(to, data) => {
-                    tracing::debug!("generating: sending a private message to {to:?}");
-                    ctx.msg_channel
-                        .send(
-                            self.me,
-                            to,
-                            GeneratingMessage {
-                                from: self.me,
-                                data,
-                            },
-                        )
-                        .await;
-                }
-                Action::Return(r) => {
+
+                if let Some(new_tokens) = running.restartable(self.me, ctx, &self.participants) {
                     tracing::info!(
-                        public_key = hex::encode(r.public_key.to_bytes()),
-                        "generating: successfully completed key generation"
+                        ?new_tokens,
+                        "generating: received readiness for new attempt while running, restarting",
                     );
-                    return self.finalize(r.public_key, r.private_share, ctx).await;
+                    self.phase = GeneratingPhase::awaiting(self.me);
+                    if let GeneratingPhase::Awaiting(state) = &mut self.phase {
+                        for (participant, token) in new_tokens {
+                            if self.participants.contains_key(&participant) {
+                                state.ready_tokens.insert(participant, token);
+                            }
+                        }
+                    }
+                    if let Err(err) = self.protocol.refresh().await {
+                        tracing::warn!(
+                            ?err,
+                            "generating: unable to refresh keygen protocol while restarting"
+                        );
+                    }
+                    return NodeState::Generating(self);
+                }
+
+                let participants = self.participants.keys_vec();
+                tracing::info!(
+                    ?participants,
+                    active = ?mesh_state.active,
+                    "generating: progressing key generation",
+                );
+                loop {
+                    let action = match self.protocol.poke() {
+                        Ok(action) => action,
+                        Err(err) => {
+                            tracing::error!(?err, "generating failed: refreshing...");
+                            if let Err(refresh_err) = self.protocol.refresh().await {
+                                tracing::warn!(?refresh_err, "unable to refresh keygen protocol");
+                            }
+                            return NodeState::Generating(self);
+                        }
+                    };
+                    match action {
+                        Action::Wait => {
+                            tracing::debug!("generating: waiting");
+                            let mut counts = HashMap::<Participant, usize>::new();
+                            loop {
+                                let msg = match ctx.generating.try_recv() {
+                                    Ok(msg) => msg,
+                                    Err(mpsc::error::TryRecvError::Empty) => break,
+                                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                                        tracing::warn!(
+                                            "generating: unexpected channel closure, stopping"
+                                        );
+                                        break;
+                                    }
+                                };
+
+                                if msg.epoch != GENERATING_INITIAL_EPOCH {
+                                    tracing::debug!(
+                                        expected = GENERATING_INITIAL_EPOCH,
+                                        actual = msg.epoch,
+                                        "generating: ignoring message for other epoch",
+                                    );
+                                    continue;
+                                }
+
+                                if msg.token != running.token {
+                                    tracing::debug!(
+                                        expected = ?running.token,
+                                        actual = ?msg.token,
+                                        participant = ?msg.from,
+                                        "generating: ignoring message for different attempt",
+                                    );
+                                    continue;
+                                }
+
+                                counts.entry(msg.from).and_modify(|c| *c += 1).or_insert(1);
+                                self.protocol.message(msg.from, msg.data);
+                            }
+                            if !counts.is_empty() {
+                                tracing::info!(?counts, "generating: handling new messages");
+                            }
+                            return NodeState::Generating(self);
+                        }
+                        Action::SendMany(data) => {
+                            tracing::debug!("generating: sending a message to many participants");
+                            for p in &participants {
+                                if p == &self.me {
+                                    continue;
+                                }
+
+                                ctx.msg_channel
+                                    .send(
+                                        self.me,
+                                        *p,
+                                        GeneratingMessage {
+                                            epoch: GENERATING_INITIAL_EPOCH,
+                                            from: self.me,
+                                            token: running.token,
+                                            data: data.clone(),
+                                        },
+                                    )
+                                    .await;
+                            }
+                        }
+                        Action::SendPrivate(to, data) => {
+                            tracing::debug!("generating: sending a private message to {to:?}");
+                            ctx.msg_channel
+                                .send(
+                                    self.me,
+                                    to,
+                                    GeneratingMessage {
+                                        epoch: GENERATING_INITIAL_EPOCH,
+                                        from: self.me,
+                                        token: running.token,
+                                        data,
+                                    },
+                                )
+                                .await;
+                        }
+                        Action::Return(r) => {
+                            tracing::info!(
+                                public_key = hex::encode(r.public_key.to_bytes()),
+                                "generating: successfully completed key generation"
+                            );
+                            return self.finalize(r.public_key, r.private_share, ctx).await;
+                        }
+                    }
                 }
             }
         }
@@ -162,6 +234,156 @@ impl GeneratingState {
             private_share,
             public_key,
         })
+    }
+}
+
+impl GenerateAwaiting {
+    pub(crate) fn startable(&self, participants: &Participants) -> bool {
+        let ready = self.ready_count(participants);
+        let total = participants.len();
+        total > 0 && ready == total
+    }
+
+    fn update(&mut self, ctx: &mut MpcSignProtocol, participants: &Participants) -> bool {
+        let mut updated = false;
+        loop {
+            match ctx.ready.try_recv() {
+                Ok(ReadyMessage {
+                    epoch, from, token, ..
+                }) => {
+                    if epoch != GENERATING_INITIAL_EPOCH {
+                        tracing::debug!(
+                            message_epoch = epoch,
+                            expected_epoch = GENERATING_INITIAL_EPOCH,
+                            "generating: ignoring readiness message for other epoch",
+                        );
+                        continue;
+                    }
+
+                    if participants.contains_key(&from) {
+                        self.ready_tokens.insert(from, token);
+                        updated = true;
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    tracing::warn!(
+                        "generating: readiness channel closed unexpectedly while awaiting"
+                    );
+                    break;
+                }
+            }
+        }
+        updated
+    }
+
+    async fn broadcast_ready(
+        &mut self,
+        me: Participant,
+        ctx: &mut MpcSignProtocol,
+        participants: &Participants,
+        nonce: u64,
+    ) -> u64 {
+        if self.broadcast_interval.elapsed() < GENERATING_READY_BROADCAST_INTERVAL {
+            return nonce;
+        }
+        self.broadcast_interval = Instant::now();
+
+        for participant in participants.keys() {
+            if participant == &me {
+                continue;
+            }
+            ctx.msg_channel
+                .send(
+                    me,
+                    *participant,
+                    ReadyMessage {
+                        epoch: GENERATING_INITIAL_EPOCH,
+                        from: me,
+                        nonce,
+                        token: self.my_token,
+                    },
+                )
+                .await;
+        }
+
+        nonce.wrapping_add(1)
+    }
+
+    fn ready_count(&self, participants: &Participants) -> usize {
+        self.ready_tokens
+            .keys()
+            .filter(|participant| participants.contains_key(participant))
+            .count()
+    }
+
+    fn combine_tokens(&self) -> u64 {
+        let mut tokens = self.ready_tokens.values().collect::<Vec<_>>();
+        tokens.sort();
+
+        let mut hasher = Sha256::new();
+        for token in tokens {
+            hasher.update(token.to_le_bytes());
+        }
+        let digest = hasher.finalize();
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&digest[..8]);
+        u64::from_le_bytes(bytes)
+    }
+}
+
+impl GenerateRunning {
+    fn restartable(
+        &self,
+        me: Participant,
+        ctx: &mut MpcSignProtocol,
+        participants: &Participants,
+    ) -> Option<Vec<(Participant, u64)>> {
+        let mut new_tokens = HashMap::<Participant, u64>::new();
+        loop {
+            match ctx.ready.try_recv() {
+                Ok(ReadyMessage {
+                    epoch,
+                    from,
+                    token: attempt,
+                    ..
+                }) => {
+                    if epoch != GENERATING_INITIAL_EPOCH {
+                        tracing::debug!(
+                            message_epoch = epoch,
+                            expected_epoch = GENERATING_INITIAL_EPOCH,
+                            "generating: ignoring readiness message for other epoch while running",
+                        );
+                        continue;
+                    }
+                    if from == me {
+                        continue;
+                    }
+                    if !participants.contains_key(&from) {
+                        continue;
+                    }
+                    match self.ready_tokens.get(&from) {
+                        Some(current) if *current == attempt => {}
+                        _ => {
+                            new_tokens.insert(from, attempt);
+                        }
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    tracing::warn!(
+                        "generating: readiness channel closed unexpectedly while running"
+                    );
+                    break;
+                }
+            }
+        }
+
+        if new_tokens.is_empty() {
+            None
+        } else {
+            Some(new_tokens.into_iter().collect())
+        }
     }
 }
 

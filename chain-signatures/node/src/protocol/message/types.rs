@@ -57,7 +57,13 @@ impl From<PositMessage> for Message {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct GeneratingMessage {
+    #[serde(default)]
+    pub epoch: Epoch,
     pub from: Participant,
+    /// Unique identifier for the current generation attempt. Messages belonging to earlier
+    /// attempts are discarded so nodes can safely restart readiness.
+    #[serde(default)]
+    pub token: u64,
     #[serde(with = "serde_bytes")]
     pub data: MessageData,
 }
@@ -86,7 +92,6 @@ impl From<ResharingMessage> for Message {
     }
 }
 
-// TODO: make it work alongside generating
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ReadyMessage {
     pub epoch: Epoch,

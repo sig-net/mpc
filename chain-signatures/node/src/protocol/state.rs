@@ -16,6 +16,8 @@ use std::fmt::{Display, Formatter};
 use std::time::{Duration, Instant};
 
 pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
+pub const GENERATING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
+pub const GENERATING_INITIAL_EPOCH: u64 = 0;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PersistentNodeData {
@@ -43,10 +45,43 @@ pub struct GeneratingState {
     pub participants: Participants,
     pub threshold: usize,
     pub protocol: KeygenProtocol,
+    pub phase: GeneratingPhase,
+    pub ready_nonce: u64,
 
     /// If the generating state fails to store data after generating, it gets temporarily
     /// stored here and retried later.
     pub failed_store: Option<(PublicKey, SecretKeyShare)>,
+}
+
+pub struct GenerateAwaiting {
+    pub ready_tokens: HashMap<Participant, u64>,
+    pub my_token: u64,
+    /// Interval to control broadcasting readiness messages.
+    // NOTE: this mimics resharing broadcast behaviour while generating runs in main loop.
+    pub broadcast_interval: Instant,
+}
+
+pub struct GenerateRunning {
+    pub ready_tokens: HashMap<Participant, u64>,
+    /// Unique identifier for the current generating attempt. Messages that do not match
+    /// this token are discarded and ignored from processing.
+    pub token: u64,
+}
+
+pub enum GeneratingPhase {
+    Awaiting(GenerateAwaiting),
+    Running(GenerateRunning),
+}
+
+impl GeneratingPhase {
+    pub fn awaiting(me: Participant) -> Self {
+        let my_token = random::<u64>();
+        Self::Awaiting(GenerateAwaiting {
+            ready_tokens: std::iter::once((me, my_token)).collect(),
+            my_token,
+            broadcast_interval: Instant::now() - GENERATING_READY_BROADCAST_INTERVAL,
+        })
+    }
 }
 
 pub struct WaitingForConsensusState {
@@ -322,6 +357,42 @@ impl NodeStateWatcher {
             NodeStatus::Joining { participants } => participants,
             _ => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::contract::primitives::ParticipantInfo;
+
+    #[test]
+    fn generating_phase_awaiting_registers_self_token() {
+        let me = Participant::from(0u32);
+        let phase = GeneratingPhase::awaiting(me);
+        let GeneratingPhase::Awaiting(state) = phase else {
+            panic!("expected awaiting phase");
+        };
+        assert!(state.ready_tokens.contains_key(&me));
+        assert_eq!(state.ready_tokens.len(), 1);
+        assert!(state.broadcast_interval.elapsed() >= GENERATING_READY_BROADCAST_INTERVAL);
+    }
+
+    #[test]
+    fn generating_phase_requires_all_ready_participants() {
+        let me = Participant::from(0u32);
+        let other = Participant::from(1u32);
+        let mut participants = Participants::default();
+        participants.insert(&me, ParticipantInfo::new(me.into()));
+        participants.insert(&other, ParticipantInfo::new(other.into()));
+
+        let mut phase = GeneratingPhase::awaiting(me);
+        let GeneratingPhase::Awaiting(ref mut awaiting) = phase else {
+            panic!("expected awaiting phase");
+        };
+
+        assert!(!awaiting.startable(&participants));
+        awaiting.ready_tokens.insert(other, 42);
+        assert!(awaiting.startable(&participants));
     }
 }
 
