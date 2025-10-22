@@ -1321,7 +1321,7 @@ pub async fn run(
         }
 
         for block_number in (current_block + 1)..=latest_block {
-            match process_block_rpc(
+            match process_block(
                 &client,
                 block_number,
                 contract_address,
@@ -1359,7 +1359,7 @@ pub async fn run(
 
 #[cfg(not(feature = "light_client"))]
 #[allow(clippy::too_many_arguments)]
-async fn process_block_rpc(
+async fn process_block(
     client: &RpcEthereumClient,
     block_number: u64,
     contract_address: Address,
