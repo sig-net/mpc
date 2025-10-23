@@ -332,6 +332,34 @@ impl VersionedMpcContract {
     }
 
     #[handle_result]
+    pub fn revoke_join(&mut self) -> Result<(), Error> {
+        log!("revoke_join: signer={}", env::signer_account_id());
+        let protocol_state = self.mutable_state();
+
+        match protocol_state {
+            ProtocolContractState::Running(RunningContractState {
+                candidates,
+                join_votes,
+                ..
+            }) => {
+                let signer_account_id = env::signer_account_id();
+                if candidates.get(&signer_account_id).is_none() {
+                    return Err(JoinError::RevokeNotCandidate.into());
+                }
+
+                // cleanup the existing votes
+                join_votes.remove(&signer_account_id);
+
+                // remove from candidates
+                candidates.remove(&signer_account_id);
+
+                Ok(())
+            }
+            _ => Err(InvalidState::ProtocolStateNotRunning.into()),
+        }
+    }
+
+    #[handle_result]
     pub fn vote_join(&mut self, candidate: AccountId) -> Result<bool, Error> {
         log!(
             "vote_join: signer={}, candidate={}",

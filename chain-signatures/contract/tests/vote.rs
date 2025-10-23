@@ -57,6 +57,89 @@ async fn test_join() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn test_revoke_join() -> anyhow::Result<()> {
+    let (worker, contract, accounts, _) = init_env().await;
+
+    // Create a new account to join as candidate
+    let alice = worker.dev_create_account().await?;
+    let execution = alice
+        .call(contract.id(), "join")
+        .args_json(json!({
+            "url": "127.0.0.1",
+            "cipher_pk": vec![1u8; 32],
+            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    // Verify alice is in candidates
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractState::Running(r) => {
+            assert!(r.candidates.contains_key(alice.id()));
+        }
+        _ => panic!("should be in running state"),
+    };
+
+    // Vote for alice to join
+    let execution = accounts[0]
+        .call(contract.id(), "vote_join")
+        .args_json(json!({
+            "candidate": alice.id()
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    // Verify votes exist for alice
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractState::Running(state) => {
+            assert!(state.candidates.contains_key(alice.id()));
+            assert!(state.join_votes.contains_key(alice.id()));
+            assert_eq!(state.join_votes.votes.get(alice.id()).unwrap().len(), 1);
+        }
+        _ => panic!("should be in running state"),
+    };
+
+    // Alice revokes her join request
+    let execution = alice.call(contract.id(), "revoke_join").transact().await?;
+    assert!(execution.is_success());
+
+    // Verify alice is no longer in candidates and votes are cleaned up
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractState::Running(r) => {
+            assert!(!r.candidates.contains_key(alice.id()));
+            assert!(!r.join_votes.contains_key(alice.id()));
+        }
+        _ => panic!("should be in running state"),
+    };
+
+    // Try to revoke again, should fail (not a candidate anymore)
+    let execution = alice.call(contract.id(), "revoke_join").transact().await?;
+    assert!(execution.is_failure());
+
+    // Random account tries to revoke (was never a candidate)
+    let bob = worker.dev_create_account().await?;
+    let execution = bob.call(contract.id(), "revoke_join").transact().await?;
+    assert!(execution.is_failure());
+
+    // Participant tries to revoke (not a candidate, is a participant)
+    let execution = accounts[0]
+        .call(contract.id(), "revoke_join")
+        .transact()
+        .await?;
+    assert!(execution.is_failure());
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_vote_join() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
 

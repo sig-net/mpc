@@ -302,6 +302,14 @@ impl Votes {
     pub fn is_empty(&self) -> bool {
         self.votes.is_empty()
     }
+
+    pub fn remove(&mut self, account_id: &AccountId) {
+        self.votes.remove(account_id);
+    }
+
+    pub fn contains_key(&self, account_id: &AccountId) -> bool {
+        self.votes.contains_key(account_id)
+    }
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
