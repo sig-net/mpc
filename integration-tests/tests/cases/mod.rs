@@ -383,6 +383,46 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test(tokio::test)]
+async fn test_resharing_possible_with_kicked_node_offline() -> anyhow::Result<()> {
+    set_resharing_running_timeout(Duration::from_secs(20));
+
+    let mut nodes = cluster::spawn().disable_prestockpile().await?;
+    nodes.wait().signable().await?;
+    let initial_state = nodes.expect_running().await?;
+
+    let kick_account = nodes.account_id(1).clone();
+
+    // set the node that is getting kicked offline
+    let _ = nodes.kill_node(&kick_account).await;
+
+    // kick node
+    let participant_accounts = nodes.participant_accounts().await?;
+    let voting_accounts = participant_accounts
+        .into_iter()
+        .filter(|account| account.id() != &kick_account)
+        .take(initial_state.threshold)
+        .collect::<Vec<_>>();
+    utils::vote_leave(&voting_accounts, nodes.contract().id(), &kick_account).await?;
+
+    // ensure that the kicked node is not a participant anymore
+    let final_state = nodes
+        .wait()
+        .running_on_epoch(initial_state.epoch + 1)
+        .await?;
+    assert_eq!(
+        final_state.participants.len(),
+        initial_state.participants.len() - 1
+    );
+    assert!(!final_state.participants.contains_key(&kick_account));
+
+    // sign to ensure everything is working
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
+
+    Ok(())
+}
+
 async fn wait_for_resharing_phase(
     nodes: &cluster::Cluster,
     account_id: &near_workspaces::AccountId,
