@@ -57,7 +57,7 @@ async fn test_join() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_revoke_join() -> anyhow::Result<()> {
+async fn test_remove_candidacy() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
 
     // Create a new account to join as candidate
@@ -106,7 +106,10 @@ async fn test_revoke_join() -> anyhow::Result<()> {
     };
 
     // Alice revokes her join request
-    let execution = alice.call(contract.id(), "revoke_join").transact().await?;
+    let execution = alice
+        .call(contract.id(), "remove_candidacy")
+        .transact()
+        .await?;
     assert!(execution.is_success());
 
     // Verify alice is no longer in candidates and votes are cleaned up
@@ -121,17 +124,23 @@ async fn test_revoke_join() -> anyhow::Result<()> {
     };
 
     // Try to revoke again, should fail (not a candidate anymore)
-    let execution = alice.call(contract.id(), "revoke_join").transact().await?;
+    let execution = alice
+        .call(contract.id(), "remove_candidacy")
+        .transact()
+        .await?;
     assert!(execution.is_failure());
 
     // Random account tries to revoke (was never a candidate)
     let bob = worker.dev_create_account().await?;
-    let execution = bob.call(contract.id(), "revoke_join").transact().await?;
+    let execution = bob
+        .call(contract.id(), "remove_candidacy")
+        .transact()
+        .await?;
     assert!(execution.is_failure());
 
     // Participant tries to revoke (not a candidate, is a participant)
     let execution = accounts[0]
-        .call(contract.id(), "revoke_join")
+        .call(contract.id(), "remove_candidacy")
         .transact()
         .await?;
     assert!(execution.is_failure());

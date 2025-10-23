@@ -332,8 +332,8 @@ impl VersionedMpcContract {
     }
 
     #[handle_result]
-    pub fn revoke_join(&mut self) -> Result<(), Error> {
-        log!("revoke_join: signer={}", env::signer_account_id());
+    pub fn remove_candidacy(&mut self) -> Result<(), Error> {
+        log!("remove_candidacy: signer={}", env::signer_account_id());
         let protocol_state = self.mutable_state();
 
         match protocol_state {
