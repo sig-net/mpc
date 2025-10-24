@@ -9,6 +9,7 @@ tmp
 # Artifacts that may be left over
 **/*-secret-manager-*
 integration-tests/.project
+integration-tests/test-ledger/
 
 node_modules/
 chain-signatures/contract-eth/artifacts

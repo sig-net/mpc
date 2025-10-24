@@ -54,6 +54,12 @@ jobs:
         run: |
           docker pull redis:7.4.2
 
+      - name: Setup Solana and Anchor
+        uses: metadaoproject/setup-anchor@v3.1
+        with:
+          solana-cli-version: '2.3.9'
+          anchor-version: '0.30.1'
+
       - name: Install stable toolchain
         uses: actions-rs/toolchain@v1
         with:

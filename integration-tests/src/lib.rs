@@ -316,6 +316,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             helios_data_path: format!("/tmp/helios-{}", contract_address_hex),
             refresh_finalized_interval: 1_000,
             total_timeout: 600,
+            optimistic_requests: false,
         });
 
         ethereum = Some(EthereumContext {

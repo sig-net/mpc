@@ -138,6 +138,11 @@ where
     Ok(response.status())
 }
 
+pub async fn is_port_available(port: u16) -> bool {
+    let addr = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, port);
+    tokio::net::TcpListener::bind(addr).await.is_ok()
+}
+
 /// Request an unused port from the OS.
 pub async fn pick_unused_port() -> anyhow::Result<u16> {
     // Port 0 means the OS gives us an unused port
@@ -147,6 +152,14 @@ pub async fn pick_unused_port() -> anyhow::Result<u16> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let port = listener.local_addr()?.port();
     Ok(port)
+}
+
+pub async fn pick_preferred_or_unused_port(preferred: u16) -> u16 {
+    // Try preferred port first
+    if is_port_available(preferred).await {
+        return preferred;
+    }
+    pick_unused_port().await.unwrap_or(preferred)
 }
 
 pub async fn ping_until_ok(addr: &str, timeout: u64) -> anyhow::Result<()> {

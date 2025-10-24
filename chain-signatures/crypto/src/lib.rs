@@ -3,7 +3,10 @@ pub mod types;
 
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::EncodedPoint;
-pub use kdf::{derive_epsilon_near, derive_key, x_coordinate};
+pub use kdf::{
+    check_ec_signature, derive_epsilon_eth, derive_epsilon_near, derive_epsilon_sol, derive_key,
+    x_coordinate,
+};
 pub use types::{PublicKey, ScalarExt};
 
 // Our wasm runtime doesn't support good syncronous entropy.

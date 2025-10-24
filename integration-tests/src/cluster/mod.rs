@@ -7,12 +7,11 @@ use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{Finality, NearToken};
 use near_workspaces::{Account, AccountId, Contract, Worker};
-use spawner::Prestockpile;
+use spawner::{ClusterSpawner, Prestockpile};
 
 use crate::actions::sign::SignAction;
 use crate::actions::wait::WaitAction;
-use crate::cluster::spawner::ClusterSpawner;
-use crate::containers::DockerClient;
+use crate::containers::{self, DockerClient};
 use crate::local::NodeEnvConfig;
 use crate::utils::{self, vote_join, vote_leave};
 use crate::{NodeConfig, Nodes};
@@ -38,6 +37,7 @@ pub struct Cluster {
     http_client: reqwest::Client,
     pub nodes: Nodes,
     pub account_idx: usize,
+    pub solana: Option<containers::Solana>,
 }
 
 impl Cluster {

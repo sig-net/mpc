@@ -638,17 +638,18 @@ impl SignatureGenerator {
                         .with_label_values(&[my_account_id.as_str()])
                         .observe(self.created.elapsed().as_secs_f64());
 
-                    if self.request.proposer == me {
-                        self.rpc.publish(
-                            self.public_key,
-                            self.request.clone(),
-                            output,
-                            self.participants.clone(),
-                        );
-                    } else if let SignRequestType::SignBidirectional(_) =
-                        self.request.indexed.sign_request_type
+                    if let SignRequestType::SignBidirectional(_) = self.request.indexed.sign_request_type
                     {
                         self.sign_bidirectional_signature_channel.send(
+                            self.public_key,
+                            self.request.clone(),
+                            output.clone(),
+                            self.participants.clone(),
+                        );
+                    }
+
+                    if self.request.proposer == me {
+                        self.rpc.publish(
                             self.public_key,
                             self.request.clone(),
                             output,

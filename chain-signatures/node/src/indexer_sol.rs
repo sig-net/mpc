@@ -179,7 +179,7 @@ pub struct SignatureRequestedEvent {
     pub payload: [u8; 32],
     pub key_version: u32,
     pub deposit: u64,
-    pub chain_id: u64,
+    pub chain_id: String,
     pub path: String,
     pub algo: String,
     pub dest: String,
@@ -197,7 +197,7 @@ impl SignatureEventTrait for SignatureRequestedEvent {
             Token::Bytes(self.payload.to_vec()),
             Token::String(self.path.clone()),
             Token::Uint(self.key_version.into()),
-            Token::Uint(self.chain_id.into()),
+            Token::String(self.chain_id.clone()),
             Token::String(self.algo.clone()),
             Token::String(self.dest.clone()),
             Token::String(self.params.clone()),
@@ -314,7 +314,7 @@ impl SignatureEventTrait for SignBidirectionalEvent {
             anyhow::bail!("deposit is 0");
         }
 
-        if self.key_version != 0 {
+        if self.key_version > LATEST_MPC_KEY_VERSION {
             tracing::warn!("unsupported key version: {}", self.key_version);
             anyhow::bail!("unsupported key version");
         }
