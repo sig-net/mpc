@@ -13,6 +13,7 @@ pub mod protocol;
 pub mod respond_bidirectional;
 pub mod rpc;
 pub mod sign_bidirectional;
+pub mod signing;
 pub mod storage;
 pub mod types;
 pub mod util;

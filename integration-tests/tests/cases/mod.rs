@@ -14,6 +14,7 @@ pub mod mpc;
 pub mod nightly;
 pub mod store;
 pub mod sync;
+pub mod threshold_signer;
 
 #[test(tokio::test)]
 async fn test_multichain_reshare() -> anyhow::Result<()> {

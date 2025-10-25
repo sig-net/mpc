@@ -56,6 +56,7 @@ mpc-contract.workspace = true
 mpc-keys.workspace = true
 mpc-node = { path = "../chain-signatures/node", features = ["test-feature", "debug-page"] }
 mpc-primitives.workspace = true
+threshold-ts = { path = "../chain-signatures/threshold-ts" }
 
 [dev-dependencies]
 criterion = "0.5.1"
