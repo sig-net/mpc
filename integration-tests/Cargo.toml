@@ -54,7 +54,7 @@ near-workspaces = "0.15.0"
 mpc-crypto.workspace = true
 mpc-contract.workspace = true
 mpc-keys.workspace = true
-mpc-node = { path = "../chain-signatures/node", features = ["test-feature", "debug-page"] }
+mpc-node = { path = "../chain-signatures/node", features = ["test-feature", "debug-page", "near-threshold-signatures"] }
 mpc-primitives.workspace = true
 threshold-ts = { path = "../chain-signatures/threshold-ts" }
 

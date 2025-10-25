@@ -9,6 +9,13 @@ anyhow.workspace = true
 near-account-id.workspace = true
 near-sdk.workspace = true
 sha3.workspace = true
+async-trait = "0.1"
+cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
+thiserror.workspace = true
+
+[features]
+default = []
+near-threshold-signatures = []
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2.12", features = ["custom"] }

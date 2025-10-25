@@ -86,6 +86,7 @@ mpc-crypto.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
 signet-program.workspace = true
+threshold-ts = { path = "../threshold-ts", optional = true }
 
 alloy-rlp.workspace = true
 alloy-dyn-abi.workspace = true
@@ -110,3 +111,5 @@ bench = []
 test-feature = []
 # Show a debug page
 debug-page = ["maud"]
+# Use near/threshold-signatures instead of cait-sith for signing operations
+near-threshold-signatures = ["threshold-ts"]

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use mpc_contract::config::ProtocolConfig;
+use mpc_crypto::signing::SigningBackend;
 use mpc_keys::hpke;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -76,10 +77,22 @@ impl Config {
 
 /// All the local configurations on a node that are not accessible by anyone else
 /// but the current node.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct LocalConfig {
     pub network: NetworkConfig,
     pub over: OverrideConfig,
+    /// Signing backend to use for threshold operations
+    pub signing_backend: SigningBackend,
+}
+
+impl Default for LocalConfig {
+    fn default() -> Self {
+        Self {
+            network: NetworkConfig::default(),
+            over: OverrideConfig::default(),
+            signing_backend: SigningBackend::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

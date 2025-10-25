@@ -49,19 +49,25 @@ async fn test_threshold_signer_ecdsa() {
     };
 
     // Sign the message
-    let result = signer
-        .sign(request)
-        .await
-        .expect("should sign with ECDSA");
+    let result = signer.sign(request).await.expect("should sign with ECDSA");
 
     // Verify the signature
     let is_valid = signer
-        .verify(&key_meta, b"test message for ECDSA", &result.signature, &result.metadata)
+        .verify(
+            &key_meta,
+            b"test message for ECDSA",
+            &result.signature,
+            &result.metadata,
+        )
         .await
         .expect("should verify ECDSA signature");
 
     assert!(is_valid, "ECDSA signature should be valid");
-    assert_eq!(result.signature.len(), 64, "ECDSA signature should be 64 bytes");
+    assert_eq!(
+        result.signature.len(),
+        64,
+        "ECDSA signature should be 64 bytes"
+    );
 }
 
 /// Test EdDSA threshold signing using NearThresholdSigner
@@ -101,20 +107,26 @@ async fn test_threshold_signer_eddsa() {
     };
 
     // Sign the message
-    let result = signer
-        .sign(request)
-        .await
-        .expect("should sign with EdDSA");
+    let result = signer.sign(request).await.expect("should sign with EdDSA");
 
     // Verify the signature
     let is_valid = signer
-        .verify(&key_meta, b"test message for EdDSA", &result.signature, &result.metadata)
+        .verify(
+            &key_meta,
+            b"test message for EdDSA",
+            &result.signature,
+            &result.metadata,
+        )
         .await
         .expect("should verify EdDSA signature");
 
     assert!(is_valid, "EdDSA signature should be valid");
     // EdDSA signatures are typically 64 bytes (32 bytes R + 32 bytes s)
-    assert_eq!(result.signature.len(), 64, "EdDSA signature should be 64 bytes");
+    assert_eq!(
+        result.signature.len(),
+        64,
+        "EdDSA signature should be 64 bytes"
+    );
 }
 
 /// Test that CaitSithAdapter rejects EdDSA requests

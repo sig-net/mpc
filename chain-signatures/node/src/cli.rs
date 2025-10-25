@@ -298,6 +298,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let config = Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network,
+                signing_backend: Default::default(),
             });
             let (config_tx, config_rx) = watch::channel(config);
 

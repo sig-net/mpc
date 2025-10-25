@@ -1310,6 +1310,7 @@ mod tests {
                 sign_sk: sign_sk.clone(),
                 cipher_sk,
             },
+            signing_backend: Default::default(),
         });
         let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
             &node_id,

@@ -7070,11 +7070,14 @@ version = "1.9.1"
 dependencies = [
  "alloy",
  "anyhow",
+ "async-trait",
+ "cait-sith",
  "getrandom 0.2.16",
  "k256",
  "near-account-id",
  "near-sdk",
  "sha3",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -7162,6 +7165,7 @@ dependencies = [
  "sysinfo",
  "test-log",
  "thiserror 1.0.69",
+ "threshold-ts",
  "tokio",
  "tokio-retry",
  "tokio-stream",
@@ -14484,7 +14488,7 @@ dependencies = [
  "cait-sith",
  "ed25519-dalek 2.1.1",
  "k256",
- "mpc-node",
+ "mpc-crypto",
  "rand 0.8.5",
  "serde",
  "thiserror 1.0.69",
