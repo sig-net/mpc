@@ -1,0 +1,18 @@
+[package]
+name = "mpc-redis-module"
+version.workspace = true
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+redis-module = "2.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+near-account-id = { workspace = true }
+cait-sith = { workspace = true }
+mpc-primitives = { workspace = true }
+mpc-node = { workspace = true }
