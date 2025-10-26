@@ -7,6 +7,7 @@ use cait_sith::protocol::Participant;
 use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
+use serde_json;
 
 use near_account_id::AccountId;
 
@@ -164,35 +165,11 @@ impl TripleStorage {
     pub async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
         let start = Instant::now();
 
-        const SCRIPT: &str = r#"
-            local triple_key = KEYS[1]
-            local used_key = KEYS[2]
-            local reserved_key = KEYS[3]
-            local triple_id = ARGV[1]
-
-            -- cannot reserve this triple if it already exists.
-            if redis.call("SADD", reserved_key, triple_id) == 0 then
-                return {err = "WARN triple " .. triple_id .. " has already been reserved"}
-            end
-
-            -- cannot reserve this triple if its already in storage.
-            if redis.call("HEXISTS", triple_key, triple_id) == 1 then
-                return {err = "WARN triple " .. triple_id .. " has already been stored"}
-            end
-
-            -- cannot reserve this triple if it has already been used.
-            if redis.call("HEXISTS", used_key, triple_id) == 1 then
-                return {err = "WARN triple " .. triple_id .. " has already been used"}
-            end
-        "#;
-
         let mut conn = self.connect().await?;
-        let result: Result<(), _> = redis::Script::new(SCRIPT)
-            .key(&self.triple_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
+        let result: Result<String, _> = redis::cmd("TRIPLES.RESERVE")
+            .arg(self.account_id.to_string())
             .arg(id)
-            .invoke_async(&mut conn)
+            .query_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
@@ -200,20 +177,15 @@ impl TripleStorage {
             .with_label_values(&["triple", "reserve", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
 
-        match result {
-            Ok(_) => Some(TripleSlot {
+        if result.is_ok() {
+            Some(TripleSlot {
                 id,
                 storage: self.clone(),
                 stored: false,
-            }),
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to reserve triple"
-                );
-                None
-            }
+            })
+        } else {
+            tracing::warn!(?result, "failed to reserve triple");
+            None
         }
     }
 
@@ -221,7 +193,12 @@ impl TripleStorage {
         let Some(mut conn) = self.connect().await else {
             return;
         };
-        let outcome: Result<(), _> = conn.srem(&self.reserved_key, &triples).await;
+        let mut cmd = redis::cmd("TRIPLES.UNRESERVE");
+        cmd.arg(self.account_id.to_string());
+        for triple in triples {
+            cmd.arg(triple);
+        }
+        let outcome: Result<(), _> = cmd.query_async(&mut conn).await;
         if let Err(err) = outcome {
             tracing::warn!(?triples, ?err, "failed to unreserve triples");
         }
@@ -234,57 +211,16 @@ impl TripleStorage {
     ) -> Vec<TripleId> {
         let start = Instant::now();
 
-        const SCRIPT: &str = r#"
-            local triple_key = KEYS[1]
-            local reserved_key = KEYS[2]
-            local owner_key = KEYS[3]
-
-            -- convert the list of ids to a table for easy lookup
-            local owner_shares = {}
-            for _, value in ipairs(ARGV) do
-                owner_shares[value] = true
-            end
-
-            -- find all shares that the owner no longer tracks
-            local outdated = {}
-            local our_shares = redis.call("SMEMBERS", owner_key)
-            for _, id in ipairs(our_shares) do
-                if not owner_shares[id] then
-                    table.insert(outdated, id)
-                end
-
-                -- remove the outdated shares from our node if we have too many
-                -- already to be able to process them in one go.
-                if #outdated >= 4096 then
-                    redis.call("SREM", owner_key, unpack(outdated))
-                    redis.call("SREM", reserved_key, unpack(outdated))
-                    redis.call("HDEL", triple_key, unpack(outdated))
-                    -- clear the outdated list for the next batchw
-                    outdated = {}
-                end
-            end
-
-            -- remove the remaining outdated shares from our node
-            if #outdated > 0 then
-                redis.call("SREM", owner_key, unpack(outdated))
-                redis.call("SREM", reserved_key, unpack(outdated))
-                redis.call("HDEL", triple_key, unpack(outdated))
-            end
-
-            return outdated
-        "#;
-
         let Some(mut conn) = self.connect().await else {
             return Vec::new();
         };
-        let result: Result<Vec<TripleId>, _> = redis::Script::new(SCRIPT)
-            .key(&self.triple_key)
-            .key(&self.reserved_key)
-            .key(owner_key(&self.owner_keys, owner))
-            // NOTE: this encodes each entry of owner_shares as a separate ARGV[index] entry.
-            .arg(owner_shares)
-            .invoke_async(&mut conn)
-            .await;
+        let mut cmd = redis::cmd("TRIPLES.REMOVE_OUTDATED");
+        cmd.arg(self.account_id.to_string())
+            .arg(Into::<u32>::into(owner));
+        for share in owner_shares {
+            cmd.arg(share);
+        }
+        let result: Result<Vec<TripleId>, _> = cmd.query_async(&mut conn).await;
 
         let elapsed = start.elapsed();
         crate::metrics::REDIS_LATENCY
@@ -330,44 +266,17 @@ impl TripleStorage {
     async fn insert(&self, triple: Triple, owner: Participant) -> bool {
         let start = Instant::now();
 
-        const SCRIPT: &str = r#"
-            local triple_key = KEYS[1]
-            local used_key = KEYS[2]
-            local reserved_key = KEYS[3]
-            local owner_keys = KEYS[4]
-            local owner_key = KEYS[5]
-            local triple_id = ARGV[1]
-            local triple = ARGV[2]
-
-            -- if the triple has not been reserved, then something went wrong when acquiring the
-            -- reservation for it via triple slot.
-            if redis.call("SREM", reserved_key, triple_id) == 0 then
-                return {err = "WARN triple " .. triple_id .. " has NOT been reserved"}
-            end
-
-            if redis.call("HEXISTS", used_key, triple_id) == 1 then
-                return {err = "WARN triple " .. triple_id .. " has already been used"}
-            end
-
-            redis.call("SADD", owner_key, triple_id)
-            redis.call("SADD", owner_keys, owner_key)
-            redis.call("HSET", triple_key, triple_id, triple)
-        "#;
-
         let id = triple.id;
         let Some(mut conn) = self.connect().await else {
             tracing::warn!(id, "failed to insert triple: connection failed");
             return false;
         };
-        let result: Result<(), _> = redis::Script::new(SCRIPT)
-            .key(&self.triple_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
-            .key(&self.owner_keys)
-            .key(owner_key(&self.owner_keys, owner))
+        let result: Result<String, _> = redis::cmd("TRIPLES.INSERT")
+            .arg(self.account_id.to_string())
             .arg(id)
-            .arg(triple)
-            .invoke_async(&mut conn)
+            .arg(serde_json::to_string(&triple).unwrap())
+            .arg(Into::<u32>::into(owner))
+            .query_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
@@ -452,63 +361,15 @@ impl TripleStorage {
         owner: Participant,
         me: Participant,
     ) -> Option<TriplesTaken> {
-        const SCRIPT: &str = r#"
-            local triple_key = KEYS[1]
-            local used_key = KEYS[2]
-            local owner_key = KEYS[3]
-            local mine_key = KEYS[4]
-            local reserved_key = KEYS[5]
-            local id1 = ARGV[1]
-            local id2 = ARGV[2]
-
-            local reserved = redis.call("SMISMEMBER", reserved_key, id1, id2)
-            if reserved[1] == 1 or reserved[2] == 1 then
-                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " is generating or taken"}
-            end
-
-            -- check if the given triple id belong to us, if so then we cannot take it as foreign
-            local check = redis.call("SMISMEMBER", mine_key, id1, id2)
-            if check[1] == 1 or check[2] == 1 then
-                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " cannot be taken as foreign owned"}
-            end
-
-            -- check if the given triple id belong to the owner, if not then error out
-            local check = redis.call("SMISMEMBER", owner_key, id1, id2)
-            if check[1] == 0 or check[2] == 0 then
-                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " cannot be taken by incorrect owner " .. owner_key}
-            end
-
-            -- fetch the triples and delete them once successfully fetched
-            local triples = redis.call("HMGET", triple_key, id1, id2)
-            if not triples[1] then
-                return {err = "WARN unexpected, triple " .. id1 .. " is missing"}
-            end
-            if not triples[2] then
-                return {err = "WARN unexpected, triple " .. id2 .. " is missing"}
-            end
-            redis.call("HDEL", triple_key, id1, id2)
-            redis.call("SREM", owner_key, id1, id2)
-
-            -- Add the triples to the used set and set expiration time. Note, HSET is used so
-            -- we can expire on each field instead of the whole hash set.
-            redis.call("HSET", used_key, id1, "1", id2, "1")
-            redis.call("HEXPIRE", used_key, ARGV[3], "FIELDS", 2, id1, id2)
-
-            return triples
-        "#;
-
         let start = Instant::now();
         let mut conn = self.connect().await?;
-        let result = redis::Script::new(SCRIPT)
-            .key(&self.triple_key)
-            .key(&self.used_key)
-            .key(owner_key(&self.owner_keys, owner))
-            .key(owner_key(&self.owner_keys, me))
-            .key(&self.reserved_key)
+        let result: Result<(Triple, Triple), _> = redis::cmd("TRIPLES.TAKE_TWO")
+            .arg(self.account_id.to_string())
             .arg(id1)
             .arg(id2)
-            .arg(USED_EXPIRE_TIME.num_seconds())
-            .invoke_async(&mut conn)
+            .arg(Into::<u32>::into(owner))
+            .arg(Into::<u32>::into(me))
+            .query_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
@@ -543,54 +404,12 @@ impl TripleStorage {
     /// It is very important to NOT reuse the same triple twice for two different
     /// protocols.
     pub async fn take_two_mine(&self, me: Participant) -> Option<TriplesTaken> {
-        const SCRIPT: &str = r#"
-            local triple_key = KEYS[1]
-            local used_key = KEYS[2]
-            local mine_key = KEYS[3]
-            local reserved_key = KEYS[4]
-            local expire_time = ARGV[1]
-
-            if redis.call("SCARD", mine_key) < 2 then
-                return nil
-            end
-
-            -- pop two triples from the self owner set and delete them once successfully fetched
-            local triple_ids = redis.call("SPOP", mine_key, 2)
-            local triples = redis.call("HMGET", triple_key, unpack(triple_ids))
-            if not triples[1] then
-                return {err = "WARN unexpected, triple " .. triple_ids[1] .. " is missing"}
-            end
-            if not triples[2] then
-                return {err = "WARN unexpected, triple " .. triple_ids[2] .. " is missing"}
-            end
-
-            -- reserve the triples again, since the owner is taking them here, and should
-            -- not invalidate the other nodes when syncing.
-            redis.call("SADD", reserved_key, unpack(triple_ids))
-
-            -- Delete the triples from the hash map
-            redis.call("HDEL", triple_key, unpack(triple_ids))
-            -- delete the triples from our self owner set
-            redis.call("SREM", mine_key, unpack(triple_ids))
-
-            -- Add the triples to the used set and set expiration time. Note, HSET is used so
-            -- we can expire on each field instead of the whole hash set.
-            redis.call("HSET", used_key, triple_ids[1], "1", triple_ids[2], "1")
-            redis.call("HEXPIRE", used_key, expire_time, "FIELDS", 2, unpack(triple_ids))
-
-            -- Return the triples as a response
-            return triples
-        "#;
-
         let start = Instant::now();
         let mut conn = self.connect().await?;
-        let result = redis::Script::new(SCRIPT)
-            .key(&self.triple_key)
-            .key(&self.used_key)
-            .key(owner_key(&self.owner_keys, me))
-            .key(&self.reserved_key)
-            .arg(USED_EXPIRE_TIME.num_seconds())
-            .invoke_async(&mut conn)
+        let result: Result<Option<(Triple, Triple)>, _> = redis::cmd("TRIPLES.TAKE_TWO_MINE")
+            .arg(self.account_id.to_string())
+            .arg(Into::<u32>::into(me))
+            .query_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
@@ -655,29 +474,13 @@ impl TripleStorage {
     /// Clear all triple storage, including used, reserved, and owned keys.
     /// Return true if successful, false otherwise.
     pub async fn clear(&self) -> bool {
-        const SCRIPT: &str = r#"
-            local owner_keys = redis.call("SMEMBERS", KEYS[1])
-            local del = {}
-            for _, key in ipairs(KEYS) do
-                table.insert(del, key)
-            end
-            for _, key in ipairs(owner_keys) do
-                table.insert(del, key)
-            end
-
-            redis.call("DEL", unpack(del))
-        "#;
-
         let start = Instant::now();
         let Some(mut conn) = self.connect().await else {
             return false;
         };
-        let outcome: Option<()> = redis::Script::new(SCRIPT)
-            .key(&self.owner_keys)
-            .key(&self.triple_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
-            .invoke_async(&mut conn)
+        let outcome: Result<(), _> = redis::cmd("TRIPLES.CLEAR")
+            .arg(self.account_id.to_string())
+            .query_async(&mut conn)
             .await
             .inspect_err(|err| {
                 let elapsed = start.elapsed();
@@ -686,16 +489,14 @@ impl TripleStorage {
                     elapsed_ms = elapsed.as_millis(),
                     "failed to clear triple storage"
                 );
-            })
-            .ok();
+            });
 
         let elapsed = start.elapsed();
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["triple", "clear", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
 
-        // if the outcome is None, it means the script failed or there was an error.
-        outcome.is_some()
+        outcome.is_ok()
     }
 }
 

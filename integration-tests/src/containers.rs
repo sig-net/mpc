@@ -27,7 +27,7 @@ use serde_json::json;
 use testcontainers::core::ExecCommand;
 use testcontainers::ContainerAsync;
 use testcontainers::{
-    core::{IntoContainerPort, WaitFor},
+    core::{IntoContainerPort, Mount, WaitFor},
     runners::AsyncRunner,
     GenericImage, ImageExt,
 };
@@ -311,10 +311,20 @@ impl Redis {
 
     pub async fn run(spawner: &ClusterSpawner) -> Self {
         tracing::info!("Running Redis container...");
+        let module_path = "/usr/local/lib/libmpc_redis_module.so";
         let container = GenericImage::new("redis", "7.4.2")
             .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
             .with_network(&spawner.network)
+            .with_mount(Mount::bind_mount(
+                "/home/ubuntu/space/mpc11/target/release/libmpc_redis_module.so",
+                module_path,
+            ))
+            .with_cmd(vec![
+                "redis-server".to_string(),
+                "--loadmodule".to_string(),
+                module_path.to_string(),
+            ])
             .start()
             .await
             .unwrap();

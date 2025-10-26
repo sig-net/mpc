@@ -16,3 +16,6 @@ near-account-id = { workspace = true }
 cait-sith = { workspace = true }
 mpc-primitives = { workspace = true }
 mpc-node = { workspace = true }
+
+[dev-dependencies]
+redis = "0.25"

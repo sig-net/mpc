@@ -3,6 +3,7 @@ use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
+use serde_json;
 use std::time::Instant;
 use tokio::task::JoinHandle;
 
@@ -144,36 +145,12 @@ impl PresignatureStorage {
     }
 
     pub async fn reserve(&self, id: PresignatureId) -> Option<PresignatureSlot> {
-        const SCRIPT: &str = r#"
-            local presig_key = KEYS[1]
-            local used_key = KEYS[2]
-            local reserved_key = KEYS[3]
-            local presig_id = ARGV[1]
-
-            -- cannot reserve this presignature if it already exists.
-            if redis.call("SADD", reserved_key, presig_id) == 0 then
-                return {err = "WARN presignature " .. presig_id .. " has already been reserved"}
-            end
-
-            -- cannot reserve this presignature if its already in storage.
-            if redis.call("HEXISTS", presig_key, presig_id) == 1 then
-                return {err = "WARN presignature " .. presig_id .. " has already been stored"}
-            end
-
-            -- cannot reserve this presignature if it has already been used.
-            if redis.call("HEXISTS", used_key, presig_id) == 1 then
-                return {err = "WARN presignature " .. presig_id .. " has already been used"}
-            end
-        "#;
-
         let start = Instant::now();
         let mut conn = self.connect().await?;
-        let result: Result<(), _> = redis::Script::new(SCRIPT)
-            .key(&self.presig_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
+        let result: Result<String, _> = redis::cmd("PRESIG.RESERVE")
+            .arg(self.account_id.to_string())
             .arg(id)
-            .invoke_async(&mut conn)
+            .query_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
@@ -203,7 +180,12 @@ impl PresignatureStorage {
         let Some(mut conn) = self.connect().await else {
             return;
         };
-        if let Err(err) = conn.srem::<'_, _, _, ()>(&self.reserved_key, id).await {
+        let outcome: Result<(), _> = redis::cmd("PRESIG.UNRESERVE")
+            .arg(self.account_id.to_string())
+            .arg(id)
+            .query_async(&mut conn)
+            .await;
+        if let Err(err) = outcome {
             tracing::warn!(id, ?err, "failed to unreserve presignature");
         }
     }
@@ -213,58 +195,17 @@ impl PresignatureStorage {
         owner: Participant,
         owner_shares: &[PresignatureId],
     ) -> Vec<PresignatureId> {
-        const SCRIPT: &str = r#"
-            local presig_key = KEYS[1]
-            local reserved_key = KEYS[2]
-            local owner_key = KEYS[3]
-
-            -- convert the list of ids to a table for easy lookup
-            local owner_shares = {}
-            for _, value in ipairs(ARGV) do
-                owner_shares[value] = true
-            end
-
-            -- find all shares that the owner no longer tracks
-            local outdated = {}
-            local our_shares = redis.call("SMEMBERS", owner_key)
-            for _, id in ipairs(our_shares) do
-                if not owner_shares[id] then
-                    table.insert(outdated, id)
-                end
-
-                -- remove the outdated shares from our node if we have too many
-                -- already to be able to process them in one go.
-                if #outdated >= 4096 then
-                    redis.call("SREM", owner_key, unpack(outdated))
-                    redis.call("SREM", reserved_key, unpack(outdated))
-                    redis.call("HDEL", presig_key, unpack(outdated))
-                    -- clear the outdated list for the next batch
-                    outdated = {}
-                end
-            end
-
-            -- remove the remaining outdated shares from our node
-            if #outdated > 0 then
-                redis.call("SREM", owner_key, unpack(outdated))
-                redis.call("SREM", reserved_key, unpack(outdated))
-                redis.call("HDEL", presig_key, unpack(outdated))
-            end
-
-            return outdated
-        "#;
-
         let start = Instant::now();
         let Some(mut conn) = self.connect().await else {
             return Vec::new();
         };
-        let result: Result<Vec<PresignatureId>, _> = redis::Script::new(SCRIPT)
-            .key(&self.presig_key)
-            .key(&self.reserved_key)
-            .key(owner_key(&self.owner_keys, owner))
-            // NOTE: this encodes each entry of owner_shares as a separate ARGV[index] entry.
-            .arg(owner_shares)
-            .invoke_async(&mut conn)
-            .await;
+        let mut cmd = redis::cmd("PRESIG.REMOVE_OUTDATED");
+        cmd.arg(self.account_id.to_string())
+            .arg(Into::<u32>::into(owner));
+        for share in owner_shares {
+            cmd.arg(share);
+        }
+        let result: Result<Vec<PresignatureId>, _> = cmd.query_async(&mut conn).await;
 
         let elapsed = start.elapsed();
         crate::metrics::REDIS_LATENCY
@@ -296,45 +237,18 @@ impl PresignatureStorage {
     /// Insert a presignature into the storage. If `mine` is true, the presignature will be
     /// owned by the current node. If `back` is true, the presignature will be marked as unused.
     pub async fn insert(&self, presignature: Presignature, owner: Participant) -> bool {
-        const SCRIPT: &str = r#"
-            local presig_key = KEYS[1]
-            local used_key = KEYS[2]
-            local reserved_key = KEYS[3]
-            local owner_keys = KEYS[4]
-            local owner_key = KEYS[5]
-            local presig_id = ARGV[1]
-            local presig = ARGV[2]
-
-            -- if the presignature has NOT been reserved, then something went wrong when acquiring the
-            -- reservation for it via presignature slot.
-            if redis.call("SREM", reserved_key, presig_id) == 0 then
-                return {err = "WARN presignature " .. presig_id .. " has NOT been reserved"}
-            end
-
-            if redis.call('HEXISTS', used_key, presig_id) == 1 then
-                return {err = 'WARN presignature ' .. presig_id .. ' is already used'}
-            end
-
-            redis.call("SADD", owner_key, presig_id)
-            redis.call("SADD", owner_keys, owner_key)
-            redis.call("HSET", presig_key, presig_id, presig)
-        "#;
-
         let start = Instant::now();
         let id = presignature.id;
         let Some(mut conn) = self.connect().await else {
             tracing::warn!(id, "failed to insert presignature: connection failed");
             return false;
         };
-        let outcome = redis::Script::new(SCRIPT)
-            .key(&self.presig_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
-            .key(&self.owner_keys)
-            .key(owner_key(&self.owner_keys, owner))
+        let outcome: Result<(), _> = redis::cmd("PRESIG.INSERT")
+            .arg(self.account_id.to_string())
             .arg(id)
-            .arg(presignature)
-            .invoke_async(&mut conn)
+            .arg(serde_json::to_string(&presignature).unwrap())
+            .arg(Into::<u32>::into(owner))
+            .query_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
@@ -406,49 +320,14 @@ impl PresignatureStorage {
         owner: Participant,
         me: Participant,
     ) -> Option<PresignatureTaken> {
-        const SCRIPT: &str = r#"
-            local presig_key = KEYS[1]
-            local used_key = KEYS[2]
-            local owner_key = KEYS[3]
-            local mine_key = KEYS[4]
-            local reserved_key = KEYS[5]
-            local presig_id = ARGV[1]
-
-            if redis.call("SMISMEMBER", reserved_key, presig_id) == 1 then
-                return {err = 'WARN presignature ' .. presig_id .. ' is generating or taken'}
-            end
-
-            if redis.call("SISMEMBER", mine_key, presig_id) == 1 then
-                return {err = 'WARN presignature ' .. presig_id ..' cannot be taken as foreign owned'}
-            end
-            if redis.call("SISMEMBER", owner_key, presig_id) == 0 then
-                return {err = 'WARN presignature ' .. presig_id .. ' cannot be taken by incorrect owner ' .. owner_key }
-            end
-
-            local presig = redis.call("HGET", presig_key, presig_id)
-            if not presig then
-                return {err = "WARN presignature " .. presig_id .. " is missing"}
-            end
-
-            redis.call("SREM", owner_key, presig_id)
-            redis.call("HDEL", presig_key, presig_id)
-            redis.call("HSET", used_key, presig_id, "1")
-            redis.call("HEXPIRE", used_key, ARGV[2], "FIELDS", "1", presig_id)
-
-            return presig
-        "#;
-
         let start = Instant::now();
         let mut conn = self.connect().await?;
-        let result = redis::Script::new(SCRIPT)
-            .key(&self.presig_key)
-            .key(&self.used_key)
-            .key(owner_key(&self.owner_keys, owner))
-            .key(owner_key(&self.owner_keys, me))
-            .key(&self.reserved_key)
+        let result: Result<Presignature, _> = redis::cmd("PRESIG.TAKE")
+            .arg(self.account_id.to_string())
             .arg(id)
-            .arg(USED_EXPIRE_TIME.num_seconds())
-            .invoke_async(&mut conn)
+            .arg(Into::<u32>::into(owner))
+            .arg(Into::<u32>::into(me))
+            .query_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
@@ -473,39 +352,12 @@ impl PresignatureStorage {
     }
 
     pub async fn take_mine(&self, me: Participant) -> Option<PresignatureTaken> {
-        const SCRIPT: &str = r#"
-            local presig_key = KEYS[1]
-            local used_key = KEYS[2]
-            local reserved_key = KEYS[3]
-            local mine_key = KEYS[4]
-
-            local presig_id = redis.call("SPOP", mine_key)
-            if not presig_id then
-                return nil
-            end
-
-            local presig = redis.call("HGET", presig_key, presig_id)
-            if not presig then
-                return {err = "WARN unexpected, presignature " .. presig_id .. " is missing"}
-            end
-
-            redis.call("SADD", reserved_key, presig_id)
-            redis.call("HDEL", presig_key, presig_id)
-            redis.call("HSET", used_key, presig_id, "1")
-            redis.call("HEXPIRE", used_key, ARGV[1], "FIELDS", "1", presig_id)
-
-            return presig
-        "#;
-
         let start = Instant::now();
         let mut conn = self.connect().await?;
-        let result = redis::Script::new(SCRIPT)
-            .key(&self.presig_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
-            .key(owner_key(&self.owner_keys, me))
-            .arg(USED_EXPIRE_TIME.num_seconds())
-            .invoke_async(&mut conn)
+        let result: Result<Option<Presignature>, _> = redis::cmd("PRESIG.TAKE_MINE")
+            .arg(self.account_id.to_string())
+            .arg(Into::<u32>::into(me))
+            .query_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
@@ -560,29 +412,13 @@ impl PresignatureStorage {
     /// Clear all presignature storage, including used, reserved, and owned keys.
     /// Return true if successful, false otherwise.
     pub async fn clear(&self) -> bool {
-        const SCRIPT: &str = r#"
-            local owner_keys = redis.call("SMEMBERS", KEYS[1])
-            local del = {}
-            for _, key in ipairs(KEYS) do
-                table.insert(del, key)
-            end
-            for _, key in ipairs(owner_keys) do
-                table.insert(del, key)
-            end
-
-            redis.call("DEL", unpack(del))
-        "#;
-
         let start = Instant::now();
         let Some(mut conn) = self.connect().await else {
             return false;
         };
-        let outcome: Option<()> = redis::Script::new(SCRIPT)
-            .key(&self.owner_keys)
-            .key(&self.presig_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
-            .invoke_async(&mut conn)
+        let outcome: Result<(), _> = redis::cmd("PRESIG.CLEAR")
+            .arg(self.account_id.to_string())
+            .query_async(&mut conn)
             .await
             .inspect_err(|err| {
                 let elapsed = start.elapsed();
@@ -591,15 +427,14 @@ impl PresignatureStorage {
                     elapsed_ms = elapsed.as_millis(),
                     "failed to clear presignature storage"
                 );
-            })
-            .ok();
+            });
 
         let elapsed = start.elapsed();
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["presignature", "clear", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
 
-        outcome.is_some()
+        outcome.is_ok()
     }
 }
 
