@@ -8,6 +8,7 @@ async-trait = "0.1"
 cait-sith.workspace = true
 mpc-crypto.workspace = true
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 thiserror = "1.0"
 threshold-signatures = { git = "https://github.com/near/threshold-signatures", rev = "42c25b1674e5bc03a02ae462cf9b355f95fe9623" }
 k256 = { version = "0.13.1", features = ["ecdsa", "sha256"] }

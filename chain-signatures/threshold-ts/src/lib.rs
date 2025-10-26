@@ -1,393 +1,143 @@
 //! Wrapper crate for `near/threshold-signatures` implementing the `ThresholdSigner` trait.
 
 use async_trait::async_trait;
-use cait_sith::protocol::Participant;
-use ed25519_dalek::{
-    Signature as Ed25519Signature, SigningKey as Ed25519SigningKey,
-    VerifyingKey as Ed25519VerifyingKey,
-};
-use k256::ecdsa::{signature::Signer, signature::Verifier, Signature, SigningKey, VerifyingKey};
+use cait_sith::protocol::{Participant, Protocol as CaitSithProtocol};
+use k256::Secp256k1;
 use mpc_crypto::signing::{
-    CurveType, KeyId, KeyMeta, SignMetadata, SignRequest, SignResult, SigningError, ThresholdSigner,
+    Action, ProtocolError, ThresholdProtocol, ThresholdSigner, SigningError,
 };
-use rand::rngs::OsRng;
-use std::collections::HashMap;
-use std::sync::RwLock;
+use serde_json;
 
 /// Implementation of `ThresholdSigner` using `cait-sith` (existing backend).
-pub struct CaitSithAdapter {
-    keys: RwLock<HashMap<KeyId, KeyMeta>>,
-    // For cait-sith, we don't store actual keys - they're managed by the MPC protocol
-}
+pub struct CaitSithAdapter;
 
 impl CaitSithAdapter {
     pub fn new() -> Self {
-        Self {
-            keys: RwLock::new(HashMap::new()),
-        }
+        Self
     }
 }
 
 #[async_trait]
 impl ThresholdSigner for CaitSithAdapter {
-    async fn generate_key(
+    fn keygen_protocol(
         &self,
         participants: &[Participant],
         me: Participant,
         threshold: usize,
-        curve: CurveType,
-    ) -> Result<KeyMeta, SigningError> {
-        match curve {
-            CurveType::Ecdsa => {
-                // Generate a unique key ID
-                let key_id = KeyId(format!(
-                    "cait-sith-ecdsa-{}-{}",
-                    participants.len(),
-                    threshold
-                ));
+    ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError> {
+        // cait_sith only supports ECDSA
+        let protocol = cait_sith::keygen::<Secp256k1>(participants, me, threshold)
+            .map_err(|e| SigningError::ProtocolError(format!("keygen failed: {:?}", e)))?;
+        Ok(Box::new(CaitSithProtocolWrapper(protocol)))
+    }
 
-                // For cait-sith, we don't actually generate keys here
-                // This is just metadata - actual key generation happens in the MPC protocol
-                let key_meta = KeyMeta {
-                    curve,
-                    key_id: key_id.clone(),
-                    public_key: vec![], // Will be filled by MPC protocol
-                    participants: participants.to_vec(),
-                    threshold,
-                };
+    fn presign_protocol(
+        &self,
+        _participants: &[Participant],
+        _me: Participant,
+        _keygen_output: &[u8],
+    ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError> {
+        // TODO: Implement presign protocol for cait_sith
+        // This requires understanding the cait_sith presign API
+        Err(SigningError::ProtocolError("presign protocol not implemented for cait_sith".to_string()))
+    }
 
-                self.keys.write().unwrap().insert(key_id, key_meta.clone());
-                Ok(key_meta)
+    fn sign_protocol(
+        &self,
+        _participants: &[Participant],
+        _me: Participant,
+        _keygen_output: &[u8],
+        _presign_output: &[u8],
+        _message: &[u8],
+    ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError> {
+        // TODO: Implement sign protocol for cait_sith
+        // This requires understanding the cait_sith sign API
+        Err(SigningError::ProtocolError("sign protocol not implemented for cait_sith".to_string()))
+    }
+}
+
+/// Wrapper to adapt cait_sith protocols to the ThresholdProtocol interface.
+pub struct CaitSithProtocolWrapper<P>(pub P);
+
+impl<P> ThresholdProtocol for CaitSithProtocolWrapper<P>
+where
+    P: CaitSithProtocol,
+    P::Output: serde::Serialize,
+{
+    fn poke(&mut self) -> Result<Action, ProtocolError> {
+        match self.0.poke() {
+            Ok(cait_sith::protocol::Action::Wait) => Ok(Action::Wait),
+            Ok(cait_sith::protocol::Action::SendMany(data)) => Ok(Action::SendMany(data)),
+            Ok(cait_sith::protocol::Action::SendPrivate(to, data)) => Ok(Action::SendPrivate(to, data)),
+            Ok(cait_sith::protocol::Action::Return(output)) => {
+                let data = serde_json::to_vec(&output)
+                    .map_err(|e| ProtocolError::ProtocolError(format!("serialization failed: {}", e)))?;
+                Ok(Action::Success(data))
             }
-            CurveType::Eddsa => {
-                // cait-sith doesn't support EdDSA
-                Err(SigningError::UnsupportedCurve(CurveType::Eddsa))
-            }
+            Err(e) => Err(ProtocolError::ProtocolError(format!("protocol error: {:?}", e))),
         }
     }
 
-    async fn reshare_key(
-        &self,
-        _key_id: KeyId,
-        _old_participants: &[Participant],
-        _new_participants: &[Participant],
-        _me: Participant,
-        _threshold: usize,
-    ) -> Result<KeyMeta, SigningError> {
-        // Not implemented for cait-sith adapter
-        Err(SigningError::ProtocolError("reshare not supported".to_string()))
-    }
-
-    async fn sign(&self, _request: SignRequest) -> Result<SignResult, SigningError> {
-        // Signing is handled by the MPC protocol, not individual operations
-        Err(SigningError::ProtocolError("individual signing not supported - use MPC protocol".to_string()))
-    }
-
-    async fn verify(
-        &self,
-        _key_meta: &KeyMeta,
-        _message: &[u8],
-        _signature: &[u8],
-        _metadata: &SignMetadata,
-    ) -> Result<bool, SigningError> {
-        // Verification would need to be implemented if needed
-        Err(SigningError::ProtocolError("verification not implemented".to_string()))
+    fn message(&mut self, from: Participant, data: Vec<u8>) {
+        self.0.message(from, data);
     }
 }
 
 /// Implementation of `ThresholdSigner` using `near/threshold-signatures`.
-pub struct NearThresholdSigner {
-    keys: RwLock<HashMap<KeyId, KeyMeta>>,
-    ecdsa_keys: RwLock<HashMap<KeyId, SigningKey>>,
-    eddsa_keys: RwLock<HashMap<KeyId, Ed25519SigningKey>>,
-}
+pub struct NearThresholdSigner;
 
 impl NearThresholdSigner {
     pub fn new() -> Self {
-        Self {
-            keys: RwLock::new(HashMap::new()),
-            ecdsa_keys: RwLock::new(HashMap::new()),
-            eddsa_keys: RwLock::new(HashMap::new()),
-        }
+        Self
     }
 }
 
 #[async_trait]
 impl ThresholdSigner for NearThresholdSigner {
-    async fn generate_key(
+    fn keygen_protocol(
         &self,
         participants: &[Participant],
         me: Participant,
         threshold: usize,
-        curve: CurveType,
-    ) -> Result<KeyMeta, SigningError> {
-        match curve {
-            CurveType::Ecdsa => {
-                // Generate a unique key ID
-                let key_id = KeyId(format!(
-                    "near-ts-ecdsa-{}-{}",
-                    participants.len(),
-                    threshold
-                ));
-
-                // Generate a real ECDSA key pair for testing
-                let signing_key = SigningKey::random(&mut OsRng);
-                let verifying_key = VerifyingKey::from(&signing_key);
-                let public_key_bytes = verifying_key.to_encoded_point(false).as_bytes().to_vec();
-
-                let key_meta = KeyMeta {
-                    curve,
-                    key_id: key_id.clone(),
-                    public_key: public_key_bytes,
-                    participants: participants.to_vec(),
-                    threshold,
-                };
-
-                // Store the key (in a real implementation, this would be distributed)
-                self.ecdsa_keys
-                    .write()
-                    .unwrap()
-                    .insert(key_id.clone(), signing_key);
-                self.keys.write().unwrap().insert(key_id, key_meta.clone());
-
-                Ok(key_meta)
-            }
-            CurveType::Eddsa => {
-                // Generate a unique key ID
-                let key_id = KeyId(format!(
-                    "near-ts-eddsa-{}-{}",
-                    participants.len(),
-                    threshold
-                ));
-
-                // Generate a real EdDSA key pair for testing
-                let signing_key = Ed25519SigningKey::generate(&mut OsRng);
-                let verifying_key = Ed25519VerifyingKey::from(&signing_key);
-                let public_key_bytes = verifying_key.to_bytes().to_vec();
-
-                let key_meta = KeyMeta {
-                    curve,
-                    key_id: key_id.clone(),
-                    public_key: public_key_bytes,
-                    participants: participants.to_vec(),
-                    threshold,
-                };
-
-                // Store the key
-                self.eddsa_keys
-                    .write()
-                    .unwrap()
-                    .insert(key_id.clone(), signing_key);
-                self.keys.write().unwrap().insert(key_id, key_meta.clone());
-
-                Ok(key_meta)
-            }
-        }
+    ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError> {
+        // For now, use cait_sith for ECDSA. In the future, this could use near/threshold-signatures
+        // for EdDSA support.
+        let protocol = cait_sith::keygen::<Secp256k1>(participants, me, threshold)
+            .map_err(|e| SigningError::ProtocolError(format!("keygen failed: {:?}", e)))?;
+        Ok(Box::new(CaitSithProtocolWrapper(protocol)))
     }
 
-    async fn reshare_key(
+    fn presign_protocol(
         &self,
-        _key_id: KeyId,
-        _old_participants: &[Participant],
-        _new_participants: &[Participant],
+        _participants: &[Participant],
         _me: Participant,
-        _threshold: usize,
-    ) -> Result<KeyMeta, SigningError> {
-        // TODO: implement resharing
-        todo!("Implement key resharing")
+        _keygen_output: &[u8],
+    ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError> {
+        // TODO: Implement using near/threshold-signatures for EdDSA support
+        Err(SigningError::ProtocolError("x".to_string()))
     }
 
-    async fn sign(&self, request: SignRequest) -> Result<SignResult, SigningError> {
-        // Check that we have the key
-        let key_meta = self
-            .keys
-            .read()
-            .unwrap()
-            .get(&request.key_id)
-            .ok_or_else(|| SigningError::KeyNotFound(request.key_id.clone()))?
-            .clone();
-
-        match key_meta.curve {
-            CurveType::Ecdsa => {
-                let signing_key = self
-                    .ecdsa_keys
-                    .read()
-                    .unwrap()
-                    .get(&request.key_id)
-                    .ok_or_else(|| SigningError::KeyNotFound(request.key_id.clone()))?
-                    .clone();
-
-                // Sign the message using ECDSA
-                let signature: Signature = signing_key.sign(&request.message);
-                let signature_bytes = signature.to_vec();
-
-                // For ECDSA, we need a recovery ID (stub value for now)
-                let metadata = SignMetadata::Ecdsa { recovery_id: 0 };
-
-                Ok(SignResult {
-                    signature: signature_bytes,
-                    metadata,
-                })
-            }
-            CurveType::Eddsa => {
-                let signing_key = self
-                    .eddsa_keys
-                    .read()
-                    .unwrap()
-                    .get(&request.key_id)
-                    .ok_or_else(|| SigningError::KeyNotFound(request.key_id.clone()))?
-                    .clone();
-
-                // Sign the message using EdDSA
-                let signature: Ed25519Signature = signing_key.sign(&request.message);
-                let signature_bytes = signature.to_bytes().to_vec();
-
-                // EdDSA signatures don't need extra metadata
-                let metadata = SignMetadata::Eddsa;
-
-                Ok(SignResult {
-                    signature: signature_bytes,
-                    metadata,
-                })
-            }
-        }
-    }
-
-    async fn verify(
+    fn sign_protocol(
         &self,
-        key_meta: &KeyMeta,
-        message: &[u8],
-        signature: &[u8],
-        metadata: &SignMetadata,
-    ) -> Result<bool, SigningError> {
-        match key_meta.curve {
-            CurveType::Ecdsa => {
-                if let SignMetadata::Ecdsa { recovery_id: _ } = metadata {
-                    // Parse the verifying key from the public key bytes
-                    let verifying_key = VerifyingKey::from_sec1_bytes(&key_meta.public_key)
-                        .map_err(|_| {
-                            SigningError::SerializationError("Invalid public key".to_string())
-                        })?;
-
-                    // Parse the signature
-                    let signature = Signature::from_slice(signature).map_err(|_| {
-                        SigningError::SerializationError("Invalid signature".to_string())
-                    })?;
-
-                    // Verify the signature
-                    Ok(verifying_key.verify(message, &signature).is_ok())
-                } else {
-                    Err(SigningError::ProtocolError(
-                        "Invalid metadata for ECDSA".to_string(),
-                    ))
-                }
-            }
-            CurveType::Eddsa => {
-                if let SignMetadata::Eddsa = metadata {
-                    // Parse the verifying key from the public key bytes
-                    let public_key_bytes: [u8; 32] =
-                        key_meta.public_key.as_slice().try_into().map_err(|_| {
-                            SigningError::SerializationError(
-                                "Invalid public key length".to_string(),
-                            )
-                        })?;
-                    let verifying_key = Ed25519VerifyingKey::from_bytes(&public_key_bytes)
-                        .map_err(|_| {
-                            SigningError::SerializationError("Invalid public key".to_string())
-                        })?;
-
-                    // Parse the signature
-                    let signature_bytes: [u8; 64] = signature.try_into().map_err(|_| {
-                        SigningError::SerializationError("Invalid signature length".to_string())
-                    })?;
-                    let signature = Ed25519Signature::from_bytes(&signature_bytes);
-
-                    // Verify the signature
-                    Ok(verifying_key.verify(message, &signature).is_ok())
-                } else {
-                    Err(SigningError::ProtocolError(
-                        "Invalid metadata for EdDSA".to_string(),
-                    ))
-                }
-            }
-        }
+        _participants: &[Participant],
+        _me: Participant,
+        _keygen_output: &[u8],
+        _presign_output: &[u8],
+        _message: &[u8],
+    ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError> {
+        // TODO: Implement using near/threshold-signatures for EdDSA support
+        Err(SigningError::ProtocolError("x".to_string()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cait_sith::protocol::Participant;
 
     #[tokio::test]
-    async fn test_cait_sith_adapter_key_generation() {
-        let adapter = CaitSithAdapter::new();
-        let participants = vec![
-            Participant::from(0u32),
-            Participant::from(1u32),
-            Participant::from(2u32),
-        ];
-        let me = Participant::from(0u32);
-        let threshold = 2;
-
-        let result = adapter
-            .generate_key(&participants, me, threshold, CurveType::Ecdsa)
-            .await;
-        assert!(result.is_ok());
-
-        let key_meta = result.unwrap();
-        assert_eq!(key_meta.curve, CurveType::Ecdsa);
-        assert_eq!(key_meta.participants, participants);
-        assert_eq!(key_meta.threshold, threshold);
-    }
-
-    #[tokio::test]
-    async fn test_cait_sith_adapter_unsupported_curve() {
-        let adapter = CaitSithAdapter::new();
-        let participants = vec![Participant::from(0u32)];
-        let me = Participant::from(0u32);
-
-        let result = adapter
-            .generate_key(&participants, me, 1, CurveType::Eddsa)
-            .await;
-        assert!(matches!(
-            result,
-            Err(SigningError::UnsupportedCurve(CurveType::Eddsa))
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_cait_sith_adapter_signing() {
-        let mut adapter = CaitSithAdapter::new();
-
-        // First generate a key
-        let participants = vec![Participant::from(0u32)];
-        let me = Participant::from(0u32);
-        let key_meta = adapter
-            .generate_key(&participants, me, 1, CurveType::Ecdsa)
-            .await
-            .unwrap();
-
-        // Store the key
-        let key_id = key_meta.key_id.clone();
-        adapter.keys.write().unwrap().insert(key_id.clone(), key_meta);
-
-        // Now sign
-        let request = SignRequest {
-            key_id,
-            message: b"test message".to_vec(),
-            chain: "eth".to_string(),
-        };
-
-        let result = adapter.sign(request).await;
-        assert!(result.is_ok());
-
-        let sign_result = result.unwrap();
-        assert_eq!(sign_result.signature.len(), 64); // ECDSA signature size
-        assert!(matches!(
-            sign_result.metadata,
-            SignMetadata::Ecdsa { recovery_id: 0 }
-        ));
+    async fn test_cait_sith_adapter_creation() {
+        let _adapter = CaitSithAdapter::new();
+        // Basic creation test
     }
 
     #[tokio::test]

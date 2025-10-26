@@ -4,6 +4,7 @@
 //! decoupling the rest of the codebase from specific implementations like
 //! `cait-sith` or `near/threshold-signatures`.
 
+use async_trait::async_trait;
 use cait_sith::protocol::Participant;
 
 /// Available signing backends for threshold operations
@@ -91,40 +92,67 @@ pub enum SigningError {
     IoError(#[from] std::io::Error),
 }
 
+/// Common interface for threshold signing protocols.
+/// This matches the cait_sith protocol interface.
+pub trait ThresholdProtocol {
+    /// Advance the protocol and return the next action.
+    fn poke(&mut self) -> Result<Action, ProtocolError>;
+    
+    /// Receive a message from another participant.
+    fn message(&mut self, from: Participant, data: Vec<u8>);
+}
+
+/// Actions that a threshold protocol can take.
+#[derive(Debug, Clone)]
+pub enum Action {
+    /// Wait for messages from other participants.
+    Wait,
+    /// Send data to all other participants.
+    SendMany(Vec<u8>),
+    /// Send data to a specific participant.
+    SendPrivate(Participant, Vec<u8>),
+    /// Protocol completed successfully with result.
+    Success(Vec<u8>),
+}
+
+/// Errors that can occur in threshold protocols.
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolError {
+    #[error("initialization error: {0}")]
+    InitializationError(String),
+    #[error("protocol error: {0}")]
+    ProtocolError(String),
+}
+
 /// Trait for threshold signing backends.
 ///
-/// Implementations should handle the full lifecycle of threshold protocols
+/// Implementations should provide the full lifecycle of threshold protocols
 /// (key generation, signing, etc.) and provide a unified interface.
 #[async_trait::async_trait]
 pub trait ThresholdSigner: Send + Sync {
-    /// Generate a new threshold key.
-    async fn generate_key(
+    /// Create a key generation protocol.
+    fn keygen_protocol(
         &self,
         participants: &[Participant],
         me: Participant,
         threshold: usize,
-        curve: CurveType,
-    ) -> Result<KeyMeta, SigningError>;
+    ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError>;
 
-    /// Reshare an existing key to new participants.
-    async fn reshare_key(
+    /// Create a presignature generation protocol.
+    fn presign_protocol(
         &self,
-        key_id: KeyId,
-        old_participants: &[Participant],
-        new_participants: &[Participant],
+        participants: &[Participant],
         me: Participant,
-        threshold: usize,
-    ) -> Result<KeyMeta, SigningError>;
+        keygen_output: &[u8], // Serialized keygen output
+    ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError>;
 
-    /// Sign a message using a threshold key.
-    async fn sign(&self, request: SignRequest) -> Result<SignResult, SigningError>;
-
-    /// Verify a signature (for testing/debugging).
-    async fn verify(
+    /// Create a signature generation protocol.
+    fn sign_protocol(
         &self,
-        key_meta: &KeyMeta,
+        participants: &[Participant],
+        me: Participant,
+        keygen_output: &[u8], // Serialized keygen output
+        presign_output: &[u8], // Serialized presign output
         message: &[u8],
-        signature: &[u8],
-        metadata: &SignMetadata,
-    ) -> Result<bool, SigningError>;
+    ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError>;
 }
