@@ -16,8 +16,8 @@ jobs:
     name: Integration Test
     strategy:
       matrix:
-        # FIXME: macos-latest-xl is disabled since colima is erroring out right now
         os: [warp-ubuntu-latest-x64-4x]
+        backend: [cait-sith, near-threshold-signatures]
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -80,15 +80,30 @@ jobs:
         run: npm i && npx hardhat compile
 
       - name: Build Chain-Signatures Node
-        run: cargo build -p mpc-node --release
+        run: |
+          if [ "${{ matrix.backend }}" = "near-threshold-signatures" ]; then
+            cargo build -p mpc-node --release --features near-threshold-signatures
+          else
+            cargo build -p mpc-node --release
+          fi
 
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
-        run: cargo build -p integration-tests --tests
+        run: |
+          if [ "${{ matrix.backend }}" = "near-threshold-signatures" ]; then
+            cargo build -p integration-tests --tests --features near-threshold-signatures
+          else
+            cargo build -p integration-tests --tests
+          fi
 
       - name: Test
-        run: cargo test -p integration-tests --jobs 1 -- --test-threads 1
+        run: |
+          if [ "${{ matrix.backend }}" = "near-threshold-signatures" ]; then
+            cargo test -p integration-tests --jobs 1 -- --test-threads 1 --features near-threshold-signatures
+          else
+            cargo test -p integration-tests --jobs 1 -- --test-threads 1
+          fi
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1

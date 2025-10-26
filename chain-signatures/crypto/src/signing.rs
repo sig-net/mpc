@@ -97,7 +97,7 @@ pub enum SigningError {
 pub trait ThresholdProtocol {
     /// Advance the protocol and return the next action.
     fn poke(&mut self) -> Result<Action, ProtocolError>;
-    
+
     /// Receive a message from another participant.
     fn message(&mut self, from: Participant, data: Vec<u8>);
 }
@@ -151,7 +151,7 @@ pub trait ThresholdSigner: Send + Sync {
         &self,
         participants: &[Participant],
         me: Participant,
-        keygen_output: &[u8], // Serialized keygen output
+        keygen_output: &[u8],  // Serialized keygen output
         presign_output: &[u8], // Serialized presign output
         message: &[u8],
     ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError>;

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use cait_sith::protocol::{Participant, Protocol as CaitSithProtocol};
 use k256::Secp256k1;
 use mpc_crypto::signing::{
-    Action, ProtocolError, ThresholdProtocol, ThresholdSigner, SigningError,
+    Action, ProtocolError, SigningError, ThresholdProtocol, ThresholdSigner,
 };
 use serde_json;
 
@@ -39,7 +39,9 @@ impl ThresholdSigner for CaitSithAdapter {
     ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError> {
         // TODO: Implement presign protocol for cait_sith
         // This requires understanding the cait_sith presign API
-        Err(SigningError::ProtocolError("presign protocol not implemented for cait_sith".to_string()))
+        Err(SigningError::ProtocolError(
+            "presign protocol not implemented for cait_sith".to_string(),
+        ))
     }
 
     fn sign_protocol(
@@ -52,7 +54,9 @@ impl ThresholdSigner for CaitSithAdapter {
     ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError> {
         // TODO: Implement sign protocol for cait_sith
         // This requires understanding the cait_sith sign API
-        Err(SigningError::ProtocolError("sign protocol not implemented for cait_sith".to_string()))
+        Err(SigningError::ProtocolError(
+            "sign protocol not implemented for cait_sith".to_string(),
+        ))
     }
 }
 
@@ -68,13 +72,19 @@ where
         match self.0.poke() {
             Ok(cait_sith::protocol::Action::Wait) => Ok(Action::Wait),
             Ok(cait_sith::protocol::Action::SendMany(data)) => Ok(Action::SendMany(data)),
-            Ok(cait_sith::protocol::Action::SendPrivate(to, data)) => Ok(Action::SendPrivate(to, data)),
+            Ok(cait_sith::protocol::Action::SendPrivate(to, data)) => {
+                Ok(Action::SendPrivate(to, data))
+            }
             Ok(cait_sith::protocol::Action::Return(output)) => {
-                let data = serde_json::to_vec(&output)
-                    .map_err(|e| ProtocolError::ProtocolError(format!("serialization failed: {}", e)))?;
+                let data = serde_json::to_vec(&output).map_err(|e| {
+                    ProtocolError::ProtocolError(format!("serialization failed: {}", e))
+                })?;
                 Ok(Action::Success(data))
             }
-            Err(e) => Err(ProtocolError::ProtocolError(format!("protocol error: {:?}", e))),
+            Err(e) => Err(ProtocolError::ProtocolError(format!(
+                "protocol error: {:?}",
+                e
+            ))),
         }
     }
 

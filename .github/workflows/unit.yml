@@ -19,6 +19,9 @@ jobs:
   test:
     runs-on: warp-ubuntu-latest-x64-4x
     name: Check & Test
+    strategy:
+      matrix:
+        backend: [cait-sith, near-threshold-signatures]
     steps:
       - uses: actions/checkout@v3
       - name: Install stable toolchain
@@ -53,13 +56,28 @@ jobs:
       - name: Eth contract unit tests
         run: cd chain-signatures/contract-eth && npx hardhat test
       - name: Compile
-        run: cargo check
+        run: |
+          if [ "${{ matrix.backend }}" = "near-threshold-signatures" ]; then
+            cargo check --features near-threshold-signatures
+          else
+            cargo check
+          fi
       - name: Test format
         run: cargo fmt -- --check
       - name: Test clippy
-        run: cargo clippy --tests -- -Dclippy::all
+        run: |
+          if [ "${{ matrix.backend }}" = "near-threshold-signatures" ]; then
+            cargo clippy --tests --features near-threshold-signatures -- -Dclippy::all
+          else
+            cargo clippy --tests -- -Dclippy::all
+          fi
       - name: Unit tests
-        run: cargo test --workspace --exclude integration-tests
+        run: |
+          if [ "${{ matrix.backend }}" = "near-threshold-signatures" ]; then
+            cargo test --workspace --exclude integration-tests --features near-threshold-signatures
+          else
+            cargo test --workspace --exclude integration-tests
+          fi
 
   audit:
     name: Audit
