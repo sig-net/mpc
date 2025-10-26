@@ -45,6 +45,15 @@ The answer is the indexer. Each node would ideally run an indexer to listen to a
 
 The MPC node is the central piece to the operation of the network itself. These nodes will listen to requests from the sign smart contracts, utilizing an `Indexer`, eventually forwarding the request over to the signature pipeline to be signed by each node. Most of the computation for this is pre-calculated ahead of time (i.e., beaver triple stockpiling) to save time on the signature being returned. If the network is congested, the bottleneck here would be a new set of triples being generated. One signature would require two owned triples per node. To generate a singular triple takes about 30 seconds in the best case with our default hardware configurations. Since we can run many of such protocols in parallel, the actual time is ~2 seconds. Signature protocols are much faster and take a couple of seconds each depending on the load.
 
+#### Threshold Signing Backends
+
+The MPC node supports multiple threshold signing backends through a unified protocol factory interface:
+
+- **CaitSithAdapter**: Legacy backend supporting threshold ECDSA signatures using the `cait-sith` library
+- **NearThresholdSigner**: Modern backend supporting both threshold ECDSA and EdDSA signatures using the `near/threshold-signatures` library
+
+The backend is selected via feature flags at compile time, allowing for gradual migration and backward compatibility.
+
 #### Networking
 
 Each of the MPC nodes needs to keep track of who is alive in the connective mesh. This is to ensure that messages for things like signature generation and triple generation are routed correctly and done in a reasonable amount of time.
