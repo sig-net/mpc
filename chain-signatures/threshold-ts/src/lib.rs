@@ -534,8 +534,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_near_threshold_signer_creation() {
-        let _signer = NearThresholdSigner::new();
-        // Basic creation test - more comprehensive tests when implementation is complete
+    async fn test_near_threshold_signer_eddsa_keygen() {
+        let signer = NearThresholdSigner::new();
+        let participants = vec![Participant::from(0u32), Participant::from(1u32), Participant::from(2u32)];
+        let me = Participant::from(0u32);
+
+        let result = signer
+            .generate_key(&participants, me, 2, CurveType::Eddsa)
+            .await;
+
+        assert!(result.is_ok(), "EdDSA key generation should succeed");
+        let keygen_result = result.unwrap();
+        assert!(!keygen_result.public_key.is_empty(), "Public key should not be empty");
+        assert!(!keygen_result.secret_share.is_empty(), "Secret share should not be empty");
     }
 }
