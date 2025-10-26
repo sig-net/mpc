@@ -8,20 +8,20 @@ use errors::{
     ConversionError, InitError, InvalidParameters, InvalidState, JoinError, PublicKeyError,
     RespondError, SignError, VoteError,
 };
-use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_crypto::{
-    derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
-    ScalarExt as _,
+    ScalarExt as _, derive_epsilon_near, derive_key, kdf::check_ec_signature,
+    near_public_key_to_affine_point,
 };
-use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{LATEST_MPC_KEY_VERSION, SignId, Signature};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
 use near_sdk::store::IterableMap;
 use near_sdk::{
-    env, log, near_bindgen, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise,
-    PromiseError, PublicKey,
+    AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError, PublicKey, env, log,
+    near_bindgen,
 };
 use primitives::{
     CandidateInfo, Candidates, InternalSignRequest, Participants, PendingRequest, PkVotes,
@@ -309,7 +309,7 @@ impl VersionedMpcContract {
         match protocol_state {
             ProtocolContractState::Running(RunningContractState {
                 participants,
-                ref mut candidates,
+                candidates,
                 ..
             }) => {
                 let signer_account_id = env::signer_account_id();
@@ -801,7 +801,7 @@ impl VersionedMpcContract {
 
     fn mutable_state(&mut self) -> &mut ProtocolContractState {
         match self {
-            Self::V0(ref mut mpc_contract) => &mut mpc_contract.protocol_state,
+            Self::V0(mpc_contract) => &mut mpc_contract.protocol_state,
         }
     }
 
@@ -813,7 +813,7 @@ impl VersionedMpcContract {
 
     fn lock_request(&mut self, id: SignId, payload: Scalar, epsilon: Scalar) {
         match self {
-            Self::V0(ref mut mpc_contract) => mpc_contract.lock_request(id, payload, epsilon),
+            Self::V0(mpc_contract) => mpc_contract.lock_request(id, payload, epsilon),
         }
     }
 

@@ -147,7 +147,7 @@ impl ThresholdSigner for CaitSithAdapter {
             CurveType::Ecdsa => {
                 // Run the keygen protocol to generate the actual key
                 let mut protocol = self.keygen_protocol(participants, me, threshold)?;
-                
+
                 // Run the protocol to completion
                 loop {
                     match protocol.poke() {
@@ -164,14 +164,23 @@ impl ThresholdSigner for CaitSithAdapter {
                         Ok(Action::Success(data)) => {
                             // Deserialize the keygen output
                             let keygen_output: serde_json::Value = serde_json::from_slice(&data)
-                                .map_err(|e| SigningError::ProtocolError(format!("failed to deserialize keygen output: {}", e)))?;
-                            
+                                .map_err(|e| {
+                                    SigningError::ProtocolError(format!(
+                                        "failed to deserialize keygen output: {}",
+                                        e
+                                    ))
+                                })?;
+
                             // Extract public key from the output
                             let public_key = data; // For CaitSith, we store the serialized output
-                            
+
                             return Ok(KeyMeta {
                                 curve: CurveType::Ecdsa,
-                                key_id: KeyId(format!("ecdsa_key_{}_{}", participants.len(), threshold)),
+                                key_id: KeyId(format!(
+                                    "ecdsa_key_{}_{}",
+                                    participants.len(),
+                                    threshold
+                                )),
                                 public_key,
                                 participants: participants.to_vec(),
                                 threshold,
@@ -536,7 +545,11 @@ mod tests {
     #[tokio::test]
     async fn test_near_threshold_signer_eddsa_keygen() {
         let signer = NearThresholdSigner::new();
-        let participants = vec![Participant::from(0u32), Participant::from(1u32), Participant::from(2u32)];
+        let participants = vec![
+            Participant::from(0u32),
+            Participant::from(1u32),
+            Participant::from(2u32),
+        ];
         let me = Participant::from(0u32);
 
         let result = signer
@@ -545,7 +558,13 @@ mod tests {
 
         assert!(result.is_ok(), "EdDSA key generation should succeed");
         let keygen_result = result.unwrap();
-        assert!(!keygen_result.public_key.is_empty(), "Public key should not be empty");
-        assert!(!keygen_result.secret_share.is_empty(), "Secret share should not be empty");
+        assert!(
+            !keygen_result.public_key.is_empty(),
+            "Public key should not be empty"
+        );
+        assert!(
+            !keygen_result.secret_share.is_empty(),
+            "Secret share should not be empty"
+        );
     }
 }
