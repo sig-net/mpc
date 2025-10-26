@@ -16,7 +16,7 @@ use std::time::Duration;
 use threshold_ts::{CaitSithAdapter, NearThresholdSigner};
 
 // Tests are temporarily disabled until updated for new protocol factory API
-/*
+
 /// Test ECDSA threshold signing using CaitSithAdapter
 #[tokio::test(flavor = "multi_thread")]
 async fn test_threshold_signer_ecdsa() {
@@ -151,4 +151,3 @@ async fn test_cait_sith_adapter_rejects_eddsa() {
         mpc_node::signing::SigningError::UnsupportedCurve(CurveType::Eddsa)
     ));
 }
-*/

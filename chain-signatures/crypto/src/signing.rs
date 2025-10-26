@@ -155,4 +155,25 @@ pub trait ThresholdSigner: Send + Sync {
         presign_output: &[u8], // Serialized presign output
         message: &[u8],
     ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError>;
+
+    /// Generate a new threshold key.
+    async fn generate_key(
+        &self,
+        participants: &[Participant],
+        me: Participant,
+        threshold: usize,
+        curve: CurveType,
+    ) -> Result<KeyMeta, SigningError>;
+
+    /// Sign a message using a threshold key.
+    async fn sign(&self, request: SignRequest) -> Result<SignResult, SigningError>;
+
+    /// Verify a signature.
+    async fn verify(
+        &self,
+        key_meta: &KeyMeta,
+        message: &[u8],
+        signature: &[u8],
+        metadata: &SignMetadata,
+    ) -> Result<bool, SigningError>;
 }

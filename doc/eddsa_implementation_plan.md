@@ -9,8 +9,8 @@
 #### 1.1 CaitSithAdapter::presign_protocol ✅ IMPLEMENTED
 **Implementation**: Returns proper error explaining that presign is not supported in the trait abstraction layer, as it requires pre-computed triples that aren't available in this interface.
 
-#### 1.2 CaitSithAdapter::sign_protocol ✅ IMPLEMENTED  
-**Implementation**: 
+#### 1.2 CaitSithAdapter::sign_protocol ✅ IMPLEMENTED
+**Implementation**:
 - Deserializes keygen output (KeygenOutput) and presign output (PresignOutput)
 - Converts message from &[u8] to Scalar
 - Calls cait_sith::sign with proper parameters
@@ -186,7 +186,7 @@ where
 - **Error Handling**: Proper error messages and validation
 - **Code Compilation**: All components compile successfully
 
-### 🔄 IN PROGRESS  
+### 🔄 IN PROGRESS
 - **NearThresholdSigner**: Basic structure implemented, EdDSA protocols need completion
 
 ### 📋 PENDING
@@ -204,7 +204,7 @@ where
 
 ### Medium-term Goals
 4. **Re-enable integration tests** - Update to use protocol factory pattern
-5. **Add unit tests** - Comprehensive coverage for all implementations  
+5. **Add unit tests** - Comprehensive coverage for all implementations
 6. **Update documentation** - Reflect actual implementation status
 
 ## Success Criteria Met So Far
