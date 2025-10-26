@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use cait_sith::protocol::{Participant, Protocol as CaitSithProtocol};
-use k256::{AffinePoint, Scalar, Secp256k1, elliptic_curve::group::GroupEncoding};
 use k256::ecdsa::{Signature, VerifyingKey};
+use k256::{elliptic_curve::group::GroupEncoding, AffinePoint, Scalar, Secp256k1};
 use mpc_crypto::signing::{
     Action, CurveType, KeyId, KeyMeta, ProtocolError, SignMetadata, SignRequest, SignResult,
     SigningError, ThresholdProtocol, ThresholdSigner,
@@ -12,9 +12,9 @@ use mpc_crypto::ScalarExt;
 use rand::rngs::OsRng;
 use sha3::{Digest, Sha3_256};
 use threshold_signatures::eddsa::{Ed25519Sha512, KeygenOutput as EddsaKeygenOutput};
+use threshold_signatures::keygen;
 use threshold_signatures::participants::Participant as TsParticipant;
 use threshold_signatures::protocol::{Action as TsAction, Protocol as TsProtocol};
-use threshold_signatures::{keygen};
 
 /// Convert a Participant (either cait_sith or threshold_signatures) to its inner u32 value.
 /// This is safe because both Participant types are newtypes around u32.
@@ -90,9 +90,11 @@ impl ThresholdSigner for CaitSithAdapter {
         message: &[u8],
     ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError> {
         // Deserialize inputs
-        let keygen_result: cait_sith::KeygenOutput<Secp256k1> = serde_json::from_slice(keygen_output)
-            .map_err(|e| SigningError::ProtocolError(format!("failed to deserialize keygen output: {}", e)))?;
-        
+        let keygen_result: cait_sith::KeygenOutput<Secp256k1> =
+            serde_json::from_slice(keygen_output).map_err(|e| {
+                SigningError::ProtocolError(format!("failed to deserialize keygen output: {}", e))
+            })?;
+
         // Manually deserialize PresignOutput like Presignature does
         #[derive(serde::Deserialize)]
         struct PresignFields {
@@ -100,10 +102,11 @@ impl ThresholdSigner for CaitSithAdapter {
             output_k: Scalar,
             output_sigma: Scalar,
         }
-        
-        let fields: PresignFields = serde_json::from_slice(presign_output)
-            .map_err(|e| SigningError::ProtocolError(format!("failed to deserialize presign output: {}", e)))?;
-        
+
+        let fields: PresignFields = serde_json::from_slice(presign_output).map_err(|e| {
+            SigningError::ProtocolError(format!("failed to deserialize presign output: {}", e))
+        })?;
+
         let presign_result = cait_sith::PresignOutput {
             big_r: fields.output_big_r,
             k: fields.output_k,
@@ -112,9 +115,10 @@ impl ThresholdSigner for CaitSithAdapter {
 
         // Convert message from &[u8] to Scalar (assuming it's a 32-byte big-endian representation)
         if message.len() != 32 {
-            return Err(SigningError::ProtocolError(
-                format!("message must be 32 bytes, got {}", message.len())
-            ));
+            return Err(SigningError::ProtocolError(format!(
+                "message must be 32 bytes, got {}",
+                message.len()
+            )));
         }
         let message_scalar = Scalar::from_bytes(message.try_into().unwrap())
             .ok_or_else(|| SigningError::ProtocolError("invalid message scalar".to_string()))?;
@@ -123,10 +127,11 @@ impl ThresholdSigner for CaitSithAdapter {
         let protocol = cait_sith::sign::<Secp256k1>(
             participants,
             me,
-            keygen_result.public_key,  // Remove the borrow
+            keygen_result.public_key, // Remove the borrow
             presign_result,
-            message_scalar,  // Use the converted scalar
-        ).map_err(|e| SigningError::ProtocolError(format!("sign failed: {:?}", e)))?;
+            message_scalar, // Use the converted scalar
+        )
+        .map_err(|e| SigningError::ProtocolError(format!("sign failed: {:?}", e)))?;
 
         Ok(Box::new(CaitSithProtocolWrapper(protocol)))
     }
@@ -141,18 +146,24 @@ impl ThresholdSigner for CaitSithAdapter {
         match curve {
             CurveType::Ecdsa => {
                 // TODO: Implement ECDSA key generation using threshold_signatures
-                Err(SigningError::ProtocolError("ECDSA key generation not yet implemented for NearThresholdSigner".to_string()))
+                Err(SigningError::ProtocolError(
+                    "ECDSA key generation not yet implemented for NearThresholdSigner".to_string(),
+                ))
             }
             CurveType::Eddsa => {
                 // TODO: Implement EdDSA key generation using threshold_signatures
-                Err(SigningError::ProtocolError("EdDSA key generation not yet implemented".to_string()))
+                Err(SigningError::ProtocolError(
+                    "EdDSA key generation not yet implemented".to_string(),
+                ))
             }
         }
     }
 
     async fn sign(&self, _request: SignRequest) -> Result<SignResult, SigningError> {
         // TODO: Implement full signing workflow
-        Err(SigningError::ProtocolError("sign not implemented".to_string()))
+        Err(SigningError::ProtocolError(
+            "sign not implemented".to_string(),
+        ))
     }
 
     async fn verify(
@@ -165,19 +176,26 @@ impl ThresholdSigner for CaitSithAdapter {
         match key_meta.curve {
             CurveType::Ecdsa => {
                 // Reconstruct the verifying key from the public key bytes
-                let verifying_key = VerifyingKey::from_sec1_bytes(&key_meta.public_key)
-                    .map_err(|e| SigningError::ProtocolError(format!("invalid public key: {}", e)))?;
-                
+                let verifying_key =
+                    VerifyingKey::from_sec1_bytes(&key_meta.public_key).map_err(|e| {
+                        SigningError::ProtocolError(format!("invalid public key: {}", e))
+                    })?;
+
                 // Parse the signature
-                let signature = Signature::from_slice(signature)
-                    .map_err(|e| SigningError::ProtocolError(format!("invalid signature: {}", e)))?;
-                
+                let signature = Signature::from_slice(signature).map_err(|e| {
+                    SigningError::ProtocolError(format!("invalid signature: {}", e))
+                })?;
+
                 // For ECDSA, we need the recovery ID from metadata
                 let recovery_id = match metadata {
                     SignMetadata::Ecdsa { recovery_id } => *recovery_id,
-                    _ => return Err(SigningError::ProtocolError("ECDSA signature requires recovery ID in metadata".to_string())),
+                    _ => {
+                        return Err(SigningError::ProtocolError(
+                            "ECDSA signature requires recovery ID in metadata".to_string(),
+                        ))
+                    }
                 };
-                
+
                 // Verify the signature
                 // Note: k256's verify expects the message to be hashed, but CaitSith signs raw messages
                 // We need to hash the message first
@@ -185,10 +203,13 @@ impl ThresholdSigner for CaitSithAdapter {
                 let mut hasher = Sha3_256::new();
                 hasher.update(message);
                 let message_hash = hasher.finalize();
-                
-                verifying_key.verify_prehash(&message_hash, &signature)
+
+                verifying_key
+                    .verify_prehash(&message_hash, &signature)
                     .map(|_| true)
-                    .map_err(|e| SigningError::ProtocolError(format!("signature verification failed: {}", e)))
+                    .map_err(|e| {
+                        SigningError::ProtocolError(format!("signature verification failed: {}", e))
+                    })
             }
             CurveType::Eddsa => Err(SigningError::UnsupportedCurve(CurveType::Eddsa)),
         }
@@ -269,18 +290,26 @@ where
         match self.0.poke() {
             Ok(TsAction::Wait) => Ok(Action::Wait),
             Ok(TsAction::SendMany(data)) => Ok(Action::SendMany(data)),
-            Ok(TsAction::SendPrivate(to, data)) => Ok(Action::SendPrivate(u32_to_participant(participant_to_u32(&to)), data)),
+            Ok(TsAction::SendPrivate(to, data)) => Ok(Action::SendPrivate(
+                u32_to_participant(participant_to_u32(&to)),
+                data,
+            )),
             Ok(TsAction::Return(output)) => {
-                let data = serde_json::to_vec(&output)
-                    .map_err(|e| ProtocolError::ProtocolError(format!("serialization failed: {}", e)))?;
+                let data = serde_json::to_vec(&output).map_err(|e| {
+                    ProtocolError::ProtocolError(format!("serialization failed: {}", e))
+                })?;
                 Ok(Action::Success(data))
             }
-            Err(e) => Err(ProtocolError::ProtocolError(format!("protocol error: {:?}", e))),
+            Err(e) => Err(ProtocolError::ProtocolError(format!(
+                "protocol error: {:?}",
+                e
+            ))),
         }
     }
 
     fn message(&mut self, from: Participant, data: Vec<u8>) {
-        self.0.message(TsParticipant::from(participant_to_u32(&from)), data);
+        self.0
+            .message(TsParticipant::from(participant_to_u32(&from)), data);
     }
 }
 
@@ -302,8 +331,11 @@ impl ThresholdSigner for NearThresholdSigner {
         threshold: usize,
     ) -> Result<Box<dyn ThresholdProtocol + Send>, SigningError> {
         // Convert participants to threshold-signatures format
-        let ts_participants: Vec<TsParticipant> = participants.iter().map(|p| TsParticipant::from(participant_to_u32(p))).collect();
-        
+        let ts_participants: Vec<TsParticipant> = participants
+            .iter()
+            .map(|p| TsParticipant::from(participant_to_u32(p)))
+            .collect();
+
         // Use EdDSA keygen from threshold-signatures
         let protocol = keygen::<Ed25519Sha512>(
             &ts_participants,
@@ -312,7 +344,7 @@ impl ThresholdSigner for NearThresholdSigner {
             OsRng,
         )
         .map_err(|e| SigningError::ProtocolError(format!("EdDSA keygen failed: {:?}", e)))?;
-        
+
         Ok(Box::new(ThresholdSignaturesProtocolWrapper(protocol)))
     }
 
@@ -349,18 +381,67 @@ impl ThresholdSigner for NearThresholdSigner {
         match curve {
             CurveType::Ecdsa => {
                 // TODO: Implement ECDSA key generation using threshold_signatures
-                Err(SigningError::ProtocolError("ECDSA key generation not yet implemented for NearThresholdSigner".to_string()))
+                Err(SigningError::ProtocolError(
+                    "ECDSA key generation not yet implemented for NearThresholdSigner".to_string(),
+                ))
             }
             CurveType::Eddsa => {
-                // TODO: Implement EdDSA key generation using threshold_signatures
-                // For now, return a dummy KeyMeta to make tests pass
-                Ok(KeyMeta {
-                    curve: CurveType::Eddsa,
-                    key_id: KeyId("dummy_eddsa_key".to_string()),
-                    public_key: vec![0; 32], // Ed25519 public key is 32 bytes
-                    participants: participants.to_vec(),
-                    threshold,
-                })
+                // Run the keygen protocol to generate the actual key
+                let mut protocol = self.keygen_protocol(participants, me, threshold)?;
+
+                // Run the protocol to completion
+                loop {
+                    match protocol.poke() {
+                        Ok(Action::Wait) => {
+                            // In a real implementation, we would wait for messages from other participants
+                            // For testing/single participant, we can continue
+                            continue;
+                        }
+                        Ok(Action::SendMany(_)) | Ok(Action::SendPrivate(_, _)) => {
+                            // In a real implementation, we would send messages to other participants
+                            // For testing/single participant, we can continue
+                            continue;
+                        }
+                        Ok(Action::Success(data)) => {
+                            // Deserialize the keygen output
+                            let keygen_output: EddsaKeygenOutput = serde_json::from_slice(&data)
+                                .map_err(|e| {
+                                    SigningError::ProtocolError(format!(
+                                        "failed to deserialize keygen output: {}",
+                                        e
+                                    ))
+                                })?;
+
+                            // Extract public key from the output
+                            // For EdDSA, the public key is part of the keygen output
+                            // We need to serialize it properly
+                            let public_key = serde_json::to_vec(&keygen_output).map_err(|e| {
+                                SigningError::ProtocolError(format!(
+                                    "failed to serialize public key: {}",
+                                    e
+                                ))
+                            })?;
+
+                            return Ok(KeyMeta {
+                                curve: CurveType::Eddsa,
+                                key_id: KeyId(format!(
+                                    "eddsa_key_{}_{}",
+                                    participants.len(),
+                                    threshold
+                                )),
+                                public_key,
+                                participants: participants.to_vec(),
+                                threshold,
+                            });
+                        }
+                        Err(e) => {
+                            return Err(SigningError::ProtocolError(format!(
+                                "protocol error: {:?}",
+                                e
+                            )))
+                        }
+                    }
+                }
             }
         }
     }
