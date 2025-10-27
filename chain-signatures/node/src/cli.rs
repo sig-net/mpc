@@ -592,4 +592,27 @@ mod tests {
         // Grafana value: -4889179067099200000
         assert_eq!(digest, -4889179067099199685);
     }
+
+    #[test]
+    fn test_digest_blacksand() {
+        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
+        let account_id = AccountId::from_str("blacksandtech-sig.near").unwrap();
+        let account_pk =
+            PublicKey::from_str("ed25519:67w2feimgcV21ZgEegvGhHTxyd9DR4yRxguqP8MctyJE").unwrap();
+        let cipher_pk = "231f6ddc22796c076dcc11a90b92c23e54071b1673abd2743fb84d5a1fc53f61";
+        let sign_pk =
+            PublicKey::from_str("ed25519:D5Pccv8i88AuDGXuXQoNSVGAZLfuHCZw2TQmoZxi2tEM").unwrap();
+
+        let digest = calculate_digest(
+            mpc_contract_id,
+            account_id,
+            account_pk,
+            cipher_pk.to_string(),
+            sign_pk,
+            ETH_CONTRACT_ADDRESS.to_string(),
+        );
+
+        // Grafana value: -8312902466823593000
+        assert_eq!(digest, -6950551088322443092);
+    }
 }
