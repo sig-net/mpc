@@ -1,5 +1,6 @@
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
+use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
 
@@ -34,7 +35,10 @@ pub struct ClusterSpawner {
 
     pub cfg: NodeConfig,
     pub wait_for_running: bool,
+    pub redis: Option<containers::Redis>,
+    pub worker: Option<Worker<Sandbox>>,
     prestockpile: Option<Prestockpile>,
+    pub use_ethereum: bool,
 }
 
 impl Default for ClusterSpawner {
@@ -59,7 +63,10 @@ impl Default for ClusterSpawner {
 
             cfg,
             wait_for_running: true,
+            redis: None,
+            worker: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
+            use_ethereum: false,
         }
     }
 }
@@ -126,24 +133,77 @@ impl ClusterSpawner {
         self
     }
 
+    pub fn ethereum(mut self) -> Self {
+        self.use_ethereum = true;
+        self
+    }
+
     pub fn debug_node(&mut self) -> &mut Self {
         self.release = false;
         self
     }
 
+    pub fn account_id(&self, idx: usize) -> AccountId {
+        if idx >= self.accounts.len() {
+            panic!("Account index out of bounds: {idx}");
+        }
+        self.accounts[idx].id().clone()
+    }
+
     /// Create accounts for the nodes
     pub async fn create_accounts(&mut self, worker: &Worker<Sandbox>) {
-        let mut accounts = Vec::with_capacity(self.cfg.nodes);
+        if self.accounts.len() >= self.cfg.nodes {
+            // accounts already created, don't create anymore.
+            return;
+        }
+
         for i in 0..self.cfg.nodes {
-            accounts.push(dev_gen_indexed(worker, i).await.unwrap());
+            self.accounts
+                .push(dev_gen_indexed(worker, i).await.unwrap());
         }
         self.participants
-            .extend((0..accounts.len() as u32).map(Participant::from));
-        self.accounts.extend(accounts);
+            .extend((0..self.accounts.len() as u32).map(Participant::from));
     }
 
     pub async fn spawn_redis(&self) -> containers::Redis {
         containers::Redis::run(self).await
+    }
+
+    /// Prespawns a redis instance where we're able to make use of it before the nodes are spun
+    /// up and are in running phase. This redis instance will be reused when the whole environment
+    /// is setup.
+    pub async fn prespawn_redis(&mut self) -> &containers::Redis {
+        self.redis = Some(self.spawn_redis().await);
+        self.redis.as_ref().unwrap()
+    }
+
+    /// Grabs the underlying redis instance that was prespawned, or if not prespawned, create a
+    /// new one from start up.
+    pub async fn take_redis(&mut self) -> containers::Redis {
+        match self.redis.take() {
+            Some(redis) => redis,
+            None => self.spawn_redis().await,
+        }
+    }
+
+    pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Worker<Sandbox>> {
+        if self.worker.is_none() {
+            self.worker = Some(near_workspaces::sandbox().await?);
+        }
+        Ok(self.worker.as_ref().unwrap())
+    }
+
+    pub async fn take_worker(&mut self) -> Worker<Sandbox> {
+        match self.worker.take() {
+            Some(worker) => worker,
+            None => near_workspaces::sandbox().await.unwrap(),
+        }
+    }
+
+    pub async fn presetup(&mut self) -> anyhow::Result<&containers::Redis> {
+        let worker = self.prespawn_sandbox().await?.clone();
+        self.create_accounts(&worker).await;
+        Ok(self.prespawn_redis().await)
     }
 
     pub async fn run(&mut self) -> anyhow::Result<Nodes> {
@@ -165,7 +225,7 @@ impl IntoFuture for ClusterSpawner {
 
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
-            let jsonrpc_client = connector.connect(&nodes.ctx().lake_indexer.rpc_host_address);
+            let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
 
             let cluster = Cluster {
@@ -173,6 +233,7 @@ impl IntoFuture for ClusterSpawner {
                 rpc_client,
                 http_client: reqwest::Client::default(),
                 docker_client: self.docker,
+                account_idx: nodes.len(),
                 nodes,
             };
 

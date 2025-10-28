@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::mesh::MeshState;
@@ -19,6 +19,10 @@ use super::triple::TripleId;
 /// based on the number of participants in the network. If we have 1024 participants then
 /// our issue will more than likely not be the channel size.
 const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
+
+/// The interval which we will try to sync with other nodes to see if they have lost track
+/// of anything.
+pub const RECURRING_SYNC_INTERVAL: Duration = Duration::from_secs(3600 * 24);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
@@ -49,8 +53,8 @@ pub struct SyncTask {
     client: NodeClient,
     triples: TripleStorage,
     presignatures: PresignatureStorage,
-    mesh_state: Arc<RwLock<MeshState>>,
-    watcher: ContractStateWatcher,
+    mesh_state: watch::Receiver<MeshState>,
+    contract: ContractStateWatcher,
     requests: SyncRequestReceiver,
     synced_peer_tx: mpsc::Sender<Participant>,
 }
@@ -61,8 +65,8 @@ impl SyncTask {
         client: &NodeClient,
         triples: TripleStorage,
         presignatures: PresignatureStorage,
-        mesh_state: Arc<RwLock<MeshState>>,
-        watcher: ContractStateWatcher,
+        mesh_state: watch::Receiver<MeshState>,
+        contract: ContractStateWatcher,
         synced_peer_tx: mpsc::Sender<Participant>,
     ) -> (SyncChannel, Self) {
         let (requests, channel) = SyncChannel::new();
@@ -71,7 +75,7 @@ impl SyncTask {
             triples,
             presignatures,
             mesh_state,
-            watcher,
+            contract,
             requests,
             synced_peer_tx,
         };
@@ -81,16 +85,16 @@ impl SyncTask {
     pub async fn run(mut self) {
         tracing::info!("task has been started");
         let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
-        let mut sync_interval = tokio::time::interval(Duration::from_millis(100));
+        let mut sync_interval = tokio::time::interval(Duration::from_millis(200));
         // Broadcast should generally not be necessary.
-        let mut broadcast_interval = tokio::time::interval(Duration::from_secs(3600 * 24));
+        let mut broadcast_interval = tokio::time::interval(RECURRING_SYNC_INTERVAL);
         let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(100));
 
         // Do NOT start until we have our own participant info.
         // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
         let (_threshold, me) = loop {
             watcher_interval.tick().await;
-            if let Some(info) = self.watcher.info().await {
+            if let Some(info) = self.contract.info().await {
                 break info;
             }
         };
@@ -106,9 +110,7 @@ impl SyncTask {
                         continue;
                     }
 
-                    let state = self.mesh_state.read().await;
-                    let need_sync = &state.need_sync;
-
+                    let need_sync = &self.mesh_state.borrow().need_sync.clone();
                     if need_sync.is_empty() {
                         continue;
                     }
@@ -136,13 +138,13 @@ impl SyncTask {
                     }
 
                     let update = self.new_update(me).await;
-                    let state = self.mesh_state.read().await.clone();
-                    let active = state.active;
+                    let active = self.mesh_state.borrow().active.clone();
 
                     let start = Instant::now();
                     let task = tokio::spawn(broadcast_sync(
                         self.client.clone(),
-                        update, active.into_iter(),
+                        update,
+                        active.into_iter(),
                         self.synced_peer_tx.clone(),
                         me
                     ));
@@ -199,17 +201,25 @@ async fn broadcast_sync(
     me: Participant,
 ) {
     if update.is_empty() {
+        for (participant, _) in receivers {
+            if synced_peer_tx.send(participant).await.is_err() {
+                tracing::error!(
+                    ?participant,
+                    "sync reporter is down: state sync will no longer work"
+                );
+            }
+        }
         return;
     }
 
     let start = Instant::now();
     let mut tasks = JoinSet::new();
-    let arc_update = Arc::new(update.clone());
+    let update = Arc::new(update);
     for (p, info) in receivers {
         let client = client.clone();
-        let update = arc_update.clone();
+        let update = update.clone();
         let url = info.url;
-        let synced_peer_tx_clone = synced_peer_tx.clone();
+        let sync_tx = synced_peer_tx.clone();
         tasks.spawn(async move {
             // Only actually do the sync on other peers, not on self. (Hack) We
             // still want to send the message to synced_peer_tx though, since
@@ -221,11 +231,8 @@ async fn broadcast_sync(
             } else {
                 None
             };
-            let result = synced_peer_tx_clone.send(p).await;
-            if result.is_err() {
-                tracing::error!(
-                    "synced_peer_tx failed, receiver is down. State sync will no longer work."
-                )
+            if sync_tx.send(p).await.is_err() {
+                tracing::error!("sync reporter is down: state sync will no longer work")
             }
             (p, sync_view)
         });
@@ -294,5 +301,41 @@ impl SyncChannel {
         if let Err(err) = self.request_update.send(update).await {
             tracing::warn!(?err, "failed to request update");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node_client::Options as NodeClientOptions;
+
+    #[tokio::test]
+    async fn test_broadcast_sync_on_empty_update() {
+        let client = NodeClient::new(&NodeClientOptions::default());
+        let update = SyncUpdate::empty();
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let participants = vec![
+            (Participant::from(1u32), ParticipantInfo::new(1)),
+            (Participant::from(2u32), ParticipantInfo::new(2)),
+        ];
+
+        broadcast_sync(
+            client,
+            update,
+            participants.clone().into_iter(),
+            tx,
+            Participant::from(0u32),
+        )
+        .await;
+
+        let mut received = Vec::new();
+        for _ in 0..participants.len() {
+            received.push(rx.recv().await.expect("missing synced participant"));
+        }
+
+        let expected: Vec<_> = participants.iter().map(|(p, _)| *p).collect();
+        assert_eq!(received, expected);
+        assert!(rx.recv().await.is_none());
     }
 }

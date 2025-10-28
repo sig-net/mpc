@@ -25,6 +25,8 @@ pub enum RespondError {
 pub enum JoinError {
     #[error("Account to join is already in the participant set.")]
     JoinAlreadyParticipant,
+    #[error("Account to revoke is not in the candidate set.")]
+    RevokeNotCandidate,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]

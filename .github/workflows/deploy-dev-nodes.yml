@@ -6,6 +6,7 @@ on:
       - develop
     paths:
       - chain-signatures/**
+      - Cargo.*
 
 env:
   IMAGE: "europe-west1-docker.pkg.dev/near-cs-dev/multichain-public/multichain-dev"

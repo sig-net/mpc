@@ -32,6 +32,7 @@ pub struct ResharingContractState {
     pub threshold: usize,
     pub public_key: PublicKey,
     pub finished_votes: HashSet<AccountId>,
+    pub cancel_votes: HashSet<AccountId>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]

@@ -197,6 +197,10 @@ impl Participants {
             participants: intersect,
         }
     }
+
+    pub fn clear(&mut self) {
+        self.participants.clear();
+    }
 }
 
 /// ParticipantMap used to find a participant by specific amount of participants.
@@ -229,7 +233,7 @@ pub struct CandidateInfo {
     pub sign_pk: near_crypto::PublicKey,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Candidates {
     pub candidates: BTreeMap<AccountId, CandidateInfo>,
 }
@@ -282,7 +286,7 @@ impl From<mpc_contract::primitives::Candidates> for Candidates {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PkVotes {
     pub pk_votes: BTreeMap<near_crypto::PublicKey, HashSet<AccountId>>,
 }
@@ -317,7 +321,7 @@ impl From<mpc_contract::primitives::PkVotes> for PkVotes {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Votes {
     pub votes: BTreeMap<AccountId, HashSet<AccountId>>,
 }

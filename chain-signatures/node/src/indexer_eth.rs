@@ -1,27 +1,50 @@
-use crate::protocol::{Chain, IndexedSignRequest};
+use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::sign_bidirectional::BidirectionalTx;
+use crate::sign_bidirectional::BidirectionalTxId;
+use crate::storage::app_data_storage::AppDataStorage;
 use alloy::consensus::BlockHeader;
+#[cfg(not(feature = "light_client"))]
+use alloy::consensus::Transaction as _;
+#[cfg(feature = "light_client")]
+use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
-use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::Log;
-use alloy::sol_types::{sol, SolEvent};
-use alloy::transports::http::Client as AlloyClient;
-use alloy::transports::http::Http;
-use anyhow::anyhow;
-use helios::common::types::{BlockTag, SubscriptionEvent, SubscriptionType};
-use helios::ethereum::{
-    config::networks::Network, database::FileDB, EthereumClient, EthereumClientBuilder,
+#[cfg(not(feature = "light_client"))]
+use alloy::rpc::types::Transaction;
+#[cfg(not(feature = "light_client"))]
+use alloy::rpc::types::TransactionReceipt;
+
+#[cfg(not(feature = "light_client"))]
+use crate::respond_bidirectional::{
+    CompletedTx, RespondBidirectionalSerializedOutput, SerDeserFormat,
+    OUTPUT_DESERIALIZATION_FORMAT, RESPOND_SERIALIZATION_FORMAT,
 };
+use crate::sign_bidirectional::BidirectionalTxStatus;
+#[cfg(not(feature = "light_client"))]
+use crate::sign_bidirectional::TransactionOutput;
+use alloy::sol_types::{sol, SolEvent};
+#[cfg(feature = "light_client")]
+use helios::common::types::{SubscriptionEvent, SubscriptionType};
+#[cfg(feature = "light_client")]
+use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 use k256::Scalar;
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
-use mpc_primitives::{SignArgs, SignId};
+use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::json;
 use std::collections::HashMap;
+#[cfg(feature = "light_client")]
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::{fmt, path::PathBuf, str::FromStr, sync::LazyLock, time::Instant};
+use std::{fmt, str::FromStr, sync::LazyLock, time::Instant};
+#[cfg(feature = "light_client")]
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
-use tokio::time::Duration;
+use tokio::sync::RwLock;
+use tokio::time::{sleep, Duration};
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     Scalar::from_bytes(
@@ -32,6 +55,12 @@ pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     )
     .unwrap()
 });
+// This is the maximum number of blocks that Helios can look back to
+#[cfg(feature = "light_client")]
+const MAX_CATCHUP_BLOCKS: u64 = 8191;
+
+#[cfg(feature = "light_client")]
+type BlockNumber = u64;
 
 #[derive(Clone)]
 pub struct EthConfig {
@@ -49,6 +78,8 @@ pub struct EthConfig {
     pub helios_data_path: String,
     /// refresh finalized block interval in milliseconds
     pub refresh_finalized_interval: u64,
+    /// total timeout for a sign request starting from indexed time in seconds
+    pub total_timeout: u64,
 }
 
 impl fmt::Debug for EthConfig {
@@ -64,6 +95,7 @@ impl fmt::Debug for EthConfig {
                 "refresh_finalized_interval",
                 &self.refresh_finalized_interval,
             )
+            .field("total_timeout", &self.total_timeout)
             .finish()
     }
 }
@@ -116,6 +148,9 @@ pub struct EthArgs {
         default_value = "10000"
     )]
     pub eth_refresh_finalized_interval: Option<u64>,
+    /// total timeout for a sign request starting from indexed time in seconds
+    #[clap(long, env("MPC_ETH_TOTAL_TIMEOUT"), default_value = "1500")]
+    pub eth_total_timeout: Option<u64>,
 }
 
 impl EthArgs {
@@ -151,6 +186,12 @@ impl EthArgs {
                 eth_refresh_finalized_interval.to_string(),
             ]);
         }
+        if let Some(eth_total_timeout) = self.eth_total_timeout {
+            args.extend([
+                "--eth-total-timeout".to_string(),
+                eth_total_timeout.to_string(),
+            ]);
+        }
         args
     }
 
@@ -163,6 +204,7 @@ impl EthArgs {
             network: self.eth_network?,
             helios_data_path: self.eth_helios_data_path?,
             refresh_finalized_interval: self.eth_refresh_finalized_interval?,
+            total_timeout: self.eth_total_timeout?,
         })
     }
 
@@ -176,6 +218,7 @@ impl EthArgs {
                 eth_network: Some(config.network),
                 eth_helios_data_path: Some(config.helios_data_path),
                 eth_refresh_finalized_interval: Some(config.refresh_finalized_interval),
+                eth_total_timeout: Some(config.total_timeout),
             },
             _ => Self {
                 eth_account_sk: None,
@@ -185,11 +228,19 @@ impl EthArgs {
                 eth_network: None,
                 eth_helios_data_path: None,
                 eth_refresh_finalized_interval: None,
+                eth_total_timeout: None,
             },
         }
     }
 }
 
+#[cfg(feature = "light_client")]
+pub enum BlockToProcess {
+    Catchup(BlockNumber),
+    NewBlock(BlockNumberAndHash),
+}
+
+#[cfg(feature = "light_client")]
 #[derive(Clone)]
 pub struct BlockAndRequests {
     block_number: u64,
@@ -197,6 +248,7 @@ pub struct BlockAndRequests {
     indexed_requests: Vec<IndexedSignRequest>,
 }
 
+#[cfg(feature = "light_client")]
 impl BlockAndRequests {
     fn new(
         block_number: u64,
@@ -243,17 +295,20 @@ sol! {
     );
 }
 
-fn sign_request_from_filtered_log(log: Log) -> anyhow::Result<IndexedSignRequest> {
+fn sign_request_from_filtered_log(
+    log: Log,
+    total_timeout: Duration,
+) -> anyhow::Result<IndexedSignRequest> {
     let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
     if event.deposit == U256::ZERO {
         tracing::warn!("deposit is 0, skipping sign request");
-        return Err(anyhow::anyhow!("deposit is 0"));
+        anyhow::bail!("deposit is 0");
     }
 
-    if event.key_version != 0 {
+    if event.key_version > LATEST_MPC_KEY_VERSION {
         tracing::warn!("unsupported key version: {}", event.key_version);
-        return Err(anyhow::anyhow!("unsupported key version"));
+        anyhow::bail!("unsupported key version");
     }
 
     // Create sign request from event
@@ -262,9 +317,7 @@ fn sign_request_from_filtered_log(log: Log) -> anyhow::Result<IndexedSignRequest
             "eth `sign` did not produce payload hash correctly: {:?}",
             event.payload_hash,
         );
-        return Err(anyhow::anyhow!(
-            "failed to convert event payload hash to scalar"
-        ));
+        anyhow::bail!("failed to convert event payload hash to scalar");
     };
 
     if payload > *MAX_SECP256K1_SCALAR {
@@ -272,12 +325,16 @@ fn sign_request_from_filtered_log(log: Log) -> anyhow::Result<IndexedSignRequest
         anyhow::bail!("payload exceeds secp256k1 curve order");
     }
 
-    let epsilon = derive_epsilon_eth(format!("0x{}", event.requester.encode_hex()), &event.path);
+    let epsilon = derive_epsilon_eth(
+        event.key_version,
+        format!("0x{}", event.requester.encode_hex()).as_str(),
+        &event.path,
+    );
 
     // Use transaction hash as entropy
     let entropy = log.transaction_hash.unwrap_or_default();
 
-    let sign_id = SignId::new(calculate_request_id(&event));
+    let sign_id = SignId::new(event.generate_request_id());
     tracing::info!(?sign_id, "eth signature requested");
 
     Ok(IndexedSignRequest {
@@ -287,33 +344,16 @@ fn sign_request_from_filtered_log(log: Log) -> anyhow::Result<IndexedSignRequest
             epsilon,
             payload,
             path: event.path,
-            key_version: 0,
+            key_version: event.key_version,
         },
         chain: Chain::Ethereum,
         unix_timestamp_indexed: crate::util::current_unix_timestamp(),
         timestamp_sign_queue: None,
+        total_timeout,
+        sign_request_type: SignRequestType::Sign,
+        participants: None,
     })
 }
-
-fn encode_abi(event: &SignatureRequestedEvent) -> Vec<u8> {
-    let signature_requested_event_encoding = SignatureRequestedEncoding {
-        sender: event.requester,
-        payload: event.payload_hash.to_vec().into(),
-        path: event.path.clone(),
-        keyVersion: event.key_version,
-        chainId: event.chain_id,
-        algo: event.algo.clone(),
-        dest: event.dest.clone(),
-        params: event.params.clone(),
-    };
-    signature_requested_event_encoding.encode_data()
-}
-
-fn calculate_request_id(event: &SignatureRequestedEvent) -> [u8; 32] {
-    let abi_encoded = encode_abi(event);
-    alloy::primitives::keccak256(abi_encoded).into()
-}
-
 // Helper function to parse event logs
 fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
     // Parse data fields
@@ -375,7 +415,16 @@ fn parse_string_args(data: &Bytes, offset_start: usize) -> String {
     String::from_utf8(bytes.to_vec()).unwrap_or_default()
 }
 
+#[cfg(feature = "light_client")]
+const MAX_BLOCKS_TO_PROCESS: usize = 10000;
+#[cfg(feature = "light_client")]
+fn blocks_to_process_channel() -> (mpsc::Sender<BlockToProcess>, mpsc::Receiver<BlockToProcess>) {
+    mpsc::channel(MAX_BLOCKS_TO_PROCESS)
+}
+
+#[cfg(feature = "light_client")]
 const MAX_INDEXED_REQUESTS: usize = 1024;
+#[cfg(feature = "light_client")]
 fn indexed_channel() -> (
     mpsc::Sender<BlockAndRequests>,
     mpsc::Receiver<BlockAndRequests>,
@@ -383,8 +432,11 @@ fn indexed_channel() -> (
     mpsc::channel(MAX_INDEXED_REQUESTS)
 }
 
+#[cfg(feature = "light_client")]
 type BlockNumberAndHash = (u64, alloy::primitives::B256);
+#[cfg(feature = "light_client")]
 const MAX_FAILED_BLOCKS: usize = 1024;
+#[cfg(feature = "light_client")]
 fn failed_blocks_channel() -> (
     mpsc::Sender<BlockNumberAndHash>,
     mpsc::Receiver<BlockNumberAndHash>,
@@ -392,103 +444,133 @@ fn failed_blocks_channel() -> (
     mpsc::channel(MAX_FAILED_BLOCKS)
 }
 
-type BlockNumberToHashMap = HashMap<u64, alloy::primitives::B256>;
-
-#[derive(Debug, Clone)]
-struct FinalizedEpoch {
-    pub start_block: u64,
-    pub end_block: u64,
-    pub blocks: BlockNumberToHashMap,
-}
-
+#[cfg(feature = "light_client")]
 const MAX_FINALIZED_BLOCKS: usize = 1024;
-fn finalized_blocks_channel() -> (mpsc::Sender<FinalizedEpoch>, mpsc::Receiver<FinalizedEpoch>) {
+#[cfg(feature = "light_client")]
+fn finalized_block_channel() -> (mpsc::Sender<BlockNumber>, mpsc::Receiver<BlockNumber>) {
     mpsc::channel(MAX_FINALIZED_BLOCKS)
 }
 
+#[cfg(feature = "light_client")]
 pub async fn run(
     eth: Option<EthConfig>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
+    app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
-) -> anyhow::Result<()> {
+    bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
+) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
-        return Ok(());
+        return;
     };
 
-    let network = Network::from_str(eth.network.as_str())
-        .map_err(|err| anyhow::anyhow!("Network input incorrect: {:?}", err))?;
+    let last_processed_block = app_data_storage
+        .last_processed_block_eth()
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!("Failed to get last processed block: {err:?}");
+            None
+        });
 
-    let mut client: EthereumClient<FileDB> = EthereumClientBuilder::new()
-        .network(network)
-        .consensus_rpc(&eth.consensus_rpc_http_url)
-        .execution_rpc(&eth.execution_rpc_http_url)
-        .data_dir(PathBuf::from(&eth.helios_data_path))
-        .build()
-        .map_err(|err| anyhow::anyhow!("Failed to build Ethereum Helios client: {:?}", err))?;
+    let Ok(network) = Network::from_str(eth.network.as_str()) else {
+        tracing::error!("Network input incorrect: {}", eth.network);
+        return;
+    };
+
+    let client: EthereumClient = {
+        let builder = match EthereumClientBuilder::new()
+            .network(network)
+            .consensus_rpc(&eth.consensus_rpc_http_url)
+        {
+            Ok(builder) => builder,
+            Err(err) => {
+                tracing::error!("Failed to build consensus RPC: {err:?}");
+                return;
+            }
+        };
+
+        let builder = match builder.execution_rpc(&eth.execution_rpc_http_url) {
+            Ok(builder) => builder,
+            Err(err) => {
+                tracing::error!("Failed to build execution RPC: {err:?}");
+                return;
+            }
+        };
+
+        match builder
+            .data_dir(PathBuf::from(&eth.helios_data_path))
+            .with_file_db()
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::error!("Failed to build Helios client: {err:?}");
+                return;
+            }
+        }
+    };
 
     tracing::info!("Built Helios client on network {}", network);
 
-    client
-        .start()
-        .await
-        .map_err(|err| anyhow::anyhow!("Failed to start Ethereum Helios client: {:?}", err))?;
-
     client.wait_synced().await;
-
-    let untrusted_rpc_client: RootProvider<alloy::transports::http::Http<AlloyClient>> =
-        ProviderBuilder::new().on_http(url::Url::parse(&eth.execution_rpc_http_url).unwrap());
 
     tracing::info!("running ethereum indexer");
 
-    let eth_contract_addr = Address::from_str(&format!("0x{}", eth.contract_address))?;
+    let mut block_heads_rx = match client.subscribe(SubscriptionType::NewHeads).await {
+        Ok(block_heads_rx) => block_heads_rx,
+        Err(err) => {
+            tracing::error!("Failed to subscribe to new block heads: {err:?}");
+            return;
+        }
+    };
 
-    let mut block_heads_rx = client
-        .subscribe(SubscriptionType::NewHeads)
-        .await
-        .map_err(|err| anyhow::anyhow!("Failed to subscribe to new block heads: {:?}", err))?;
+    let Ok(eth_contract_addr) = Address::from_str(&format!("0x{}", eth.contract_address)) else {
+        tracing::error!("Failed to parse contract address: {}", eth.contract_address);
+        return;
+    };
+    let total_timeout = Duration::from_secs(eth.total_timeout);
 
     let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
 
     let (requests_indexed_send, requests_indexed_recv) = indexed_channel();
 
-    let (finalized_epoch_send, finalized_epoch_recv) = finalized_blocks_channel();
+    let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
+
+    let (blocks_to_process_send, mut blocks_to_process_recv) = blocks_to_process_channel();
 
     let client = Arc::new(client);
+
     let client_clone = Arc::clone(&client);
     tokio::spawn(async move {
-        tracing::info!("Spawned task to refresh finalized epoch's blocks");
-        refresh_finalized_epoch(
+        tracing::info!("Spawned task to refresh the latest finalized block");
+        refresh_finalized_block(
             &client_clone,
-            &untrusted_rpc_client,
-            finalized_epoch_send.clone(),
+            finalized_block_send.clone(),
             eth.refresh_finalized_interval,
         )
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("Failed to refresh finalized epoch: {:?}", err);
-        });
+        .await;
     });
 
     let near_account_id_clone = node_near_account_id.clone();
+    let client_clone = Arc::clone(&client);
     tokio::spawn(async move {
         tracing::info!("Spawned task to send indexed requests to send queue");
         send_requests_when_final(
+            &client_clone,
             requests_indexed_recv,
-            finalized_epoch_recv,
+            finalized_block_recv,
             sign_tx.clone(),
+            app_data_storage.clone(),
             near_account_id_clone.clone(),
         )
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("Failed to send requests when final: {:?}", err);
-        });
+        .await;
     });
 
     let near_account_id_clone = node_near_account_id.clone();
     let requests_indexed_send_clone = requests_indexed_send.clone();
     let blocks_failed_send_clone = blocks_failed_send.clone();
     let client_clone = Arc::clone(&client);
+    let bidirectional_tx_map_clone = bidirectional_tx_map.clone();
     tokio::spawn(async move {
         tracing::info!("Spawned task to retry failed blocks");
         retry_failed_blocks(
@@ -498,37 +580,60 @@ pub async fn run(
             eth_contract_addr,
             near_account_id_clone,
             requests_indexed_send_clone,
+            total_timeout,
+            bidirectional_tx_map_clone,
         )
         .await;
     });
 
+    let blocks_to_process_send_clone = blocks_to_process_send.clone();
+    if let Some(last_processed_block) = last_processed_block {
+        let Ok(SubscriptionEvent::NewHeads(latest_block)) = block_heads_rx.recv().await else {
+            tracing::warn!("Failed to receive latest block head");
+            return;
+        };
+        let end_block_number = latest_block.header.number;
+        add_catchup_blocks_to_process(
+            blocks_to_process_send_clone,
+            last_processed_block,
+            end_block_number,
+        )
+        .await;
+    }
+
+    let blocks_to_process_send_clone = blocks_to_process_send.clone();
+    tokio::spawn(async move {
+        tracing::info!("Spawned task to add new blocks to process");
+        add_new_block_to_process(block_heads_rx, blocks_to_process_send_clone).await;
+    });
+
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let requests_indexed_send_clone = requests_indexed_send.clone();
-    let mut receiver_state_update_timestamp = Instant::now();
     loop {
-        interval.tick().await;
-        if block_heads_rx.is_empty() {
-            if receiver_state_update_timestamp.elapsed() > Duration::from_secs(60) {
-                tracing::warn!("No new block heads received for 60 seconds, waiting...");
-                receiver_state_update_timestamp = Instant::now();
-            }
+        let Some(block_to_process) = blocks_to_process_recv.recv().await else {
+            interval.tick().await;
             continue;
-        }
-        let Ok(new_block_head) = block_heads_rx.recv().await.inspect_err(|err| {
-            tracing::warn!(
-                "Eth indexer failed to receive latest block header: {:?}",
-                err
-            );
-        }) else {
-            break;
         };
-        receiver_state_update_timestamp = Instant::now();
-        let SubscriptionEvent::NewHeads(new_block) = new_block_head;
-        let block_number = new_block.header.number;
-        let block_hash = new_block.header.hash;
-        if block_number % 10 == 0 {
-            tracing::info!("Received new block head: {block_number}");
-        }
+        let (block_number, block_hash, is_catchup) = match block_to_process {
+            BlockToProcess::Catchup(block_number) => {
+                let block = fetch_block(
+                    &client,
+                    BlockId::Number(BlockNumberOrTag::Number(block_number)),
+                    5,
+                    Duration::from_millis(200),
+                )
+                .await;
+                if let Some(block) = block {
+                    (block.header.number, block.header.hash, true)
+                } else {
+                    continue;
+                }
+            }
+            BlockToProcess::NewBlock((block_number, block_hash)) => {
+                (block_number, block_hash, false)
+            }
+        };
+        let bidirectional_tx_map_clone = bidirectional_tx_map.clone();
         if let Err(err) = process_block(
             block_number,
             block_hash,
@@ -536,31 +641,39 @@ pub async fn run(
             eth_contract_addr,
             node_near_account_id.clone(),
             requests_indexed_send_clone.clone(),
+            total_timeout,
+            bidirectional_tx_map_clone,
         )
         .await
         {
-            tracing::warn!(
-                "Eth indexer failed to process block number {}: {:?}",
-                block_number,
-                err
-            );
+            tracing::warn!("Eth indexer failed to process block number {block_number}: {err:?}");
             add_failed_block(blocks_failed_send.clone(), block_number, block_hash).await;
             continue;
+        }
+        if block_number % 10 == 0 {
+            if is_catchup {
+                tracing::info!("Processed catchup block number {block_number}");
+            } else {
+                tracing::info!("Processed new block number {block_number}");
+            }
         }
         crate::metrics::LATEST_BLOCK_NUMBER
             .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
             .set(block_number as i64);
     }
-    Ok(())
 }
 
+#[cfg(feature = "light_client")]
+#[allow(clippy::too_many_arguments)]
 async fn retry_failed_blocks(
     mut blocks_failed_rx: mpsc::Receiver<BlockNumberAndHash>,
     blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
-    client: &Arc<EthereumClient<FileDB>>,
+    client: &Arc<EthereumClient>,
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
+    total_timeout: Duration,
+    bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
 ) {
     loop {
         let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
@@ -574,17 +687,20 @@ async fn retry_failed_blocks(
             eth_contract_addr,
             node_near_account_id.clone(),
             requests_indexed.clone(),
+            total_timeout,
+            bidirectional_tx_map.clone(),
         )
         .await
         {
-            tracing::warn!("Retry failed for block {block_number}: {:?}", err);
+            tracing::warn!("Retry failed for block {block_number}: {err:?}");
             add_failed_block(blocks_failed_tx.clone(), block_number, block_hash).await;
         } else {
-            tracing::info!("Successfully retried block: {}", block_number);
+            tracing::info!("Successfully retried block: {block_number}");
         }
     }
 }
 
+#[cfg(feature = "light_client")]
 async fn add_failed_block(
     blocks_failed: mpsc::Sender<BlockNumberAndHash>,
     block_number: u64,
@@ -598,129 +714,189 @@ async fn add_failed_block(
         });
 }
 
-/// Polls for the latest finalized block and update the latest finalized blocks.
-/// Once finalized block gets updated, we fetch the blocks in the epoch ending with the finalized block.
-/// To ensure the blocks we fetched are proven, we fetch the latest finalized block from Helios.
-/// Then using an unstrusted RPC client, we go backwards to fetch the blocks in the epoch and check that the hash of the block's header == its next block's parent_hash.
-/// This is proven because the finalized block is already proven by helios, and by checking current block hash == next block's parent hash, we prove that each block is indeed included in the chain.
-async fn refresh_finalized_epoch(
-    helios_client: &Arc<EthereumClient<FileDB>>,
-    untrusted_rpc_client: &RootProvider<Http<AlloyClient>>,
-    finalized_epoch_send: mpsc::Sender<FinalizedEpoch>,
+#[cfg(feature = "light_client")]
+async fn add_new_block_to_process(
+    mut block_heads_rx: tokio::sync::broadcast::Receiver<
+        SubscriptionEvent<helios::ethereum::spec::Ethereum>,
+    >,
+    blocks_to_process: mpsc::Sender<BlockToProcess>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_millis(200));
+    let mut receiver_state_update_timestamp = Instant::now();
+    loop {
+        interval.tick().await;
+        if block_heads_rx.is_empty()
+            && receiver_state_update_timestamp.elapsed() > Duration::from_secs(60)
+        {
+            tracing::warn!("No new block heads received for 60 seconds, waiting...");
+            receiver_state_update_timestamp = Instant::now();
+        }
+        let new_block_head = match block_heads_rx.recv().await {
+            Ok(new_block_head) => new_block_head,
+            Err(RecvError::Lagged(lagged_count)) => {
+                tracing::warn!(
+                    "Eth indexer failed to receive latest block header: block heads stream lagged too far behind, lagged count: {lagged_count}"
+                );
+                continue;
+            }
+            Err(RecvError::Closed) => {
+                tracing::error!(
+                    "Eth indexer failed to receive latest block header: block heads stream closed"
+                );
+                // TODO: add a retry mechanism for closed block heads stream
+                break;
+            }
+        };
+        receiver_state_update_timestamp = Instant::now();
+        let SubscriptionEvent::NewHeads(new_block) = new_block_head;
+        let block_number = new_block.header.number;
+        let block_hash = new_block.header.hash;
+        if block_number % 10 == 0 {
+            tracing::info!("Received new block head: {block_number}");
+        }
+        if let Err(err) = blocks_to_process
+            .send(BlockToProcess::NewBlock((block_number, block_hash)))
+            .await
+        {
+            tracing::warn!("Failed to send block to process: {err:?}");
+        }
+    }
+}
+
+#[cfg(feature = "light_client")]
+async fn add_catchup_blocks_to_process(
+    blocks_to_process: mpsc::Sender<BlockToProcess>,
+    start_block_number: u64,
+    end_block_number: u64,
+) {
+    // helios can only go back maximum MAX_CATCHUP_BLOCKS blocks, so we need to adjust the start block number if it's too far behind
+    let helios_oldest_block_number = end_block_number.saturating_sub(MAX_CATCHUP_BLOCKS);
+    let start_block_number = if start_block_number < helios_oldest_block_number {
+        tracing::warn!(
+            "Start block number {start_block_number} is too far behind the latest block {end_block_number}, adjusting to {helios_oldest_block_number}"
+        );
+        helios_oldest_block_number
+    } else {
+        start_block_number
+    };
+
+    for block_number in start_block_number..=end_block_number {
+        if let Err(err) = blocks_to_process
+            .send(BlockToProcess::Catchup(block_number))
+            .await
+        {
+            tracing::warn!("Failed to send block to process: {err:?}");
+        }
+    }
+}
+
+// retry getting block from helios with exponential backoff
+#[cfg(feature = "light_client")]
+async fn fetch_block(
+    helios_client: &Arc<EthereumClient>,
+    block_id: BlockId,
+    max_retries: u8,
+    base_delay: Duration,
+) -> Option<alloy::rpc::types::Block> {
+    let mut retries = 0;
+    loop {
+        match helios_client.get_block(block_id, false).await {
+            Ok(Some(block)) => return Some(block),
+            Ok(None) => {
+                tracing::warn!("Block {block_id} not found from Helios client");
+                return None;
+            }
+            Err(e) => {
+                if retries < max_retries {
+                    retries += 1;
+                    let delay = base_delay * 2u32.pow((retries - 1) as u32);
+                    tracing::warn!(
+                        "Failed to fetch block number {block_id} from Helios client: {:?}, retrying",
+                        e
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                tracing::warn!(
+                    "Failed to fetch block number {block_id} from Helios client: {:?}, exceeded maximum retry",
+                    e
+                );
+                return None;
+            }
+        }
+    }
+}
+
+/// Polls for the latest finalized block and update finalized block channel.
+#[cfg(feature = "light_client")]
+async fn refresh_finalized_block(
+    helios_client: &Arc<EthereumClient>,
+    finalized_block_send: mpsc::Sender<BlockNumber>,
     refresh_finalized_interval: u64,
-) -> anyhow::Result<()> {
+) {
     let mut interval = tokio::time::interval(Duration::from_millis(refresh_finalized_interval));
-    let mut finalized_blocks: BlockNumberToHashMap = BlockNumberToHashMap::new();
-    let mut final_block_number: Option<u64> = None;
+    let mut final_block_number: Option<BlockNumber> = None;
+
     loop {
         interval.tick().await;
         tracing::info!("Refreshing finalized epoch");
-        finalized_blocks.clear();
-        let Ok(Some(new_finalized_block)) = helios_client
-            .get_block_by_number(BlockTag::Finalized, false)
-            .await
-        else {
-            tracing::warn!("Failed to get finalized block from Helios client");
-            return Err(anyhow::anyhow!(
-                "Failed to get finalized block from Helios client"
-            ));
+
+        let new_finalized_block = match fetch_block(
+            helios_client,
+            BlockId::Number(BlockNumberOrTag::Finalized),
+            5,
+            Duration::from_millis(200),
+        )
+        .await
+        {
+            Some(block) => block,
+            None => {
+                continue;
+            }
         };
 
+        let new_final_block_number = new_finalized_block.header.number;
         tracing::info!(
-            "New finalized block number: {}, last finalized block number: {:?}",
-            new_finalized_block.header.number,
-            final_block_number
+            "New finalized block number: {new_final_block_number}, last finalized block number: {final_block_number:?}"
         );
 
-        let new_final_block_number = new_finalized_block.header.number;
+        if final_block_number.is_none_or(|n| new_final_block_number > n) {
+            tracing::info!("Found new finalized block!");
+            if let Err(err) = finalized_block_send.send(new_final_block_number).await {
+                tracing::warn!("Failed to send finalized block: {err:?}");
+                continue;
+            }
+            final_block_number.replace(new_final_block_number);
+            continue;
+        }
 
         let Some(last_final_block_number) = final_block_number else {
-            tracing::info!("Last finalized block was None");
-            final_block_number.replace(new_final_block_number);
             continue;
         };
 
         if new_final_block_number < last_final_block_number {
-            let err_msg =
-                "New finalized block number overflowed range of u64 and has wrapped around!";
-            tracing::warn!(err_msg);
-            return Err(anyhow::anyhow!(err_msg));
+            tracing::warn!(
+                "New finalized block number overflowed range of u64 and has wrapped around!"
+            );
         }
 
         if last_final_block_number == new_final_block_number {
             tracing::info!("No new finalized block");
-            continue;
         }
-
-        finalized_blocks.insert(new_final_block_number, new_finalized_block.header.hash);
-
-        let mut parent_hash = new_finalized_block.header.inner.parent_hash;
-
-        let Some(start) = last_final_block_number.checked_add(1) else {
-            let err_msg = "Last finalized block number + 1 overflowed range of u64!";
-            tracing::warn!(err_msg);
-            return Err(anyhow::anyhow!(err_msg));
-        };
-        let Some(end) = new_final_block_number.checked_sub(1) else {
-            let err_msg = "New finalized block number - 1 overflowed range of u64!";
-            tracing::warn!(err_msg);
-            return Err(anyhow::anyhow!(err_msg));
-        };
-
-        // go backwards from latest_finalized_block_number - 1, and check that each block's hash == next block's parent hash
-        for i in (start..=end).rev() {
-            tracing::info!("Fetching block {i} from untrusted RPC client");
-            let cur_block = untrusted_rpc_client
-                .get_block_by_number(
-                    alloy::eips::BlockNumberOrTag::Number(i),
-                    alloy::rpc::types::BlockTransactionsKind::Hashes,
-                )
-                .await;
-            let Ok(Some(cur_block)) = cur_block else {
-                tracing::warn!("Failed to get block {i} from untrusted RPC client");
-                return Err(anyhow::anyhow!(
-                    "Failed to get block {i} from untrusted RPC client"
-                ));
-            };
-            let cur_block_hash = cur_block.header.hash_slow();
-            if cur_block_hash == parent_hash {
-                finalized_blocks.insert(i, cur_block_hash);
-                parent_hash = cur_block.header.inner.parent_hash;
-            } else {
-                tracing::warn!(
-                    "Block {i} hash mismatch: expected {}, got {}",
-                    parent_hash,
-                    cur_block_hash
-                );
-                return Err(anyhow::anyhow!(
-                    "Block {i} hash mismatch: expected {}, got {}",
-                    parent_hash,
-                    cur_block_hash
-                ));
-            }
-        }
-        final_block_number.replace(new_final_block_number);
-        tracing::info!("Sending finalized blocks to finalized epoch");
-        let finalized_epoch = FinalizedEpoch {
-            start_block: start,
-            end_block: end,
-            blocks: finalized_blocks.clone(),
-        };
-        finalized_epoch_send
-            .send(finalized_epoch)
-            .await
-            .map_err(|err| anyhow!("Failed to send finalized block: {:?}", err))?;
     }
 }
 
+#[cfg(feature = "light_client")]
 #[allow(clippy::too_many_arguments)]
 async fn process_block(
     block_number: u64,
     block_hash: alloy::primitives::B256,
-    client: &Arc<EthereumClient<FileDB>>,
+    client: &Arc<EthereumClient>,
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
+    total_timeout: Duration,
+    bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -729,7 +905,7 @@ async fn process_block(
     );
     let start = Instant::now();
     let block_receipts_result = client
-        .get_block_receipts(BlockTag::Number(block_number))
+        .get_block_receipts(BlockId::Number(BlockNumberOrTag::Number(block_number)))
         .await;
     crate::metrics::ETH_BLOCK_RECEIPT_LATENCY
         .with_label_values(&[node_near_account_id.as_str()])
@@ -745,6 +921,115 @@ async fn process_block(
         return Ok(());
     };
 
+    let pending_txs: HashMap<BidirectionalTxId, BidirectionalTx> = {
+        bidirectional_tx_map
+            .read()
+            .await
+            .iter()
+            .filter(|(_, tx)| tx.status == BidirectionalTxStatus::Pending)
+            .map(|(id, tx)| (*id, tx.clone()))
+            .collect()
+    };
+    let mut respond_bidirectional_requests: Vec<IndexedSignRequest> = Vec::new();
+    for receipt in &block_receipts {
+        let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
+            continue;
+        };
+        let status = receipt.status();
+        tracing::info!(
+            "Tx {} found in block {block_number}: {}",
+            receipt.transaction_hash,
+            if status { "success" } else { "failed" }
+        );
+        let client_clone = client.clone();
+        let mut pending_tx = pending_tx.clone();
+        pending_tx.status = if status {
+            BidirectionalTxStatus::Success
+        } else {
+            BidirectionalTxStatus::Failed
+        };
+
+        let pending_tx_clone = pending_tx.clone();
+        let completed_tx =
+            crate::respond_bidirectional::CompletedTx::new(pending_tx_clone, block_number);
+
+        let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
+            .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
+            .await;
+        if let Some(respond_bidirectional_sign_request) = respond_bidirectional_sign_request {
+            respond_bidirectional_requests.push(respond_bidirectional_sign_request);
+            bidirectional_tx_map
+                .write()
+                .await
+                .insert(receipt.transaction_hash.into(), pending_tx);
+        } else {
+            // failed to create sign request from completed tx, remove the tx from the map
+            // TODO: we need to implement a better solution for not finding such txs in helios. possible: https://github.com/sig-net/mpc/issues/499
+            tracing::warn!(
+                "Failed to create sign request from completed tx, removing tx from map: {:?}",
+                receipt.transaction_hash
+            );
+            bidirectional_tx_map
+                .write()
+                .await
+                .remove(&receipt.transaction_hash.into());
+        }
+    }
+
+    let remaining_pending_txs: HashMap<BidirectionalTxId, BidirectionalTx> = {
+        bidirectional_tx_map
+            .read()
+            .await
+            .iter()
+            .filter(|(_, tx)| tx.status == BidirectionalTxStatus::Pending)
+            .map(|(id, tx)| (*id, tx.clone()))
+            .collect()
+    };
+
+    for (tx_id, mut tx) in remaining_pending_txs {
+        let current_nonce = client
+            .get_nonce(
+                tx.from_address,
+                BlockId::Number(BlockNumberOrTag::Number(block_number)),
+            )
+            .await;
+        if current_nonce.is_err() {
+            tracing::warn!("Failed to get current nonce: {:?}", current_nonce.err());
+            continue;
+        }
+        let current_nonce = current_nonce.unwrap();
+        if tx.nonce < current_nonce {
+            tracing::warn!(
+                "Nonce too low for tx {:?}: expected {}, got {}",
+                tx_id,
+                tx.nonce,
+                current_nonce
+            );
+            tx.status = BidirectionalTxStatus::Failed;
+            let client_clone = client.clone();
+
+            let pending_tx = tx.clone();
+
+            let completed_tx =
+                crate::respond_bidirectional::CompletedTx::new(pending_tx, block_number);
+
+            let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
+                .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
+                .await;
+            if let Some(respond_bidirectional_sign_request) = respond_bidirectional_sign_request {
+                respond_bidirectional_requests.push(respond_bidirectional_sign_request);
+                bidirectional_tx_map.write().await.insert(tx_id, tx);
+            } else {
+                // failed to create sign request from completed tx, remove the tx from the map
+                tracing::warn!(
+                    "Failed to create sign request from completed tx, removing tx from map: {:?}",
+                    tx_id
+                );
+                bidirectional_tx_map.write().await.remove(&tx_id);
+            }
+        }
+    }
+
     let filtered_logs: Vec<Log> = block_receipts
         .into_iter()
         .filter_map(|receipt| receipt.as_ref().as_receipt().cloned())
@@ -758,27 +1043,37 @@ async fn process_block(
         })
         .collect();
 
-    if filtered_logs.is_empty() {
+    let mut all_sign_requests = Vec::new();
+    if !filtered_logs.is_empty() {
+        all_sign_requests.extend(parse_filtered_logs(filtered_logs, total_timeout));
+    }
+    if !respond_bidirectional_requests.is_empty() {
+        all_sign_requests.extend(respond_bidirectional_requests);
+    }
+
+    if all_sign_requests.is_empty() {
         return Ok(());
     }
 
-    let indexed_requests = parse_filtered_logs(filtered_logs);
     requests_indexed
         .send(BlockAndRequests::new(
             block_number,
             block_hash,
-            indexed_requests.clone(),
+            all_sign_requests.clone(),
         ))
         .await
         .map_err(|err| anyhow::anyhow!("Failed to send indexed requests: {:?}", err))?;
 
     let block_timestamp = client
-        .get_block_by_number(BlockTag::Number(block_number), false)
+        .get_block(
+            BlockId::Number(BlockNumberOrTag::Number(block_number)),
+            false,
+        )
         .await
         .ok()
         .and_then(|block| block.map(|b| b.header.timestamp()));
 
-    for request in &indexed_requests {
+    for request in &all_sign_requests {
         if let Some(block_timestamp) = block_timestamp {
             crate::metrics::INDEXER_DELAY
                 .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
@@ -791,100 +1086,95 @@ async fn process_block(
                 );
         }
     }
+
     Ok(())
 }
 
 /// Sends a request to the sign queue when the block where the request is in is finalized.
-/// This assumes that the requests_indexed are mostly ordered by block number, with occasional retried blocks that can go farthest 2 finalized epochs back.
-/// Whenever there are requests in requests_indexed, function will keep polling if the block where the first request is in has finalized, if finalized, it will send this request to the sign queue.
+#[cfg(feature = "light_client")]
 async fn send_requests_when_final(
+    helios_client: &Arc<EthereumClient>,
     mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
-    mut finalized_epoch_rx: mpsc::Receiver<FinalizedEpoch>,
+    mut finalized_block_rx: mpsc::Receiver<BlockNumber>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
+    app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
-) -> anyhow::Result<()> {
-    // We keep the last 2 finalized epochs to handle retried blocks that happen to be older
-    let mut finalized_epochs: Vec<FinalizedEpoch> = Vec::new();
+) {
+    let mut finalized_block_number: Option<BlockNumber> = None;
+    let mut last_processed_block: Option<BlockNumber> = app_data_storage
+        .last_processed_block_eth()
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!("Failed to fetch last processed block: {err:?}, setting to None");
+            None
+        });
+
     loop {
-        while let Some(BlockAndRequests {
+        let Some(BlockAndRequests {
             block_number,
             block_hash,
             indexed_requests,
         }) = requests_indexed.recv().await
-        {
-            loop {
-                // Check if block is in any of the finalized epochs
-                let mut block_found = false;
-                for epoch in &finalized_epochs {
-                    if let Some(finalized_block_hash) = epoch.blocks.get(&block_number) {
-                        block_found = true;
-                        if *finalized_block_hash == block_hash {
-                            tracing::info!("Block {block_number} is finalized!");
-                            send_indexed_requests(
-                                indexed_requests.clone(),
-                                sign_tx.clone(),
-                                node_near_account_id.clone(),
-                            );
-                            break;
-                        } else {
-                            tracing::error!(
-                                "Block {block_number} hash mismatch: expected {block_hash:?}, got {finalized_block_hash:?}. Chain re-orged."
-                            );
-                            //TODO: handle the block reorg case
-                            break;
-                        }
-                    }
+        else {
+            tracing::error!("Failed to receive indexed requests");
+            return;
+        };
+
+        // Wait for finalized block if needed
+        while finalized_block_number.is_none_or(|n| block_number > n) {
+            let Some(new_finalized_block) = finalized_block_rx.recv().await else {
+                tracing::error!("Failed to receive finalized blocks");
+                return;
+            };
+            finalized_block_number.replace(new_finalized_block);
+        }
+
+        // Verify block hash and send requests
+        let block = fetch_block(
+            helios_client,
+            block_number.into(),
+            5,
+            Duration::from_millis(200),
+        )
+        .await;
+
+        let Some(block) = block else {
+            tracing::warn!("Block {block_number} not found from Helios client, skipping this block and its requests");
+            continue;
+        };
+
+        if block.header.hash == block_hash {
+            tracing::info!("Block {block_number} is finalized!");
+            send_indexed_requests(
+                indexed_requests,
+                sign_tx.clone(),
+                node_near_account_id.clone(),
+            );
+            if last_processed_block.is_none_or(|n| n < block_number) {
+                if let Err(err) = app_data_storage
+                    .set_last_processed_block_eth(block_number)
+                    .await
+                {
+                    tracing::warn!("Failed to set last processed block: {err:?}");
                 }
-
-                if block_found {
-                    break;
-                }
-
-                tracing::warn!(
-                    "Block number {block_number} with hash: {block_hash:?} not in finalized epochs. "
-                );
-
-                // Check if block is in history (older than our oldest epoch)
-                if !finalized_epochs.is_empty() {
-                    let oldest_epoch = &finalized_epochs[0];
-                    if block_number < oldest_epoch.start_block {
-                        tracing::error!("Block {block_number} is in history");
-                        //TODO: handle the block in history case which happens when a block is retried
-                        break;
-                    }
-                }
-
-                // Wait for new finalized epoch
-                let Some(received_epoch) = finalized_epoch_rx.recv().await else {
-                    tracing::warn!("Failed to receive finalized blocks");
-                    return Err(anyhow::anyhow!("Failed to receive finalized blocks"));
-                };
-
-                let start_block = received_epoch.start_block;
-                let end_block = received_epoch.end_block;
-                let blocks = received_epoch.blocks;
-
-                let new_epoch = FinalizedEpoch {
-                    start_block,
-                    end_block,
-                    blocks,
-                };
-
-                // Update epochs list, keeping only the last 2
-                finalized_epochs.push(new_epoch);
-                if finalized_epochs.len() > 2 {
-                    finalized_epochs.remove(0);
-                }
+                last_processed_block.replace(block_number);
             }
+        } else {
+            // no special handling for chain reorg, just log the error
+            // This is because when such chain reorg happens, the new canonical chain will have already been emitted by helios's block header stream, and we can safely skip this block here.
+            tracing::error!(
+                "Block {block_number} hash mismatch: expected {block_hash:?}, got {:?}. Chain re-orged.",
+                block.header.hash
+            );
         }
     }
 }
 
-fn parse_filtered_logs(logs: Vec<Log>) -> Vec<IndexedSignRequest> {
+fn parse_filtered_logs(logs: Vec<Log>, total_timeout: Duration) -> Vec<IndexedSignRequest> {
     let mut indexed_requests = Vec::new();
     for log in logs {
         tracing::debug!("Parsing Ethereum log: {:?}", log);
-        match sign_request_from_filtered_log(log.clone()) {
+        match sign_request_from_filtered_log(log.clone(), total_timeout) {
             Ok(request) => indexed_requests.push(request),
             Err(err) => {
                 tracing::warn!(?log, ?err, "Failed to parse Ethereum log");
@@ -912,6 +1202,9 @@ fn send_indexed_requests(
                 args: request.args,
                 unix_timestamp_indexed: request.unix_timestamp_indexed,
                 timestamp_sign_queue: Some(Instant::now()),
+                total_timeout: request.total_timeout,
+                sign_request_type: request.sign_request_type,
+                participants: request.participants,
             };
             match sign_tx.send(request).await {
                 Ok(_) => {
@@ -941,4 +1234,525 @@ struct SignatureRequestedEvent {
     algo: String,
     dest: String,
     params: String,
+}
+
+impl SignatureRequestedEvent {
+    fn encode_abi(&self) -> Vec<u8> {
+        let signature_requested_event_encoding = SignatureRequestedEncoding {
+            sender: self.requester,
+            payload: self.payload_hash.to_vec().into(),
+            path: self.path.clone(),
+            keyVersion: self.key_version,
+            chainId: self.chain_id,
+            algo: self.algo.clone(),
+            dest: self.dest.clone(),
+            params: self.params.clone(),
+        };
+        signature_requested_event_encoding.encode_data()
+    }
+
+    pub fn generate_request_id(&self) -> [u8; 32] {
+        let abi_encoded = self.encode_abi();
+        alloy::primitives::keccak256(abi_encoded).into()
+    }
+}
+
+#[cfg(not(feature = "light_client"))]
+pub async fn run(
+    eth: Option<EthConfig>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    app_data_storage: AppDataStorage,
+    node_near_account_id: AccountId,
+    bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
+) {
+    let Some(eth) = eth else {
+        tracing::warn!("ethereum indexer is disabled");
+        return;
+    };
+
+    let client = RpcEthereumClient::new(&eth.execution_rpc_http_url);
+
+    let contract_address = match Address::from_str(&format!("0x{}", eth.contract_address)) {
+        Ok(addr) => addr,
+        Err(err) => {
+            tracing::error!("Failed to parse contract address: {}", err);
+            return;
+        }
+    };
+
+    let total_timeout = Duration::from_secs(eth.total_timeout);
+
+    let mut last_processed_block = app_data_storage
+        .last_processed_block_eth()
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!("Failed to get last processed block: {err:?}");
+            None
+        });
+
+    if last_processed_block.is_none() {
+        match client.block_number().await {
+            Ok(latest) => {
+                last_processed_block = Some(latest.saturating_sub(1));
+            }
+            Err(err) => {
+                tracing::warn!("Failed to fetch latest block number: {err:?}");
+                last_processed_block = Some(0);
+            }
+        }
+    }
+
+    let mut current_block = last_processed_block.unwrap_or(0);
+    tracing::info!("ethereum rpc indexer starting at block {}", current_block);
+
+    loop {
+        let latest_block = match client.block_number().await {
+            Ok(num) => num,
+            Err(err) => {
+                tracing::warn!("Failed to fetch latest block number: {err:?}");
+                sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        if latest_block <= current_block {
+            sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+
+        for block_number in (current_block + 1)..=latest_block {
+            match process_block(
+                &client,
+                block_number,
+                contract_address,
+                node_near_account_id.clone(),
+                sign_tx.clone(),
+                total_timeout,
+                &bidirectional_tx_map,
+            )
+            .await
+            {
+                Ok(_) => {
+                    crate::metrics::LATEST_BLOCK_NUMBER
+                        .with_label_values(&[
+                            Chain::Ethereum.as_str(),
+                            node_near_account_id.as_str(),
+                        ])
+                        .set(block_number as i64);
+                    if let Err(err) = app_data_storage
+                        .set_last_processed_block_eth(block_number)
+                        .await
+                    {
+                        tracing::warn!("Failed to set last processed block: {err:?}");
+                    }
+                    current_block = block_number;
+                }
+                Err(err) => {
+                    tracing::warn!("Failed to process block {block_number}: {err:?}");
+                    sleep(Duration::from_secs(1)).await;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "light_client"))]
+#[allow(clippy::too_many_arguments)]
+async fn process_block(
+    client: &RpcEthereumClient,
+    block_number: u64,
+    contract_address: Address,
+    node_near_account_id: AccountId,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    total_timeout: Duration,
+    bidirectional_tx_map: &Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
+) -> anyhow::Result<()> {
+    tracing::info!("Processing block number {}", block_number);
+
+    let block = match client.block_by_number(block_number).await? {
+        Some(block) => block,
+        None => {
+            tracing::warn!("Block {block_number} not found via rpc, skipping");
+            return Ok(());
+        }
+    };
+
+    let block_hash = block.header.hash;
+    let block_timestamp = block.header.timestamp();
+
+    let mut sign_requests = Vec::new();
+
+    let logs = client.get_logs(block_hash, contract_address).await?;
+    if !logs.is_empty() {
+        sign_requests.extend(parse_filtered_logs(logs, total_timeout));
+    }
+
+    let mut respond_requests = process_bidirectional_requests(
+        client,
+        block_number,
+        total_timeout,
+        bidirectional_tx_map,
+        &node_near_account_id,
+    )
+    .await?;
+
+    sign_requests.append(&mut respond_requests);
+
+    if sign_requests.is_empty() {
+        return Ok(());
+    }
+
+    send_indexed_requests(
+        sign_requests.clone(),
+        sign_tx.clone(),
+        node_near_account_id.clone(),
+    );
+
+    for request in &sign_requests {
+        crate::metrics::INDEXER_DELAY
+            .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
+            .observe(
+                crate::util::duration_between_unix(block_timestamp, request.unix_timestamp_indexed)
+                    .as_secs() as f64,
+            );
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "light_client"))]
+async fn process_bidirectional_requests(
+    client: &RpcEthereumClient,
+    block_number: u64,
+    total_timeout: Duration,
+    bidirectional_tx_map: &Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
+    node_near_account_id: &AccountId,
+) -> anyhow::Result<Vec<IndexedSignRequest>> {
+    let pending_txs: HashMap<BidirectionalTxId, BidirectionalTx> = {
+        bidirectional_tx_map
+            .read()
+            .await
+            .iter()
+            .filter(|(_, tx)| tx.status == BidirectionalTxStatus::Pending)
+            .map(|(id, tx)| (*id, tx.clone()))
+            .collect()
+    };
+
+    let mut respond_requests = Vec::new();
+
+    for (tx_id, pending_tx) in pending_txs {
+        let start = Instant::now();
+        let receipt = client.transaction_receipt(tx_id).await;
+        crate::metrics::ETH_BLOCK_RECEIPT_LATENCY
+            .with_label_values(&[node_near_account_id.as_str()])
+            .observe(start.elapsed().as_millis() as f64);
+
+        let Some(receipt) = receipt? else {
+            continue;
+        };
+
+        let status = receipt.status();
+        tracing::info!(
+            "Tx {:?} found in block {block_number}: {}",
+            tx_id,
+            if status { "success" } else { "failed" }
+        );
+
+        let mut updated_tx = pending_tx.clone();
+        updated_tx.status = if status {
+            BidirectionalTxStatus::Success
+        } else {
+            BidirectionalTxStatus::Failed
+        };
+
+        let completed_tx = CompletedTx::new(updated_tx.clone(), block_number);
+        if status {
+            match extract_success_output_with_rpc(client, &updated_tx, block_number).await {
+                Ok(serialized_output) => {
+                    match completed_tx.create_sign_request_from_serialized_output(
+                        serialized_output,
+                        total_timeout,
+                    ) {
+                        Ok(sign_request) => respond_requests.push(sign_request),
+                        Err(err) => tracing::warn!(
+                            ?tx_id,
+                            ?err,
+                            "Failed to build bidirectional respond sign request"
+                        ),
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?tx_id,
+                        ?err,
+                        "Failed to extract transaction output for bidirectional tx"
+                    );
+                }
+            }
+        } else {
+            match completed_tx
+                .create_failed_sign_request_without_light_client(total_timeout)
+                .await
+            {
+                Ok(sign_request) => respond_requests.push(sign_request),
+                Err(err) => tracing::warn!(
+                    ?tx_id,
+                    ?err,
+                    "Failed to build failed bidirectional sign request"
+                ),
+            }
+        }
+
+        bidirectional_tx_map.write().await.insert(tx_id, updated_tx);
+    }
+
+    let remaining_pending: HashMap<BidirectionalTxId, BidirectionalTx> = {
+        bidirectional_tx_map
+            .read()
+            .await
+            .iter()
+            .filter(|(_, tx)| tx.status == BidirectionalTxStatus::Pending)
+            .map(|(id, tx)| (*id, tx.clone()))
+            .collect()
+    };
+
+    for (tx_id, mut tx) in remaining_pending {
+        let current_nonce = match client
+            .transaction_count(tx.from_address, block_number)
+            .await
+        {
+            Ok(nonce) => nonce,
+            Err(err) => {
+                tracing::warn!(?tx_id, ?err, "Failed to fetch nonce for bidirectional tx");
+                continue;
+            }
+        };
+
+        if tx.nonce < current_nonce {
+            tracing::warn!(
+                "Nonce too low for tx {:?}: expected {}, got {}",
+                tx_id,
+                tx.nonce,
+                current_nonce
+            );
+            tx.status = BidirectionalTxStatus::Failed;
+            let completed_tx = CompletedTx::new(tx.clone(), block_number);
+            match completed_tx
+                .create_failed_sign_request_without_light_client(total_timeout)
+                .await
+            {
+                Ok(sign_request) => respond_requests.push(sign_request),
+                Err(err) => {
+                    tracing::warn!(?tx_id, ?err, "Failed to build sign request for stale nonce")
+                }
+            }
+            bidirectional_tx_map.write().await.insert(tx_id, tx);
+        }
+    }
+
+    Ok(respond_requests)
+}
+
+#[cfg(not(feature = "light_client"))]
+async fn extract_success_output_with_rpc(
+    client: &RpcEthereumClient,
+    tx: &BidirectionalTx,
+    block_number: u64,
+) -> anyhow::Result<RespondBidirectionalSerializedOutput> {
+    let Some(tx_info) = client.transaction_by_hash(tx.id).await? else {
+        anyhow::bail!("Failed to fetch transaction {:?} via rpc", tx.id);
+    };
+
+    let data = tx_info.inner.input().clone();
+    let is_contract_call = data.len() > 2 && data != Bytes::from("0x");
+    let output_deserialization_format = OUTPUT_DESERIALIZATION_FORMAT;
+    let output_deserialization_schema = &tx.output_deserialization_schema;
+
+    let transaction_output = match output_deserialization_format {
+        SerDeserFormat::Abi if is_contract_call => {
+            let to_address = tx_info
+                .inner
+                .to()
+                .ok_or_else(|| anyhow::anyhow!("Transaction {:?} missing destination", tx.id))?;
+            let call_block = block_number.saturating_sub(1);
+            let call_result = client
+                .call(tx.from_address, to_address, data.clone(), call_block)
+                .await?;
+            TransactionOutput::from_call_result(output_deserialization_schema, &call_result)?
+        }
+        _ => TransactionOutput::non_function_call_output(),
+    };
+
+    let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
+    let respond_serialization_schema = &tx.respond_serialization_schema;
+    let serialized_output = transaction_output
+        .output
+        .serialize(respond_serialization_format, respond_serialization_schema)?;
+    Ok(serialized_output)
+}
+
+#[cfg(not(feature = "light_client"))]
+#[derive(Clone)]
+struct RpcEthereumClient {
+    http: reqwest::Client,
+    url: String,
+    id: Arc<AtomicU64>,
+}
+
+#[cfg(not(feature = "light_client"))]
+impl RpcEthereumClient {
+    fn new(endpoint: &str) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            url: endpoint.to_owned(),
+            id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    fn next_id(&self) -> u64 {
+        self.id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    async fn rpc_call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Vec<serde_json::Value>,
+    ) -> anyhow::Result<T> {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": self.next_id(),
+            "method": method,
+            "params": params,
+        });
+
+        let response = self.http.post(&self.url).json(&request).send().await?;
+        let value: serde_json::Value = response.json().await?;
+
+        if let Some(error) = value.get("error") {
+            anyhow::bail!("rpc {method} failed: {error}");
+        }
+
+        let result = value
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        Ok(serde_json::from_value(result)?)
+    }
+
+    async fn block_number(&self) -> anyhow::Result<u64> {
+        let hex: String = self.rpc_call("eth_blockNumber", Vec::new()).await?;
+        hex_to_u64(&hex)
+    }
+
+    async fn block_by_number(
+        &self,
+        number: u64,
+    ) -> anyhow::Result<Option<alloy::rpc::types::Block>> {
+        self.rpc_call(
+            "eth_getBlockByNumber",
+            vec![json!(to_hex_u64(number)), json!(false)],
+        )
+        .await
+    }
+
+    async fn get_logs(
+        &self,
+        block_hash: alloy::primitives::B256,
+        contract_address: Address,
+    ) -> anyhow::Result<Vec<Log>> {
+        let topic = format!("0x{}", SignatureRequested::SIGNATURE_HASH.encode_hex());
+        let filter = json!({
+            "address": format_address(contract_address),
+            "blockHash": format!("{:#x}", block_hash),
+            "topics": [topic],
+        });
+        self.rpc_call("eth_getLogs", vec![filter]).await
+    }
+
+    async fn transaction_receipt(
+        &self,
+        tx_id: BidirectionalTxId,
+    ) -> anyhow::Result<Option<TransactionReceipt>> {
+        self.rpc_call(
+            "eth_getTransactionReceipt",
+            vec![json!(format!("{:#x}", tx_id.0))],
+        )
+        .await
+    }
+
+    async fn transaction_by_hash(
+        &self,
+        tx_id: BidirectionalTxId,
+    ) -> anyhow::Result<Option<Transaction>> {
+        self.rpc_call(
+            "eth_getTransactionByHash",
+            vec![json!(format!("{:#x}", tx_id.0))],
+        )
+        .await
+    }
+
+    async fn transaction_count(&self, address: Address, block_number: u64) -> anyhow::Result<u64> {
+        let hex: String = self
+            .rpc_call(
+                "eth_getTransactionCount",
+                vec![
+                    json!(format_address(address)),
+                    json!(to_hex_u64(block_number)),
+                ],
+            )
+            .await?;
+        hex_to_u64(&hex)
+    }
+
+    async fn call(
+        &self,
+        from: Address,
+        to: Address,
+        data: Bytes,
+        block_number: u64,
+    ) -> anyhow::Result<Bytes> {
+        let params = json!({
+            "from": format_address(from),
+            "to": format_address(to),
+            "data": format_bytes(&data),
+        });
+        let block = json!(to_hex_u64(block_number));
+        let result: String = self.rpc_call("eth_call", vec![params, block]).await?;
+        let stripped = result.trim_start_matches("0x");
+        if stripped.is_empty() {
+            return Ok(Bytes::default());
+        }
+        let decoded = hex::decode(stripped)?;
+        Ok(Bytes::from(decoded))
+    }
+}
+
+#[cfg(not(feature = "light_client"))]
+fn format_address(address: Address) -> String {
+    format!("0x{}", address.encode_hex())
+}
+
+#[cfg(not(feature = "light_client"))]
+fn format_bytes(data: &Bytes) -> String {
+    if data.is_empty() {
+        "0x".to_string()
+    } else {
+        format!("0x{}", hex::encode(data))
+    }
+}
+
+#[cfg(not(feature = "light_client"))]
+fn to_hex_u64(value: u64) -> String {
+    format!("0x{:x}", value)
+}
+
+#[cfg(not(feature = "light_client"))]
+fn hex_to_u64(value: &str) -> anyhow::Result<u64> {
+    let trimmed = value.trim_start_matches("0x");
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    u64::from_str_radix(trimmed, 16)
+        .map_err(|err| anyhow::anyhow!("failed to parse hex value '{value}': {err}"))
 }

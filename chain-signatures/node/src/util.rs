@@ -65,7 +65,7 @@ impl AffinePointExt for AffinePoint {
             &self.to_encoded_point(false).as_bytes()[1..65],
         )
         .unwrap();
-        format!("{:?}", key)
+        format!("{key:?}")
     }
 }
 

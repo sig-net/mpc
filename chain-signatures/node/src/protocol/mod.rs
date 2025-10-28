@@ -1,7 +1,6 @@
-mod cryptography;
-
 pub mod consensus;
 pub mod contract;
+pub mod cryptography;
 pub mod error;
 pub mod message;
 pub mod posit;
@@ -11,6 +10,9 @@ pub mod state;
 pub mod sync;
 pub mod triple;
 
+#[cfg(feature = "test-feature")]
+pub mod test_setup;
+
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
@@ -19,11 +21,14 @@ pub use signature::{IndexedSignRequest, SignQueue};
 pub use state::{Node, NodeState};
 
 use crate::config::Config;
+use crate::indexer_sol::SignBidirectionalEvent;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
-use crate::protocol::message::MessageReceiver as _;
-use crate::rpc::{NearClient, RpcChannel};
+use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
+use crate::respond_bidirectional::RespondBidirectionalTx;
+use crate::rpc::{ContractStateWatcher, RpcChannel};
+use crate::sign_bidirectional::SignBidirectionalSignatureChannel;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -35,29 +40,49 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
-use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use tokio::sync::{mpsc, watch};
 
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
-    pub(crate) near: NearClient,
     pub(crate) secret_storage: SecretNodeStorageBox,
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
     pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+    pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
+    pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
+    pub(crate) ready: mpsc::Receiver<ReadyMessage>,
     pub(crate) msg_channel: MessageChannel,
     pub(crate) rpc_channel: RpcChannel,
-    pub(crate) config: Arc<RwLock<Config>>,
-    pub(crate) mesh_state: Arc<RwLock<MeshState>>,
+    pub(crate) contract: ContractStateWatcher,
+    pub(crate) config: watch::Receiver<Config>,
+    pub(crate) mesh_state: watch::Receiver<MeshState>,
+    pub(crate) sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
+}
+
+/// Interface required by the [`MpcSignProtocol`] to participate in the
+/// self-governing methods of the MPC network.
+pub trait Governance {
+    fn propose_join(&self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+
+    fn vote_reshared(
+        &self,
+        epoch: u64,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+
+    fn vote_public_key(
+        &self,
+        public_key: &near_crypto::PublicKey,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
 }
 
 impl MpcSignProtocol {
-    pub async fn run(
+    pub async fn run<G: Governance>(
         mut self,
         mut node: Node,
-        contract_state: Arc<RwLock<Option<ProtocolState>>>,
-        config: Arc<RwLock<Config>>,
-        mesh_state: Arc<RwLock<MeshState>>,
+        mut gov_client: G,
+        contract_state: ContractStateWatcher,
+        mesh_state: watch::Receiver<MeshState>,
     ) {
         let my_account_id = self.my_account_id.as_str();
         let _span = tracing::info_span!("running", my_account_id);
@@ -72,51 +97,29 @@ impl MpcSignProtocol {
 
         loop {
             let protocol_time = Instant::now();
-            tracing::debug!("trying to advance chain signatures protocol");
-
             crate::metrics::PROTOCOL_ITER_CNT
                 .with_label_values(&[my_account_id.as_str()])
                 .inc();
 
-            let contract_state = {
-                let state = contract_state.read().await;
-                state.clone()
-            };
-            let cfg = {
-                let config = config.read().await;
-                config.clone()
-            };
-            let mesh_state = {
-                let state = mesh_state.read().await;
-                state.clone()
-            };
-
+            let mesh_state = mesh_state.borrow().clone();
             let crypto_time = Instant::now();
-            node.state = node
-                .state
-                .progress(&mut self, cfg.clone(), mesh_state.clone())
-                .await;
+            node.state = node.state.progress(&mut self, mesh_state).await;
             node.update_watchers().await;
             crate::metrics::PROTOCOL_LATENCY_ITER_CRYPTO
                 .with_label_values(&[my_account_id.as_str()])
                 .observe(crypto_time.elapsed().as_secs_f64());
 
-            if let Some(contract_state) = contract_state {
+            if let Some(contract_state) = contract_state.state() {
                 let consensus_time = Instant::now();
-                node.state = node.state.advance(&mut self, contract_state).await;
+                node.state = node
+                    .state
+                    .advance(&mut self, &mut gov_client, contract_state)
+                    .await;
                 crate::metrics::PROTOCOL_LATENCY_ITER_CONSENSUS
                     .with_label_values(&[my_account_id.as_str()])
                     .observe(consensus_time.elapsed().as_secs_f64());
                 node.update_watchers().await;
             }
-
-            let message_time = Instant::now();
-            if let Err(err) = node.state.recv(&self.msg_channel, cfg, mesh_state).await {
-                tracing::warn!("protocol unable to receive messages: {err:?}");
-            }
-            crate::metrics::PROTOCOL_LATENCY_ITER_MESSAGE
-                .with_label_values(&[my_account_id.as_str()])
-                .observe(message_time.elapsed().as_secs_f64());
 
             let sleep_ms = match node.state {
                 NodeState::Generating(_) => 500,
@@ -134,6 +137,10 @@ impl MpcSignProtocol {
                 .observe(protocol_time.elapsed().as_secs_f64());
             tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
         }
+    }
+
+    pub fn my_account_id(&self) -> &AccountId {
+        &self.my_account_id
     }
 }
 
@@ -224,6 +231,13 @@ pub enum Chain {
     NEAR,
     Ethereum,
     Solana,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SignRequestType {
+    Sign,
+    SignBidirectional(SignBidirectionalEvent),
+    RespondBidirectional(RespondBidirectionalTx),
 }
 
 impl Chain {

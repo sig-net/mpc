@@ -14,7 +14,7 @@ use mpc_crypto::{
     derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     ScalarExt as _,
 };
-use mpc_primitives::{SignId, Signature};
+use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
@@ -173,11 +173,11 @@ impl VersionedMpcContract {
         );
         let entropy = near_sdk::env::random_seed_array();
         env::log_str(&serde_json::to_string(&entropy).unwrap());
-        let epsilon = derive_epsilon_near(&predecessor, &path);
+        let epsilon = derive_epsilon_near(request.key_version, &predecessor, &path);
 
         // lock the request such that it can't be submitted again until released either by erroring out
         // or by finishing the request when the signature is submitted.
-        self.lock_request(sign_id.clone(), payload, epsilon);
+        self.lock_request(sign_id, payload, epsilon);
 
         let request = InternalSignRequest {
             id: sign_id,
@@ -203,11 +203,12 @@ impl VersionedMpcContract {
     #[handle_result]
     pub fn derived_public_key(
         &self,
+        key_version: u32,
         path: String,
         predecessor: Option<AccountId>,
     ) -> Result<PublicKey, Error> {
         let predecessor = predecessor.unwrap_or_else(env::predecessor_account_id);
-        let epsilon = derive_epsilon_near(&predecessor, &path);
+        let epsilon = derive_epsilon_near(key_version, &predecessor, &path);
         let derived_public_key =
             derive_key(near_public_key_to_affine_point(self.public_key()?), epsilon);
         let encoded_point = derived_public_key.to_encoded_point(false);
@@ -220,9 +221,8 @@ impl VersionedMpcContract {
     /// Key versions refer new versions of the root key that we may choose to generate on cohort changes
     /// Older key versions will always work but newer key versions were never held by older signers
     /// Newer key versions may also add new security features, like only existing within a secure enclave
-    /// Currently only 0 is a valid key version
     pub const fn latest_key_version(&self) -> u32 {
-        0
+        LATEST_MPC_KEY_VERSION
     }
 
     /// This experimental function calculates the fee for a signature request.
@@ -332,6 +332,34 @@ impl VersionedMpcContract {
     }
 
     #[handle_result]
+    pub fn remove_candidacy(&mut self) -> Result<(), Error> {
+        log!("remove_candidacy: signer={}", env::signer_account_id());
+        let protocol_state = self.mutable_state();
+
+        match protocol_state {
+            ProtocolContractState::Running(RunningContractState {
+                candidates,
+                join_votes,
+                ..
+            }) => {
+                let signer_account_id = env::signer_account_id();
+                if candidates.get(&signer_account_id).is_none() {
+                    return Err(JoinError::RevokeNotCandidate.into());
+                }
+
+                // cleanup the existing votes
+                join_votes.remove(&signer_account_id);
+
+                // remove from candidates
+                candidates.remove(&signer_account_id);
+
+                Ok(())
+            }
+            _ => Err(InvalidState::ProtocolStateNotRunning.into()),
+        }
+    }
+
+    #[handle_result]
     pub fn vote_join(&mut self, candidate: AccountId) -> Result<bool, Error> {
         log!(
             "vote_join: signer={}, candidate={}",
@@ -365,6 +393,7 @@ impl VersionedMpcContract {
                         threshold: *threshold,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
+                        cancel_votes: HashSet::new(),
                     });
                     Ok(true)
                 } else {
@@ -411,6 +440,7 @@ impl VersionedMpcContract {
                         threshold: *threshold,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
+                        cancel_votes: HashSet::new(),
                     });
                     Ok(true)
                 } else {
@@ -471,11 +501,11 @@ impl VersionedMpcContract {
         match protocol_state {
             ProtocolContractState::Resharing(ResharingContractState {
                 old_epoch,
-                old_participants: _,
                 new_participants,
                 threshold,
                 public_key,
                 finished_votes,
+                ..
             }) => {
                 if *old_epoch + 1 != epoch {
                     return Err(InvalidState::EpochMismatch.into());
@@ -501,6 +531,40 @@ impl VersionedMpcContract {
                     Ok(true)
                 } else {
                     Err(InvalidState::UnexpectedProtocolState.message("Running: invalid epoch"))
+                }
+            }
+            _ => Err(InvalidState::UnexpectedProtocolState.message(protocol_state.name())),
+        }
+    }
+
+    #[handle_result]
+    pub fn vote_cancel_resharing(&mut self) -> Result<bool, Error> {
+        let voter = self.voter()?;
+        log!("vote_cancel_resharing: signer={voter:?}");
+        let protocol_state = self.mutable_state();
+        match protocol_state {
+            ProtocolContractState::Resharing(ResharingContractState {
+                old_epoch,
+                old_participants,
+                threshold,
+                public_key,
+                cancel_votes,
+                ..
+            }) => {
+                cancel_votes.insert(voter);
+                if cancel_votes.len() >= *threshold {
+                    *protocol_state = ProtocolContractState::Running(RunningContractState {
+                        epoch: *old_epoch,
+                        participants: old_participants.clone(),
+                        threshold: *threshold,
+                        public_key: public_key.clone(),
+                        candidates: Candidates::new(),
+                        join_votes: Votes::new(),
+                        leave_votes: Votes::new(),
+                    });
+                    Ok(true)
+                } else {
+                    Ok(false)
                 }
             }
             _ => Err(InvalidState::UnexpectedProtocolState.message(protocol_state.name())),
@@ -677,6 +741,12 @@ impl VersionedMpcContract {
     pub fn pending_requests(&self) -> u32 {
         match self {
             Self::V0(mpc_contract) => mpc_contract.pending_requests.len(),
+        }
+    }
+
+    pub fn pending_requests_data(&self) -> Vec<(&SignId, &PendingRequest)> {
+        match self {
+            Self::V0(mpc_contract) => mpc_contract.pending_requests.iter().collect(),
         }
     }
 

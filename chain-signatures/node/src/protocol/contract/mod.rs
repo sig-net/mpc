@@ -9,7 +9,7 @@ use std::{collections::HashSet, str::FromStr};
 
 use self::primitives::{Candidates, Participants, PkVotes, Votes};
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct InitializingContractState {
     pub candidates: Candidates,
     pub threshold: usize,
@@ -26,7 +26,7 @@ impl From<mpc_contract::InitializingContractState> for InitializingContractState
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct RunningContractState {
     pub epoch: u64,
     pub participants: Participants,
@@ -51,7 +51,7 @@ impl From<mpc_contract::RunningContractState> for RunningContractState {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct ResharingContractState {
     pub old_epoch: u64,
     pub old_participants: Participants,
@@ -59,6 +59,7 @@ pub struct ResharingContractState {
     pub threshold: usize,
     pub public_key: PublicKey,
     pub finished_votes: HashSet<AccountId>,
+    pub cancel_votes: HashSet<AccountId>,
 }
 
 impl From<mpc_contract::ResharingContractState> for ResharingContractState {
@@ -74,11 +75,16 @@ impl From<mpc_contract::ResharingContractState> for ResharingContractState {
                 .into_iter()
                 .map(|acc_id| AccountId::from_str(acc_id.as_ref()).unwrap())
                 .collect(),
+            cancel_votes: contract_state
+                .cancel_votes
+                .into_iter()
+                .map(|acc_id| AccountId::from_str(acc_id.as_ref()).unwrap())
+                .collect(),
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ProtocolState {
     Initializing(InitializingContractState),
     Running(RunningContractState),

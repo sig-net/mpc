@@ -1,3 +1,5 @@
+use crate::protocol::message::cbor_to_bytes;
+use crate::protocol::state::NodeStatus;
 use crate::protocol::sync::SyncUpdate;
 use crate::web::StateView;
 use hyper::StatusCode;
@@ -7,8 +9,6 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::str::Utf8Error;
 use std::time::Duration;
-use tokio_retry::strategy::{jitter, ExponentialBackoff};
-use tokio_retry::Retry;
 use url::Url;
 
 #[derive(Debug, Clone, clap::Parser)]
@@ -53,6 +53,8 @@ pub enum RequestError {
     MalformedBody(reqwest::Error),
     #[error("http response body is not valid utf-8: {0}")]
     MalformedResponse(Utf8Error),
+    #[error("io error: {0}")]
+    Conversion(String),
 }
 
 #[derive(Debug, Clone)]
@@ -97,12 +99,16 @@ impl NodeClient {
         }
     }
 
-    async fn post_msg(&self, url: &Url, msg: &[&Ciphered]) -> Result<(), RequestError> {
+    pub async fn post_cbor<T: Serialize + ?Sized>(
+        &self,
+        url: &Url,
+        payload: &T,
+    ) -> Result<(), RequestError> {
         let resp = self
             .http
             .post(url.clone())
-            .header("content-type", "application/json")
-            .json(&msg)
+            .header("content-type", "application/cbor")
+            .body(cbor_to_bytes(payload).map_err(|err| RequestError::Conversion(err.to_string()))?)
             .send()
             .await?;
 
@@ -113,21 +119,18 @@ impl NodeClient {
             // TODO: parse response body and convert to mpc_node::Error type.
             let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
             let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            tracing::warn!("failed to send a message to {url} with code {status}: {resp}");
             Err(RequestError::Unsuccessful(status, resp.into()))
         }
+    }
+
+    async fn post_msg(&self, url: &Url, msg: &[&Ciphered]) -> Result<(), RequestError> {
+        self.post_cbor(url, msg).await
     }
 
     pub async fn msg(&self, base: impl IntoUrl, msg: &[&Ciphered]) -> Result<(), RequestError> {
         let mut url = base.into_url()?;
         url.set_path("msg");
-
-        let strategy = ExponentialBackoff::from_millis(10).map(jitter).take(3);
-        Retry::spawn(strategy, || self.post_msg(&url, msg)).await
-    }
-
-    pub async fn msg_empty(&self, base: impl IntoUrl) -> Result<(), RequestError> {
-        self.msg(base, &[]).await
+        self.post_msg(&url, msg).await
     }
 
     pub async fn state(&self, base: impl IntoUrl) -> Result<StateView, RequestError> {
@@ -144,10 +147,24 @@ impl NodeClient {
         Ok(resp.json::<StateView>().await?)
     }
 
+    pub async fn status(&self, base: impl IntoUrl) -> Result<NodeStatus, RequestError> {
+        let mut url = base.into_url()?;
+        url.set_path("status");
+
+        let resp = self
+            .http
+            .get(url)
+            .timeout(Duration::from_millis(self.options.state_timeout))
+            .send()
+            .await?;
+
+        Ok(resp.json().await?)
+    }
+
     pub async fn sync(&self, base: impl IntoUrl, update: &SyncUpdate) -> Result<(), RequestError> {
         let mut url = base.into_url()?;
         url.set_path("sync");
 
-        self.post_json(&url, update).await
+        self.post_cbor(&url, update).await
     }
 }

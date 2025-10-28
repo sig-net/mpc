@@ -1,28 +1,38 @@
 use super::contract::{ProtocolState, ResharingContractState};
 use super::state::{
-    JoiningState, NodeState, PersistentNodeData, RunningState, StartedState,
-    WaitingForConsensusState,
+    JoiningState, NodeState, PersistentNodeData, ResharingPhase, ResharingState, RunningState,
+    StartedState, WaitingForConsensusState,
 };
 use super::MpcSignProtocol;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::presignature::PresignatureSpawnerTask;
-use crate::protocol::signature::SignatureManager;
-use crate::protocol::state::{GeneratingState, ResharingState};
+use crate::protocol::signature::SignatureSpawnerTask;
+use crate::protocol::state::GeneratingState;
 use crate::protocol::triple::TripleSpawnerTask;
-use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
+use crate::protocol::Governance;
+use crate::types::{KeygenProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 
+use rand::random;
+
 use std::cmp::Ordering;
-use std::sync::Arc;
 
-use tokio::sync::RwLock;
-
-pub(crate) trait ConsensusProtocol {
-    async fn advance(self, ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState;
+pub(crate) trait ConsensusProtocol<G> {
+    async fn advance(
+        self,
+        ctx: &mut MpcSignProtocol,
+        gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState;
 }
 
-impl ConsensusProtocol for StartedState {
-    async fn advance(self, ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+impl<G: Governance> ConsensusProtocol<G> for StartedState {
+    async fn advance(
+        self,
+        ctx: &mut MpcSignProtocol,
+        _gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState {
         match self.persistent_node_data {
             Some(PersistentNodeData {
                 epoch,
@@ -97,16 +107,13 @@ impl ConsensusProtocol for StartedState {
                                 &public_key,
                             );
 
-                            let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
+                            let sign_task = SignatureSpawnerTask::run(
                                 me,
-                                &ctx.my_account_id,
                                 contract_state.threshold,
-                                public_key,
                                 epoch,
-                                ctx.sign_rx.clone(),
-                                &ctx.presignature_storage,
-                                ctx.msg_channel.clone(),
-                            )));
+                                ctx,
+                                public_key,
+                            );
 
                             NodeState::Running(RunningState {
                                 epoch,
@@ -117,7 +124,7 @@ impl ConsensusProtocol for StartedState {
                                 public_key,
                                 triple_task,
                                 presign_task,
-                                signature_manager,
+                                sign_task,
                             })
                         }
                     }
@@ -161,7 +168,7 @@ impl ConsensusProtocol for StartedState {
                             tracing::info!(
                                 "started(resharing): contract state is resharing with us, joining as a participant"
                             );
-                            start_resharing(Some(private_share), ctx, contract_state).await
+                            resharing(Some(private_share), ctx, contract_state).await
                         }
                     }
                 }
@@ -212,8 +219,13 @@ impl ConsensusProtocol for StartedState {
     }
 }
 
-impl ConsensusProtocol for GeneratingState {
-    async fn advance(self, _ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+impl<G: Governance> ConsensusProtocol<G> for GeneratingState {
+    async fn advance(
+        self,
+        _ctx: &mut MpcSignProtocol,
+        _gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState {
         match contract_state {
             ProtocolState::Initializing(_) => {
                 tracing::info!("generating(initializing): continuing generation, contract state has not been finalized yet");
@@ -293,8 +305,13 @@ impl ConsensusProtocol for GeneratingState {
     }
 }
 
-impl ConsensusProtocol for WaitingForConsensusState {
-    async fn advance(self, ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
+    async fn advance(
+        self,
+        ctx: &mut MpcSignProtocol,
+        gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState {
         match contract_state {
             ProtocolState::Initializing(contract_state) => {
                 tracing::info!("waiting(initializing): waiting for consensus, contract state has not been finalized yet");
@@ -306,7 +323,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                     .unwrap_or_default();
                 if !has_voted {
                     tracing::info!("waiting(initializing): we haven't voted yet, voting for the generated public key");
-                    if let Err(err) = ctx.near.vote_public_key(&public_key).await {
+                    if let Err(err) = gov.vote_public_key(&public_key).await {
                         tracing::error!(
                             ?err,
                             "waiting(initializing): failed to vote for the generated public key, retrying..."
@@ -391,17 +408,13 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         &self.private_share,
                         &self.public_key,
                     );
-
-                    let signature_manager = Arc::new(RwLock::new(SignatureManager::new(
+                    let sign_task = SignatureSpawnerTask::run(
                         me,
-                        &ctx.my_account_id,
                         self.threshold,
-                        self.public_key,
                         self.epoch,
-                        ctx.sign_rx.clone(),
-                        &ctx.presignature_storage,
-                        ctx.msg_channel.clone(),
-                    )));
+                        ctx,
+                        self.public_key,
+                    );
 
                     NodeState::Running(RunningState {
                         epoch: self.epoch,
@@ -412,7 +425,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                         public_key: self.public_key,
                         triple_task,
                         presign_task,
-                        signature_manager,
+                        sign_task,
                     })
                 }
             },
@@ -460,7 +473,7 @@ impl ConsensusProtocol for WaitingForConsensusState {
                                 epoch = self.epoch,
                                 "waiting(resharing): we haven't voted yet, voting for resharing to complete"
                             );
-                            if let Err(err) = ctx.near.vote_reshared(self.epoch).await {
+                            if let Err(err) = gov.vote_reshared(self.epoch).await {
                                 tracing::error!(
                                     ?err,
                                     "waiting(resharing): failed to vote for resharing to complete, retrying..."
@@ -480,10 +493,11 @@ impl ConsensusProtocol for WaitingForConsensusState {
     }
 }
 
-impl ConsensusProtocol for RunningState {
+impl<G: Governance> ConsensusProtocol<G> for RunningState {
     async fn advance(
         mut self,
         ctx: &mut MpcSignProtocol,
+        _gov: &mut G,
         contract_state: ProtocolState,
     ) -> NodeState {
         match contract_state {
@@ -519,7 +533,6 @@ impl ConsensusProtocol for RunningState {
                         })
                     }
                     Ordering::Equal => {
-                        tracing::debug!("running(running): continuing to run as normal");
                         if contract_state.public_key != self.public_key {
                             tracing::warn!(
                                 node_pk = ?self.public_key,
@@ -542,8 +555,8 @@ impl ConsensusProtocol for RunningState {
                                 self.participants = contract_state.participants;
                             } else {
                                 tracing::warn!(
-                                "running(running): ... but we are not a participant anymore, rejoining...",
-                            );
+                                    "running(running): ... but we are not a participant anymore, rejoining...",
+                                );
                                 return NodeState::Joining(JoiningState {
                                     participants: contract_state.participants,
                                     public_key: contract_state.public_key,
@@ -552,10 +565,10 @@ impl ConsensusProtocol for RunningState {
                         }
                         if contract_state.threshold != self.threshold {
                             tracing::warn!(
-                            node_threshold = self.threshold,
-                            contract_threshold = contract_state.threshold,
-                            "running(running): our threshold does not match contract, overriding",
-                        );
+                                node_threshold = self.threshold,
+                                contract_threshold = contract_state.threshold,
+                                "running(running): our threshold does not match contract, overriding",
+                            );
                             self.threshold = contract_state.threshold;
                         }
                         NodeState::Running(self)
@@ -614,7 +627,7 @@ impl ConsensusProtocol for RunningState {
                                 public_key: contract_state.public_key,
                             });
                         }
-                        start_resharing(Some(self.private_share), ctx, contract_state).await
+                        resharing(Some(self.private_share), ctx, contract_state).await
                     }
                 }
             }
@@ -622,8 +635,13 @@ impl ConsensusProtocol for RunningState {
     }
 }
 
-impl ConsensusProtocol for ResharingState {
-    async fn advance(self, _ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+impl<G: Governance> ConsensusProtocol<G> for ResharingState {
+    async fn advance(
+        self,
+        _ctx: &mut MpcSignProtocol,
+        _gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState {
         match contract_state {
             ProtocolState::Initializing(_) => {
                 tracing::info!(
@@ -632,10 +650,10 @@ impl ConsensusProtocol for ResharingState {
                 NodeState::Resharing(self)
             }
             ProtocolState::Running(contract_state) => {
-                match contract_state.epoch.cmp(&(self.old_epoch + 1)) {
+                match contract_state.epoch.cmp(&(self.contract.old_epoch + 1)) {
                     Ordering::Greater => {
                         tracing::warn!(
-                            next_epoch = self.old_epoch + 1,
+                            next_epoch = self.contract.old_epoch + 1,
                             contract_epoch = contract_state.epoch,
                             "resharing(running): our next epoch is behind contract, rejoining...",
                         );
@@ -646,7 +664,7 @@ impl ConsensusProtocol for ResharingState {
                     }
                     Ordering::Less => {
                         tracing::error!(
-                            next_epoch = self.old_epoch + 1,
+                            next_epoch = self.contract.old_epoch + 1,
                             contract_epoch = contract_state.epoch,
                             "resharing(running, unexpected): our next epoch is ahead of contract, rejoining...",
                         );
@@ -657,9 +675,9 @@ impl ConsensusProtocol for ResharingState {
                     }
                     Ordering::Equal => {
                         tracing::info!("resharing(running): contract state has finished resharing, trying to catch up");
-                        if contract_state.public_key != self.public_key {
+                        if contract_state.public_key != self.contract.public_key {
                             tracing::warn!(
-                                node_pk = ?self.public_key,
+                                node_pk = ?self.contract.public_key,
                                 contract_pk = ?contract_state.public_key,
                                 "resharing(running): our public key does not match contract, rejoining...",
                             );
@@ -668,9 +686,9 @@ impl ConsensusProtocol for ResharingState {
                                 public_key: contract_state.public_key,
                             });
                         }
-                        if contract_state.participants != self.new_participants {
+                        if contract_state.participants != self.contract.new_participants {
                             tracing::warn!(
-                                node_participants = ?self.new_participants,
+                                node_participants = ?self.contract.new_participants,
                                 contract_participants = ?contract_state.participants,
                                 "resharing(running): our participants do not match contract, rejoining...",
                             );
@@ -679,9 +697,9 @@ impl ConsensusProtocol for ResharingState {
                                 public_key: contract_state.public_key,
                             });
                         }
-                        if contract_state.threshold != self.threshold {
+                        if contract_state.threshold != self.contract.threshold {
                             tracing::warn!(
-                                node_threshold = self.threshold,
+                                node_threshold = self.contract.threshold,
                                 contract_threshold = contract_state.threshold,
                                 "resharing(running): our threshold does not match contract, rejoining...",
                             );
@@ -695,10 +713,10 @@ impl ConsensusProtocol for ResharingState {
                 }
             }
             ProtocolState::Resharing(contract_state) => {
-                match contract_state.old_epoch.cmp(&self.old_epoch) {
+                match contract_state.old_epoch.cmp(&self.contract.old_epoch) {
                     Ordering::Greater => {
                         tracing::warn!(
-                            old_epoch = self.old_epoch,
+                            old_epoch = self.contract.old_epoch,
                             contract_old_epoch = contract_state.old_epoch,
                             "resharing(resharing): our epoch is different from contract, rejoining...",
                         );
@@ -709,7 +727,7 @@ impl ConsensusProtocol for ResharingState {
                     }
                     Ordering::Less => {
                         tracing::error!(
-                            old_epoch = self.old_epoch,
+                            old_epoch = self.contract.old_epoch,
                             contract_old_epoch = contract_state.old_epoch,
                             "resharing(resharing, unexpected): our epoch is ahead of contract, rejoining...",
                         );
@@ -720,9 +738,9 @@ impl ConsensusProtocol for ResharingState {
                     }
                     Ordering::Equal => {
                         tracing::info!("resharing(resharing): continue to reshare as normal");
-                        if contract_state.public_key != self.public_key {
+                        if contract_state.public_key != self.contract.public_key {
                             tracing::warn!(
-                                node_pk = ?self.public_key,
+                                node_pk = ?self.contract.public_key,
                                 contract_pk = ?contract_state.public_key,
                                 "resharing(resharing): our public key does not match contract, rejoining...",
                             );
@@ -731,9 +749,9 @@ impl ConsensusProtocol for ResharingState {
                                 public_key: contract_state.public_key,
                             });
                         }
-                        if contract_state.old_participants != self.old_participants {
+                        if contract_state.old_participants != self.contract.old_participants {
                             tracing::warn!(
-                                node_participants = ?self.old_participants,
+                                node_participants = ?self.contract.old_participants,
                                 contract_participants = ?contract_state.old_participants,
                                 "resharing(resharing): our old participants do not match contract, rejoining...",
                             );
@@ -742,9 +760,9 @@ impl ConsensusProtocol for ResharingState {
                                 public_key: contract_state.public_key,
                             });
                         }
-                        if contract_state.new_participants != self.new_participants {
+                        if contract_state.new_participants != self.contract.new_participants {
                             tracing::warn!(
-                                node_participants = ?self.new_participants,
+                                node_participants = ?self.contract.new_participants,
                                 contract_participants = ?contract_state.new_participants,
                                 "resharing(resharing): our new participants do not match contract, rejoining...",
                             );
@@ -753,9 +771,9 @@ impl ConsensusProtocol for ResharingState {
                                 public_key: contract_state.public_key,
                             });
                         }
-                        if contract_state.threshold != self.threshold {
+                        if contract_state.threshold != self.contract.threshold {
                             tracing::warn!(
-                                node_threshold = self.threshold,
+                                node_threshold = self.contract.threshold,
                                 contract_threshold = contract_state.threshold,
                                 "resharing(resharing): our threshold does not match contract, rejoining...",
                             );
@@ -772,8 +790,13 @@ impl ConsensusProtocol for ResharingState {
     }
 }
 
-impl ConsensusProtocol for JoiningState {
-    async fn advance(self, ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+impl<G: Governance> ConsensusProtocol<G> for JoiningState {
+    async fn advance(
+        self,
+        ctx: &mut MpcSignProtocol,
+        gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState {
         match contract_state {
             ProtocolState::Initializing(contract_state) => {
                 let participants: Participants = contract_state.candidates.clone().into();
@@ -809,7 +832,7 @@ impl ConsensusProtocol for JoiningState {
                     tracing::info!(
                         "joining(running): sending a transaction to join the participant set"
                     );
-                    if let Err(err) = ctx.near.propose_join().await {
+                    if let Err(err) = gov.propose_join().await {
                         tracing::error!(?err, "failed to propose to join the participant set");
                     }
                     return NodeState::Joining(self);
@@ -839,7 +862,7 @@ impl ConsensusProtocol for JoiningState {
                     .contains_account_id(&ctx.my_account_id)
                 {
                     tracing::info!("joining(resharing): joining as a new participant");
-                    start_resharing(None, ctx, contract_state).await
+                    resharing(None, ctx, contract_state).await
                 } else {
                     tracing::info!("joining(resharing): network is resharing without us, waiting for them to finish");
                     NodeState::Joining(self)
@@ -849,8 +872,13 @@ impl ConsensusProtocol for JoiningState {
     }
 }
 
-impl ConsensusProtocol for NodeState {
-    async fn advance(self, ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+impl<G: Governance> ConsensusProtocol<G> for NodeState {
+    async fn advance(
+        self,
+        ctx: &mut MpcSignProtocol,
+        gov: &mut G,
+        contract_state: ProtocolState,
+    ) -> NodeState {
         match self {
             NodeState::Starting => {
                 let persistent_node_data = match ctx.secret_storage.load().await {
@@ -864,17 +892,17 @@ impl ConsensusProtocol for NodeState {
                     persistent_node_data,
                 })
             }
-            NodeState::Started(state) => state.advance(ctx, contract_state).await,
-            NodeState::Generating(state) => state.advance(ctx, contract_state).await,
-            NodeState::WaitingForConsensus(state) => state.advance(ctx, contract_state).await,
-            NodeState::Running(state) => state.advance(ctx, contract_state).await,
-            NodeState::Resharing(state) => state.advance(ctx, contract_state).await,
-            NodeState::Joining(state) => state.advance(ctx, contract_state).await,
+            NodeState::Started(state) => state.advance(ctx, gov, contract_state).await,
+            NodeState::Generating(state) => state.advance(ctx, gov, contract_state).await,
+            NodeState::WaitingForConsensus(state) => state.advance(ctx, gov, contract_state).await,
+            NodeState::Running(state) => state.advance(ctx, gov, contract_state).await,
+            NodeState::Resharing(state) => state.advance(ctx, gov, contract_state).await,
+            NodeState::Joining(state) => state.advance(ctx, gov, contract_state).await,
         }
     }
 }
 
-async fn start_resharing(
+async fn resharing(
     private_share: Option<SecretKeyShare>,
     ctx: &MpcSignProtocol,
     contract_state: ResharingContractState,
@@ -888,24 +916,11 @@ async fn start_resharing(
             public_key: contract_state.public_key,
         });
     };
-    let protocol = match ReshareProtocol::new(private_share, me, &contract_state) {
-        Ok(protocol) => protocol,
-        Err(err) => {
-            tracing::error!(?err, "resharing: failed to initialize resharing protocol");
-            return NodeState::Joining(JoiningState {
-                participants: contract_state.new_participants,
-                public_key: contract_state.public_key,
-            });
-        }
-    };
     NodeState::Resharing(ResharingState {
         me,
-        old_epoch: contract_state.old_epoch,
-        old_participants: contract_state.old_participants,
-        new_participants: contract_state.new_participants,
-        threshold: contract_state.threshold,
-        public_key: contract_state.public_key,
-        protocol,
-        failed_store: Default::default(),
+        contract: contract_state,
+        local_private_share: private_share,
+        phase: ResharingPhase::awaiting(me),
+        ready_nonce: random(),
     })
 }

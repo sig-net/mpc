@@ -98,6 +98,17 @@ pub(crate) static SIGN_QUEUE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     .unwrap()
 });
 
+// Redis operation metrics
+pub(crate) static REDIS_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
+    try_create_histogram_vec(
+        "multichain_redis_operation_latency_ms",
+        "Latency of Redis operations in storage layers",
+        &["protocol", "operation", "node_account_id"],
+        Some(exponential_buckets(1.0, 2.0, 15).unwrap()),
+    )
+    .unwrap()
+});
+
 pub(crate) static SIGN_QUEUE_MINE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec(
         "multichain_sign_queue_mine_size",
@@ -165,15 +176,6 @@ pub(crate) static NUM_PRESIGNATURE_GENERATORS_TOTAL: LazyLock<IntGaugeVec> = Laz
     try_create_int_gauge_vec(
         "multichain_num_presignature_generators_total",
         "number of total ongoing presignature generators",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
-
-pub(crate) static MESSAGE_QUEUE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
-    try_create_int_gauge_vec(
-        "multichain_message_queue_size",
-        "size of message queue of the node",
         &["node_account_id"],
     )
     .unwrap()
@@ -297,16 +299,6 @@ pub(crate) static PROTOCOL_LATENCY_ITER_CONSENSUS: LazyLock<HistogramVec> = Lazy
     .unwrap()
 });
 
-pub(crate) static PROTOCOL_LATENCY_ITER_MESSAGE: LazyLock<HistogramVec> = LazyLock::new(|| {
-    try_create_histogram_vec(
-        "multichain_protocol_iter_message",
-        "Latency of multichain protocol iter, start of message iter till end",
-        &["node_account_id"],
-        Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
-    )
-    .unwrap()
-});
-
 pub(crate) static NUM_SEND_ENCRYPTED_FAILURE: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
         "multichain_send_encrypted_failure",
@@ -341,6 +333,16 @@ pub(crate) static FAILED_SEND_ENCRYPTED_LATENCY: LazyLock<HistogramVec> = LazyLo
         "Latency of failed send encrypted.",
         &["node_account_id"],
         Some(exponential_buckets(0.5, 1.5, 20).unwrap()),
+    )
+    .unwrap()
+});
+
+pub(crate) static WEB_ENDPOINT_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
+    try_create_histogram_vec(
+        "multichain_web_endpoint_duration_ms",
+        "Web endpoint response time in milliseconds",
+        &["endpoint", "node_account_id"],
+        Some(exponential_buckets(1.0, 1.5, 25).unwrap()),
     )
     .unwrap()
 });
@@ -694,8 +696,7 @@ fn check_metric_multichain_prefix(name: &str) -> Result<()> {
         Ok(())
     } else {
         Err(prometheus::Error::Msg(format!(
-            "Metrics are expected to start with 'multichain_', got {}",
-            name
+            "Metrics are expected to start with 'multichain_', got {name}"
         )))
     }
 }

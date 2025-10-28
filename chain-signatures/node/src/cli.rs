@@ -6,7 +6,9 @@ use crate::protocol::message::MessageChannel;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
+use crate::respond_bidirectional::RespondBidirectionalTxProcessor;
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
+use crate::sign_bidirectional::SignBidirectionalSignatureProcessor;
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 use clap::Parser;
@@ -16,8 +18,9 @@ use local_ip_address::local_ip;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use url::Url;
 
 use mpc_keys::hpke;
@@ -60,7 +63,7 @@ pub enum Cli {
         /// Solana Indexer options
         #[clap(flatten)]
         sol: indexer_sol::SolArgs,
-        /// NEAR Lake Indexer options
+        /// NEAR requests options
         #[clap(flatten)]
         indexer_options: indexer::Options,
         /// Local address that other peers can use to message this node.
@@ -230,7 +233,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     &mpc_contract_id,
                     &account_id,
                     sign_tx.clone(),
-                    app_data_storage.clone(),
                     rpc_client.clone(),
                 )?;
                 Some(indexer)
@@ -245,7 +247,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 // this is only used for integration tests
                 // mainnet, testnet and dev nodes should have MPC_LOCAL_ADDRESS set in their env var
                 let my_ip = local_ip().unwrap();
-                Url::parse(&format!("http://{my_ip}:{}", web_port)).unwrap()
+                Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
             });
 
             tracing::info!(%my_address, "address detected");
@@ -253,10 +255,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let client = NodeClient::new(&message_options);
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
-            let mesh = Mesh::new(&client, mesh_options, synced_peer_rx);
-            let mesh_state = mesh.state().clone();
-            let watcher = ContractStateWatcher::new(&account_id);
-            let contract_state = watcher.state().clone();
+            let mesh = Mesh::new(&client, mesh_options, &account_id, synced_peer_rx);
+            let mesh_state = mesh.watch();
+            let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(&account_id);
 
             let eth = eth.into_config();
             let sol = sol.into_config();
@@ -264,14 +265,23 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol);
+            let (sign_bidirectional_signature_channel, sign_bidirectional_signature_processor) =
+                SignBidirectionalSignatureProcessor::new();
+            let (respond_bidirectional_tx_channel, respond_bidirectional_tx_processor) =
+                RespondBidirectionalTxProcessor::new();
             let (sync_channel, sync) = SyncTask::new(
                 &client,
                 triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
-                watcher.clone(),
+                contract_watcher.clone(),
                 synced_peer_tx,
             );
+
+            let bidirectional_tx_map = Arc::new(RwLock::new(HashMap::<
+                crate::sign_bidirectional::BidirectionalTxId,
+                crate::sign_bidirectional::BidirectionalTx,
+            >::new()));
 
             tracing::info!(
                 %digest,
@@ -285,47 +295,74 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 "starting node",
             );
 
-            let config = Arc::new(RwLock::new(Config::new(LocalConfig {
+            let config = Config::new(LocalConfig {
                 over: override_config.unwrap_or_else(Default::default),
                 network,
-            })));
+            });
+            let (config_tx, config_rx) = watch::channel(config);
 
-            let state = Node::new();
-            let state_watcher = state.watcher.clone();
+            let node = Node::new();
+            let node_watcher = node.watch();
 
-            let (sender, msg_channel) =
-                MessageChannel::spawn(client, &account_id, &config, watcher, &mesh_state).await;
+            let msg_channel = MessageChannel::spawn(
+                client,
+                &account_id,
+                config_rx.clone(),
+                contract_watcher.clone(),
+            )
+            .await;
             let protocol = MpcSignProtocol {
                 my_account_id: account_id.clone(),
-                near: near_client,
                 rpc_channel,
-                msg_channel,
+                msg_channel: msg_channel.clone(),
+                generating: msg_channel.subscribe_generation().await,
+                resharing: msg_channel.subscribe_resharing().await,
+                ready: msg_channel.subscribe_ready().await,
                 sign_rx: Arc::new(RwLock::new(sign_rx)),
                 secret_storage: key_storage,
                 triple_storage: triple_storage.clone(),
                 presignature_storage: presignature_storage.clone(),
-                config: config.clone(),
+                contract: contract_watcher.clone(),
+                config: config_rx,
                 mesh_state: mesh_state.clone(),
+                sign_bidirectional_signature_channel: sign_bidirectional_signature_channel.clone(),
             };
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync.run());
-            tokio::spawn(rpc.run(contract_state.clone(), config.clone()));
-            tokio::spawn(mesh.run(contract_state.clone()));
+            tokio::spawn(rpc.run(
+                contract_state_tx,
+                config_tx.clone(),
+                sign_bidirectional_signature_channel.clone(),
+                respond_bidirectional_tx_channel.clone(),
+            ));
+
+            let bidirectional_tx_map_clone = bidirectional_tx_map.clone();
+            tokio::spawn(sign_bidirectional_signature_processor.run(bidirectional_tx_map_clone, 5));
+            let bidirectional_tx_map_clone = bidirectional_tx_map.clone();
+            tokio::spawn(respond_bidirectional_tx_processor.run(bidirectional_tx_map_clone, 5));
+            tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
             let protocol_handle =
-                tokio::spawn(protocol.run(state, contract_state, config, mesh_state));
+                tokio::spawn(protocol.run(node, near_client, contract_watcher, mesh_state));
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
                 web_port,
-                sender,
-                state_watcher,
+                msg_channel,
+                node_watcher,
                 indexer,
                 triple_storage,
                 presignature_storage,
                 sync_channel,
+                account_id.clone(),
             ));
-            tokio::spawn(indexer_eth::run(eth, sign_tx.clone(), account_id.clone()));
+            tokio::spawn(indexer_eth::run(
+                eth,
+                sign_tx.clone(),
+                app_data_storage.clone(),
+                account_id.clone(),
+                bidirectional_tx_map,
+            ));
             tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;

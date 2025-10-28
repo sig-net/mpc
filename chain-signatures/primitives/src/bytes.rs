@@ -102,14 +102,14 @@ mod tests {
             {
                 let serialized = borsh::to_vec(&input).unwrap();
                 let output: WithScalar = borsh::from_slice(&serialized).unwrap();
-                assert_eq!(input, output, "Failed on {:?}", scalar);
+                assert_eq!(input, output, "Failed on {scalar:?}");
             }
 
             // Test Serde via JSON
             {
                 let serialized = serde_json::to_vec(&input).unwrap();
                 let output: WithScalar = serde_json::from_slice(&serialized).unwrap();
-                assert_eq!(input, output, "Failed on {:?}", scalar);
+                assert_eq!(input, output, "Failed on {scalar:?}");
             }
         }
     }

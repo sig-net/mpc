@@ -14,7 +14,7 @@ use crate::actions::wait::WaitAction;
 use crate::cluster::spawner::ClusterSpawner;
 use crate::containers::DockerClient;
 use crate::local::NodeEnvConfig;
-use crate::utils::{vote_join, vote_leave};
+use crate::utils::{self, vote_join, vote_leave};
 use crate::{NodeConfig, Nodes};
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 use mpc_contract::{ProtocolContractState, RunningContractState};
@@ -37,6 +37,7 @@ pub struct Cluster {
     pub rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
     pub nodes: Nodes,
+    pub account_idx: usize,
 }
 
 impl Cluster {
@@ -166,7 +167,8 @@ impl Cluster {
                 node.account
             }
             None => {
-                let account = self.worker().dev_create_account().await?;
+                let account = utils::dev_gen_indexed(self.worker(), self.account_idx).await?;
+                self.account_idx += 1;
                 tracing::info!(node_account_id = %account.id(), "adding new participant");
                 account
             }

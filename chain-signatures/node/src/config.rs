@@ -5,8 +5,7 @@ use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::rpc::NearClient;
+use tokio::sync::watch;
 
 /// The contract's config is a dynamic representation of all configurations possible.
 pub type ContractConfig = HashMap<String, Value>;
@@ -18,6 +17,15 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn channel(local: LocalConfig) -> (watch::Sender<Self>, watch::Receiver<Self>) {
+        let config = Self::new(local);
+        watch::channel(config)
+    }
+
+    pub fn channel_default() -> (watch::Sender<Self>, watch::Receiver<Self>) {
+        Self::channel(LocalConfig::default())
+    }
+
     pub fn new(local: LocalConfig) -> Self {
         let mut protocol = ProtocolConfig::default();
 
@@ -50,11 +58,19 @@ impl Config {
         })
     }
 
-    /// Fetches the latest config from the contract and set the config inplace. The old config
-    /// is returned when swap is completed.
-    pub async fn fetch_inplace(&mut self, rpc_client: &NearClient) -> anyhow::Result<Self> {
-        let new_config = rpc_client.fetch_config(self).await?;
-        Ok(std::mem::replace(self, new_config))
+    pub fn update(&mut self, mut contract: ContractConfig) -> bool {
+        let Some(mut protocol) = contract.remove("protocol") else {
+            tracing::warn!("unable to find protocol in contract config");
+            return false;
+        };
+        merge(&mut protocol, &self.local.over.entries);
+        let Ok(protocol) = serde_json::from_value(protocol) else {
+            tracing::warn!("unable to parse protocol in contract config");
+            return false;
+        };
+
+        self.protocol = protocol;
+        true
     }
 }
 

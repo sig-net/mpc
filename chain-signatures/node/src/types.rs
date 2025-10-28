@@ -3,7 +3,6 @@ use cait_sith::triples::TripleGenerationOutput;
 use cait_sith::{protocol::Protocol, KeygenOutput};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
-use mpc_crypto::PublicKey;
 
 use crate::protocol::contract::ResharingContractState;
 
@@ -55,13 +54,7 @@ impl KeygenProtocol {
 }
 
 pub struct ReshareProtocol {
-    old_participants: Vec<Participant>,
-    new_participants: Vec<Participant>,
-    me: Participant,
-    threshold: usize,
-    private_share: Option<SecretKeyShare>,
     protocol: Box<dyn Protocol<Output = SecretKeyShare> + Send + Sync>,
-    root_pk: PublicKey,
 }
 
 impl ReshareProtocol {
@@ -78,42 +71,16 @@ impl ReshareProtocol {
             new_participants,
             me
         );
-        Ok(Self {
-            protocol: Box::new(cait_sith::reshare::<Secp256k1>(
-                &old_participants,
-                contract_state.threshold,
-                &new_participants,
-                contract_state.threshold,
-                me,
-                private_share,
-                contract_state.public_key,
-            )?),
-            private_share,
+        let protocol = Box::new(cait_sith::reshare::<Secp256k1>(
+            &old_participants,
+            contract_state.threshold,
+            &new_participants,
+            contract_state.threshold,
             me,
-            threshold: contract_state.threshold,
-            old_participants,
-            new_participants,
-            root_pk: contract_state.public_key,
-        })
-    }
-
-    pub async fn refresh(&mut self) -> Result<(), InitializationError> {
-        tracing::debug!(
-            "ReshareProtocol::refresh old participants {:?} new participants {:?} me {:?}",
-            self.old_participants,
-            self.new_participants,
-            self.me
-        );
-        self.protocol = Box::new(cait_sith::reshare::<Secp256k1>(
-            &self.old_participants,
-            self.threshold,
-            &self.new_participants,
-            self.threshold,
-            self.me,
-            self.private_share,
-            self.root_pk,
+            private_share,
+            contract_state.public_key,
         )?);
-        Ok(())
+        Ok(Self { protocol })
     }
 
     pub fn poke(&mut self) -> Result<Action<SecretKeyShare>, ProtocolError> {
