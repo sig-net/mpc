@@ -283,7 +283,45 @@ pub struct SignBidirectionalEvent {
     pub respond_serialization_schema: Vec<u8>,
 }
 
+#[event]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SignRespondRequestedEvent {
+    pub sender: Pubkey,
+    pub transaction_data: Vec<u8>,
+    pub slip44_chain_id: u32,
+    pub key_version: u32,
+    pub deposit: u64,
+    pub path: String,
+    pub algo: String,
+    pub dest: String,
+    pub params: String,
+    pub explorer_deserialization_format: u8,
+    pub explorer_deserialization_schema: Vec<u8>,
+    pub callback_serialization_format: u8,
+    pub callback_serialization_schema: Vec<u8>,
+}
+
 impl SignatureEvent for SignBidirectionalEvent {}
+
+impl SignatureEvent for SignRespondRequestedEvent {}
+
+impl From<SignRespondRequestedEvent> for SignBidirectionalEvent {
+    fn from(event: SignRespondRequestedEvent) -> Self {
+        SignBidirectionalEvent {
+            sender: event.sender,
+            transaction_data: event.transaction_data,
+            caip2_id: format!("eip155:{}", event.slip44_chain_id),
+            key_version: event.key_version,
+            deposit: event.deposit,
+            path: event.path,
+            algo: event.algo,
+            dest: event.dest,
+            params: event.params,
+            output_deserialization_schema: event.explorer_deserialization_schema,
+            respond_serialization_schema: event.callback_serialization_schema,
+        }
+    }
+}
 
 impl SignatureEventTrait for SignBidirectionalEvent {
     fn generate_request_id(&self) -> [u8; 32] {
@@ -356,6 +394,77 @@ impl SignatureEventTrait for SignBidirectionalEvent {
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::SignBidirectional(self.clone()),
+            participants: None,
+        })
+    }
+}
+
+impl SignatureEventTrait for SignRespondRequestedEvent {
+    fn generate_request_id(&self) -> [u8; 32] {
+        // Encode the event data in ABI format similar to the contract
+        let encoded = encode(&[
+            Token::String(self.sender.to_string()),
+            Token::Bytes(self.transaction_data.clone()),
+            Token::String(self.path.clone()),
+            Token::Uint(self.key_version.into()),
+            Token::String(format!("solana")), // chain_id
+        ]);
+
+        keccak::hash(&encoded).to_bytes()
+    }
+
+    fn generate_sign_request(
+        &self,
+        tx_sig: Vec<u8>,
+        total_timeout: Duration,
+    ) -> anyhow::Result<IndexedSignRequest> {
+        tracing::info!("found solana sign_respond event: {:?}", self);
+        if self.deposit == 0 {
+            tracing::warn!("deposit is 0, skipping sign request");
+            anyhow::bail!("deposit is 0");
+        }
+
+        if self.key_version > LATEST_MPC_KEY_VERSION {
+            tracing::warn!("unsupported key version: {}", self.key_version);
+            anyhow::bail!("unsupported key version");
+        }
+
+        let request_id = self.generate_request_id();
+        let rlp_encoded_tx = self.transaction_data.clone();
+
+        // Call the existing derive_epsilon_sol function with the correct parameters
+        let epsilon = derive_epsilon_sol(self.key_version, &self.sender.to_string(), &self.path);
+
+        // Use transaction signature as entropy
+        let mut entropy = [0u8; 32];
+        entropy.copy_from_slice(&tx_sig[..32]);
+
+        let sign_id = SignId::new(request_id);
+        tracing::info!(?sign_id, "solana sign_respond signature requested");
+        let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
+        let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
+            anyhow::bail!("Failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
+        };
+
+        if payload > *MAX_SECP256K1_SCALAR {
+            tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
+            anyhow::bail!("payload exceeds secp256k1 curve order");
+        }
+
+        Ok(IndexedSignRequest {
+            id: sign_id,
+            args: SignArgs {
+                entropy,
+                epsilon,
+                payload,
+                path: self.path.clone(),
+                key_version: 0,
+            },
+            chain: Chain::Solana,
+            timestamp_sign_queue: Some(Instant::now()),
+            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
+            total_timeout,
+            sign_request_type: SignRequestType::SignBidirectional(self.clone().into()),
             participants: None,
         })
     }
@@ -591,6 +700,13 @@ async fn parse_cpi_events(
                 Ok(ev) => acc.push(Box::new(ev) as SignatureEventBox),
                 Err(e) => {
                     tracing::warn!("Failed to deserialize SignBidirectionalEvent: {e}")
+                }
+            }
+        } else if event_discriminator == SignRespondRequestedEvent::DISCRIMINATOR {
+            match SignRespondRequestedEvent::deserialize(&mut &event_data[..]) {
+                Ok(ev) => acc.push(Box::new(ev) as SignatureEventBox),
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize SignRespondRequestedEvent: {e}")
                 }
             }
         }
