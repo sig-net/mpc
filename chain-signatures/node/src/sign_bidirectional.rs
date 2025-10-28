@@ -353,7 +353,7 @@ fn public_key_to_address(public_key: &secp256k1::PublicKey) -> Address {
     Address::from_slice(&hash[12..])
 }
 
-fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Scalar) -> Address {
+pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Scalar) -> Address {
     let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
     let parity = match user_pk.y_is_odd().unwrap_u8() {
         0 => secp256k1::Parity::Even,
