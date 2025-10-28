@@ -3,6 +3,7 @@
 
 [advisories]
 ignore = [
+	"RUSTSEC-2025-0111",  # tokio-tar parses PAX extended headers incorrectly, allows file smuggling; package unmaintained, only used for testing
 	"RUSTSEC-2024-0344",  # curve25519-dalek pinned via Solana 2.x; upgrade blocked until Solana adopts dalek 4.x
 	"RUSTSEC-2022-0093",  # ed25519-dalek 2.x unavailable in Solana 2.x dependency tree
 	"RUSTSEC-2024-0421",  # idna >=1.0 incompatible with google-apis + libp2p stacks we cannot yet bump
