@@ -9,7 +9,6 @@ use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
 use mpc_crypto::kdf::check_ec_signature;
 use mpc_crypto::{derive_epsilon_sol, derive_key, near_public_key_to_affine_point, ScalarExt as _};
-use mpc_node::indexer_eth::EthConfig;
 use mpc_node::sign_bidirectional::hash_rlp_data;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use reqwest::Client;
@@ -30,8 +29,6 @@ const FUNDING_MAX_ATTEMPTS: usize = 20;
 
 const TX_RECEIPT_POLL_INTERVAL_SECS: u64 = 6;
 const TX_RECEIPT_MAX_ATTEMPTS: usize = 40;
-
-const CONTRACT_ADDRESS: &str = "098Ed32aC23c75C5FB5b4Dc0C2BcF5F64ccd5E27";
 
 #[test(tokio::test)]
 async fn test_solana_signature_basic() -> anyhow::Result<()> {
@@ -126,39 +123,19 @@ async fn test_solana_signature_first_phase_bidirectional() -> anyhow::Result<()>
 #[test(tokio::test)]
 async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let key_version = LATEST_MPC_KEY_VERSION;
-    let account_sk = std::env::var("IT_ETH_ACCOUNT_SK")
-        .context("IT_ETH_ACCOUNT_SK not set")?
-        .trim()
-        .to_string();
-    let consensus_rpc_http_url = std::env::var("IT_ETH_CONSENSUS_RPC_URL")
-        .context("IT_ETH_CONSENSUS_RPC_URL not set")?
-        .trim()
-        .to_string();
-    let execution_rpc_http_url = std::env::var("IT_ETH_EXECUTION_RPC_URL")
-        .context("IT_ETH_EXECUTION_RPC_URL not set")?
-        .trim()
-        .to_string();
-    let contract_address =
-        std::env::var("IT_ETH_CONTRACT_ADDR").unwrap_or_else(|_e| CONTRACT_ADDRESS.to_string());
-
-    let nodes = cluster::spawn()
-        .solana()
-        .with_config(|config| {
-            config.eth = Some(EthConfig {
-                account_sk: account_sk.clone(),
-                consensus_rpc_http_url,
-                execution_rpc_http_url: execution_rpc_http_url.clone(),
-                contract_address,
-                network: "sepolia".to_string(),
-                helios_data_path: "/tmp/helios/sepolia_test".to_string(),
-                refresh_finalized_interval: 30000,
-                total_timeout: 600,
-                optimistic_requests: true,
-            });
-        })
-        .await?;
+    let nodes = cluster::spawn().solana().ethereum().await?;
 
     nodes.wait().signable().await?;
+
+    let ctx = nodes.nodes.ctx();
+    let eth_ctx = ctx
+        .ethereum
+        .as_ref()
+        .context("ethereum sandbox not initialized")?;
+    let execution_rpc_http_url = eth_ctx.sandbox.external_http_endpoint.clone();
+    let account_sk = eth_ctx.sandbox.secret_key.clone();
+    let chain_id = eth_ctx.sandbox.chain_id;
+    let parameters = serde_json::to_string(&json!({ "network": "sandbox" }))?;
 
     let solana = nodes
         .solana
@@ -168,7 +145,6 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let signer_account = solana.payer_keypair.pubkey().to_string();
 
     let path = "solana::ethereum::bridge";
-    let chain_id = 11155111u64;
 
     let root_pk_near = nodes.root_public_key().await?;
     let root_pk = near_public_key_to_affine_point(root_pk_near);
@@ -219,7 +195,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         .key_version(key_version)
         .algorithm("ECDSA")
         .destination("ethereum")
-        .parameters("{\"network\":\"sepolia\"}")
+        .parameters(&parameters)
         .await?;
 
     assert_eq!(

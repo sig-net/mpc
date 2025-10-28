@@ -8,7 +8,7 @@ use crate::NodeConfig;
 
 use anyhow::{anyhow, Context};
 use async_process::{Child, Command};
-use bollard::container::{LogOutput, LogsOptions};
+use bollard::container::LogsOptions;
 use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
 use bollard::Docker;
@@ -465,7 +465,7 @@ impl EthereumSandbox {
 
         let container = request.start().await?;
 
-        let secret_key = extract_secret_key(&spawner.docker, container.id()).await?;
+        let secret_key = derive_secret_key(Self::DEFAULT_MNEMONIC)?;
 
         let (internal_http_endpoint, external_http_endpoint) = if cfg!(feature = "docker-test") {
             let network_ip = spawner
@@ -543,41 +543,16 @@ async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {
     ))
 }
 
-async fn extract_secret_key(docker: &DockerClient, container_id: &str) -> anyhow::Result<String> {
-    let mut logs = docker.docker.logs::<String>(
-        container_id,
-        Some(LogsOptions {
-            follow: true,
-            stdout: true,
-            stderr: true,
-            ..Default::default()
-        }),
-    );
+fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
+    use ethers::signers::{coins_bip39::English, MnemonicBuilder};
 
-    let mut in_secret_keys = false;
-    while let Some(Ok(entry)) = logs.next().await {
-        let line = match entry {
-            LogOutput::StdOut { message } | LogOutput::StdErr { message } => {
-                String::from_utf8_lossy(&message).trim().to_owned()
-            }
-            LogOutput::Console { message } => String::from_utf8_lossy(&message).trim().to_owned(),
-            _ => continue,
-        };
-        if line.contains("Private Keys") {
-            in_secret_keys = true;
-            continue;
-        }
+    let wallet = MnemonicBuilder::<English>::default()
+        .phrase(mnemonic)
+        .derivation_path("m/44'/60'/0'/0/0")?
+        .build()?;
+    let bytes = wallet.signer().to_bytes();
 
-        if in_secret_keys {
-            if let Some(key) = line.split_whitespace().nth(1) {
-                if key.starts_with("0x") {
-                    return Ok(key.to_string());
-                }
-            }
-        }
-    }
-
-    anyhow::bail!("failed to read private key from anvil logs")
+    Ok(format!("0x{}", hex::encode(bytes)))
 }
 
 fn shares_to_triples(
@@ -603,6 +578,7 @@ pub struct Solana {
     pub payer_keypair: SolanaKeypair,
     pub rpc_port: u16,
     pub ws_port: u16,
+    pub faucet_port: u16,
     pub rpc_client: SolanaRpcClient,
 }
 
@@ -648,6 +624,7 @@ impl Solana {
         // Find available ports (websocket is automatically rpc_port + 1)
         let rpc_port = pick_preferred_or_unused_port(8899).await;
         let ws_port = rpc_port + 1;
+        let faucet_port = pick_preferred_or_unused_port(9900).await;
 
         let rpc_address = format!("http://127.0.0.1:{}", rpc_port);
         let ws_address = format!("ws://127.0.0.1:{}", ws_port);
@@ -656,6 +633,8 @@ impl Solana {
         let process = Command::new("solana-test-validator")
             .arg("--rpc-port")
             .arg(rpc_port.to_string())
+            .arg("--faucet-port")
+            .arg(faucet_port.to_string())
             .arg("--bind-address")
             .arg("127.0.0.1")
             .arg("--reset")
@@ -685,6 +664,7 @@ impl Solana {
             payer_keypair,
             rpc_port,
             ws_port,
+            faucet_port,
             rpc_client,
         }
     }
@@ -776,6 +756,30 @@ impl Solana {
 
         // Deploy the program using solana CLI
         tracing::info!("deploying solana program via CLI...");
+
+        // Best-effort cleanup in case a previous test run left the program account around.
+        // This avoids `account already in use` errors when redeploying with the same
+        // deterministic program id.
+        let program_pubkey = self.program_keypair.pubkey().to_string();
+        let close_args = [
+            "program",
+            "close",
+            &program_pubkey,
+            "--url",
+            &self.rpc_address,
+            "--keypair",
+            payer_keypair_path.to_str().unwrap(),
+        ];
+        let close_output = tokio::process::Command::new("solana")
+            .args(close_args)
+            .output()
+            .await?;
+        if close_output.status.success() {
+            tracing::info!(program_id = %program_pubkey, "closed existing solana program account");
+        } else {
+            tracing::debug!(program_id = %program_pubkey, "no existing program account closed");
+        }
+
         let deploy_output = tokio::process::Command::new("solana")
             .args([
                 "program",
