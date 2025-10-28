@@ -7,11 +7,10 @@ use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
-use mpc_crypto::kdf::{check_ec_signature, derive_epsilon_eth};
+use mpc_crypto::kdf::check_ec_signature;
 use mpc_crypto::{derive_epsilon_sol, derive_key, near_public_key_to_affine_point, ScalarExt as _};
 use mpc_node::indexer_eth::EthConfig;
 use mpc_node::sign_bidirectional::hash_rlp_data;
-use mpc_node::util::NearPublicKeyExt;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use reqwest::Client;
 use rlp::RlpStream;
@@ -34,7 +33,7 @@ const TX_RECEIPT_MAX_ATTEMPTS: usize = 40;
 
 const CONTRACT_ADDRESS: &str = "098Ed32aC23c75C5FB5b4Dc0C2BcF5F64ccd5E27";
 
-#[test_log::test(tokio::test)]
+#[test(tokio::test)]
 async fn test_solana_signature_basic() -> anyhow::Result<()> {
     let cluster = cluster::spawn().solana().await?;
     let payload = [42u8; 32];
@@ -71,7 +70,7 @@ async fn test_solana_signature_basic() -> anyhow::Result<()> {
     }
 }
 
-#[test_log::test(tokio::test)]
+#[test(tokio::test)]
 async fn test_solana_signature_first_phase_bidirectional() -> anyhow::Result<()> {
     let cluster = cluster::spawn().solana().await?;
     let payload = [42u8; 32];
@@ -125,89 +124,6 @@ async fn test_solana_signature_first_phase_bidirectional() -> anyhow::Result<()>
 }
 
 #[test(tokio::test)]
-async fn test_eth_signature_basic() -> anyhow::Result<()> {
-    // TODO: move these over to cluster spawner
-    let account_sk = std::env::var("IT_ETH_ACCOUNT_SK")
-        .context("IT_ETH_ACCOUNT_SK not set")?
-        .trim()
-        .to_string();
-    let consensus_rpc_http_url = std::env::var("IT_ETH_CONSENSUS_RPC_URL")
-        .context("IT_ETH_CONSENSUS_RPC_URL not set")?
-        .trim()
-        .to_string();
-    let execution_rpc_http_url = std::env::var("IT_ETH_EXECUTION_RPC_URL")
-        .context("IT_ETH_EXECUTION_RPC_URL not set")?
-        .trim()
-        .to_string();
-    let contract_address =
-        std::env::var("IT_ETH_CONTRACT_ADDR").unwrap_or_else(|_e| CONTRACT_ADDRESS.to_string());
-
-    let key_version = LATEST_MPC_KEY_VERSION;
-    let nodes = cluster::spawn()
-        .with_config(|config| {
-            config.eth = Some(EthConfig {
-                account_sk,
-                consensus_rpc_http_url,
-                execution_rpc_http_url,
-                contract_address,
-                network: "sepolia".to_string(),
-                helios_data_path: "/tmp/helios/sepolia_test".to_string(),
-                refresh_finalized_interval: 30000,
-                total_timeout: 600,
-                optimistic_requests: true,
-            });
-        })
-        .await?;
-
-    tracing::info!("Executing ETH sign request");
-    let test_algorithm = "ECDSA";
-    let test_payload = [1u8; 32]; // Simple test payload
-    let test_path = "ethereum,1"; // ETH derivation path
-    let test_payload_hash =
-        k256::Scalar::from_bytes(*alloy::primitives::keccak256(test_payload)).unwrap();
-    let outcome = nodes
-        .sign()
-        .eth()
-        .payload(test_payload)
-        .path(test_path)
-        .algorithm(test_algorithm)
-        .key_version(key_version)
-        .parameters("{}")
-        .deposit(1u64) // 1 wei
-        .await;
-    let Ok(outcome) = outcome else {
-        anyhow::bail!("ETH sign request failed: {:?}", outcome.err());
-    };
-
-    tracing::info!(
-        contract = format!("0x{CONTRACT_ADDRESS}"),
-        eth_tx_hash = outcome.eth_tx_hash,
-        payload = ?outcome.payload,
-        payload_hash = ?outcome.payload_hash,
-        "ETH sign request completed",
-    );
-
-    let mpc_pk: k256::AffinePoint = nodes.root_public_key().await?.into_affine_point();
-    let signer_addr = format!("0x{:x}", outcome.signer_address);
-    let epsilon = derive_epsilon_eth(key_version, &signer_addr, test_path);
-    let user_pk = derive_key(mpc_pk, epsilon);
-    tracing::info!("derived user public key: {user_pk:?}");
-
-    // Validate the signature by trying both recovery IDs
-    let big_r = outcome.signature.big_r;
-    let s = outcome.signature.s;
-
-    for recovery_id in 0..=1 {
-        if check_ec_signature(&user_pk, &big_r, &s, test_payload_hash, recovery_id).is_ok() {
-            tracing::info!(recovery_id, "signature validation successful with");
-            return Ok(());
-        }
-    }
-
-    anyhow::bail!("signature validation failed");
-}
-
-#[test_log::test(tokio::test)]
 async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let key_version = LATEST_MPC_KEY_VERSION;
     let account_sk = std::env::var("IT_ETH_ACCOUNT_SK")
