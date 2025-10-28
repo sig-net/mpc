@@ -683,13 +683,10 @@ where
         }
         seen.insert(signature, now);
 
-        match parse_cpi_events(&rpc_client, &signature, &program_id).await {
-            Ok(events) => {
-                for ev in events {
-                    event_handler(ev, signature, response.context.slot);
-                }
+        if let Ok(events) = parse_cpi_events(&rpc_client, &signature, &program_id).await {
+            for ev in events {
+                event_handler(ev, signature, response.context.slot);
             }
-            Err(e) => tracing::error!("Failed to parse tx {}: {}", signature, e),
         }
     }
 
