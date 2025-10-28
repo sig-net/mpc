@@ -42,6 +42,15 @@ pub(crate) static NUM_SIGN_SUCCESS: LazyLock<CounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
+pub(crate) static NUM_PROPOSER_REELECTIONS: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_proposer_reelections",
+        "number of times a proposer was re-elected due to idle sign requests",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
 pub(crate) static SIGN_TOTAL_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_sign_latency_sec",

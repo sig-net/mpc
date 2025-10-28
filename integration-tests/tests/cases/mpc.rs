@@ -247,3 +247,118 @@ async fn test_presignature_timeout() {
         .await
         .expect("should have enough presignatures eventually");
 }
+
+/// Test proposer re-election when the initial proposer fails to propose a posit.
+/// This simulates a scenario where the proposer is offline or misses the sign request.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_proposer_reelection_on_idle() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        // Speed up the proposer re-election timeout to 5 seconds for faster testing
+        .with_proposer_reelection_timeout_ms(5000)
+        .build()
+        .await;
+
+    tokio::time::timeout(
+        Duration::from_millis(300),
+        network.wait_for_presignatures(2),
+    )
+    .await
+    .expect("should start with enough presignatures");
+
+    tracing::info!("Presignatures ready, sending sign request");
+
+    // Send a sign request
+    let request = sign_request(0);
+    
+    network[0].sign_tx.send(request.clone()).await.unwrap();
+    network[1].sign_tx.send(request.clone()).await.unwrap();
+    network[2].sign_tx.send(request.clone()).await.unwrap();
+
+    // Wait for the signature to complete
+    let timeout = Duration::from_secs(15);
+
+    let actions = tokio::time::timeout(timeout, network.wait_for_actions(1))
+        .await
+        .expect("should publish RPC action eventually");
+
+    assert_eq!(actions.len(), 1);
+    let action_str = actions.iter().next().unwrap();
+    assert!(
+        action_str.contains("RpcAction::Publish"),
+        "unexpected rpc action {action_str}"
+    );
+    
+    tracing::info!("Successfully completed signature");
+}
+
+/// Test that when a proposer completely fails (drops posits), another node
+/// takes over and successfully completes the signature.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_proposer_reelection_with_filter() {
+    // Create a filter that drops only Signature Posit messages from node 0
+    // This allows presignature generation to proceed normally while simulating
+    // a failed signature proposer
+    fn create_signature_posit_drop_filter() -> MessageFilter {
+        Box::new(move |(msg, _)| {
+            match msg {
+                mpc_node::protocol::Message::Posit(posit_msg) => {
+                    // Only drop signature posits, allow triple and presignature posits through
+                    if matches!(posit_msg.id, mpc_node::protocol::message::PositProtocolId::Signature(_, _)) {
+                        tracing::info!("Dropping Signature Posit message to simulate failed proposer");
+                        false
+                    } else {
+                        true
+                    }
+                }
+                _ => true,
+            }
+        })
+    }
+
+    let network = MpcFixtureBuilder::default()
+        // Use preshared triples to skip triple generation and speed up presignature generation
+        .with_preshared_triples()
+        // Apply filter to node 0 to drop only its signature posit messages
+        .with_outgoing_message_filter(0, create_signature_posit_drop_filter())
+        // Speed up the proposer re-election timeout to 5 seconds
+        .with_proposer_reelection_timeout_ms(5000)
+        .build()
+        .await;
+
+    // Wait for presignatures to be generated
+    // We need at least 2: one for the failed proposal, one for the retry
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        network.wait_for_presignatures(3),
+    )
+    .await
+    .expect("should start with enough presignatures");
+
+    tracing::info!("Presignatures ready, sending sign request");
+
+    // Send a sign request - node 0 should be selected as proposer based on round-robin
+    // but will fail to send posits. After idle timeout, another node should take over.
+    let request = sign_request(42); // Use specific entropy
+    
+    network[0].sign_tx.send(request.clone()).await.unwrap();
+    network[1].sign_tx.send(request.clone()).await.unwrap();
+    network[2].sign_tx.send(request.clone()).await.unwrap();
+
+    // Wait for signature completion - should succeed via proposer re-election
+    // Give it enough time for multiple re-elections if needed (5s timeout + processing time)
+    let timeout = Duration::from_secs(25);
+
+    let actions = tokio::time::timeout(timeout, network.wait_for_actions(1))
+        .await
+        .expect("should publish RPC action eventually after proposer re-election");
+
+    assert_eq!(actions.len(), 1);
+    let action_str = actions.iter().next().unwrap();
+    assert!(
+        action_str.contains("RpcAction::Publish"),
+        "unexpected rpc action {action_str}"
+    );
+    
+    tracing::info!("Successfully completed signature after proposer re-election");
+}

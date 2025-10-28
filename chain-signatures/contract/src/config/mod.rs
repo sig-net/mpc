@@ -89,6 +89,10 @@ pub struct SignatureConfig {
     pub generation_timeout_total: u64,
     /// Garbage collection timeout in milliseconds for signatures generated.
     pub garbage_timeout: u64,
+    /// Timeout in milliseconds for how long a sign request can be idle (no posit activity
+    /// or generation) before non-proposers trigger a proposer re-election. This helps handle
+    /// cases where the current proposer is offline or missed the request.
+    pub proposer_reelection_timeout: u64,
 
     /// The remaining entries that can be present in future forms of the configuration.
     #[serde(flatten)]

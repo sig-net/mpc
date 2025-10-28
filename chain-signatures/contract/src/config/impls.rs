@@ -70,6 +70,8 @@ impl Default for SignatureConfig {
             generation_timeout: secs_to_ms(45),
             generation_timeout_total: secs_to_ms(200),
             garbage_timeout: hours_to_ms(24),
+            // Default to 60 seconds - enough time for a proposer to propose a posit or start generation
+            proposer_reelection_timeout: secs_to_ms(60),
 
             other: Default::default(),
         }

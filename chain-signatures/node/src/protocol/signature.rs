@@ -101,6 +101,9 @@ pub struct SignRequest {
     pub proposer: Participant,
     pub stable: BTreeSet<Participant>,
     pub round: usize,
+    /// Tracks the last time this request had any activity (posit or generation).
+    /// Used to detect idle requests where the proposer may have failed to process it.
+    pub last_activity: Instant,
 }
 
 pub struct SignQueue {
@@ -226,6 +229,7 @@ impl SignQueue {
             proposer,
             stable: stable.clone(),
             round,
+            last_activity: Instant::now(),
         }
     }
 
@@ -365,6 +369,63 @@ impl SignQueue {
 
     pub fn remove(&mut self, sign_id: SignId) -> Option<SignRequest> {
         self.requests.remove(&sign_id)
+    }
+
+    /// Mark a sign request as having activity (posit or generation started).
+    /// This resets the idle timer used for proposer re-election.
+    pub fn mark_active(&mut self, sign_id: &SignId) {
+        if let Some(request) = self.requests.get_mut(sign_id) {
+            request.last_activity = Instant::now();
+        }
+    }
+
+    /// Check for idle requests and trigger re-election for non-proposers.
+    /// Returns a list of sign requests that should be reorganized with a new proposer.
+    pub fn check_idle_and_reelect(
+        &mut self,
+        stable: &BTreeSet<Participant>,
+        participants: &Participants,
+        cfg: &ProtocolConfig,
+    ) -> Vec<SignRequest> {
+        let idle_timeout = Duration::from_millis(cfg.signature.proposer_reelection_timeout);
+        let mut to_reelect = Vec::new();
+
+        for (sign_id, request) in &self.requests {
+            // Skip if this is our own request (we are the proposer)
+            if request.proposer == self.me {
+                continue;
+            }
+
+            // Check if the request has been idle for too long
+            // Note: last_activity is updated when posit is proposed/processed or generation starts
+            if request.last_activity.elapsed() >= idle_timeout {
+                tracing::warn!(
+                    ?sign_id,
+                    ?request.proposer,
+                    idle_duration = ?request.last_activity.elapsed(),
+                    "sign request idle, triggering proposer re-election"
+                );
+
+                // Reorganize with incremented round to select a new proposer
+                let reorganized =
+                    self.organize_request(stable, participants, request.indexed.clone(), request.round + 1);
+                to_reelect.push(reorganized);
+            }
+        }
+
+        // Update the requests with the reorganized versions
+        for request in &to_reelect {
+            let sign_id = request.indexed.id;
+            
+            // Add to my_requests if we are now the proposer
+            if request.proposer == self.me && !self.my_requests.contains(&sign_id) {
+                self.my_requests.push_back(sign_id);
+            }
+
+            self.requests.insert(sign_id, request.clone());
+        }
+
+        to_reelect
     }
 }
 
@@ -728,6 +789,9 @@ impl SignatureSpawner {
             "proposing protocol to generate a new signature"
         );
 
+        // Mark the request as active since we're proposing a posit
+        self.sign_queue.mark_active(&sign_id);
+
         self.posits
             .propose((sign_id, presignature_id), taken, participants);
         for &p in participants.iter() {
@@ -771,6 +835,8 @@ impl SignatureSpawner {
         } else if matches!(action, PositAction::Propose) {
             if let Some(request) = request {
                 if request.proposer == from {
+                    // Mark as active when we see a propose action
+                    self.sign_queue.mark_active(&sign_id);
                     self.posits
                         .act((sign_id, presignature_id), from, self.threshold, &action)
                 } else {
@@ -881,6 +947,9 @@ impl SignatureSpawner {
         participants: Vec<Participant>,
         cfg: ProtocolConfig,
     ) {
+        // Mark as active when generation starts
+        self.sign_queue.mark_active(&sign_id);
+        
         if positor.is_proposer() {
             for &p in &participants {
                 if p == self.me {
@@ -1064,6 +1133,16 @@ impl SignatureSpawner {
                     };
                     let stable = mesh_state.borrow().stable.clone();
                     let protocol = cfg.borrow().protocol.clone();
+                    
+                    // Check for idle requests and trigger proposer re-election if needed
+                    let reelected = self.sign_queue.check_idle_and_reelect(&stable, &participants, &protocol);
+                    
+                    if !reelected.is_empty() {
+                        crate::metrics::NUM_PROPOSER_REELECTIONS
+                            .with_label_values(&[self.my_account_id.as_str()])
+                            .inc_by(reelected.len() as f64);
+                    }
+                    
                     self.handle_requests(&stable, &participants, &protocol).await;
                 }
             }

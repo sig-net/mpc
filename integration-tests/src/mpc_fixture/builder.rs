@@ -68,6 +68,7 @@ struct FixtureConfig {
     signature_timeout_ms: u64,
     presignature_timeout_ms: u64,
     triple_timeout_ms: u64,
+    proposer_reelection_timeout_ms: u64,
 }
 
 /// Context required to start a fixture node.
@@ -111,6 +112,7 @@ impl FixtureConfig {
             signature_timeout_ms: 10_000,
             presignature_timeout_ms: 10_000,
             triple_timeout_ms: min_to_ms(10),
+            proposer_reelection_timeout_ms: 60_000, // Default 60 seconds
         }
     }
 }
@@ -206,6 +208,7 @@ impl MpcFixtureBuilder {
     fn build_protocol_config(&self) -> ProtocolConfig {
         let mut config = ProtocolConfig::default();
         config.signature.generation_timeout = self.fixture_config.signature_timeout_ms;
+        config.signature.proposer_reelection_timeout = self.fixture_config.proposer_reelection_timeout_ms;
         config.presignature.max_presignatures = self.fixture_config.max_presignatures;
         config.presignature.min_presignatures = self.fixture_config.min_presignatures;
         config.presignature.generation_timeout = self.fixture_config.presignature_timeout_ms;
@@ -314,6 +317,12 @@ impl MpcFixtureBuilder {
     /// Set protocol config
     pub fn with_presignature_timeout_ms(mut self, ms: u64) -> Self {
         self.fixture_config.presignature_timeout_ms = ms;
+        self
+    }
+
+    /// Set protocol config for proposer re-election timeout
+    pub fn with_proposer_reelection_timeout_ms(mut self, ms: u64) -> Self {
+        self.fixture_config.proposer_reelection_timeout_ms = ms;
         self
     }
 
