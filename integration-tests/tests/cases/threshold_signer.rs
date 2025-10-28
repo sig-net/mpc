@@ -11,7 +11,7 @@ use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use mpc_node::signing::{CurveType, ThresholdSigner};
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{LATEST_MPC_KEY_VERSION, SignArgs, SignId};
 use std::time::Duration;
 use threshold_ts::{CaitSithAdapter, NearThresholdSigner};
 

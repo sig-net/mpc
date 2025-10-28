@@ -1,9 +1,9 @@
 use anyhow::Context;
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use near_workspaces::{
+    Account, AccountId, Worker,
     network::Sandbox,
     types::{KeyType, SecretKey},
-    Account, AccountId, Worker,
 };
 use rand::Rng;
 use std::sync::Once;

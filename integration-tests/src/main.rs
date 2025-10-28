@@ -4,8 +4,8 @@ use std::str::FromStr;
 use std::vec;
 
 use clap::Parser;
-use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::NodeConfig;
+use integration_tests::cluster::spawner::ClusterSpawner;
 use mpc_node::indexer_eth::EthConfig;
 use near_account_id::AccountId;
 use near_crypto::PublicKey;

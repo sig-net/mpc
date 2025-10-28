@@ -8,7 +8,7 @@ use crate::sign_bidirectional::SignBidirectionalSignatureChannel;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use near_sdk::AccountId;
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{RwLock, mpsc, watch};
 
 pub struct TestProtocolStorage {
     pub secret_storage: SecretNodeStorageBox,

@@ -1,9 +1,9 @@
 use crate::types::{PublicKey, ScalarExt};
 use anyhow::Context;
 use k256::{
-    ecdsa::{RecoveryId, Signature, VerifyingKey},
-    elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
     Scalar, Secp256k1, SecretKey,
+    ecdsa::{RecoveryId, Signature, VerifyingKey},
+    elliptic_curve::{CurveArithmetic, point::AffineCoordinates, sec1::ToEncodedPoint},
 };
 use near_account_id::AccountId;
 use sha3::{Digest, Keccak256, Sha3_256};

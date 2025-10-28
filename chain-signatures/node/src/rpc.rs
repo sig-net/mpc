@@ -1,8 +1,8 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
-use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
+use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::signature::SignRequest;
 use crate::protocol::{Chain, Governance, ProtocolState};
 use crate::util::AffinePointExt as _;
@@ -17,8 +17,8 @@ use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, RootProvider, WalletProvider};
 use alloy::rpc::types::{Transaction, TransactionReceipt};
-use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
+use cait_sith::protocol::Participant;
 use k256::{AffinePoint, Secp256k1};
 use mpc_keys::hpke;
 use mpc_primitives::SignId;
@@ -33,8 +33,11 @@ use alloy_signer_local::PrivateKeySigner;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use near_account_id::AccountId;
-use near_crypto::InMemorySigner;
-use near_fetch::result::ExecutionFinalResult;
+use near_crypto::{InMemorySigner, Signer};
+use near_fetch::{
+    result::ExecutionFinalResult,
+    signer::{ExposeAccountId, SignerExt},
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -42,6 +45,26 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use url::Url;
+
+// Wrapper to implement SignerExt for InMemorySigner
+#[derive(Clone)]
+pub struct NearSigner(InMemorySigner);
+
+impl SignerExt for NearSigner {
+    fn sign(&self, data: &[u8]) -> near_crypto::signature::Signature {
+        self.0.sign(data)
+    }
+
+    fn public_key(&self) -> near_crypto::signature::PublicKey {
+        self.0.public_key()
+    }
+}
+
+impl ExposeAccountId for NearSigner {
+    fn account_id(&self) -> &AccountId {
+        &self.0.account_id
+    }
+}
 
 /// The maximum amount of times to retry publishing a signature.
 const MAX_PUBLISH_RETRY: usize = 6;
@@ -403,7 +426,7 @@ pub struct NearClient {
     contract_id: AccountId,
     my_addr: Url,
     my_account_id: AccountId,
-    signer: InMemorySigner,
+    signer: NearSigner,
     cipher_pk: hpke::PublicKey,
     sign_pk: near_crypto::PublicKey,
 }
@@ -428,14 +451,15 @@ impl NearClient {
         my_addr: &Url,
         network: &NetworkConfig,
         contract_id: &AccountId,
+        my_account_id: &AccountId,
         signer: InMemorySigner,
     ) -> Self {
         Self {
             client: near_fetch::Client::new(near_rpc),
             contract_id: contract_id.clone(),
             my_addr: my_addr.clone(),
-            my_account_id: signer.account_id.clone(),
-            signer,
+            my_account_id: my_account_id.clone(),
+            signer: NearSigner(signer),
             cipher_pk: network.cipher_sk.public_key(),
             sign_pk: network.sign_sk.public_key(),
         }
@@ -479,7 +503,7 @@ impl NearClient {
         &self,
         public_key: &near_crypto::PublicKey,
     ) -> anyhow::Result<bool> {
-        tracing::info!(%public_key, signer_id = %self.signer.account_id, "voting for public key");
+        tracing::info!(%public_key, signer_id = %self.my_account_id, "voting for public key");
         let result = self
             .client
             .call(&self.signer, &self.contract_id, "vote_pk")
@@ -499,7 +523,7 @@ impl NearClient {
     }
 
     pub async fn vote_reshared(&self, epoch: u64) -> anyhow::Result<bool> {
-        tracing::info!(%epoch, signer_id = %self.signer.account_id, "voting for reshared");
+        tracing::info!(%epoch, signer_id = %self.my_account_id, "voting for reshared");
         let result = self
             .client
             .call(&self.signer, &self.contract_id, "vote_reshared")
@@ -519,7 +543,7 @@ impl NearClient {
     }
 
     pub async fn propose_join(&self) -> anyhow::Result<()> {
-        tracing::info!(signer_id = %self.signer.account_id, "joining the protocol");
+        tracing::info!(signer_id = %self.my_account_id, "joining the protocol");
         self.client
             .call(&self.signer, &self.contract_id, "join")
             .args_json(json!({
@@ -1299,12 +1323,12 @@ async fn execute_batch_publish(
     }
 }
 
+use signet_program::AffinePoint as SolanaContractAffinePoint;
+use signet_program::Signature as SolanaContractSignature;
 use signet_program::accounts::ReadRespond as SolanaReadRespondAccount;
 use signet_program::accounts::Respond as SolanaRespondAccount;
 use signet_program::instruction::Respond as SolanaRespond;
 use signet_program::instruction::RespondBidirectional as SolanaRespondBidirectional;
-use signet_program::AffinePoint as SolanaContractAffinePoint;
-use signet_program::Signature as SolanaContractSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
 async fn try_publish_sol(
     sol: &SolanaClient,

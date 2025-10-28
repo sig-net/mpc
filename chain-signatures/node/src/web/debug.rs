@@ -1,12 +1,12 @@
 //! A debug page showing a live view of what the node it currently doing.
 
 use alloy_primitives::map::HashMap;
-use axum::response::Html;
 use axum::Extension;
-use maud::{html, Markup, Render};
+use axum::response::Html;
+use maud::{Markup, Render, html};
 use std::sync::Arc;
 use std::{sync::LazyLock, time::Instant};
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, watch};
 
 use crate::web::AxumState;
 

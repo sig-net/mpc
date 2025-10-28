@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 
 use crate::protocol::presignature::{Presignature, PresignatureId};
 
-use super::{owner_key, STORAGE_VERSION};
+use super::{STORAGE_VERSION, owner_key};
 
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 

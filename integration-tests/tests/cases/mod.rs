@@ -4,7 +4,7 @@ use integration_tests::cluster;
 use k256::elliptic_curve::point::AffineCoordinates;
 use mpc_contract::config::Config;
 use mpc_contract::update::ProposeUpdateArgs;
-use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt};
+use mpc_crypto::{self, ScalarExt, derive_epsilon_near, derive_key, x_coordinate};
 use mpc_node::kdf::into_eth_sig;
 use mpc_node::util::NearPublicKeyExt as _;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;

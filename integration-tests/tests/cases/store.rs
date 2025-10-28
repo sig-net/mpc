@@ -1,14 +1,14 @@
+use cait_sith::PresignOutput;
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::PresignOutput;
 use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
 use k256::Secp256k1;
 use mpc_crypto::PublicKey;
+use mpc_node::protocol::MessageChannel;
 use mpc_node::protocol::presignature::{Presignature, PresignatureSpawner};
 use mpc_node::protocol::triple::{Triple, TripleSpawner};
-use mpc_node::protocol::MessageChannel;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
 

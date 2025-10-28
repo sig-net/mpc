@@ -6,9 +6,9 @@ use crate::mpc_fixture::fixture_interface::SharedOutput;
 use crate::mpc_fixture::fixture_tasks::MessageFilter;
 use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::mock_governance::MockGovernance;
-use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
+use crate::mpc_fixture::{MpcFixture, MpcFixtureNode, fixture_tasks};
 use cait_sith::protocol::Participant;
-use mpc_contract::config::{min_to_ms, ProtocolConfig};
+use mpc_contract::config::{ProtocolConfig, min_to_ms};
 use mpc_contract::primitives::{
     CandidateInfo, Candidates as CandidatesById, ParticipantInfo, Participants as ParticipantsById,
 };
@@ -23,13 +23,13 @@ use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState, S
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
 use mpc_node::sign_bidirectional::SignBidirectionalSignatureProcessor;
-use mpc_node::storage::{presignature_storage, secret_storage, triple_storage, Options};
+use mpc_node::storage::{Options, presignature_storage, secret_storage, triple_storage};
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
-use tokio::sync::RwLock;
 
 pub struct MpcFixtureBuilder {
     prepared_nodes: Vec<MpcFixtureNodeBuilder>,

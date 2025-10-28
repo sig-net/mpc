@@ -3,8 +3,8 @@ use axum::body::Bytes;
 use axum::extract::{FromRequest, Request};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use http::{header, HeaderMap};
-use serde::{de::DeserializeOwned, Serialize};
+use http::{HeaderMap, header};
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::protocol::message::cbor_to_bytes;
 

@@ -1,4 +1,4 @@
-use mpc_crypto::{near_public_key_to_affine_point, PublicKey};
+use mpc_crypto::{PublicKey, near_public_key_to_affine_point};
 
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};

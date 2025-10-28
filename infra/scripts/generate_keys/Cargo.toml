@@ -8,6 +8,6 @@ edition = "2021"
 [dependencies]
 ethers = "2.0"
 hex = "0.4.3"
-near-crypto = "0.27"
+near-crypto = "0.33.0"
 mpc-keys = { path = "../../../chain-signatures/keys" }
 rand = "0.8"

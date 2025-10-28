@@ -2,8 +2,8 @@ use std::sync::LazyLock;
 use std::sync::Mutex;
 
 use prometheus::{
-    self, exponential_buckets, linear_buckets, CounterVec, HistogramOpts, HistogramVec,
-    IntGaugeVec, Opts, Result,
+    self, CounterVec, HistogramOpts, HistogramVec, IntGaugeVec, Opts, Result, exponential_buckets,
+    linear_buckets,
 };
 
 pub(crate) static NODE_RUNNING: LazyLock<IntGaugeVec> = LazyLock::new(|| {

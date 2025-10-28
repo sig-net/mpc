@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::containers::{self, DockerClient};
 use crate::utils::dev_gen_indexed;
-use crate::{execute, NodeConfig, Nodes};
+use crate::{NodeConfig, Nodes, execute};
 
 use crate::cluster::Cluster;
 

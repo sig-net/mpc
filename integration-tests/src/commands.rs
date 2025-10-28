@@ -6,7 +6,7 @@ use mpc_contract::{
     update::ProposeUpdateArgs,
 };
 use mpc_keys::hpke;
-use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{LATEST_MPC_KEY_VERSION, SignId, Signature};
 use near_account_id::AccountId;
 use near_primitives::borsh;
 use near_sdk::PublicKey;

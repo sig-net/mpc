@@ -4,7 +4,7 @@ use near_sdk::AccountId;
 
 use crate::{
     node_client::NodeClient,
-    protocol::{contract::primitives::Participants, state::NodeStatus, ParticipantInfo},
+    protocol::{ParticipantInfo, contract::primitives::Participants, state::NodeStatus},
 };
 
 use super::StateView;

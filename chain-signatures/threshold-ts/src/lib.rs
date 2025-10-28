@@ -3,12 +3,12 @@
 use async_trait::async_trait;
 use cait_sith::protocol::{Participant, Protocol as CaitSithProtocol};
 use k256::ecdsa::{Signature, VerifyingKey};
-use k256::{elliptic_curve::group::GroupEncoding, AffinePoint, Scalar, Secp256k1};
+use k256::{AffinePoint, Scalar, Secp256k1, elliptic_curve::group::GroupEncoding};
+use mpc_crypto::ScalarExt;
 use mpc_crypto::signing::{
     Action, CurveType, KeyId, KeyMeta, ProtocolError, SignMetadata, SignRequest, SignResult,
     SigningError, ThresholdProtocol, ThresholdSigner,
 };
-use mpc_crypto::ScalarExt;
 use rand::rngs::OsRng;
 use sha3::{Digest, Sha3_256};
 use threshold_signatures::eddsa::{Ed25519Sha512, KeygenOutput as EddsaKeygenOutput};
@@ -190,7 +190,7 @@ impl ThresholdSigner for CaitSithAdapter {
                             return Err(SigningError::ProtocolError(format!(
                                 "protocol error: {:?}",
                                 e
-                            )))
+                            )));
                         }
                     }
                 }
@@ -234,7 +234,7 @@ impl ThresholdSigner for CaitSithAdapter {
                     _ => {
                         return Err(SigningError::ProtocolError(
                             "ECDSA signature requires recovery ID in metadata".to_string(),
-                        ))
+                        ));
                     }
                 };
 
@@ -480,7 +480,7 @@ impl ThresholdSigner for NearThresholdSigner {
                             return Err(SigningError::ProtocolError(format!(
                                 "protocol error: {:?}",
                                 e
-                            )))
+                            )));
                         }
                     }
                 }

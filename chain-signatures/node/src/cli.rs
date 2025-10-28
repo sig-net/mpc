@@ -5,7 +5,7 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
-use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
+use crate::protocol::{MpcSignProtocol, SignQueue, spawn_system_metrics};
 use crate::respond_bidirectional::RespondBidirectionalTxProcessor;
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::sign_bidirectional::SignBidirectionalSignatureProcessor;
@@ -20,7 +20,7 @@ use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{RwLock, watch};
 use url::Url;
 
 use mpc_keys::hpke;
@@ -253,7 +253,11 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tracing::info!(%my_address, "address detected");
 
             let client = NodeClient::new(&message_options);
-            let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
+            let signer = InMemorySigner {
+                account_id: account_id.clone(),
+                public_key: account_sk.public_key(),
+                secret_key: account_sk.clone(),
+            };
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
             let mesh = Mesh::new(&client, mesh_options, &account_id, synced_peer_rx);
             let mesh_state = mesh.watch();
@@ -262,8 +266,14 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let eth = eth.into_config();
             let sol = sol.into_config();
             let network = NetworkConfig { cipher_sk, sign_sk };
-            let near_client =
-                NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
+            let near_client = NearClient::new(
+                &near_rpc,
+                &my_address,
+                &network,
+                &mpc_contract_id,
+                &account_id,
+                signer,
+            );
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol);
             let (sign_bidirectional_signature_channel, sign_bidirectional_signature_processor) =
                 SignBidirectionalSignatureProcessor::new();

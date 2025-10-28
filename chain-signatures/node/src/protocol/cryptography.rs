@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use super::state::{GeneratingState, NodeState, ResharingState};
 use super::MpcSignProtocol;
+use super::state::{GeneratingState, NodeState, ResharingState};
 use crate::config::Config;
+use crate::protocol::MeshState;
 use crate::protocol::message::{GeneratingMessage, ResharingMessage};
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
-use crate::protocol::MeshState;
 use crate::types::SecretKeyShare;
 
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};

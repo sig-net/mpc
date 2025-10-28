@@ -1,11 +1,11 @@
 use std::time::Instant;
 
 use cait_sith::{
+    PresignOutput,
     protocol::Participant,
     triples::{TriplePub, TripleShare},
-    PresignOutput,
 };
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use elliptic_curve::CurveArithmetic;
 use integration_tests::{cluster::spawner::ClusterSpawner, containers::Redis};
 use k256::Secp256k1;
@@ -13,11 +13,11 @@ use mpc_node::{
     mesh::{Mesh, MeshState},
     node_client::{self, NodeClient},
     protocol::{
-        contract::{primitives::Participants, RunningContractState},
+        ParticipantInfo, ProtocolState,
+        contract::{RunningContractState, primitives::Participants},
         presignature::Presignature,
         sync::{SyncChannel, SyncTask},
         triple::Triple,
-        ParticipantInfo, ProtocolState,
     },
     rpc::ContractStateWatcher,
     storage::{PresignatureStorage, TripleStorage},

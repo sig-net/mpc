@@ -1,8 +1,8 @@
 use axum::extract::rejection::JsonRejection;
 use http::StatusCode;
 
-use crate::protocol::message::MessageError;
 use crate::protocol::CryptographicError;
+use crate::protocol::message::MessageError;
 use crate::web::cbor::CborRejection;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

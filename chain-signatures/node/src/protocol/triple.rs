@@ -1,6 +1,6 @@
+use super::MpcSignProtocol;
 use super::message::{MessageChannel, PositMessage, PositProtocolId, TripleMessage};
 use super::posit::{PositAction, PositInternalAction, Posits};
-use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::posit::Positor;
@@ -14,8 +14,8 @@ use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::triples::{TriplePub, TripleShare};
 use chrono::Utc;
 use highway::{HighwayHash, HighwayHasher};
-use k256::elliptic_curve::group::GroupEncoding;
 use k256::Secp256k1;
+use k256::elliptic_curve::group::GroupEncoding;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};

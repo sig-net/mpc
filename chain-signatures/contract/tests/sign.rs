@@ -3,7 +3,7 @@ use common::{candidates, create_response, init, init_env, sign_and_validate};
 
 use mpc_contract::errors;
 use mpc_contract::primitives::{CandidateInfo, SignRequest};
-use mpc_primitives::{Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{LATEST_MPC_KEY_VERSION, Signature};
 use near_workspaces::types::{AccountId, NearToken};
 
 use std::collections::HashMap;
@@ -51,9 +51,10 @@ async fn test_contract_sign_request() -> anyhow::Result<()> {
     let err = sign_and_validate(&request, None, &contract)
         .await
         .expect_err("should have failed with timeout");
-    assert!(err
-        .to_string()
-        .contains(&errors::SignError::Timeout.to_string()));
+    assert!(
+        err.to_string()
+            .contains(&errors::SignError::Timeout.to_string())
+    );
 
     Ok(())
 }
@@ -168,9 +169,10 @@ async fn test_contract_sign_fail_refund() -> anyhow::Result<()> {
         .unwrap()
         .into_result()
         .expect_err("should have failed with timeout");
-    assert!(err
-        .to_string()
-        .contains(&errors::SignError::Timeout.to_string()));
+    assert!(
+        err.to_string()
+            .contains(&errors::SignError::Timeout.to_string())
+    );
 
     let new_balance = alice.view_account().await?.balance;
     let new_contract_balance = contract.view_account().await?.balance;
@@ -230,19 +232,23 @@ async fn test_contract_sign_request_deposits() -> anyhow::Result<()> {
         .transact()
         .await?;
     dbg!(&respond);
-    assert!(respond
-        .into_result()
-        .unwrap_err()
-        .to_string()
-        .contains(&errors::InvalidParameters::RequestNotFound.to_string()));
+    assert!(
+        respond
+            .into_result()
+            .unwrap_err()
+            .to_string()
+            .contains(&errors::InvalidParameters::RequestNotFound.to_string())
+    );
 
     let execution = status.await?;
     dbg!(&execution);
-    assert!(execution
-        .into_result()
-        .unwrap_err()
-        .to_string()
-        .contains(&errors::InvalidParameters::InsufficientDeposit.to_string()));
+    assert!(
+        execution
+            .into_result()
+            .unwrap_err()
+            .to_string()
+            .contains(&errors::InvalidParameters::InsufficientDeposit.to_string())
+    );
 
     Ok(())
 }

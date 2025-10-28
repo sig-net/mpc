@@ -386,7 +386,9 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     println!("\nPlease call below to update localnet:\n");
     let near_rpc = ctx.worker.rpc_addr();
-    println!("near config add-connection --network-name local --connection-name local --rpc-url {near_rpc} --wallet-url http://127.0.0.1/ --explorer-transaction-url http://127.0.0.1:6666/");
+    println!(
+        "near config add-connection --network-name local --connection-name local --rpc-url {near_rpc} --wallet-url http://127.0.0.1/ --explorer-transaction-url http://127.0.0.1:6666/"
+    );
     println!("\nAfter run the nodes, please call the following command to init contract: ");
     let args = json!({
         "threshold": cfg.threshold,
@@ -395,12 +397,13 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     .to_string();
     let sk = SecretKey::from_seed(KeyType::ED25519, "testificate");
 
-    println!("near contract call-function as-transaction {} init json-args '{}' prepaid-gas '100.0 Tgas' attached-deposit '0 NEAR' sign-as {} network-config local sign-with-plaintext-private-key --signer-public-key {} --signer-private-key {} send",
-             ctx.mpc_contract.id(),
-             args,
-             ctx.mpc_contract.id(),
-             sk.public_key(),
-             sk
+    println!(
+        "near contract call-function as-transaction {} init json-args '{}' prepaid-gas '100.0 Tgas' attached-deposit '0 NEAR' sign-as {} network-config local sign-with-plaintext-private-key --signer-public-key {} --signer-private-key {} send",
+        ctx.mpc_contract.id(),
+        args,
+        ctx.mpc_contract.id(),
+        sk.public_key(),
+        sk
     );
     println!();
 
