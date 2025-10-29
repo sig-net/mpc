@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::future::IntoFuture;
 use std::str::FromStr;
@@ -9,10 +10,12 @@ use alloy::providers::Provider;
 use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolEvent;
+use anchor_client::anchor_lang::{AnchorDeserialize, Discriminator};
 use anchor_client::{Client, Cluster as AnchorCluster};
 use anyhow::Context as _;
 use cait_sith::FullSignature;
 use elliptic_curve::sec1::FromEncodedPoint;
+use futures::StreamExt;
 use generic_array::GenericArray;
 use k256::Secp256k1;
 use mpc_contract::errors;
@@ -24,11 +27,16 @@ use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::{Account, AccountId};
 use rand::Rng;
+use solana_client::nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient};
+use solana_client::rpc_config::{
+    RpcTransactionConfig, RpcTransactionLogsConfig, RpcTransactionLogsFilter,
+};
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature as SolSignature;
 use solana_sdk::signer::Signer as _;
 use tokio::sync::oneshot;
+use tokio::time::sleep;
 
 use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
@@ -495,43 +503,12 @@ impl<'a> SolSignAction<'a> {
         );
 
         let program_id = solana.program_keypair.pubkey();
-        let cluster = AnchorCluster::Custom(solana.rpc_address.clone(), solana.ws_address.clone());
-        let client = Client::new_with_options(
-            cluster,
-            Arc::new(solana.payer_keypair.insecure_clone()),
-            CommitmentConfig::confirmed(),
-        );
-        let program = client.program(program_id)?;
-        let (tx, response_rx) = oneshot::channel();
-        let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
-
-        let event_subscription = program
-            .on(move |ctx, event: SignatureRespondedEvent| {
-                tracing::info!(
-                    request_id = %hex::encode(event.request_id),
-                    responder = ?event.responder,
-                    tx_signature = ?ctx.signature,
-                    "received SignatureRespondedEvent",
-                );
-
-                let signature_result = parse_sol_signature(&event.signature);
-                if let Ok(mut sender) = tx.lock() {
-                    if let Some(sender) = sender.take() {
-                        let result =
-                            signature_result.map(|(signature, recovery_id)| SolSignatureResponse {
-                                request_id: event.request_id,
-                                signature,
-                                recovery_id,
-                            });
-                        if sender.send(result).is_err() {
-                            tracing::error!("failed to send SignatureRespondedEvent outcome");
-                        }
-                    }
-                }
-            })
-            .await?;
-
-        tracing::info!("subscribed to SignatureRespondedEvent, waiting for MPC response...");
+        let response_listener = tokio::spawn(wait_for_signature_responded_event(
+            solana.rpc_address.clone(),
+            solana.ws_address.clone(),
+            program_id,
+            Duration::from_secs(90),
+        ));
 
         let tx_signature = match self.call {
             SignCall::Sign => match solana
@@ -540,7 +517,7 @@ impl<'a> SolSignAction<'a> {
             {
                 Ok(sig) => sig,
                 Err(err) => {
-                    let _ = event_subscription.unsubscribe().await;
+                    response_listener.abort();
                     return Err(err);
                 }
             },
@@ -549,7 +526,7 @@ impl<'a> SolSignAction<'a> {
                 let transaction_data = match config.transaction_data.clone() {
                     Some(data) => data,
                     None => {
-                        let _ = event_subscription.unsubscribe().await;
+                        response_listener.abort();
                         anyhow::bail!(
                             "transaction data must be provided for solana sign_bidirectional requests"
                         );
@@ -557,7 +534,7 @@ impl<'a> SolSignAction<'a> {
                 };
 
                 if config.caip2_id.is_empty() {
-                    let _ = event_subscription.unsubscribe().await;
+                    response_listener.abort();
                     anyhow::bail!(
                         "caip2_id must be provided for solana sign_bidirectional requests"
                     );
@@ -583,7 +560,7 @@ impl<'a> SolSignAction<'a> {
                 {
                     Ok(sig) => sig,
                     Err(err) => {
-                        let _ = event_subscription.unsubscribe().await;
+                        response_listener.abort();
                         return Err(err);
                     }
                 }
@@ -591,17 +568,187 @@ impl<'a> SolSignAction<'a> {
         };
 
         tracing::info!("waiting for MPC response event...");
-        let response_result = tokio::time::timeout(Duration::from_secs(90), response_rx).await;
-        event_subscription.unsubscribe().await;
-
-        let response = match response_result {
-            Ok(Ok(Ok(response))) => response,
-            Ok(Ok(Err(e))) => anyhow::bail!("failed to parse sol signature: {e}"),
-            Ok(Err(_)) => anyhow::bail!("sol event channel closed unexpectedly"),
-            Err(_) => anyhow::bail!("timeout waiting for respond on sol"),
+        let response = match response_listener.await {
+            Ok(result) => result?,
+            Err(join_err) => {
+                anyhow::bail!("signature response listener task failed: {join_err}")
+            }
         };
         Ok((tx_signature, response))
     }
+}
+
+const RESPOND_EVENT_HINT: &str = "Program log: Instruction: Respond";
+
+async fn wait_for_signature_responded_event(
+    rpc_http_url: String,
+    rpc_ws_url: String,
+    program_id: Pubkey,
+    timeout: Duration,
+) -> anyhow::Result<SolSignatureResponse> {
+    let rpc_client = RpcClient::new(rpc_http_url);
+    let pubsub_client = PubsubClient::new(rpc_ws_url.as_str()).await?;
+
+    let filter = RpcTransactionLogsFilter::Mentions(vec![program_id.to_string()]);
+    let config = RpcTransactionLogsConfig {
+        commitment: Some(CommitmentConfig::confirmed()),
+    };
+    let (mut stream, _unsubscribe) = pubsub_client.logs_subscribe(filter, config).await?;
+
+    let mut seen = HashSet::new();
+    let program_invoke_prefix = format!("Program {} invoke [", program_id);
+
+    let deadline = sleep(timeout);
+    tokio::pin!(deadline);
+
+    loop {
+        tokio::select! {
+            _ = &mut deadline => {
+                anyhow::bail!("timeout waiting for respond on sol");
+            }
+            maybe = stream.next() => {
+                let Some(response) = maybe else {
+                    anyhow::bail!("sol signature respond log stream closed unexpectedly");
+                };
+
+                if response.value.err.is_some() {
+                    continue;
+                }
+
+                let logs = &response.value.logs;
+                if !logs.iter().any(|log| log.contains(RESPOND_EVENT_HINT)) {
+                    continue;
+                }
+                if !logs.iter().any(|log| log.starts_with(&program_invoke_prefix)) {
+                    continue;
+                }
+
+                let sig_text = &response.value.signature;
+                let Ok(tx_signature) = solana_sdk::signature::Signature::from_str(sig_text) else {
+                    tracing::warn!(tx_signature = sig_text, "invalid solana signature string in respond logs");
+                    continue;
+                };
+
+                if !seen.insert(tx_signature) {
+                    continue;
+                }
+
+                match parse_signature_responded_events(&rpc_client, &tx_signature, &program_id).await {
+                    Ok(events) => {
+                        for event in events {
+                            tracing::info!(
+                                request_id = %hex::encode(event.request_id),
+                                tx_signature = %tx_signature,
+                                "received SignatureRespondedEvent via CPI logs",
+                            );
+
+                            match parse_sol_signature(&event.signature) {
+                                Ok((signature, recovery_id)) => {
+                                    return Ok(SolSignatureResponse {
+                                        request_id: event.request_id,
+                                        signature,
+                                        recovery_id,
+                                    });
+                                }
+                                Err(err) => {
+                                    tracing::warn!(?err, "failed to parse sol signature from SignatureRespondedEvent");
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            ?err,
+                            tx_signature = %tx_signature,
+                            "failed to parse SignatureRespondedEvent from respond transaction",
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn parse_signature_responded_events(
+    rpc_client: &RpcClient,
+    signature: &solana_sdk::signature::Signature,
+    program_id: &Pubkey,
+) -> anyhow::Result<Vec<SignatureRespondedEvent>> {
+    use solana_transaction_status::{UiInstruction, UiParsedInstruction};
+
+    let tx = rpc_client
+        .get_transaction_with_config(
+            signature,
+            RpcTransactionConfig {
+                encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
+                commitment: Some(CommitmentConfig::confirmed()),
+                max_supported_transaction_version: Some(0),
+            },
+        )
+        .await?;
+
+    let Some(meta) = tx.transaction.meta else {
+        return Ok(Vec::new());
+    };
+
+    let inner_sets = match meta.inner_instructions {
+        solana_transaction_status::option_serializer::OptionSerializer::Some(inner) => inner,
+        _ => return Ok(Vec::new()),
+    };
+
+    let target_program = program_id.to_string();
+    let mut events = Vec::new();
+
+    for (set_idx, inner_set) in inner_sets.iter().enumerate() {
+        for (ix_idx, instruction) in inner_set.instructions.iter().enumerate() {
+            let UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(parsed)) = instruction
+            else {
+                continue;
+            };
+
+            if parsed.program_id != target_program {
+                continue;
+            }
+
+            let Ok(ix_data) = solana_sdk::bs58::decode(&parsed.data).into_vec() else {
+                tracing::warn!(
+                    "failed to decode inner instruction data for SignatureRespondedEvent"
+                );
+                continue;
+            };
+
+            if ix_data.len() < anchor_client::anchor_lang::event::EVENT_IX_TAG_LE.len() + 8
+                || !ix_data.starts_with(anchor_client::anchor_lang::event::EVENT_IX_TAG_LE)
+            {
+                continue;
+            }
+
+            let discriminator = &ix_data[8..16];
+            if discriminator != SignatureRespondedEvent::DISCRIMINATOR {
+                continue;
+            }
+
+            let event_data = &ix_data[16..];
+            match SignatureRespondedEvent::deserialize(&mut &event_data[..]) {
+                Ok(event) => {
+                    tracing::info!(
+                        request_id = %hex::encode(event.request_id),
+                        inner_index = %format!("{}.{}", set_idx, ix_idx),
+                        "parsed SignatureRespondedEvent from respond transaction",
+                    );
+                    events.push(event);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        "failed to deserialize SignatureRespondedEvent from respond transaction"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(events)
 }
 
 impl SignCall {

@@ -6210,6 +6210,7 @@ dependencies = [
  "signet-program",
  "solana-client",
  "solana-sdk",
+ "solana-transaction-status",
  "test-log",
  "testcontainers",
  "thiserror 1.0.69",
