@@ -975,53 +975,51 @@ impl Solana {
     #[allow(clippy::too_many_arguments)]
     pub async fn sign_bidirectional(
         &self,
-        transaction_data: &[u8],
-        slip44_chain_id: u32,
+        serialized_transaction: &[u8],
+        caip2_id: &str,
         key_version: u32,
         path: &str,
         algo: &str,
         dest: &str,
         params: &str,
-        explorer_deserialization_format: u8,
-        explorer_deserialization_schema: &[u8],
-        callback_serialization_format: u8,
-        callback_serialization_schema: &[u8],
+        callback_program_id: SolanaPubkey,
+        output_deserialization_schema: &[u8],
+        respond_serialization_schema: &[u8],
     ) -> anyhow::Result<SolanaSignature> {
         if self.rpc_client.get_version().await.is_err() {
             anyhow::bail!("solana container is not ready");
         }
 
-        let program_id = self.program_keypair.pubkey();
-        tracing::info!("using program_id for sign_respond: {program_id}");
+        let contract_program_id = self.program_keypair.pubkey();
+        tracing::info!("using program_id for sign_bidirectional: {contract_program_id}");
 
         let (program_state_pda, _bump) =
-            SolanaPubkey::find_program_address(&[b"program-state"], &program_id);
+            SolanaPubkey::find_program_address(&[b"program-state"], &contract_program_id);
         let (event_authority_pda, _bump) =
-            SolanaPubkey::find_program_address(&[b"__event_authority"], &program_id);
+            SolanaPubkey::find_program_address(&[b"__event_authority"], &contract_program_id);
 
         let mut data = Vec::new();
         let mut hasher = Sha256::new();
-        hasher.update(b"global:sign_respond");
+        hasher.update(b"global:sign_bidirectional");
         let discriminator = hasher.finalize();
         data.extend_from_slice(&discriminator[..8]);
 
         let args = SignBidirectionalArgs {
-            transaction_data: transaction_data.to_vec(),
-            slip44_chain_id,
+            serialized_transaction: serialized_transaction.to_vec(),
+            caip2_id: caip2_id.to_string(),
             key_version,
             path: path.to_string(),
             algo: algo.to_string(),
             dest: dest.to_string(),
             params: params.to_string(),
-            explorer_deserialization_format,
-            explorer_deserialization_schema: explorer_deserialization_schema.to_vec(),
-            callback_serialization_format,
-            callback_serialization_schema: callback_serialization_schema.to_vec(),
+            program_id: callback_program_id.to_bytes(),
+            output_deserialization_schema: output_deserialization_schema.to_vec(),
+            respond_serialization_schema: respond_serialization_schema.to_vec(),
         };
         args.serialize(&mut data)?;
 
         let instruction = solana_sdk::instruction::Instruction {
-            program_id,
+            program_id: contract_program_id,
             accounts: vec![
                 AccountMeta::new(program_state_pda, false),
                 AccountMeta::new(self.payer_keypair.pubkey(), true),
@@ -1029,7 +1027,7 @@ impl Solana {
                 AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
                 AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false),
                 AccountMeta::new_readonly(event_authority_pda, false),
-                AccountMeta::new_readonly(program_id, false),
+                AccountMeta::new_readonly(contract_program_id, false),
             ],
             data,
         };
@@ -1047,16 +1045,16 @@ impl Solana {
 
         tracing::info!(
             ?signature,
-            slip44_chain_id,
+            caip2_id,
             path,
             key_version,
-            "sign_respond transaction successful",
+            "sign_bidirectional transaction successful",
         );
 
         Ok(signature)
     }
 
-    pub async fn read_respond(
+    pub async fn respond_bidirectional(
         &self,
         request_id: [u8; 32],
         serialized_output: Vec<u8>,
@@ -1070,7 +1068,7 @@ impl Solana {
         let program_id = self.program_keypair.pubkey();
         let mut data = Vec::new();
         let mut hasher = Sha256::new();
-        hasher.update(b"global:read_respond");
+        hasher.update(b"global:respond_bidirectional");
         let discriminator = hasher.finalize();
         data.extend_from_slice(&discriminator[..8]);
 
@@ -1085,11 +1083,11 @@ impl Solana {
         let mut s_bytes = [0u8; 32];
         s_bytes.copy_from_slice(signature.s.to_bytes().as_slice());
 
-        let args = ReadRespondArgs {
+        let args = RespondBidirectionalArgs {
             request_id,
             serialized_output,
-            signature: ReadRespondSignature {
-                big_r: ReadRespondAffinePoint { x, y },
+            signature: RespondBidirectionalSignature {
+                big_r: RespondBidirectionalAffinePoint { x, y },
                 s: s_bytes,
                 recovery_id,
             },
@@ -1117,7 +1115,7 @@ impl Solana {
         tracing::info!(
             ?signature,
             request_id = %hex::encode(request_id),
-            "read_respond transaction successful",
+            "respond_bidirectional transaction successful",
         );
 
         Ok(signature)
@@ -1146,35 +1144,34 @@ struct SignArgs {
 
 #[derive(BorshSerialize, BorshDeserialize)]
 struct SignBidirectionalArgs {
-    transaction_data: Vec<u8>,
-    slip44_chain_id: u32,
+    serialized_transaction: Vec<u8>,
+    caip2_id: String,
     key_version: u32,
     path: String,
     algo: String,
     dest: String,
     params: String,
-    explorer_deserialization_format: u8,
-    explorer_deserialization_schema: Vec<u8>,
-    callback_serialization_format: u8,
-    callback_serialization_schema: Vec<u8>,
+    program_id: [u8; 32],
+    output_deserialization_schema: Vec<u8>,
+    respond_serialization_schema: Vec<u8>,
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
-struct ReadRespondArgs {
+struct RespondBidirectionalArgs {
     request_id: [u8; 32],
     serialized_output: Vec<u8>,
-    signature: ReadRespondSignature,
+    signature: RespondBidirectionalSignature,
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
-struct ReadRespondSignature {
-    big_r: ReadRespondAffinePoint,
+struct RespondBidirectionalSignature {
+    big_r: RespondBidirectionalAffinePoint,
     s: [u8; 32],
     recovery_id: u8,
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
-struct ReadRespondAffinePoint {
+struct RespondBidirectionalAffinePoint {
     x: [u8; 32],
     y: [u8; 32],
 }

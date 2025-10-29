@@ -49,7 +49,7 @@ pub enum BidirectionalTxStatus {
 pub struct BidirectionalTx {
     pub id: BidirectionalTxId,
     pub sender: Pubkey,
-    pub transaction_data: Vec<u8>,
+    pub serialized_transaction: Vec<u8>,
     pub caip2_id: String,
     pub key_version: u32,
     pub deposit: u64,
@@ -77,7 +77,7 @@ impl BidirectionalTx {
             anyhow::bail!("sign request is not a sign bidirectional");
         };
 
-        let unsigned_rlp_data = &sign_respond_event.transaction_data;
+        let unsigned_rlp_data = &sign_respond_event.serialized_transaction;
 
         let (signed_transaction_hash, nonce) =
             sign_and_hash_transaction(unsigned_rlp_data, sign_respond_signature.signature)?;
@@ -94,7 +94,7 @@ impl BidirectionalTx {
         Ok(Self {
             id: BidirectionalTxId(signed_transaction_hash.into()),
             sender: sign_respond_event.sender,
-            transaction_data: sign_respond_event.transaction_data,
+            serialized_transaction: sign_respond_event.serialized_transaction,
             caip2_id: sign_respond_event.caip2_id,
             key_version: sign_respond_event.key_version,
             deposit: sign_respond_event.deposit,

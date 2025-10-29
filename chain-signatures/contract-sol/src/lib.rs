@@ -40,8 +40,8 @@ pub mod signet_program {
         Ok(())
     }
 
-    pub fn read_respond(
-        ctx: Context<ReadRespond>,
+    pub fn respond_bidirectional(
+        ctx: Context<RespondBidirectional>,
         request_id: [u8; 32],
         serialized_output: Vec<u8>,
         signature: Signature,
@@ -50,7 +50,7 @@ pub mod signet_program {
         // - nonce too low
         // - balance too low
         // - literal on chain error
-        emit!(ReadRespondedEvent {
+        emit!(RespondBidirectionalEvent {
             request_id,
             responder: *ctx.accounts.responder.key,
             serialized_output,
@@ -87,34 +87,32 @@ pub mod signet_program {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn sign_respond(
-        ctx: Context<SignRespond>,
-        transaction_data: Vec<u8>,
-        slip44_chain_id: u32,
+    pub fn sign_bidirectional(
+        ctx: Context<SignBidirectional>,
+        serialized_transaction: Vec<u8>,
+        caip2_id: String,
         key_version: u32,
         path: String,
         algo: String,
         dest: String,
         params: String,
-        explorer_deserialization_format: u8,
-        explorer_deserialization_schema: Vec<u8>,
-        callback_serialization_format: u8,
-        callback_serialization_schema: Vec<u8>,
+        program_id: Pubkey,
+        output_deserialization_schema: Vec<u8>,
+        respond_serialization_schema: Vec<u8>,
     ) -> Result<()> {
-        emit!(SignRespondRequestedEvent {
+        emit!(SignBidirectionalEvent {
             sender: *ctx.accounts.requester.key,
-            transaction_data,
-            slip44_chain_id,
+            serialized_transaction,
+            caip2_id,
             key_version,
             deposit: ctx.accounts.program_state.signature_deposit,
             path,
             algo,
             dest,
             params,
-            explorer_deserialization_format,
-            explorer_deserialization_schema,
-            callback_serialization_format,
-            callback_serialization_schema,
+            program_id,
+            output_deserialization_schema,
+            respond_serialization_schema,
         });
 
         Ok(())
@@ -163,7 +161,7 @@ pub struct Respond<'info> {
 }
 
 #[derive(Accounts)]
-pub struct ReadRespond<'info> {
+pub struct RespondBidirectional<'info> {
     pub responder: Signer<'info>,
 }
 
@@ -178,7 +176,7 @@ pub struct Sign<'info> {
 }
 
 #[derive(Accounts)]
-pub struct SignRespond<'info> {
+pub struct SignBidirectional<'info> {
     #[account(mut, seeds = [b"program-state"], bump)]
     pub program_state: Account<'info, ProgramState>,
     #[account(mut)]
@@ -197,7 +195,7 @@ pub struct SignatureRespondedEvent {
 }
 
 #[event]
-pub struct ReadRespondedEvent {
+pub struct RespondBidirectionalEvent {
     pub request_id: [u8; 32],
     pub responder: Pubkey,
     pub serialized_output: Vec<u8>,
@@ -219,18 +217,17 @@ pub struct SignatureRequestedEvent {
 }
 
 #[event]
-pub struct SignRespondRequestedEvent {
+pub struct SignBidirectionalEvent {
     pub sender: Pubkey,
-    pub transaction_data: Vec<u8>,
-    pub slip44_chain_id: u32,
+    pub serialized_transaction: Vec<u8>,
+    pub caip2_id: String,
     pub key_version: u32,
     pub deposit: u64,
     pub path: String,
     pub algo: String,
     pub dest: String,
     pub params: String,
-    pub explorer_deserialization_format: u8,
-    pub explorer_deserialization_schema: Vec<u8>,
-    pub callback_serialization_format: u8,
-    pub callback_serialization_schema: Vec<u8>,
+    pub program_id: Pubkey,
+    pub output_deserialization_schema: Vec<u8>,
+    pub respond_serialization_schema: Vec<u8>,
 }

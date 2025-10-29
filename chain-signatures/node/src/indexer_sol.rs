@@ -271,7 +271,7 @@ impl SignatureEventTrait for SignatureRequestedEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SignBidirectionalEvent {
     pub sender: Pubkey,
-    pub transaction_data: Vec<u8>,
+    pub serialized_transaction: Vec<u8>,
     pub caip2_id: String,
     pub key_version: u32,
     pub deposit: u64,
@@ -279,6 +279,7 @@ pub struct SignBidirectionalEvent {
     pub algo: String,
     pub dest: String,
     pub params: String,
+    pub program_id: Pubkey,
     pub output_deserialization_schema: Vec<u8>,
     pub respond_serialization_schema: Vec<u8>,
 }
@@ -309,7 +310,7 @@ impl From<SignRespondRequestedEvent> for SignBidirectionalEvent {
     fn from(event: SignRespondRequestedEvent) -> Self {
         SignBidirectionalEvent {
             sender: event.sender,
-            transaction_data: event.transaction_data,
+            serialized_transaction: event.transaction_data,
             caip2_id: format!("eip155:{}", event.slip44_chain_id),
             key_version: event.key_version,
             deposit: event.deposit,
@@ -317,6 +318,7 @@ impl From<SignRespondRequestedEvent> for SignBidirectionalEvent {
             algo: event.algo,
             dest: event.dest,
             params: event.params,
+            program_id: Pubkey::default(),
             output_deserialization_schema: event.explorer_deserialization_schema,
             respond_serialization_schema: event.callback_serialization_schema,
         }
@@ -328,7 +330,7 @@ impl SignatureEventTrait for SignBidirectionalEvent {
         // Match TypeScript implementation using ABI encoding
         let encoded = (
             self.sender.to_string(),
-            self.transaction_data.clone(),
+            self.serialized_transaction.clone(),
             self.caip2_id.clone(),
             self.key_version,
             self.path.clone(),
@@ -358,7 +360,7 @@ impl SignatureEventTrait for SignBidirectionalEvent {
         }
 
         let request_id = self.generate_request_id();
-        let rlp_encoded_tx = self.transaction_data.clone();
+        let rlp_encoded_tx = self.serialized_transaction.clone();
 
         // Call the existing derive_epsilon_sol function with the correct parameters
         // to match the TypeScript implementation
@@ -387,7 +389,7 @@ impl SignatureEventTrait for SignBidirectionalEvent {
                 epsilon,
                 payload,
                 path: self.path.clone(),
-                key_version: 0,
+                key_version: self.key_version,
             },
             chain: Chain::Solana,
             timestamp_sign_queue: Some(Instant::now()),
@@ -458,7 +460,7 @@ impl SignatureEventTrait for SignRespondRequestedEvent {
                 epsilon,
                 payload,
                 path: self.path.clone(),
-                key_version: 0,
+                key_version: self.key_version,
             },
             chain: Chain::Solana,
             timestamp_sign_queue: Some(Instant::now()),

@@ -25,6 +25,7 @@ use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::{Account, AccountId};
 use rand::Rng;
 use solana_sdk::commitment_config::CommitmentConfig;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature as SolSignature;
 use solana_sdk::signer::Signer as _;
 use tokio::sync::oneshot;
@@ -33,7 +34,7 @@ use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
 use crate::containers;
 
-use signet_program::{ReadRespondedEvent, SignatureRespondedEvent};
+use signet_program::{RespondBidirectionalEvent, SignatureRespondedEvent};
 
 // ChainSignatures contract ABI
 alloy::sol! {
@@ -126,11 +127,10 @@ impl fmt::Debug for SignOutcome {
 #[derive(Clone, Default)]
 struct SolanaSignArgs {
     transaction_data: Option<Vec<u8>>,
-    slip44_chain_id: u32,
-    explorer_deserialization_format: u8,
-    explorer_deserialization_schema: Vec<u8>,
-    callback_serialization_format: u8,
-    callback_serialization_schema: Vec<u8>,
+    caip2_id: String,
+    program_id: Option<solana_sdk::pubkey::Pubkey>,
+    output_deserialization_schema: Vec<u8>,
+    respond_serialization_schema: Vec<u8>,
 }
 
 pub struct SignAction<'a> {
@@ -325,29 +325,33 @@ impl<'a> SolSignAction<'a> {
         self
     }
 
-    /// Attach raw transaction data to be used with sign_respond flows.
+    /// Attach raw transaction data to be used with bidirectional flows.
     pub fn transaction_data(mut self, data: Vec<u8>) -> Self {
         self.args.transaction_data = Some(data);
         self
     }
 
-    /// Set the SLIP-0044 chain identifier for sign_respond flows.
-    pub fn slip44_chain_id(mut self, chain_id: u32) -> Self {
-        self.args.slip44_chain_id = chain_id;
+    /// Set the CAIP-2 chain identifier for bidirectional flows.
+    pub fn caip2_id(mut self, caip2_id: &str) -> Self {
+        self.args.caip2_id = caip2_id.to_string();
         self
     }
 
-    /// Configure explorer deserialization metadata for sign_respond flows.
-    pub fn explorer_deserialization(mut self, format: u8, schema: Vec<u8>) -> Self {
-        self.args.explorer_deserialization_format = format;
-        self.args.explorer_deserialization_schema = schema;
+    /// Override the optional callback program identifier for bidirectional flows.
+    pub fn program_id(mut self, program_id: Pubkey) -> Self {
+        self.args.program_id = Some(program_id);
         self
     }
 
-    /// Configure callback serialization metadata for sign_respond flows.
-    pub fn callback_serialization(mut self, format: u8, schema: Vec<u8>) -> Self {
-        self.args.callback_serialization_format = format;
-        self.args.callback_serialization_schema = schema;
+    /// Configure output deserialization schema metadata for bidirectional flows.
+    pub fn output_deserialization_schema(mut self, schema: Vec<u8>) -> Self {
+        self.args.output_deserialization_schema = schema;
+        self
+    }
+
+    /// Configure respond serialization schema metadata for bidirectional flows.
+    pub fn respond_serialization_schema(mut self, schema: Vec<u8>) -> Self {
+        self.args.respond_serialization_schema = schema;
         self
     }
 }
@@ -403,7 +407,7 @@ struct SolSignatureResponse {
     recovery_id: u8,
 }
 
-pub struct SolReadRespondOutcome {
+pub struct SolRespondBidirectionalOutcome {
     pub request_id: [u8; 32],
     pub responder: String,
     pub serialized_output: Vec<u8>,
@@ -547,24 +551,33 @@ impl<'a> SolSignAction<'a> {
                     None => {
                         let _ = event_subscription.unsubscribe().await;
                         anyhow::bail!(
-                            "transaction data must be provided for solana sign_respond requests"
+                            "transaction data must be provided for solana sign_bidirectional requests"
                         );
                     }
                 };
 
+                if config.caip2_id.is_empty() {
+                    let _ = event_subscription.unsubscribe().await;
+                    anyhow::bail!(
+                        "caip2_id must be provided for solana sign_bidirectional requests"
+                    );
+                }
+
+                let default_program_id = solana.program_keypair.pubkey();
+                let program_id = config.program_id.unwrap_or(default_program_id);
+
                 match solana
                     .sign_bidirectional(
                         &transaction_data,
-                        config.slip44_chain_id,
+                        &config.caip2_id,
                         key_version,
                         path,
                         algo,
                         dest,
                         params,
-                        config.explorer_deserialization_format,
-                        &config.explorer_deserialization_schema,
-                        config.callback_serialization_format,
-                        &config.callback_serialization_schema,
+                        program_id,
+                        &config.output_deserialization_schema,
+                        &config.respond_serialization_schema,
                     )
                     .await
                 {
@@ -594,17 +607,17 @@ impl<'a> SolSignAction<'a> {
 impl SignCall {
     const fn as_str(self) -> &'static str {
         match self {
-            SignCall::Bidirectional => "sign_respond",
+            SignCall::Bidirectional => "sign_bidirectional",
             SignCall::Sign => "sign",
         }
     }
 }
 
-pub async fn wait_for_read_respond(
+pub async fn wait_for_respond_bidirectional(
     solana: &containers::Solana,
     expected_request_id: [u8; 32],
     timeout: Duration,
-) -> anyhow::Result<SolReadRespondOutcome> {
+) -> anyhow::Result<SolRespondBidirectionalOutcome> {
     let program_id = solana.program_keypair.pubkey();
 
     let cluster = AnchorCluster::Custom(solana.rpc_address.clone(), solana.ws_address.clone());
@@ -618,12 +631,12 @@ pub async fn wait_for_read_respond(
     let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
 
     let event_unsub = program
-        .on(move |_ctx, event: ReadRespondedEvent| {
+        .on(move |_ctx, event: RespondBidirectionalEvent| {
             tracing::info!(
                 request_id = %hex::encode(event.request_id),
                 responder = ?event.responder,
                 serialized_output_len = event.serialized_output.len(),
-                "received ReadRespondedEvent",
+                "received RespondBidirectionalEvent",
             );
 
             if event.request_id != expected_request_id {
@@ -633,16 +646,17 @@ pub async fn wait_for_read_respond(
             let signature_result = parse_sol_signature(&event.signature);
             if let Ok(mut sender) = tx.lock() {
                 if let Some(sender) = sender.take() {
-                    let outcome =
-                        signature_result.map(|(signature, recovery_id)| SolReadRespondOutcome {
+                    let outcome = signature_result.map(|(signature, recovery_id)| {
+                        SolRespondBidirectionalOutcome {
                             request_id: event.request_id,
                             responder: event.responder.to_string(),
                             serialized_output: event.serialized_output.clone(),
                             signature,
                             recovery_id,
-                        });
+                        }
+                    });
                     if sender.send(outcome).is_err() {
-                        tracing::error!("failed to send ReadRespondedEvent outcome");
+                        tracing::error!("failed to send RespondBidirectionalEvent outcome");
                     }
                 }
             }
@@ -651,16 +665,16 @@ pub async fn wait_for_read_respond(
 
     tracing::info!(
         request_id = %hex::encode(expected_request_id),
-        "subscribed to ReadRespondedEvent, waiting for MPC read respond...",
+        "subscribed to RespondBidirectionalEvent, waiting for MPC response...",
     );
     let result = tokio::time::timeout(timeout, rx).await;
     event_unsub.unsubscribe().await;
 
     match result {
         Ok(Ok(Ok(outcome))) => Ok(outcome),
-        Ok(Ok(Err(e))) => anyhow::bail!("failed to parse sol read respond signature: {e}"),
-        Ok(Err(_)) => anyhow::bail!("sol read respond event channel closed unexpectedly"),
-        Err(_) => anyhow::bail!("timeout waiting for read respond on sol"),
+        Ok(Ok(Err(e))) => anyhow::bail!("failed to parse sol respond bidirectional signature: {e}"),
+        Ok(Err(_)) => anyhow::bail!("sol respond bidirectional event channel closed unexpectedly"),
+        Err(_) => anyhow::bail!("timeout waiting for respond bidirectional on sol"),
     }
 }
 

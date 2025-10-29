@@ -94,9 +94,9 @@ async fn test_solana_signature_first_phase_bidirectional() -> anyhow::Result<()>
         .solana()
         .bidirectional()
         .transaction_data(unsigned_rlp)
-        .slip44_chain_id(60)
-        .explorer_deserialization(0, Vec::new())
-        .callback_serialization(0, Vec::new())
+        .caip2_id("eip155:60")
+        .output_deserialization_schema(Vec::new())
+        .respond_serialization_schema(Vec::new())
         .payload(payload)
         .path(path)
         .key_version(key_version)
@@ -186,9 +186,9 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         .solana()
         .bidirectional()
         .transaction_data(unsigned_rlp.clone())
-        .slip44_chain_id(60)
-        .explorer_deserialization(0, Vec::new())
-        .callback_serialization(0, Vec::new())
+        .caip2_id("eip155:60")
+        .output_deserialization_schema(Vec::new())
+        .respond_serialization_schema(Vec::new())
         .payload(msg_hash_bytes)
         .payload_hash(msg_hash_bytes)
         .path(path)
@@ -269,7 +269,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         );
     }
 
-    let read_outcome = actions::sign::wait_for_read_respond(
+    let read_outcome = actions::sign::wait_for_respond_bidirectional(
         solana,
         sol_outcome.request_id,
         Duration::from_secs(120),
@@ -278,7 +278,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
 
     assert_eq!(
         read_outcome.request_id, sol_outcome.request_id,
-        "read respond event request_id mismatch"
+        "respond bidirectional event request_id mismatch"
     );
 
     Ok(())
