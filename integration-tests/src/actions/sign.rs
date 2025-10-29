@@ -33,7 +33,7 @@ use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
 use crate::containers;
 
-use signet_program::{RespondBidirectionalEvent, SignatureRespondedEvent};
+use signet_program::{ReadRespondedEvent, SignatureRespondedEvent};
 
 // ChainSignatures contract ABI
 alloy::sol! {
@@ -618,12 +618,12 @@ pub async fn wait_for_read_respond(
     let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
 
     let event_unsub = program
-        .on(move |_ctx, event: RespondBidirectionalEvent| {
+        .on(move |_ctx, event: ReadRespondedEvent| {
             tracing::info!(
                 request_id = %hex::encode(event.request_id),
                 responder = ?event.responder,
                 serialized_output_len = event.serialized_output.len(),
-                "received RespondBidirectionalEvent",
+                "received ReadRespondedEvent",
             );
 
             if event.request_id != expected_request_id {
@@ -642,7 +642,7 @@ pub async fn wait_for_read_respond(
                             recovery_id,
                         });
                     if sender.send(outcome).is_err() {
-                        tracing::error!("failed to send RespondBidirectionalEvent outcome");
+                        tracing::error!("failed to send ReadRespondedEvent outcome");
                     }
                 }
             }
@@ -651,7 +651,7 @@ pub async fn wait_for_read_respond(
 
     tracing::info!(
         request_id = %hex::encode(expected_request_id),
-        "subscribed to RespondBidirectionalEvent, waiting for MPC read respond...",
+        "subscribed to ReadRespondedEvent, waiting for MPC read respond...",
     );
     let result = tokio::time::timeout(timeout, rx).await;
     event_unsub.unsubscribe().await;

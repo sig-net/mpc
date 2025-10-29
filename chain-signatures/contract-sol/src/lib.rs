@@ -40,7 +40,7 @@ pub mod signet_program {
         Ok(())
     }
 
-    pub fn respond_bidirectional(
+    pub fn read_respond(
         ctx: Context<ReadRespond>,
         request_id: [u8; 32],
         serialized_output: Vec<u8>,
@@ -50,7 +50,7 @@ pub mod signet_program {
         // - nonce too low
         // - balance too low
         // - literal on chain error
-        emit!(RespondBidirectionalEvent {
+        emit!(ReadRespondedEvent {
             request_id,
             responder: *ctx.accounts.responder.key,
             serialized_output,
@@ -197,7 +197,7 @@ pub struct SignatureRespondedEvent {
 }
 
 #[event]
-pub struct RespondBidirectionalEvent {
+pub struct ReadRespondedEvent {
     pub request_id: [u8; 32],
     pub responder: Pubkey,
     pub serialized_output: Vec<u8>,

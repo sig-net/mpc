@@ -1301,8 +1301,8 @@ async fn execute_batch_publish(
 
 use signet_program::accounts::ReadRespond as SolanaReadRespondAccount;
 use signet_program::accounts::Respond as SolanaRespondAccount;
+use signet_program::instruction::ReadRespond as SolanaReadRespond;
 use signet_program::instruction::Respond as SolanaRespond;
-use signet_program::instruction::RespondBidirectional as SolanaRespondBidirectional;
 use signet_program::AffinePoint as SolanaContractAffinePoint;
 use signet_program::Signature as SolanaContractSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
@@ -1385,7 +1385,7 @@ async fn try_publish_sol(
                 .accounts(SolanaReadRespondAccount {
                     responder: sol.payer.clone().try_pubkey().unwrap(),
                 })
-                .args(SolanaRespondBidirectional {
+                .args(SolanaReadRespond {
                     request_id: request_ids[0],
                     serialized_output: respond_bidirectional_serialized_output.clone(),
                     signature: signature.clone(),
