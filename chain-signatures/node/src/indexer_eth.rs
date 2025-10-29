@@ -1423,11 +1423,12 @@ async fn process_bidirectional_requests(
         };
 
         let completed_tx = CompletedTx::new(updated_tx.clone(), block_number);
+        let source_chain = updated_tx.source_chain;
         if status {
             match extract_success_output_with_rpc(client, &updated_tx, block_number).await {
                 Ok(serialized_output) => {
                     match completed_tx.create_sign_request_from_serialized_output(
-                        Chain::Ethereum,
+                        source_chain,
                         serialized_output,
                         total_timeout,
                     ) {
@@ -1449,7 +1450,7 @@ async fn process_bidirectional_requests(
             }
         } else {
             match completed_tx
-                .create_failed_sign_request_without_light_client(Chain::Ethereum, total_timeout)
+                .create_failed_sign_request_without_light_client(source_chain, total_timeout)
                 .await
             {
                 Ok(sign_request) => respond_requests.push(sign_request),
@@ -1490,7 +1491,7 @@ async fn process_bidirectional_requests(
             tx.status = PendingRequestStatus::Failed;
             let completed_tx = CompletedTx::new(tx.clone(), block_number);
             match completed_tx
-                .create_failed_sign_request_without_light_client(Chain::Ethereum, total_timeout)
+                .create_failed_sign_request_without_light_client(tx.source_chain, total_timeout)
                 .await
             {
                 Ok(sign_request) => respond_requests.push(sign_request),

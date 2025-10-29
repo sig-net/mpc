@@ -1,4 +1,5 @@
 use crate::protocol::signature::SignRequest;
+use crate::protocol::Chain;
 use crate::protocol::SignRequestType;
 use crate::respond_bidirectional::SerDeserFormat;
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
@@ -15,6 +16,7 @@ use serde_json::Value;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::io::Write;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Copy)]
 pub struct BidirectionalTxId(pub B256);
@@ -47,6 +49,8 @@ pub struct BidirectionalTx {
     pub id: BidirectionalTxId,
     pub sender: Pubkey,
     pub transaction_data: Vec<u8>,
+    pub source_chain: Chain,
+    pub target_chain: Chain,
     pub caip2_id: String,
     pub key_version: u32,
     pub deposit: u64,
@@ -72,6 +76,13 @@ impl BidirectionalTx {
         };
 
         let unsigned_rlp_data = &event.transaction_data;
+        let target_chain = Chain::from_str(&event.dest).map_err(|err| {
+            anyhow::anyhow!(
+                "invalid target chain '{}' for bidirectional transaction: {err}",
+                event.dest
+            )
+        })?;
+        let source_chain = signature.request.indexed.chain;
 
         let (signed_transaction_hash, nonce) =
             sign_and_hash_transaction(unsigned_rlp_data, signature.signature)?;
@@ -87,6 +98,8 @@ impl BidirectionalTx {
             id: BidirectionalTxId(signed_transaction_hash.into()),
             sender: event.sender,
             transaction_data: event.transaction_data,
+            source_chain,
+            target_chain,
             caip2_id: event.caip2_id,
             key_version: event.key_version,
             deposit: event.deposit,

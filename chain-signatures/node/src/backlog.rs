@@ -260,6 +260,8 @@ mod tests {
             id: BidirectionalTxId(B256::from([id; 32])),
             sender: Pubkey::new_unique(),
             transaction_data: vec![1, 2, 3],
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
             caip2_id: "test_caip2_id".to_string(),
             key_version: 1,
             deposit: 1000,

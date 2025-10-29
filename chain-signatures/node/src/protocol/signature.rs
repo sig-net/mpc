@@ -28,7 +28,6 @@ use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -655,18 +654,7 @@ impl SignatureGenerator {
                         &self.request.indexed.sign_request_type
                     {
                         let source_chain = self.request.indexed.chain;
-                        let target_chain = match Chain::from_str(&event.dest) {
-                            Ok(chain) => chain,
-                            Err(err) => {
-                                tracing::error!(
-                                    ?sign_id,
-                                    ?source_chain,
-                                    ?err,
-                                    "invalid target chain: unable to proceed w/ SignRespond"
-                                );
-                                break Ok(());
-                            }
-                        };
+                        let dest = event.dest.clone();
                         let expected_public_key = mpc_crypto::derive_key(
                             self.public_key,
                             self.request.indexed.args.epsilon,
@@ -683,7 +671,7 @@ impl SignatureGenerator {
                                 tracing::error!(
                                     ?sign_id,
                                     ?source_chain,
-                                    ?target_chain,
+                                    target_chain = ?dest,
                                     ?err,
                                     "failed to generate a valid signature"
                                 );
@@ -700,6 +688,8 @@ impl SignatureGenerator {
 
                         match BidirectionalTx::new(signature) {
                             Ok(tx) => {
+                                let target_chain = tx.target_chain;
+                                let source_chain = tx.source_chain;
                                 self.backlog.insert(target_chain, sign_id, tx).await;
                                 tracing::info!(
                                     ?sign_id,
@@ -712,7 +702,7 @@ impl SignatureGenerator {
                                 tracing::error!(
                                     ?sign_id,
                                     ?source_chain,
-                                    ?target_chain,
+                                    target_chain = ?dest,
                                     ?err,
                                     "failed to create SignRespondTx",
                                 );

@@ -1003,7 +1003,8 @@ async fn send_eth_transaction(
         Duration::from_secs(10),
         contract
             .provider()
-            .get_transaction_count(contract.provider().default_signer_address()),
+            .get_transaction_count(contract.provider().default_signer_address())
+            .pending(),
     )
     .await
     {
