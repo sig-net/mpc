@@ -208,17 +208,6 @@ async fn test_sign_request_retries_after_failure() {
         dropper.enable();
     }
 
-    // Signature timeout should abort the task in 1seconds.
-    let drop_handle = {
-        let droppers = droppers.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            for dropper in &droppers {
-                dropper.disable();
-            }
-        })
-    };
-
     tokio::time::timeout(
         Duration::from_millis(300),
         network.wait_for_presignatures(2),
@@ -232,11 +221,38 @@ async fn test_sign_request_retries_after_failure() {
     }
 
     let start = std::time::Instant::now();
+
+    // Wait until at least one signature attempt is dropped to prove a retry occurred.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let dropped = droppers
+                .iter()
+                .map(SignatureDropper::dropped)
+                .sum::<usize>();
+
+            if dropped > 0 {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("expected to drop at least one signature message while filters enabled");
+
+    if start.elapsed() < Duration::from_secs(2) {
+        tokio::time::sleep(Duration::from_secs(2) - start.elapsed()).await;
+    }
+
+    for dropper in &droppers {
+        dropper.disable();
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     let actions = tokio::time::timeout(Duration::from_secs(20), network.wait_for_actions(1))
         .await
         .expect("should publish RPC action eventually");
-
-    drop_handle.await.unwrap();
 
     let dropped_messages: usize = droppers.iter().map(SignatureDropper::dropped).sum();
     assert!(
