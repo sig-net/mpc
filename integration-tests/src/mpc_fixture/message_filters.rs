@@ -30,19 +30,19 @@ impl SignatureDropper {
 
         let filter: MessageFilter = Box::new(move |send_message: &SendMessage| {
             if !filter_enabled.load(Ordering::SeqCst) {
-                return true;
+                return false;
             }
 
             let (message, (from, _, _)) = send_message;
             if *from != filter_participant {
-                return true;
+                return false;
             }
 
             if matches!(message, protocol::Message::Signature(_)) {
                 filter_dropped.fetch_add(1, Ordering::SeqCst);
-                false
-            } else {
                 true
+            } else {
+                false
             }
         });
 

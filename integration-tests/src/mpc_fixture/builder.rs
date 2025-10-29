@@ -318,6 +318,7 @@ impl MpcFixtureBuilder {
     }
 
     /// Specify a method that acts as message filter for all sent messages the given node.
+    /// if the filter returns true, the message is dropped, otherwise it is sent.
     pub fn with_outgoing_message_filter(mut self, node_idx: usize, filter: MessageFilter) -> Self {
         self.prepared_nodes[node_idx].messaging.filter.push(filter);
         self
@@ -390,7 +391,7 @@ impl MpcFixtureNodeBuilder {
             inbox,
             outbox,
             channel,
-            filter: vec![Box::new(|_| true)],
+            filter: vec![Box::new(|_| false)],
         };
 
         MpcFixtureNodeBuilder {
