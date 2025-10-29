@@ -406,8 +406,8 @@ async fn test_presignature_timeout() {
     fn create_filter() -> MessageFilter {
         let mut drop_counter = 20;
         Box::new(move |(msg, _)| {
-            let should_drop = matches!(msg, mpc_node::protocol::Message::Presignature(_))
-                && drop_counter > 0;
+            let should_drop =
+                matches!(msg, mpc_node::protocol::Message::Presignature(_)) && drop_counter > 0;
 
             if should_drop {
                 drop_counter -= 1;
