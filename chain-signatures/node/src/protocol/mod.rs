@@ -18,7 +18,7 @@ pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
 pub use mpc_primitives::Chain;
-pub use signature::{IndexedSignRequest, SignQueue};
+pub use signature::IndexedSignRequest;
 use signet_program::SignBidirectionalEvent;
 pub use state::{Node, NodeState};
 

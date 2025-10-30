@@ -354,6 +354,54 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
     }
 }
 
+/// A single posit counter that tracks participants accepting/rejecting a proposal.
+/// This is used by individual signature tasks instead of the global Posits mapping.
+pub struct SinglePositCounter {
+    participants: HashSet<Participant>,
+    rejects: HashSet<Participant>,
+    pub accepts: HashSet<Participant>,
+}
+
+impl SinglePositCounter {
+    pub fn new(me: Participant, participants: &[Participant]) -> Self {
+        let mut accepts = HashSet::new();
+        accepts.insert(me);
+        Self {
+            participants: participants.iter().copied().collect(),
+            rejects: HashSet::new(),
+            accepts,
+        }
+    }
+
+    pub fn enough_accepts(&self, threshold: usize) -> bool {
+        self.accepts.len() >= threshold
+    }
+
+    pub fn enough_rejects(&self, threshold: usize) -> bool {
+        self.rejects.len() > self.participants.len() - threshold
+    }
+
+    pub fn meets_totality(&self) -> bool {
+        self.accepts.len() + self.rejects.len() == self.participants.len()
+    }
+
+    pub fn process_action(&mut self, from: Participant, action: &PositAction) -> bool {
+        if !self.participants.contains(&from) {
+            return false;
+        }
+        match action {
+            PositAction::Accept => {
+                self.accepts.insert(from);
+            }
+            PositAction::Reject => {
+                self.rejects.insert(from);
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
