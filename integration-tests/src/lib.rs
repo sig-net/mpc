@@ -101,6 +101,15 @@ impl Nodes {
         }
     }
 
+    /// Returns the URL that should be used by the visualizer backend running on the host machine.
+    /// For Docker nodes, this returns the localhost-mapped address. For local nodes, same as url().
+    pub fn visualizer_url(&self, id: usize) -> &str {
+        match self {
+            Nodes::Local { nodes, .. } => &nodes[id].address,
+            Nodes::Docker { nodes, .. } => &nodes[id].local_address,
+        }
+    }
+
     pub fn account_id(&self, id: usize) -> &AccountId {
         match self {
             Nodes::Local { nodes, .. } => nodes[id].account.id(),

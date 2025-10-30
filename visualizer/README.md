@@ -49,7 +49,7 @@ The visualizer will automatically:
 You can also run the visualizer standalone:
 
 ```bash
-cargo run --bin visualizer -- 8080 http://node1:3000 http://node2:3000 http://node3:3000
+cargo run -p visualizer -- 8080 http://node1:3000 http://node2:3000 http://node3:3000
 ```
 
 Then open `http://localhost:8080/ui` in your browser.

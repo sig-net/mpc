@@ -252,15 +252,18 @@ impl IntoFuture for ClusterSpawner {
                 let visualizer_port = 8080;
                 let mut node_urls = Vec::new();
                 
+                tracing::info!("=== Visualizer Configuration ===");
                 for i in 0..nodes.len() {
-                    let node_url = nodes.url(i).to_string();
+                    let node_url = nodes.visualizer_url(i).to_string();
+                    tracing::info!("  Node {}: {}", i, node_url);
                     node_urls.push(node_url);
                 }
-
-                tracing::info!("Starting visualizer on port {} with nodes: {:?}", visualizer_port, node_urls);
+                tracing::info!("Starting visualizer on port {} to aggregate {} nodes", visualizer_port, node_urls.len());
 
                 let mut cmd = Command::new("cargo");
                 cmd.arg("run")
+                    .arg("-p")
+                    .arg("visualizer")
                     .arg("--bin")
                     .arg("visualizer")
                     .arg("--")
@@ -274,7 +277,8 @@ impl IntoFuture for ClusterSpawner {
                     .expect("Failed to spawn visualizer");
 
                 let visualizer_url = format!("http://localhost:{}/ui", visualizer_port);
-                tracing::info!("Visualizer UI available at: {}", visualizer_url);
+                tracing::info!("✓ Visualizer UI available at: {}", visualizer_url);
+                tracing::info!("================================");
 
                 // Give it a moment to start up
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;

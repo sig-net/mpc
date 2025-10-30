@@ -59,7 +59,7 @@ async fn my_test() {
 ### Standalone
 
 ```bash
-cargo run --bin visualizer -- 8080 http://node1:3000 http://node2:3000 http://node3:3000
+cargo run -p visualizer -- 8080 http://node1:3000 http://node2:3000 http://node3:3000
 ```
 
 Then open http://localhost:8080/ui
@@ -207,3 +207,31 @@ The visualizer infrastructure is **complete and functional**:
 - ✅ State tracking infrastructure (ready for integration)
 
 To see actual sign request data, follow the "Future Work" section to integrate the `VisualizerState` into the protocol. The groundwork is all in place!
+
+## How It Works
+
+When you call `cluster::spawn().visualize()`:
+
+1. **Cluster spawns nodes** - Integration test framework starts all MPC nodes (e.g., 3 nodes)
+2. **Extracts node URLs** - Automatically collects the URLs of all spawned nodes
+3. **Launches visualizer backend** - Spawns the visualizer service with:
+   ```bash
+   cargo run -p visualizer -- 8080 http://node0:3000 http://node1:3000 http://node2:3000
+   ```
+4. **Backend polls nodes** - Visualizer automatically polls all nodes every 500ms
+5. **UI updates in real-time** - Frontend displays aggregated data from all nodes
+
+### Example Log Output
+
+When you run with visualizer enabled, you'll see:
+```
+=== Visualizer Configuration ===
+  Node 0: http://127.0.0.1:3001
+  Node 1: http://127.0.0.1:3002
+  Node 2: http://127.0.0.1:3003
+Starting visualizer on port 8080 to aggregate 3 nodes
+✓ Visualizer UI available at: http://localhost:8080/ui
+================================
+```
+
+The visualizer is **automatically pre-populated** with all the nodes from your integration test - no manual configuration needed!
