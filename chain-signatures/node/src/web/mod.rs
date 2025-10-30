@@ -82,6 +82,8 @@ pub async fn run(
         .route("/status", get(status))
         .route("/metrics", get(metrics))
         .route("/debug", get(debug::page))
+        .route("/visualizer/active", get(visualizer_active))
+        .route("/visualizer/completed", get(visualizer_completed))
         .merge(sync);
 
     if cfg!(feature = "bench") {
@@ -267,6 +269,40 @@ async fn sync(
         .with_label_values(&["sync", state.my_account_id.as_str()])
         .observe(start.elapsed().as_millis() as f64);
     Ok(Json(()))
+}
+
+// Placeholder visualizer endpoints that return empty arrays
+// These can be enhanced later to track actual sign request lifecycle
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignRequestView {
+    pub sign_id: String,
+    pub sign_request_type: String,
+    pub status: String,
+    pub time_in_status_ms: u64,
+    pub time_since_last_action_ms: u64,
+    pub messages_sent: usize,
+    pub messages_received: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletedSignRequestView {
+    pub sign_id: String,
+    pub sign_request_type: String,
+    pub total_time_ms: u64,
+    pub messages_sent: usize,
+    pub messages_received: usize,
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn visualizer_active() -> Result<Json<Vec<SignRequestView>>> {
+    // TODO: Implement actual tracking
+    Ok(Json(vec![]))
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn visualizer_completed() -> Result<Json<Vec<CompletedSignRequestView>>> {
+    // TODO: Implement actual tracking
+    Ok(Json(vec![]))
 }
 
 #[cfg(not(feature = "debug-page"))]

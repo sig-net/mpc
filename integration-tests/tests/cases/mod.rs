@@ -472,3 +472,22 @@ async fn wait_for_resharing_phase(
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
+
+
+
+#[tokio::test]
+async fn test_visualizer() {
+    let cluster = cluster::spawn()
+        .nodes(3)
+        .visualize()  // Enable visualizer
+        .await
+        .unwrap();
+
+    // Visualizer UI available at http://localhost:8080/ui
+
+    cluster.sign().await.unwrap();
+    cluster.sign().await.unwrap();
+    cluster.sign().await.unwrap();
+
+    tokio::time::sleep(Duration::from_secs(10000)).await;
+}

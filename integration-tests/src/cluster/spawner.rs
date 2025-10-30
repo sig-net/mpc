@@ -6,6 +6,7 @@ use near_workspaces::{Account, Worker};
 
 use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
+use std::process::{Child, Command};
 
 use crate::containers::{self, DockerClient};
 use crate::utils::dev_gen_indexed;
@@ -39,6 +40,7 @@ pub struct ClusterSpawner {
     pub worker: Option<Worker<Sandbox>>,
     prestockpile: Option<Prestockpile>,
     pub use_ethereum: bool,
+    pub enable_visualizer: bool,
 }
 
 impl Default for ClusterSpawner {
@@ -67,6 +69,7 @@ impl Default for ClusterSpawner {
             worker: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             use_ethereum: false,
+            enable_visualizer: false,
         }
     }
 }
@@ -135,6 +138,11 @@ impl ClusterSpawner {
 
     pub fn ethereum(mut self) -> Self {
         self.use_ethereum = true;
+        self
+    }
+
+    pub fn visualize(mut self) -> Self {
+        self.enable_visualizer = true;
         self
     }
 
@@ -215,6 +223,17 @@ impl ClusterSpawner {
     }
 }
 
+pub struct VisualizerHandle {
+    pub process: Child,
+    pub url: String,
+}
+
+impl Drop for VisualizerHandle {
+    fn drop(&mut self) {
+        let _ = self.process.kill();
+    }
+}
+
 impl IntoFuture for ClusterSpawner {
     type Output = anyhow::Result<Cluster>;
     type IntoFuture = std::pin::Pin<Box<dyn Future<Output = Self::Output> + Send>>;
@@ -228,6 +247,46 @@ impl IntoFuture for ClusterSpawner {
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
 
+            // Spawn visualizer if enabled
+            let visualizer_handle = if self.enable_visualizer {
+                let visualizer_port = 8080;
+                let mut node_urls = Vec::new();
+                
+                for i in 0..nodes.len() {
+                    let node_url = nodes.url(i).to_string();
+                    node_urls.push(node_url);
+                }
+
+                tracing::info!("Starting visualizer on port {} with nodes: {:?}", visualizer_port, node_urls);
+
+                let mut cmd = Command::new("cargo");
+                cmd.arg("run")
+                    .arg("--bin")
+                    .arg("visualizer")
+                    .arg("--")
+                    .arg(visualizer_port.to_string());
+                
+                for url in &node_urls {
+                    cmd.arg(url);
+                }
+
+                let child = cmd.spawn()
+                    .expect("Failed to spawn visualizer");
+
+                let visualizer_url = format!("http://localhost:{}/ui", visualizer_port);
+                tracing::info!("Visualizer UI available at: {}", visualizer_url);
+
+                // Give it a moment to start up
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+                Some(VisualizerHandle {
+                    process: child,
+                    url: visualizer_url,
+                })
+            } else {
+                None
+            };
+
             let cluster = Cluster {
                 cfg: self.cfg,
                 rpc_client,
@@ -235,6 +294,7 @@ impl IntoFuture for ClusterSpawner {
                 docker_client: self.docker,
                 account_idx: nodes.len(),
                 nodes,
+                visualizer_handle,
             };
 
             if self.wait_for_running {

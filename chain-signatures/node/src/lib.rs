@@ -16,4 +16,5 @@ pub mod sign_bidirectional;
 pub mod storage;
 pub mod types;
 pub mod util;
+pub mod visualizer;
 pub mod web;

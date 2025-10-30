@@ -38,6 +38,7 @@ pub struct Cluster {
     http_client: reqwest::Client,
     pub nodes: Nodes,
     pub account_idx: usize,
+    pub visualizer_handle: Option<spawner::VisualizerHandle>,
 }
 
 impl Cluster {
