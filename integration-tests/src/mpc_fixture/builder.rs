@@ -21,7 +21,7 @@ use mpc_node::protocol::contract::{InitializingContractState, RunningContractSta
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
 use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::triple::Triple;
-use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue};
+use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
 use mpc_node::storage::{
@@ -30,7 +30,7 @@ use mpc_node::storage::{
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::watch;
 use tokio::sync::RwLock;
 
@@ -417,9 +417,9 @@ impl MpcFixtureNodeBuilder {
         let presignature_storage = storage.presignature_storage.clone();
 
         // prepare all channels for the node
-        let (sign_tx, sign_rx) = SignQueue::channel();
+        let (sign_tx, sign_rx) = mpsc::channel(1024);
         const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
-        let (rpc_tx, rpc_rx) = tokio::sync::mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
+        let (rpc_tx, rpc_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         let rpc_channel = RpcChannel { tx: rpc_tx };
         let (mesh_tx, mesh_rx) = watch::channel(context.init_mesh.clone());
         let (config_tx, config_rx) = watch::channel(self.config);
