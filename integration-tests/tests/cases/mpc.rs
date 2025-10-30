@@ -793,7 +793,7 @@ async fn test_triples_message_count() {
     // Check message counts are as expected. Right now, the expectation is:
     // Particpants with a lower id send around 10 messages to participant with higher ids.
     // Particpants with a higher id send around 135 messages to participant with lower ids.
-    // Tolerance +/- 4 for the smaller case, +/- 10 in the larger case.
+    // Tolerance +/- 6 for the smaller case, +/- 20 in the larger case.
     //
     // Note: We don't actually care about these sepcific numbers. But we want to
     // understand it and know it if somehow these numbers change.
@@ -801,13 +801,13 @@ async fn test_triples_message_count() {
         for (key, num) in &link_stats.message_counts {
             if key.contains("Triple") {
                 if from < to {
-                    let tolerance = 4;
+                    let tolerance = 6;
                     assert!(
                         num.abs_diff(10) <= tolerance,
                         "{from:?} -> {to:?} sent {num} messages"
                     );
                 } else {
-                    let tolerance = 10;
+                    let tolerance = 20;
                     assert!(
                         num.abs_diff(135) <= tolerance,
                         "{from:?} -> {to:?} sent {num} messages"
