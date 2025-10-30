@@ -39,8 +39,8 @@ pub type PresignatureId = u64;
 /// that was used to generate it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct FullPresignatureId {
-    id: PresignatureId,
-    pair_id: TripleId,
+    pub id: PresignatureId,
+    pub pair_id: TripleId,
 }
 
 impl FullPresignatureId {

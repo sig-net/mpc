@@ -2,6 +2,7 @@
 //! it with controlled inputs, and assert on outputs.
 
 use crate::containers::Redis;
+use crate::mpc_fixture::message_collector::{CollectMessages, MessagePrinter};
 use cait_sith::protocol::Participant;
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
@@ -41,9 +42,8 @@ pub struct MpcFixtureNode {
 }
 
 /// Logs for reading outputs after a test run for assertions and debugging.
-#[derive(Default)]
 pub struct SharedOutput {
-    pub msg_log: Arc<Mutex<Vec<String>>>,
+    pub msg_log: Arc<Mutex<dyn CollectMessages + Send>>,
     pub rpc_actions: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -72,14 +72,6 @@ impl MpcFixture {
 
             drop(actions);
             tokio::time::sleep(interval).await;
-        }
-    }
-
-    /// Print all messages to debug.
-    pub async fn print_msg_log(&self) {
-        let guard = self.output.msg_log.lock().await;
-        for msg in guard.iter() {
-            tracing::debug!("{msg}");
         }
     }
 }
@@ -132,5 +124,23 @@ impl std::ops::Index<usize> for MpcFixture {
 impl std::ops::IndexMut<usize> for MpcFixture {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.nodes[index]
+    }
+}
+
+impl SharedOutput {
+    pub fn new<M: CollectMessages + Default + Send + 'static>() -> Self {
+        Self {
+            msg_log: Arc::new(Mutex::new(M::default())),
+            rpc_actions: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+}
+
+impl Default for SharedOutput {
+    fn default() -> Self {
+        Self {
+            msg_log: Arc::new(Mutex::new(MessagePrinter)),
+            rpc_actions: Default::default(),
+        }
     }
 }
