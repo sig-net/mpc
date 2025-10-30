@@ -477,7 +477,8 @@ enum SignatureTaskPhase {
 /// A single signature generation task that combines posit and generator phases
 pub struct SignatureTask {
     sign_id: SignId,
-    presignature_id: PresignatureId,
+    /// Current presignature_id being used (changes on retry)
+    presignature_id: Option<PresignatureId>,
     request: SignRequest,
     phase: SignatureTaskPhase,
     /// The presignature taken from storage, held during posit phase
@@ -506,7 +507,7 @@ impl SignatureTask {
 
         let task = Self {
             sign_id,
-            presignature_id,
+            presignature_id: Some(presignature_id),
             request,
             phase: SignatureTaskPhase::Posit {
                 counter,
@@ -540,6 +541,7 @@ impl SignatureTask {
     }
 
     /// Create a new signature task starting in Posit phase (deliberator mode without presignature)
+    /// Returns Accept message to send back to proposer
     fn new_deliberator(
         me: Participant,
         sign_id: SignId,
@@ -549,12 +551,12 @@ impl SignatureTask {
         participants: Vec<Participant>,
         threshold: usize,
         timeout_total: Duration,
-    ) -> Self {
+    ) -> (Self, PositMessage) {
         let counter = SinglePositCounter::new(me, &participants);
 
-        Self {
+        let task = Self {
             sign_id,
-            presignature_id,
+            presignature_id: Some(presignature_id),
             request,
             phase: SignatureTaskPhase::Posit {
                 counter,
@@ -566,7 +568,15 @@ impl SignatureTask {
             timeout_total,
             me,
             threshold,
-        }
+        };
+
+        let accept_message = PositMessage {
+            id: PositProtocolId::Signature(sign_id, presignature_id),
+            from: me,
+            action: PositAction::Accept,
+        };
+
+        (task, accept_message)
     }
 
     /// Check if total timeout has been exceeded
@@ -1041,10 +1051,11 @@ pub struct SignatureSpawner {
     ongoing: JoinMap<(SignId, PresignatureId), Result<(), SignError>>,
     /// Sign queue that maintains all requests coming in from indexer.
     sign_queue: SignQueue,
-    /// Consolidated signature tasks combining posit + generation.
-    tasks: HashMap<(SignId, PresignatureId), SignatureTask>,
+    /// Consolidated signature tasks - one per sign_id
+    tasks: HashMap<SignId, SignatureTask>,
     /// Buffer for posit messages that arrived before the task was created
-    pending_posit_messages: HashMap<(SignId, PresignatureId), Vec<(Participant, PositAction)>>,
+    /// Maps sign_id -> list of (presignature_id, from, action)
+    pending_posit_messages: HashMap<SignId, Vec<(PresignatureId, Participant, PositAction)>>,
 
     me: Participant,
     my_account_id: AccountId,
@@ -1116,22 +1127,24 @@ impl SignatureSpawner {
             self.threshold,
             timeout_total,
         );
-        self.tasks.insert((sign_id, presignature_id), task);
+        self.tasks.insert(sign_id, task);
 
         // Process any pending posit messages that arrived before the task was created
-        if let Some(pending_messages) = self
-            .pending_posit_messages
-            .remove(&(sign_id, presignature_id))
-        {
+        if let Some(pending_messages) = self.pending_posit_messages.remove(&sign_id) {
             tracing::debug!(
                 ?sign_id,
-                presignature_id,
                 count = pending_messages.len(),
                 "draining pending posit messages"
             );
-            for (msg_from, msg_action) in pending_messages {
-                let task = self.tasks.get_mut(&(sign_id, presignature_id)).unwrap();
+            for (msg_presignature_id, msg_from, msg_action) in pending_messages {
+                // Only process messages for the current presignature_id
+                if msg_presignature_id != presignature_id {
+                    continue;
+                }
+                let task = self.tasks.get_mut(&sign_id).unwrap();
                 let result = task.process_message(msg_from, &msg_action);
+                // Extract presignature_id from task for result handling
+                let presignature_id = task.presignature_id.unwrap();
                 self.handle_task_result(sign_id, presignature_id, result, cfg)
                     .await;
             }
@@ -1158,9 +1171,7 @@ impl SignatureSpawner {
         }
 
         // Special case: Propose creates deliberator task if request is available
-        if matches!(action, PositAction::Propose)
-            && !self.tasks.contains_key(&(sign_id, presignature_id))
-        {
+        if matches!(action, PositAction::Propose) && !self.tasks.contains_key(&sign_id) {
             // Check if we have the request in our sign queue
             if let Some(request) = self.sign_queue.requests.get(&sign_id).cloned() {
                 // Verify proposer matches
@@ -1186,10 +1197,10 @@ impl SignatureSpawner {
                     return;
                 }
 
-                // Create deliberator task
+                // Create deliberator task - it returns Accept message to send
                 let participants = request.stable.iter().copied().collect::<Vec<_>>();
                 let timeout_total = request.indexed.total_timeout;
-                let task = SignatureTask::new_deliberator(
+                let (task, accept_message) = SignatureTask::new_deliberator(
                     self.me,
                     sign_id,
                     presignature_id,
@@ -1199,49 +1210,43 @@ impl SignatureSpawner {
                     self.threshold,
                     timeout_total,
                 );
-                self.tasks.insert((sign_id, presignature_id), task);
+                self.tasks.insert(sign_id, task);
 
                 // Process any buffered messages for this task
-                if let Some(pending_messages) = self
-                    .pending_posit_messages
-                    .remove(&(sign_id, presignature_id))
-                {
-                    for (msg_from, msg_action) in pending_messages {
-                        let task = self.tasks.get_mut(&(sign_id, presignature_id)).unwrap();
+                if let Some(pending_messages) = self.pending_posit_messages.remove(&sign_id) {
+                    for (msg_presignature_id, msg_from, msg_action) in pending_messages {
+                        // Only process messages for the current presignature_id
+                        if msg_presignature_id != presignature_id {
+                            continue;
+                        }
+                        let task = self.tasks.get_mut(&sign_id).unwrap();
                         let result = task.process_message(msg_from, &msg_action);
+                        let presignature_id = task.presignature_id.unwrap();
                         self.handle_task_result(sign_id, presignature_id, result, cfg)
                             .await;
                     }
                 }
 
                 // Send Accept back
-                self.msg
-                    .send(
-                        self.me,
-                        from,
-                        PositMessage {
-                            id: PositProtocolId::Signature(sign_id, presignature_id),
-                            from: self.me,
-                            action: PositAction::Accept,
-                        },
-                    )
-                    .await;
+                self.msg.send(self.me, from, accept_message).await;
                 return;
             }
             // Request not available yet - buffer the Propose
         }
 
         // If task exists, forward to it
-        if let Some(task) = self.tasks.get_mut(&(sign_id, presignature_id)) {
+        if let Some(task) = self.tasks.get_mut(&sign_id) {
             let result = task.process_message(from, &action);
-            self.handle_task_result(sign_id, presignature_id, result, cfg)
+            // Use presignature_id from the message or task
+            let task_presignature_id = task.presignature_id.unwrap_or(presignature_id);
+            self.handle_task_result(sign_id, task_presignature_id, result, cfg)
                 .await;
         } else {
             // No task - buffer message
             self.pending_posit_messages
-                .entry((sign_id, presignature_id))
+                .entry(sign_id)
                 .or_insert_with(Vec::new)
-                .push((from, action));
+                .push((presignature_id, from, action));
         }
     }
 
@@ -1316,7 +1321,7 @@ impl SignatureSpawner {
                 );
 
                 // Extract proposer from task
-                let task = self.tasks.get(&(sign_id, presignature_id)).unwrap();
+                let task = self.tasks.get(&sign_id).unwrap();
                 let proposer = match &task.phase {
                     SignatureTaskPhase::Posit { proposer, .. } => *proposer,
                     _ => {
@@ -1341,7 +1346,7 @@ impl SignatureSpawner {
         cfg: &ProtocolConfig,
     ) {
         // Extract presignature from task
-        let task = self.tasks.get_mut(&(sign_id, presignature_id)).unwrap();
+        let task = self.tasks.get_mut(&sign_id).unwrap();
         let presignature = if let Some(taken) = task.presignature.take() {
             PendingPresignature::Available(taken)
         } else {
@@ -1442,12 +1447,9 @@ impl SignatureSpawner {
         // Process buffered Propose messages now that requests have been organized
         // This allows deliberator tasks to be created if the request arrived after the Propose
         let pending_keys: Vec<_> = self.pending_posit_messages.keys().copied().collect();
-        for (sign_id, presignature_id) in pending_keys {
-            if let Some(pending_msgs) = self
-                .pending_posit_messages
-                .remove(&(sign_id, presignature_id))
-            {
-                for (from, action) in pending_msgs {
+        for sign_id in pending_keys {
+            if let Some(pending_msgs) = self.pending_posit_messages.remove(&sign_id) {
+                for (presignature_id, from, action) in pending_msgs {
                     self.handle_posit_message(sign_id, presignature_id, from, action, cfg)
                         .await;
                 }
@@ -1514,9 +1516,10 @@ impl SignatureSpawner {
                     let posit_timeout = Duration::from_secs(60);
                     let expired_tasks: Vec<_> = self.tasks.iter_mut()
                         .filter(|(_, task)| task.in_posit_phase() && task.created.elapsed() >= posit_timeout)
-                        .filter_map(|((sign_id, presignature_id), task)| {
+                        .filter_map(|(sign_id, task)| {
+                            let presignature_id = task.presignature_id?;
                             task.handle_posit_expiration(self.threshold)
-                                .map(|action| ((*sign_id, *presignature_id), action))
+                                .map(|action| ((*sign_id, presignature_id), action))
                         })
                         .collect();
 
@@ -1551,7 +1554,7 @@ impl SignatureSpawner {
                                 }
 
                                 // Extract presignature and start generation
-                                let task = self.tasks.get_mut(&(sign_id, presignature_id)).unwrap();
+                                let task = self.tasks.get_mut(&sign_id).unwrap();
                                 let presignature = if let Some(taken) = task.presignature.take() {
                                     // Proposer has presignature already
                                     PendingPresignature::Available(taken)
@@ -1604,8 +1607,7 @@ impl SignatureSpawner {
                         Ok(()) | Err(SignError::TotalTimeout) | Err(SignError::Aborted) => {
                             self.sign_queue.remove(sign_id);
                             // Also clean up any associated tasks
-                            // Find and remove tasks for this sign_id
-                            self.tasks.retain(|(sid, _), _| sid != &sign_id);
+                            self.tasks.remove(&sign_id);
                         }
                     }
                 }
