@@ -758,30 +758,17 @@ impl SignatureTask {
         cfg: ProtocolConfig,
         mut task_rx: mpsc::Receiver<SignatureTaskMessage>,
     ) -> Result<(), SignError> {
-        let created = Instant::now();
-        let timeout_total = indexed.total_timeout;
         let mut round = 0;
 
         tracing::info!(
             ?sign_id,
             ?me,
-            ?timeout_total,
             "signature task starting with organizing loop"
         );
 
         // Main retry loop - on failure, go back to organizing
+        // Tasks will retry indefinitely until they succeed
         loop {
-            // Check total timeout
-            if created.elapsed() >= timeout_total {
-                tracing::warn!(
-                    ?sign_id,
-                    ?round,
-                    elapsed = ?created.elapsed(),
-                    "signature task total timeout exceeded"
-                );
-                return Err(SignError::Aborted);
-            }
-
             // Phase 1: Organizing - select proposer from stable participants
             tracing::debug!(?sign_id, ?round, "entering organizing phase");
 
