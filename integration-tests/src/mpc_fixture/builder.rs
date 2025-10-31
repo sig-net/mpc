@@ -556,5 +556,5 @@ async fn redis() -> Redis {
         .await
         .expect("failed setting up redis container");
 
-    crate::containers::Redis::run(&spawner).await
+    crate::containers::Redis::run(&spawner.docker, &spawner.network).await
 }

@@ -11,9 +11,8 @@ use crate::containers::{self, DockerClient};
 use crate::utils::dev_gen_indexed;
 use crate::{execute, NodeConfig, Nodes};
 
-use crate::cluster::Cluster;
+use crate::cluster::{Cluster, DEFAULT_DOCKER_NETWORK};
 
-const DOCKER_NETWORK: &str = "mpc_it_network";
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
 
@@ -56,7 +55,7 @@ impl Default for ClusterSpawner {
             release: true,
             env: ENV.to_string(),
             gcp_project_id: GCP_PROJECT_ID.to_string(),
-            network: DOCKER_NETWORK.to_string(),
+            network: DEFAULT_DOCKER_NETWORK.to_string(),
             accounts: Vec::with_capacity(cfg.nodes),
             participants: Vec::with_capacity(cfg.nodes),
             tmp_dir,
@@ -166,7 +165,7 @@ impl ClusterSpawner {
     }
 
     pub async fn spawn_redis(&self) -> containers::Redis {
-        containers::Redis::run(self).await
+        containers::Redis::run(&self.docker, &self.network).await
     }
 
     /// Prespawns a redis instance where we're able to make use of it before the nodes are spun

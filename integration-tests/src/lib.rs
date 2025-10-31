@@ -290,7 +290,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     let mut ethereum = None;
     if spawner.use_ethereum {
-        let sandbox = containers::EthereumSandbox::run(spawner).await?;
+        let sandbox = containers::EthereumSandbox::run(&spawner.docker, &spawner.network).await?;
 
         let (client, deployer_address) = eth::client(
             &sandbox.external_http_endpoint,

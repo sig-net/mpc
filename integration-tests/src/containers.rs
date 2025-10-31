@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
 use crate::NodeConfig;
 
@@ -309,18 +308,17 @@ pub struct Redis {
 impl Redis {
     const DEFAULT_REDIS_PORT: u16 = 6379;
 
-    pub async fn run(spawner: &ClusterSpawner) -> Self {
+    pub async fn run(docker: &DockerClient, network: &str) -> Self {
         tracing::info!("Running Redis container...");
         let container = GenericImage::new("redis", "7.4.2")
             .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .with_network(&spawner.network)
+            .with_network(network)
             .start()
             .await
             .unwrap();
-        let network_ip = spawner
-            .docker
-            .get_network_ip_address(&container, &spawner.network)
+        let network_ip = docker
+            .get_network_ip_address(&container, network)
             .await
             .unwrap();
 
@@ -428,7 +426,7 @@ impl EthereumSandbox {
     const DEFAULT_MNEMONIC: &'static str =
         "test test test test test test test test test test test junk";
 
-    pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Self> {
+    pub async fn run(docker: &DockerClient, network: &str) -> anyhow::Result<Self> {
         let chain_id_arg = Self::DEFAULT_CHAIN_ID.to_string();
         let command = vec![
             "anvil".to_string(),
@@ -443,7 +441,7 @@ impl EthereumSandbox {
         let request = if cfg!(feature = "docker-test") {
             GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
                 .with_exposed_port(Self::RPC_PORT.tcp())
-                .with_network(&spawner.network)
+                .with_network(network)
                 .with_cmd(command.clone())
         } else {
             GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
@@ -453,13 +451,10 @@ impl EthereumSandbox {
 
         let container = request.start().await?;
 
-        let secret_key = extract_secret_key(&spawner.docker, container.id()).await?;
+        let secret_key = extract_secret_key(docker, container.id()).await?;
 
         let (internal_http_endpoint, external_http_endpoint) = if cfg!(feature = "docker-test") {
-            let network_ip = spawner
-                .docker
-                .get_network_ip_address(&container, &spawner.network)
-                .await?;
+            let network_ip = docker.get_network_ip_address(&container, network).await?;
 
             let external_port = container
                 .get_host_port_ipv4(Self::RPC_PORT)

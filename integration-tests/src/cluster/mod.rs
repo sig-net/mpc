@@ -1,4 +1,9 @@
+pub mod env;
 pub mod spawner;
+
+pub const DEFAULT_DOCKER_NETWORK: &str = "mpc_it_network";
+
+pub use env::ClusterEnv;
 
 use std::collections::HashSet;
 
