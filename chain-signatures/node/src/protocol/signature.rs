@@ -371,8 +371,6 @@ impl SignQueue {
 
 #[derive(Debug, Clone, Copy)]
 enum SignError {
-    Retry,
-    TotalTimeout,
     Aborted,
 }
 
@@ -457,12 +455,16 @@ enum SignatureTaskMessageResult {
     CreateDeliberator { from: Participant },
 }
 
-/// Represents a complete signature workflow including posit negotiation and signature generation.
-/// This task goes through three phases:
-/// 1. Posit: Handles consensus on who should be the proposer
-/// 2. Generating: Actual signature generation using presignature
-/// 3. Complete: Terminal state tracking success or failure
+/// Represents a complete signature workflow including organizing, posit negotiation and signature generation.
+/// This task goes through four phases:
+/// 1. Organizing: Waits for stable participants, selects proposer, determines our role
+/// 2. Posit: Handles consensus on who should be the proposer
+/// 3. Generating: Actual signature generation using presignature
+/// 4. Complete: Terminal state tracking success or failure
 enum SignatureTaskPhase {
+    /// Organizing phase - waits for stable participants and selects proposer
+    /// On failure, tasks return to this phase to reorganize with new participants
+    Organizing { round: usize },
     /// Posit negotiation phase
     Posit {
         counter: SinglePositCounter,
@@ -729,212 +731,422 @@ impl SignatureTask {
                     ?threshold,
                     "posit expired without enough accepts, aborting"
                 );
-                self.phase = SignatureTaskPhase::Complete(Err(SignError::TotalTimeout));
+                self.phase = SignatureTaskPhase::Complete(Err(SignError::Aborted));
                 Some(SignatureTaskPositAction::Reject)
             }
             _ => None,
         }
     }
 
-    /// Spawn a complete signature task (posit + generation) as an async task
-    /// This handles the entire lifecycle: posit negotiation -> generation -> completion
+    /// Spawn a complete signature task with organizing loop
+    /// This handles the entire lifecycle: organizing -> posit negotiation -> generation -> completion
+    /// On failure during posit or generation, goes back to organizing phase
     #[allow(clippy::too_many_arguments)]
     async fn spawn(
         me: Participant,
         sign_id: SignId,
-        presignature_id: PresignatureId,
-        request: SignRequest,
-        presignature: Option<PresignatureTaken>,
-        participants: Vec<Participant>,
+        indexed: IndexedSignRequest,
         threshold: usize,
         public_key: PublicKey,
         epoch: u64,
         my_account_id: AccountId,
         presignatures: PresignatureStorage,
+        mesh_state: watch::Receiver<MeshState>,
         msg: MessageChannel,
         rpc: RpcChannel,
         sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
         cfg: ProtocolConfig,
         mut task_rx: mpsc::Receiver<SignatureTaskMessage>,
     ) -> Result<(), SignError> {
-        // Phase 1: Posit negotiation
-        let proposer = request.proposer;
-        let is_proposer = me == proposer;
-
-        tracing::debug!(
-            ?sign_id,
-            ?me,
-            ?proposer,
-            is_proposer,
-            "signature task starting"
-        );
-
-        let mut counter = SinglePositCounter::new(me, &participants);
-        let presignature = presignature;
-
-        // If we're a deliberator (not proposer), send Accept to proposer
-        if !is_proposer {
-            tracing::debug!(?sign_id, ?me, ?proposer, "deliberator sending Accept");
-            msg.send(
-                me,
-                proposer,
-                PositMessage {
-                    id: PositProtocolId::Signature(sign_id, presignature_id),
-                    from: me,
-                    action: PositAction::Accept,
-                },
-            )
-            .await;
-            tracing::debug!(?sign_id, ?me, ?proposer, "deliberator sent Accept");
-        }
-
-        // Posit timeout (60 seconds)
-        let posit_timeout = Duration::from_secs(60);
-        let posit_deadline = tokio::time::sleep(posit_timeout);
-        tokio::pin!(posit_deadline);
-
-        let accepted_participants = loop {
-            tokio::select! {
-                Some(task_msg) = task_rx.recv() => {
-                    match task_msg {
-                        SignatureTaskMessage::PositMessage { from, action } => {
-                            // Deliberators: if we receive Start from proposer, begin generation
-                            if !is_proposer && matches!(action, PositAction::Start(_)) {
-                                if from != proposer {
-                                    tracing::warn!(?sign_id, ?from, ?proposer, "received Start from non-proposer, ignoring");
-                                    continue;
-                                }
-                                if let PositAction::Start(participants) = action {
-                                    tracing::info!(?sign_id, ?me, ?participants, "deliberator received Start, beginning generation");
-                                    break participants;
-                                } else {
-                                    unreachable!();
-                                }
-                            }
-
-                            // Proposer: process Accept/Reject votes from deliberators
-                            if is_proposer {
-                                if !counter.process_action(from, &action) {
-                                    continue;
-                                }
-
-                                // Check for enough rejects
-                                if counter.enough_rejects(threshold) {
-                                    tracing::info!(?sign_id, ?from, "received enough REJECTs, aborting");
-                                    return Err(SignError::Aborted);
-                                }
-
-                                // Only complete early if we have totality (everyone voted)
-                                // Otherwise wait for timeout even if we have enough accepts
-                                if counter.meets_totality() {
-                                    let participants = counter.accepts.iter().copied().collect::<Vec<_>>();
-
-                                    // Broadcast Start to all deliberators
-                                    tracing::info!(?sign_id, ?me, ?participants, "proposer broadcasting Start to deliberators");
-                                    for &p in &participants {
-                                        if p == me {
-                                            continue;
-                                        }
-                                        msg.send(
-                                            me,
-                                            p,
-                                            PositMessage {
-                                                id: PositProtocolId::Signature(sign_id, presignature_id),
-                                                from: me,
-                                                action: PositAction::Start(participants.clone()),
-                                            },
-                                        )
-                                        .await;
-                                    }
-
-                                    break participants;
-                                }
-                            }
-                        }
-                    }
-                }
-                _ = &mut posit_deadline => {
-                    // Posit expired - only proposer handles timeout
-                    if is_proposer {
-                        if counter.enough_accepts(threshold) {
-                            tracing::info!(?sign_id, "posit expired with enough accepts");
-                            let participants = counter.accepts.iter().copied().collect::<Vec<_>>();
-
-                            // Broadcast Start to all deliberators
-                            tracing::info!(?sign_id, ?me, ?participants, "proposer broadcasting Start after timeout");
-                            for &p in &participants {
-                                if p == me {
-                                    continue;
-                                }
-                                msg.send(
-                                    me,
-                                    p,
-                                    PositMessage {
-                                        id: PositProtocolId::Signature(sign_id, presignature_id),
-                                        from: me,
-                                        action: PositAction::Start(participants.clone()),
-                                    },
-                                )
-                                .await;
-                            }
-
-                            break participants;
-                        } else {
-                            tracing::info!(?sign_id, "posit expired without enough accepts");
-                            return Err(SignError::TotalTimeout);
-                        }
-                    } else {
-                        // Deliberators should not timeout - they wait for Start from proposer
-                        tracing::warn!(?sign_id, ?me, "deliberator timeout waiting for Start from proposer");
-                        return Err(SignError::TotalTimeout);
-                    }
-                }
-            }
-        };
+        let created = Instant::now();
+        let timeout_total = indexed.total_timeout;
+        let mut round = 0;
 
         tracing::info!(
             ?sign_id,
-            presignature_id,
-            ?accepted_participants,
             ?me,
-            ?proposer,
-            has_presignature = presignature.is_some(),
-            "posit complete, starting generation"
+            ?timeout_total,
+            "signature task starting with organizing loop"
         );
 
-        // Phase 2: Signature generation
-        let presignature = if let Some(taken) = presignature {
-            tracing::info!(?sign_id, ?me, "using available presignature");
-            PendingPresignature::Available(taken)
-        } else {
+        // Main retry loop - on failure, go back to organizing
+        loop {
+            // Check total timeout
+            if created.elapsed() >= timeout_total {
+                tracing::warn!(
+                    ?sign_id,
+                    ?round,
+                    elapsed = ?created.elapsed(),
+                    "signature task total timeout exceeded"
+                );
+                return Err(SignError::Aborted);
+            }
+
+            // Phase 1: Organizing - select proposer from stable participants
+            tracing::debug!(?sign_id, ?round, "entering organizing phase");
+
+            // Helper function to select proposer (copied from organize_request logic)
+            fn proposer_per_round(
+                round: usize,
+                participants: &[Participant],
+                entropy: &[u8; 32],
+            ) -> Participant {
+                let index = entropy[0] as usize + round;
+                participants[index % participants.len()]
+            }
+
+            // Wait for enough stable participants
+            let (stable, proposer, participants) = loop {
+                let stable = mesh_state.borrow().stable.clone();
+                if stable.len() < threshold {
+                    tracing::debug!(
+                        ?sign_id,
+                        stable_count = stable.len(),
+                        ?threshold,
+                        "not enough stable participants, waiting"
+                    );
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+
+                // Get all participants for this request
+                let mut all_participants = if indexed.participants.is_some() {
+                    indexed.participants.clone().unwrap()
+                } else {
+                    // Will need to get from contract participants, but for now use stable
+                    stable.iter().copied().collect::<Vec<_>>()
+                };
+                all_participants.sort();
+
+                // Select proposer from stable participants
+                let max_rounds = round + 512;
+                let (selected_round, proposer) = (round..max_rounds)
+                    .map(|r| {
+                        (
+                            r,
+                            proposer_per_round(r, &all_participants, &indexed.args.entropy),
+                        )
+                    })
+                    .find(|(_, potential_proposer)| stable.contains(potential_proposer))
+                    .unwrap_or_else(|| {
+                        // Fallback: pick a random stable participant
+                        (
+                            max_rounds,
+                            *stable
+                                .iter()
+                                .choose(&mut StdRng::from_seed(indexed.args.entropy))
+                                .unwrap(),
+                        )
+                    });
+
+                round = selected_round;
+                let is_mine = proposer == me;
+
+                tracing::info!(
+                    ?sign_id,
+                    ?round,
+                    ?proposer,
+                    ?me,
+                    is_mine,
+                    stable_count = stable.len(),
+                    "organized: selected proposer"
+                );
+
+                break (stable, proposer, all_participants);
+            };
+
+            let is_proposer = proposer == me;
+            let posit_participants = stable.iter().copied().collect::<Vec<_>>();
+
+            // Phase 2: Get presignature (proposer) or wait for Propose (deliberator)
+            let (presignature_id, presignature) = if is_proposer {
+                // Proposer needs to get a presignature first
+                tracing::info!(?sign_id, ?round, "proposer waiting for presignature");
+                let taken = match tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        if let Some(taken) = presignatures.take_mine(me).await {
+                            break taken;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                })
+                .await
+                {
+                    Ok(taken) => taken,
+                    Err(_) => {
+                        tracing::warn!(
+                            ?sign_id,
+                            ?round,
+                            "proposer timeout waiting for presignature, reorganizing"
+                        );
+                        round += 1;
+                        continue; // Go back to organizing
+                    }
+                };
+
+                let presignature_id = taken.presignature.id;
+                tracing::info!(?sign_id, presignature_id, "proposer got presignature");
+
+                // Send Propose messages to all participants
+                for &p in &posit_participants {
+                    if p == me {
+                        continue;
+                    }
+                    msg.send(
+                        me,
+                        p,
+                        PositMessage {
+                            id: PositProtocolId::Signature(sign_id, presignature_id),
+                            from: me,
+                            action: PositAction::Propose,
+                        },
+                    )
+                    .await;
+                }
+
+                (presignature_id, Some(taken))
+            } else {
+                // Deliberator waits for Propose from proposer
+                tracing::info!(
+                    ?sign_id,
+                    ?round,
+                    ?proposer,
+                    "deliberator waiting for Propose"
+                );
+
+                let presignature_id = match tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        if let Some(task_msg) = task_rx.recv().await {
+                            let SignatureTaskMessage::PositMessage {
+                                presignature_id,
+                                from,
+                                action,
+                            } = task_msg;
+                            if from == proposer && matches!(action, PositAction::Propose) {
+                                tracing::info!(
+                                    ?sign_id,
+                                    presignature_id,
+                                    ?from,
+                                    "deliberator received Propose"
+                                );
+                                break presignature_id;
+                            }
+                        }
+                    }
+                })
+                .await
+                {
+                    Ok(id) => id,
+                    Err(_) => {
+                        tracing::warn!(
+                            ?sign_id,
+                            ?round,
+                            ?proposer,
+                            "deliberator timeout waiting for Propose, reorganizing"
+                        );
+                        round += 1;
+                        continue; // Go back to organizing
+                    }
+                };
+
+                (presignature_id, None)
+            };
+
+            // Phase 3: Posit negotiation
             tracing::info!(
                 ?sign_id,
-                ?me,
-                ?proposer,
                 presignature_id,
-                "will fetch presignature from storage"
+                ?round,
+                is_proposer,
+                "entering posit phase"
             );
-            PendingPresignature::InStorage(presignature_id, proposer, presignatures)
-        };
 
-        let pending_request = PendingRequest::Available(request);
-        tracing::info!(?sign_id, ?me, "creating SignatureGenerator");
-        let generator = SignatureGenerator::new(
-            me,
-            pending_request,
-            presignature,
-            accepted_participants,
-            public_key,
-            cfg,
-            msg,
-            rpc,
-            sign_bidirectional_signature_channel,
-            &my_account_id,
-        )
-        .await
-        .map_err(|_| SignError::Retry)?;
+            let mut counter = SinglePositCounter::new(me, &posit_participants);
 
-        generator.run(me, epoch, my_account_id).await
+            // If we're a deliberator, send Accept to proposer
+            if !is_proposer {
+                msg.send(
+                    me,
+                    proposer,
+                    PositMessage {
+                        id: PositProtocolId::Signature(sign_id, presignature_id),
+                        from: me,
+                        action: PositAction::Accept,
+                    },
+                )
+                .await;
+            }
+
+            let posit_timeout = Duration::from_secs(60);
+            let posit_deadline = tokio::time::sleep(posit_timeout);
+            tokio::pin!(posit_deadline);
+
+            let accepted_participants = loop {
+                tokio::select! {
+                    Some(task_msg) = task_rx.recv() => {
+                        match task_msg {
+                            SignatureTaskMessage::PositMessage { presignature_id: _, from, action } => {
+                                // Deliberators: if we receive Start from proposer, begin generation
+                                if !is_proposer && matches!(action, PositAction::Start(_)) {
+                                    if from != proposer {
+                                        tracing::warn!(?sign_id, ?from, ?proposer, "received Start from non-proposer, ignoring");
+                                        continue;
+                                    }
+                                    if let PositAction::Start(participants) = action {
+                                        tracing::info!(?sign_id, ?me, ?participants, "deliberator received Start");
+                                        break participants;
+                                    }
+                                }
+
+                                // Proposer: process Accept/Reject votes
+                                if is_proposer {
+                                    if !counter.process_action(from, &action) {
+                                        continue;
+                                    }
+
+                                    // Check for enough rejects
+                                    if counter.enough_rejects(threshold) {
+                                        tracing::warn!(?sign_id, ?from, "received enough REJECTs, reorganizing");
+                                        round += 1;
+                                        break Vec::new(); // Signal reorganize
+                                    }
+
+                                    // Check totality
+                                    if counter.meets_totality() {
+                                        let participants = counter.accepts.iter().copied().collect::<Vec<_>>();
+
+                                        // Broadcast Start to deliberators
+                                        tracing::info!(?sign_id, ?me, ?participants, "proposer broadcasting Start");
+                                        for &p in &participants {
+                                            if p == me {
+                                                continue;
+                                            }
+                                            msg.send(
+                                                me,
+                                                p,
+                                                PositMessage {
+                                                    id: PositProtocolId::Signature(sign_id, presignature_id),
+                                                    from: me,
+                                                    action: PositAction::Start(participants.clone()),
+                                                },
+                                            )
+                                            .await;
+                                        }
+
+                                        break participants;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ = &mut posit_deadline => {
+                        if is_proposer {
+                            if counter.enough_accepts(threshold) {
+                                let participants = counter.accepts.iter().copied().collect::<Vec<_>>();
+                                tracing::info!(?sign_id, "posit timeout with enough accepts, broadcasting Start");
+
+                                for &p in &participants {
+                                    if p == me {
+                                        continue;
+                                    }
+                                    msg.send(
+                                        me,
+                                        p,
+                                        PositMessage {
+                                            id: PositProtocolId::Signature(sign_id, presignature_id),
+                                            from: me,
+                                            action: PositAction::Start(participants.clone()),
+                                        },
+                                    )
+                                    .await;
+                                }
+
+                                break participants;
+                            } else {
+                                tracing::warn!(?sign_id, "posit timeout without enough accepts, reorganizing");
+                                round += 1;
+                                break Vec::new(); // Signal reorganize
+                            }
+                        } else {
+                            tracing::warn!(?sign_id, "deliberator posit timeout waiting for Start, reorganizing");
+                            round += 1;
+                            break Vec::new(); // Signal reorganize
+                        }
+                    }
+                }
+            };
+
+            // Check if we need to reorganize
+            if accepted_participants.is_empty() {
+                continue; // Go back to organizing
+            }
+
+            tracing::info!(
+                ?sign_id,
+                presignature_id,
+                ?accepted_participants,
+                "posit complete, starting generation"
+            );
+
+            // Phase 4: Signature generation
+            let presignature_pending = if let Some(taken) = presignature {
+                PendingPresignature::Available(taken)
+            } else {
+                PendingPresignature::InStorage(presignature_id, proposer, presignatures.clone())
+            };
+
+            let request = SignRequest {
+                indexed: indexed.clone(),
+                proposer,
+                stable: stable.clone(),
+                round,
+            };
+
+            let pending_request = PendingRequest::Available(request.clone());
+            let generator = match SignatureGenerator::new(
+                me,
+                pending_request,
+                presignature_pending,
+                accepted_participants,
+                public_key,
+                cfg.clone(),
+                msg.clone(),
+                rpc.clone(),
+                sign_bidirectional_signature_channel.clone(),
+                &my_account_id,
+            )
+            .await
+            {
+                Ok(gen) => gen,
+                Err(err) => {
+                    tracing::warn!(
+                        ?sign_id,
+                        ?round,
+                        ?err,
+                        "failed to create generator, reorganizing"
+                    );
+                    round += 1;
+                    continue; // Go back to organizing
+                }
+            };
+
+            match generator.run(me, epoch, my_account_id.clone()).await {
+                Ok(()) => {
+                    tracing::info!(?sign_id, ?round, "signature generation succeeded");
+                    return Ok(());
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?sign_id,
+                        ?round,
+                        ?err,
+                        "signature generation failed, reorganizing"
+                    );
+                    round += 1;
+                    continue; // Go back to organizing
+                }
+            }
+        }
     }
 }
 
@@ -1064,12 +1276,8 @@ impl SignatureGenerator {
                 Err(SignError::Aborted)
             }
             Err(_err) => {
-                tracing::warn!(
-                    ?sign_id,
-                    presignature_id,
-                    "signature generation timeout, retrying..."
-                );
-                Err(SignError::Retry)
+                tracing::warn!(?sign_id, presignature_id, "signature generation timeout");
+                Err(SignError::Aborted)
             }
         }
     }
@@ -1112,7 +1320,7 @@ impl SignatureGenerator {
                     signature_generator_failures_metric.inc();
                     signature_failures_metric.inc();
                 }
-                break Err(SignError::TotalTimeout);
+                break Err(SignError::Aborted);
             }
 
             let poke_start_time = Instant::now();
@@ -1124,7 +1332,7 @@ impl SignatureGenerator {
                         ?err,
                         "signature generation failed on protocol advancement",
                     );
-                    break Err(SignError::Retry);
+                    break Err(SignError::Aborted);
                 }
             };
 
@@ -1249,6 +1457,7 @@ impl Drop for SignatureGenerator {
 /// Message types that can be sent to a running signature task
 enum SignatureTaskMessage {
     PositMessage {
+        presignature_id: PresignatureId,
         from: Participant,
         action: PositAction,
     },
@@ -1266,6 +1475,8 @@ pub struct SignatureSpawner {
     /// Buffer for posit messages that arrived before the task was created
     /// Maps sign_id -> list of (presignature_id, from, action)
     pending_posit_messages: HashMap<SignId, Vec<(PresignatureId, Participant, PositAction)>>,
+    /// Watch channel for stable participants (needed for task reorganization)
+    mesh_state: watch::Receiver<MeshState>,
 
     me: Participant,
     my_account_id: AccountId,
@@ -1287,6 +1498,7 @@ impl SignatureSpawner {
         epoch: u64,
         sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
         presignatures: &PresignatureStorage,
+        mesh_state: watch::Receiver<MeshState>,
         msg: MessageChannel,
         rpc: RpcChannel,
         sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
@@ -1297,6 +1509,7 @@ impl SignatureSpawner {
             tasks: JoinMap::new(),
             task_channels: HashMap::new(),
             pending_posit_messages: HashMap::new(),
+            mesh_state,
             me,
             my_account_id: my_account_id.clone(),
             threshold,
@@ -1308,46 +1521,17 @@ impl SignatureSpawner {
         }
     }
 
-    /// Creates a proposer task for a new sign request
-    async fn create_proposer_task(
-        &mut self,
-        request: &SignRequest,
-        taken: PresignatureTaken,
-        participants: &[Participant],
-        cfg: &ProtocolConfig,
-    ) {
-        let sign_id = request.indexed.id;
-        let presignature_id = taken.presignature.id;
-        tracing::info!(
-            ?sign_id,
-            presignature_id,
-            "spawning proposer task to generate a new signature"
-        );
+    /// Creates a signature task for a new sign request
+    /// The task will handle organizing, posit, and generation internally
+    async fn create_task(&mut self, indexed: IndexedSignRequest, cfg: &ProtocolConfig) {
+        let sign_id = indexed.id;
+        tracing::info!(?sign_id, "spawning signature task");
 
         // Create channel for task communication
         let (tx, rx) = mpsc::channel(100);
-        self.task_channels.insert(sign_id, tx);
+        self.task_channels.insert(sign_id, tx.clone());
 
-        // Send Propose messages to all participants
-        let participants_vec = participants.to_vec();
-        for &p in &participants_vec {
-            if p == self.me {
-                continue;
-            }
-            self.msg
-                .send(
-                    self.me,
-                    p,
-                    PositMessage {
-                        id: PositProtocolId::Signature(sign_id, presignature_id),
-                        from: self.me,
-                        action: PositAction::Propose,
-                    },
-                )
-                .await;
-        }
-
-        // Process any pending posit messages that arrived before the task was created
+        // Process any pending posit messages
         if let Some(pending_messages) = self.pending_posit_messages.remove(&sign_id) {
             tracing::debug!(
                 ?sign_id,
@@ -1355,36 +1539,29 @@ impl SignatureSpawner {
                 "sending pending posit messages to task"
             );
             for (msg_presignature_id, msg_from, msg_action) in pending_messages {
-                // Only process messages for the current presignature_id
-                if msg_presignature_id != presignature_id {
-                    continue;
-                }
-                if let Some(ch) = self.task_channels.get(&sign_id) {
-                    let _ = ch
-                        .send(SignatureTaskMessage::PositMessage {
-                            from: msg_from,
-                            action: msg_action,
-                        })
-                        .await;
-                }
+                let _ = tx
+                    .send(SignatureTaskMessage::PositMessage {
+                        presignature_id: msg_presignature_id,
+                        from: msg_from,
+                        action: msg_action,
+                    })
+                    .await;
             }
         }
 
-        // Spawn the async task
+        // Spawn the async task with organizing loop
         self.tasks.spawn(
             sign_id,
             SignatureTask::spawn(
                 self.me,
                 sign_id,
-                presignature_id,
-                request.clone(),
-                Some(taken),
-                participants_vec,
+                indexed,
                 self.threshold,
                 self.public_key,
                 self.epoch,
                 self.my_account_id.clone(),
                 self.presignatures.clone(),
+                self.mesh_state.clone(),
                 self.msg.clone(),
                 self.rpc.clone(),
                 self.sign_bidirectional_signature_channel.clone(),
@@ -1394,106 +1571,31 @@ impl SignatureSpawner {
         );
     }
 
-    /// Handle a posit message - creates deliberator task on Propose if request available, otherwise routes to task
+    /// Handle a posit message - routes to existing task or buffers if task not yet created
     async fn handle_posit_message(
         &mut self,
         sign_id: SignId,
         presignature_id: PresignatureId,
         from: Participant,
         action: PositAction,
-        cfg: &ProtocolConfig,
+        _cfg: &ProtocolConfig,
     ) {
         // Ignore messages from ourselves
         if from == self.me {
             return;
         }
 
-        // Special case: Propose creates deliberator task if request is available
-        if matches!(action, PositAction::Propose) && self.task_channels.get(&sign_id).is_none() {
-            tracing::debug!(?sign_id, ?from, "received Propose, checking for request");
-            // Check if we have the request in our sign queue
-            if let Some(request) = self.sign_queue.requests.get(&sign_id).cloned() {
-                tracing::info!(?sign_id, ?from, "creating deliberator task for Propose");
-                // Verify proposer matches
-                if request.proposer != from {
-                    tracing::warn!(
-                        ?sign_id,
-                        presignature_id,
-                        expected_proposer = ?request.proposer,
-                        actual_proposer = ?from,
-                        "rejecting signature posit: proposer mismatch",
-                    );
-                    self.msg
-                        .send(
-                            self.me,
-                            from,
-                            PositMessage {
-                                id: PositProtocolId::Signature(sign_id, presignature_id),
-                                from: self.me,
-                                action: PositAction::Reject,
-                            },
-                        )
-                        .await;
-                    return;
-                }
-
-                // Create deliberator task
-                let participants = request.stable.iter().copied().collect::<Vec<_>>();
-
-                // Create channel for task communication
-                let (tx, rx) = mpsc::channel(100);
-                self.task_channels.insert(sign_id, tx.clone());
-
-                // Process any buffered messages for this task
-                if let Some(pending_messages) = self.pending_posit_messages.remove(&sign_id) {
-                    for (msg_presignature_id, msg_from, msg_action) in pending_messages {
-                        // Only process messages for the current presignature_id
-                        if msg_presignature_id != presignature_id {
-                            continue;
-                        }
-                        let _ = tx
-                            .send(SignatureTaskMessage::PositMessage {
-                                from: msg_from,
-                                action: msg_action,
-                            })
-                            .await;
-                    }
-                }
-
-                // Spawn the deliberator task (no presignature, will fetch from storage)
-                self.tasks.spawn(
-                    sign_id,
-                    SignatureTask::spawn(
-                        self.me,
-                        sign_id,
-                        presignature_id,
-                        request.clone(),
-                        None, // Deliberator fetches from storage
-                        participants,
-                        self.threshold,
-                        self.public_key,
-                        self.epoch,
-                        self.my_account_id.clone(),
-                        self.presignatures.clone(),
-                        self.msg.clone(),
-                        self.rpc.clone(),
-                        self.sign_bidirectional_signature_channel.clone(),
-                        cfg.clone(),
-                        rx,
-                    ),
-                );
-                return;
-            }
-            // Request not available yet - buffer the Propose
-        }
-
         // If task channel exists, forward message to it
         if let Some(ch) = self.task_channels.get(&sign_id) {
             let _ = ch
-                .send(SignatureTaskMessage::PositMessage { from, action })
+                .send(SignatureTaskMessage::PositMessage {
+                    presignature_id,
+                    from,
+                    action,
+                })
                 .await;
         } else {
-            // No task - buffer message
+            // No task yet - buffer message for when task is created
             tracing::debug!(?sign_id, ?from, ?action, "buffering message - no task yet");
             self.pending_posit_messages
                 .entry(sign_id)
@@ -1528,62 +1630,22 @@ impl SignatureSpawner {
             .with_label_values(&[self.my_account_id.as_str()])
             .set(self.sign_queue.len_mine() as i64);
 
-        // Process buffered Propose messages now that requests have been organized
-        // This allows deliberator tasks to be created if the request arrived after the Propose
-        let pending_keys: Vec<_> = self.pending_posit_messages.keys().copied().collect();
-        for sign_id in pending_keys {
-            if let Some(pending_msgs) = self.pending_posit_messages.remove(&sign_id) {
-                for (presignature_id, from, action) in pending_msgs {
-                    self.handle_posit_message(sign_id, presignature_id, from, action, cfg)
-                        .await;
-                }
-            }
-        }
+        // Create tasks for all new requests (not just "mine")
+        // With the organizing loop, tasks determine their role (proposer/deliberator) internally
+        let new_requests: Vec<_> = self
+            .sign_queue
+            .requests
+            .iter()
+            .filter(|(sign_id, _)| !self.task_channels.contains_key(sign_id))
+            .map(|(_, request)| request.indexed.clone())
+            .collect();
 
-        let mut retry = Vec::new();
-        while let Some(taken) = {
-            if self.sign_queue.is_empty_mine() {
-                None
-            } else {
-                self.presignatures.take_mine(self.me).await
-            }
-        } {
-            let Some(my_request) = self.sign_queue.take_mine() else {
-                tracing::warn!(
-                    presignature = ?taken.presignature,
-                    "unexpected, no more requests to handle. presignature will be removed",
-                );
-                continue;
-            };
-
-            let stable = stable.iter().copied().collect::<Vec<_>>();
-            let participants = intersect_vec(&[&stable, &taken.presignature.participants]);
-            if participants.len() < self.threshold {
-                tracing::warn!(
-                    sign_id = ?my_request.indexed.id,
-                    presignature_id = ?taken.presignature.id,
-                    ?participants,
-                    "intersection < threshold, trashing presignature"
-                );
-                retry.push(my_request.indexed.id);
-                continue;
-            }
-
-            self.create_proposer_task(&my_request, taken, &participants, cfg)
-                .await;
-        }
-
-        for sign_id in retry {
-            self.sign_queue.push_failed(sign_id);
+        for indexed in new_requests {
+            self.create_task(indexed, cfg).await;
         }
     }
 
-    async fn run(
-        mut self,
-        contract: ContractStateWatcher,
-        mesh_state: watch::Receiver<MeshState>,
-        cfg: watch::Receiver<Config>,
-    ) {
+    async fn run(mut self, contract: ContractStateWatcher, cfg: watch::Receiver<Config>) {
         let mut check_requests_interval = tokio::time::interval(Duration::from_millis(100));
         let mut posits = self.msg.subscribe_signature_posit().await;
 
@@ -1608,15 +1670,11 @@ impl SignatureSpawner {
                     self.task_channels.remove(&sign_id);
 
                     match result {
-                        Err(SignError::Retry) => {
-                            tracing::info!(?sign_id, "signature task failed, retrying");
-                            self.sign_queue.push_failed(sign_id);
-                        }
                         Ok(()) => {
                             tracing::info!(?sign_id, "signature task completed successfully");
                             self.sign_queue.remove(sign_id);
                         }
-                        Err(SignError::TotalTimeout) | Err(SignError::Aborted) => {
+                        Err(SignError::Aborted) => {
                             tracing::warn!(?sign_id, ?result, "signature task terminated");
                             self.sign_queue.remove(sign_id);
                         }
@@ -1626,7 +1684,7 @@ impl SignatureSpawner {
                     let Some(participants) = contract.participants() else {
                         continue;
                     };
-                    let stable = mesh_state.borrow().stable.clone();
+                    let stable = self.mesh_state.borrow().stable.clone();
                     let protocol = cfg.borrow().protocol.clone();
                     self.handle_requests(&stable, &participants, &protocol).await;
                 }
@@ -1662,17 +1720,14 @@ impl SignatureSpawnerTask {
             epoch,
             ctx.sign_rx.clone(),
             &ctx.presignature_storage,
+            ctx.mesh_state.clone(),
             ctx.msg_channel.clone(),
             ctx.rpc_channel.clone(),
             ctx.sign_bidirectional_signature_channel.clone(),
         );
 
         Self {
-            handle: tokio::spawn(spawner.run(
-                ctx.contract.clone(),
-                ctx.mesh_state.clone(),
-                ctx.config.clone(),
-            )),
+            handle: tokio::spawn(spawner.run(ctx.contract.clone(), ctx.config.clone())),
         }
     }
 
