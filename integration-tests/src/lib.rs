@@ -45,13 +45,13 @@ impl Default for NodeConfig {
                 max_concurrent_generation: 16,
                 max_concurrent_introduction: 2,
                 triple: TripleConfig {
-                    min_triples: 16,
-                    max_triples: 320,
+                    min_triples: 1,
+                    max_triples: 128,
                     ..Default::default()
                 },
                 presignature: PresignatureConfig {
-                    min_presignatures: 16,
-                    max_presignatures: 320,
+                    min_presignatures: 1,
+                    max_presignatures: 128,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -271,8 +271,9 @@ pub struct Context {
 }
 
 pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
+    spawner.ensure_runtime_resources().await?;
+
     let worker = spawner.take_worker().await;
-    spawner.create_accounts(&worker).await;
 
     let mpc_contract = worker
         .dev_deploy(&std::fs::read(

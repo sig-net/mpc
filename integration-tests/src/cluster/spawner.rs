@@ -65,7 +65,7 @@ impl Default for ClusterSpawner {
             wait_for_running: true,
             redis: None,
             worker: None,
-            prestockpile: Some(Prestockpile { multiplier: 4 }),
+            prestockpile: Some(Prestockpile { multiplier: 2 }),
             use_ethereum: false,
         }
     }
@@ -186,6 +186,10 @@ impl ClusterSpawner {
         }
     }
 
+    pub async fn spawn_sandbox() -> anyhow::Result<Worker<Sandbox>> {
+        Ok(near_workspaces::sandbox().await?)
+    }
+
     pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Worker<Sandbox>> {
         if self.worker.is_none() {
             self.worker = Some(near_workspaces::sandbox().await?);
@@ -198,6 +202,36 @@ impl ClusterSpawner {
             Some(worker) => worker,
             None => near_workspaces::sandbox().await.unwrap(),
         }
+    }
+
+    pub async fn ensure_runtime_resources(&mut self) -> anyhow::Result<()> {
+        let needs_worker = self.worker.is_none();
+        let needs_redis = self.redis.is_none();
+
+        match (needs_worker, needs_redis) {
+            (true, true) => {
+                let (worker_result, redis) =
+                    tokio::join!(Self::spawn_sandbox(), self.spawn_redis());
+                let worker = worker_result?;
+                self.worker = Some(worker);
+                self.redis = Some(redis);
+            }
+            (true, false) => {
+                let worker = Self::spawn_sandbox().await?;
+                self.worker = Some(worker);
+            }
+            (false, true) => {
+                self.redis = Some(self.spawn_redis().await);
+            }
+            (false, false) => {}
+        }
+
+        if let Some(worker) = self.worker.as_ref() {
+            let worker = worker.clone();
+            self.create_accounts(&worker).await;
+        }
+
+        Ok(())
     }
 
     pub async fn presetup(&mut self) -> anyhow::Result<&containers::Redis> {
