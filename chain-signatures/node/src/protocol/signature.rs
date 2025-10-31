@@ -798,31 +798,94 @@ impl SignatureTask {
                 Some(task_msg) = task_rx.recv() => {
                     match task_msg {
                         SignatureTaskMessage::PositMessage { from, action } => {
-                            if !counter.process_action(from, &action) {
-                                continue;
+                            // Deliberators: if we receive Start from proposer, begin generation
+                            if !is_proposer && matches!(action, PositAction::Start(_)) {
+                                if from != proposer {
+                                    tracing::warn!(?sign_id, ?from, ?proposer, "received Start from non-proposer, ignoring");
+                                    continue;
+                                }
+                                if let PositAction::Start(participants) = action {
+                                    tracing::info!(?sign_id, ?me, ?participants, "deliberator received Start, beginning generation");
+                                    break participants;
+                                } else {
+                                    unreachable!();
+                                }
                             }
 
-                            // Check for enough rejects
-                            if counter.enough_rejects(threshold) {
-                                tracing::info!(?sign_id, ?from, "received enough REJECTs, aborting");
-                                return Err(SignError::Aborted);
-                            }
+                            // Proposer: process Accept/Reject votes from deliberators
+                            if is_proposer {
+                                if !counter.process_action(from, &action) {
+                                    continue;
+                                }
 
-                            // Only complete early if we have totality (everyone voted)
-                            // Otherwise wait for timeout even if we have enough accepts
-                            if counter.meets_totality() {
-                                break counter.accepts.iter().copied().collect::<Vec<_>>();
+                                // Check for enough rejects
+                                if counter.enough_rejects(threshold) {
+                                    tracing::info!(?sign_id, ?from, "received enough REJECTs, aborting");
+                                    return Err(SignError::Aborted);
+                                }
+
+                                // Only complete early if we have totality (everyone voted)
+                                // Otherwise wait for timeout even if we have enough accepts
+                                if counter.meets_totality() {
+                                    let participants = counter.accepts.iter().copied().collect::<Vec<_>>();
+
+                                    // Broadcast Start to all deliberators
+                                    tracing::info!(?sign_id, ?me, ?participants, "proposer broadcasting Start to deliberators");
+                                    for &p in &participants {
+                                        if p == me {
+                                            continue;
+                                        }
+                                        msg.send(
+                                            me,
+                                            p,
+                                            PositMessage {
+                                                id: PositProtocolId::Signature(sign_id, presignature_id),
+                                                from: me,
+                                                action: PositAction::Start(participants.clone()),
+                                            },
+                                        )
+                                        .await;
+                                    }
+
+                                    break participants;
+                                }
                             }
                         }
                     }
                 }
                 _ = &mut posit_deadline => {
-                    // Posit expired
-                    if counter.enough_accepts(threshold) {
-                        tracing::info!(?sign_id, "posit expired with enough accepts");
-                        break counter.accepts.iter().copied().collect::<Vec<_>>();
+                    // Posit expired - only proposer handles timeout
+                    if is_proposer {
+                        if counter.enough_accepts(threshold) {
+                            tracing::info!(?sign_id, "posit expired with enough accepts");
+                            let participants = counter.accepts.iter().copied().collect::<Vec<_>>();
+
+                            // Broadcast Start to all deliberators
+                            tracing::info!(?sign_id, ?me, ?participants, "proposer broadcasting Start after timeout");
+                            for &p in &participants {
+                                if p == me {
+                                    continue;
+                                }
+                                msg.send(
+                                    me,
+                                    p,
+                                    PositMessage {
+                                        id: PositProtocolId::Signature(sign_id, presignature_id),
+                                        from: me,
+                                        action: PositAction::Start(participants.clone()),
+                                    },
+                                )
+                                .await;
+                            }
+
+                            break participants;
+                        } else {
+                            tracing::info!(?sign_id, "posit expired without enough accepts");
+                            return Err(SignError::TotalTimeout);
+                        }
                     } else {
-                        tracing::info!(?sign_id, "posit expired without enough accepts");
+                        // Deliberators should not timeout - they wait for Start from proposer
+                        tracing::warn!(?sign_id, ?me, "deliberator timeout waiting for Start from proposer");
                         return Err(SignError::TotalTimeout);
                     }
                 }
@@ -833,17 +896,29 @@ impl SignatureTask {
             ?sign_id,
             presignature_id,
             ?accepted_participants,
+            ?me,
+            ?proposer,
+            has_presignature = presignature.is_some(),
             "posit complete, starting generation"
         );
 
         // Phase 2: Signature generation
         let presignature = if let Some(taken) = presignature {
+            tracing::info!(?sign_id, ?me, "using available presignature");
             PendingPresignature::Available(taken)
         } else {
+            tracing::info!(
+                ?sign_id,
+                ?me,
+                ?proposer,
+                presignature_id,
+                "will fetch presignature from storage"
+            );
             PendingPresignature::InStorage(presignature_id, proposer, presignatures)
         };
 
         let pending_request = PendingRequest::Available(request);
+        tracing::info!(?sign_id, ?me, "creating SignatureGenerator");
         let generator = SignatureGenerator::new(
             me,
             pending_request,
