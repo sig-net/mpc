@@ -4026,7 +4026,7 @@ dependencies = [
  "sha2 0.10.8",
  "sha3",
  "thiserror 1.0.69",
- "uuid",
+ "uuid 0.8.2",
 ]
 
 [[package]]
@@ -6166,10 +6166,13 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "anchor-client",
  "anyhow",
  "async-process 1.8.1",
  "backon",
  "bollard",
+ "borsh 1.5.7",
+ "bs58 0.5.1",
  "cait-sith",
  "clap",
  "criterion",
@@ -6197,11 +6200,17 @@ dependencies = [
  "near-workspaces",
  "rand 0.8.5",
  "reqwest 0.11.27",
+ "rlp",
  "secp256k1 0.28.2",
  "serde",
  "serde_json",
+ "sha2 0.10.8",
  "sha3",
  "shell-escape",
+ "signet-program",
+ "solana-client",
+ "solana-sdk",
+ "solana-transaction-status",
  "test-log",
  "testcontainers",
  "thiserror 1.0.69",
@@ -6209,6 +6218,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.20",
  "url 2.5.4",
+ "uuid 1.18.1",
 ]
 
 [[package]]
@@ -7417,11 +7427,8 @@ name = "mpc-node"
 version = "1.10.0"
 dependencies = [
  "alloy",
- "alloy-consensus",
  "alloy-dyn-abi",
- "alloy-json-abi",
  "alloy-primitives",
- "alloy-rlp",
  "alloy-signer-local",
  "alloy-sol-types",
  "anchor-client",
@@ -7438,7 +7445,6 @@ dependencies = [
  "clap",
  "deadpool-redis",
  "ethabi",
- "ethers-core",
  "futures-util",
  "google-datastore1",
  "google-secretmanager1",
@@ -7487,10 +7493,8 @@ dependencies = [
  "test-log",
  "thiserror 1.0.69",
  "tokio",
- "tokio-retry",
  "tokio-stream",
  "tracing",
- "tracing-appender",
  "tracing-opentelemetry",
  "tracing-stackdriver",
  "tracing-subscriber 0.3.20",
@@ -15248,18 +15252,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-appender"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3566e8ce28cc0a3fe42519fc80e6b4c943cc4c8cef275620eb8dac2d3d4e06cf"
-dependencies = [
- "crossbeam-channel",
- "thiserror 1.0.69",
- "time",
- "tracing-subscriber 0.3.20",
-]
-
-[[package]]
 name = "tracing-attributes"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15684,6 +15676,17 @@ checksum = "bc5cf98d8186244414c848017f0e2676b3fcb46807f6668a97dfe67359a3c4b7"
 dependencies = [
  "getrandom 0.2.16",
  "serde",
+]
+
+[[package]]
+name = "uuid"
+version = "1.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f87b8aa10b915a06587d0dec516c282ff295b475d94abf425d62b57710070a2"
+dependencies = [
+ "getrandom 0.3.2",
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]

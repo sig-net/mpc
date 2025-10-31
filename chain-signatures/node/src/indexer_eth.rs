@@ -86,6 +86,8 @@ pub struct EthConfig {
     pub refresh_finalized_interval: u64,
     /// total timeout for a sign request starting from indexed time in seconds
     pub total_timeout: u64,
+    /// Enable the indexer to just send requests optimistically instead waiting for final.
+    pub optimistic_requests: bool,
 }
 
 impl fmt::Debug for EthConfig {
@@ -102,6 +104,7 @@ impl fmt::Debug for EthConfig {
                 &self.refresh_finalized_interval,
             )
             .field("total_timeout", &self.total_timeout)
+            .field("optimistic_requests", &self.optimistic_requests)
             .finish()
     }
 }
@@ -157,6 +160,10 @@ pub struct EthArgs {
     /// total timeout for a sign request starting from indexed time in seconds
     #[clap(long, env("MPC_ETH_TOTAL_TIMEOUT"), default_value = "1500")]
     pub eth_total_timeout: Option<u64>,
+    /// Enable the indexer to just send requests optimistically instead waiting for final.
+    /// Useful for testing where we do not want to reach finality due to how long it takes.
+    #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
+    pub eth_optimistic_requests: bool,
 }
 
 impl EthArgs {
@@ -198,6 +205,9 @@ impl EthArgs {
                 eth_total_timeout.to_string(),
             ]);
         }
+        if self.eth_optimistic_requests {
+            args.push("--eth-optimistic-requests".to_string());
+        }
         args
     }
 
@@ -211,6 +221,7 @@ impl EthArgs {
             helios_data_path: self.eth_helios_data_path?,
             refresh_finalized_interval: self.eth_refresh_finalized_interval?,
             total_timeout: self.eth_total_timeout?,
+            optimistic_requests: self.eth_optimistic_requests,
         })
     }
 
@@ -225,6 +236,7 @@ impl EthArgs {
                 eth_helios_data_path: Some(config.helios_data_path),
                 eth_refresh_finalized_interval: Some(config.refresh_finalized_interval),
                 eth_total_timeout: Some(config.total_timeout),
+                eth_optimistic_requests: config.optimistic_requests,
             },
             _ => Self {
                 eth_account_sk: None,
@@ -235,6 +247,7 @@ impl EthArgs {
                 eth_helios_data_path: None,
                 eth_refresh_finalized_interval: None,
                 eth_total_timeout: None,
+                eth_optimistic_requests: false,
             },
         }
     }
@@ -564,6 +577,7 @@ pub async fn run(
         sign_tx.clone(),
         app_data_storage.clone(),
         node_near_account_id.clone(),
+        eth.optimistic_requests,
         backlog.clone(),
     ));
 
@@ -916,75 +930,92 @@ async fn process_block(
         .get_by_status(Chain::Ethereum, PendingRequestStatus::PendingExecution)
         .await;
 
-    let Some((sign_id, pending_tx)) = pending_entry else {
-        continue;
-    };
-    let status = receipt.status();
-    tracing::info!(
-        "Tx {} found in block {block_number}: {}",
-        receipt.transaction_hash,
-        if status { "success" } else { "failed" }
-    );
-    let mut pending_tx = pending_tx.clone();
-    pending_tx.status = if status {
-        PendingRequestStatus::Success
-    } else {
-        PendingRequestStatus::Failed
-    };
+    let mut respond_bidirectional_requests: Vec<IndexedSignRequest> = Vec::new();
 
-    let pending_tx_clone = pending_tx.clone();
-    let completed_tx =
-        crate::respond_bidirectional::CompletedTx::new(pending_tx_clone, block_number);
-
-    let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
-        .create_sign_request_from_completed_tx(client, Chain::Ethereum, 6, total_timeout)
-        .await;
-    if let Some(request) = respond_bidirectional_sign_request {
-        respond_bidirectional_requests.push(request);
-        backlog.insert(Chain::Ethereum, *sign_id, pending_tx).await;
-    } else {
-        // failed to create sign request from completed tx, remove the tx from the map
-        // TODO: we need to implement a better solution for not finding such txs in helios. possible: https://github.com/sig-net/mpc/issues/499
-        tracing::warn!(
-            "Failed to create sign request from completed tx, removing tx from map: {:?}",
-            receipt.transaction_hash
+    for receipt in &block_receipts {
+        let tx_id = receipt.transaction_hash.into();
+        let Some(pending_tx) = pending_txs.get(&tx_id) else {
+            continue;
+        };
+        let status = receipt.status();
+        tracing::info!(
+            "Tx {} found in block {block_number}: {}",
+            receipt.transaction_hash,
+            if status { "success" } else { "failed" }
         );
-        backlog.remove(Chain::Ethereum, sign_id).await;
+        let client_clone = client.clone();
+        let mut pending_tx = pending_tx.clone();
+        pending_tx.status = if status {
+            PendingRequestStatus::Success
+        } else {
+            PendingRequestStatus::Failed
+        };
+
+        let pending_tx_clone = pending_tx.clone();
+        let completed_tx =
+            crate::respond_bidirectional::CompletedTx::new(pending_tx_clone, block_number);
+
+        let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
+            .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
+            .await;
+        if let Some(respond_bidirectional_sign_request) = respond_bidirectional_sign_request {
+            respond_bidirectional_requests.push(respond_bidirectional_sign_request);
+            tracing::info!(?tx_id, "eth/inserting updated tx with new status into map");
+            backlog.insert(Chain::Ethereum, *sign_id, pending_tx).await;
+        } else {
+            // failed to create sign request from completed tx, remove the tx from the map
+            // TODO: we need to implement a better solution for not finding such txs in helios. possible: https://github.com/sig-net/mpc/issues/499
+            tracing::warn!(
+                "Failed to create sign request from completed tx, removing tx from map: {:?}",
+                receipt.transaction_hash
+            );
+            backlog.remove(Chain::Ethereum, sign_id).await;
+        }
     }
 
     let remaining_pending_txs = backlog
         .get_by_status(Chain::Ethereum, PendingRequestStatus::PendingExecution)
         .await;
-    if current_nonce.is_err() {
-        tracing::warn!("Failed to get current nonce: {:?}", current_nonce.err());
-        continue;
-    }
-    let current_nonce = current_nonce.unwrap();
-    if tx.nonce < current_nonce {
-        tracing::warn!(
-            ?sign_id,
-            expected_nonce = tx.nonce,
-            actual_nonce = current_nonce,
-            "nonce too low for tx",
-        );
-        tx.status = PendingRequestStatus::Failed;
-        let pending_tx = tx.clone();
 
-        let completed_tx = crate::respond_bidirectional::CompletedTx::new(pending_tx, block_number);
-
-        let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
-            .create_sign_request_from_completed_tx(client, Chain::Ethereum, 6, total_timeout)
+    for (tx_id, mut tx) in remaining_pending_txs {
+        let current_nonce = client
+            .get_nonce(
+                tx.from_address,
+                BlockId::Number(BlockNumberOrTag::Number(block_number)),
+            )
             .await;
-        if let Some(request) = respond_bidirectional_sign_request {
-            respond_bidirectional_requests.push(request);
-            backlog.insert(Chain::Ethereum, sign_id, tx).await;
-        } else {
-            // failed to create sign request from completed tx, remove the tx from the map
+        if current_nonce.is_err() {
+            tracing::warn!("Failed to get current nonce: {:?}", current_nonce.err());
+            continue;
+        }
+        let current_nonce = current_nonce.unwrap();
+        if tx.nonce < current_nonce {
             tracing::warn!(
                 ?sign_id,
-                "failed to create sign request from completed tx, removing tx from map",
+                expected_nonce = tx.nonce,
+                actual_nonce = current_nonce,
+                "nonce too low for tx",
             );
-            backlog.remove(Chain::Ethereum, &sign_id).await;
+            tx.status = PendingRequestStatus::Failed;
+            let pending_tx = tx.clone();
+
+            let completed_tx =
+                crate::respond_bidirectional::CompletedTx::new(pending_tx, block_number);
+
+            let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
+                .create_sign_request_from_completed_tx(client, Chain::Ethereum, 6, total_timeout)
+                .await;
+            if let Some(request) = respond_bidirectional_sign_request {
+                respond_bidirectional_requests.push(request);
+                backlog.insert(Chain::Ethereum, sign_id, tx).await;
+            } else {
+                // failed to create sign request from completed tx, remove the tx from the map
+                tracing::warn!(
+                    ?sign_id,
+                    "failed to create sign request from completed tx, removing tx from map",
+                );
+                backlog.remove(Chain::Ethereum, &sign_id).await;
+            }
         }
     }
 
@@ -1057,6 +1088,7 @@ async fn send_requests_when_final(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
+    optimistic_requests: bool,
     backlog: Backlog,
 ) {
     let mut finalized_block_number: Option<BlockNumber> = None;
@@ -1079,13 +1111,15 @@ async fn send_requests_when_final(
             return;
         };
 
-        // Wait for finalized block if needed
-        while finalized_block_number.is_none_or(|n| block_number > n) {
-            let Some(new_finalized_block) = finalized_block_rx.recv().await else {
-                tracing::error!("Failed to receive finalized blocks");
-                return;
-            };
-            finalized_block_number.replace(new_finalized_block);
+        if !optimistic_requests {
+            // Wait for finalized block if needed
+            while finalized_block_number.is_none_or(|n| block_number > n) {
+                let Some(new_finalized_block) = finalized_block_rx.recv().await else {
+                    tracing::error!("Failed to receive finalized blocks");
+                    return;
+                };
+                finalized_block_number.replace(new_finalized_block);
+            }
         }
 
         // Verify block hash and send requests
@@ -1202,7 +1236,7 @@ impl SignatureRequestedEvent {
     fn encode_abi(&self) -> Vec<u8> {
         let signature_requested_event_encoding = SignatureRequestedEncoding {
             sender: self.requester,
-            payload: self.payload_hash.to_vec().into(),
+            payload: self.payload_hash.into(),
             path: self.path.clone(),
             keyVersion: self.key_version,
             chainId: self.chain_id,

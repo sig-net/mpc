@@ -15,9 +15,11 @@ use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use std::time::{Duration, Instant};
 use test_log::test;
 
+pub mod chains;
 pub mod ethereum;
 pub mod mpc;
 pub mod nightly;
+pub mod solana;
 pub mod store;
 pub mod sync;
 

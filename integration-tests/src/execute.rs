@@ -42,7 +42,7 @@ pub fn spawn_multichain(
 
     async_process::Command::new(&executable)
         .args(cli.into_str_args())
-        .env("RUST_LOG", "mpc_node=INFO")
+        .env("RUST_LOG", "info,workspaces=warn")
         .envs(std::env::vars())
         .stdout(async_process::Stdio::inherit())
         .stderr(async_process::Stdio::inherit())

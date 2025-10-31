@@ -1312,8 +1312,8 @@ async fn execute_batch_publish(
     }
 }
 
-use signet_program::accounts::ReadRespond as SolanaReadRespondAccount;
 use signet_program::accounts::Respond as SolanaRespondAccount;
+use signet_program::accounts::RespondBidirectional as SolanaRespondBidirectionalAccount;
 use signet_program::instruction::Respond as SolanaRespond;
 use signet_program::instruction::RespondBidirectional as SolanaRespondBidirectional;
 use signet_program::AffinePoint as SolanaContractAffinePoint;
@@ -1331,18 +1331,21 @@ async fn try_publish_sol(
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
 
     let request_ids = vec![action.request.indexed.id.request_id];
+    let big_r = signature.big_r.to_encoded_point(false);
     let signature = SolanaContractSignature {
         big_r: SolanaContractAffinePoint {
-            x: signature.big_r.to_encoded_point(false).as_bytes()[1..33]
-                .try_into()
-                .unwrap(),
-            y: signature.big_r.to_encoded_point(false).as_bytes()[33..65]
-                .try_into()
-                .unwrap(),
+            x: big_r.as_bytes()[1..33].try_into().unwrap(),
+            y: big_r.as_bytes()[33..65].try_into().unwrap(),
         },
         s: signature.s.to_bytes().into(),
         recovery_id: signature.recovery_id,
     };
+
+    tracing::debug!(
+        sign_id = ?action.request.indexed.id,
+        request_type = ?action.request.indexed.sign_request_type,
+        "try_publish_sol: dispatching request"
+    );
 
     match &action.request.indexed.sign_request_type {
         SignRequestType::Sign | SignRequestType::SignBidirectional(_) => {
@@ -1352,7 +1355,7 @@ async fn try_publish_sol(
                 .request()
                 .signer(sol.payer.clone())
                 .accounts(SolanaRespondAccount {
-                    responder: sol.payer.clone().try_pubkey().unwrap(),
+                    responder: sol.payer.pubkey(),
                     event_authority,
                     program: sol.program_id,
                 })
@@ -1381,11 +1384,17 @@ async fn try_publish_sol(
             );
         }
         SignRequestType::RespondBidirectional(respond_bidirectional_tx) => {
+            tracing::debug!(
+                sign_id = ?action.request.indexed.id,
+                request_id = ?request_ids[0],
+                serialized_output_len = respond_bidirectional_tx.output.len(),
+                "try_publish_sol: entering RespondBidirectional arm"
+            );
             let respond_bidirectional_serialized_output = respond_bidirectional_tx.output.clone();
             let tx = program
                 .request()
                 .signer(sol.payer.clone())
-                .accounts(SolanaReadRespondAccount {
+                .accounts(SolanaRespondBidirectionalAccount {
                     responder: sol.payer.clone().try_pubkey().unwrap(),
                 })
                 .args(SolanaRespondBidirectional {

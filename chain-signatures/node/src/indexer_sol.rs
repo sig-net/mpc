@@ -180,7 +180,7 @@ pub struct SignatureRequestedEvent {
     pub payload: [u8; 32],
     pub key_version: u32,
     pub deposit: u64,
-    pub chain_id: u64,
+    pub chain_id: String,
     pub path: String,
     pub algo: String,
     pub dest: String,
@@ -198,7 +198,7 @@ impl SignatureEventTrait for SignatureRequestedEvent {
             Token::Bytes(self.payload.to_vec()),
             Token::String(self.path.clone()),
             Token::Uint(self.key_version.into()),
-            Token::Uint(self.chain_id.into()),
+            Token::String(self.chain_id.clone()),
             Token::String(self.algo.clone()),
             Token::String(self.dest.clone()),
             Token::String(self.params.clone()),
@@ -272,7 +272,7 @@ impl SignatureEventTrait for SignatureRequestedEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SignBidirectionalEvent {
     pub sender: Pubkey,
-    pub transaction_data: Vec<u8>,
+    pub serialized_transaction: Vec<u8>,
     pub caip2_id: String,
     pub key_version: u32,
     pub deposit: u64,
@@ -280,6 +280,7 @@ pub struct SignBidirectionalEvent {
     pub algo: String,
     pub dest: String,
     pub params: String,
+    pub program_id: Pubkey,
     pub output_deserialization_schema: Vec<u8>,
     pub respond_serialization_schema: Vec<u8>,
 }
@@ -291,7 +292,7 @@ impl SignatureEventTrait for SignBidirectionalEvent {
         // Match TypeScript implementation using ABI encoding
         let encoded = (
             self.sender.to_string(),
-            self.transaction_data.clone(),
+            self.serialized_transaction.clone(),
             self.caip2_id.clone(),
             self.key_version,
             self.path.clone(),
@@ -315,13 +316,13 @@ impl SignatureEventTrait for SignBidirectionalEvent {
             anyhow::bail!("deposit is 0");
         }
 
-        if self.key_version != 0 {
+        if self.key_version > LATEST_MPC_KEY_VERSION {
             tracing::warn!("unsupported key version: {}", self.key_version);
             anyhow::bail!("unsupported key version");
         }
 
         let request_id = self.generate_request_id();
-        let rlp_encoded_tx = self.transaction_data.clone();
+        let rlp_encoded_tx = self.serialized_transaction.clone();
 
         // Call the existing derive_epsilon_sol function with the correct parameters
         // to match the TypeScript implementation
@@ -350,7 +351,7 @@ impl SignatureEventTrait for SignBidirectionalEvent {
                 epsilon,
                 payload,
                 path: self.path.clone(),
-                key_version: 0,
+                key_version: self.key_version,
             },
             chain: Chain::Solana,
             timestamp_sign_queue: Some(Instant::now()),

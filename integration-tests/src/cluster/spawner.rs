@@ -37,6 +37,8 @@ pub struct ClusterSpawner {
     pub wait_for_running: bool,
     pub redis: Option<containers::Redis>,
     pub worker: Option<Worker<Sandbox>>,
+    pub solana: Option<containers::Solana>,
+    pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub use_ethereum: bool,
 }
@@ -65,6 +67,8 @@ impl Default for ClusterSpawner {
             wait_for_running: true,
             redis: None,
             worker: None,
+            solana: None,
+            program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             use_ethereum: false,
         }
@@ -115,6 +119,28 @@ impl ClusterSpawner {
 
     pub fn prestockpile(mut self, multiplier: u32) -> Self {
         self.prestockpile = Some(Prestockpile { multiplier });
+        self
+    }
+
+    /// Configures the cluster to spawn with Solana sandbox.
+    /// This method sets up a Solana test validator and configures the SolConfig.
+    pub fn solana(mut self) -> Self {
+        // Enable Solana by setting a placeholder if not already configured
+        if self.cfg.sol.is_none() {
+            self.cfg.sol = Some(mpc_node::indexer_sol::SolConfig {
+                account_sk: String::new(),      // Will be filled in later
+                rpc_http_url: String::new(),    // Will be filled in later
+                rpc_ws_url: String::new(),      // Will be filled in later
+                program_address: String::new(), // Will be filled in later
+                total_timeout: 60,
+            });
+        }
+        self
+    }
+
+    /// Set the Solana program address to watch for events.
+    pub fn program_address(mut self, address: String) -> Self {
+        self.program_address = Some(address);
         self
     }
 
@@ -169,12 +195,22 @@ impl ClusterSpawner {
         containers::Redis::run(self).await
     }
 
+    pub async fn spawn_solana(&self) -> containers::Solana {
+        containers::Solana::run().await
+    }
+
     /// Prespawns a redis instance where we're able to make use of it before the nodes are spun
     /// up and are in running phase. This redis instance will be reused when the whole environment
     /// is setup.
     pub async fn prespawn_redis(&mut self) -> &containers::Redis {
         self.redis = Some(self.spawn_redis().await);
         self.redis.as_ref().unwrap()
+    }
+
+    /// Prespawns a Solana test validator instance for integration testing.
+    pub async fn prespawn_solana(&mut self) -> &containers::Solana {
+        self.solana = Some(self.spawn_solana().await);
+        self.solana.as_ref().unwrap()
     }
 
     /// Grabs the underlying redis instance that was prespawned, or if not prespawned, create a
@@ -184,6 +220,12 @@ impl ClusterSpawner {
             Some(redis) => redis,
             None => self.spawn_redis().await,
         }
+    }
+
+    /// Grabs the underlying Solana instance that was prespawned, or if not prespawned, create a
+    /// new one from start up.
+    pub async fn take_solana(&mut self) -> Option<containers::Solana> {
+        self.solana.take()
     }
 
     pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Worker<Sandbox>> {
@@ -223,6 +265,27 @@ impl IntoFuture for ClusterSpawner {
         Box::pin(async move {
             self = self.init_network().await?;
 
+            // Check if Solana is enabled and spawn if needed
+            if self.cfg.sol.is_some() {
+                // Start Solana test validator
+                let solana = self.spawn_solana().await;
+
+                // Deploy the core contracts and get the program address
+                let program_address = if let Some(addr) = self.program_address.clone() {
+                    // Use provided program address
+                    addr
+                } else {
+                    // Deploy the contract and use the deployed program address
+                    solana.deploy_contract().await?
+                };
+
+                let sol_config = solana.get_config(program_address);
+                self.cfg.sol = Some(sol_config);
+
+                // Store the Solana container for potential later use
+                self.solana = Some(solana);
+            }
+
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
@@ -234,6 +297,7 @@ impl IntoFuture for ClusterSpawner {
                 http_client: reqwest::Client::default(),
                 docker_client: self.docker,
                 account_idx: nodes.len(),
+                solana: self.solana.take(),
                 nodes,
             };
 

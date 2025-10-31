@@ -11,6 +11,8 @@ anyhow.workspace = true
 async-process = "1"
 backon = "0.4"
 bollard = "0.17.0"
+borsh.workspace = true
+bs58 = "0.5.1"
 clap.workspace = true
 deadpool-redis.workspace = true
 futures = "0.3"
@@ -28,7 +30,17 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
 url.workspace = true
+uuid = { version = "1.0", features = ["v4"] }
 sha3.workspace = true
+sha2 = "0.10"
+rlp = "0.5"
+
+# solana dependencies
+anchor-client.workspace = true
+signet-program.workspace = true
+solana-sdk.workspace = true
+solana-client.workspace = true
+solana-transaction-status.workspace = true
 
 # crypto dependencies
 ecdsa = "0.16.9"

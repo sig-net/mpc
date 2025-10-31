@@ -48,7 +48,7 @@ pub enum PendingRequestStatus {
 pub struct BidirectionalTx {
     pub id: BidirectionalTxId,
     pub sender: Pubkey,
-    pub transaction_data: Vec<u8>,
+    pub serialized_transaction: Vec<u8>,
     pub source_chain: Chain,
     pub target_chain: Chain,
     pub caip2_id: String,
@@ -75,7 +75,7 @@ impl BidirectionalTx {
             anyhow::bail!("sign request is not a sign bidirectional");
         };
 
-        let unsigned_rlp_data = &event.transaction_data;
+        let unsigned_rlp_data = &event.serialized_transaction;
         let target_chain = Chain::from_str(&event.dest).map_err(|err| {
             anyhow::anyhow!(
                 "invalid target chain '{}' for bidirectional transaction: {err}",
@@ -97,7 +97,7 @@ impl BidirectionalTx {
         Ok(Self {
             id: BidirectionalTxId(signed_transaction_hash.into()),
             sender: event.sender,
-            transaction_data: event.transaction_data,
+            serialized_transaction: event.serialized_transaction,
             source_chain,
             target_chain,
             caip2_id: event.caip2_id,
