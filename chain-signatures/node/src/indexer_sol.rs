@@ -1,6 +1,7 @@
 use crate::protocol::SignRequestType;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
+use crate::solana_cpi_watcher::subscribe_anchor_cpi_events;
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::{AnchorDeserialize, AnchorSerialize};
 use anchor_client::{Client, Cluster, Program};
@@ -8,7 +9,6 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use ethabi::{encode, Token};
-use futures_util::StreamExt;
 use k256::Scalar;
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
@@ -16,15 +16,10 @@ use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
-use solana_client::{
-    nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},
-    rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
-};
 use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
-use std::collections::HashMap;
 use std::fmt;
-use std::ops::Deref;
+use std::ops::{ControlFlow, Deref};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -613,30 +608,40 @@ async fn subscribe_and_process_sign_events(
         let sign_tx_clone = sign_tx.clone();
         let node_near_account_id_clone = node_near_account_id.clone();
 
-        let result = subscribe_to_program_cpi_events(
+        let result = subscribe_anchor_cpi_events(
             program_id,
             rpc_url,
             ws_url,
-            move |event, signature, _slot| {
-                tracing::info!("got event: {:?}", event);
-                let tx_sig: Vec<u8> = signature.as_ref().to_vec();
+            CPI_EVENT_HINTS,
+            |discriminator, event_data| {
+                Ok(parse_signature_events_from_cpi(discriminator, event_data))
+            },
+            {
+                let sign_tx_clone = sign_tx_clone.clone();
+                let node_near_account_id_clone = node_near_account_id_clone.clone();
+                move |event: SignatureEventBox, signature: Signature, _slot: u64| {
+                    tracing::info!("got event: {:?}", event);
+                    let tx_sig: Vec<u8> = signature.as_ref().to_vec();
 
-                let sign_tx_inner = sign_tx_clone.clone();
-                let node_near_account_id_inner = node_near_account_id_clone.clone();
+                    let sign_tx_inner = sign_tx_clone.clone();
+                    let node_near_account_id_inner = node_near_account_id_clone.clone();
 
-                tokio::spawn(async move {
-                    if let Err(err) = process_anchor_sign_event(
-                        event,
-                        tx_sig,
-                        sign_tx_inner,
-                        node_near_account_id_inner,
-                        total_timeout,
-                    )
-                    .await
-                    {
-                        tracing::warn!("Failed to process event: {:?}", err);
-                    }
-                });
+                    tokio::spawn(async move {
+                        if let Err(err) = process_anchor_sign_event(
+                            event,
+                            tx_sig,
+                            sign_tx_inner,
+                            node_near_account_id_inner,
+                            total_timeout,
+                        )
+                        .await
+                        {
+                            tracing::warn!("Failed to process event: {:?}", err);
+                        }
+                    });
+
+                    ControlFlow::Continue(())
+                }
             },
         )
         .await;
@@ -649,176 +654,28 @@ async fn subscribe_and_process_sign_events(
     }
 }
 
-async fn parse_cpi_events(
-    rpc_client: &RpcClient,
-    signature: &Signature,
-    target_program_id: &Pubkey,
-) -> Result<Vec<SignatureEventBox>> {
-    use solana_transaction_status::{UiInstruction, UiParsedInstruction};
+fn parse_signature_events_from_cpi(
+    discriminator: &[u8],
+    event_data: &[u8],
+) -> Vec<SignatureEventBox> {
+    let mut events = Vec::new();
 
-    let tx = rpc_client
-        .get_transaction_with_config(
-            signature,
-            solana_client::rpc_config::RpcTransactionConfig {
-                encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
-                commitment: Some(CommitmentConfig::confirmed()),
-                max_supported_transaction_version: Some(0),
-            },
-        )
-        .await?;
-
-    let Some(meta) = tx.transaction.meta else {
-        return Ok(Vec::new());
-    };
-
-    let target_program_str = target_program_id.to_string();
-    let mut out = Vec::<SignatureEventBox>::new();
-
-    // Small helper closure to try decoding both event types from raw data
-    let try_parse_events = |data: &str| -> Result<Vec<SignatureEventBox>> {
-        let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
-            tracing::warn!("Failed to decode instruction data for target program");
-            return Ok(Vec::new());
-        };
-
-        // Ensure this is an Anchor emit_cpi! instruction
-        if !ix_data.starts_with(anchor_lang::event::EVENT_IX_TAG_LE) {
-            return Ok(Vec::new());
+    if discriminator == SignatureRequestedEvent::DISCRIMINATOR {
+        match SignatureRequestedEvent::deserialize(&mut &event_data[..]) {
+            Ok(ev) => events.push(Box::new(ev) as SignatureEventBox),
+            Err(err) => tracing::warn!(?err, "Failed to deserialize SignatureRequestedEvent"),
         }
-
-        let event_discriminator = &ix_data[8..16];
-        let event_data = &ix_data[16..];
-
-        let mut acc = Vec::new();
-
-        // handle both event types
-        if event_discriminator == SignatureRequestedEvent::DISCRIMINATOR {
-            match SignatureRequestedEvent::deserialize(&mut &event_data[..]) {
-                Ok(ev) => acc.push(Box::new(ev) as SignatureEventBox),
-                Err(e) => tracing::warn!("Failed to deserialize SignatureRequestedEvent: {e}"),
-            }
-        } else if event_discriminator == SignBidirectionalEvent::DISCRIMINATOR {
-            match SignBidirectionalEvent::deserialize(&mut &event_data[..]) {
-                Ok(ev) => acc.push(Box::new(ev) as SignatureEventBox),
-                Err(e) => {
-                    tracing::warn!("Failed to deserialize SignBidirectionalEvent: {e}")
-                }
-            }
-        } else if event_discriminator == SignRespondRequestedEvent::DISCRIMINATOR {
-            match SignRespondRequestedEvent::deserialize(&mut &event_data[..]) {
-                Ok(ev) => acc.push(Box::new(ev) as SignatureEventBox),
-                Err(e) => {
-                    tracing::warn!("Failed to deserialize SignRespondRequestedEvent: {e}")
-                }
-            }
+    } else if discriminator == SignBidirectionalEvent::DISCRIMINATOR {
+        match SignBidirectionalEvent::deserialize(&mut &event_data[..]) {
+            Ok(ev) => events.push(Box::new(ev) as SignatureEventBox),
+            Err(err) => tracing::warn!(?err, "Failed to deserialize SignBidirectionalEvent"),
         }
-
-        Ok(acc)
-    };
-
-    // Look into inner instructions for CPI calls
-    let inner_ixs = match meta.inner_instructions {
-        solana_transaction_status::option_serializer::OptionSerializer::Some(ixs) => ixs,
-        _ => return Ok(Vec::new()),
-    };
-
-    for (set_idx, inner_ix_set) in inner_ixs.iter().enumerate() {
-        for (ix_idx, instruction) in inner_ix_set.instructions.iter().enumerate() {
-            if let UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(ui)) = instruction {
-                if ui.program_id == target_program_str {
-                    match try_parse_events(&ui.data) {
-                        Ok(mut v) => {
-                            if !v.is_empty() {
-                                tracing::info!(
-                                    "parsed {} event(s) from {}.{}",
-                                    v.len(),
-                                    set_idx,
-                                    ix_idx
-                                );
-                            }
-                            out.append(&mut v);
-                        }
-                        Err(e) => tracing::warn!(
-                            "Error processing inner instruction {}.{}: {}",
-                            set_idx,
-                            ix_idx,
-                            e
-                        ),
-                    }
-                }
-            }
+    } else if discriminator == SignRespondRequestedEvent::DISCRIMINATOR {
+        match SignRespondRequestedEvent::deserialize(&mut &event_data[..]) {
+            Ok(ev) => events.push(Box::new(ev) as SignatureEventBox),
+            Err(err) => tracing::warn!(?err, "Failed to deserialize SignRespondRequestedEvent"),
         }
     }
 
-    Ok(out)
-}
-
-// Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L311
-async fn subscribe_to_program_cpi_events<F>(
-    program_id: Pubkey,
-    rpc_url: &str,
-    ws_url: &str,
-    mut event_handler: F,
-) -> Result<()>
-where
-    F: FnMut(SignatureEventBox, Signature, u64) + Send,
-{
-    let rpc_client = RpcClient::new(rpc_url.to_string());
-    let pubsub_client = PubsubClient::new(ws_url).await?;
-
-    let filter = RpcTransactionLogsFilter::Mentions(vec![program_id.to_string()]);
-    let config = RpcTransactionLogsConfig {
-        commitment: Some(CommitmentConfig::confirmed()),
-    };
-
-    let (mut stream, _unsubscriber) = pubsub_client.logs_subscribe(filter, config).await?;
-
-    // Simple TTL cache to avoid multiple getTransaction calls for the same signature
-    let mut seen: HashMap<Signature, Instant> = HashMap::new();
-    let ttl = Duration::from_secs(30);
-
-    let target_program_str = program_id.to_string();
-    let program_invoke_str = format!("Program {} invoke [", target_program_str);
-    while let Some(response) = stream.next().await {
-        if response.value.err.is_some() {
-            continue;
-        }
-
-        let logs = &response.value.logs;
-        if !looks_like_cpi_sign_event(logs) || !has_log_starts_with(logs, &program_invoke_str) {
-            continue;
-        }
-
-        let Ok(signature) = Signature::from_str(&response.value.signature) else {
-            tracing::warn!("Invalid signature format");
-            continue;
-        };
-        let now = Instant::now();
-        // Periodic cleanup of expired entries in the TTL cache
-        seen.retain(|_, &mut timestamp| now.duration_since(timestamp) < ttl);
-        if seen.contains_key(&signature) {
-            continue;
-        }
-        seen.insert(signature, now);
-
-        match parse_cpi_events(&rpc_client, &signature, &program_id).await {
-            Ok(events) => {
-                for ev in events {
-                    event_handler(ev, signature, response.context.slot);
-                }
-            }
-            Err(e) => tracing::error!("Failed to parse tx {}: {}", signature, e),
-        }
-    }
-
-    Ok(())
-}
-
-fn looks_like_cpi_sign_event(logs: &[String]) -> bool {
-    logs.iter()
-        .any(|l| CPI_EVENT_HINTS.iter().any(|h| l.contains(h)))
-}
-
-fn has_log_starts_with(logs: &[String], start_with: &str) -> bool {
-    logs.iter().any(|l| l.starts_with(start_with))
+    events
 }
