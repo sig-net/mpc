@@ -6,17 +6,26 @@ use tokio::task::JoinHandle;
 use crate::cluster::DEFAULT_DOCKER_NETWORK;
 use crate::containers::{self, DockerClient};
 
+#[derive(Default)]
 enum ResourceState<T> {
-    Pending(JoinHandle<Result<T>>),
+    #[default]
+    Standby,
     Ready(T),
+    Pending(JoinHandle<Result<T>>),
+}
+
+impl<T> ResourceState<T> {
+    pub fn is_standby(&self) -> bool {
+        matches!(self, ResourceState::Standby)
+    }
 }
 
 pub struct ClusterEnv {
     docker: DockerClient,
     network: String,
-    redis: Option<ResourceState<containers::Redis>>,
-    near_sandbox: Option<ResourceState<Worker<Sandbox>>>,
-    ethereum_sandbox: Option<ResourceState<containers::EthereumSandbox>>,
+    redis: ResourceState<containers::Redis>,
+    near_sandbox: ResourceState<Worker<Sandbox>>,
+    ethereum_sandbox: ResourceState<containers::EthereumSandbox>,
     ethereum_enabled: bool,
 }
 
@@ -25,9 +34,9 @@ impl ClusterEnv {
         Self {
             docker: DockerClient::default(),
             network: DEFAULT_DOCKER_NETWORK.to_string(),
-            redis: None,
-            near_sandbox: None,
-            ethereum_sandbox: None,
+            redis: ResourceState::Standby,
+            near_sandbox: ResourceState::Standby,
+            ethereum_sandbox: ResourceState::Standby,
             ethereum_enabled: false,
         }
     }
@@ -68,41 +77,41 @@ impl ClusterEnv {
     }
 
     pub fn spawn_redis(&mut self) {
-        if self.redis.is_some() {
+        if !self.redis.is_standby() {
             return;
         }
 
         let docker = self.docker.clone();
         let network = self.network.clone();
-        self.redis = Some(ResourceState::Pending(tokio::spawn(async move {
+        self.redis = ResourceState::Pending(tokio::spawn(async move {
             docker
                 .create_network(&network)
                 .await
                 .context("failed to ensure docker network for redis")?;
             Ok(containers::Redis::run(&docker, &network).await)
-        })));
+        }));
     }
 
     pub fn spawn_near_sandbox(&mut self) {
-        if self.near_sandbox.is_some() {
+        if !self.near_sandbox.is_standby() {
             return;
         }
 
-        self.near_sandbox = Some(ResourceState::Pending(tokio::spawn(async {
+        self.near_sandbox = ResourceState::Pending(tokio::spawn(async {
             near_workspaces::sandbox()
                 .await
                 .context("failed to spawn near sandbox")
-        })));
+        }));
     }
 
     pub fn spawn_ethereum_sandbox(&mut self) {
-        if !self.ethereum_enabled || self.ethereum_sandbox.is_some() {
+        if !self.ethereum_enabled || !self.ethereum_sandbox.is_standby() {
             return;
         }
 
         let docker = self.docker.clone();
         let network = self.network.clone();
-        self.ethereum_sandbox = Some(ResourceState::Pending(tokio::spawn(async move {
+        self.ethereum_sandbox = ResourceState::Pending(tokio::spawn(async move {
             docker
                 .create_network(&network)
                 .await
@@ -110,7 +119,7 @@ impl ClusterEnv {
             containers::EthereumSandbox::run(&docker, &network)
                 .await
                 .context("failed to spawn ethereum sandbox")
-        })));
+        }));
     }
 
     pub async fn redis(&mut self) -> Result<&containers::Redis> {
@@ -155,40 +164,35 @@ impl ClusterEnv {
             .map(Some)
     }
 
-    async fn await_resource<'a, T>(
-        slot: &'a mut Option<ResourceState<T>>,
-        name: &str,
-    ) -> Result<&'a T> {
+    async fn await_resource<'a, T>(slot: &'a mut ResourceState<T>, name: &str) -> Result<&'a T> {
         loop {
             match slot {
-                Some(ResourceState::Ready(resource)) => return Ok(resource),
-                Some(ResourceState::Pending(_)) => {
-                    let handle = match slot.take() {
-                        Some(ResourceState::Pending(handle)) => handle,
+                ResourceState::Ready(resource) => return Ok(resource),
+                ResourceState::Pending(_) => {
+                    let handle = match std::mem::replace(slot, ResourceState::Standby) {
+                        ResourceState::Pending(handle) => handle,
                         _ => continue,
                     };
                     let resource = handle
                         .await
                         .with_context(|| format!("task for {name} panicked"))??;
-                    *slot = Some(ResourceState::Ready(resource));
+                    *slot = ResourceState::Ready(resource);
                 }
-                None => bail!("{name} has not been spawned"),
+                ResourceState::Standby => bail!("{name} has not been spawned"),
             }
         }
     }
 
-    async fn await_resource_owned<T>(slot: &mut Option<ResourceState<T>>, name: &str) -> Result<T> {
-        loop {
-            match slot.take() {
-                Some(ResourceState::Ready(resource)) => return Ok(resource),
-                Some(ResourceState::Pending(handle)) => {
-                    let resource = handle
-                        .await
-                        .with_context(|| format!("task for {name} panicked"))??;
-                    return Ok(resource);
-                }
-                None => bail!("{name} has not been spawned"),
+    async fn await_resource_owned<T>(slot: &mut ResourceState<T>, name: &str) -> Result<T> {
+        match std::mem::replace(slot, ResourceState::Standby) {
+            ResourceState::Ready(resource) => Ok(resource),
+            ResourceState::Pending(handle) => {
+                let resource = handle
+                    .await
+                    .with_context(|| format!("task for {name} panicked"))??;
+                Ok(resource)
             }
+            ResourceState::Standby => bail!("{name} has not been spawned"),
         }
     }
 }
