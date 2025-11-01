@@ -550,11 +550,11 @@ impl MpcFixtureNodeBuilder {
 }
 
 async fn redis() -> Redis {
-    let spawner = crate::cluster::spawner::ClusterSpawner::default()
+    let mut spawner = crate::cluster::spawner::ClusterSpawner::default()
         .network("mpc-test")
         .init_network()
         .await
         .expect("failed setting up redis container");
 
-    crate::containers::Redis::run(&spawner.docker, &spawner.network).await
+    spawner.take_redis().await.expect("failed to spawn redis")
 }

@@ -3,7 +3,6 @@ use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
 use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
-use integration_tests::containers;
 use k256::Secp256k1;
 use mpc_crypto::PublicKey;
 use mpc_node::protocol::presignature::{Presignature, PresignatureSpawner};
@@ -14,7 +13,7 @@ use test_log::test;
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {
-    let spawner = ClusterSpawner::default()
+    let mut spawner = ClusterSpawner::default()
         .network("test-triple-persistence")
         .init_network()
         .await?;
@@ -23,7 +22,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let node1 = Participant::from(1);
     let (_, _, msg) = MessageChannel::new();
     let node0_id = "party0.near".parse().unwrap();
-    let redis = containers::Redis::run(&spawner.docker, &spawner.network).await;
+    let redis = spawner.spawn_redis().await?;
     let triple_storage = redis.triple_storage(&node0_id);
     let triple_spawner = TripleSpawner::new(node0, 5, 123, &node0_id, &triple_storage, msg);
 
@@ -163,7 +162,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_presignature_persistence() -> anyhow::Result<()> {
-    let spawner = ClusterSpawner::default()
+    let mut spawner = ClusterSpawner::default()
         .network("test-presignature-persistence")
         .init_network()
         .await?;
@@ -172,7 +171,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let node1 = Participant::from(1);
     let (_, _, msg) = MessageChannel::new();
     let node0_id = "party0.near".parse().unwrap();
-    let redis = containers::Redis::run(&spawner.docker, &spawner.network).await;
+    let redis = spawner.spawn_redis().await?;
     let triple_storage = redis.triple_storage(&node0_id);
     let presignature_storage = redis.presignature_storage(&node0_id);
     let presignature_spawner = PresignatureSpawner::new(

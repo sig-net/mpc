@@ -25,7 +25,6 @@ use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 use mpc_contract::{ProtocolContractState, RunningContractState};
 use mpc_node::web::{BenchMetrics, StateView};
 
-use anyhow::Context;
 use url::Url;
 
 const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(9000);
@@ -115,8 +114,7 @@ impl Cluster {
             .contract()
             .view("state")
             .finality(Finality::Final)
-            .await
-            .context("could not view state")?
+            .await?
             .json()?;
         Ok(state)
     }

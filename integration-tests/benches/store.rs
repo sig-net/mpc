@@ -76,7 +76,7 @@ fn env() -> (Runtime, SyncEnv) {
 
     let rt = runtime();
     let env = rt.block_on(async move {
-        let spawner = ClusterSpawner::default()
+        let mut spawner = ClusterSpawner::default()
             .with_config(|cfg| {
                 cfg.protocol.triple.min_triples = 3 * 1024;
                 cfg.protocol.triple.max_triples = 1000000;
@@ -86,7 +86,10 @@ fn env() -> (Runtime, SyncEnv) {
             .await
             .unwrap();
 
-        let redis = spawner.spawn_redis().await;
+        let redis = spawner
+            .take_redis()
+            .await
+            .expect("failed to spawn redis for bench");
         let triples = redis.triple_storage(&node_id);
         let presignatures = redis.presignature_storage(&node_id);
         {

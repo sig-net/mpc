@@ -134,6 +134,27 @@ impl ClusterEnv {
             .map(Some)
     }
 
+    pub async fn take_redis(&mut self) -> Result<containers::Redis> {
+        self.spawn_redis();
+        Self::await_resource_owned(&mut self.redis, "redis container").await
+    }
+
+    pub async fn take_near_sandbox(&mut self) -> Result<Worker<Sandbox>> {
+        self.spawn_near_sandbox();
+        Self::await_resource_owned(&mut self.near_sandbox, "near sandbox").await
+    }
+
+    pub async fn take_ethereum_sandbox(&mut self) -> Result<Option<containers::EthereumSandbox>> {
+        if !self.ethereum_enabled {
+            return Ok(None);
+        }
+
+        self.spawn_ethereum_sandbox();
+        Self::await_resource_owned(&mut self.ethereum_sandbox, "ethereum sandbox")
+            .await
+            .map(Some)
+    }
+
     async fn await_resource<'a, T>(
         slot: &'a mut Option<ResourceState<T>>,
         name: &str,
@@ -150,6 +171,21 @@ impl ClusterEnv {
                         .await
                         .with_context(|| format!("task for {name} panicked"))??;
                     *slot = Some(ResourceState::Ready(resource));
+                }
+                None => bail!("{name} has not been spawned"),
+            }
+        }
+    }
+
+    async fn await_resource_owned<T>(slot: &mut Option<ResourceState<T>>, name: &str) -> Result<T> {
+        loop {
+            match slot.take() {
+                Some(ResourceState::Ready(resource)) => return Ok(resource),
+                Some(ResourceState::Pending(handle)) => {
+                    let resource = handle
+                        .await
+                        .with_context(|| format!("task for {name} panicked"))??;
+                    return Ok(resource);
                 }
                 None => bail!("{name} has not been spawned"),
             }

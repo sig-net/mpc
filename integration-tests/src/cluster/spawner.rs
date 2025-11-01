@@ -4,14 +4,14 @@ use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
 
+use crate::cluster::env::ClusterEnv;
+use crate::containers::DockerClient;
+use crate::utils::dev_gen_indexed;
+use crate::{execute, NodeConfig, Nodes};
 use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
 
-use crate::containers::{self, DockerClient};
-use crate::utils::dev_gen_indexed;
-use crate::{execute, NodeConfig, Nodes};
-
-use crate::cluster::{Cluster, DEFAULT_DOCKER_NETWORK};
+use crate::cluster::Cluster;
 
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
@@ -23,19 +23,16 @@ pub struct Prestockpile {
 }
 
 pub struct ClusterSpawner {
-    pub docker: DockerClient,
+    pub cluster_env: ClusterEnv,
     pub release: bool,
     pub env: String,
     pub gcp_project_id: String,
-    pub network: String,
     pub accounts: Vec<Account>,
     pub participants: Vec<Participant>,
     pub tmp_dir: PathBuf,
 
     pub cfg: NodeConfig,
     pub wait_for_running: bool,
-    pub redis: Option<containers::Redis>,
-    pub worker: Option<Worker<Sandbox>>,
     prestockpile: Option<Prestockpile>,
     pub use_ethereum: bool,
 }
@@ -51,19 +48,16 @@ impl Default for ClusterSpawner {
             ..Default::default()
         };
         Self {
-            docker: DockerClient::default(),
+            cluster_env: ClusterEnv::new(),
             release: true,
             env: ENV.to_string(),
             gcp_project_id: GCP_PROJECT_ID.to_string(),
-            network: DEFAULT_DOCKER_NETWORK.to_string(),
             accounts: Vec::with_capacity(cfg.nodes),
             participants: Vec::with_capacity(cfg.nodes),
             tmp_dir,
 
             cfg,
             wait_for_running: true,
-            redis: None,
-            worker: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             use_ethereum: false,
         }
@@ -72,7 +66,10 @@ impl Default for ClusterSpawner {
 
 impl ClusterSpawner {
     pub async fn init_network(self) -> anyhow::Result<Self> {
-        self.docker.create_network(&self.network).await?;
+        self.cluster_env
+            .docker()
+            .create_network(self.cluster_env.network())
+            .await?;
         Ok(self)
     }
 
@@ -128,12 +125,13 @@ impl ClusterSpawner {
     }
 
     pub fn network(mut self, network: &str) -> Self {
-        self.network = network.to_string();
+        self.cluster_env.set_network(network);
         self
     }
 
     pub fn ethereum(mut self) -> Self {
         self.use_ethereum = true;
+        self.cluster_env.enable_ethereum();
         self
     }
 
@@ -164,45 +162,52 @@ impl ClusterSpawner {
             .extend((0..self.accounts.len() as u32).map(Participant::from));
     }
 
-    pub async fn spawn_redis(&self) -> containers::Redis {
-        containers::Redis::run(&self.docker, &self.network).await
+    pub fn docker_client(&self) -> DockerClient {
+        self.cluster_env.docker().clone()
     }
 
-    /// Prespawns a redis instance where we're able to make use of it before the nodes are spun
-    /// up and are in running phase. This redis instance will be reused when the whole environment
-    /// is setup.
-    pub async fn prespawn_redis(&mut self) -> &containers::Redis {
-        self.redis = Some(self.spawn_redis().await);
-        self.redis.as_ref().unwrap()
+    pub fn docker_network(&self) -> &str {
+        self.cluster_env.network()
     }
 
-    /// Grabs the underlying redis instance that was prespawned, or if not prespawned, create a
-    /// new one from start up.
-    pub async fn take_redis(&mut self) -> containers::Redis {
-        match self.redis.take() {
-            Some(redis) => redis,
-            None => self.spawn_redis().await,
-        }
+    pub fn cluster_env(&mut self) -> &mut ClusterEnv {
+        &mut self.cluster_env
+    }
+
+    pub async fn spawn_redis(&mut self) -> anyhow::Result<&crate::containers::Redis> {
+        self.cluster_env.spawn_redis();
+        self.cluster_env.redis().await
+    }
+
+    pub async fn redis(&mut self) -> anyhow::Result<&crate::containers::Redis> {
+        self.cluster_env.redis().await
+    }
+
+    pub fn spawn_redis_task(&mut self) {
+        self.cluster_env.spawn_redis();
+    }
+
+    pub async fn prespawn_redis(&mut self) -> anyhow::Result<&crate::containers::Redis> {
+        self.spawn_redis().await
     }
 
     pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Worker<Sandbox>> {
-        if self.worker.is_none() {
-            self.worker = Some(near_workspaces::sandbox().await?);
-        }
-        Ok(self.worker.as_ref().unwrap())
+        self.cluster_env.spawn_near_sandbox();
+        self.cluster_env.near_sandbox().await
     }
 
-    pub async fn take_worker(&mut self) -> Worker<Sandbox> {
-        match self.worker.take() {
-            Some(worker) => worker,
-            None => near_workspaces::sandbox().await.unwrap(),
-        }
+    pub async fn take_worker(&mut self) -> anyhow::Result<Worker<Sandbox>> {
+        self.cluster_env.take_near_sandbox().await
     }
 
-    pub async fn presetup(&mut self) -> anyhow::Result<&containers::Redis> {
+    pub async fn presetup(&mut self) -> anyhow::Result<&crate::containers::Redis> {
         let worker = self.prespawn_sandbox().await?.clone();
         self.create_accounts(&worker).await;
-        Ok(self.prespawn_redis().await)
+        self.redis().await
+    }
+
+    pub async fn take_redis(&mut self) -> anyhow::Result<crate::containers::Redis> {
+        self.cluster_env.take_redis().await
     }
 
     pub async fn run(&mut self) -> anyhow::Result<Nodes> {
@@ -227,19 +232,24 @@ impl IntoFuture for ClusterSpawner {
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
 
+            let docker_client = self.docker_client();
+            let cfg = self.cfg;
+            let wait_for_running = self.wait_for_running;
+            let prestockpile = self.prestockpile;
+
             let cluster = Cluster {
-                cfg: self.cfg,
+                cfg,
                 rpc_client,
                 http_client: reqwest::Client::default(),
-                docker_client: self.docker,
+                docker_client,
                 account_idx: nodes.len(),
                 nodes,
             };
 
-            if self.wait_for_running {
+            if wait_for_running {
                 cluster.wait().running().nodes_running().await?;
 
-                if let Some(prestockpile) = self.prestockpile {
+                if let Some(prestockpile) = prestockpile {
                     cluster.prestockpile(prestockpile).await;
                 }
             }

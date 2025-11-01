@@ -21,13 +21,12 @@ use mpc_node::storage::{PresignatureStorage, TripleStorage};
 
 #[test_log::test(tokio::test)]
 async fn test_state_sync_update() -> anyhow::Result<()> {
-    let spawner = ClusterSpawner::default()
+    let mut spawner = ClusterSpawner::default()
         .network("protocol-sync")
         .init_network()
-        .await
-        .unwrap();
+        .await?;
 
-    let redis = spawner.spawn_redis().await;
+    let redis = spawner.spawn_redis().await?;
     let num_nodes = 1;
     let threshold = 2;
     let node0_account_id = "p0_test.near".parse().unwrap();
@@ -111,7 +110,7 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
     let node0_account_id = spawner.account_id(Into::<u32>::into(node0) as usize);
     let node1 = Participant::from(1);
     let node1_account_id = spawner.account_id(Into::<u32>::into(node1) as usize);
-    let redis = spawner.prespawn_redis().await;
+    let redis = spawner.prespawn_redis().await.unwrap();
 
     // immediately add to triples/presignatures storage the triples/presignatures we want to invalidate.
     let node0_triples = redis.triple_storage(&node0_account_id);
