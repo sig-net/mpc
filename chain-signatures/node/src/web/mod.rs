@@ -7,17 +7,18 @@ pub mod mock;
 pub mod debug;
 
 use self::error::Error;
+use crate::backlog::{Backlog, Checkpoint};
 use crate::indexer::NearIndexer;
 use crate::metrics::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
-use crate::protocol::MessageChannel;
+use crate::protocol::{Chain, MessageChannel};
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
 use crate::web::error::Result;
 
 use anyhow::Context;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, Query};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -28,6 +29,7 @@ use near_account_id::AccountId;
 use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -39,6 +41,7 @@ struct AxumState {
     sync_channel: SyncChannel,
     msg_channel: MessageChannel,
     my_account_id: AccountId,
+    backlog: Backlog,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -51,6 +54,7 @@ pub async fn run(
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     my_account_id: AccountId,
+    backlog: Backlog,
 ) {
     tracing::info!("starting web server");
     let axum_state = AxumState {
@@ -61,6 +65,7 @@ pub async fn run(
         presignature_storage,
         sync_channel,
         my_account_id,
+        backlog,
     };
 
     // Sync can be a large payload, so we set a higher limit for payload.
@@ -81,6 +86,7 @@ pub async fn run(
         .route("/state", get(state))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
+        .route("/checkpoint", get(checkpoint))
         .route("/debug", get(debug::page))
         .merge(sync);
 
@@ -267,6 +273,65 @@ async fn sync(
         .with_label_values(&["sync", state.my_account_id.as_str()])
         .observe(start.elapsed().as_millis() as f64);
     Ok(Json(()))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ChainsParam {
+    One(String),
+    Many(Vec<String>),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CheckpointQuery {
+    #[serde(default)]
+    chains: Option<ChainsParam>,
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn checkpoint(
+    Extension(state): Extension<Arc<AxumState>>,
+    Query(query): Query<CheckpointQuery>,
+) -> Result<Json<HashMap<Chain, Checkpoint>>> {
+    let start = Instant::now();
+    let chains_to_fetch: Vec<Chain> = match query.chains {
+        Some(chains_param) => {
+            let chain_strs = match chains_param {
+                ChainsParam::One(chain) => vec![chain],
+                ChainsParam::Many(chains) => chains,
+            };
+
+            let mut errs = Vec::with_capacity(chain_strs.len());
+            let mut chains = Vec::with_capacity(chain_strs.len());
+            for chain_str in chain_strs {
+                match chain_str.parse::<Chain>() {
+                    Ok(chain) => chains.push(chain),
+                    Err(err) => {
+                        errs.push(err);
+                        continue;
+                    }
+                }
+            }
+            if !errs.is_empty() {
+                return Err(Error::InvalidParameters(errs.join(", ")));
+            }
+
+            chains
+        }
+        None => vec![Chain::NEAR, Chain::Ethereum, Chain::Solana],
+    };
+
+    let mut resp = HashMap::new();
+    for chain in chains_to_fetch {
+        let checkpoint = state.backlog.checkpoint(chain).await;
+        resp.insert(chain, checkpoint);
+    }
+
+    WEB_ENDPOINT_LATENCY
+        .with_label_values(&["checkpoint", state.my_account_id.as_str()])
+        .observe(start.elapsed().as_millis() as f64);
+
+    Ok(Json(resp))
 }
 
 #[cfg(not(feature = "debug-page"))]

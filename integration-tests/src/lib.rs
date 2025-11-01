@@ -7,21 +7,23 @@ pub mod local;
 pub mod mpc_fixture;
 pub mod utils;
 
-use cluster::spawner::ClusterSpawner;
-use deadpool_redis::Pool;
-use mpc_node::indexer_eth::EthConfig;
-use mpc_node::indexer_sol::SolConfig;
 use std::collections::HashMap;
 
 use self::local::NodeEnvConfig;
 use crate::containers::DockerClient;
+
 use anyhow::Context as _;
+use cluster::spawner::ClusterSpawner;
+use deadpool_redis::Pool;
 use ethers::types::{Address, U256};
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
+use mpc_node::indexer_eth::EthConfig;
+use mpc_node::indexer_sol::SolConfig;
 use mpc_node::storage::triple_storage::TripleStorage;
 use mpc_node::{logs, mesh, node_client, storage};
+use mpc_primitives::{Chain, Checkpoint};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
@@ -240,6 +242,28 @@ impl Nodes {
 
     pub fn contract(&self) -> &Contract {
         &self.ctx().mpc_contract
+    }
+
+    pub async fn fetch_checkpoint(&self, id: usize, chain: Chain) -> anyhow::Result<Checkpoint> {
+        let url = format!("{}/checkpoint?chains={chain}", self.url(id));
+        let response = reqwest::get(&url).await?;
+        let status = response.status();
+        let body = response.text().await?;
+        tracing::info!(?status, raw_body = %body, "checkpoint response body");
+        let mut value: HashMap<Chain, Checkpoint> = serde_json::from_str(&body)?;
+        Ok(value
+            .remove(&chain)
+            .context("checkpoint not found for chain")?)
+    }
+
+    pub async fn fetch_checkpoints(&self, id: usize) -> anyhow::Result<HashMap<Chain, Checkpoint>> {
+        let url = format!("{}/checkpoint", self.url(id));
+        let response = reqwest::get(&url).await?;
+        let status = response.status();
+        let body = response.text().await?;
+        tracing::info!(?status, raw_body = %body, "checkpoint response body");
+        let value = serde_json::from_str(&body)?;
+        Ok(value)
     }
 }
 

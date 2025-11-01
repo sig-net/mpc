@@ -1,9 +1,10 @@
 pub mod spawner;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use mpc_contract::primitives::Participants;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
+use mpc_primitives::{Chain, Checkpoint};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{Finality, NearToken};
 use near_workspaces::{Account, AccountId, Contract, Worker};
@@ -335,5 +336,9 @@ impl Cluster {
             .min_mine_presignatures(self.cfg.protocol.presignature.min_presignatures as usize)
             .await
             .unwrap();
+    }
+
+    pub async fn fetch_checkpoints(&self, id: usize) -> anyhow::Result<HashMap<Chain, Checkpoint>> {
+        self.nodes.fetch_checkpoints(id).await
     }
 }

@@ -21,6 +21,8 @@ pub enum Error {
     Message(#[from] MessageError),
     #[error(transparent)]
     Rpc(#[from] near_fetch::Error),
+    #[error("invalid parameters: {0}")]
+    InvalidParameters(String),
 }
 
 impl Error {
@@ -31,6 +33,7 @@ impl Error {
             Error::Cryptography(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Message(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Rpc(_) => StatusCode::BAD_REQUEST,
+            Error::InvalidParameters(_) => StatusCode::BAD_REQUEST,
         }
     }
 }
