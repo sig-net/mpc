@@ -24,10 +24,10 @@ use near_sdk::{
     PromiseError, PublicKey,
 };
 use primitives::{
-    CandidateInfo, Candidates, InternalSignRequest, Participants, PendingRequest, PkVotes,
-    SignPoll, SignRequest, StorageKey, Votes, YieldIndex,
+    CandidateInfo, Candidates, Chain, Checkpoint, InternalSignRequest, Participants,
+    PendingRequest, PkVotes, SignPoll, SignRequest, StorageKey, Votes, YieldIndex,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::config::Config;
 use crate::errors::Error;
@@ -477,6 +477,8 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
+                        checkpoint_votes: HashMap::new(),
+                        latest_checkpoints: HashMap::new(),
                     });
                     Ok(true)
                 } else {
@@ -520,6 +522,8 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
+                        checkpoint_votes: HashMap::new(),
+                        latest_checkpoints: HashMap::new(),
                     });
                     Ok(true)
                 } else {
@@ -561,6 +565,8 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
+                        checkpoint_votes: HashMap::new(),
+                        latest_checkpoints: HashMap::new(),
                     });
                     Ok(true)
                 } else {
@@ -568,6 +574,58 @@ impl VersionedMpcContract {
                 }
             }
             _ => Err(InvalidState::UnexpectedProtocolState.message(protocol_state.name())),
+        }
+    }
+
+    /// Vote on a checkpoint for a specific chain. When threshold votes are reached
+    /// for the exact same checkpoint (same block_height and pending_transactions),
+    /// it is stored as the latest checkpoint for that chain.
+    ///
+    /// Returns Ok(true) if threshold was reached and checkpoint was stored.
+    /// Returns Ok(false) if threshold was not yet reached.
+    #[handle_result]
+    pub fn vote_checkpoint(&mut self, chain: Chain, checkpoint: Checkpoint) -> Result<bool, Error> {
+        let voter = self.voter()?;
+        let checkpoint_height = checkpoint.block_height;
+        log!("vote_checkpoint: signer={voter}, chain={chain:?}, block_height={checkpoint_height}");
+        let ProtocolContractState::Running(RunningContractState {
+            threshold,
+            checkpoint_votes,
+            latest_checkpoints,
+            ..
+        }) = self.mutable_state()
+        else {
+            return Err(InvalidState::ProtocolStateNotRunning.into());
+        };
+
+        if let Some(latest) = latest_checkpoints.get(&chain) {
+            if checkpoint.block_height <= latest.block_height {
+                log!(
+                    "checkpoint ignored: chain={chain:?} block_height={checkpoint_height} <= latest_height={}",
+                    latest.block_height
+                );
+                return Ok(true);
+            }
+        }
+
+        let chain_votes = checkpoint_votes.entry(chain).or_default();
+
+        // Add this voter's vote for this specific checkpoint
+        let voted = chain_votes.entry(checkpoint.clone());
+        voted.insert(voter);
+        let vote_count = voted.len();
+
+        if vote_count >= *threshold {
+            log!("checkpoint latest updated: chain={chain:?} block_height={checkpoint_height}");
+
+            // Store as latest checkpoint
+            latest_checkpoints.insert(chain, checkpoint);
+            // latest checkpoint reached, clear previous ones:
+            checkpoint_votes.remove(&chain);
+            Ok(true)
+        } else {
+            log!("checkpoint voted: chain={chain:?} block_height={checkpoint_height}, votes={vote_count}/{threshold}");
+            Ok(false)
         }
     }
 
@@ -698,6 +756,8 @@ impl VersionedMpcContract {
                 candidates: Candidates::new(),
                 join_votes: Votes::new(),
                 leave_votes: Votes::new(),
+                checkpoint_votes: HashMap::new(),
+                latest_checkpoints: HashMap::new(),
             }),
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
@@ -715,8 +775,74 @@ impl VersionedMpcContract {
     #[init(ignore_state)]
     #[handle_result]
     pub fn migrate() -> Result<Self, Error> {
-        let old: MpcContract = env::state_read().ok_or(InvalidState::ContractStateIsMissing)?;
-        Ok(VersionedMpcContract::V0(old))
+        #[derive(BorshDeserialize)]
+        struct OldRunningContractState {
+            pub epoch: u64,
+            pub participants: Participants,
+            pub threshold: usize,
+            pub public_key: PublicKey,
+            pub candidates: Candidates,
+            pub join_votes: Votes,
+            pub leave_votes: Votes,
+        }
+
+        #[derive(BorshDeserialize)]
+        enum OldProtocolContractState {
+            NotInitialized,
+            Initializing(InitializingContractState),
+            Running(OldRunningContractState),
+            Resharing(ResharingContractState),
+        }
+
+        #[derive(BorshDeserialize)]
+        struct OldMpcContract {
+            protocol_state: OldProtocolContractState,
+            pending_requests: IterableMap<SignId, PendingRequest>,
+            proposed_updates: ProposedUpdates,
+            config: Config,
+        }
+
+        // Try to read as old state first (for migration)
+        if let Some(old_contract) = env::state_read::<OldMpcContract>() {
+            log!("Migrating from old contract state (adding checkpoint fields)");
+
+            // Convert old state to new state
+            let new_protocol_state = match old_contract.protocol_state {
+                OldProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
+                OldProtocolContractState::Initializing(state) => {
+                    ProtocolContractState::Initializing(state)
+                }
+                OldProtocolContractState::Running(old_running) => {
+                    ProtocolContractState::Running(RunningContractState {
+                        epoch: old_running.epoch,
+                        participants: old_running.participants,
+                        threshold: old_running.threshold,
+                        public_key: old_running.public_key,
+                        candidates: old_running.candidates,
+                        join_votes: old_running.join_votes,
+                        leave_votes: old_running.leave_votes,
+                        checkpoint_votes: HashMap::new(),
+                        latest_checkpoints: HashMap::new(),
+                    })
+                }
+                OldProtocolContractState::Resharing(state) => {
+                    ProtocolContractState::Resharing(state)
+                }
+            };
+
+            return Ok(VersionedMpcContract::V0(MpcContract {
+                protocol_state: new_protocol_state,
+                pending_requests: old_contract.pending_requests,
+                proposed_updates: old_contract.proposed_updates,
+                config: old_contract.config,
+            }));
+        }
+
+        // If old state read failed, try reading as new state (no migration needed)
+        let new_contract: MpcContract =
+            env::state_read().ok_or(InvalidState::ContractStateIsMissing)?;
+        log!("Contract state is already up to date");
+        Ok(VersionedMpcContract::V0(new_contract))
     }
 
     pub fn state(&self) -> &ProtocolContractState {
@@ -753,6 +879,19 @@ impl VersionedMpcContract {
     // contract version
     pub fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()
+    }
+
+    /// Get the latest agreed checkpoint for a specific chain
+    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&Checkpoint> {
+        match self {
+            Self::V0(mpc_contract) => {
+                if let ProtocolContractState::Running(state) = &mpc_contract.protocol_state {
+                    state.latest_checkpoints.get(&chain)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     #[private]

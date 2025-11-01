@@ -3,6 +3,7 @@
 
 use crate::containers::Redis;
 use cait_sith::protocol::Participant;
+use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::state::NodeStateWatcher;
@@ -34,6 +35,7 @@ pub struct MpcFixtureNode {
 
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
+    pub backlog: Backlog,
 
     pub web_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -106,6 +108,7 @@ impl MpcFixtureNode {
             // unused but needed to call the web interface
             SyncChannel::new().1,
             account_id,
+            self.backlog.clone(),
         );
         self.web_handle = Some(tokio::spawn(task));
     }

@@ -17,12 +17,13 @@ pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
+pub use mpc_primitives::Chain;
 pub use signature::{IndexedSignRequest, SignQueue};
+use signet_program::SignBidirectionalEvent;
 pub use state::{Node, NodeState};
 
 use crate::backlog::Backlog;
 use crate::config::Config;
-use crate::indexer_sol::SignBidirectionalEvent;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
@@ -35,8 +36,6 @@ use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
 use semver::Version;
-use serde::{Deserialize, Serialize};
-use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -227,48 +226,12 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Chain {
-    NEAR,
-    Ethereum,
-    Solana,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[allow(clippy::large_enum_variant)]
 pub enum SignRequestType {
     Sign,
     SignBidirectional(SignBidirectionalEvent),
     RespondBidirectional(RespondBidirectionalTx),
-}
-
-impl Chain {
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Chain::NEAR => "NEAR",
-            Chain::Ethereum => "Ethereum",
-            Chain::Solana => "Solana",
-        }
-    }
-}
-
-impl std::str::FromStr for Chain {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "NEAR" | "Near" | "near" => Ok(Chain::NEAR),
-            "Ethereum" | "ethereum" | "eth" => Ok(Chain::Ethereum),
-            "Solana" | "solana" | "sol" => Ok(Chain::Solana),
-            _ => Err(format!("unknown or unsupported chain {s}")),
-        }
-    }
-}
-
-impl fmt::Display for Chain {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
 }
 
 #[cfg(test)]

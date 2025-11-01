@@ -6,7 +6,6 @@ use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use anchor_lang::prelude::Pubkey;
 use borsh::BorshSerialize;
-use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
@@ -36,10 +35,14 @@ struct AbiField {
     typ: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PendingRequestStatus {
+    /// Request has been received on the source chain and is waiting for a `respond`
+    /// transaction to be observed.
+    AwaitingResponse,
+    /// Request has been responded to and the derived transaction is now waiting to
+    /// execute on the destination chain.
     PendingExecution,
-    PendingPublish,
     Failed,
     Success,
 }
@@ -63,7 +66,6 @@ pub struct BidirectionalTx {
     pub request_id: [u8; 32],
     pub from_address: Address,
     pub nonce: u64,
-    pub participants: Vec<Participant>,
     pub status: PendingRequestStatus,
 }
 
@@ -112,8 +114,7 @@ impl BidirectionalTx {
             request_id: signature.request.indexed.id.request_id,
             from_address,
             nonce,
-            participants: signature.participants,
-            status: PendingRequestStatus::PendingExecution,
+            status: PendingRequestStatus::AwaitingResponse,
         })
     }
 }
@@ -266,7 +267,18 @@ pub fn sign_and_hash_transaction(
     if is_eip1559(unsigned_rlp) {
         sign_and_hash_eip1559_from_unsigned(unsigned_rlp, &r, &s, y_parity)
     } else {
-        sign_and_hash_legacy_from_unsigned(unsigned_rlp, Some(60), &r, &s, y_parity)
+        // Extract chain_id from the unsigned RLP (it's the 7th field in legacy transactions)
+        // In legacy Ethereum transactions with EIP-155, there are 9 fields:
+        // [nonce, gasPrice, gasLimit, to, value, data, chain_id, 0, 0]
+        // The chain_id is the 7th field (index 6, 0-based).
+        // We check for at least 9 fields to ensure chain_id is present.
+        let rlp = Rlp::new(unsigned_rlp);
+        let chain_id = if rlp.item_count().unwrap_or(0) >= 9 {
+            rlp.val_at::<u64>(6).ok()
+        } else {
+            None
+        };
+        sign_and_hash_legacy_from_unsigned(unsigned_rlp, chain_id, &r, &s, y_parity)
     }
 }
 
@@ -514,5 +526,4 @@ pub struct SignBidirectionalSignature {
     pub public_key: mpc_crypto::PublicKey,
     pub request: SignRequest,
     pub signature: Signature,
-    pub participants: Vec<Participant>,
 }

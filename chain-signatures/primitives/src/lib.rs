@@ -5,6 +5,7 @@ use near_account_id::AccountId;
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use sha3::Digest;
+use std::{fmt, str::FromStr};
 
 use crate::bytes::cbor_scalar;
 
@@ -100,6 +101,109 @@ impl Signature {
             big_r,
             s,
             recovery_id,
+        }
+    }
+}
+
+/// Supported blockchain networks for checkpoints.
+#[derive(
+    BorshDeserialize,
+    BorshSerialize,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+#[borsh(crate = "near_sdk::borsh")]
+pub enum Chain {
+    NEAR,
+    Ethereum,
+    Solana,
+}
+
+impl Chain {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Chain::NEAR => "NEAR",
+            Chain::Ethereum => "Ethereum",
+            Chain::Solana => "Solana",
+        }
+    }
+}
+
+impl fmt::Display for Chain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for Chain {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "near" => Ok(Chain::NEAR),
+            "ethereum" | "eth" => Ok(Chain::Ethereum),
+            "solana" | "sol" => Ok(Chain::Solana),
+            other => Err(format!("unknown or unsupported chain {other}")),
+        }
+    }
+}
+
+/// Transaction information tracked across checkpoints.
+#[derive(
+    BorshDeserialize,
+    BorshSerialize,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct PendingTx {
+    pub sign_id: SignId,
+    #[serde(with = "serde_bytes")]
+    pub transaction: Vec<u8>,
+}
+
+/// A checkpoint represents the backlog state at a specific block height.
+#[derive(
+    BorshDeserialize,
+    BorshSerialize,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct Checkpoint {
+    pub chain: Chain,
+    pub block_height: u64,
+    pub pending_requests: Vec<PendingTx>,
+}
+
+impl Checkpoint {
+    pub fn empty(chain: Chain) -> Self {
+        Self {
+            chain,
+            block_height: 0,
+            pending_requests: Vec::new(),
         }
     }
 }

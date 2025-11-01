@@ -119,13 +119,13 @@ pub mod signet_program {
     }
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AffinePoint {
     pub x: [u8; 32],
     pub y: [u8; 32],
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Signature {
     pub big_r: AffinePoint,
     pub s: [u8; 32],
@@ -188,6 +188,7 @@ pub struct SignBidirectional<'info> {
 }
 
 #[event]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignatureRespondedEvent {
     pub request_id: [u8; 32],
     pub responder: Pubkey,
@@ -203,6 +204,7 @@ pub struct RespondBidirectionalEvent {
 }
 
 #[event]
+#[derive(Clone, Debug)]
 pub struct SignatureRequestedEvent {
     pub sender: Pubkey,
     pub payload: [u8; 32],
@@ -217,6 +219,7 @@ pub struct SignatureRequestedEvent {
 }
 
 #[event]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SignBidirectionalEvent {
     pub sender: Pubkey,
     pub serialized_transaction: Vec<u8>,
