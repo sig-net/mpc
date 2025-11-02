@@ -1,17 +1,29 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use futures::future::{BoxFuture, FutureExt, Shared};
 use near_workspaces::network::Sandbox;
 use near_workspaces::Worker;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::cluster::DEFAULT_DOCKER_NETWORK;
 use crate::containers::{self, DockerClient};
 
-#[derive(Default)]
+struct PendingResource<T> {
+    wait: Shared<BoxFuture<'static, ()>>,
+    result: Arc<Mutex<Option<Result<T>>>>,
+}
+
 enum ResourceState<T> {
-    #[default]
     Standby,
     Ready(T),
-    Pending(JoinHandle<Result<T>>),
+    Pending(PendingResource<T>),
+}
+
+impl<T> Default for ResourceState<T> {
+    fn default() -> Self {
+        ResourceState::Standby
+    }
 }
 
 impl<T> ResourceState<T> {
@@ -83,13 +95,14 @@ impl ClusterEnv {
 
         let docker = self.docker.clone();
         let network = self.network.clone();
-        self.redis = ResourceState::Pending(tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             docker
                 .create_network(&network)
                 .await
                 .context("failed to ensure docker network for redis")?;
             Ok(containers::Redis::run(&docker, &network).await)
-        }));
+        });
+        self.redis = ResourceState::Pending(shared_from_handle("redis container", handle));
     }
 
     pub fn spawn_near_sandbox(&mut self) {
@@ -97,11 +110,12 @@ impl ClusterEnv {
             return;
         }
 
-        self.near_sandbox = ResourceState::Pending(tokio::spawn(async {
+        let handle = tokio::spawn(async {
             near_workspaces::sandbox()
                 .await
                 .context("failed to spawn near sandbox")
-        }));
+        });
+        self.near_sandbox = ResourceState::Pending(shared_from_handle("near sandbox", handle));
     }
 
     pub fn spawn_ethereum_sandbox(&mut self) {
@@ -111,7 +125,7 @@ impl ClusterEnv {
 
         let docker = self.docker.clone();
         let network = self.network.clone();
-        self.ethereum_sandbox = ResourceState::Pending(tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             docker
                 .create_network(&network)
                 .await
@@ -119,7 +133,9 @@ impl ClusterEnv {
             containers::EthereumSandbox::run(&docker, &network)
                 .await
                 .context("failed to spawn ethereum sandbox")
-        }));
+        });
+        self.ethereum_sandbox =
+            ResourceState::Pending(shared_from_handle("ethereum sandbox", handle));
     }
 
     pub async fn redis(&mut self) -> Result<&containers::Redis> {
@@ -164,37 +180,89 @@ impl ClusterEnv {
             .map(Some)
     }
 
-    async fn await_resource<'a, T>(slot: &'a mut ResourceState<T>, name: &str) -> Result<&'a T> {
+    async fn await_resource<'a, T>(slot: &'a mut ResourceState<T>, name: &str) -> Result<&'a T>
+    where
+        T: Send + 'static,
+    {
         loop {
-            match slot {
-                ResourceState::Ready(resource) => return Ok(resource),
-                ResourceState::Pending(_) => {
-                    let handle = match std::mem::replace(slot, ResourceState::Standby) {
-                        ResourceState::Pending(handle) => handle,
-                        _ => continue,
-                    };
-                    let resource = handle
-                        .await
-                        .with_context(|| format!("task for {name} panicked"))??;
+            if let ResourceState::Ready(resource) = slot {
+                return Ok(resource);
+            }
+
+            if matches!(slot, ResourceState::Standby) {
+                bail!("{name} has not been spawned");
+            }
+
+            let (wait, result) = match slot {
+                ResourceState::Pending(pending) => {
+                    (pending.wait.clone(), Arc::clone(&pending.result))
+                }
+                _ => continue,
+            };
+
+            wait.await;
+
+            let outcome = {
+                let mut guard = result.lock().await;
+                guard.take()
+            };
+
+            match outcome {
+                Some(Ok(resource)) => {
                     *slot = ResourceState::Ready(resource);
                 }
-                ResourceState::Standby => bail!("{name} has not been spawned"),
+                Some(Err(err)) => {
+                    *slot = ResourceState::Standby;
+                    return Err(err);
+                }
+                None => continue,
             }
         }
     }
 
-    async fn await_resource_owned<T>(slot: &mut ResourceState<T>, name: &str) -> Result<T> {
+    async fn await_resource_owned<T>(slot: &mut ResourceState<T>, name: &str) -> Result<T>
+    where
+        T: Send + 'static,
+    {
         match std::mem::replace(slot, ResourceState::Standby) {
             ResourceState::Ready(resource) => Ok(resource),
-            ResourceState::Pending(handle) => {
-                let resource = handle
-                    .await
-                    .with_context(|| format!("task for {name} panicked"))??;
-                Ok(resource)
+            ResourceState::Pending(pending) => {
+                let wait = pending.wait.clone();
+                let result = Arc::clone(&pending.result);
+
+                wait.await;
+
+                let mut guard = result.lock().await;
+                match guard.take() {
+                    Some(Ok(resource)) => Ok(resource),
+                    Some(Err(err)) => Err(err),
+                    None => bail!("{name} has already been taken"),
+                }
             }
             ResourceState::Standby => bail!("{name} has not been spawned"),
         }
     }
+}
+
+fn shared_from_handle<T>(name: &'static str, handle: JoinHandle<Result<T>>) -> PendingResource<T>
+where
+    T: Send + 'static,
+{
+    let result = Arc::new(Mutex::new(None));
+    let shared_result = Arc::clone(&result);
+    let name = name.to_string();
+    let wait = async move {
+        let outcome = match handle.await {
+            Ok(resource) => resource,
+            Err(join_error) => Err(anyhow!("task for {name} panicked: {join_error}")),
+        };
+
+        *shared_result.lock().await = Some(outcome);
+    }
+    .boxed()
+    .shared();
+
+    PendingResource { wait, result }
 }
 
 impl Default for ClusterEnv {
