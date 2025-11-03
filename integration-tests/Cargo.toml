@@ -78,6 +78,11 @@ name = "store"
 path = "benches/store.rs"
 harness = false
 
+[[bench]]
+name = "redis"
+path = "benches/redis.rs"
+harness = false
+
 [features]
 default = []
 docker-test = []
