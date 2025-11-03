@@ -352,6 +352,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher.clone(),
                 mesh_state.clone(),
                 client.clone(),
+                true,
             ));
             tokio::spawn(indexer_sol::run(
                 sol,
