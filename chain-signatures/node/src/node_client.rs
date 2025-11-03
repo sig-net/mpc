@@ -95,7 +95,10 @@ impl NodeClient {
             let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
             let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
             tracing::warn!("failed to send a message to {url} with code {status}: {resp}");
-            Err(RequestError::Unsuccessful(status, resp.into()))
+            Err(RequestError::Unsuccessful(
+                StatusCode::from_u16(status.as_u16()).unwrap(),
+                resp.into(),
+            ))
         }
     }
 
@@ -119,7 +122,10 @@ impl NodeClient {
             // TODO: parse response body and convert to mpc_node::Error type.
             let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
             let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            Err(RequestError::Unsuccessful(status, resp.into()))
+            Err(RequestError::Unsuccessful(
+                StatusCode::from_u16(status.as_u16()).unwrap(),
+                resp.into(),
+            ))
         }
     }
 

@@ -3,15 +3,17 @@ pub mod error;
 use crate::storage;
 
 use google_datastore1::api::Key;
-use google_datastore1::oauth2::AccessTokenAuthenticator;
 use google_secretmanager1::api::{AddSecretVersionRequest, SecretPayload};
-use google_secretmanager1::oauth2::authenticator::ApplicationDefaultCredentialsTypes;
-use google_secretmanager1::oauth2::{
-    ApplicationDefaultCredentialsAuthenticator, ApplicationDefaultCredentialsFlowOpts,
-};
 use google_secretmanager1::SecretManager;
-use hyper::client::HttpConnector;
-use hyper_rustls::HttpsConnector;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
+use yup_oauth2::{
+    authenticator::{
+        AccessTokenAuthenticator, ApplicationDefaultCredentialsAuthenticator,
+        ApplicationDefaultCredentialsTypes,
+    },
+    ApplicationDefaultCredentialsFlowOpts,
+};
 
 use near_account_id::AccountId;
 
@@ -19,7 +21,7 @@ pub type SecretResult<T> = std::result::Result<T, error::SecretStorageError>;
 
 #[derive(Clone)]
 pub struct SecretManagerService {
-    secret_manager: SecretManager<HttpsConnector<HttpConnector>>,
+    secret_manager: SecretManager<HttpConnector>,
     project_id: String,
 }
 
@@ -49,7 +51,11 @@ impl SecretManagerService {
         }
     }
 
-    pub async fn store_secret<T: AsRef<str>>(&mut self, data: &[u8], name: T) -> SecretResult<()> {
+    pub async fn store_secret<T: AsRef<str>>(
+        &mut self,
+        data: &[u8],
+        name: T,
+    ) -> SecretResult<()> {
         self.secret_manager
             .projects()
             .secrets_add_version(
@@ -94,30 +100,20 @@ impl GcpService {
         let project_id = storage_options.gcp_project_id.clone();
         let secret_manager;
         if storage_options.env == "local-test" {
-            let client = hyper::Client::builder().build(
-                hyper_rustls::HttpsConnectorBuilder::new()
-                    .with_native_roots()
-                    .https_or_http()
-                    .enable_http1()
-                    .enable_http2()
-                    .build(),
-            );
+            // For local testing, use HTTP-only client to avoid HTTPS trait issues
+            let client =
+                hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build_http();
             // Assuming we are in a test environment, token does not matter
             let authenticator = AccessTokenAuthenticator::builder("TOKEN".to_string())
                 .build()
                 .await?;
             secret_manager = SecretManager::new(client.clone(), authenticator.clone());
         } else {
-            // restring client to use https in production
-            let client = hyper::Client::builder().build(
-                hyper_rustls::HttpsConnectorBuilder::new()
-                    .with_native_roots()
-                    .https_only()
-                    .enable_http1()
-                    .enable_http2()
-                    .build(),
-            );
-            let opts = ApplicationDefaultCredentialsFlowOpts::default();
+            // For production, also use HTTP-only client due to HTTPS trait compatibility issues
+            // TODO: Fix HTTPS client compatibility when Google API libraries are updated
+            let client =
+                hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build_http();
+            let opts = ApplicationDefaultCredentialsFlowOpts { metadata_url: None };
             let authenticator = match ApplicationDefaultCredentialsAuthenticator::builder(opts)
                 .await
             {

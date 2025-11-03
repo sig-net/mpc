@@ -12,12 +12,15 @@ async-trait = "0.1"
 axum = "0.7.9"
 axum-extra = "0.9.6"
 chrono = "0.4.24"
-google-datastore1 = "=5.0.4"
-google-secretmanager1 = "5"
+google-apis-common = "7.0"
+google-datastore1 = "6.0.0+20240617"
+google-secretmanager1 = "6.0.0+20240621"
 hkdf = "0.12.4"
 highway = "1.1.0"
 http = "1.1.0"
-hyper-rustls = { version = "=0.24", features = ["http2"] }
+http-body-util = "0.1"
+hyper-rustls = { version = "0.27", features = ["http2"] }
+hyper-util = "0.1"
 local-ip-address = "0.5.4"
 lru = "0.13.0"
 mime = "0.3.17"
@@ -28,6 +31,7 @@ sysinfo = "0.32.0"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 tracing-stackdriver = "0.10.0"
 tracing-opentelemetry = "0.30.0"
+yup-oauth2 = "11.0.0"
 opentelemetry = { version = "0.29.0", default-features = false, features = [
     "trace",
 ] }
@@ -52,7 +56,7 @@ ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true
 hex.workspace = true
-hyper.workspace = true
+hyper = "1.0"
 k256.workspace = true
 rand.workspace = true
 reqwest.workspace = true
@@ -91,6 +95,7 @@ rlp.workspace = true
 alloy-primitives.workspace = true
 
 maud = { version = "0.27.0", optional = true }
+hyper-tls = "0.6.0"
 
 [dev-dependencies]
 mockito = "1.7.0"
