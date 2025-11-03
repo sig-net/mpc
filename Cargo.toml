@@ -16,6 +16,7 @@ version = "1.10.0"
 
 [workspace.dependencies]
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
+alloy-primitives = "1.4.1"
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 borsh = "1.5.3"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
@@ -56,10 +57,6 @@ alloy-dyn-abi = "1.4.1"
 ethers-core = "2.0.13"
 secp256k1 = "0.28.2"
 rlp = "0.5"
-alloy-consensus = { version = "1.0.38", features = ["serde"] }
-alloy-primitives = "1.4.1"
-alloy-json-abi = "1.4.1"
-alloy-rlp = "0.3.12"
 solana-client = "2.2.7"
 futures-util = "0.3.31"
 
