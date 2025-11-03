@@ -1,7 +1,18 @@
+use std::fmt;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::time::Instant;
+
+use crate::backlog::Backlog;
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+#[cfg(not(feature = "light_client"))]
 use crate::sign_bidirectional::BidirectionalTx;
+#[cfg(not(feature = "light_client"))]
 use crate::sign_bidirectional::BidirectionalTxId;
+use crate::sign_bidirectional::PendingRequestStatus;
 use crate::storage::app_data_storage::AppDataStorage;
+
 use alloy::consensus::BlockHeader;
 #[cfg(not(feature = "light_client"))]
 use alloy::consensus::Transaction as _;
@@ -20,7 +31,6 @@ use crate::respond_bidirectional::{
     CompletedTx, RespondBidirectionalSerializedOutput, SerDeserFormat,
     OUTPUT_DESERIALIZATION_FORMAT, RESPOND_SERIALIZATION_FORMAT,
 };
-use crate::sign_bidirectional::BidirectionalTxStatus;
 #[cfg(not(feature = "light_client"))]
 use crate::sign_bidirectional::TransactionOutput;
 use alloy::sol_types::{sol, SolEvent};
@@ -34,16 +44,12 @@ use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
 #[cfg(feature = "light_client")]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::{fmt, str::FromStr, sync::LazyLock, time::Instant};
 #[cfg(feature = "light_client")]
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
@@ -457,7 +463,7 @@ pub async fn run(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
-    bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
+    backlog: Backlog,
 ) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
@@ -551,40 +557,26 @@ pub async fn run(
         .await;
     });
 
-    let near_account_id_clone = node_near_account_id.clone();
-    let client_clone = Arc::clone(&client);
-    tokio::spawn(async move {
-        tracing::info!("Spawned task to send indexed requests to send queue");
-        send_requests_when_final(
-            &client_clone,
-            requests_indexed_recv,
-            finalized_block_recv,
-            sign_tx.clone(),
-            app_data_storage.clone(),
-            near_account_id_clone.clone(),
-        )
-        .await;
-    });
+    tokio::spawn(send_requests_when_final(
+        Arc::clone(&client),
+        requests_indexed_recv,
+        finalized_block_recv,
+        sign_tx.clone(),
+        app_data_storage.clone(),
+        node_near_account_id.clone(),
+        backlog.clone(),
+    ));
 
-    let near_account_id_clone = node_near_account_id.clone();
-    let requests_indexed_send_clone = requests_indexed_send.clone();
-    let blocks_failed_send_clone = blocks_failed_send.clone();
-    let client_clone = Arc::clone(&client);
-    let bidirectional_tx_map_clone = bidirectional_tx_map.clone();
-    tokio::spawn(async move {
-        tracing::info!("Spawned task to retry failed blocks");
-        retry_failed_blocks(
-            blocks_failed_recv,
-            blocks_failed_send_clone,
-            &client_clone,
-            eth_contract_addr,
-            near_account_id_clone,
-            requests_indexed_send_clone,
-            total_timeout,
-            bidirectional_tx_map_clone,
-        )
-        .await;
-    });
+    tokio::spawn(retry_failed_blocks(
+        blocks_failed_recv,
+        blocks_failed_send.clone(),
+        Arc::clone(&client),
+        eth_contract_addr,
+        node_near_account_id.clone(),
+        requests_indexed_send.clone(),
+        total_timeout,
+        backlog.clone(),
+    ));
 
     let blocks_to_process_send_clone = blocks_to_process_send.clone();
     if let Some(last_processed_block) = last_processed_block {
@@ -633,7 +625,6 @@ pub async fn run(
                 (block_number, block_hash, false)
             }
         };
-        let bidirectional_tx_map_clone = bidirectional_tx_map.clone();
         if let Err(err) = process_block(
             block_number,
             block_hash,
@@ -642,7 +633,7 @@ pub async fn run(
             node_near_account_id.clone(),
             requests_indexed_send_clone.clone(),
             total_timeout,
-            bidirectional_tx_map_clone,
+            backlog.clone(),
         )
         .await
         {
@@ -668,12 +659,12 @@ pub async fn run(
 async fn retry_failed_blocks(
     mut blocks_failed_rx: mpsc::Receiver<BlockNumberAndHash>,
     blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
-    client: &Arc<EthereumClient>,
+    client: Arc<EthereumClient>,
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
-    bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
+    backlog: Backlog,
 ) {
     loop {
         let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
@@ -683,12 +674,12 @@ async fn retry_failed_blocks(
         if let Err(err) = process_block(
             block_number,
             block_hash,
-            client,
+            &client,
             eth_contract_addr,
             node_near_account_id.clone(),
             requests_indexed.clone(),
             total_timeout,
-            bidirectional_tx_map.clone(),
+            backlog.clone(),
         )
         .await
         {
@@ -896,7 +887,7 @@ async fn process_block(
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
-    bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
+    backlog: Backlog,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -921,112 +912,79 @@ async fn process_block(
         return Ok(());
     };
 
-    let pending_txs: HashMap<BidirectionalTxId, BidirectionalTx> = {
-        bidirectional_tx_map
-            .read()
-            .await
-            .iter()
-            .filter(|(_, tx)| tx.status == BidirectionalTxStatus::Pending)
-            .map(|(id, tx)| (*id, tx.clone()))
-            .collect()
+    let pending_txs = backlog
+        .get_by_status(Chain::Ethereum, PendingRequestStatus::PendingExecution)
+        .await;
+
+    let Some((sign_id, pending_tx)) = pending_entry else {
+        continue;
     };
-    let mut respond_bidirectional_requests: Vec<IndexedSignRequest> = Vec::new();
-    for receipt in &block_receipts {
-        let Some(pending_tx) = pending_txs.get(&receipt.transaction_hash.into()) else {
-            continue;
-        };
-        let status = receipt.status();
-        tracing::info!(
-            "Tx {} found in block {block_number}: {}",
-            receipt.transaction_hash,
-            if status { "success" } else { "failed" }
+    let status = receipt.status();
+    tracing::info!(
+        "Tx {} found in block {block_number}: {}",
+        receipt.transaction_hash,
+        if status { "success" } else { "failed" }
+    );
+    let mut pending_tx = pending_tx.clone();
+    pending_tx.status = if status {
+        PendingRequestStatus::Success
+    } else {
+        PendingRequestStatus::Failed
+    };
+
+    let pending_tx_clone = pending_tx.clone();
+    let completed_tx =
+        crate::respond_bidirectional::CompletedTx::new(pending_tx_clone, block_number);
+
+    let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
+        .create_sign_request_from_completed_tx(client, Chain::Ethereum, 6, total_timeout)
+        .await;
+    if let Some(request) = respond_bidirectional_sign_request {
+        respond_bidirectional_requests.push(request);
+        backlog.insert(Chain::Ethereum, *sign_id, pending_tx).await;
+    } else {
+        // failed to create sign request from completed tx, remove the tx from the map
+        // TODO: we need to implement a better solution for not finding such txs in helios. possible: https://github.com/sig-net/mpc/issues/499
+        tracing::warn!(
+            "Failed to create sign request from completed tx, removing tx from map: {:?}",
+            receipt.transaction_hash
         );
-        let client_clone = client.clone();
-        let mut pending_tx = pending_tx.clone();
-        pending_tx.status = if status {
-            BidirectionalTxStatus::Success
-        } else {
-            BidirectionalTxStatus::Failed
-        };
-
-        let pending_tx_clone = pending_tx.clone();
-        let completed_tx =
-            crate::respond_bidirectional::CompletedTx::new(pending_tx_clone, block_number);
-
-        let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
-            .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
-            .await;
-        if let Some(respond_bidirectional_sign_request) = respond_bidirectional_sign_request {
-            respond_bidirectional_requests.push(respond_bidirectional_sign_request);
-            bidirectional_tx_map
-                .write()
-                .await
-                .insert(receipt.transaction_hash.into(), pending_tx);
-        } else {
-            // failed to create sign request from completed tx, remove the tx from the map
-            // TODO: we need to implement a better solution for not finding such txs in helios. possible: https://github.com/sig-net/mpc/issues/499
-            tracing::warn!(
-                "Failed to create sign request from completed tx, removing tx from map: {:?}",
-                receipt.transaction_hash
-            );
-            bidirectional_tx_map
-                .write()
-                .await
-                .remove(&receipt.transaction_hash.into());
-        }
+        backlog.remove(Chain::Ethereum, sign_id).await;
     }
 
-    let remaining_pending_txs: HashMap<BidirectionalTxId, BidirectionalTx> = {
-        bidirectional_tx_map
-            .read()
-            .await
-            .iter()
-            .filter(|(_, tx)| tx.status == BidirectionalTxStatus::Pending)
-            .map(|(id, tx)| (*id, tx.clone()))
-            .collect()
-    };
+    let remaining_pending_txs = backlog
+        .get_by_status(Chain::Ethereum, PendingRequestStatus::PendingExecution)
+        .await;
+    if current_nonce.is_err() {
+        tracing::warn!("Failed to get current nonce: {:?}", current_nonce.err());
+        continue;
+    }
+    let current_nonce = current_nonce.unwrap();
+    if tx.nonce < current_nonce {
+        tracing::warn!(
+            ?sign_id,
+            expected_nonce = tx.nonce,
+            actual_nonce = current_nonce,
+            "nonce too low for tx",
+        );
+        tx.status = PendingRequestStatus::Failed;
+        let pending_tx = tx.clone();
 
-    for (tx_id, mut tx) in remaining_pending_txs {
-        let current_nonce = client
-            .get_nonce(
-                tx.from_address,
-                BlockId::Number(BlockNumberOrTag::Number(block_number)),
-            )
+        let completed_tx = crate::respond_bidirectional::CompletedTx::new(pending_tx, block_number);
+
+        let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
+            .create_sign_request_from_completed_tx(client, Chain::Ethereum, 6, total_timeout)
             .await;
-        if current_nonce.is_err() {
-            tracing::warn!("Failed to get current nonce: {:?}", current_nonce.err());
-            continue;
-        }
-        let current_nonce = current_nonce.unwrap();
-        if tx.nonce < current_nonce {
+        if let Some(request) = respond_bidirectional_sign_request {
+            respond_bidirectional_requests.push(request);
+            backlog.insert(Chain::Ethereum, sign_id, tx).await;
+        } else {
+            // failed to create sign request from completed tx, remove the tx from the map
             tracing::warn!(
-                "Nonce too low for tx {:?}: expected {}, got {}",
-                tx_id,
-                tx.nonce,
-                current_nonce
+                ?sign_id,
+                "failed to create sign request from completed tx, removing tx from map",
             );
-            tx.status = BidirectionalTxStatus::Failed;
-            let client_clone = client.clone();
-
-            let pending_tx = tx.clone();
-
-            let completed_tx =
-                crate::respond_bidirectional::CompletedTx::new(pending_tx, block_number);
-
-            let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
-                .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
-                .await;
-            if let Some(respond_bidirectional_sign_request) = respond_bidirectional_sign_request {
-                respond_bidirectional_requests.push(respond_bidirectional_sign_request);
-                bidirectional_tx_map.write().await.insert(tx_id, tx);
-            } else {
-                // failed to create sign request from completed tx, remove the tx from the map
-                tracing::warn!(
-                    "Failed to create sign request from completed tx, removing tx from map: {:?}",
-                    tx_id
-                );
-                bidirectional_tx_map.write().await.remove(&tx_id);
-            }
+            backlog.remove(Chain::Ethereum, &sign_id).await;
         }
     }
 
@@ -1093,12 +1051,13 @@ async fn process_block(
 /// Sends a request to the sign queue when the block where the request is in is finalized.
 #[cfg(feature = "light_client")]
 async fn send_requests_when_final(
-    helios_client: &Arc<EthereumClient>,
+    helios_client: Arc<EthereumClient>,
     mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
     mut finalized_block_rx: mpsc::Receiver<BlockNumber>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
+    backlog: Backlog,
 ) {
     let mut finalized_block_number: Option<BlockNumber> = None;
     let mut last_processed_block: Option<BlockNumber> = app_data_storage
@@ -1131,7 +1090,7 @@ async fn send_requests_when_final(
 
         // Verify block hash and send requests
         let block = fetch_block(
-            helios_client,
+            &helios_client,
             block_number.into(),
             5,
             Duration::from_millis(200),
@@ -1159,6 +1118,9 @@ async fn send_requests_when_final(
                 }
                 last_processed_block.replace(block_number);
             }
+            backlog
+                .set_processed_block(Chain::Ethereum, block_number)
+                .await;
         } else {
             // no special handling for chain reorg, just log the error
             // This is because when such chain reorg happens, the new canonical chain will have already been emitted by helios's block header stream, and we can safely skip this block here.
@@ -1263,7 +1225,7 @@ pub async fn run(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
-    bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
+    backlog: Backlog,
 ) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
@@ -1328,7 +1290,7 @@ pub async fn run(
                 node_near_account_id.clone(),
                 sign_tx.clone(),
                 total_timeout,
-                &bidirectional_tx_map,
+                &backlog,
             )
             .await
             {
@@ -1366,7 +1328,7 @@ async fn process_block(
     node_near_account_id: AccountId,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     total_timeout: Duration,
-    bidirectional_tx_map: &Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
+    backlog: &Backlog,
 ) -> anyhow::Result<()> {
     tracing::info!("Processing block number {}", block_number);
 
@@ -1392,7 +1354,7 @@ async fn process_block(
         client,
         block_number,
         total_timeout,
-        bidirectional_tx_map,
+        backlog,
         &node_near_account_id,
     )
     .await?;
@@ -1426,24 +1388,18 @@ async fn process_bidirectional_requests(
     client: &RpcEthereumClient,
     block_number: u64,
     total_timeout: Duration,
-    bidirectional_tx_map: &Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
+    backlog: &Backlog,
     node_near_account_id: &AccountId,
 ) -> anyhow::Result<Vec<IndexedSignRequest>> {
-    let pending_txs: HashMap<BidirectionalTxId, BidirectionalTx> = {
-        bidirectional_tx_map
-            .read()
-            .await
-            .iter()
-            .filter(|(_, tx)| tx.status == BidirectionalTxStatus::Pending)
-            .map(|(id, tx)| (*id, tx.clone()))
-            .collect()
-    };
+    let pending_txs = backlog
+        .get_by_status(Chain::Ethereum, PendingRequestStatus::PendingExecution)
+        .await;
 
     let mut respond_requests = Vec::new();
 
     for (tx_id, pending_tx) in pending_txs {
         let start = Instant::now();
-        let receipt = client.transaction_receipt(tx_id).await;
+        let receipt = client.transaction_receipt(pending_tx.id).await;
         crate::metrics::ETH_BLOCK_RECEIPT_LATENCY
             .with_label_values(&[node_near_account_id.as_str()])
             .observe(start.elapsed().as_millis() as f64);
@@ -1461,16 +1417,18 @@ async fn process_bidirectional_requests(
 
         let mut updated_tx = pending_tx.clone();
         updated_tx.status = if status {
-            BidirectionalTxStatus::Success
+            PendingRequestStatus::Success
         } else {
-            BidirectionalTxStatus::Failed
+            PendingRequestStatus::Failed
         };
 
         let completed_tx = CompletedTx::new(updated_tx.clone(), block_number);
+        let source_chain = updated_tx.source_chain;
         if status {
             match extract_success_output_with_rpc(client, &updated_tx, block_number).await {
                 Ok(serialized_output) => {
                     match completed_tx.create_sign_request_from_serialized_output(
+                        source_chain,
                         serialized_output,
                         total_timeout,
                     ) {
@@ -1492,7 +1450,7 @@ async fn process_bidirectional_requests(
             }
         } else {
             match completed_tx
-                .create_failed_sign_request_without_light_client(total_timeout)
+                .create_failed_sign_request_without_light_client(source_chain, total_timeout)
                 .await
             {
                 Ok(sign_request) => respond_requests.push(sign_request),
@@ -1504,18 +1462,12 @@ async fn process_bidirectional_requests(
             }
         }
 
-        bidirectional_tx_map.write().await.insert(tx_id, updated_tx);
+        backlog.insert(Chain::Ethereum, tx_id, updated_tx).await;
     }
 
-    let remaining_pending: HashMap<BidirectionalTxId, BidirectionalTx> = {
-        bidirectional_tx_map
-            .read()
-            .await
-            .iter()
-            .filter(|(_, tx)| tx.status == BidirectionalTxStatus::Pending)
-            .map(|(id, tx)| (*id, tx.clone()))
-            .collect()
-    };
+    let remaining_pending = backlog
+        .get_by_status(Chain::Ethereum, PendingRequestStatus::PendingExecution)
+        .await;
 
     for (tx_id, mut tx) in remaining_pending {
         let current_nonce = match client
@@ -1536,10 +1488,10 @@ async fn process_bidirectional_requests(
                 tx.nonce,
                 current_nonce
             );
-            tx.status = BidirectionalTxStatus::Failed;
+            tx.status = PendingRequestStatus::Failed;
             let completed_tx = CompletedTx::new(tx.clone(), block_number);
             match completed_tx
-                .create_failed_sign_request_without_light_client(total_timeout)
+                .create_failed_sign_request_without_light_client(tx.source_chain, total_timeout)
                 .await
             {
                 Ok(sign_request) => respond_requests.push(sign_request),
@@ -1547,7 +1499,7 @@ async fn process_bidirectional_requests(
                     tracing::warn!(?tx_id, ?err, "Failed to build sign request for stale nonce")
                 }
             }
-            bidirectional_tx_map.write().await.insert(tx_id, tx);
+            backlog.insert(Chain::Ethereum, tx_id, tx).await;
         }
     }
 

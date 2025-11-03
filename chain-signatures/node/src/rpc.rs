@@ -1,18 +1,18 @@
+use crate::backlog::Backlog;
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::signature::SignRequest;
-use crate::protocol::{Chain, Governance, ProtocolState};
+use crate::protocol::{Chain, Governance, ProtocolState, SignRequestType};
+use crate::respond_bidirectional::RespondBidirectionalTxChannel;
 use crate::util::AffinePointExt as _;
+
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::keypair::Keypair;
 
-use crate::protocol::SignRequestType;
-use crate::respond_bidirectional::RespondBidirectionalTxChannel;
-use crate::sign_bidirectional::SignBidirectionalSignatureChannel;
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, RootProvider, WalletProvider};
@@ -284,6 +284,7 @@ pub struct RpcExecutor {
     eth: Option<EthClient>,
     solana: Option<SolanaClient>,
     action_rx: mpsc::Receiver<RpcAction>,
+    backlog: Backlog,
 }
 
 impl RpcExecutor {
@@ -291,6 +292,7 @@ impl RpcExecutor {
         near: &NearClient,
         eth: &Option<EthConfig>,
         solana: &Option<SolConfig>,
+        backlog: Backlog,
     ) -> (RpcChannel, Self) {
         let eth = eth.as_ref().map(EthClient::new);
         let solana = solana.as_ref().map(SolanaClient::new);
@@ -302,6 +304,7 @@ impl RpcExecutor {
                 eth,
                 solana,
                 action_rx: rx,
+                backlog,
             },
         )
     }
@@ -310,7 +313,6 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
-        sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
         respond_bidirectional_tx_channel: RespondBidirectionalTxChannel,
     ) {
         // spin up update task for updating contract state and config
@@ -349,9 +351,8 @@ impl RpcExecutor {
             let client = self.client(&chain);
             let near_account_id = self.near.my_account_id.clone();
             let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
+            let backlog = self.backlog.clone();
 
-            let sign_bidirectional_signature_channel_clone =
-                sign_bidirectional_signature_channel.clone();
             let respond_bidirectional_tx_channel_clone = respond_bidirectional_tx_channel.clone();
             tokio::spawn(async move {
                 match chain {
@@ -360,7 +361,7 @@ impl RpcExecutor {
                             client,
                             action,
                             near_account_id,
-                            sign_bidirectional_signature_channel_clone,
+                            backlog,
                             respond_bidirectional_tx_channel_clone,
                         )
                         .await;
@@ -656,13 +657,14 @@ async fn execute_publish(
     client: ChainClient,
     mut action: PublishAction,
     near_account_id: AccountId,
-    sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
+    backlog: Backlog,
     respond_bidirectional_tx_channel: RespondBidirectionalTxChannel,
 ) {
     let chain = action.request.indexed.chain;
+    let sign_id = action.request.indexed.id;
     tracing::info!(
-        sign_id = ?action.request.indexed.id,
-        chain = ?chain,
+        ?sign_id,
+        ?chain,
         started_at = ?action.timestamp.elapsed(),
         "trying to publish signature",
     );
@@ -683,7 +685,7 @@ async fn execute_publish(
         return;
     };
 
-    loop {
+    let publish_result = loop {
         let publish = match &client {
             ChainClient::Near(near) => {
                 try_publish_near(near, &action, &action.timestamp, &signature)
@@ -706,7 +708,6 @@ async fn execute_publish(
                 &action.timestamp,
                 &signature,
                 &near_account_id,
-                sign_bidirectional_signature_channel.clone(),
                 respond_bidirectional_tx_channel.clone(),
             )
             .await
@@ -717,7 +718,7 @@ async fn execute_publish(
             }
         };
         if publish.is_ok() {
-            break;
+            break publish;
         }
 
         action.retry_count += 1;
@@ -728,7 +729,7 @@ async fn execute_publish(
                 elapsed = ?action.timestamp.elapsed(),
                 "exceeded max retries, trashing publish request",
             );
-            break;
+            break publish;
         } else {
             tracing::info!(
                 sign_id = ?action.request.indexed.id,
@@ -736,6 +737,17 @@ async fn execute_publish(
                 elapsed = ?action.timestamp.elapsed(),
                 "failed to publish, retrying"
             );
+        }
+    };
+
+    // Mark completion in Backlog for SignBidirectional requests
+    if matches!(
+        action.request.indexed.sign_request_type,
+        SignRequestType::SignBidirectional(_)
+    ) {
+        let success = publish_result.is_ok();
+        if let Err(err) = backlog.mark_published(chain, &sign_id, success).await {
+            tracing::warn!(?sign_id, ?err, "failed to mark publish status in backlog");
         }
     }
 }
@@ -991,7 +1003,8 @@ async fn send_eth_transaction(
         Duration::from_secs(10),
         contract
             .provider()
-            .get_transaction_count(contract.provider().default_signer_address()),
+            .get_transaction_count(contract.provider().default_signer_address())
+            .pending(),
     )
     .await
     {
@@ -1312,7 +1325,6 @@ async fn try_publish_sol(
     timestamp: &Instant,
     signature: &Signature,
     near_account_id: &AccountId,
-    sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
     respond_bidirectional_tx_channel: RespondBidirectionalTxChannel,
 ) -> Result<(), ()> {
     let chain = action.request.indexed.chain;
@@ -1400,17 +1412,8 @@ async fn try_publish_sol(
                 elapsed = ?timestamp.elapsed(),
                 "published respond bidirectional solana signature successfully"
             );
-            respond_bidirectional_tx_channel.send(respond_bidirectional_tx.tx_id);
+            respond_bidirectional_tx_channel.send(chain, action.request.indexed.id);
         }
-    }
-
-    if let SignRequestType::SignBidirectional(_) = action.request.indexed.sign_request_type {
-        sign_bidirectional_signature_channel.send(
-            action.public_key,
-            action.request.clone(),
-            action.output.clone(),
-            action.participants.clone(),
-        );
     }
 
     crate::metrics::NUM_SIGN_SUCCESS

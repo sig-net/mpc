@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::{IndexedSignRequest, MessageChannel, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::sign_bidirectional::SignBidirectionalSignatureChannel;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use near_sdk::AccountId;
@@ -22,7 +22,6 @@ pub struct TestProtocolChannels {
     pub rpc_channel: RpcChannel,
     pub config: watch::Receiver<Config>,
     pub mesh_state: watch::Receiver<MeshState>,
-    pub sign_bidirectional_signature_channel: SignBidirectionalSignatureChannel,
 }
 
 impl MpcSignProtocol {
@@ -49,7 +48,7 @@ impl MpcSignProtocol {
             contract,
             config: channels.config,
             mesh_state: channels.mesh_state,
-            sign_bidirectional_signature_channel: channels.sign_bidirectional_signature_channel,
+            backlog: Backlog::new(),
         }
     }
 }

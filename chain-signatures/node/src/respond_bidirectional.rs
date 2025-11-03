@@ -1,3 +1,4 @@
+use crate::backlog::Backlog;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::BidirectionalTx;
 use crate::sign_bidirectional::BidirectionalTxId;
@@ -18,12 +19,8 @@ use alloy::rpc::types::TransactionRequest;
 use helios::ethereum::EthereumClient;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
-use mpc_primitives::SignArgs;
-use mpc_primitives::SignId;
-use std::collections::HashMap;
-use std::sync::Arc;
+use mpc_primitives::{SignArgs, SignId};
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
@@ -66,19 +63,22 @@ impl CompletedTx {
     #[cfg(not(feature = "light_client"))]
     pub(crate) async fn create_failed_sign_request_without_light_client(
         &self,
+        chain: Chain,
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
-        self.process_failed_tx(signature_generation_total_timeout)
+        self.process_failed_tx(chain, signature_generation_total_timeout)
             .await
     }
 
     #[cfg(not(feature = "light_client"))]
     pub(crate) fn create_sign_request_from_serialized_output(
         &self,
+        chain: Chain,
         serialized_output: RespondBidirectionalSerializedOutput,
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
         self.create_respond_bidirectional_sign_request(
+            chain,
             serialized_output,
             signature_generation_total_timeout,
         )
@@ -88,12 +88,14 @@ impl CompletedTx {
     pub async fn create_sign_request_from_completed_tx(
         &self,
         helios_client: &Arc<EthereumClient>,
+        chain: Chain,
         max_attempts: u8,
         signature_generation_total_timeout: Duration,
     ) -> Option<IndexedSignRequest> {
         match self
             .process_completed_tx(
                 helios_client,
+                chain,
                 max_attempts,
                 signature_generation_total_timeout,
             )
@@ -120,24 +122,27 @@ impl CompletedTx {
     async fn process_completed_tx(
         &self,
         helios_client: &Arc<EthereumClient>,
+        chain: Chain,
         max_attempts: u8,
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
-        if self.tx.status == BidirectionalTxStatus::Success {
+        if self.tx.status == PendingRequestStatus::Success {
             self.process_success_tx(
                 helios_client,
+                chain,
                 max_attempts,
                 signature_generation_total_timeout,
             )
             .await
         } else {
-            self.process_failed_tx(signature_generation_total_timeout)
+            self.process_failed_tx(chain, signature_generation_total_timeout)
                 .await
         }
     }
 
     async fn process_failed_tx(
         &self,
+        chain: Chain,
         total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("Tx failed: {:?}", self.tx.id);
@@ -160,8 +165,11 @@ impl CompletedTx {
                 Bytes::from(output).into()
             }
         };
-        let sign_request =
-            self.create_respond_bidirectional_sign_request(serialized_output, total_timeout)?;
+        let sign_request = self.create_respond_bidirectional_sign_request(
+            chain,
+            serialized_output,
+            total_timeout,
+        )?;
         Ok(sign_request)
     }
 
@@ -169,6 +177,7 @@ impl CompletedTx {
     async fn process_success_tx(
         &self,
         helios_client: &Arc<EthereumClient>,
+        chain: Chain,
         max_attempts: u8,
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
@@ -182,6 +191,7 @@ impl CompletedTx {
             .output
             .serialize(respond_serialization_format, respond_serialization_schema)?;
         self.create_respond_bidirectional_sign_request(
+            chain,
             serialized_output,
             signature_generation_total_timeout,
         )
@@ -189,6 +199,7 @@ impl CompletedTx {
 
     fn create_respond_bidirectional_sign_request(
         &self,
+        chain: Chain,
         serialized_output: RespondBidirectionalSerializedOutput,
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
@@ -219,7 +230,7 @@ impl CompletedTx {
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest {
             id: SignId::new(request_id_bytes),
-            chain: Chain::Solana,
+            chain,
             args: SignArgs {
                 entropy: entropy.into(),
                 epsilon,
@@ -354,14 +365,14 @@ async fn fetch_tx_from_helios(
 
 #[derive(Clone)]
 pub struct RespondBidirectionalTxChannel {
-    tx: mpsc::Sender<BidirectionalTxId>,
+    tx: mpsc::Sender<(Chain, SignId)>,
 }
 
 impl RespondBidirectionalTxChannel {
-    pub fn send(&self, tx_id: BidirectionalTxId) {
+    pub fn send(&self, chain: Chain, sign_id: SignId) {
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Err(err) = tx.send(tx_id).await {
+            if let Err(err) = tx.send((chain, sign_id)).await {
                 tracing::error!(%err, "failed to send respond bidirectional tx id");
             }
         });
@@ -369,7 +380,7 @@ impl RespondBidirectionalTxChannel {
 }
 
 pub struct RespondBidirectionalTxProcessor {
-    respond_bidirectional_tx_rx: mpsc::Receiver<BidirectionalTxId>,
+    rx: mpsc::Receiver<(Chain, SignId)>,
 }
 
 const MAX_CONCURRENT_RESPOND_BIDIRECTIONAL_TX_REQUESTS: usize = 1024;
@@ -377,31 +388,23 @@ const MAX_CONCURRENT_RESPOND_BIDIRECTIONAL_TX_REQUESTS: usize = 1024;
 impl RespondBidirectionalTxProcessor {
     pub fn new() -> (RespondBidirectionalTxChannel, Self) {
         let (tx, rx) = mpsc::channel(MAX_CONCURRENT_RESPOND_BIDIRECTIONAL_TX_REQUESTS);
-        (
-            RespondBidirectionalTxChannel { tx },
-            Self {
-                respond_bidirectional_tx_rx: rx,
-            },
-        )
+        (RespondBidirectionalTxChannel { tx }, Self { rx })
     }
 
-    pub async fn run(
-        mut self,
-        bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
-        max_attempts: u8,
-    ) {
-        while let Some(bidirectional_tx_id) = self.respond_bidirectional_tx_rx.recv().await {
+    pub async fn run(mut self, backlog: Backlog, max_attempts: u8) {
+        while let Some((chain, sign_id)) = self.rx.recv().await {
             for attempt in 1..=max_attempts {
-                if bidirectional_tx_map
-                    .write()
-                    .await
-                    .remove(&bidirectional_tx_id)
-                    .is_some()
-                {
-                    tracing::info!(sign_id = ?bidirectional_tx_id, "removed bidirectional tx from map");
+                if backlog.remove(chain, &sign_id).await.is_some() {
+                    tracing::info!(?sign_id, ?chain, "removed bidirectional tx from backlog");
                     break;
                 } else if attempt == max_attempts {
-                    tracing::error!(sign_id = ?bidirectional_tx_id, "failed to remove bidirectional tx from map after {max_attempts} attempts");
+                    tracing::error!(
+                        ?sign_id,
+                        ?chain,
+                        "failed to remove bidirectional tx from backlog after {max_attempts} attempts"
+                    );
+                } else {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
             }
         }
