@@ -252,21 +252,13 @@ impl ClusterEnv {
         self.near_sandbox.wait_ref("near sandbox").await
     }
 
-    pub async fn ethereum_sandbox(&mut self) -> Result<Option<&containers::EthereumSandbox>> {
+    pub async fn ethereum_sandbox(&mut self) -> Result<&containers::EthereumSandbox> {
         if !self.ethereum_enabled {
-            return Ok(None);
+            return Err(anyhow!("ethereum sandbox is not enabled"));
         }
 
         self.spawn_ethereum_sandbox();
-        self.ethereum_sandbox
-            .wait_ref("ethereum sandbox")
-            .await
-            .map(Some)
-    }
-
-    pub async fn take_redis(&mut self) -> Result<containers::Redis> {
-        self.spawn_redis();
-        self.redis.take_owned("redis container").await
+        self.ethereum_sandbox.wait_ref("ethereum sandbox").await
     }
 
     pub async fn take_near_sandbox(&mut self) -> Result<Worker<Sandbox>> {

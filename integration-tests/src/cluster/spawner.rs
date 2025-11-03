@@ -23,9 +23,9 @@ pub struct Prestockpile {
 }
 
 pub struct ClusterSpawner {
-    pub cluster_env: ClusterEnv,
+    pub env: ClusterEnv,
     pub release: bool,
-    pub env: String,
+    pub gcp_env: String,
     pub gcp_project_id: String,
     pub accounts: Vec<Account>,
     pub participants: Vec<Participant>,
@@ -48,9 +48,9 @@ impl Default for ClusterSpawner {
             ..Default::default()
         };
         Self {
-            cluster_env: ClusterEnv::new(),
+            env: ClusterEnv::new(),
             release: true,
-            env: ENV.to_string(),
+            gcp_env: ENV.to_string(),
             gcp_project_id: GCP_PROJECT_ID.to_string(),
             accounts: Vec::with_capacity(cfg.nodes),
             participants: Vec::with_capacity(cfg.nodes),
@@ -66,10 +66,7 @@ impl Default for ClusterSpawner {
 
 impl ClusterSpawner {
     pub async fn init_network(self) -> anyhow::Result<Self> {
-        self.cluster_env
-            .docker()
-            .create_network(self.cluster_env.network())
-            .await?;
+        self.env.docker().create_network(self.env.network()).await?;
         Ok(self)
     }
 
@@ -115,7 +112,7 @@ impl ClusterSpawner {
     }
 
     pub fn env(mut self, env: &str) -> Self {
-        self.env = env.to_string();
+        self.gcp_env = env.to_string();
         self
     }
 
@@ -125,13 +122,13 @@ impl ClusterSpawner {
     }
 
     pub fn network(mut self, network: &str) -> Self {
-        self.cluster_env.set_network(network);
+        self.env.set_network(network);
         self
     }
 
     pub fn ethereum(mut self) -> Self {
         self.use_ethereum = true;
-        self.cluster_env.enable_ethereum();
+        self.env.enable_ethereum();
         self
     }
 
@@ -163,28 +160,28 @@ impl ClusterSpawner {
     }
 
     pub fn docker_client(&self) -> DockerClient {
-        self.cluster_env.docker().clone()
+        self.env.docker().clone()
     }
 
     pub fn docker_network(&self) -> &str {
-        self.cluster_env.network()
+        self.env.network()
     }
 
     pub fn cluster_env(&mut self) -> &mut ClusterEnv {
-        &mut self.cluster_env
+        &mut self.env
     }
 
     pub async fn spawn_redis(&mut self) -> anyhow::Result<&crate::containers::Redis> {
-        self.cluster_env.spawn_redis();
-        self.cluster_env.redis().await
+        self.env.spawn_redis();
+        self.env.redis().await
     }
 
     pub async fn redis(&mut self) -> anyhow::Result<&crate::containers::Redis> {
-        self.cluster_env.redis().await
+        self.env.redis().await
     }
 
     pub fn spawn_redis_task(&mut self) {
-        self.cluster_env.spawn_redis();
+        self.env.spawn_redis();
     }
 
     pub async fn prespawn_redis(&mut self) -> anyhow::Result<&crate::containers::Redis> {
@@ -192,22 +189,18 @@ impl ClusterSpawner {
     }
 
     pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Worker<Sandbox>> {
-        self.cluster_env.spawn_near_sandbox();
-        self.cluster_env.near_sandbox().await
+        self.env.spawn_near_sandbox();
+        self.env.near_sandbox().await
     }
 
     pub async fn take_worker(&mut self) -> anyhow::Result<Worker<Sandbox>> {
-        self.cluster_env.take_near_sandbox().await
+        self.env.take_near_sandbox().await
     }
 
     pub async fn presetup(&mut self) -> anyhow::Result<&crate::containers::Redis> {
         let worker = self.prespawn_sandbox().await?.clone();
         self.create_accounts(&worker).await;
         self.redis().await
-    }
-
-    pub async fn take_redis(&mut self) -> anyhow::Result<crate::containers::Redis> {
-        self.cluster_env.take_redis().await
     }
 
     pub async fn run(&mut self) -> anyhow::Result<Nodes> {

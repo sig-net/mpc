@@ -283,18 +283,14 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         .await?;
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
 
-    let redis = spawner.take_redis().await?;
+    let redis = spawner.env.redis().await?;
     let sk_share_local_path = spawner.tmp_dir.join("secrets");
     std::fs::create_dir_all(&sk_share_local_path).expect("could not create secrets dir");
     let sk_share_local_path = sk_share_local_path.to_string_lossy().to_string();
 
     let mut ethereum = None;
     if spawner.use_ethereum {
-        let sandbox = spawner
-            .cluster_env
-            .take_ethereum_sandbox()
-            .await?
-            .expect("ethereum sandbox should be available when enabled");
+        let sandbox = spawner.env.ethereum_sandbox().await?;
 
         let (client, deployer_address) = eth::client(
             &sandbox.external_http_endpoint,
@@ -330,7 +326,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     }
 
     let storage_options = mpc_node::storage::Options {
-        env: spawner.env.clone(),
+        env: spawner.gcp_env.clone(),
         gcp_project_id: spawner.gcp_project_id.clone(),
         sk_share_secret_id: None,
         sk_share_local_path: Some(sk_share_local_path),

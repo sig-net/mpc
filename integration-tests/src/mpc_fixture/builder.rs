@@ -556,5 +556,5 @@ async fn redis() -> Redis {
         .await
         .expect("failed setting up redis container");
 
-    spawner.take_redis().await.expect("failed to spawn redis")
+    spawner.env.take_redis().await.expect("failed to spawn redis")
 }

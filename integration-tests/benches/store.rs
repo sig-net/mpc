@@ -56,13 +56,13 @@ fn participants(len: usize) -> Participants {
 }
 
 struct SyncEnv {
+    env: ClusterEnv,
     threshold: usize,
     node_id: AccountId,
     me: Participant,
     participants: Participants,
     mesh_state: watch::Receiver<MeshState>,
     client: NodeClient,
-    redis: Redis,
     triples: TripleStorage,
     presignatures: PresignatureStorage,
     sync_channel: SyncChannel,
@@ -87,7 +87,8 @@ fn env() -> (Runtime, SyncEnv) {
             .unwrap();
 
         let redis = spawner
-            .take_redis()
+            .env
+            .redis()
             .await
             .expect("failed to spawn redis for bench");
         let triples = redis.triple_storage(&node_id);
@@ -134,13 +135,13 @@ fn env() -> (Runtime, SyncEnv) {
         );
 
         SyncEnv {
+            env: spawner.env,
             threshold,
             node_id,
             me,
             participants,
             mesh_state: mesh.watch(),
             client,
-            redis,
             triples,
             presignatures,
             sync_channel,
