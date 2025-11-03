@@ -23,6 +23,6 @@ node_configs = [
     sol_account_sk_secret_id = "multichain-sol-account-sk-mainnet"
     sol_rpc_http_url_secret_id = "multichain-sol-rpc-http-url-mainnet"
     sol_rpc_ws_url_secret_id = "multichain-sol-rpc-ws-url-mainnet"
-    sol_program_address = "<mainnet-sol-program-address>"
+    sol_program_address = "SigMcRMjKfnC7RDG5q4yUMZM1s5KJ9oYTPP4NmJRDRw"
   },
 ]
