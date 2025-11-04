@@ -83,3 +83,6 @@ x25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek",
 # big optimization even in test builds for math heavy crates
 [profile.dev.package.curve25519-dalek]
 opt-level = 3
+
+[profile.bench]
+inherits = "release"

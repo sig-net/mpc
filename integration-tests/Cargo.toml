@@ -78,6 +78,11 @@ name = "store"
 path = "benches/store.rs"
 harness = false
 
+[[bench]]
+name = "triples"
+path = "benches/triples.rs"
+harness = false
+
 [features]
 default = []
 docker-test = []
