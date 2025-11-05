@@ -259,19 +259,36 @@ pub fn sign_and_hash_transaction(
     unsigned_rlp: &[u8],
     signature: Signature,
 ) -> anyhow::Result<([u8; 32], u64)> {
-    let r = signature.big_r.x().as_slice().to_vec();
-    let s = signature.s.to_bytes().as_slice().to_vec();
+    let r_bytes = signature.big_r.x();
+    let s_bytes = signature.s.to_bytes();
     let y_parity = signature.recovery_id == 1;
 
     if is_eip1559(unsigned_rlp) {
-        sign_and_hash_eip1559_from_unsigned(unsigned_rlp, &r, &s, y_parity)
+        sign_and_hash_eip1559_from_unsigned(
+            unsigned_rlp,
+            r_bytes.as_slice(),
+            s_bytes.as_slice(),
+            y_parity,
+        )
     } else {
-        sign_and_hash_legacy_from_unsigned(unsigned_rlp, Some(60), &r, &s, y_parity)
+        sign_and_hash_legacy_from_unsigned(
+            unsigned_rlp,
+            Some(60),
+            r_bytes.as_slice(),
+            s_bytes.as_slice(),
+            y_parity,
+        )
     }
 }
 
 fn is_eip1559(unsigned_rlp: &[u8]) -> bool {
     unsigned_rlp[0] == 0x02
+}
+
+fn trim_rlp_leading_zeroes(bytes: &[u8]) -> Vec<u8> {
+    // RLP integers must be minimally encoded; drop redundant leading zero octets.
+    let first_non_zero = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len());
+    bytes[first_non_zero..].to_vec()
 }
 
 pub fn sign_and_hash_eip1559_from_unsigned(
@@ -303,6 +320,8 @@ pub fn sign_and_hash_eip1559_from_unsigned(
     }
     let y: u8 = if y_parity { 1 } else { 0 };
     srlp.append(&y);
+    let r = trim_rlp_leading_zeroes(r);
+    let s = trim_rlp_leading_zeroes(s);
     srlp.append(&r);
     srlp.append(&s);
 
@@ -336,12 +355,37 @@ pub fn sign_and_hash_legacy_from_unsigned(
     }
     let v: u64 = 35 + 2 * chain_id.unwrap_or(0) + if y_parity { 1 } else { 0 };
     out.append(&v);
+    let r = trim_rlp_leading_zeroes(r);
+    let s = trim_rlp_leading_zeroes(s);
     out.append(&r);
     out.append(&s);
 
     let signed_bytes = out.out().to_vec();
     let hash = alloy_primitives::keccak256(&signed_bytes);
     Ok((hash.into(), nonce))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_rlp_bytes_drops_leading_zeroes() {
+        let bytes = [0u8, 0x00, 0x01, 0xAB];
+        assert_eq!(trim_rlp_leading_zeroes(&bytes), vec![0x01, 0xAB]);
+    }
+
+    #[test]
+    fn trim_rlp_bytes_all_zeroes_becomes_empty() {
+        let bytes = [0u8; 4];
+        assert!(trim_rlp_leading_zeroes(&bytes).is_empty());
+    }
+
+    #[test]
+    fn trim_rlp_bytes_leaves_minimal_value() {
+        let bytes = [0x7Fu8, 0x10];
+        assert_eq!(trim_rlp_leading_zeroes(&bytes), bytes.to_vec());
+    }
 }
 
 /// Get the x coordinate of a point, as a scalar
