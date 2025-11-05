@@ -203,7 +203,7 @@ impl Nodes {
             }
         }
         // wait for the node to be added to the network
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         Ok(())
     }
