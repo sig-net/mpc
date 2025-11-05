@@ -1,9 +1,11 @@
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
+use mpc_node::protocol::state::NodeKeyInfo;
 use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
 
+use std::collections::BTreeMap;
 use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
 
@@ -16,6 +18,75 @@ use crate::cluster::Cluster;
 const DOCKER_NETWORK: &str = "mpc_it_network";
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
+
+/// Configuration for pregenerated keys to skip the 20+ second key generation phase.
+/// 
+/// When enabled, uses hardcoded key shares from fixture data to start nodes in
+/// Running state immediately, avoiding the expensive MPC key generation protocol.
+#[derive(Clone)]
+pub enum PregeneratedKeys {
+    /// Generate keys fresh during cluster setup (slow but tests full protocol)
+    Disabled,
+    /// Use pregenerated keys from fixture data (fast, skips keygen)
+    Enabled {
+        /// Key shares for each participant, indexed by participant ID
+        keys: BTreeMap<Participant, NodeKeyInfo>,
+        /// The shared public key for all participants
+        public_key: mpc_crypto::PublicKey,
+    },
+}
+
+impl PregeneratedKeys {
+    /// Load pregenerated keys for the given number of nodes from fixture data
+    pub fn load(num_nodes: u32) -> Self {
+        let data = match num_nodes {
+            3 => include_str!("../mpc_fixture/3_nodes.json"),
+            5 => include_str!("../mpc_fixture/5_nodes.json"),
+            other => panic!("No pregenerated keys for {other} nodes available"),
+        };
+
+        #[derive(serde::Deserialize)]
+        struct FixtureData {
+            keys: BTreeMap<Participant, NodeKeyInfo>,
+        }
+
+        let fixture: FixtureData = serde_json::from_str(data)
+            .expect("Failed to parse pregenerated keys from fixture data");
+
+        let public_key = fixture
+            .keys
+            .values()
+            .next()
+            .expect("No keys in fixture data")
+            .public_key;
+
+        Self::Enabled {
+            keys: fixture.keys,
+            public_key,
+        }
+    }
+
+    /// Check if keys are enabled
+    pub fn is_enabled(&self) -> bool {
+        matches!(self, Self::Enabled { .. })
+    }
+
+    /// Get the key info for a specific participant
+    pub fn get(&self, participant: &Participant) -> Option<&NodeKeyInfo> {
+        match self {
+            Self::Disabled => None,
+            Self::Enabled { keys, .. } => keys.get(participant),
+        }
+    }
+
+    /// Get the public key
+    pub fn public_key(&self) -> Option<mpc_crypto::PublicKey> {
+        match self {
+            Self::Disabled => None,
+            Self::Enabled { public_key, .. } => Some(*public_key),
+        }
+    }
+}
 
 pub struct Prestockpile {
     /// Multiplier to increase the stockpile such that stockpiling presignatures does not trigger
@@ -40,6 +111,7 @@ pub struct ClusterSpawner {
     pub solana: Option<containers::Solana>,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
+    pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
 }
 
@@ -70,6 +142,7 @@ impl Default for ClusterSpawner {
             solana: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
+            pregenerated_keys: PregeneratedKeys::load(3),  // Default: use pregenerated keys
             use_ethereum: false,
         }
     }
@@ -83,6 +156,10 @@ impl ClusterSpawner {
 
     pub fn nodes(mut self, nodes: usize) -> Self {
         self.cfg.nodes = nodes;
+        // Update pregenerated keys if enabled
+        if self.pregenerated_keys.is_enabled() {
+            self.pregenerated_keys = PregeneratedKeys::load(nodes as u32);
+        }
         self
     }
 
@@ -97,12 +174,21 @@ impl ClusterSpawner {
     }
 
     pub fn config(mut self, cfg: NodeConfig) -> Self {
+        // Update pregenerated keys if enabled and node count changed
+        if self.pregenerated_keys.is_enabled() && self.cfg.nodes != cfg.nodes {
+            self.pregenerated_keys = PregeneratedKeys::load(cfg.nodes as u32);
+        }
         self.cfg = cfg;
         self
     }
 
     pub fn with_config(mut self, call: impl FnOnce(&mut NodeConfig)) -> Self {
+        let old_nodes = self.cfg.nodes;
         call(&mut self.cfg);
+        // Update pregenerated keys if enabled and node count changed
+        if self.pregenerated_keys.is_enabled() && old_nodes != self.cfg.nodes {
+            self.pregenerated_keys = PregeneratedKeys::load(self.cfg.nodes as u32);
+        }
         self
     }
 
@@ -119,6 +205,20 @@ impl ClusterSpawner {
 
     pub fn prestockpile(mut self, multiplier: u32) -> Self {
         self.prestockpile = Some(Prestockpile { multiplier });
+        self
+    }
+
+    /// Enable pregenerated keys (default behavior).
+    /// This skips the 20+ second key generation phase by using hardcoded key shares.
+    pub fn with_pregenerated_keys(mut self) -> Self {
+        self.pregenerated_keys = PregeneratedKeys::load(self.cfg.nodes as u32);
+        self
+    }
+
+    /// Disable pregenerated keys and generate keys fresh.
+    /// This is slower but tests the full key generation protocol.
+    pub fn without_pregenerated_keys(mut self) -> Self {
+        self.pregenerated_keys = PregeneratedKeys::Disabled;
         self
     }
 
@@ -302,10 +402,16 @@ impl IntoFuture for ClusterSpawner {
             };
 
             if self.wait_for_running {
+                let start = std::time::Instant::now();
+                tracing::info!("⏱️  Starting wait for running state...");
                 cluster.wait().running().nodes_running().await?;
+                tracing::info!("⏱️  Wait for running took: {:?}", start.elapsed());
 
                 if let Some(prestockpile) = self.prestockpile {
+                    let start = std::time::Instant::now();
+                    tracing::info!("⏱️  Starting prestockpile...");
                     cluster.prestockpile(prestockpile).await;
+                    tracing::info!("⏱️  Prestockpile took: {:?}", start.elapsed());
                 }
             }
 

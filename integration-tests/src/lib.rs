@@ -345,6 +345,35 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         state_timeout: 1000,
     };
 
+    // If using pregenerated keys, inject them into storage before nodes start
+    if spawner.pregenerated_keys.is_enabled() {
+        tracing::info!("💾 Injecting pregenerated key shares into storage...");
+        for (i, account) in spawner.accounts.iter().enumerate() {
+            let participant = cait_sith::protocol::Participant::from(i as u32);
+            if let Some(key_info) = spawner.pregenerated_keys.get(&participant) {
+                let mut secret_storage = storage::secret_storage::init(
+                    None,  // No GCP service for tests
+                    &storage_options,
+                    account.id(),
+                );
+
+                let persistent_data = mpc_node::protocol::state::PersistentNodeData {
+                    epoch: 0,
+                    private_share: key_info.private_share,
+                    public_key: key_info.public_key,
+                };
+
+                secret_storage
+                    .store(&persistent_data)
+                    .await
+                    .with_context(|| format!("Failed to store pregenerated key for participant {}", i))?;
+
+                tracing::info!("  ✓ Stored key share for participant {} ({})", i, account.id());
+            }
+        }
+        tracing::info!("✅ All key shares injected successfully");
+    }
+
     Ok(Context {
         docker_client: spawner.docker.clone(),
         docker_network: spawner.network.clone(),
@@ -388,15 +417,47 @@ pub async fn docker(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
             )
         })
         .collect();
-    ctx.mpc_contract
-        .call("init")
-        .args_json(json!({
-            "threshold": cfg.threshold,
-            "candidates": candidates
-        }))
-        .transact()
-        .await?
-        .into_result()?;
+
+    // Initialize contract based on whether we're using pregenerated keys
+    if let Some(public_key) = spawner.pregenerated_keys.public_key() {
+        // Use init_running to skip key generation
+        let candidates_struct = mpc_contract::primitives::Candidates {
+            candidates: candidates.clone().into_iter().collect(),
+        };
+        let participants = mpc_contract::primitives::Participants::from(candidates_struct);
+        // Convert secp256k1 public key to NEAR public key format (secp256k1)
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        let near_pk = near_crypto::PublicKey::SECP256K1(
+            near_crypto::Secp256K1PublicKey::try_from(
+                &public_key.to_encoded_point(false).as_bytes()[1..65],
+            )
+            .unwrap(),
+        );
+        ctx.mpc_contract
+            .call("init_running")
+            .args_json(json!({
+                "epoch": 0,
+                "participants": participants,
+                "threshold": cfg.threshold,
+                "public_key": near_pk,
+            }))
+            .transact()
+            .await?
+            .into_result()?;
+        tracing::info!("✅ Contract initialized with pregenerated keys (skipped keygen)");
+    } else {
+        // Standard init - will trigger key generation
+        ctx.mpc_contract
+            .call("init")
+            .args_json(json!({
+                "threshold": cfg.threshold,
+                "candidates": candidates
+            }))
+            .transact()
+            .await?
+            .into_result()?;
+        tracing::info!("🔑 Contract initialized, will generate keys...");
+    }
 
     Ok(Nodes::Docker {
         next_id: nodes.len(),
@@ -482,15 +543,47 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
             )
         })
         .collect();
-    ctx.mpc_contract
-        .call("init")
-        .args_json(json!({
-            "threshold": cfg.threshold,
-            "candidates": candidates
-        }))
-        .transact()
-        .await?
-        .into_result()?;
+
+    // Initialize contract based on whether we're using pregenerated keys
+    if let Some(public_key) = spawner.pregenerated_keys.public_key() {
+        // Use init_running to skip key generation
+        let candidates_struct = mpc_contract::primitives::Candidates {
+            candidates: candidates.clone().into_iter().collect(),
+        };
+        let participants = mpc_contract::primitives::Participants::from(candidates_struct);
+        // Convert secp256k1 public key to NEAR public key format (secp256k1)
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        let near_pk = near_crypto::PublicKey::SECP256K1(
+            near_crypto::Secp256K1PublicKey::try_from(
+                &public_key.to_encoded_point(false).as_bytes()[1..65],
+            )
+            .unwrap(),
+        );
+        ctx.mpc_contract
+            .call("init_running")
+            .args_json(json!({
+                "epoch": 0,
+                "participants": participants,
+                "threshold": cfg.threshold,
+                "public_key": near_pk,
+            }))
+            .transact()
+            .await?
+            .into_result()?;
+        tracing::info!("✅ Contract initialized with pregenerated keys (skipped keygen)");
+    } else {
+        // Standard init - will trigger key generation
+        ctx.mpc_contract
+            .call("init")
+            .args_json(json!({
+                "threshold": cfg.threshold,
+                "candidates": candidates
+            }))
+            .transact()
+            .await?
+            .into_result()?;
+        tracing::info!("🔑 Contract initialized, will generate keys...");
+    }
 
     Ok(Nodes::Local {
         next_id: nodes.len(),

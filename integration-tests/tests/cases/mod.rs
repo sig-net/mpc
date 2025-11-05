@@ -61,16 +61,57 @@ async fn test_multichain_reshare() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_signature_basic() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().await?;
+    let start = std::time::Instant::now();
+    tracing::info!("⏱️  Test starting...");
+
+    let spawn_start = std::time::Instant::now();
+    let nodes = cluster::spawn().disable_prestockpile().await?;
+    tracing::info!("⏱️  Cluster spawn took: {:?}", spawn_start.elapsed());
+
+    let signable_start = std::time::Instant::now();
     nodes.wait().signable().await?;
+    tracing::info!("⏱️  Wait for signable took: {:?}", signable_start.elapsed());
+
+    let sign_start = std::time::Instant::now();
     nodes.sign().await?;
+    tracing::info!("⏱️  Sign operation took: {:?}", sign_start.elapsed());
+
+    tracing::info!("⏱️  TOTAL TEST TIME: {:?}", start.elapsed());
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_key_generation() -> anyhow::Result<()> {
+    tracing::info!("🔑 Testing fresh key generation (no pregenerated keys)");
+    let start = std::time::Instant::now();
+
+    // Explicitly disable pregenerated keys to test the fresh keygen path
+    let keygen_start = std::time::Instant::now();
+    let nodes = cluster::spawn()
+        .without_pregenerated_keys()
+        .disable_prestockpile()
+        .await?;
+    tracing::info!("⏱️  Cluster spawn with keygen took: {:?}", keygen_start.elapsed());
+
+    // Wait for nodes to complete key generation and become signable
+    let wait_start = std::time::Instant::now();
+    nodes.wait().signable().await?;
+    tracing::info!("⏱️  Wait for signable took: {:?}", wait_start.elapsed());
+
+    // Verify the generated key works by doing a signature
+    let sign_start = std::time::Instant::now();
+    nodes.sign().await?;
+    tracing::info!("⏱️  Sign operation took: {:?}", sign_start.elapsed());
+
+    tracing::info!("⏱️  TOTAL KEYGEN TEST TIME: {:?}", start.elapsed());
 
     Ok(())
 }
 
 #[test(tokio::test)]
 async fn test_signature_rogue() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().await?;
+    let nodes = cluster::spawn().disable_prestockpile().await?;
     nodes.wait().signable().await?;
     nodes.sign().rogue_responder().await?;
 
