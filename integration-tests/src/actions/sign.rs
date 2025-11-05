@@ -842,7 +842,10 @@ impl SignAction<'_> {
         let account = self.account_or_new().await;
         let payload = self.payload_or_random();
         let payload_hash = self.compute_payload_hash();
+
+        let transact_start = std::time::Instant::now();
         let status = self.transact_sign(&account, payload_hash).await?;
+        tracing::info!("⏱️  transact_sign took: {:?}", transact_start.elapsed());
 
         // We have to use seperate transactions because one could fail.
         // This leads to a potential race condition where this transaction could get sent after the signature completes, but I think that's unlikely
@@ -858,7 +861,13 @@ impl SignAction<'_> {
             None
         };
 
+        let wait_start = std::time::Instant::now();
         let signature = wait_for::signature_responded(status).await?;
+        tracing::info!(
+            "⏱️  wait_for::signature_responded took: {:?}",
+            wait_start.elapsed()
+        );
+
         let mut mpc_pk_bytes = vec![0x04];
         mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
 
@@ -871,7 +880,13 @@ impl SignAction<'_> {
         //     hex::encode(payload_hash),
         //     account.id(),
         // );
+
+        let validate_start = std::time::Instant::now();
         actions::validate_signature(account.id(), &mpc_pk_bytes, payload_hash, &signature).await?;
+        tracing::info!(
+            "⏱️  validate_signature took: {:?}",
+            validate_start.elapsed()
+        );
 
         Ok(SignOutcome {
             account,

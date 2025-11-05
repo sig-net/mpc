@@ -352,7 +352,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             let participant = cait_sith::protocol::Participant::from(i as u32);
             if let Some(key_info) = spawner.pregenerated_keys.get(&participant) {
                 let mut secret_storage = storage::secret_storage::init(
-                    None,  // No GCP service for tests
+                    None, // No GCP service for tests
                     &storage_options,
                     account.id(),
                 );
@@ -366,9 +366,15 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
                 secret_storage
                     .store(&persistent_data)
                     .await
-                    .with_context(|| format!("Failed to store pregenerated key for participant {}", i))?;
+                    .with_context(|| {
+                        format!("Failed to store pregenerated key for participant {}", i)
+                    })?;
 
-                tracing::info!("  ✓ Stored key share for participant {} ({})", i, account.id());
+                tracing::info!(
+                    "  ✓ Stored key share for participant {} ({})",
+                    i,
+                    account.id()
+                );
             }
         }
         tracing::info!("✅ All key shares injected successfully");

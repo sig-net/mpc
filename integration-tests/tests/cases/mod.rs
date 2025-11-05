@@ -72,7 +72,9 @@ async fn test_signature_basic() -> anyhow::Result<()> {
     nodes.wait().signable().await?;
     tracing::info!("⏱️  Wait for signable took: {:?}", signable_start.elapsed());
 
+    // Break down the sign operation timing
     let sign_start = std::time::Instant::now();
+    tracing::info!("⏱️  Starting sign operation...");
     nodes.sign().await?;
     tracing::info!("⏱️  Sign operation took: {:?}", sign_start.elapsed());
 
@@ -92,7 +94,10 @@ async fn test_key_generation() -> anyhow::Result<()> {
         .without_pregenerated_keys()
         .disable_prestockpile()
         .await?;
-    tracing::info!("⏱️  Cluster spawn with keygen took: {:?}", keygen_start.elapsed());
+    tracing::info!(
+        "⏱️  Cluster spawn with keygen took: {:?}",
+        keygen_start.elapsed()
+    );
 
     // Wait for nodes to complete key generation and become signable
     let wait_start = std::time::Instant::now();

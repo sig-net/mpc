@@ -20,7 +20,7 @@ const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
 
 /// Configuration for pregenerated keys to skip the 20+ second key generation phase.
-/// 
+///
 /// When enabled, uses hardcoded key shares from fixture data to start nodes in
 /// Running state immediately, avoiding the expensive MPC key generation protocol.
 #[derive(Clone)]
@@ -142,7 +142,7 @@ impl Default for ClusterSpawner {
             solana: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
-            pregenerated_keys: PregeneratedKeys::load(3),  // Default: use pregenerated keys
+            pregenerated_keys: PregeneratedKeys::load(3), // Default: use pregenerated keys
             use_ethereum: false,
         }
     }
