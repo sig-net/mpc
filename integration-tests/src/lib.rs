@@ -271,9 +271,15 @@ pub struct Context {
 }
 
 pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
+    let worker_start = std::time::Instant::now();
     let worker = spawner.take_worker().await;
+    tracing::info!("⏱️  take_worker took: {:?}", worker_start.elapsed());
+    
+    let accounts_start = std::time::Instant::now();
     spawner.create_accounts(&worker).await;
+    tracing::info!("⏱️  create_accounts took: {:?}", accounts_start.elapsed());
 
+    let deploy_start = std::time::Instant::now();
     let mpc_contract = worker
         .dev_deploy(&std::fs::read(
             execute::target_dir()
@@ -281,9 +287,13 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
                 .join("wasm32-unknown-unknown/release/mpc_contract.wasm"),
         )?)
         .await?;
+    tracing::info!("⏱️  deploy contract took: {:?}", deploy_start.elapsed());
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
 
+    let redis_start = std::time::Instant::now();
     let redis = spawner.take_redis().await;
+    tracing::info!("⏱️  take_redis took: {:?}", redis_start.elapsed());
+    
     let sk_share_local_path = spawner.tmp_dir.join("secrets");
     std::fs::create_dir_all(&sk_share_local_path).expect("could not create secrets dir");
     let sk_share_local_path = sk_share_local_path.to_string_lossy().to_string();
@@ -522,9 +532,13 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 }
 
 pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
+    let setup_start = std::time::Instant::now();
     let ctx = setup(spawner).await?;
+    tracing::info!("⏱️  setup (total) took: {:?}", setup_start.elapsed());
+    
     let cfg = &spawner.cfg;
 
+    let spawn_nodes_start = std::time::Instant::now();
     let node_futures = spawner
         .accounts
         .iter()
@@ -533,6 +547,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
+    tracing::info!("⏱️  spawn all nodes took: {:?}", spawn_nodes_start.elapsed());
     let candidates: HashMap<AccountId, CandidateInfo> = spawner
         .accounts
         .iter()
@@ -551,6 +566,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
         .collect();
 
     // Initialize contract based on whether we're using pregenerated keys
+    let init_contract_start = std::time::Instant::now();
     if let Some(public_key) = spawner.pregenerated_keys.public_key() {
         // Use init_running to skip key generation
         let candidates_struct = mpc_contract::primitives::Candidates {
@@ -590,6 +606,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
             .into_result()?;
         tracing::info!("🔑 Contract initialized, will generate keys...");
     }
+    tracing::info!("⏱️  init contract took: {:?}", init_contract_start.elapsed());
 
     Ok(Nodes::Local {
         next_id: nodes.len(),

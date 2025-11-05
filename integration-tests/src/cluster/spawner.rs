@@ -363,14 +363,19 @@ impl IntoFuture for ClusterSpawner {
 
     fn into_future(mut self) -> Self::IntoFuture {
         Box::pin(async move {
+            let init_start = std::time::Instant::now();
             self = self.init_network().await?;
+            tracing::info!("⏱️  init_network took: {:?}", init_start.elapsed());
 
             // Check if Solana is enabled and spawn if needed
             if self.cfg.sol.is_some() {
                 // Start Solana test validator
+                let solana_start = std::time::Instant::now();
                 let solana = self.spawn_solana().await;
+                tracing::info!("⏱️  spawn_solana took: {:?}", solana_start.elapsed());
 
                 // Deploy the core contracts and get the program address
+                let deploy_start = std::time::Instant::now();
                 let program_address = if let Some(addr) = self.program_address.clone() {
                     // Use provided program address
                     addr
@@ -378,6 +383,7 @@ impl IntoFuture for ClusterSpawner {
                     // Deploy the contract and use the deployed program address
                     solana.deploy_contract().await?
                 };
+                tracing::info!("⏱️  deploy_contract took: {:?}", deploy_start.elapsed());
 
                 let sol_config = solana.get_config(program_address);
                 self.cfg.sol = Some(sol_config);
@@ -386,7 +392,10 @@ impl IntoFuture for ClusterSpawner {
                 self.solana = Some(solana);
             }
 
+            let run_start = std::time::Instant::now();
             let nodes = self.run().await?;
+            tracing::info!("⏱️  run (spawn nodes) took: {:?}", run_start.elapsed());
+            
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
