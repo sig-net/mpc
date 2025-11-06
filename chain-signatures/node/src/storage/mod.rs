@@ -8,7 +8,7 @@ pub use presignature_storage::PresignatureStorage;
 pub use triple_storage::TripleStorage;
 
 // Can be used to "clear" redis storage in case of a breaking change
-pub const STORAGE_VERSION: &str = "v8";
+pub const STORAGE_VERSION: &str = "v9";
 
 /// Configures storage.
 #[derive(Debug, Clone, clap::Parser)]

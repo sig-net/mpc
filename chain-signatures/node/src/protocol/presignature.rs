@@ -474,7 +474,7 @@ impl PresignatureSpawner {
         };
 
         let pair_id = triples.pair.id;
-        // note: only one of the pair's participants is need since they are the same.
+        // note: only one of the pair's participants is needed since they are the same.
         let participants = intersect_vec(&[active, &triples.pair.triple0.public.participants]);
         if participants.len() < self.threshold {
             tracing::warn!(

@@ -205,18 +205,26 @@ impl TripleGenerator {
                     poke_counts.observe(total_pokes as f64);
 
                     // Assuming outputs is Vec<(TripleShare, TriplePub)> with 2 elements
-                    let triple0 = Triple {
-                        share: outputs[0].0.clone(),
-                        public: outputs[0].1.clone(),
+                    let [first, second, ..] = &outputs[..] else {
+                        tracing::warn!(
+                            id = self.id,
+                            triples = outputs.len(),
+                            "unexpected, not enough triples to make pair"
+                        );
+                        break;
                     };
-                    let triple1 = Triple {
-                        share: outputs[1].0.clone(),
-                        public: outputs[1].1.clone(),
+                    let first = Triple {
+                        share: first.0.clone(),
+                        public: first.1.clone(),
+                    };
+                    let second = Triple {
+                        share: second.0.clone(),
+                        public: second.1.clone(),
                     };
 
                     // For simplicity, assign both triples to the same owner based on the first triple
                     let triple_owner = {
-                        let big_c = triple0.public.big_c;
+                        let big_c = first.public.big_c;
                         let entropy = HighwayHasher::default().hash64(&big_c.to_bytes()) as usize;
                         let num_participants = self.participants.len();
                         self.participants[entropy % num_participants]
@@ -229,8 +237,8 @@ impl TripleGenerator {
                         ?triple_owner,
                         pair_is_mine,
                         participants = ?self.participants,
-                        big_a0 = ?triple0.public.big_a.to_base58(),
-                        big_a1 = ?triple1.public.big_a.to_base58(),
+                        big_a0 = ?first.public.big_a.to_base58(),
+                        big_a1 = ?second.public.big_a.to_base58(),
                         elapsed = ?self.created.elapsed(),
                         "completed triple pair generation"
                     );
@@ -241,8 +249,8 @@ impl TripleGenerator {
 
                     let pair = TriplePair {
                         id: self.id,
-                        triple0,
-                        triple1,
+                        triple0: first,
+                        triple1: second,
                     };
                     self.slot.insert(pair, triple_owner).await;
                     break;
@@ -407,10 +415,8 @@ impl TripleSpawner {
 
     /// Propose a new triple generation protocol to the network.
     async fn propose_posit(&mut self, active: &[Participant]) {
-        let id0 = rand::random();
-        let id1 = rand::random();
-        self.posits.propose(id0, (), active);
-        self.posits.propose(id1, (), active);
+        let pair_id = rand::random();
+        self.posits.propose(pair_id, (), active);
         for &p in active.iter() {
             if p == self.me {
                 continue;
@@ -421,18 +427,7 @@ impl TripleSpawner {
                     self.me,
                     p,
                     PositMessage {
-                        id: PositProtocolId::Triple(id0),
-                        from: self.me,
-                        action: PositAction::Propose,
-                    },
-                )
-                .await;
-            self.msg
-                .send(
-                    self.me,
-                    p,
-                    PositMessage {
-                        id: PositProtocolId::Triple(id1),
+                        id: PositProtocolId::Triple(pair_id),
                         from: self.me,
                         action: PositAction::Propose,
                     },
