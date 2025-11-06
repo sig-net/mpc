@@ -22,7 +22,9 @@ use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
-use mpc_node::storage::{presignature_storage, secret_storage, triple_storage, Options};
+use mpc_node::storage::{
+    presignature_storage, secret_storage, triple_storage, triple_storage::TriplePair, Options,
+};
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -517,9 +519,15 @@ impl MpcFixtureNodeBuilder {
             // removing here because we can't clone a triple
             let my_shares = fixture_config.input.triples.remove(&self.me).unwrap();
             for (owner, triple_shares) in my_shares {
-                for triple_share in triple_shares {
-                    let mut slot = triple_storage.reserve(triple_share.id).await.unwrap();
-                    slot.insert(triple_share, owner).await;
+                // Group triples into pairs
+                for pair in triple_shares.chunks_exact(2) {
+                    let pair_id = pair[0].id; // Use first triple's ID as pair ID
+                    let pair = TriplePair {
+                        triple0: pair[0].clone(),
+                        triple1: pair[1].clone(),
+                    };
+                    let mut slot = triple_storage.reserve_pair(pair_id).await.unwrap();
+                    slot.insert(pair, owner).await;
                 }
             }
         }
