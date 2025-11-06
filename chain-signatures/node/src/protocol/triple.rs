@@ -225,9 +225,21 @@ impl TripleGenerator {
                     // For simplicity, assign both triples to the same owner based on the first triple
                     let triple_owner = {
                         let big_c = first.public.big_c;
-                        let entropy = HighwayHasher::default().hash64(&big_c.to_bytes()) as usize;
+                        let big_c_bytes = big_c.to_bytes();
+                        let entropy = HighwayHasher::default().hash64(&big_c_bytes) as usize;
                         let num_participants = self.participants.len();
-                        self.participants[entropy % num_participants]
+                        let owner_index = entropy % num_participants;
+
+                        tracing::trace!(
+                            id = self.id,
+                            entropy,
+                            num_participants,
+                            owner_index,
+                            big_c_hash = format!("{:016x}", entropy),
+                            "calculated triple owner"
+                        );
+
+                        self.participants[owner_index]
                     };
                     let pair_is_mine = triple_owner == self.me;
 
@@ -239,6 +251,7 @@ impl TripleGenerator {
                         participants = ?self.participants,
                         big_a0 = ?first.public.big_a.to_base58(),
                         big_a1 = ?second.public.big_a.to_base58(),
+                        big_c0 = ?first.public.big_c.to_base58(),
                         elapsed = ?self.created.elapsed(),
                         "completed triple pair generation"
                     );

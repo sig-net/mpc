@@ -10,6 +10,9 @@ pub mod state;
 pub mod sync;
 pub mod triple;
 
+#[cfg(test)]
+mod triple_serde_test;
+
 #[cfg(feature = "test-feature")]
 pub mod test_setup;
 

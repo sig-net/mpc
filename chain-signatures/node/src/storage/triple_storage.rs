@@ -43,6 +43,12 @@ impl FromRedisValue for TriplePair {
         let json = String::from_redis_value(v)?;
 
         serde_json::from_str(&json).map_err(|e| {
+            // Log the actual JSON to help debug serialization issues
+            tracing::warn!(
+                json_preview = %json.chars().take(200).collect::<String>(),
+                error = %e,
+                "Failed to deserialize TriplePair - this may be due to old v8 format with id field"
+            );
             RedisError::from((
                 redis::ErrorKind::TypeError,
                 "Failed to deserialize TriplePair",
