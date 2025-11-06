@@ -268,6 +268,10 @@ pub fn sign_and_hash_transaction(
         sign_and_hash_eip1559_from_unsigned(unsigned_rlp, &r, &s, y_parity)
     } else {
         // Extract chain_id from the unsigned RLP (it's the 7th field in legacy transactions)
+        // In legacy Ethereum transactions with EIP-155, there are 9 fields:
+        // [nonce, gasPrice, gasLimit, to, value, data, chain_id, 0, 0]
+        // The chain_id is the 7th field (index 6, 0-based).
+        // We check for at least 9 fields to ensure chain_id is present.
         let rlp = Rlp::new(unsigned_rlp);
         let chain_id = if rlp.item_count().unwrap_or(0) >= 9 {
             rlp.val_at::<u64>(6).ok()

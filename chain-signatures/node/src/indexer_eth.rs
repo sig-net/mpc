@@ -1067,7 +1067,7 @@ async fn process_block(
         });
 
     if !respond_logs.is_empty() {
-        mark_responded_requests(&respond_logs, &backlog).await;
+        process_respond_events(&respond_logs, &backlog).await;
     }
 
     let request_logs: Vec<Log> = potential_request_logs

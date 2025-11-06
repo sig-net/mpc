@@ -23,7 +23,7 @@ use mpc_node::web::{BenchMetrics, StateView};
 use anyhow::Context;
 use url::Url;
 
-const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(9000);
+const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(10000);
 const CURRENT_CONTRACT_FILE_PATH: &str =
     "../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
 

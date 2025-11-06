@@ -54,14 +54,6 @@ pub enum VoteError {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
-pub enum CheckpointError {
-    #[error("Unsupported chain for checkpoint.")]
-    InvalidChain,
-    #[error("Invalid checkpoint data.")]
-    InvalidCheckpoint,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
 pub enum InvalidParameters {
     #[error("Malformed payload.")]
     MalformedPayload,
@@ -117,9 +109,6 @@ pub enum ErrorKind {
     /// An error occurred while node is performing vote_* call.
     #[error("{0}")]
     Vote(#[from] VoteError),
-    /// An error occurred while node is performing checkpoint operations.
-    #[error("{0}")]
-    Checkpoint(#[from] CheckpointError),
     // Invalid parameters errors
     #[error("{0}")]
     InvalidParameters(#[from] InvalidParameters),

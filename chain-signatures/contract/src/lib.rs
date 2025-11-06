@@ -27,7 +27,7 @@ use primitives::{
     CandidateInfo, Candidates, Chain, Checkpoint, CheckpointVotes, InternalSignRequest,
     Participants, PendingRequest, PkVotes, SignPoll, SignRequest, StorageKey, Votes, YieldIndex,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::config::Config;
 use crate::errors::Error;
@@ -477,8 +477,8 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
-                        checkpoint_votes: BTreeMap::new(),
-                        latest_checkpoints: BTreeMap::new(),
+                        checkpoint_votes: HashMap::new(),
+                        latest_checkpoints: HashMap::new(),
                     });
                     Ok(true)
                 } else {
@@ -522,8 +522,8 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
-                        checkpoint_votes: BTreeMap::new(),
-                        latest_checkpoints: BTreeMap::new(),
+                        checkpoint_votes: HashMap::new(),
+                        latest_checkpoints: HashMap::new(),
                     });
                     Ok(true)
                 } else {
@@ -565,8 +565,8 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
-                        checkpoint_votes: BTreeMap::new(),
-                        latest_checkpoints: BTreeMap::new(),
+                        checkpoint_votes: HashMap::new(),
+                        latest_checkpoints: HashMap::new(),
                     });
                     Ok(true)
                 } else {
@@ -758,8 +758,8 @@ impl VersionedMpcContract {
                 candidates: Candidates::new(),
                 join_votes: Votes::new(),
                 leave_votes: Votes::new(),
-                checkpoint_votes: BTreeMap::new(),
-                latest_checkpoints: BTreeMap::new(),
+                checkpoint_votes: HashMap::new(),
+                latest_checkpoints: HashMap::new(),
             }),
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
@@ -818,37 +818,14 @@ impl VersionedMpcContract {
     }
 
     /// Get the latest agreed checkpoint for a specific chain
-    pub fn latest_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
+    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&Checkpoint> {
         match self {
             Self::V0(mpc_contract) => {
                 if let ProtocolContractState::Running(state) = &mpc_contract.protocol_state {
-                    state.latest_checkpoints.get(&chain).cloned()
+                    state.latest_checkpoints.get(&chain)
                 } else {
                     None
                 }
-            }
-        }
-    }
-
-    /// Get all checkpoints being voted on with their vote counts for a specific chain
-    pub fn checkpoint_votes(&self, chain: Chain) -> Vec<(Checkpoint, usize)> {
-        match self {
-            Self::V0(mpc_contract) => {
-                let ProtocolContractState::Running(state) = &mpc_contract.protocol_state else {
-                    return Vec::new();
-                };
-
-                state
-                    .checkpoint_votes
-                    .get(&chain)
-                    .map(|votes| {
-                        votes
-                            .votes
-                            .iter()
-                            .map(|(checkpoint, votes)| (checkpoint.clone(), votes.len()))
-                            .collect()
-                    })
-                    .unwrap_or_default()
             }
         }
     }
