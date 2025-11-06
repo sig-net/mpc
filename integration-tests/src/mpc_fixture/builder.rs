@@ -22,6 +22,7 @@ use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
+use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::{
     presignature_storage, secret_storage, triple_storage, triple_storage::TriplePair, Options,
 };
@@ -520,11 +521,18 @@ impl MpcFixtureNodeBuilder {
             let my_shares = fixture_config.input.triples.remove(&self.me).unwrap();
             for (owner, triple_shares) in my_shares {
                 // Group triples into pairs
-                for pair in triple_shares.chunks_exact(2) {
-                    let pair_id = pair[0].id; // Use first triple's ID as pair ID
+                for (i, pair) in triple_shares.chunks_exact(2).enumerate() {
+                    let pair_id = i as u64; // Use index as pair ID
                     let pair = TriplePair {
-                        triple0: pair[0].clone(),
-                        triple1: pair[1].clone(),
+                        id: pair_id,
+                        triple0: Triple {
+                            share: pair[0].share.clone(),
+                            public: pair[0].public.clone(),
+                        },
+                        triple1: Triple {
+                            share: pair[1].share.clone(),
+                            public: pair[1].public.clone(),
+                        },
                     };
                     let mut slot = triple_storage.reserve_pair(pair_id).await.unwrap();
                     slot.insert(pair, owner).await;

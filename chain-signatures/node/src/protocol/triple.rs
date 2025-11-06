@@ -33,7 +33,6 @@ pub type TripleId = u64;
 /// A completed triple.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Triple {
-    pub id: TripleId,
     pub share: TripleShare<Secp256k1>,
     pub public: TriplePub<Secp256k1>,
 }
@@ -207,12 +206,10 @@ impl TripleGenerator {
 
                     // Assuming outputs is Vec<(TripleShare, TriplePub)> with 2 elements
                     let triple0 = Triple {
-                        id: self.id,
                         share: outputs[0].0.clone(),
                         public: outputs[0].1.clone(),
                     };
                     let triple1 = Triple {
-                        id: self.id + 1,
                         share: outputs[1].0.clone(),
                         public: outputs[1].1.clone(),
                     };
@@ -242,7 +239,7 @@ impl TripleGenerator {
                         success_owned_counts.inc();
                     }
 
-                    let pair = TriplePair { triple0, triple1 };
+                    let pair = TriplePair { id: self.id, triple0, triple1 };
                     self.slot.insert(pair, triple_owner).await;
                     break;
                 }

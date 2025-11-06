@@ -228,8 +228,7 @@ impl PresignatureGenerator {
                                 *to,
                                 PresignatureMessage {
                                     id: self.id,
-                                    triple0: self.dropper.id0,
-                                    triple1: self.dropper.id1,
+                                    pair_id: self.dropper.pair_id,
                                     epoch,
                                     from: me,
                                     data: data.clone(),
@@ -246,8 +245,7 @@ impl PresignatureGenerator {
                             to,
                             PresignatureMessage {
                                 id: self.id,
-                                triple0: self.dropper.id0,
-                                triple1: self.dropper.id1,
+                                pair_id: self.dropper.pair_id,
                                 epoch,
                                 from: me,
                                 data,
@@ -475,8 +473,7 @@ impl PresignatureSpawner {
             return;
         };
 
-        let t0 = triples.pair.triple0.id;
-        let t1 = triples.pair.triple1.id;
+        let pair_id = triples.pair.id;
         let participants = intersect_vec(&[
             active,
             &triples.pair.triple0.public.participants,
@@ -486,14 +483,15 @@ impl PresignatureSpawner {
             tracing::warn!(
                 intersection = ?participants,
                 ?participants,
-                triple0 = ?(t0, &triples.pair.triple0.public.participants),
-                triple1 = ?(t1, &triples.pair.triple1.public.participants),
+                pair_id,
+                triple0 = ?(&triples.pair.triple0.public.participants),
+                triple1 = ?(&triples.pair.triple1.public.participants),
                 "intersection < threshold, trashing two triples"
             );
             return;
         }
 
-        let id = FullPresignatureId::from_pair(t0);
+        let id = FullPresignatureId::from_pair(pair_id);
         tracing::info!(
             ?id,
             ?triples,

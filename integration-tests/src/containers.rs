@@ -409,10 +409,10 @@ impl Redis {
                 let pair_id = rand::random();
                 for ((me, triple0), triple1) in participant_ids
                     .iter()
-                    .zip(shares_to_triples(pair_id, &public, &shares))
-                    .zip(shares_to_triples(pair_id + 1, &public, &shares))
+                    .zip(shares_to_triples(&public, &shares))
+                    .zip(shares_to_triples(&public, &shares))
                 {
-                    let pair = TriplePair { triple0, triple1 };
+                    let pair = TriplePair { id: pair_id, triple0, triple1 };
                     storage
                         .get(me)
                         .unwrap()
@@ -559,14 +559,12 @@ fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
 }
 
 fn shares_to_triples(
-    id: u64,
     public: &TriplePub<Secp256k1>,
     shares: &[TripleShare<Secp256k1>],
 ) -> Vec<Triple> {
     shares
         .iter()
         .map(|share| Triple {
-            id,
             public: public.clone(),
             share: share.clone(),
         })

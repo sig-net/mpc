@@ -18,6 +18,7 @@ const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 /// A pair of completed triples.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriplePair {
+    pub id: TripleId,
     pub triple0: Triple,
     pub triple1: Triple,
 }
@@ -95,8 +96,7 @@ pub struct TriplesTaken {
 impl TriplesTaken {
     pub fn owner(pair: TriplePair, storage: TripleStorage) -> Self {
         let dropper = TriplesTakenDropper {
-            id0: pair.triple0.id,
-            id1: pair.triple1.id,
+            pair_id: pair.id,
             storage: Some(storage),
         };
         Self { pair, dropper }
@@ -104,8 +104,7 @@ impl TriplesTaken {
 
     pub fn foreigner(pair: TriplePair) -> Self {
         let dropper = TriplesTakenDropper {
-            id0: pair.triple0.id,
-            id1: pair.triple1.id,
+            pair_id: pair.id,
             storage: None,
         };
         Self { pair, dropper }
@@ -119,22 +118,20 @@ impl TriplesTaken {
 impl fmt::Debug for TriplesTaken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("TriplesTaken")
-            .field(&self.pair.triple0.id)
-            .field(&self.pair.triple1.id)
+            .field(&self.pair.id)
             .finish()
     }
 }
 
 pub struct TriplesTakenDropper {
-    pub id0: TripleId,
-    pub id1: TripleId,
+    pub pair_id: TripleId,
     storage: Option<TripleStorage>,
 }
 
 impl Drop for TriplesTakenDropper {
     fn drop(&mut self) {
         if let Some(storage) = self.storage.take() {
-            let pair_id = self.id0; // Pair is stored under id0
+            let pair_id = self.pair_id;
             tokio::spawn(async move {
                 storage.unreserve_pair([pair_id]).await;
             });
@@ -145,8 +142,7 @@ impl Drop for TriplesTakenDropper {
 impl fmt::Debug for TriplesTakenDropper {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("TriplesTakenDropper")
-            .field(&self.id0)
-            .field(&self.id1)
+            .field(&self.pair_id)
             .finish()
     }
 }
@@ -385,7 +381,7 @@ impl TripleStorage {
             redis.call("HSET", triple_key, pair_id, pair)
         "#;
 
-        let id = pair.triple0.id; // Use first triple's ID as pair ID
+        let id = pair.id;
         let Some(mut conn) = self.connect().await else {
             tracing::warn!(id, "failed to insert pair: connection failed");
             return false;
@@ -615,7 +611,7 @@ impl TripleStorage {
             Ok(Some(pair)) => {
                 let taken = TriplesTaken::owner(pair, self.clone());
                 tracing::debug!(
-                    id = taken.pair.triple0.id,
+                    id = taken.pair.id,
                     elapsed_ms = elapsed.as_millis(),
                     "took mine pair"
                 );

@@ -316,14 +316,14 @@ fn dummy_presignature(id: u64) -> Presignature {
 
 fn dummy_pair(id: u64) -> TriplePair {
     TriplePair {
-        triple0: dummy_triple(id * 2),
-        triple1: dummy_triple(id * 2 + 1),
+        id,
+        triple0: dummy_triple(),
+        triple1: dummy_triple(),
     }
 }
 
-fn dummy_triple(id: u64) -> Triple {
+fn dummy_triple() -> Triple {
     Triple {
-        id,
         share: TripleShare {
             a: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
             b: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
