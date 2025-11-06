@@ -363,7 +363,7 @@ pub enum SignPoll {
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct CheckpointVotes {
-    pub votes: BTreeMap<Checkpoint, HashSet<AccountId>>,
+    pub votes: HashMap<Checkpoint, HashSet<AccountId>>,
 }
 
 impl Default for CheckpointVotes {
@@ -375,7 +375,7 @@ impl Default for CheckpointVotes {
 impl CheckpointVotes {
     pub fn new() -> Self {
         CheckpointVotes {
-            votes: BTreeMap::new(),
+            votes: HashMap::new(),
         }
     }
 
