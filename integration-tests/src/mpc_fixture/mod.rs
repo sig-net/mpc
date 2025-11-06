@@ -8,5 +8,5 @@ pub mod fixture_tasks;
 pub mod input;
 pub mod mock_governance;
 
-pub use builder::MpcFixtureBuilder;
-pub use fixture_interface::{MpcFixture, MpcFixtureNode};
+pub use builder::MpcFixtureBuilder;MpcFixtureNode
+pub use fixture_interface::{MpcFixture, };

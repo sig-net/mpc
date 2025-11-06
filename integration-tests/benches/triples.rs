@@ -20,19 +20,17 @@ fn bench_triple_generation(c: &mut Criterion) {
 
     c.bench_function("triple generation (3 nodes, threshold 2)", |b| {
         b.iter_custom(|iters| {
-            rt.block_on(async {
-                let mut total = Duration::new(0, 0);
-                for _ in 0..iters {
-                    let start = Instant::now();
-                    network.wait_for_triples(5).await;
-                    total += start.elapsed();
+            let mut total = Duration::new(0, 0);
+            for _ in 0..iters {
+                let start = Instant::now();
+                rt.block_on(network.wait_for_triples(5));
+                total += start.elapsed();
 
-                    for node in &network.nodes {
-                        node.triple_storage.clear().await;
-                    }
+                for node in &network.nodes {
+                    rt.block_on(node.triple_storage.clear());
                 }
-                total
-            })
+            }
+            total
         })
     });
 }
