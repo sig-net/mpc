@@ -320,7 +320,7 @@ impl Cluster {
             "did not successfully vote for update"
         );
 
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
     pub async fn prestockpile(&self, prestockpile: Prestockpile) {

@@ -1,9 +1,11 @@
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
+use mpc_node::protocol::state::NodeKeyInfo;
 use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
 
+use std::collections::BTreeMap;
 use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
 
@@ -16,6 +18,89 @@ use crate::cluster::Cluster;
 const DOCKER_NETWORK: &str = "mpc_it_network";
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
+
+/// Configuration for pregenerated keys to skip the 20+ second key generation phase.
+///
+/// When enabled, uses hardcoded key shares from fixture data to start nodes in
+/// Running state immediately, avoiding the expensive MPC key generation protocol.
+#[derive(Clone)]
+pub enum PregeneratedKeys {
+    /// Generate keys fresh during cluster setup (slow but tests full protocol)
+    Disabled,
+    /// Use pregenerated keys from fixture data (fast, skips keygen)
+    Enabled {
+        /// Key shares for each participant, indexed by participant ID
+        keys: BTreeMap<Participant, NodeKeyInfo>,
+        /// The shared public key for all participants
+        public_key: mpc_crypto::PublicKey,
+    },
+}
+
+impl PregeneratedKeys {
+    /// Load pregenerated keys for the given number of nodes from fixture data
+    pub fn load(num_nodes: usize) -> Option<Self> {
+        let data = match num_nodes {
+            3 => include_str!("../mpc_fixture/3_nodes.json"),
+            5 => include_str!("../mpc_fixture/5_nodes.json"),
+            other => {
+                tracing::warn!("No pregenerated keys for {other} nodes available");
+                return None;
+            }
+        };
+
+        #[derive(serde::Deserialize)]
+        struct FixtureData {
+            keys: BTreeMap<Participant, NodeKeyInfo>,
+        }
+
+        let fixture: FixtureData = serde_json::from_str(data)
+            .expect("Failed to parse pregenerated keys from fixture data");
+
+        let public_key = fixture
+            .keys
+            .values()
+            .next()
+            .expect("No keys in fixture data")
+            .public_key;
+
+        Some(Self::Enabled {
+            keys: fixture.keys,
+            public_key,
+        })
+    }
+
+    /// Check if keys are enabled
+    pub fn is_enabled(&self) -> bool {
+        matches!(self, Self::Enabled { .. })
+    }
+
+    /// Get the key info for a specific participant
+    pub fn get(&self, participant: &Participant) -> Option<&NodeKeyInfo> {
+        match self {
+            Self::Disabled => None,
+            Self::Enabled { keys, .. } => keys.get(participant),
+        }
+    }
+
+    /// Get the public key
+    pub fn public_key(&self) -> Option<mpc_crypto::PublicKey> {
+        match self {
+            Self::Disabled => None,
+            Self::Enabled { public_key, .. } => Some(*public_key),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Disabled => 0,
+            Self::Enabled { keys, .. } => keys.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 pub struct Prestockpile {
     /// Multiplier to increase the stockpile such that stockpiling presignatures does not trigger
@@ -40,6 +125,7 @@ pub struct ClusterSpawner {
     pub solana: Option<containers::Solana>,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
+    pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
 }
 
@@ -48,8 +134,9 @@ impl Default for ClusterSpawner {
         let mut tmp_dir = execute::target_dir().expect("unable to locate target dir");
         tmp_dir.push("tmp");
 
+        let nodes = 3;
         let cfg = NodeConfig {
-            nodes: 3,
+            nodes,
             threshold: 2,
             ..Default::default()
         };
@@ -70,6 +157,7 @@ impl Default for ClusterSpawner {
             solana: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
+            pregenerated_keys: PregeneratedKeys::load(nodes).unwrap(),
             use_ethereum: false,
         }
     }
@@ -119,6 +207,21 @@ impl ClusterSpawner {
 
     pub fn prestockpile(mut self, multiplier: u32) -> Self {
         self.prestockpile = Some(Prestockpile { multiplier });
+        self
+    }
+
+    /// Disable pregenerated keys and generate keys fresh.
+    /// This is slower but tests the full key generation protocol.
+    pub fn without_pregenerated_keys(mut self) -> Self {
+        self.pregenerated_keys = PregeneratedKeys::Disabled;
+        self
+    }
+
+    fn load_pregenerated_keys(mut self) -> Self {
+        if self.pregenerated_keys.is_enabled() && self.pregenerated_keys.len() != self.cfg.nodes {
+            self.pregenerated_keys =
+                PregeneratedKeys::load(self.cfg.nodes).unwrap_or(PregeneratedKeys::Disabled);
+        }
         self
     }
 
@@ -263,7 +366,7 @@ impl IntoFuture for ClusterSpawner {
 
     fn into_future(mut self) -> Self::IntoFuture {
         Box::pin(async move {
-            self = self.init_network().await?;
+            self = self.load_pregenerated_keys().init_network().await?;
 
             // Check if Solana is enabled and spawn if needed
             if self.cfg.sol.is_some() {

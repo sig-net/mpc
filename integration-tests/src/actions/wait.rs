@@ -230,8 +230,8 @@ async fn require_node_state(nodes: &Cluster, state: NodeState, id: usize) -> any
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(20);
+        .with_delay(std::time::Duration::from_millis(500))
+        .with_max_times(30);
 
     let state = is_ready
         .retry(&strategy)
@@ -240,7 +240,7 @@ async fn require_node_state(nodes: &Cluster, state: NodeState, id: usize) -> any
 
     if matches!(state, NodeState::Joining) {
         // wait a bit longer for voting to join
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
     }
 
     Ok(())
@@ -267,8 +267,8 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(20);
+        .with_delay(std::time::Duration::from_millis(500))
+        .with_max_times(30);
 
     is_ready
         .retry(&strategy)
@@ -296,8 +296,8 @@ pub async fn running_mpc(
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(50);
+        .with_delay(std::time::Duration::from_millis(500))
+        .with_max_times(40);
 
     is_running.retry(&strategy).await.with_context(|| {
         format!(
@@ -346,7 +346,7 @@ pub async fn require_presignatures(
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(5))
+        .with_delay(std::time::Duration::from_secs(1))
         .with_max_times(expected * 100);
 
     let state_views = is_enough.retry(&strategy).await.with_context(|| {
@@ -391,7 +391,7 @@ pub async fn require_triples(
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(5))
+        .with_delay(std::time::Duration::from_secs(1))
         .with_max_times(expected * 100);
 
     let state_views = is_enough.retry(&strategy).await.with_context(|| {
