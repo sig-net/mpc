@@ -1,5 +1,6 @@
 use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
+use integration_tests::mpc_fixture::input::FixtureTriple;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
@@ -91,7 +92,11 @@ async fn test_basic_generate_triples() {
                         .hget::<&str, u64, Triple>(node.triple_storage.triple_key(), triple_id)
                         .await;
                     if let Ok(t) = t {
-                        peer_triples.push(t);
+                        peer_triples.push(FixtureTriple {
+                            id: triple_id,
+                            share: t.share,
+                            public: t.public,
+                        });
                     } else {
                         tracing::error!("missing triple in redis {triple_id}");
                     }

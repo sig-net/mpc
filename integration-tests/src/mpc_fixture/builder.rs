@@ -521,8 +521,9 @@ impl MpcFixtureNodeBuilder {
             let my_shares = fixture_config.input.triples.remove(&self.me).unwrap();
             for (owner, triple_shares) in my_shares {
                 // Group triples into pairs
-                for (i, pair) in triple_shares.chunks_exact(2).enumerate() {
-                    let pair_id = i as u64; // Use index as pair ID
+                for pair in triple_shares.chunks_exact(2) {
+                    // Use the id from the fixture data as the pair ID
+                    let pair_id = pair[0].id;
                     let pair = TriplePair {
                         id: pair_id,
                         triple0: Triple {
