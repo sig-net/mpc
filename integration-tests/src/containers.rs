@@ -407,16 +407,10 @@ impl Redis {
             for _ in 0..(cfg.protocol.triple.min_triples * mul / 2) {
                 num_pairs += 1;
                 let pair_id = rand::random();
-                // Deal two triples for the pair
-                let (public0, shares0) =
-                    cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
-                let (public1, shares1) =
-                    cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
-
                 for ((me, triple0), triple1) in participant_ids
                     .iter()
-                    .zip(shares_to_triples(pair_id, &public0, &shares0))
-                    .zip(shares_to_triples(pair_id + 1, &public1, &shares1))
+                    .zip(shares_to_triples(pair_id, &public, &shares))
+                    .zip(shares_to_triples(pair_id + 1, &public, &shares))
                 {
                     let pair = TriplePair { triple0, triple1 };
                     storage
