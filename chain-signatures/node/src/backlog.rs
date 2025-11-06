@@ -625,7 +625,6 @@ mod tests {
     use alloy::primitives::{Address, B256};
     use anchor_lang::prelude::Pubkey;
     use mpc_primitives::SignId;
-    use signet_program::SignBidirectionalEvent;
 
     fn create_test_tx(id: u8, status: PendingRequestStatus) -> BidirectionalTx {
         BidirectionalTx {
@@ -670,17 +669,16 @@ mod tests {
                 Chain::Ethereum,
                 sign_id_eth,
                 BacklogTransaction::Bidirectional(tx_eth.clone()),
-                SignRequestType::SignBidirectional(SignBidirectionalEvent {
+                SignRequestType::SignBidirectional(BidirectionalMetadata {
                     sender: Default::default(),
+                    dest_chain: Chain::Ethereum,
                     serialized_transaction: vec![],
-                    dest: "ethereum".to_string(),
                     caip2_id: "eip155:1".to_string(),
                     key_version: 0,
                     deposit: 0,
                     path: "".to_string(),
                     algo: "".to_string(),
                     params: "".to_string(),
-                    program_id,
                     output_deserialization_schema: vec![],
                     respond_serialization_schema: vec![],
                 }),
@@ -691,17 +689,16 @@ mod tests {
                 Chain::Solana,
                 sign_id_sol,
                 BacklogTransaction::Bidirectional(tx_sol.clone()),
-                SignRequestType::SignBidirectional(SignBidirectionalEvent {
+                SignRequestType::SignBidirectional(BidirectionalMetadata {
                     sender: Default::default(),
+                    dest_chain: Chain::Solana,
                     serialized_transaction: vec![],
-                    dest: "solana".to_string(),
                     caip2_id: "solana:5eykt4UsFY6PZFX8nTM1".to_string(),
                     key_version: 0,
                     deposit: 0,
                     path: "".to_string(),
                     algo: "".to_string(),
                     params: "".to_string(),
-                    program_id,
                     output_deserialization_schema: vec![],
                     respond_serialization_schema: vec![],
                 }),
@@ -712,17 +709,16 @@ mod tests {
                 Chain::NEAR,
                 sign_id_near,
                 BacklogTransaction::Bidirectional(tx_near.clone()),
-                SignRequestType::SignBidirectional(SignBidirectionalEvent {
+                SignRequestType::SignBidirectional(BidirectionalMetadata {
                     sender: Default::default(),
+                    dest_chain: Chain::NEAR,
                     serialized_transaction: vec![],
-                    dest: "near".to_string(),
                     caip2_id: "near:mainnet".to_string(),
                     key_version: 0,
                     deposit: 0,
                     path: "".to_string(),
                     algo: "".to_string(),
                     params: "".to_string(),
-                    program_id,
                     output_deserialization_schema: vec![],
                     respond_serialization_schema: vec![],
                 }),

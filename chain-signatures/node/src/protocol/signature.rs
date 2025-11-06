@@ -641,7 +641,7 @@ impl SignatureGenerator {
                         );
                     }
 
-                    if let SignRequestType::SignBidirectional(event) =
+                    if let SignRequestType::SignBidirectional(metadata) =
                         &self.request.indexed.sign_request_type
                     {
                         let source_chain = self.request.indexed.chain;
@@ -652,7 +652,7 @@ impl SignatureGenerator {
                         tracing::debug!(
                             ?sign_id,
                             ?source_chain,
-                            ?event.dest,
+                            dest_chain = ?metadata.dest_chain,
                             "generated signature for bidirectional request, awaiting indexer to process"
                         );
                     }

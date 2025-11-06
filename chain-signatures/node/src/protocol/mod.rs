@@ -19,7 +19,6 @@ pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
 pub use mpc_primitives::Chain;
 pub use signature::{IndexedSignRequest, SignQueue};
-use signet_program::SignBidirectionalEvent;
 pub use state::{Node, NodeState};
 
 use crate::backlog::Backlog;
@@ -227,10 +226,25 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BidirectionalMetadata {
+    pub sender: anchor_lang::prelude::Pubkey,
+    pub dest_chain: Chain,
+    pub serialized_transaction: Vec<u8>,
+    pub caip2_id: String,
+    pub key_version: u32,
+    pub deposit: u64,
+    pub path: String,
+    pub algo: String,
+    pub params: String,
+    pub output_deserialization_schema: Vec<u8>,
+    pub respond_serialization_schema: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[allow(clippy::large_enum_variant)]
 pub enum SignRequestType {
     Sign,
-    SignBidirectional(SignBidirectionalEvent),
+    SignBidirectional(BidirectionalMetadata),
     RespondBidirectional(RespondBidirectionalTx),
 }
 

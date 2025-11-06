@@ -15,7 +15,6 @@ use serde_json::Value;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::io::Write;
-use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Copy)]
 pub struct BidirectionalTxId(pub B256);
@@ -71,19 +70,14 @@ pub struct BidirectionalTx {
 
 impl BidirectionalTx {
     pub fn new(signature: SignBidirectionalSignature) -> anyhow::Result<Self> {
-        let SignRequestType::SignBidirectional(event) =
+        let SignRequestType::SignBidirectional(metadata) =
             signature.request.indexed.sign_request_type.clone()
         else {
             anyhow::bail!("sign request is not a sign bidirectional");
         };
 
-        let unsigned_rlp_data = &event.serialized_transaction;
-        let target_chain = Chain::from_str(&event.dest).map_err(|err| {
-            anyhow::anyhow!(
-                "invalid target chain '{}' for bidirectional transaction: {err}",
-                event.dest
-            )
-        })?;
+        let unsigned_rlp_data = &metadata.serialized_transaction;
+        let target_chain = metadata.dest_chain;
         let source_chain = signature.request.indexed.chain;
 
         let (signed_transaction_hash, nonce) =
@@ -98,19 +92,19 @@ impl BidirectionalTx {
 
         Ok(Self {
             id: BidirectionalTxId(signed_transaction_hash.into()),
-            sender: event.sender,
-            serialized_transaction: event.serialized_transaction,
+            sender: metadata.sender,
+            serialized_transaction: metadata.serialized_transaction,
             source_chain,
             target_chain,
-            caip2_id: event.caip2_id,
-            key_version: event.key_version,
-            deposit: event.deposit,
-            path: event.path,
-            algo: event.algo,
-            dest: event.dest,
-            params: event.params,
-            output_deserialization_schema: event.output_deserialization_schema,
-            respond_serialization_schema: event.respond_serialization_schema,
+            caip2_id: metadata.caip2_id,
+            key_version: metadata.key_version,
+            deposit: metadata.deposit,
+            path: metadata.path,
+            algo: metadata.algo,
+            dest: metadata.dest_chain.to_string(),
+            params: metadata.params,
+            output_deserialization_schema: metadata.output_deserialization_schema,
+            respond_serialization_schema: metadata.respond_serialization_schema,
             request_id: signature.request.indexed.id.request_id,
             from_address,
             nonce,

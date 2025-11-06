@@ -1,5 +1,5 @@
 use crate::backlog::{Backlog, BacklogTransaction, SignTx};
-use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest, SignRequestType, BidirectionalMetadata};
 use crate::sign_bidirectional::{
     hash_rlp_data, BidirectionalTx, BidirectionalTxId, PendingRequestStatus,
 };
@@ -324,8 +324,29 @@ impl SignatureEventTrait for SignBidirectionalEvent {
             timestamp_sign_queue: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
-            sign_request_type: SignRequestType::SignBidirectional(self.clone()),
+            sign_request_type: SignRequestType::SignBidirectional(BidirectionalMetadata::from(self.clone())),
         })
+    }
+}
+
+impl From<SignBidirectionalEvent> for crate::protocol::BidirectionalMetadata {
+    fn from(event: SignBidirectionalEvent) -> Self {
+        use std::str::FromStr;
+        let dest_chain = Chain::from_str(&event.dest)
+            .unwrap_or_else(|_| panic!("Invalid destination chain: {}", event.dest));
+        Self {
+            sender: event.sender,
+            dest_chain,
+            serialized_transaction: event.serialized_transaction,
+            caip2_id: event.caip2_id,
+            key_version: event.key_version,
+            deposit: event.deposit,
+            path: event.path,
+            algo: event.algo,
+            params: event.params,
+            output_deserialization_schema: event.output_deserialization_schema,
+            respond_serialization_schema: event.respond_serialization_schema,
+        }
     }
 }
 
@@ -944,8 +965,8 @@ async fn subscribe_to_program_respond_events(
                 );
                 continue;
             };
-            let event = match sign_type {
-                SignRequestType::SignBidirectional(event) => event,
+            let metadata = match sign_type {
+                SignRequestType::SignBidirectional(metadata) => metadata,
                 SignRequestType::Sign => {
                     tracing::info!(?sign_id, "sign request completed successfully");
                     backlog.remove(Chain::Solana, &sign_id).await;
@@ -958,11 +979,7 @@ async fn subscribe_to_program_respond_events(
             };
 
             tracing::info!(?sign_id, "bidirectional processing initial respond event");
-            let Ok(target_chain) = Chain::from_str(&event.dest).inspect_err(|err| {
-                tracing::warn!(?sign_id, %err, "unable to parse target chain from dest");
-            }) else {
-                continue;
-            };
+            let target_chain = metadata.dest_chain;
 
             let Some(BacklogTransaction::Sign(_)) = backlog.get(Chain::Solana, &sign_id).await
             else {
@@ -1002,7 +1019,7 @@ async fn subscribe_to_program_respond_events(
 
             // Sign and hash the transaction to get the correct tx_id and nonce
             let (signed_tx_hash, nonce) = crate::sign_bidirectional::sign_and_hash_transaction(
-                &event.serialized_transaction,
+                &metadata.serialized_transaction,
                 mpc_sig,
             )?;
 
@@ -1011,9 +1028,9 @@ async fn subscribe_to_program_respond_events(
             // Get the MPC public key and derive the from_address
             let root_public_key = contract_watcher.wait_public_key().await;
             let epsilon = mpc_crypto::kdf::derive_epsilon_sol(
-                event.key_version,
+                metadata.key_version,
                 &ev.responder.to_string(),
-                &event.path,
+                &metadata.path,
             );
             let from_address =
                 crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
@@ -1021,18 +1038,18 @@ async fn subscribe_to_program_respond_events(
             let bidirectional_tx = BidirectionalTx {
                 id: tx_id,
                 sender: ev.responder,
-                serialized_transaction: event.serialized_transaction,
+                serialized_transaction: metadata.serialized_transaction,
                 source_chain: Chain::Solana,
                 target_chain,
-                caip2_id: event.caip2_id,
-                key_version: event.key_version,
-                deposit: event.deposit,
-                path: event.path.clone(),
-                algo: event.algo.clone(),
-                dest: event.dest.clone(),
-                params: event.params.clone(),
-                output_deserialization_schema: event.output_deserialization_schema.clone(),
-                respond_serialization_schema: event.respond_serialization_schema.clone(),
+                caip2_id: metadata.caip2_id,
+                key_version: metadata.key_version,
+                deposit: metadata.deposit,
+                path: metadata.path.clone(),
+                algo: metadata.algo.clone(),
+                dest: metadata.dest_chain.to_string(),
+                params: metadata.params.clone(),
+                output_deserialization_schema: metadata.output_deserialization_schema.clone(),
+                respond_serialization_schema: metadata.respond_serialization_schema.clone(),
                 request_id: ev.request_id,
                 from_address,
                 nonce,
