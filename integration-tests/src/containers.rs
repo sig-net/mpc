@@ -412,11 +412,15 @@ impl Redis {
                     .zip(shares_to_triples(&public, &shares))
                     .zip(shares_to_triples(&public, &shares))
                 {
-                    let pair = TriplePair { id: pair_id, triple0, triple1 };
+                    let pair = TriplePair {
+                        id: pair_id,
+                        triple0,
+                        triple1,
+                    };
                     storage
                         .get(me)
                         .unwrap()
-                        .reserve_pair(pair_id)
+                        .reserve(pair_id)
                         .await
                         .unwrap()
                         .insert(pair, *owner)

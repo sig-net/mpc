@@ -19,10 +19,10 @@ use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
 use mpc_node::protocol::state::NodeKeyInfo;
+use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
-use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::{
     presignature_storage, secret_storage, triple_storage, triple_storage::TriplePair, Options,
 };
@@ -534,7 +534,7 @@ impl MpcFixtureNodeBuilder {
                             public: pair[1].public.clone(),
                         },
                     };
-                    let mut slot = triple_storage.reserve_pair(pair_id).await.unwrap();
+                    let mut slot = triple_storage.reserve(pair_id).await.unwrap();
                     slot.insert(pair, owner).await;
                 }
             }

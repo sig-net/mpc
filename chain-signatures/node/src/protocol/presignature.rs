@@ -423,8 +423,8 @@ impl PresignatureSpawner {
             // TODO: we can potentially wait for the triples to exist first to then be able to accept.
             // whereas we just blatantly reject here. The problem with waiting is that the other side
             // might expire their posit first.
-            (self.triples.contains_reserved(id.pair_id).await
-                || self.triples.contains(id.pair_id).await)
+            self.triples.contains_reserved(id.pair_id).await
+                || self.triples.contains(id.pair_id).await
         } {
             tracing::warn!(
                 ?id,
@@ -474,19 +474,14 @@ impl PresignatureSpawner {
         };
 
         let pair_id = triples.pair.id;
-        let participants = intersect_vec(&[
-            active,
-            &triples.pair.triple0.public.participants,
-            &triples.pair.triple1.public.participants,
-        ]);
+        // note: only one of the pair's participants is need since they are the same.
+        let participants = intersect_vec(&[active, &triples.pair.triple0.public.participants]);
         if participants.len() < self.threshold {
             tracing::warn!(
-                intersection = ?participants,
-                ?participants,
                 pair_id,
-                triple0 = ?(&triples.pair.triple0.public.participants),
-                triple1 = ?(&triples.pair.triple1.public.participants),
-                "intersection < threshold, trashing two triples"
+                ?active,
+                ?participants,
+                "intersection < threshold, trashing triple pair"
             );
             return;
         }

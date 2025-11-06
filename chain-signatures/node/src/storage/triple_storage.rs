@@ -117,9 +117,7 @@ impl TriplesTaken {
 
 impl fmt::Debug for TriplesTaken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("TriplesTaken")
-            .field(&self.pair.id)
-            .finish()
+        f.debug_tuple("TriplesTaken").field(&self.pair.id).finish()
     }
 }
 
@@ -184,7 +182,7 @@ impl TripleStorage {
             .ok()
     }
 
-    pub async fn reserve_pair(&self, id: TripleId) -> Option<TriplePairSlot> {
+    pub async fn reserve(&self, id: TripleId) -> Option<TriplePairSlot> {
         let start = Instant::now();
 
         const SCRIPT: &str = r#"

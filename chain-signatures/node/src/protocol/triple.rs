@@ -239,7 +239,11 @@ impl TripleGenerator {
                         success_owned_counts.inc();
                     }
 
-                    let pair = TriplePair { id: self.id, triple0, triple1 };
+                    let pair = TriplePair {
+                        id: self.id,
+                        triple0,
+                        triple1,
+                    };
                     self.slot.insert(pair, triple_owner).await;
                     break;
                 }
@@ -324,10 +328,6 @@ impl TripleSpawner {
             my_account_id: my_account_id.clone(),
             msg,
         }
-    }
-
-    async fn reserve(&self, id: TripleId) -> Option<TriplePairSlot> {
-        self.triple_storage.reserve_pair(id).await
     }
 
     pub async fn contains(&self, id: TripleId) -> bool {
@@ -487,7 +487,7 @@ impl TripleSpawner {
         timeout: Duration,
     ) -> Result<(), InitializationError> {
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        let Some(slot) = self.triple_storage.reserve_pair(id).await else {
+        let Some(slot) = self.triple_storage.reserve(id).await else {
             return Err(InitializationError::BadParameters(format!(
                 "id collision: pair_id={id}"
             )));

@@ -183,7 +183,7 @@ async fn insert_triples(
 ) {
     for id in range {
         triples
-            .reserve_pair(id)
+            .reserve(id)
             .await
             .unwrap()
             .insert(dummy_pair(id), node)
