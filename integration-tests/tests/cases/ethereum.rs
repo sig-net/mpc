@@ -9,7 +9,6 @@ use mpc_crypto::derive_key;
 use mpc_crypto::kdf::derive_epsilon_eth;
 use mpc_primitives::{Chain, Checkpoint, LATEST_MPC_KEY_VERSION};
 use near_workspaces::types::Finality;
-use std::time::Instant;
 use test_log::test;
 use tokio::time::{sleep, Duration};
 
@@ -403,27 +402,27 @@ async fn wait_contract_checkpoint(
     min_block_height: u64,
     timeout: Duration,
 ) -> anyhow::Result<Checkpoint> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let latest: Option<Checkpoint> = contract
-            .view("latest_checkpoint")
-            .args_json(serde_json::json!({ "chain": chain }))
-            .finality(Finality::Final)
-            .await?
-            .json()?;
+    tokio::time::timeout(timeout, async {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
 
-        if let Some(checkpoint) = latest {
-            if checkpoint.block_height >= min_block_height {
-                return Ok(checkpoint);
+            let latest: Option<Checkpoint> = contract
+                .view("latest_checkpoint")
+                .args_json(serde_json::json!({ "chain": chain }))
+                .finality(Finality::Final)
+                .await?
+                .json()?;
+
+            if let Some(checkpoint) = latest {
+                if checkpoint.block_height >= min_block_height {
+                    return Ok(checkpoint);
+                }
             }
         }
-
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for contract checkpoint >= {min_block_height}");
-        }
-
-        sleep(Duration::from_secs(1)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timeout waiting for contract checkpoint >= {min_block_height}"))
 }
 
 async fn wait_node_checkpoint(
@@ -433,19 +432,21 @@ async fn wait_node_checkpoint(
     min_block_height: u64,
     timeout: Duration,
 ) -> anyhow::Result<Checkpoint> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let checkpoints = nodes.fetch_checkpoints(node_idx).await?;
-        if let Some(checkpoint) = checkpoints.get(&chain) {
-            if checkpoint.block_height >= min_block_height {
-                return Ok(checkpoint.clone());
+    tokio::time::timeout(timeout, async {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+
+            let checkpoints = nodes.fetch_checkpoints(node_idx).await?;
+            if let Some(checkpoint) = checkpoints.get(&chain) {
+                if checkpoint.block_height >= min_block_height {
+                    return Ok(checkpoint.clone());
+                }
             }
         }
-
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for node {node_idx} checkpoint >= {min_block_height}");
-        }
-
-        sleep(Duration::from_secs(1)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("timed out waiting for node {node_idx} checkpoint >= {min_block_height}")
+    })
 }

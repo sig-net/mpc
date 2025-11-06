@@ -75,9 +75,8 @@ impl PendingRequests {
     fn pending_execution(&self) -> Vec<(SignId, BacklogTransaction)> {
         self.requests
             .iter()
-            .filter_map(|(&id, tx)| {
-                (tx.status() == PendingRequestStatus::PendingExecution).then(|| (id, tx.clone()))
-            })
+            .filter(|(_, tx)| tx.status() == PendingRequestStatus::PendingExecution)
+            .map(|(&id, tx)| (id, tx.clone()))
             .collect()
     }
 
@@ -421,8 +420,7 @@ impl Backlog {
         };
 
         // create a checkpoint on interval
-        let should_checkpoint = height % checkpoint_interval == 0;
-        if should_checkpoint {
+        if height.is_multiple_of(checkpoint_interval) {
             tracing::info!(
                 ?chain,
                 height,
@@ -497,8 +495,8 @@ impl Backlog {
             // Only restore execution watchers for bidirectional transactions
             if let Some(target_chain) = tx.target_chain() {
                 // Extract the BidirectionalTx from the BacklogTransaction
-                if let BacklogTransaction::Bidirectional(bidirectional_tx) = &tx {
-                    self.watch_execution(target_chain, sign_id, bidirectional_tx.clone())
+                if let BacklogTransaction::Bidirectional(bidirectional_tx) = tx {
+                    self.watch_execution(target_chain, sign_id, bidirectional_tx)
                         .await;
                 }
             }
@@ -564,6 +562,7 @@ pub struct SignTx {
 
 /// Pending transaction in the backlog - can be either a sign-only or bidirectional.
 #[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum BacklogTransaction {
     Sign(SignTx),
     Bidirectional(BidirectionalTx),

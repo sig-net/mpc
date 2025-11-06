@@ -1270,9 +1270,9 @@ async fn process_respond_events(logs: &[Log], backlog: &Backlog) {
 }
 
 fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
-    if !log
+    if log
         .topic0()
-        .is_some_and(|topic| *topic == SignatureResponded::SIGNATURE_HASH)
+        .is_none_or(|topic| *topic != SignatureResponded::SIGNATURE_HASH)
     {
         return None;
     }

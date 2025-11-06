@@ -251,9 +251,9 @@ impl Nodes {
         let body = response.text().await?;
         tracing::info!(?status, raw_body = %body, "checkpoint response body");
         let mut value: HashMap<Chain, Checkpoint> = serde_json::from_str(&body)?;
-        Ok(value
+        value
             .remove(&chain)
-            .context("checkpoint not found for chain")?)
+            .context("checkpoint not found for chain")
     }
 
     pub async fn fetch_checkpoints(&self, id: usize) -> anyhow::Result<HashMap<Chain, Checkpoint>> {

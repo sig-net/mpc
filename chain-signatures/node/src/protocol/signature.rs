@@ -382,6 +382,10 @@ struct SignatureGenerator {
     inbox: mpsc::Receiver<SignatureMessage>,
     msg: MessageChannel,
     rpc: RpcChannel,
+
+    // TODO: will be used in the future when we move requests channels
+    // into the backlog.
+    #[allow(dead_code)]
     backlog: Backlog,
 
     #[cfg(feature = "debug-page")]

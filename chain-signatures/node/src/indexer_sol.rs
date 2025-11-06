@@ -514,6 +514,7 @@ async fn process_anchor_sign_event(
 }
 
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L31
+#[allow(clippy::too_many_arguments)]
 async fn subscribe_and_process_sign_events(
     program_id: Pubkey,
     rpc_url: String,
@@ -970,20 +971,17 @@ async fn subscribe_to_program_respond_events(
             };
 
             // Create a 65-byte uncompressed point representation (0x04 || x || y)
-            let mut point_bytes = [0u8; 65];
-            point_bytes[0] = 0x04;
-            point_bytes[1..33].copy_from_slice(&ev.signature.big_r.x);
-            point_bytes[33..65].copy_from_slice(&ev.signature.big_r.y);
+            let mut big_r = [0u8; 65];
+            big_r[0] = 0x04;
+            big_r[1..33].copy_from_slice(&ev.signature.big_r.x);
+            big_r[33..65].copy_from_slice(&ev.signature.big_r.y);
 
-            // Decode the point from the uncompressed representation
-            let Ok(encoded_point) =
-                k256::EncodedPoint::from_bytes(&point_bytes).inspect_err(|err| {
-                    tracing::warn!(?sign_id, %err, "unable to parse big_r for encoded point");
-                })
-            else {
+            let Ok(big_r) = k256::EncodedPoint::from_bytes(big_r).inspect_err(|err| {
+                tracing::warn!(?sign_id, %err, "unable to parse big_r for encoded point");
+            }) else {
                 continue;
             };
-            let big_r_ct_opt = AffinePoint::from_encoded_point(&encoded_point);
+            let big_r_ct_opt = AffinePoint::from_encoded_point(&big_r);
             let big_r = if bool::from(big_r_ct_opt.is_some()) {
                 big_r_ct_opt.unwrap()
             } else {
