@@ -23,7 +23,6 @@ lru = "0.13.0"
 mime = "0.3.17"
 prometheus = "0.14.0"
 redis = "0.27.2"
-semver = "1.0.23"
 sysinfo = "0.32.0"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 tracing-stackdriver = "0.10.0"
@@ -56,6 +55,7 @@ hyper.workspace = true
 k256.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 serde_json.workspace = true

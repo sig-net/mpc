@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use test_log::test;
 
 pub mod chains;
+pub mod compat;
 pub mod ethereum;
 pub mod mpc;
 pub mod nightly;
