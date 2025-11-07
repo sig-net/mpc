@@ -7403,6 +7403,7 @@ name = "mpc-crypto"
 version = "1.10.0"
 dependencies = [
  "alloy",
+ "alloy-primitives",
  "anyhow",
  "getrandom 0.2.16",
  "k256",

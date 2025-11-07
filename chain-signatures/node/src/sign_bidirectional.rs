@@ -8,8 +8,6 @@ use anchor_lang::prelude::Pubkey;
 use borsh::BorshSerialize;
 use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
-use k256::{AffinePoint, Scalar};
-use mpc_crypto::derive_key;
 use mpc_primitives::Signature;
 use rlp::{Rlp, RlpStream};
 use serde_json::Value;
@@ -89,8 +87,10 @@ impl BidirectionalTx {
 
         tracing::info!(signed_transaction_hash = ?signed_transaction_hash, "signed_transaction_hash");
 
-        let from_address =
-            derive_user_address(signature.public_key, signature.request.indexed.args.epsilon);
+        let from_address = mpc_crypto::derive_user_address(
+            signature.public_key,
+            signature.request.indexed.args.epsilon,
+        );
 
         tracing::info!(from_address = ?from_address, "from_address");
 
@@ -342,35 +342,6 @@ pub fn sign_and_hash_legacy_from_unsigned(
     let signed_bytes = out.out().to_vec();
     let hash = alloy_primitives::keccak256(&signed_bytes);
     Ok((hash.into(), nonce))
-}
-
-/// Get the x coordinate of a point, as a scalar
-fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar {
-    <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
-}
-
-fn public_key_to_address(public_key: &secp256k1::PublicKey) -> Address {
-    let public_key = public_key.serialize_uncompressed();
-
-    debug_assert_eq!(public_key[0], 0x04);
-    let hash: [u8; 32] = *alloy::primitives::keccak256(&public_key[1..]);
-
-    Address::from_slice(&hash[12..])
-}
-
-pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Scalar) -> Address {
-    let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
-    let parity = match user_pk.y_is_odd().unwrap_u8() {
-        0 => secp256k1::Parity::Even,
-        1 => secp256k1::Parity::Odd,
-        _ => unreachable!(),
-    };
-
-    let x_coord = x_coordinate::<k256::Secp256k1>(&user_pk);
-    let x_only = secp256k1::XOnlyPublicKey::from_slice(&x_coord.to_bytes()).unwrap();
-    let secp_pk = secp256k1::PublicKey::from_x_only_public_key(x_only, parity);
-
-    public_key_to_address(&secp_pk)
 }
 
 fn create_abi_data(schema: Vec<AbiField>) -> anyhow::Result<Output> {
