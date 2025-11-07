@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crate::containers::{self, DockerClient};
 use crate::utils::dev_gen_indexed;
-use crate::{execute, NodeConfig, Nodes};
+use crate::{execute, NodeBinarySource, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
 
@@ -127,6 +127,8 @@ pub struct ClusterSpawner {
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
+    /// Tracks which binary source to use for each node index
+    pub node_binary_sources: Vec<NodeBinarySource>,
 }
 
 impl Default for ClusterSpawner {
@@ -159,6 +161,7 @@ impl Default for ClusterSpawner {
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes).unwrap(),
             use_ethereum: false,
+            node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
     }
 }
@@ -171,6 +174,27 @@ impl ClusterSpawner {
 
     pub fn nodes(mut self, nodes: usize) -> Self {
         self.cfg.nodes = nodes;
+        // Resize the binary sources vector to match
+        self.node_binary_sources
+            .resize(nodes, NodeBinarySource::CurrentCode);
+        self
+    }
+
+    /// Add mainnet nodes to the cluster. Uses the highest semver binary from artifacts/mainnet.
+    pub fn mainnet_nodes(mut self, count: usize) -> Self {
+        let current_len = self.node_binary_sources.len();
+        self.node_binary_sources
+            .extend((0..count).map(|_| NodeBinarySource::Mainnet));
+        self.cfg.nodes = current_len + count;
+        self
+    }
+
+    /// Add testnet nodes to the cluster. Uses the highest semver binary from artifacts/testnet.
+    pub fn testnet_nodes(mut self, count: usize) -> Self {
+        let current_len = self.node_binary_sources.len();
+        self.node_binary_sources
+            .extend((0..count).map(|_| NodeBinarySource::Testnet));
+        self.cfg.nodes = current_len + count;
         self
     }
 
