@@ -39,7 +39,7 @@ impl Drop for Timer {
             .push(duration);
 
         // Print timing data to stderr immediately for test capture
-        eprintln!("TIMING: {} completed in {:.3}s", self.label, duration.as_secs_f64());
+        eprintln!("TIMING: {} completed in {}μs", self.label, duration.as_micros());
 
         // Write timing data to file immediately
         if let Some(account_id) = ACCOUNT_ID.lock().unwrap().as_ref() {
@@ -53,8 +53,8 @@ impl Drop for Timer {
                     let min = durations.iter().min().unwrap();
                     let max = durations.iter().max().unwrap();
 
-                    output.push_str(&format!("{}:\n  Count: {}\n  Total: {:.3}s\n  Average: {:.3}s\n  Min: {:.3}s\n  Max: {:.3}s\n\n",
-                                           label, count, total.as_secs_f64(), avg.as_secs_f64(), min.as_secs_f64(), max.as_secs_f64()));
+                    output.push_str(&format!("{}:\n  Count: {}\n  Total: {}μs\n  Average: {}μs\n  Min: {}μs\n  Max: {}μs\n\n",
+                                           label, count, total.as_micros(), avg.as_micros(), min.as_micros(), max.as_micros()));
                 }
                 let _ = file.write_all(output.as_bytes());
             }
@@ -88,10 +88,10 @@ pub fn print_timing_report_with_account_id(account_id: Option<&str>) {
 
         output.push_str(&format!("{}:\n", label));
         output.push_str(&format!("  Count: {}\n", count));
-        output.push_str(&format!("  Total: {:.3}s\n", total.as_secs_f64()));
-        output.push_str(&format!("  Average: {:.3}s\n", avg.as_secs_f64()));
-        output.push_str(&format!("  Min: {:.3}s\n", min.as_secs_f64()));
-        output.push_str(&format!("  Max: {:.3}s\n", max.as_secs_f64()));
+        output.push_str(&format!("  Total: {}μs\n", total.as_micros()));
+        output.push_str(&format!("  Average: {}μs\n", avg.as_micros()));
+        output.push_str(&format!("  Min: {}μs\n", min.as_micros()));
+        output.push_str(&format!("  Max: {}μs\n", max.as_micros()));
         output.push_str("\n");
     }
 
@@ -127,8 +127,8 @@ pub fn print_timing_report_now_with_account_id(account_id: Option<&str>) {
         let min = durations.iter().min().unwrap();
         let max = durations.iter().max().unwrap();
 
-        let entry = format!("{}:\n  Count: {}\n  Total: {:.3}s\n  Average: {:.3}s\n  Min: {:.3}s\n  Max: {:.3}s\n\n",
-                          label, count, total.as_secs_f64(), avg.as_secs_f64(), min.as_secs_f64(), max.as_secs_f64());
+        let entry = format!("{}:\n  Count: {}\n  Total: {}μs\n  Average: {}μs\n  Min: {}μs\n  Max: {}μs\n\n",
+                          label, count, total.as_micros(), avg.as_micros(), min.as_micros(), max.as_micros());
         eprintln!("{}", entry.trim_end());
         output.push_str(&entry);
     }
