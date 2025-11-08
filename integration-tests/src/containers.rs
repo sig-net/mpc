@@ -48,6 +48,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{sleep, Duration};
 use tracing;
 
+use deadpool_redis;
+
 pub type Container = ContainerAsync<GenericImage>;
 
 pub struct Node {
@@ -314,45 +316,46 @@ impl Default for DockerClient {
 }
 
 pub struct Redis {
-    pub container: Container,
+    pub child: Child,
     pub internal_address: String,
     pub external_address: String,
 }
 
 impl Redis {
-    const DEFAULT_REDIS_PORT: u16 = 6379;
 
-    pub async fn run(spawner: &ClusterSpawner) -> Self {
-        tracing::info!("Running Redis container...");
-        let container = GenericImage::new("redis", "7.4.2")
-            .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .with_network(&spawner.network)
-            .start()
-            .await
-            .unwrap();
-        let network_ip = spawner
-            .docker
-            .get_network_ip_address(&container, &spawner.network)
-            .await
-            .unwrap();
-
-        let external_address = format!("redis://{}:{}", network_ip, Self::DEFAULT_REDIS_PORT);
-
-        let host_port = container
-            .get_host_port_ipv4(Self::DEFAULT_REDIS_PORT)
-            .await
-            .unwrap();
-        let internal_address = format!("redis://127.0.0.1:{host_port}");
+    pub async fn run(_spawner: &ClusterSpawner) -> Self {
+        tracing::info!("Running Redis server...");
+        
+        let port = pick_preferred_or_unused_port(6379).await;
+        
+        let child = Command::new("redis-server")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--protected-mode")
+            .arg("no")
+            .arg("--daemonize")
+            .arg("no")
+            .arg("--loglevel")
+            .arg("warning")
+            .spawn()
+            .expect("Failed to start redis-server");
+        
+        // Give Redis server time to start up
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        let internal_address = format!("redis://127.0.0.1:{}", port);
+        let external_address = internal_address.clone();
 
         tracing::info!(
             external_address,
             internal_address,
-            "Redis container is running",
+            "Redis server is running",
         );
 
         Self {
-            container,
+            child,
             internal_address,
             external_address,
         }
