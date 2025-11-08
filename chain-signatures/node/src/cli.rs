@@ -367,7 +367,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let result = protocol_handle.await;
             web_handle.abort();
             system_handle.abort();
-            crate::timings::print_timing_report();
             tracing::info!("spinning down");
             result?;
         }
