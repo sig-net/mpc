@@ -25,7 +25,7 @@ serde.workspace = true
 serde_json.workspace = true
 shell-escape = "0.1.5"
 testcontainers = "0.23.1"
-tokio = { version = "1.45.1", features = ["full", "test-util"] }
+tokio = { version = "1.45.1", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync", "process", "signal", "net", "io-util"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
