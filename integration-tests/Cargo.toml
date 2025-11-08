@@ -56,7 +56,7 @@ near-account-id.workspace = true
 near-crypto = "0.26.0"
 near-fetch = "0.6.0"
 near-sdk.workspace = true
-near-jsonrpc-client = "0.13.0"
+near-jsonrpc-client = { version = "0.13.0", default-features = false, features = ["rustls-tls"] }
 near-primitives = "0.26.0"
 
 # if necessary, use the following branch for near related indexer hacking:
