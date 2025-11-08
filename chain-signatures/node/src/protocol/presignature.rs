@@ -9,6 +9,7 @@ use crate::protocol::MpcSignProtocol;
 use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
 use crate::storage::triple_storage::{TriplesTaken, TriplesTakenDropper};
 use crate::storage::TripleStorage;
+use crate::timings::Timer;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::{AffinePointExt, JoinMap};
 
@@ -160,6 +161,7 @@ impl PresignatureGenerator {
     }
 
     pub async fn run(mut self, my_account_id: &AccountId, me: Participant, epoch: u64) {
+        let _presignature_gen_timer = Timer::new("presignature_generation_total");
         let failure_counts = crate::metrics::PRESIGNATURE_GENERATOR_FAILURES
             .with_label_values(&[my_account_id.as_str()]);
         let before_first_poke_delay = crate::metrics::PRESIGNATURE_BEFORE_POKE_DELAY

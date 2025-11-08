@@ -2,6 +2,7 @@ use crate::backlog::Backlog;
 use crate::protocol::SignRequestType;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
+use crate::timings::Timer;
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::{AnchorDeserialize, AnchorSerialize};
 use anchor_client::{Client, Cluster, Program};
@@ -371,6 +372,7 @@ pub async fn run(
     node_near_account_id: AccountId,
     backlog: Backlog,
 ) {
+    let _sol_indexer_timer = Timer::new("sol_indexer_total");
     let Some(sol) = sol else {
         tracing::warn!("solana indexer is disabled");
         return;

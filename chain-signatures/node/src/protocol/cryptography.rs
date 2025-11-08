@@ -11,6 +11,7 @@ use crate::protocol::contract::ResharingContractState;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
+use crate::timings::Timer;
 use crate::types::{ReshareProtocol, SecretKeyShare};
 
 use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
@@ -43,6 +44,7 @@ pub(crate) trait CryptographicProtocol {
 
 impl CryptographicProtocol for GeneratingState {
     async fn progress(mut self, ctx: &mut MpcSignProtocol, mesh_state: MeshState) -> NodeState {
+        let _gen_timer = Timer::new("generating_progress");
         // Previous save to secret storage failed, try again until successful.
         if let Some((pk, sk_share)) = self.failed_store.take() {
             return self.finalize(pk, sk_share, ctx).await;
@@ -174,6 +176,7 @@ impl CryptographicProtocol for WaitingForConsensusState {
 
 impl CryptographicProtocol for ResharingState {
     async fn progress(mut self, ctx: &mut MpcSignProtocol, mesh_state: MeshState) -> NodeState {
+        let _reshare_timer = Timer::new("resharing_progress");
         tracing::info!(active = ?mesh_state.active.keys_vec(), "progressing key reshare");
 
         let mut resharing = match self.phase {

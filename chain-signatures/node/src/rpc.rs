@@ -7,6 +7,7 @@ use crate::protocol::contract::RunningContractState;
 use crate::protocol::signature::SignRequest;
 use crate::protocol::{Chain, Governance, ProtocolState, SignRequestType};
 use crate::respond_bidirectional::RespondBidirectionalTxChannel;
+use crate::timings::Timer;
 use crate::util::AffinePointExt as _;
 
 use solana_sdk::commitment_config::CommitmentConfig;
@@ -542,6 +543,7 @@ impl NearClient {
         id: &SignId,
         response: &Signature,
     ) -> Result<ExecutionFinalResult, near_fetch::Error> {
+        let _respond_timer = Timer::new("rpc_call_respond");
         self.client
             .call(&self.signer, &self.contract_id, "respond")
             .args_json(json!({
@@ -660,6 +662,7 @@ async fn execute_publish(
     backlog: Backlog,
     respond_bidirectional_tx_channel: RespondBidirectionalTxChannel,
 ) {
+    let _publish_timer = Timer::new("rpc_execute_publish");
     let chain = action.request.indexed.chain;
     let sign_id = action.request.indexed.id;
     tracing::info!(

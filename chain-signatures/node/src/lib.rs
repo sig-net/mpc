@@ -15,6 +15,7 @@ pub mod respond_bidirectional;
 pub mod rpc;
 pub mod sign_bidirectional;
 pub mod storage;
+pub mod timings;
 pub mod types;
 pub mod util;
 pub mod web;

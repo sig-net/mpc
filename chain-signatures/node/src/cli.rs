@@ -10,6 +10,7 @@ use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
 use crate::respond_bidirectional::RespondBidirectionalTxProcessor;
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
+use crate::timings::Timer;
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -162,6 +163,7 @@ impl Cli {
 }
 
 pub async fn run(cmd: Cli) -> anyhow::Result<()> {
+    let _total_timer = Timer::new("total_node_startup");
     match cmd {
         Cli::Start {
             near_rpc,
@@ -182,6 +184,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             mesh_options,
             message_options,
         } => {
+            let _setup_timer = Timer::new("node_setup");
             let _guard = logs::setup(&storage_options.env, account_id.as_str(), &log_options).await;
 
             let _span = tracing::trace_span!("cli").entered();
@@ -203,6 +206,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let (sign_tx, sign_rx) = SignQueue::channel();
 
+            let _storage_timer = Timer::new("storage_initialization");
             let gcp_service = GcpService::init(&account_id, &storage_options).await?;
 
             let key_storage =
@@ -254,6 +258,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!(%my_address, "address detected");
 
+            let _client_timer = Timer::new("client_network_setup");
             let client = NodeClient::new(&message_options);
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
@@ -267,6 +272,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
 
+            let _protocol_timer = Timer::new("protocol_initialization");
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol, backlog.clone());
             let (respond_bidirectional_tx_channel, respond_bidirectional_tx_processor) =
                 RespondBidirectionalTxProcessor::new();
@@ -325,6 +331,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             };
 
             tracing::info!("protocol initialized");
+            let _spawn_timer = Timer::new("task_spawning");
             tokio::spawn(sync.run());
             tokio::spawn(rpc.run(
                 contract_state_tx,
@@ -357,10 +364,12 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             ));
             tokio::spawn(indexer_sol::run(sol, sign_tx, account_id, backlog));
             tracing::info!("protocol http server spawned");
-            protocol_handle.await?;
-            web_handle.await?;
+            let result = protocol_handle.await;
+            web_handle.abort();
             system_handle.abort();
+            crate::timings::print_timing_report();
             tracing::info!("spinning down");
+            result?;
         }
     };
 

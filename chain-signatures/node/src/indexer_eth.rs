@@ -478,6 +478,7 @@ pub async fn run(
     node_near_account_id: AccountId,
     backlog: Backlog,
 ) {
+    let _eth_indexer_timer = Timer::new("eth_indexer_total");
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
         return;
@@ -903,6 +904,7 @@ async fn process_block(
     total_timeout: Duration,
     backlog: Backlog,
 ) -> anyhow::Result<()> {
+    let _process_timer = Timer::new("eth_process_block");
     tracing::info!(
         "Processing block number {} with hash {:?}",
         block_number,

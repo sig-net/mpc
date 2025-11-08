@@ -1,3 +1,4 @@
+use crate::timings::Timer;
 use anyhow::Context;
 use hkdf::Hkdf;
 use k256::{ecdsa::RecoveryId, elliptic_curve::sec1::ToEncodedPoint, AffinePoint, Scalar};
@@ -14,6 +15,7 @@ pub fn derive_delta(
     entropy: [u8; 32],
     presignature_big_r: AffinePoint,
 ) -> Scalar {
+    let _delta_timer = Timer::new("kdf_derive_delta");
     let hk = Hkdf::<Sha3_256>::new(None, &entropy);
     let info = format!("{DELTA_DERIVATION_PREFIX}:{}", CryptoHash(request_id));
     let mut okm = [0u8; 32];
@@ -37,6 +39,7 @@ pub fn into_eth_sig(
     s: &k256::Scalar,
     msg_hash: Scalar,
 ) -> anyhow::Result<Signature> {
+    let _eth_sig_timer = Timer::new("kdf_into_eth_sig");
     let public_key = public_key.to_encoded_point(false);
     let signature = k256::ecdsa::Signature::from_scalars(x_coordinate(big_r), s)
         .context("cannot create signature from cait_sith signature")?;

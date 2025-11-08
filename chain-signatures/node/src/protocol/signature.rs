@@ -13,6 +13,7 @@ use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::{BidirectionalTx, SignBidirectionalSignature};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
+use crate::timings::Timer;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap};
 
@@ -518,6 +519,7 @@ impl SignatureGenerator {
         epoch: u64,
         my_account_id: AccountId,
     ) -> Result<(), SignError> {
+        let _signature_gen_timer = Timer::new("signature_generation_total");
         let accrued_wait_delay = crate::metrics::SIGNATURE_ACCRUED_WAIT_DELAY
             .with_label_values(&[my_account_id.as_str()]);
         let poke_counts =
@@ -1073,6 +1075,7 @@ impl SignatureSpawner {
         mesh_state: watch::Receiver<MeshState>,
         cfg: watch::Receiver<Config>,
     ) {
+        let _signature_spawner_timer = Timer::new("signature_spawner_total");
         // NOTE: signatures should only use stable and not active participants. The difference here is that
         // stable participants utilizes more than the online status of a node, such as whether or not their
         // block height is up to date, such that they too can process signature requests. If they cannot

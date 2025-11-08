@@ -32,6 +32,7 @@ use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
+use crate::timings::Timer;
 
 use near_account_id::AccountId;
 use semver::Version;
@@ -85,6 +86,7 @@ impl MpcSignProtocol {
         contract_state: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
     ) {
+        let _protocol_timer = Timer::new("mpc_protocol_total");
         let my_account_id = self.my_account_id.as_str();
         let _span = tracing::info_span!("running", my_account_id);
         let my_account_id = self.my_account_id.clone();
