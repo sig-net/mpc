@@ -12,8 +12,12 @@ pub enum ConvertError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum SecretStorageError {
+    #[cfg(feature = "gcp")]
     #[error("GCP error: {0}")]
     GcpError(#[from] google_secretmanager1::Error),
+    #[cfg(not(feature = "gcp"))]
+    #[error("GCP support disabled at compile time")]
+    GcpDisabled,
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("(de)serialization error: {0}")]

@@ -20,7 +20,6 @@ use anyhow::Context as _;
 use ethers::types::{Address, U256};
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
-use mpc_node::gcp::GcpService;
 use mpc_node::storage::triple_storage::TripleStorage;
 use mpc_node::{logs, mesh, node_client, storage};
 use near_workspaces::network::Sandbox;
@@ -211,27 +210,6 @@ impl Nodes {
 
     pub async fn triple_storage(&self, redis_pool: &Pool, account_id: &AccountId) -> TripleStorage {
         storage::triple_storage::init(redis_pool, account_id)
-    }
-
-    pub async fn gcp_services(&self) -> anyhow::Result<Vec<GcpService>> {
-        let mut gcp_services = Vec::new();
-        match self {
-            Nodes::Local { nodes, .. } => {
-                for node in nodes {
-                    gcp_services.push(
-                        GcpService::init(node.account.id(), &self.ctx().storage_options).await?,
-                    );
-                }
-            }
-            Nodes::Docker { nodes, .. } => {
-                for node in nodes {
-                    gcp_services.push(
-                        GcpService::init(node.account.id(), &self.ctx().storage_options).await?,
-                    );
-                }
-            }
-        }
-        Ok(gcp_services)
     }
 
     pub fn proxy_name_for_node(&self, id: usize) -> String {

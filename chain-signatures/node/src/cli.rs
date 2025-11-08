@@ -203,10 +203,25 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let (sign_tx, sign_rx) = SignQueue::channel();
 
-            let gcp_service = GcpService::init(&account_id, &storage_options).await?;
+            #[cfg(feature = "gcp")]
+            let gcp_service = Some(GcpService::init(&account_id, &storage_options).await?);
 
-            let key_storage =
-                storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
+            #[cfg(not(feature = "gcp"))]
+            let gcp_service: Option<GcpService> = {
+                if storage_options.sk_share_secret_id.is_some() {
+                    tracing::warn!(
+                        account = %account_id,
+                        "GCP feature disabled; ignoring remote secret storage configuration",
+                    );
+                }
+                None
+            };
+
+            let key_storage = storage::secret_storage::init(
+                gcp_service.as_ref(),
+                &storage_options,
+                &account_id,
+            );
 
             let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
 
