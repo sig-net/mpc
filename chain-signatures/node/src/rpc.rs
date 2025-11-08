@@ -448,6 +448,7 @@ impl NearClient {
     }
 
     pub async fn fetch_state(&self) -> anyhow::Result<ProtocolState> {
+        let _timer = Timer::new("rpc_fetch_state");
         let contract_state: mpc_contract::ProtocolContractState =
             self.client.view(&self.contract_id, "state").await?.json()?;
 
@@ -460,6 +461,7 @@ impl NearClient {
     }
 
     pub async fn fetch_config(&self) -> Option<ContractConfig> {
+        let _timer = Timer::new("rpc_fetch_config");
         self.client
             .view(&self.contract_id, "config")
             .await
@@ -481,6 +483,7 @@ impl NearClient {
         &self,
         public_key: &near_crypto::PublicKey,
     ) -> anyhow::Result<bool> {
+        let _timer = Timer::new("rpc_vote_public_key");
         tracing::info!(%public_key, signer_id = %self.signer.account_id, "voting for public key");
         let result = self
             .client

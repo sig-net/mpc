@@ -19,6 +19,7 @@ use super::presignature::PresignatureId;
 use super::triple::TripleId;
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
+use crate::timings::Timer;
 use crate::protocol::Config;
 
 use cait_sith::protocol::Participant;
@@ -841,6 +842,7 @@ impl MessageOutbox {
         cfg: &ProtocolConfig,
         encrypted: HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>>,
     ) {
+        let _timer = Timer::new("messaging_send");
         let start = Instant::now();
         let timeout = Duration::from_millis(cfg.message_timeout);
 

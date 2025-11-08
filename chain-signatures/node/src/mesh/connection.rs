@@ -13,6 +13,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::state::NodeStatus as OtherNodeStatus;
 use crate::protocol::{ParticipantInfo, ProtocolState};
+use crate::timings::Timer;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NodeStatus {
@@ -106,6 +107,7 @@ impl NodeConnection {
                     });
                 }
                 _ = interval.tick() => {
+                    let _timer = Timer::new("mesh_status_check");
                     let status = match client.status(&url).await {
                         Ok(status) => status,
                         Err(err) => {

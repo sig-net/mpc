@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::posit::Positor;
 use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
+use crate::timings::Timer;
 use crate::types::TripleProtocol;
 use crate::util::{AffinePointExt, JoinMap};
 
@@ -112,6 +113,7 @@ impl TripleGenerator {
     }
 
     async fn run(mut self, my_account_id: AccountId, epoch: u64) {
+        let _timer = Timer::new("triple_generation");
         let before_first_poke_delay =
             crate::metrics::TRIPLE_BEFORE_POKE_DELAY.with_label_values(&[my_account_id.as_str()]);
         let accrued_wait_delay =

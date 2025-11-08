@@ -125,6 +125,7 @@ impl CryptographicProtocol for GeneratingState {
                         .await;
                 }
                 Action::Return(r) => {
+                    let _keygen_complete_timer = Timer::new("key_generation_complete");
                     tracing::info!(
                         public_key = hex::encode(r.public_key.to_bytes()),
                         "generating: successfully completed key generation"
