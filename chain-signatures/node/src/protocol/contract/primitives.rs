@@ -8,6 +8,8 @@ use std::{
     str::FromStr,
 };
 
+use crate::protocol::ProtocolState;
+
 type ParticipantId = u32;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -220,6 +222,27 @@ impl ParticipantMap {
                 participants1.get(p).or_else(|| participants2.get(p))
             }
         }
+    }
+}
+
+impl From<&ProtocolState> for ParticipantMap {
+    fn from(state: &ProtocolState) -> Self {
+        match state {
+            ProtocolState::Initializing(state) => {
+                ParticipantMap::One(state.candidates.clone().into())
+            }
+            ProtocolState::Running(state) => ParticipantMap::One(state.participants.clone()),
+            ProtocolState::Resharing(state) => ParticipantMap::Two(
+                state.new_participants.clone(),
+                state.old_participants.clone(),
+            ),
+        }
+    }
+}
+
+impl From<ProtocolState> for ParticipantMap {
+    fn from(state: ProtocolState) -> Self {
+        Self::from(&state)
     }
 }
 

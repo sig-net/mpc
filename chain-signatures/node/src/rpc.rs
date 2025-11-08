@@ -223,7 +223,7 @@ impl ContractStateWatcher {
     }
 
     pub async fn threshold(&self) -> Option<usize> {
-        match self.state().clone()? {
+        match self.borrow_state().as_ref()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => Some(state.threshold),
             ProtocolState::Resharing(state) => Some(state.threshold),
@@ -231,7 +231,7 @@ impl ContractStateWatcher {
     }
 
     pub async fn info(&self) -> Option<(usize, Participant)> {
-        match self.state().clone()? {
+        match self.borrow_state().as_ref()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => Some((
                 state.threshold,
@@ -245,19 +245,9 @@ impl ContractStateWatcher {
     }
 
     pub async fn participant_map(&self) -> ParticipantMap {
-        let Some(state) = self.state().clone() else {
-            return ParticipantMap::Zero;
-        };
-
-        match state {
-            ProtocolState::Initializing(state) => {
-                ParticipantMap::One(state.candidates.clone().into())
-            }
-            ProtocolState::Running(state) => ParticipantMap::One(state.participants.clone()),
-            ProtocolState::Resharing(state) => ParticipantMap::Two(
-                state.new_participants.clone(),
-                state.old_participants.clone(),
-            ),
+        match self.borrow_state().as_ref() {
+            None => ParticipantMap::Zero,
+            Some(state) => ParticipantMap::from(state),
         }
     }
 

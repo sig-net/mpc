@@ -31,6 +31,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -328,20 +329,32 @@ impl MessageInbox {
         }
     }
 
-    pub async fn run(mut self, config: watch::Receiver<Config>, contract: ContractStateWatcher) {
+    pub async fn run(
+        mut self,
+        config: watch::Receiver<Config>,
+        mut contract: ContractStateWatcher,
+    ) {
+        let mut participants = contract.participant_map().await;
+
         loop {
             tokio::select! {
                 _ = self.filter.update() => {}
                 Some(sub) = self.subscribe_rx.recv() => {
                     self.process_subscribe(sub);
                 }
+                Some(state) = contract.next_state() => {
+                    participants = ParticipantMap::from(state);
+                }
                 Some(encrypted) = self.inbox_rx.recv() => {
-                    let config = config.borrow().clone();
-                    let expiration = Duration::from_millis(config.protocol.message_timeout);
-                    let participants = contract.participant_map().await;
-                    let cipher_sk = config.local.network.cipher_sk;
+                    let (cipher_sk, message_timeout) = {
+                        let config = config.borrow();
+                        (
+                            config.local.network.cipher_sk.clone(),
+                            config.protocol.message_timeout,
+                        )
+                    };
 
-                    self.expire(expiration);
+                    self.expire(Duration::from_millis(message_timeout));
                     self.try_decrypt.push_back((encrypted, Instant::now()));
                     let messages = self.decrypt(&cipher_sk, &participants);
 
@@ -684,6 +697,36 @@ impl SignedMessage {
     pub const ASSOCIATED_DATA: &'static [u8] = b"";
 }
 
+thread_local! {
+    static CBOR_SCRATCH: RefCell<CborScratch> = RefCell::new(CborScratch::new());
+}
+
+struct CborScratch {
+    inner: Vec<u8>,
+    outer: Vec<u8>,
+}
+
+impl CborScratch {
+    const fn new() -> Self {
+        Self {
+            inner: Vec::new(),
+            outer: Vec::new(),
+        }
+    }
+
+    fn buffers(&mut self) -> (&mut Vec<u8>, &mut Vec<u8>) {
+        (&mut self.inner, &mut self.outer)
+    }
+}
+
+#[derive(Serialize)]
+struct SignedMessageView<'a> {
+    #[serde(with = "serde_bytes")]
+    msg: &'a [u8],
+    sig: &'a Signature,
+    from: Participant,
+}
+
 impl SignedMessage {
     pub fn encrypt<T: Serialize>(
         msg: &T,
@@ -691,16 +734,29 @@ impl SignedMessage {
         sign_sk: &near_crypto::SecretKey,
         cipher_pk: &hpke::PublicKey,
     ) -> Result<Ciphered, MessageError> {
-        let msg = cbor_to_bytes(msg)?;
-        let sig = sign_sk.sign(&msg);
-        let msg = Self { msg, sig, from };
-        let msg = cbor_to_bytes(&msg)?;
-        let ciphered = cipher_pk
-            .encrypt(&msg, Self::ASSOCIATED_DATA)
-            .inspect_err(|err| {
-                tracing::error!(?err, "failed to encrypt message");
-            })?;
-        Ok(ciphered)
+        CBOR_SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            let (msg_buf, envelope_buf) = scratch.buffers();
+
+            serialize_into(msg, msg_buf)?;
+            let signature = sign_sk.sign(msg_buf);
+
+            let view = SignedMessageView {
+                msg: msg_buf.as_slice(),
+                sig: &signature,
+                from,
+            };
+
+            serialize_into(&view, envelope_buf)?;
+            let ciphered = cipher_pk
+                .encrypt(envelope_buf.as_slice(), Self::ASSOCIATED_DATA)
+                .map_err(|err| {
+                    tracing::error!(?err, "failed to encrypt message");
+                    MessageError::Encryption(err)
+                })?;
+
+            Ok(ciphered)
+        })
     }
 }
 
@@ -1002,13 +1058,17 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
 
 pub fn cbor_to_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, MessageError> {
     let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf)
-        .map_err(|err| MessageError::CborConversion(err.to_string()))?;
+    serialize_into(value, &mut buf)?;
     Ok(buf)
 }
 
 fn cbor_from_bytes<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, MessageError> {
     ciborium::from_reader(bytes).map_err(|err| MessageError::CborConversion(err.to_string()))
+}
+
+fn serialize_into<T: Serialize + ?Sized>(value: &T, buf: &mut Vec<u8>) -> Result<(), MessageError> {
+    buf.clear();
+    ciborium::into_writer(value, buf).map_err(|err| MessageError::CborConversion(err.to_string()))
 }
 
 const fn cbor_name(value: &ciborium::Value) -> &'static str {
