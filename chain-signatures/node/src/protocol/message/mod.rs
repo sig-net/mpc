@@ -12,6 +12,7 @@ pub use crate::protocol::message::types::{
 };
 use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::FullPresignatureId;
+use crate::protocol::ProtocolState;
 use crate::rpc::ContractStateWatcher;
 
 use super::contract::primitives::{ParticipantMap, Participants};
@@ -29,15 +30,23 @@ use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex};
+use tokio::time::{sleep, Sleep};
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
+const OUTBOX_FLUSH_DELAY: Duration = Duration::from_millis(10);
+const OUTBOX_IMMEDIATE_FLUSH_THRESHOLD: usize = 256;
+const SEND_WORKERS: usize = 4;
+const SEND_QUEUE_CAPACITY: usize = 1024;
+const SEND_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 pub struct MessageInbox {
     /// encrypted messages that are pending to be decrypted. These are messages that we received
@@ -343,7 +352,7 @@ impl MessageInbox {
                     self.process_subscribe(sub);
                 }
                 Some(state) = contract.next_state() => {
-                    participants = ParticipantMap::from(state);
+                    participants = participant_map_from_state(state);
                 }
                 Some(encrypted) = self.inbox_rx.recv() => {
                     let (cipher_sk, message_timeout) = {
@@ -824,6 +833,17 @@ pub struct MessageOutbox {
     messages: HashMap<MessageRoute, Vec<(Message, Instant)>>,
 }
 
+struct SendJob {
+    account_label: Arc<str>,
+    to: Participant,
+    url: String,
+    payload: Ciphered,
+    timestamp: Instant,
+    message_len: usize,
+    timeout: Duration,
+    send_started: Instant,
+}
+
 impl MessageOutbox {
     pub fn new(outbox_rx: mpsc::Receiver<SendMessage>) -> Self {
         Self {
@@ -888,99 +908,83 @@ impl MessageOutbox {
         encrypted
     }
 
-    /// Send the encrypted messages to other participants.
-    pub async fn send(
-        &mut self,
-        account_id: &AccountId,
-        client: &NodeClient,
+    async fn queue_jobs(
+        &self,
+        account_label: &Arc<str>,
         participants: &Participants,
-        cfg: &ProtocolConfig,
+        protocol_cfg: &ProtocolConfig,
         encrypted: HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>>,
+        send_tx: &mpsc::Sender<SendJob>,
     ) {
-        let start = Instant::now();
-        let timeout = Duration::from_millis(cfg.message_timeout);
+        if encrypted.is_empty() {
+            return;
+        }
 
-        let msg_send_delay_metric =
-            crate::metrics::MSG_CLIENT_SEND_DELAY.with_label_values(&[account_id.as_str()]);
-        let num_send_encrypted_failure_metric =
-            crate::metrics::NUM_SEND_ENCRYPTED_FAILURE.with_label_values(&[account_id.as_str()]);
-        let send_encrypted_latency_metric =
-            crate::metrics::SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
-        let failed_send_encrypted_latency_metric =
-            crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
+        let timeout = Duration::from_millis(protocol_cfg.message_timeout);
+        let batch_started = Instant::now();
 
-        for ((_from, to), encrypted) in encrypted {
-            for (encrypted_partition, timestamp, message_len) in encrypted {
-                // guaranteed to unwrap due to our previous loop check:
-                let info = participants.get(&to).unwrap();
-                let url = info.url.clone();
+        for ((_from, to), partitions) in encrypted {
+            let Some(info) = participants.get(&to) else {
+                tracing::warn!(?to, "outbox: participant missing while queueing job");
+                continue;
+            };
 
+            for (payload, timestamp, message_len) in partitions {
                 crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
-                    .with_label_values(&[account_id.as_str()])
+                    .with_label_values(&[account_label.as_ref()])
                     .inc_by(message_len as f64);
 
-                let msg_send_delay_metric = msg_send_delay_metric.clone();
-                let num_send_encrypted_failure_metric = num_send_encrypted_failure_metric.clone();
-                let send_encrypted_latency_metric = send_encrypted_latency_metric.clone();
-                let failed_send_encrypted_latency_metric =
-                    failed_send_encrypted_latency_metric.clone();
+                let job = SendJob {
+                    account_label: Arc::clone(account_label),
+                    to,
+                    url: info.url.clone(),
+                    payload,
+                    timestamp,
+                    message_len,
+                    timeout,
+                    send_started: batch_started,
+                };
 
-                let client = client.clone();
-                tokio::spawn(async move {
-                    let instant = Instant::now();
-                    msg_send_delay_metric.observe((instant - timestamp).as_millis() as f64);
-                    let payload = &[&encrypted_partition];
-                    let timeout = tokio::time::sleep(timeout);
-                    tokio::pin!(timeout);
-
-                    loop {
-                        let attempt_timestamp = Instant::now();
-                        tokio::select! {
-                            () = &mut timeout => {
-                                tracing::warn!(
-                                    ?to, ?url, elapsed = ?instant.elapsed(),
-                                    "outbox: failed to send messages, timeout reached",
-                                );
-                                break;
-                            }
-                            result = client.msg(&url, payload) => {
-                                let Err(err) = result else {
-                                    send_encrypted_latency_metric.observe(start.elapsed().as_millis() as f64);
-                                    break;
-                                };
-
-                                tracing::warn!(
-                                    ?to, ?url, elapsed = ?attempt_timestamp.elapsed(), ?err,
-                                    "outbox: failed to send messages, retrying...",
-                                );
-                                num_send_encrypted_failure_metric.inc_by(message_len as f64);
-                                failed_send_encrypted_latency_metric
-                                    .observe(attempt_timestamp.elapsed().as_millis() as f64);
-                            }
-                        }
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                    }
-                });
+                if let Err(err) = send_tx.send(job).await {
+                    tracing::error!(?err, "outbox: failed to enqueue send job");
+                    break;
+                }
             }
         }
     }
 
-    /// Publish messages to other nodes
-    async fn publish(
+    async fn flush(
         &mut self,
-        id: &AccountId,
-        client: &NodeClient,
+        account_label: &Arc<str>,
         config: &watch::Receiver<Config>,
         contract: &ContractStateWatcher,
+        send_tx: &mpsc::Sender<SendJob>,
     ) {
+        if self.messages.is_empty() {
+            return;
+        }
+
         let Some(participants) = contract.participants() else {
             return;
         };
+
         let config = config.borrow().clone();
         let compacted = self.compact();
+        if compacted.is_empty() {
+            return;
+        }
+
         let encrypted = self.encrypt(&config.local.network.sign_sk, &participants, compacted);
-        self.send(id, client, &participants, &config.protocol, encrypted)
-            .await;
+        self.queue_jobs(
+            account_label,
+            &participants,
+            &config.protocol,
+            encrypted,
+            send_tx,
+        )
+        .await;
+
+        crate::metrics::MSG_CLIENT_SEND_DELAY.with_label_values(&[account_label.as_ref()]);
     }
 
     pub async fn run(
@@ -990,19 +994,61 @@ impl MessageOutbox {
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
     ) {
-        let mut interval = tokio::time::interval(Duration::from_millis(10));
+        let account_label: Arc<str> = Arc::from(id.as_str().to_string());
+        let (send_tx, send_rx) = mpsc::channel::<SendJob>(SEND_QUEUE_CAPACITY);
+        spawn_send_workers(client.clone(), send_rx);
+
+        let mut buffered_messages: usize = 0;
+        let mut flush_deadline: Option<Pin<Box<Sleep>>> = None;
+
         loop {
-            tokio::select! {
-                Some((msg, (from, to, timestamp))) = self.outbox_rx.recv() => {
-                    // add it to the outbox and sort it by from and to participant
-                    let entry = self.messages.entry((from, to)).or_default();
-                    entry.push((msg, timestamp));
+            if let Some(deadline) = flush_deadline.as_mut() {
+                tokio::select! {
+                    Some((msg, (from, to, timestamp))) = self.outbox_rx.recv() => {
+                        let entry = self.messages.entry((from, to)).or_default();
+                        entry.push((msg, timestamp));
+                        buffered_messages += 1;
+
+                        if buffered_messages >= OUTBOX_IMMEDIATE_FLUSH_THRESHOLD {
+                            self.flush(&account_label, &config, &contract, &send_tx).await;
+                            buffered_messages = 0;
+                            flush_deadline = None;
+                        }
+                    }
+                        _ = deadline.as_mut() => {
+                        self.flush(&account_label, &config, &contract, &send_tx).await;
+                        buffered_messages = 0;
+                        flush_deadline = None;
+                    }
                 }
-                _ = interval.tick() => {
-                    self.publish(&id, &client, &config, &contract).await;
+            } else {
+                match self.outbox_rx.recv().await {
+                    Some((msg, (from, to, timestamp))) => {
+                        let entry = self.messages.entry((from, to)).or_default();
+                        entry.push((msg, timestamp));
+                        buffered_messages += 1;
+
+                        if buffered_messages >= OUTBOX_IMMEDIATE_FLUSH_THRESHOLD {
+                            self.flush(&account_label, &config, &contract, &send_tx)
+                                .await;
+                            buffered_messages = 0;
+                        } else {
+                            flush_deadline = Some(Box::pin(sleep(OUTBOX_FLUSH_DELAY)));
+                        }
+                    }
+                    None => {
+                        break;
+                    }
                 }
             }
         }
+
+        if !self.messages.is_empty() {
+            self.flush(&account_label, &config, &contract, &send_tx)
+                .await;
+        }
+
+        drop(send_tx);
     }
 
     /// Allows tests to manually handle outgoing message before they are
@@ -1010,6 +1056,91 @@ impl MessageOutbox {
     #[cfg(feature = "test-feature")]
     pub fn intercept_outgoing_messages(&mut self) -> &mut mpsc::Receiver<SendMessage> {
         &mut self.outbox_rx
+    }
+}
+
+fn spawn_send_workers(client: NodeClient, send_rx: mpsc::Receiver<SendJob>) {
+    let shared = Arc::new(Mutex::new(send_rx));
+    for _ in 0..SEND_WORKERS {
+        let client = client.clone();
+        let shared = Arc::clone(&shared);
+        tokio::spawn(async move {
+            loop {
+                let job = {
+                    let mut guard = shared.lock().await;
+                    guard.recv().await
+                };
+
+                let Some(job) = job else {
+                    break;
+                };
+
+                process_send_job(&client, job).await;
+            }
+        });
+    }
+}
+
+async fn process_send_job(client: &NodeClient, job: SendJob) {
+    let SendJob {
+        account_label,
+        to,
+        url,
+        payload,
+        timestamp,
+        message_len,
+        timeout,
+        send_started,
+    } = job;
+
+    let account_label = account_label.as_ref();
+    let msg_send_delay_metric =
+        crate::metrics::MSG_CLIENT_SEND_DELAY.with_label_values(&[account_label]);
+    let num_send_encrypted_failure_metric =
+        crate::metrics::NUM_SEND_ENCRYPTED_FAILURE.with_label_values(&[account_label]);
+    let send_encrypted_latency_metric =
+        crate::metrics::SEND_ENCRYPTED_LATENCY.with_label_values(&[account_label]);
+    let failed_send_encrypted_latency_metric =
+        crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY.with_label_values(&[account_label]);
+
+    let instant = Instant::now();
+    msg_send_delay_metric.observe((instant - timestamp).as_millis() as f64);
+
+    let payload_ref = [&payload];
+    let timeout_sleep = tokio::time::sleep(timeout);
+    tokio::pin!(timeout_sleep);
+
+    loop {
+        let attempt_timestamp = Instant::now();
+        tokio::select! {
+            () = &mut timeout_sleep => {
+                tracing::warn!(
+                    ?to, ?url, elapsed = ?instant.elapsed(),
+                    "outbox: failed to send messages, timeout reached",
+                );
+                break;
+            }
+            result = client.msg(&url, &payload_ref) => {
+                match result {
+                    Ok(()) => {
+                        send_encrypted_latency_metric
+                            .observe(send_started.elapsed().as_millis() as f64);
+                        break;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            ?to, ?url, elapsed = ?attempt_timestamp.elapsed(), ?err,
+                            "outbox: failed to send messages, retrying...",
+                        );
+                        num_send_encrypted_failure_metric.inc_by(message_len as f64);
+                        failed_send_encrypted_latency_metric
+                            .observe(attempt_timestamp.elapsed().as_millis() as f64);
+                    }
+                }
+            }
+        }
+
+        tokio::time::sleep(SEND_RETRY_DELAY).await;
     }
 }
 
@@ -1069,6 +1200,19 @@ fn cbor_from_bytes<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, MessageError>
 fn serialize_into<T: Serialize + ?Sized>(value: &T, buf: &mut Vec<u8>) -> Result<(), MessageError> {
     buf.clear();
     ciborium::into_writer(value, buf).map_err(|err| MessageError::CborConversion(err.to_string()))
+}
+
+fn participant_map_from_state(state: ProtocolState) -> ParticipantMap {
+    match state {
+        ProtocolState::Initializing(init) => {
+            let participants: Participants = init.candidates.into();
+            ParticipantMap::One(participants)
+        }
+        ProtocolState::Running(running) => ParticipantMap::One(running.participants),
+        ProtocolState::Resharing(resharing) => {
+            ParticipantMap::Two(resharing.new_participants, resharing.old_participants)
+        }
+    }
 }
 
 const fn cbor_name(value: &ciborium::Value) -> &'static str {
