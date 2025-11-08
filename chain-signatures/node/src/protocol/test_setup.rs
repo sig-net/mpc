@@ -14,6 +14,8 @@ pub struct TestProtocolStorage {
     pub secret_storage: SecretNodeStorageBox,
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
+    pub triple_watcher: watch::Receiver<u64>,
+    pub presignature_watcher: watch::Receiver<u64>,
 }
 
 pub struct TestProtocolChannels {

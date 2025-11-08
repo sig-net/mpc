@@ -52,6 +52,8 @@ struct MpcFixtureNodeBuilder {
     config: Config,
     messaging: NodeMessagingBuilder,
     key_info: Option<NodeKeyInfo>,
+    triple_watcher: watch::Receiver<u64>,
+    presignature_watcher: watch::Receiver<u64>,
 }
 
 /// Config options for the test setup.
@@ -398,6 +400,8 @@ impl MpcFixtureNodeBuilder {
             config,
             messaging,
             key_info: None,
+            triple_watcher: watch::channel(0u64).1, // dummy receiver, will be replaced
+            presignature_watcher: watch::channel(0u64).1, // dummy receiver, will be replaced
         }
     }
 
@@ -412,9 +416,25 @@ impl MpcFixtureNodeBuilder {
         self.config.protocol = context.protocol_config.clone();
 
         // build storage
-        let storage = self.build_storage(&context, fixture_config).await;
-        let triple_storage = storage.triple_storage.clone();
-        let presignature_storage = storage.presignature_storage.clone();
+        let protocol::test_setup::TestProtocolStorage {
+            secret_storage,
+            triple_storage: triple_storage_inner,
+            presignature_storage: presignature_storage_inner,
+            triple_watcher,
+            presignature_watcher,
+        } = self.build_storage(&context, fixture_config).await;
+        let triple_storage = triple_storage_inner.clone();
+        let presignature_storage = presignature_storage_inner.clone();
+        self.triple_watcher = triple_watcher;
+        self.presignature_watcher = presignature_watcher;
+
+        let storage = protocol::test_setup::TestProtocolStorage {
+            secret_storage,
+            triple_storage: triple_storage_inner,
+            presignature_storage: presignature_storage_inner,
+            triple_watcher: watch::channel(0u64).1, // dummy
+            presignature_watcher: watch::channel(0u64).1, // dummy
+        };
 
         // prepare all channels for the node
         let (sign_tx, sign_rx) = mpsc::channel(1024);
@@ -485,6 +505,8 @@ impl MpcFixtureNodeBuilder {
             triple_storage,
             presignature_storage,
             backlog: Backlog::new(),
+            triple_watcher: self.triple_watcher,
+            presignature_watcher: self.presignature_watcher,
             web_handle: None,
         };
 
@@ -517,6 +539,7 @@ impl MpcFixtureNodeBuilder {
 
         let triple_storage =
             triple_storage::init(&context.redis_pool, &self.participant_info.account_id);
+        let (triple_storage, triple_watcher) = triple_storage.with_count_watcher();
 
         if fixture_config.use_preshared_triples {
             // removing here because we can't clone a triple
@@ -545,6 +568,8 @@ impl MpcFixtureNodeBuilder {
 
         let presignature_storage =
             presignature_storage::init(&context.redis_pool, &self.participant_info.account_id);
+        let (presignature_storage, presignature_watcher) =
+            presignature_storage.with_count_watcher();
 
         if fixture_config.presignature_stockpile {
             // removing here because we can't clone a presignature
@@ -564,6 +589,8 @@ impl MpcFixtureNodeBuilder {
             secret_storage,
             triple_storage,
             presignature_storage,
+            triple_watcher,
+            presignature_watcher,
         }
     }
 }

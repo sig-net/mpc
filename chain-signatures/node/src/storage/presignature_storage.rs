@@ -4,6 +4,8 @@ use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 use std::time::Instant;
+#[cfg(feature = "test-feature")]
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::protocol::presignature::{Presignature, PresignatureId};
@@ -106,6 +108,23 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> PresignatureStorage {
         reserved_key,
         owner_keys,
         account_id: account_id.clone(),
+        #[cfg(feature = "test-feature")]
+        count_watcher_tx: None,
+    }
+}
+
+#[cfg(feature = "test-feature")]
+impl PresignatureStorage {
+    pub fn with_count_watcher(mut self) -> (Self, watch::Receiver<u64>) {
+        let (tx, rx) = watch::channel(0);
+        self.count_watcher_tx = Some(tx);
+        (self, rx)
+    }
+
+    fn notify_count_changed(&self) {
+        if let Some(tx) = &self.count_watcher_tx {
+            let _ = tx.send_modify(|count| *count += 1);
+        }
     }
 }
 
@@ -117,6 +136,8 @@ pub struct PresignatureStorage {
     reserved_key: String,
     owner_keys: String,
     account_id: AccountId,
+    #[cfg(feature = "test-feature")]
+    count_watcher_tx: Option<watch::Sender<u64>>,
 }
 
 impl PresignatureStorage {
@@ -343,7 +364,11 @@ impl PresignatureStorage {
             .observe(elapsed.as_millis() as f64);
 
         match outcome {
-            Ok(()) => true,
+            Ok(()) => {
+                #[cfg(feature = "test-feature")]
+                self.notify_count_changed();
+                true
+            }
             Err(err) => {
                 tracing::warn!(
                     id,
@@ -457,7 +482,11 @@ impl PresignatureStorage {
             .observe(elapsed.as_millis() as f64);
 
         match result {
-            Ok(presignature) => Some(PresignatureTaken::foreigner(presignature)),
+            Ok(presignature) => {
+                #[cfg(feature = "test-feature")]
+                self.notify_count_changed();
+                Some(PresignatureTaken::foreigner(presignature))
+            }
             Err(err) => {
                 tracing::warn!(
                     id,
@@ -514,7 +543,11 @@ impl PresignatureStorage {
             .observe(elapsed.as_millis() as f64);
 
         match result {
-            Ok(Some(presignature)) => Some(PresignatureTaken::owner(presignature, self.clone())),
+            Ok(Some(presignature)) => {
+                #[cfg(feature = "test-feature")]
+                self.notify_count_changed();
+                Some(PresignatureTaken::owner(presignature, self.clone()))
+            }
             Ok(None) => None,
             Err(err) => {
                 tracing::warn!(

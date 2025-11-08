@@ -8,6 +8,8 @@ use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "test-feature")]
+use tokio::sync::watch;
 
 use near_account_id::AccountId;
 
@@ -158,6 +160,23 @@ pub fn init(pool: &Pool, account_id: &AccountId) -> TripleStorage {
         reserved_key,
         owner_keys,
         account_id: account_id.clone(),
+        #[cfg(feature = "test-feature")]
+        count_watcher_tx: None,
+    }
+}
+
+#[cfg(feature = "test-feature")]
+impl TripleStorage {
+    pub fn with_count_watcher(mut self) -> (Self, watch::Receiver<u64>) {
+        let (tx, rx) = watch::channel(0);
+        self.count_watcher_tx = Some(tx);
+        (self, rx)
+    }
+
+    fn notify_count_changed(&self) {
+        if let Some(tx) = &self.count_watcher_tx {
+            let _ = tx.send_modify(|count| *count += 1);
+        }
     }
 }
 
@@ -169,6 +188,8 @@ pub struct TripleStorage {
     reserved_key: String,
     owner_keys: String,
     account_id: AccountId,
+    #[cfg(feature = "test-feature")]
+    count_watcher_tx: Option<watch::Sender<u64>>,
 }
 
 impl TripleStorage {
@@ -409,6 +430,8 @@ impl TripleStorage {
             );
             false
         } else {
+            #[cfg(feature = "test-feature")]
+            self.notify_count_changed();
             true
         }
     }
@@ -536,6 +559,8 @@ impl TripleStorage {
         match result {
             Ok(pair) => {
                 tracing::debug!(id, elapsed_ms = elapsed.as_millis(), "took pair");
+                #[cfg(feature = "test-feature")]
+                self.notify_count_changed();
                 Some(TriplesTaken::foreigner(pair))
             }
             Err(err) => {
@@ -613,6 +638,8 @@ impl TripleStorage {
                     elapsed_ms = elapsed.as_millis(),
                     "took mine pair"
                 );
+                #[cfg(feature = "test-feature")]
+                self.notify_count_changed();
                 Some(taken)
             }
             Ok(None) => None,

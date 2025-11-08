@@ -37,42 +37,85 @@ pub struct MpcFixtureNode {
     pub presignature_storage: PresignatureStorage,
     pub backlog: Backlog,
 
+    pub triple_watcher: watch::Receiver<u64>,
+    pub presignature_watcher: watch::Receiver<u64>,
+
     pub web_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Logs for reading outputs after a test run for assertions and debugging.
-#[derive(Default)]
 pub struct SharedOutput {
     pub msg_log: Arc<Mutex<Vec<String>>>,
     pub rpc_actions: Arc<Mutex<HashSet<String>>>,
+    actions_watcher_tx: watch::Sender<u64>,
+    pub actions_watcher: watch::Receiver<u64>,
+    actions_counter: std::sync::atomic::AtomicU64,
+}
+
+impl Default for SharedOutput {
+    fn default() -> Self {
+        let (tx, rx) = watch::channel(0u64);
+        Self {
+            msg_log: Arc::new(Mutex::new(Vec::new())),
+            rpc_actions: Arc::new(Mutex::new(HashSet::new())),
+            actions_watcher_tx: tx,
+            actions_watcher: rx,
+            actions_counter: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+impl SharedOutput {
+    pub fn notify_action_added(&self) {
+        let new_count = self
+            .actions_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.actions_watcher_tx.send(new_count + 1);
+    }
+
+    pub fn actions_watcher_tx(&self) -> watch::Sender<u64> {
+        self.actions_watcher_tx.clone()
+    }
 }
 
 impl MpcFixture {
     pub async fn wait_for_triples(&self, threshold_per_node: usize) {
-        for node in &self.nodes {
-            node.wait_for_triples(threshold_per_node).await;
-        }
+        tokio::time::timeout(
+            Duration::from_secs(threshold_per_node as u64 * 120),
+            async {
+                for node in &self.nodes {
+                    node.wait_for_triples(threshold_per_node).await;
+                }
+            },
+        )
+        .await
+        .expect("should have enough triples eventually");
     }
 
     pub async fn wait_for_presignatures(&self, threshold_per_node: usize) {
-        for node in &self.nodes {
-            node.wait_for_presignatures(threshold_per_node).await;
-        }
+        tokio::time::timeout(Duration::from_secs(threshold_per_node as u64 * 60), async {
+            for node in &self.nodes {
+                node.wait_for_presignatures(threshold_per_node).await;
+            }
+        })
+        .await
+        .expect("should have enough presignatures eventually");
     }
 
     pub async fn wait_for_actions(&self, threshold: usize) -> HashSet<String> {
-        let interval = Duration::from_millis(100);
-
-        loop {
-            let actions = self.output.rpc_actions.lock().await;
-
-            if actions.len() >= threshold {
-                return actions.clone();
+        tokio::time::timeout(Duration::from_secs(threshold as u64 * 10), async {
+            loop {
+                let actions = self.output.rpc_actions.lock().await;
+                if actions.len() >= threshold {
+                    return actions.clone();
+                }
+                drop(actions);
+                let mut watcher = self.output.actions_watcher.clone();
+                let _ = watcher.changed().await;
             }
-
-            drop(actions);
-            tokio::time::sleep(interval).await;
-        }
+        })
+        .await
+        .expect("should have enough rpc actions eventually")
     }
 }
 
@@ -83,7 +126,8 @@ impl MpcFixtureNode {
             if count >= threshold_per_node {
                 break;
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let mut watcher = self.triple_watcher.clone();
+            let _ = watcher.changed().await;
         }
     }
 
@@ -93,7 +137,8 @@ impl MpcFixtureNode {
             if count >= threshold_per_node {
                 break;
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let mut watcher = self.presignature_watcher.clone();
+            let _ = watcher.changed().await;
         }
     }
 

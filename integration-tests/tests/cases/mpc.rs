@@ -25,24 +25,16 @@ const PRESIGNATURES_FILE: &str = "tmp/presignatures.json";
 async fn test_basic_generate_keys() {
     let network = MpcFixtureBuilder::new(5, 4).build().await;
 
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
-        let mut contract_state_watcher = network.shared_contract_state.subscribe();
-        contract_state_watcher
-            .wait_for(|protocol_state| {
-                tracing::info!("new protocol state: {protocol_state:?}");
-                protocol_state
-                    .as_ref()
-                    .is_some_and(|state| matches!(state, ProtocolState::Running(_)))
-            })
-            .await
-            .unwrap();
-    })
-    .await;
-
-    if result.is_err() {
-        let protocol_state = network.shared_contract_state.borrow();
-        panic!("should reach running state eventually, final state was {protocol_state:?}");
-    }
+    let mut contract_state_watcher = network.shared_contract_state.subscribe();
+    contract_state_watcher
+        .wait_for(|protocol_state| {
+            tracing::info!("new protocol state: {protocol_state:?}");
+            protocol_state
+                .as_ref()
+                .is_some_and(|state| matches!(state, ProtocolState::Running(_)))
+        })
+        .await
+        .unwrap();
 
     // give time to make all nodes aware that the protocol is running now
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -75,9 +67,7 @@ async fn test_basic_generate_triples() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(180), network.wait_for_triples(1))
-        .await
-        .expect("should have enough triples eventually");
+    network.wait_for_triples(1).await;
 
     if WRITE_OUTPUT_TO_FILES {
         let mut conn = network.redis_container.pool().get().await.unwrap();
@@ -120,9 +110,7 @@ async fn test_basic_generate_presignature() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(10), network.wait_for_presignatures(1))
-        .await
-        .expect("should have enough presignatures eventually");
+    network.wait_for_presignatures(1).await;
 
     if WRITE_OUTPUT_TO_FILES {
         let mut conn = network.redis_container.pool().get().await.unwrap();
@@ -164,12 +152,7 @@ async fn test_basic_sign() {
         .build()
         .await;
 
-    tokio::time::timeout(
-        Duration::from_millis(300),
-        network.wait_for_presignatures(2),
-    )
-    .await
-    .expect("should start with enough presignatures");
+    network.wait_for_presignatures(2).await;
 
     tracing::info!("sending requests now");
     let request = sign_request(0);
@@ -189,11 +172,7 @@ async fn test_basic_sign() {
         .await
         .unwrap();
 
-    let timeout = Duration::from_secs(10);
-
-    let actions = tokio::time::timeout(timeout, network.wait_for_actions(1))
-        .await
-        .expect("should publish RPC action eventually");
+    let actions = network.wait_for_actions(1).await;
 
     assert_eq!(actions.len(), 1);
     let action_str = actions.iter().next().unwrap();
@@ -261,7 +240,5 @@ async fn test_presignature_timeout() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(300), network.wait_for_presignatures(1))
-        .await
-        .expect("should have enough presignatures eventually");
+    network.wait_for_presignatures(1).await;
 }
