@@ -217,11 +217,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 None
             };
 
-            let key_storage = storage::secret_storage::init(
-                gcp_service.as_ref(),
-                &storage_options,
-                &account_id,
-            );
+            let key_storage =
+                storage::secret_storage::init(gcp_service.as_ref(), &storage_options, &account_id);
 
             let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
 

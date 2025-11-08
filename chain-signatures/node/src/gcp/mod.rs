@@ -53,7 +53,11 @@ mod enabled {
             }
         }
 
-        pub async fn store_secret<T: AsRef<str>>(&mut self, data: &[u8], name: T) -> SecretResult<()> {
+        pub async fn store_secret<T: AsRef<str>>(
+            &mut self,
+            data: &[u8],
+            name: T,
+        ) -> SecretResult<()> {
             self.secret_manager
                 .projects()
                 .secrets_add_version(
@@ -122,12 +126,15 @@ mod enabled {
                         .build(),
                 );
                 let opts = ApplicationDefaultCredentialsFlowOpts::default();
-                let authenticator = match ApplicationDefaultCredentialsAuthenticator::builder(opts)
-                    .await
-                {
-                    ApplicationDefaultCredentialsTypes::InstanceMetadata(auth) => auth.build().await?,
-                    ApplicationDefaultCredentialsTypes::ServiceAccount(auth) => auth.build().await?,
-                };
+                let authenticator =
+                    match ApplicationDefaultCredentialsAuthenticator::builder(opts).await {
+                        ApplicationDefaultCredentialsTypes::InstanceMetadata(auth) => {
+                            auth.build().await?
+                        }
+                        ApplicationDefaultCredentialsTypes::ServiceAccount(auth) => {
+                            auth.build().await?
+                        }
+                    };
                 secret_manager = SecretManager::new(client.clone(), authenticator.clone());
             }
 
@@ -167,7 +174,11 @@ mod disabled {
         }
 
         #[allow(clippy::unused_async)]
-        pub async fn store_secret<T: AsRef<str>>(&mut self, _data: &[u8], _name: T) -> SecretResult<()> {
+        pub async fn store_secret<T: AsRef<str>>(
+            &mut self,
+            _data: &[u8],
+            _name: T,
+        ) -> SecretResult<()> {
             Err(SecretStorageError::GcpDisabled)
         }
     }
