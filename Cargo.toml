@@ -81,6 +81,7 @@ signet-program = { path = "./chain-signatures/contract-sol" }
 x25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek", rev = "5b7082bbc8e0b2106ab0d956064f61fa0f393cdc" }
 near-workspaces = { path = "vendor/near-workspaces" }
 solana-secp256r1-program = { path = "vendor/solana-secp256r1-program" }
+agave-precompiles = { path = "vendor/agave-precompiles/agave-precompiles-2.2.7" }
 
 # big optimization even in test builds for math heavy crates
 [profile.dev.package.curve25519-dalek]

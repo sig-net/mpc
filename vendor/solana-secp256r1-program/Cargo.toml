@@ -13,8 +13,8 @@ readme = false
 [features]
 default = ["rustls"]
 rustls = ["dep:p256"]
-openssl = ["dep:openssl"]
-openssl-vendored = ["openssl", "openssl/vendored"]
+openssl = ["rustls"]
+openssl-vendored = ["openssl"]
 
 [dependencies]
 bytemuck = { version = "1.21.0", features = ["derive"] }
@@ -24,7 +24,6 @@ solana-sdk-ids = "2.2.1"
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "solana")))'.dependencies]
 solana-instruction = { version = "2.2.1", features = ["std"], default-features = false }
-openssl = { version = "0.10", optional = true }
 p256 = { version = "0.13", optional = true, features = ["ecdsa"] }
 
 [dev-dependencies]

@@ -94,8 +94,6 @@ dependencies = [
 [[package]]
 name = "agave-precompiles"
 version = "2.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "591ddfc881b44f1eb740b5f6b64c953ba46b003cf0cd49d56268bc70594f655d"
 dependencies = [
  "agave-feature-set",
  "bincode",
@@ -104,9 +102,9 @@ dependencies = [
  "ed25519-dalek 1.0.1",
  "lazy_static",
  "libsecp256k1 0.6.0",
- "openssl",
  "sha3",
  "solana-ed25519-program",
+ "solana-feature-set",
  "solana-message",
  "solana-precompile-error",
  "solana-pubkey",
@@ -13382,7 +13380,6 @@ name = "solana-secp256r1-program"
 version = "2.2.2"
 dependencies = [
  "bytemuck",
- "openssl",
  "p256",
  "solana-feature-set",
  "solana-instruction",
