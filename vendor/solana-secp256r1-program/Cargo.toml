@@ -1,0 +1,45 @@
+[package]
+name = "solana-secp256r1-program"
+version = "2.2.2"
+edition = "2021"
+authors = ["Anza Maintainers <maintainers@anza.xyz>"]
+description = "Precompile implementation for the secp256r1 elliptic curve."
+license = "Apache-2.0"
+repository = "https://github.com/anza-xyz/solana-sdk"
+documentation = "https://docs.rs/solana-secp256r1"
+homepage = "https://anza.xyz/"
+readme = false
+
+[features]
+default = ["rustls"]
+rustls = ["dep:p256"]
+openssl = ["dep:openssl"]
+openssl-vendored = ["openssl", "openssl/vendored"]
+
+[dependencies]
+bytemuck = { version = "1.21.0", features = ["derive"] }
+solana-feature-set = "2.2.4"
+solana-precompile-error = "2.2.1"
+solana-sdk-ids = "2.2.1"
+
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "solana")))'.dependencies]
+solana-instruction = { version = "2.2.1", features = ["std"], default-features = false }
+openssl = { version = "0.10", optional = true }
+p256 = { version = "0.13", optional = true, features = ["ecdsa"] }
+
+[dev-dependencies]
+solana-logger = "2.3.1"
+rand_core = "0.6"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg=docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = [
+    'cfg(target_os, values("solana"))',
+    'cfg(feature, values("frozen-abi", "no-entrypoint"))',
+]
