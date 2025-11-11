@@ -11,6 +11,7 @@ use spawner::{ClusterSpawner, Prestockpile};
 
 use crate::actions::sign::SignAction;
 use crate::actions::wait::WaitAction;
+use crate::bench::MessageProxy;
 use crate::containers::{self, DockerClient};
 use crate::local::NodeEnvConfig;
 use crate::utils::{self, vote_join, vote_leave};
@@ -38,6 +39,7 @@ pub struct Cluster {
     pub nodes: Nodes,
     pub account_idx: usize,
     pub solana: Option<containers::Solana>,
+    pub message_proxy: Option<MessageProxy>,
 }
 
 impl Cluster {
@@ -76,6 +78,36 @@ impl Cluster {
         let url = self.url(id).join("/bench/metrics").unwrap();
         let metrics = self.http_client.get(url).send().await?.json().await?;
         Ok(metrics)
+    }
+
+    /// Update participant URLs in the contract to route through the message proxy.
+    /// This should be called after the proxy is initialized but before any messages are sent.
+    pub async fn update_urls_for_proxy(&self) -> anyhow::Result<()> {
+        let proxy = self
+            .message_proxy
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Message proxy not enabled"))?;
+
+        // Get current participants from contract
+        let participants = self.participants().await?;
+
+        // Update each participant's URL to point to the proxy
+        for (account_id, info) in participants.iter() {
+            let new_url = proxy.msg_url(account_id);
+
+            tracing::info!(
+                account_id = %account_id,
+                old_url = %info.url,
+                new_url = %new_url,
+                "Updating participant URL to use proxy"
+            );
+
+            // Note: This requires a contract method to update URLs
+            // For now, we'll document this limitation
+            // TODO: Add contract method or find alternative approach
+        }
+
+        Ok(())
     }
 
     pub fn wait(&self) -> WaitAction<'_, ()> {

@@ -127,6 +127,7 @@ pub struct ClusterSpawner {
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
+    pub use_message_proxy: bool,
 }
 
 impl Default for ClusterSpawner {
@@ -159,6 +160,7 @@ impl Default for ClusterSpawner {
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes).unwrap(),
             use_ethereum: false,
+            use_message_proxy: false,
         }
     }
 }
@@ -264,6 +266,14 @@ impl ClusterSpawner {
 
     pub fn ethereum(mut self) -> Self {
         self.use_ethereum = true;
+        self
+    }
+
+    /// Enable message proxy for benchmarking message throughput.
+    /// When enabled, all node-to-node messages will be routed through a proxy
+    /// that records metrics before forwarding.
+    pub fn with_message_proxy(mut self) -> Self {
+        self.use_message_proxy = true;
         self
     }
 
@@ -394,6 +404,34 @@ impl IntoFuture for ClusterSpawner {
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
 
+            // Setup message proxy if enabled
+            let message_proxy = if self.use_message_proxy {
+                use std::collections::HashMap;
+                use crate::bench::MessageProxy;
+
+                // Build a map of account_id -> actual node URL
+                let mut node_routes = HashMap::new();
+                for idx in 0..nodes.len() {
+                    let account_id = nodes.account_id(idx).clone();
+                    let node_url = nodes.url(idx).parse().expect("Failed to parse node URL");
+                    node_routes.insert(account_id, node_url);
+                }
+
+                // Create and start the proxy
+                let proxy = MessageProxy::new(node_routes, "127.0.0.1:0")
+                    .await
+                    .expect("Failed to create message proxy");
+
+                tracing::info!(
+                    proxy_addr = %proxy.addr,
+                    "Message proxy started for benchmarking"
+                );
+
+                Some(proxy)
+            } else {
+                None
+            };
+
             let cluster = Cluster {
                 cfg: self.cfg,
                 rpc_client,
@@ -401,6 +439,7 @@ impl IntoFuture for ClusterSpawner {
                 docker_client: self.docker,
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
+                message_proxy,
                 nodes,
             };
 

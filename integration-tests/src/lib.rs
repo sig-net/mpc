@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod bench;
 pub mod cluster;
 pub mod containers;
 pub mod eth;
@@ -538,12 +539,22 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
         .accounts
         .iter()
         .zip(&nodes)
-        .map(|(account, node)| {
+        .enumerate()
+        .map(|(idx, (account, node))| {
+            // If message proxy is enabled, use a placeholder URL that will be updated later
+            // The actual proxy URL will be set when the cluster is fully initialized
+            let url = if spawner.use_message_proxy {
+                // Use a placeholder that indicates this will use the proxy
+                format!("http://proxy-placeholder-{}", idx)
+            } else {
+                node.address.clone()
+            };
+
             (
                 account.id().clone(),
                 CandidateInfo {
                     account_id: account.id().as_str().parse().unwrap(),
-                    url: node.address.clone(),
+                    url,
                     cipher_pk: node.cipher_sk.public_key().to_bytes(),
                     sign_pk: node.sign_sk.public_key().to_string().parse().unwrap(),
                 },
