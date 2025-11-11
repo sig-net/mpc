@@ -5,7 +5,8 @@ use crate::sign_bidirectional::hash_rlp_data;
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::{AnchorDeserialize, AnchorSerialize};
 use anchor_client::{Client, Cluster, Program};
-use anchor_lang::prelude::*;
+use anchor_lang::event;
+//use anchor_lang::prelude::*;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use ethabi::{encode, Token};
@@ -576,6 +577,13 @@ async fn parse_cpi_events(
 
         let event_discriminator = &ix_data[8..16];
         let event_data = &ix_data[16..];
+
+        let event_data_len = event_data.len();
+        tracing::info!(
+            "event data: {:?}, event data length: {}",
+            event_data,
+            event_data_len
+        );
 
         let mut acc = Vec::new();
 
