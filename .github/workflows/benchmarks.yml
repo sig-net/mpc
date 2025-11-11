@@ -7,12 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: 'PR number to comment on'
+        description: "PR number to comment on"
         required: false
         type: string
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 concurrency:
@@ -54,63 +54,25 @@ jobs:
           RUST_BACKTRACE: 1
         run: |
           set -euo pipefail
-          cargo bench -p integration-tests --bench sign -- --noplot | tee bench.log
+          cargo bench -p integration-tests --bench sign -- --noplot --output-format bencher > benchmark-output.txt
 
-      - name: Upload benchmark log
+      - name: Report benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: integration-tests sign
+          tool: cargo
+          output-file-path: benchmark-output.txt
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+          auto-push: false
+          comment-always: true
+          comment-on-alert: true
+          alert-threshold: '110%'
+          fail-on-alert: false
+
+      - name: Upload benchmark output
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sign-bench-log
-          path: bench.log
+          name: sign-benchmark-raw
+          path: benchmark-output.txt
           retention-days: 7
-
-      - name: Append results to job summary
-        if: always()
-        run: |
-          {
-            echo '## Benchmark Results';
-            if [ -f bench.log ]; then
-              tail -n 200 bench.log;
-            else
-              echo 'bench.log missing';
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Comment benchmark results on PR
-        if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.pr_number != '') }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-
-            const logPath = 'bench.log';
-            let logSnippet = 'bench.log not found.';
-            if (fs.existsSync(logPath)) {
-              const lines = fs.readFileSync(logPath, 'utf8').trim().split('\n');
-              const tail = lines.slice(-200);
-              logSnippet = tail.length ? tail.join('\n') : 'Log file was empty.';
-            }
-
-            const prNumber = context.payload.pull_request?.number
-              || (context.payload.inputs?.pr_number ? Number(context.payload.inputs.pr_number) : undefined);
-            if (!prNumber) {
-              core.info('No PR number available; skipping PR comment.');
-              return;
-            }
-
-            const body = [
-              '## Benchmark Results',
-              '',
-              '```',
-              logSnippet,
-              '```',
-              '',
-              `_Workflow run: ${context.runNumber}_`
-            ].join('\n');
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-              body,
-            });
