@@ -159,7 +159,7 @@ fn main() {
     let started = Instant::now();
 
     // Spawn cluster with message proxy enabled
-    let (cluster, mut collected_metrics) = rt.block_on(async {
+    let (_cluster, collected_metrics) = rt.block_on(async {
         let cluster = cluster::spawn()
             .disable_prestockpile()
             .with_message_proxy()
@@ -182,7 +182,7 @@ fn main() {
         // Benchmark scenario: signature generation
         for i in 0..SIGNATURE_AMOUNT {
             // Reset metrics before each signature
-            proxy.reset_metrics().await;
+            proxy.start_collection().await;
 
             // Create account and request signature
             let account = cluster.worker().dev_create_account().await.unwrap();
@@ -190,9 +190,8 @@ fn main() {
             // Execute signature request
             cluster.sign().account(account).await.unwrap();
 
-            // Finalize and collect metrics
-            proxy.finalize_metrics().await;
-            let metrics = proxy.metrics().await;
+            // Collect metrics
+            let metrics = proxy.collect_metrics().await;
 
             tracing::info!(
                 iteration = i,

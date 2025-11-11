@@ -80,34 +80,9 @@ impl Cluster {
         Ok(metrics)
     }
 
-    /// Update participant URLs in the contract to route through the message proxy.
-    /// This should be called after the proxy is initialized but before any messages are sent.
-    pub async fn update_urls_for_proxy(&self) -> anyhow::Result<()> {
-        let proxy = self
-            .message_proxy
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Message proxy not enabled"))?;
-
-        // Get current participants from contract
-        let participants = self.participants().await?;
-
-        // Update each participant's URL to point to the proxy
-        for (account_id, info) in participants.iter() {
-            let new_url = proxy.msg_url(account_id);
-
-            tracing::info!(
-                account_id = %account_id,
-                old_url = %info.url,
-                new_url = %new_url,
-                "Updating participant URL to use proxy"
-            );
-
-            // Note: This requires a contract method to update URLs
-            // For now, we'll document this limitation
-            // TODO: Add contract method or find alternative approach
-        }
-
-        Ok(())
+    /// Check if the message proxy is available
+    pub fn has_message_proxy(&self) -> bool {
+        self.message_proxy.is_some()
     }
 
     pub fn wait(&self) -> WaitAction<'_, ()> {

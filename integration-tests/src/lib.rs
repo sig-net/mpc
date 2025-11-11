@@ -520,13 +520,13 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let ctx = setup(spawner).await?;
     tracing::info!("⏱️  setup (total) took: {:?}", setup_start.elapsed());
 
-    let cfg = &spawner.cfg;
+    let threshold = spawner.cfg.threshold;
 
     let spawn_nodes_start = std::time::Instant::now();
     let node_futures = spawner
         .accounts
         .iter()
-        .map(|account| local::Node::run(&ctx, cfg, account));
+        .map(|account| local::Node::run(&ctx, &spawner.cfg, account));
     let nodes = futures::future::join_all(node_futures)
         .await
         .into_iter()
@@ -535,15 +535,40 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
         elapsed = ?spawn_nodes_start.elapsed(),
         "all mpc nodes have been spawned",
     );
+
+    // If proxy is enabled, register each node and get their proxy ports
+    let mut node_proxy_ports = std::collections::HashMap::new();
+    if spawner.is_proxy_enabled() {
+        // Collect (account_id, backend_url) pairs first to avoid holding immutable borrow
+        let node_info: Vec<(near_account_id::AccountId, url::Url)> = spawner
+            .accounts
+            .iter()
+            .zip(&nodes)
+            .map(|(account, node)| {
+                (account.id().clone(), node.address.parse().unwrap())
+            })
+            .collect();
+
+        // Now mutably borrow spawner to add nodes
+        for (account_id, backend_url) in node_info {
+            let proxy_port = spawner
+                .add_node_to_proxy(account_id.clone(), backend_url)
+                .await
+                .unwrap();
+            node_proxy_ports.insert(account_id, proxy_port);
+        }
+    }
+
     let candidates: HashMap<AccountId, CandidateInfo> = spawner
         .accounts
         .iter()
         .zip(&nodes)
         .map(|(account, node)| {
-            // If message proxy is enabled, use proxy URL; otherwise use node's direct URL
-            let url = if let Some(proxy_base_url) = spawner.proxy_base_url() {
-                // Route through proxy: http://proxy_addr/msg/node_id
-                format!("{}/msg/{}", proxy_base_url, account.id())
+            // If message proxy is enabled, use proxy port; otherwise use node's direct URL
+            let url = if let Some(&proxy_port) = node_proxy_ports.get(account.id()) {
+                // Route through proxy on dedicated port: http://127.0.0.1:PROXY_PORT/
+                // The proxy will handle /msg, /state, /status paths
+                format!("http://127.0.0.1:{}", proxy_port)
             } else {
                 node.address.clone()
             };
@@ -581,7 +606,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
             .args_json(json!({
                 "epoch": 0,
                 "participants": participants,
-                "threshold": cfg.threshold,
+                "threshold": threshold,
                 "public_key": near_pk,
             }))
             .transact()
@@ -593,7 +618,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
         ctx.mpc_contract
             .call("init")
             .args_json(json!({
-                "threshold": cfg.threshold,
+                "threshold": threshold,
                 "candidates": candidates
             }))
             .transact()

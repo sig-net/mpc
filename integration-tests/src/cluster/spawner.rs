@@ -365,23 +365,18 @@ impl ClusterSpawner {
     }
 
     /// Pre-spawn the message proxy if enabled.
-    /// This must be called before running nodes so that participant URLs can use the proxy.
+    /// This must be called before running nodes so that the proxy is ready.
     pub async fn prespawn_message_proxy(&mut self) -> anyhow::Result<()> {
         if !self.use_message_proxy {
             return Ok(());
         }
 
         use crate::bench::MessageProxy;
-        use std::collections::HashMap;
 
-        // Create proxy with empty routes (will be populated after nodes spawn)
-        let proxy = MessageProxy::new(HashMap::new(), "127.0.0.1:0").await?;
+        // Create proxy (no pre-allocation needed in multi-port design)
+        let proxy = MessageProxy::spawn().await?;
 
-        tracing::info!(
-            proxy_addr = %proxy.addr,
-            base_url = %proxy.url(),
-            "Message proxy pre-spawned for benchmarking"
-        );
+        tracing::info!("Message proxy spawned for benchmarking (multi-port mode)");
 
         // Store the proxy for later use
         self.message_proxy = Some(proxy);
@@ -389,9 +384,22 @@ impl ClusterSpawner {
         Ok(())
     }
 
-    /// Get the proxy base URL if the proxy has been pre-spawned
-    pub fn proxy_base_url(&self) -> Option<String> {
-        self.message_proxy.as_ref().map(|p| p.url())
+    /// Add a node to the proxy and get its proxy port
+    pub async fn add_node_to_proxy(
+        &mut self,
+        node_id: near_account_id::AccountId,
+        backend_url: url::Url,
+    ) -> anyhow::Result<u16> {
+        if let Some(proxy) = &mut self.message_proxy {
+            proxy.add_node(node_id, backend_url).await
+        } else {
+            anyhow::bail!("Message proxy not initialized")
+        }
+    }
+
+    /// Check if proxy is enabled
+    pub fn is_proxy_enabled(&self) -> bool {
+        self.use_message_proxy
     }
 
     pub async fn run(&mut self) -> anyhow::Result<Nodes> {
@@ -442,30 +450,8 @@ impl IntoFuture for ClusterSpawner {
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
 
-            // Update message proxy routes if enabled
-            let message_proxy = if let Some(proxy) = self.message_proxy {
-                use std::collections::HashMap;
-
-                // Build a map of account_id -> actual node URL
-                let mut node_routes = HashMap::new();
-                for idx in 0..nodes.len() {
-                    let account_id = nodes.account_id(idx).clone();
-                    let node_url = nodes.url(idx).parse().expect("Failed to parse node URL");
-                    node_routes.insert(account_id, node_url);
-                }
-
-                // Update the proxy with the actual node routes
-                proxy.add_routes(node_routes).await;
-
-                tracing::info!(
-                    proxy_addr = %proxy.addr,
-                    "Message proxy routes updated with actual node URLs"
-                );
-
-                Some(proxy)
-            } else {
-                None
-            };
+            // Proxy was already populated during node spawn in lib.rs
+            let message_proxy = self.message_proxy;
 
             let cluster = Cluster {
                 cfg: self.cfg,

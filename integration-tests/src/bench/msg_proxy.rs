@@ -1,19 +1,22 @@
 //! Message Proxy for benchmarking MPC node message throughput
 //!
-//! This proxy sits between MPC nodes and intercepts all `/msg` traffic,
-//! recording metrics before forwarding messages to their destinations.
-//! This allows non-invasive benchmarking without modifying node code.
+//! This proxy sits between MPC nodes and intercepts all traffic,
+//! recording metrics for `/msg` while transparently forwarding
+//! `/state` and `/status` requests. This allows non-invasive
+//! benchmarking without modifying node code.
+//!
+//! Architecture: Multi-port proxy where each node gets its own listening port.
+//! This avoids path manipulation issues with Url::set_path().
 
 use axum::body::Bytes;
-use axum::extract::{Extension, Path};
+use axum::extract::Extension;
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::response::{IntoResponse, Json};
+use axum::routing::{get, post};
 use axum::Router;
 use mpc_keys::hpke::Ciphered;
 use near_account_id::AccountId;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -101,146 +104,120 @@ impl MessageMetrics {
     }
 }
 
-/// Internal state shared between proxy handlers
-struct ProxyState {
-    /// Mapping from node account_id to their actual URL
-    node_routes: RwLock<HashMap<AccountId, Url>>,
+/// Internal state for a single node's proxy instance
+struct NodeProxyState {
+    /// The node being proxied
+    node_id: AccountId,
+    /// The actual backend URL for this node
+    backend_url: Url,
     /// HTTP client for forwarding requests
     client: reqwest::Client,
-    /// Collected metrics
-    metrics: RwLock<MessageMetrics>,
+    /// Shared metrics across all node proxies
+    metrics: Arc<RwLock<MessageMetrics>>,
 }
 
 /// Message proxy that intercepts and measures node-to-node messages
+/// Uses one listening port per node to avoid URL path manipulation issues
 pub struct MessageProxy {
-    /// Address the proxy server is listening on
-    pub addr: SocketAddr,
-    /// Shared state
-    state: Arc<ProxyState>,
-    /// Handle to the server task
-    server_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Mapping from node_id to their proxy port
+    pub node_ports: HashMap<AccountId, u16>,
+    /// Shared metrics
+    state: Arc<RwLock<MessageMetrics>>,
+    /// Server task handles (one per node)
+    _servers: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl MessageProxy {
-    /// Create a new message proxy
-    ///
-    /// # Arguments
-    /// * `node_routes` - Map of AccountId to actual node URL for routing
-    /// * `bind_addr` - Address to bind the proxy server to (e.g., "127.0.0.1:0")
-    pub async fn new(
-        node_routes: HashMap<AccountId, Url>,
-        bind_addr: impl Into<String>,
-    ) -> anyhow::Result<Self> {
-        let state = Arc::new(ProxyState {
-            node_routes: RwLock::new(node_routes),
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()?,
-            metrics: RwLock::new(MessageMetrics::default()),
-        });
-
-        // Build the router
-        let app = Router::new()
-            .route("/msg/:node_id", post(handle_msg))
-            .layer(Extension(state.clone()));
-
-        // Bind to a socket
-        let bind_addr = bind_addr.into();
-        let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-        let addr = listener.local_addr()?;
-
-        // Spawn the server
-        let server_handle = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
+    /// Spawn proxy with empty routes (to be populated after nodes start)
+    pub async fn spawn() -> anyhow::Result<Self> {
+        let state = Arc::new(RwLock::new(MessageMetrics {
+            start_time: Some(Instant::now()),
+            ..Default::default()
+        }));
 
         Ok(Self {
-            addr,
+            node_ports: HashMap::new(),
             state,
-            server_handle: Some(server_handle),
+            _servers: vec![],
         })
     }
 
-    /// Get the proxy's base URL
-    pub fn url(&self) -> String {
-        format!("http://{}", self.addr)
+    /// Add a node to the proxy by spawning a dedicated port for it
+    pub async fn add_node(
+        &mut self,
+        node_id: AccountId,
+        backend_url: Url,
+    ) -> anyhow::Result<u16> {
+        let client = reqwest::Client::new();
+
+        let node_state = Arc::new(NodeProxyState {
+            node_id: node_id.clone(),
+            backend_url,
+            client,
+            metrics: self.state.clone(),
+        });
+
+        // Create router for this node
+        let app = Router::new()
+            .route("/msg", post(handle_msg))
+            .route("/state", get(handle_passthrough))
+            .route("/status", get(handle_passthrough))
+            .layer(Extension(node_state));
+
+        // Bind to any available port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let port = addr.port();
+
+        // Spawn server task
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("proxy server failed");
+        });
+
+        self.node_ports.insert(node_id, port);
+        self._servers.push(server);
+
+        Ok(port)
     }
 
-    /// Get the proxy URL for a specific node
-    pub fn msg_url(&self, node_id: &AccountId) -> String {
-        format!("{}/msg/{}", self.url(), node_id)
+    /// Get the proxy port for a specific node
+    pub fn port_for_node(&self, node_id: &AccountId) -> Option<u16> {
+        self.node_ports.get(node_id).copied()
     }
 
-    /// Reset metrics (e.g., before starting a new benchmark iteration)
-    pub async fn reset_metrics(&self) {
-        let mut metrics = self.state.metrics.write().await;
-        *metrics = MessageMetrics {
-            start_time: Some(Instant::now()),
-            ..Default::default()
-        };
+    /// Mark the start of metrics collection
+    pub async fn start_collection(&self) {
+        let mut metrics = self.state.write().await;
+        metrics.start_time = Some(Instant::now());
     }
 
-    /// Finalize metrics collection (sets end_time)
-    pub async fn finalize_metrics(&self) {
-        let mut metrics = self.state.metrics.write().await;
+    /// Collect and finalize metrics
+    pub async fn collect_metrics(&self) -> MessageMetrics {
+        let mut metrics = self.state.write().await;
         metrics.end_time = Some(Instant::now());
-    }
-
-    /// Get a snapshot of current metrics
-    pub async fn metrics(&self) -> MessageMetrics {
-        self.state.metrics.read().await.clone()
-    }
-
-    /// Add or update a node route
-    pub async fn add_route(&self, account_id: AccountId, url: Url) {
-        let mut routes = self.state.node_routes.write().await;
-        routes.insert(account_id, url);
-    }
-
-    /// Add multiple node routes at once
-    pub async fn add_routes(&self, routes: HashMap<AccountId, Url>) {
-        let mut node_routes = self.state.node_routes.write().await;
-        node_routes.extend(routes);
-    }
-
-    /// Shutdown the proxy server
-    pub async fn shutdown(mut self) {
-        if let Some(handle) = self.server_handle.take() {
-            handle.abort();
-        }
+        metrics.clone()
     }
 }
 
-/// Handler for /msg/:node_id endpoint
+/// Handler for POST /msg requests (with metrics)
 async fn handle_msg(
-    Path(node_id): Path<String>,
-    Extension(state): Extension<Arc<ProxyState>>,
+    Extension(state): Extension<Arc<NodeProxyState>>,
     body: Bytes,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<impl IntoResponse, StatusCode> {
     let start = Instant::now();
-
-    // Parse node_id
-    let node_id: AccountId = node_id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    // Look up the real node URL
-    let node_url = {
-        let routes = state.node_routes.read().await;
-        routes.get(&node_id).cloned().ok_or(StatusCode::NOT_FOUND)?
-    };
 
     // Decode the message to count individual messages in the batch
     let message_count = match ciborium::from_reader::<Vec<Ciphered>, _>(body.as_ref()) {
         Ok(batch) => batch.len(),
-        Err(_) => {
-            // If we can't decode, just count as 1
-            1
-        }
+        Err(_) => 1,
     };
 
     let bytes_sent = body.len();
 
     // Forward the message to the real node
-    let mut target_url = node_url.clone();
+    let mut target_url = state.backend_url.clone();
     target_url.set_path("msg");
 
     let forward_result = state
@@ -260,22 +237,76 @@ async fn handle_msg(
         metrics.messages_sent += message_count;
         metrics.bytes_sent += bytes_sent;
         metrics.latencies.push(latency);
-        *metrics.per_node.entry(node_id.to_string()).or_insert(0) += message_count;
+        *metrics
+            .per_node
+            .entry(state.node_id.to_string())
+            .or_insert(0) += message_count;
     }
 
     // Return the result
     match forward_result {
-        Ok(resp) if resp.status().is_success() => Ok(StatusCode::OK),
+        Ok(resp) if resp.status().is_success() => {
+            Ok(axum::response::Response::new(axum::body::Body::empty()))
+        }
         Ok(resp) => {
             tracing::warn!(
                 "failed to forward message to {}: status {}",
-                node_id,
+                state.node_id,
                 resp.status()
             );
             Err(StatusCode::BAD_GATEWAY)
         }
         Err(err) => {
-            tracing::error!("failed to forward message to {}: {}", node_id, err);
+            tracing::error!("failed to forward message to {}: {}", state.node_id, err);
+            Err(StatusCode::BAD_GATEWAY)
+        }
+    }
+}
+
+/// Handler for GET /state and /status requests (transparent passthrough)
+async fn handle_passthrough(
+    Extension(state): Extension<Arc<NodeProxyState>>,
+    uri: axum::http::Uri,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Get the path (e.g., "state" or "status")
+    let path = uri.path().trim_start_matches('/');
+
+    // Forward the request to the real node
+    let mut target_url = state.backend_url.clone();
+    target_url.set_path(path);
+
+    let forward_result = state.client.get(target_url).send().await;
+
+    // Forward the response
+    match forward_result {
+        Ok(resp) if resp.status().is_success() => {
+            let json = resp.json::<serde_json::Value>().await.map_err(|err| {
+                tracing::error!(
+                    "failed to parse {} response from {}: {}",
+                    path,
+                    state.node_id,
+                    err
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            Ok(Json(json))
+        }
+        Ok(resp) => {
+            tracing::warn!(
+                "failed to forward {} request to {}: status {}",
+                path,
+                state.node_id,
+                resp.status()
+            );
+            Err(StatusCode::BAD_GATEWAY)
+        }
+        Err(err) => {
+            tracing::error!(
+                "failed to forward {} request to {}: {}",
+                path,
+                state.node_id,
+                err
+            );
             Err(StatusCode::BAD_GATEWAY)
         }
     }
@@ -286,28 +317,13 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_proxy_creation() {
-        let routes = HashMap::new();
-        let proxy = MessageProxy::new(routes, "127.0.0.1:0")
-            .await
-            .expect("Failed to create proxy");
+    async fn test_proxy_basics() {
+        let mut proxy = MessageProxy::spawn().await.unwrap();
+        let node_id: AccountId = "test-node".parse().unwrap();
+        let backend_url: Url = "http://127.0.0.1:8080".parse().unwrap();
 
-        assert!(proxy.addr.port() > 0);
-        proxy.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn test_metrics_reset() {
-        let routes = HashMap::new();
-        let proxy = MessageProxy::new(routes, "127.0.0.1:0")
-            .await
-            .expect("Failed to create proxy");
-
-        proxy.reset_metrics().await;
-        let metrics = proxy.metrics().await;
-        assert!(metrics.start_time.is_some());
-        assert_eq!(metrics.messages_sent, 0);
-
-        proxy.shutdown().await;
+        let port = proxy.add_node(node_id.clone(), backend_url).await.unwrap();
+        assert!(port > 0);
+        assert_eq!(proxy.port_for_node(&node_id), Some(port));
     }
 }
