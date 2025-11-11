@@ -7377,6 +7377,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
 
 [[package]]
+name = "mpc-address-derivation-utils"
+version = "1.10.0"
+dependencies = [
+ "alloy",
+ "alloy-primitives",
+ "anyhow",
+ "getrandom 0.2.16",
+ "k256",
+]
+
+[[package]]
 name = "mpc-contract"
 version = "1.10.0"
 dependencies = [
@@ -7462,6 +7473,7 @@ dependencies = [
  "maud",
  "mime",
  "mockito",
+ "mpc-address-derivation-utils",
  "mpc-contract",
  "mpc-crypto",
  "mpc-keys",

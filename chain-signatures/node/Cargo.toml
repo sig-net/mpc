@@ -83,6 +83,7 @@ mpc-contract.workspace = true
 mpc-crypto.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
+mpc-address-derivation-utils.workspace = true
 signet-program.workspace = true
 
 alloy-primitives.workspace = true

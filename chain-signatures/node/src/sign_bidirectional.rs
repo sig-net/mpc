@@ -87,7 +87,7 @@ impl BidirectionalTx {
 
         tracing::info!(signed_transaction_hash = ?signed_transaction_hash, "signed_transaction_hash");
 
-        let from_address = mpc_crypto::derive_user_address(
+        let from_address = mpc_address_derivation_utils::derive_user_address(
             signature.public_key,
             signature.request.indexed.args.epsilon,
         );
