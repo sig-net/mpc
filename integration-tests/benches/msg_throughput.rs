@@ -159,7 +159,7 @@ fn main() {
     let started = Instant::now();
 
     // Spawn cluster with message proxy enabled
-    let (_cluster, collected_metrics) = rt.block_on(async {
+    let (cluster, collected_metrics) = rt.block_on(async {
         let cluster = cluster::spawn()
             .disable_prestockpile()
             .with_message_proxy()
@@ -178,17 +178,16 @@ fn main() {
             .expect("Message proxy should be enabled");
 
         let mut collected_metrics = Vec::new();
+        cluster.wait().min_mine_presignatures(SIGNATURE_AMOUNT).await.unwrap();
 
         // Benchmark scenario: signature generation
         for i in 0..SIGNATURE_AMOUNT {
             // Reset metrics before each signature
             proxy.start_collection().await;
 
-            // Create account and request signature
-            let account = cluster.worker().dev_create_account().await.unwrap();
-
             // Execute signature request
-            cluster.sign().account(account).await.unwrap();
+            cluster.wait().signable().await.unwrap();
+            cluster.sign().await.unwrap();
 
             // Collect metrics
             let metrics = proxy.collect_metrics().await;
@@ -206,7 +205,7 @@ fn main() {
             collected_metrics.push(metrics);
         }
 
-        (Arc::new(cluster), collected_metrics)
+        (cluster, collected_metrics)
     });
 
     // Report overall statistics
@@ -244,4 +243,8 @@ fn main() {
     });
 
     println!("\nBenchmark total time: {:?}", started.elapsed());
+
+    rt.block_on(async move {
+        drop(cluster);
+    });
 }
