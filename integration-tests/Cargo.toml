@@ -9,10 +9,13 @@ publish = false
 alloy.workspace = true
 anyhow.workspace = true
 async-process = "1"
+axum = { version = "0.7", features = ["macros"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
 backon = "0.4"
 bollard = "0.17.0"
 borsh.workspace = true
 bs58 = "0.5.1"
+ciborium = "0.2"
 clap.workspace = true
 deadpool-redis.workspace = true
 futures = "0.3"
@@ -88,6 +91,11 @@ harness = false
 [[bench]]
 name = "store"
 path = "benches/store.rs"
+harness = false
+
+[[bench]]
+name = "msg_throughput"
+path = "benches/msg_throughput.rs"
 harness = false
 
 [features]

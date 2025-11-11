@@ -539,13 +539,11 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
         .accounts
         .iter()
         .zip(&nodes)
-        .enumerate()
-        .map(|(idx, (account, node))| {
-            // If message proxy is enabled, use a placeholder URL that will be updated later
-            // The actual proxy URL will be set when the cluster is fully initialized
-            let url = if spawner.use_message_proxy {
-                // Use a placeholder that indicates this will use the proxy
-                format!("http://proxy-placeholder-{}", idx)
+        .map(|(account, node)| {
+            // If message proxy is enabled, use proxy URL; otherwise use node's direct URL
+            let url = if let Some(proxy_base_url) = spawner.proxy_base_url() {
+                // Route through proxy: http://proxy_addr/msg/node_id
+                format!("{}/msg/{}", proxy_base_url, account.id())
             } else {
                 node.address.clone()
             };

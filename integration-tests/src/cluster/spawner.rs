@@ -128,6 +128,8 @@ pub struct ClusterSpawner {
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
     pub use_message_proxy: bool,
+    /// Optionally pre-spawned message proxy
+    message_proxy: Option<crate::bench::MessageProxy>,
 }
 
 impl Default for ClusterSpawner {
@@ -161,6 +163,7 @@ impl Default for ClusterSpawner {
             pregenerated_keys: PregeneratedKeys::load(nodes).unwrap(),
             use_ethereum: false,
             use_message_proxy: false,
+            message_proxy: None,
         }
     }
 }
@@ -361,6 +364,36 @@ impl ClusterSpawner {
         Ok(self.prespawn_redis().await)
     }
 
+    /// Pre-spawn the message proxy if enabled.
+    /// This must be called before running nodes so that participant URLs can use the proxy.
+    pub async fn prespawn_message_proxy(&mut self) -> anyhow::Result<()> {
+        if !self.use_message_proxy {
+            return Ok(());
+        }
+
+        use crate::bench::MessageProxy;
+        use std::collections::HashMap;
+
+        // Create proxy with empty routes (will be populated after nodes spawn)
+        let proxy = MessageProxy::new(HashMap::new(), "127.0.0.1:0").await?;
+
+        tracing::info!(
+            proxy_addr = %proxy.addr,
+            base_url = %proxy.url(),
+            "Message proxy pre-spawned for benchmarking"
+        );
+
+        // Store the proxy for later use
+        self.message_proxy = Some(proxy);
+
+        Ok(())
+    }
+
+    /// Get the proxy base URL if the proxy has been pre-spawned
+    pub fn proxy_base_url(&self) -> Option<String> {
+        self.message_proxy.as_ref().map(|p| p.url())
+    }
+
     pub async fn run(&mut self) -> anyhow::Result<Nodes> {
         crate::run(self).await
     }
@@ -377,6 +410,11 @@ impl IntoFuture for ClusterSpawner {
     fn into_future(mut self) -> Self::IntoFuture {
         Box::pin(async move {
             self = self.load_pregenerated_keys().init_network().await?;
+
+            // Pre-spawn message proxy if enabled (before nodes are created)
+            if self.use_message_proxy {
+                self.prespawn_message_proxy().await?;
+            }
 
             // Check if Solana is enabled and spawn if needed
             if self.cfg.sol.is_some() {
@@ -404,10 +442,9 @@ impl IntoFuture for ClusterSpawner {
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
 
-            // Setup message proxy if enabled
-            let message_proxy = if self.use_message_proxy {
+            // Update message proxy routes if enabled
+            let message_proxy = if let Some(proxy) = self.message_proxy {
                 use std::collections::HashMap;
-                use crate::bench::MessageProxy;
 
                 // Build a map of account_id -> actual node URL
                 let mut node_routes = HashMap::new();
@@ -417,14 +454,12 @@ impl IntoFuture for ClusterSpawner {
                     node_routes.insert(account_id, node_url);
                 }
 
-                // Create and start the proxy
-                let proxy = MessageProxy::new(node_routes, "127.0.0.1:0")
-                    .await
-                    .expect("Failed to create message proxy");
+                // Update the proxy with the actual node routes
+                proxy.add_routes(node_routes).await;
 
                 tracing::info!(
                     proxy_addr = %proxy.addr,
-                    "Message proxy started for benchmarking"
+                    "Message proxy routes updated with actual node URLs"
                 );
 
                 Some(proxy)

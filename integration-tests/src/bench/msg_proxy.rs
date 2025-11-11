@@ -20,7 +20,7 @@ use tokio::sync::RwLock;
 use url::Url;
 
 /// Metrics collected for a specific protocol type
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct ProtocolMetrics {
     pub message_count: usize,
     pub bytes_sent: usize,
@@ -28,7 +28,7 @@ pub struct ProtocolMetrics {
 }
 
 /// Complete message throughput metrics
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct MessageMetrics {
     /// Total number of message batches sent through proxy
     pub batches_sent: usize,
@@ -104,7 +104,7 @@ impl MessageMetrics {
 /// Internal state shared between proxy handlers
 struct ProxyState {
     /// Mapping from node account_id to their actual URL
-    node_routes: HashMap<AccountId, Url>,
+    node_routes: RwLock<HashMap<AccountId, Url>>,
     /// HTTP client for forwarding requests
     client: reqwest::Client,
     /// Collected metrics
@@ -132,7 +132,7 @@ impl MessageProxy {
         bind_addr: impl Into<String>,
     ) -> anyhow::Result<Self> {
         let state = Arc::new(ProxyState {
-            node_routes,
+            node_routes: RwLock::new(node_routes),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()?,
@@ -191,6 +191,18 @@ impl MessageProxy {
         self.state.metrics.read().await.clone()
     }
 
+    /// Add or update a node route
+    pub async fn add_route(&self, account_id: AccountId, url: Url) {
+        let mut routes = self.state.node_routes.write().await;
+        routes.insert(account_id, url);
+    }
+
+    /// Add multiple node routes at once
+    pub async fn add_routes(&self, routes: HashMap<AccountId, Url>) {
+        let mut node_routes = self.state.node_routes.write().await;
+        node_routes.extend(routes);
+    }
+
     /// Shutdown the proxy server
     pub async fn shutdown(mut self) {
         if let Some(handle) = self.server_handle.take() {
@@ -208,15 +220,13 @@ async fn handle_msg(
     let start = Instant::now();
 
     // Parse node_id
-    let node_id: AccountId = node_id
-        .parse()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let node_id: AccountId = node_id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Look up the real node URL
-    let node_url = state
-        .node_routes
-        .get(&node_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let node_url = {
+        let routes = state.node_routes.read().await;
+        routes.get(&node_id).cloned().ok_or(StatusCode::NOT_FOUND)?
+    };
 
     // Decode the message to count individual messages in the batch
     let message_count = match ciborium::from_reader::<Vec<Ciphered>, _>(body.as_ref()) {
