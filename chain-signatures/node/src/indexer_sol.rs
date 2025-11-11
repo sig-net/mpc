@@ -578,11 +578,10 @@ async fn parse_cpi_events(
         let event_discriminator = &ix_data[8..16];
         let event_data = &ix_data[16..];
 
-        let event_data_len = event_data.len();
-        tracing::info!(
+        tracing::debug!(
             "event data: {:?}, event data length: {}",
             event_data,
-            event_data_len
+            event_data.len()
         );
 
         let mut acc = Vec::new();
