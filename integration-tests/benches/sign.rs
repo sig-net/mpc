@@ -83,6 +83,7 @@ fn main() {
                 cfg.protocol.presignature.min_presignatures = SIGNATURE_AMOUNT as u32;
                 cfg.protocol.presignature.max_presignatures = SIGNATURE_AMOUNT as u32 * 4;
             })
+            .disable_prestockpile()
             .await
             .unwrap();
 
