@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# This crate uses Cargo's artifact dependencies (unstable feature) to automatically build:
+# - mpc-contract as wasm32-unknown-unknown cdylib
+# - mpc-node as a release binary
+# This eliminates cargo lock contention from build.rs and rust-analyzer rebuild issues.
+# Usage: cargo +nightly test -p integration-tests -Z bindeps
+# Or use aliases: cargo test-i-bindeps, cargo test-basic-bindeps
 
 [dependencies]
 alloy.workspace = true
@@ -65,9 +71,11 @@ near-workspaces = "0.15.0"
 
 # local chain-signatures dependencies
 mpc-crypto.workspace = true
-mpc-contract.workspace = true
+# Artifact dependency: integration tests depend on the built wasm contract
+mpc-contract = { path = "../chain-signatures/contract", artifact = "cdylib", lib = true, target = "wasm32-unknown-unknown" }
 mpc-keys.workspace = true
-mpc-node = { path = "../chain-signatures/node", features = ["test-feature", "debug-page"] }
+# Artifact dependency: integration tests depend on the built mpc-node binary
+mpc-node = { path = "../chain-signatures/node", artifact = "bin:mpc-node", lib = true, features = ["test-feature", "debug-page"] }
 mpc-primitives.workspace = true
 
 [dev-dependencies]

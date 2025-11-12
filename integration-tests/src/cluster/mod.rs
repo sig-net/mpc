@@ -23,8 +23,8 @@ use anyhow::Context;
 use url::Url;
 
 const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(9000);
-const CURRENT_CONTRACT_FILE_PATH: &str =
-    "../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
+// Use cargo's artifact dependency to get the built wasm path at compile time
+const CURRENT_CONTRACT_FILE_PATH: &str = env!("CARGO_CDYLIB_FILE_MPC_CONTRACT_mpc_contract");
 
 pub fn spawn() -> ClusterSpawner {
     ClusterSpawner::default()

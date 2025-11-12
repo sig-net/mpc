@@ -16,8 +16,17 @@ rustflags = [
 
 # This is basically a prebuild script used to build the node/contract before running
 # integration-tests.
-[target.'cfg(not(target = "wasm32-unknown-unknown"))']
-runner = "./setup.sh"
+# NOTE: Disabled when using artifact dependencies (bindeps) - cargo builds them automatically
+# [target.'cfg(not(target = "wasm32-unknown-unknown"))']
+# runner = "./setup.sh"
+
+[unstable]
+# Enable artifact dependencies so integration-tests can depend on built binaries
+# This allows cargo test to automatically build the wasm contract and mpc-node binary
+# without the cargo lock contention issues of build.rs
+# See: https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#artifact-dependencies
+# Requires nightly: cargo +nightly test -p integration-tests -Z bindeps
+bindeps = true
 
 [alias]
 build-node = "build -p mpc-node --release"
@@ -25,3 +34,5 @@ build-test = "build -p integration-tests --tests"
 test-i = "test -p integration-tests --jobs 1 -- --test-threads 1 --show-output"
 test-unit = "test --workspace --exclude integration-tests -- --show-output"
 test-basic = "test -p integration-tests -- --show-output --exact cases::test_signature_basic"
+# Note: For artifact dependencies, use:
+#   cargo +nightly test -p integration-tests -Z bindeps [args]

@@ -26,6 +26,14 @@ pub fn target_dir() -> Option<std::path::PathBuf> {
 }
 
 pub fn executable(release: bool, executable: &str) -> Option<std::path::PathBuf> {
+    // Try to use cargo's artifact dependency first (more reliable)
+    if executable == PACKAGE_MULTICHAIN {
+        if let Ok(artifact_path) = std::env::var("CARGO_BIN_FILE_MPC_NODE_mpc-node") {
+            return Some(artifact_path.into());
+        }
+    }
+    
+    // Fallback to traditional target dir search
     let executable = target_dir()?
         .join(if release { "release" } else { "debug" })
         .join(executable);

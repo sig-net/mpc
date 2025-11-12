@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use self::local::NodeEnvConfig;
 use crate::containers::DockerClient;
-use anyhow::Context as _;
 use ethers::types::{Address, U256};
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
@@ -275,12 +274,10 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let worker = spawner.take_worker().await;
     spawner.create_accounts(&worker).await;
 
+    // Use cargo's artifact dependency to get the built wasm path
+    let wasm_path = env!("CARGO_CDYLIB_FILE_MPC_CONTRACT_mpc_contract");
     let mpc_contract = worker
-        .dev_deploy(&std::fs::read(
-            execute::target_dir()
-                .context("could not find target dir")?
-                .join("wasm32-unknown-unknown/release/mpc_contract.wasm"),
-        )?)
+        .dev_deploy(&std::fs::read(wasm_path)?)
         .await?;
     tracing::info!(contract_id = %mpc_contract.id(), "deployed mpc contract");
 
