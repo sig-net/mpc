@@ -1,4 +1,4 @@
-use crate::backlog::{Backlog, Checkpoint};
+use crate::backlog::Backlog;
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
@@ -226,6 +226,16 @@ impl ContractStateWatcher {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => Some(state.threshold),
             ProtocolState::Resharing(state) => Some(state.threshold),
+        }
+    }
+
+    /// Wait until the MPC threshold is available and return it
+    pub async fn wait_threshold(&mut self) -> usize {
+        loop {
+            if let Some(threshold) = self.threshold().await {
+                return threshold;
+            }
+            let _ = self.contract_state.changed().await;
         }
     }
 
@@ -525,75 +535,6 @@ impl NearClient {
             .json()?;
 
         Ok(result)
-    }
-
-    pub async fn vote_checkpoint(
-        &self,
-        chain: Chain,
-        checkpoint: Checkpoint,
-    ) -> anyhow::Result<bool> {
-        tracing::info!(
-            ?chain,
-            block_height = checkpoint.block_height,
-            signer_id = %self.signer.account_id,
-            "voting for checkpoint"
-        );
-
-        // Serialize the checkpoint to JSON for the contract call
-        let checkpoint_json = serde_json::to_value(&checkpoint)
-            .map_err(|e| anyhow::anyhow!("failed to serialize checkpoint: {}", e))?;
-
-        let result = self
-            .client
-            .call(&self.signer, &self.contract_id, "vote_checkpoint")
-            .args_json(json!({
-                "chain": chain,
-                "checkpoint": checkpoint_json
-            }))
-            .max_gas()
-            .retry_exponential(10, 5)
-            .transact()
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(%err, ?chain, block_height = checkpoint.block_height, "failed to vote for checkpoint");
-            })?
-            .json()?;
-
-        Ok(result)
-    }
-
-    pub async fn fetch_latest_checkpoint(
-        &self,
-        chain: Chain,
-    ) -> anyhow::Result<Option<crate::backlog::Checkpoint>> {
-        tracing::debug!(?chain, "fetching latest checkpoint from contract");
-
-        let result: Option<mpc_contract::primitives::Checkpoint> = self
-            .client
-            .view(&self.contract_id, "latest_checkpoint")
-            .args_json(json!({
-                "chain": chain
-            }))
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(%err, ?chain, "failed to fetch latest checkpoint");
-            })?
-            .json()?;
-
-        match result {
-            Some(checkpoint) => {
-                tracing::info!(
-                    ?chain,
-                    block_height = checkpoint.block_height,
-                    "successfully fetched latest checkpoint"
-                );
-                Ok(Some(checkpoint))
-            }
-            None => {
-                tracing::debug!(?chain, "no checkpoint found for chain");
-                Ok(None)
-            }
-        }
     }
 
     pub async fn propose_join(&self) -> anyhow::Result<()> {

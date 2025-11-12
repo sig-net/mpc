@@ -1,19 +1,20 @@
+use crate::checkpoint_consensus::fetch_consensus_checkpoints;
+use crate::mesh::MeshState;
+use crate::node_client::NodeClient;
 use crate::protocol::{Chain, SignRequestType};
-use crate::rpc::NearClient;
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
 use anyhow::Context;
 use mpc_primitives::{PendingTx, SignId};
-use std::collections::HashMap;
+use std::collections::{hash_map, HashMap};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 pub use mpc_primitives::Checkpoint;
 
-/// Checkpoint interval for Ethereum (every 5 blocks)
-const CHECKPOINT_INTERVAL_ETH: u64 = 5;
-
-/// Checkpoint interval for Solana (every 10 blocks)
-const CHECKPOINT_INTERVAL_SOL: u64 = 10;
+// Clean up old checkpoints (older than 30 minutes)
+const RETENTION_DURATION: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone)]
 pub struct PendingRequests {
@@ -170,6 +171,13 @@ impl ExecutionWatchers {
     }
 }
 
+/// Historical checkpoint with timestamp for retention management
+#[derive(Debug, Clone)]
+struct HistoricalCheckpoint {
+    checkpoint: Checkpoint,
+    created_at: Instant,
+}
+
 /// Backlog manages pending sign-respond requests across multiple chains.
 /// Each chain has its own isolated set of pending requests with their own
 /// publish queues.
@@ -178,6 +186,8 @@ pub struct Backlog {
     requests: Arc<RwLock<HashMap<Chain, PendingRequests>>>,
     execution_watchers: Arc<RwLock<HashMap<Chain, ExecutionWatchers>>>,
     sign_request_types: Arc<RwLock<HashMap<(Chain, SignId), SignRequestType>>>,
+    /// Historical checkpoints kept for 30 minutes, indexed by chain
+    historical_checkpoints: Arc<RwLock<HashMap<Chain, Vec<HistoricalCheckpoint>>>>,
 }
 
 impl Default for Backlog {
@@ -192,6 +202,7 @@ impl Backlog {
             requests: Arc::new(RwLock::new(HashMap::new())),
             execution_watchers: Arc::new(RwLock::new(HashMap::new())),
             sign_request_types: Arc::new(RwLock::new(HashMap::new())),
+            historical_checkpoints: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -409,25 +420,23 @@ impl Backlog {
         let mut requests = self.requests.write().await;
         let pending = requests.entry(chain).or_default();
         pending.set_processed_block(height);
-        tracing::debug!(?chain, height, "backlog updated processed block height");
 
-        // Determine checkpoint interval based on chain
-        // TODO: need an interface for this in the future for more chains.
-        let checkpoint_interval = match chain {
-            Chain::Ethereum => CHECKPOINT_INTERVAL_ETH,
-            Chain::Solana => CHECKPOINT_INTERVAL_SOL,
-            Chain::NEAR => return None,
-        };
+        let interval = chain.checkpoint_interval();
+        tracing::trace!(
+            ?chain,
+            height,
+            ?interval,
+            "backlog updated processed block height"
+        );
 
         // create a checkpoint on interval
-        if height.is_multiple_of(checkpoint_interval) {
-            tracing::info!(
-                ?chain,
-                height,
-                tx_count = pending.len(),
-                "creating checkpoint"
-            );
-            Some(pending.checkpoint(chain))
+        if height.is_multiple_of(interval?) {
+            let tx_count = pending.len();
+            drop(requests);
+            let checkpoint = self.checkpoint(chain).await;
+            tracing::info!(?chain, height, tx_count, ?checkpoint, "creating checkpoint");
+
+            Some(checkpoint)
         } else {
             None
         }
@@ -435,12 +444,49 @@ impl Backlog {
 
     /// Create a checkpoint of the current backlog state for a specific chain
     pub async fn checkpoint(&self, chain: Chain) -> Checkpoint {
-        self.requests
+        let checkpoint = self
+            .requests
             .read()
             .await
             .get(&chain)
             .map(|pr| pr.checkpoint(chain))
-            .unwrap_or_else(|| Checkpoint::empty(chain))
+            .unwrap_or_else(|| Checkpoint::empty(chain));
+
+        // Store checkpoint in historical checkpoints
+        let mut historical = self.historical_checkpoints.write().await;
+        let historical = historical.entry(chain).or_insert_with(Vec::new);
+        historical.push(HistoricalCheckpoint {
+            checkpoint: checkpoint.clone(),
+            created_at: Instant::now(),
+        });
+        historical.retain(|hcp| hcp.created_at.elapsed() < RETENTION_DURATION);
+
+        checkpoint
+    }
+
+    pub async fn latest_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
+        let historical = self.historical_checkpoints.read().await;
+        historical.get(&chain).and_then(|checkpoints| {
+            checkpoints
+                .iter()
+                .max_by_key(|hcp| hcp.checkpoint.block_height)
+                .map(|hcp| hcp.checkpoint.clone())
+        })
+    }
+
+    /// Find a historical checkpoint by hash
+    pub async fn find_checkpoint_by_hash(&self, chain: Chain, hash: u64) -> Option<Checkpoint> {
+        let historical = self.historical_checkpoints.read().await;
+        if let Some(checkpoints) = historical.get(&chain) {
+            for hcp in checkpoints {
+                let mut hasher = hash_map::DefaultHasher::new();
+                hcp.checkpoint.hash(&mut hasher);
+                if hasher.finish() == hash {
+                    return Some(hcp.checkpoint.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Recover backlog state from a checkpoint
@@ -505,34 +551,38 @@ impl Backlog {
         Ok(())
     }
 
-    pub async fn recover(&self, near: &NearClient, chains: &[Chain]) {
-        tracing::info!("attempting to recover from latest checkpoints");
-        for &chain in chains {
-            match near.fetch_latest_checkpoint(chain).await {
-                Ok(Some(checkpoint)) => {
-                    tracing::info!(
-                        ?chain,
-                        block_height = checkpoint.block_height,
-                        "found checkpoint, attempting recovery"
-                    );
-                    if let Err(err) = self.recover_by_checkpoint(checkpoint).await {
-                        tracing::warn!(
-                            ?chain,
-                            %err,
-                            "failed to recover from checkpoint, continuing with empty state"
-                        );
-                    }
-                }
-                Ok(None) => {
-                    tracing::info!(?chain, "no checkpoint found, starting fresh");
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        ?chain,
-                        %err,
-                        "failed to fetch checkpoint, continuing with empty state"
-                    );
-                }
+    pub async fn recover(
+        &self,
+        mesh_state: &MeshState,
+        node_client: &NodeClient,
+        threshold: usize,
+        chains: &[Chain],
+    ) {
+        tracing::info!("attempting to recover from latest checkpoints via node consensus");
+
+        // p2p node consensus to find checkpoints.
+        // Fetches all checkpoints from active participants and creates a consensus checkpoint:
+        // - sorts all checkpoints by block height
+        // - selects threshold lowest block height checkpoint
+        let checkpoints =
+            fetch_consensus_checkpoints(mesh_state, node_client, threshold, chains).await;
+        if checkpoints.is_empty() {
+            tracing::info!("no consensus checkpoints found, starting with empty state");
+            return;
+        }
+
+        for (chain, checkpoint) in checkpoints {
+            tracing::info!(
+                ?chain,
+                block_height = checkpoint.block_height,
+                "found consensus checkpoint, attempting recovery"
+            );
+            if let Err(err) = self.recover_by_checkpoint(checkpoint).await {
+                tracing::warn!(
+                    ?chain,
+                    %err,
+                    "failed to recover from consensus checkpoint, continuing with empty state"
+                );
             }
         }
     }
@@ -1030,34 +1080,39 @@ mod tests {
             )
             .await;
 
+        let interval = Chain::Ethereum.checkpoint_interval().unwrap();
+
         // First few blocks shouldn't create checkpoints
-        let checkpoint = backlog.set_processed_block(Chain::Ethereum, 1).await;
-        assert!(checkpoint.is_none());
+        for i in 1..interval {
+            let checkpoint = backlog.set_processed_block(Chain::Ethereum, i).await;
+            assert!(checkpoint.is_none(), "Block {i} should not make checkpoint");
+        }
 
-        let checkpoint = backlog.set_processed_block(Chain::Ethereum, 2).await;
-        assert!(checkpoint.is_none());
-
-        // At block 5 (CHECKPOINT_INTERVAL_ETH), should create checkpoint
-        let checkpoint = backlog.set_processed_block(Chain::Ethereum, 5).await;
+        // At block interval, should create checkpoint
+        let checkpoint = backlog.set_processed_block(Chain::Ethereum, interval).await;
         assert!(checkpoint.is_some());
         let checkpoint = checkpoint.unwrap();
-        assert_eq!(checkpoint.block_height, 5);
+        assert_eq!(checkpoint.block_height, interval);
         assert_eq!(checkpoint.chain, Chain::Ethereum);
         assert_eq!(checkpoint.pending_requests.len(), 1);
 
-        // Next checkpoint should be at block 10
-        let checkpoint = backlog.set_processed_block(Chain::Ethereum, 7).await;
+        let checkpoint = backlog
+            .set_processed_block(Chain::Ethereum, interval + 1)
+            .await;
         assert!(checkpoint.is_none());
 
-        let checkpoint = backlog.set_processed_block(Chain::Ethereum, 10).await;
+        let checkpoint = backlog
+            .set_processed_block(Chain::Ethereum, 2 * interval)
+            .await;
         assert!(checkpoint.is_some());
         let checkpoint = checkpoint.unwrap();
-        assert_eq!(checkpoint.block_height, 10);
+        assert_eq!(checkpoint.block_height, 2 * interval);
     }
 
     #[tokio::test]
     async fn test_automatic_checkpoint_solana_interval() {
         let backlog = Backlog::new();
+        let interval = Chain::Solana.checkpoint_interval().unwrap();
 
         // Add transaction
         let tx1 = create_test_tx(1, PendingRequestStatus::PendingExecution);
@@ -1071,20 +1126,16 @@ mod tests {
             .await;
 
         // Solana interval is 10 blocks
-        for i in 1..10 {
+        for i in 1..interval {
             let checkpoint = backlog.set_processed_block(Chain::Solana, i).await;
-            assert!(
-                checkpoint.is_none(),
-                "Block {} should not create checkpoint",
-                i
-            );
+            assert!(checkpoint.is_none(), "Block {i} should not make checkpoint");
         }
 
-        // At block 10, should create checkpoint
-        let checkpoint = backlog.set_processed_block(Chain::Solana, 10).await;
+        // At block interval, should create checkpoint
+        let checkpoint = backlog.set_processed_block(Chain::Solana, interval).await;
         assert!(checkpoint.is_some());
         let checkpoint = checkpoint.unwrap();
-        assert_eq!(checkpoint.block_height, 10);
+        assert_eq!(checkpoint.block_height, interval);
         assert_eq!(checkpoint.chain, Chain::Solana);
     }
 }

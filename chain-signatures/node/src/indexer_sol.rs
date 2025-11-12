@@ -1,8 +1,12 @@
 use crate::backlog::{Backlog, BacklogTransaction, SignTx};
+use crate::mesh::{wait_threshold_active, MeshState};
+use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::{
     hash_rlp_data, BidirectionalTx, BidirectionalTxId, PendingRequestStatus,
 };
+
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_client::{Client, Cluster, Program};
@@ -35,7 +39,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     Scalar::from_bytes(
@@ -336,8 +340,9 @@ pub async fn run(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
     backlog: Backlog,
-    near_client: crate::rpc::NearClient,
-    contract_watcher: crate::rpc::ContractStateWatcher,
+    mut contract_watcher: ContractStateWatcher,
+    mut mesh_state: watch::Receiver<MeshState>,
+    node_client: NodeClient,
 ) {
     let Some(sol) = sol else {
         tracing::warn!("solana indexer is disabled");
@@ -350,7 +355,15 @@ pub async fn run(
         return;
     };
 
-    backlog.recover(&near_client, &[Chain::Solana]).await;
+    // Wait for threshold to be available
+    let threshold = contract_watcher.wait_threshold().await;
+    if threshold > 0 {
+        wait_threshold_active(&mut mesh_state, threshold).await;
+        let mesh_state = mesh_state.borrow().clone();
+        backlog
+            .recover(&mesh_state, &node_client, threshold, &[Chain::Solana])
+            .await;
+    }
     let keypair = Keypair::from_base58_string(&sol.account_sk);
     let cluster = Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
     let client =
@@ -378,7 +391,6 @@ pub async fn run(
         node_near_account_id.clone(),
         total_timeout,
         backlog.clone(),
-        near_client.clone(),
     ));
 
     // Subscribe to respond bidirectional events
@@ -523,7 +535,6 @@ async fn subscribe_and_process_sign_events(
     node_near_account_id: AccountId,
     total_timeout: Duration,
     backlog: Backlog,
-    near_client: crate::rpc::NearClient,
 ) {
     loop {
         let sign_tx_clone = sign_tx.clone();
@@ -535,7 +546,6 @@ async fn subscribe_and_process_sign_events(
             &rpc_url,
             &ws_url,
             backlog.clone(),
-            near_client.clone(),
             move |event, signature: solana_sdk::signature::Signature, _slot| {
                 tracing::info!("got event: {:?}", event);
                 let tx_sig: Vec<u8> = signature.as_ref().to_vec();
@@ -673,7 +683,6 @@ async fn subscribe_to_program_cpi_events<F>(
     rpc_url: &str,
     ws_url: &str,
     backlog: Backlog,
-    near_client: crate::rpc::NearClient,
     mut event_handler: F,
 ) -> Result<()>
 where
@@ -723,29 +732,16 @@ where
             }
         }
 
-        // Submit checkpoint if one was created at this slot
+        // Create checkpoint if one was created at this slot
         if let Some(checkpoint) = backlog
             .set_processed_block(Chain::Solana, response.context.slot)
             .await
         {
-            tracing::info!(slot = response.context.slot, "submitting Solana checkpoint");
-            match near_client.vote_checkpoint(Chain::Solana, checkpoint).await {
-                Ok(true) => {
-                    tracing::info!(
-                        slot = response.context.slot,
-                        "Solana checkpoint threshold reached"
-                    );
-                }
-                Ok(false) => {
-                    tracing::debug!(
-                        slot = response.context.slot,
-                        "Solana checkpoint vote recorded"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(slot = response.context.slot, %e, "failed to vote for Solana checkpoint");
-                }
-            }
+            tracing::info!(
+                slot = response.context.slot,
+                ?checkpoint,
+                "created Solana checkpoint"
+            );
         }
     }
 
@@ -880,7 +876,7 @@ async fn subscribe_to_program_respond_events(
     rpc_url: &str,
     ws_url: &str,
     backlog: Backlog,
-    mut contract_watcher: crate::rpc::ContractStateWatcher,
+    mut contract_watcher: ContractStateWatcher,
 ) -> Result<()> {
     let rpc_client = RpcClient::new(rpc_url.to_string());
     let pubsub_client = PubsubClient::new(ws_url).await?;

@@ -276,54 +276,88 @@ async fn sync(
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum ChainsParam {
-    One(String),
-    Many(Vec<String>),
+pub struct CheckpointQuery {
+    /// Combined chain selection and hash filter. Entries are separated by commas.
+    /// Examples:
+    /// - "Ethereum" -> latest Ethereum checkpoint
+    /// - "Solana:1234" -> specific Solana checkpoint by hash
+    /// - "Solana:1234,Ethereum" -> mix of filters
+    #[serde(default)]
+    query: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct CheckpointQuery {
-    #[serde(default)]
-    chains: Option<ChainsParam>,
+impl CheckpointQuery {
+    #[allow(clippy::result_large_err)]
+    fn parse(self) -> Result<Vec<(Chain, Option<u64>)>, Error> {
+        let Some(query) = self.query else {
+            return Ok(Chain::iter()
+                .into_iter()
+                .map(|chain| (chain, None))
+                .collect());
+        };
+
+        let mut selections = Vec::new();
+        for entry in query.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return Err(Error::InvalidParameters(
+                    "query parameter contains an empty segment".to_string(),
+                ));
+            }
+
+            let mut parts = entry.splitn(2, ':');
+            let chain_part = parts
+                .next()
+                .expect("splitn(2) always returns at least one part")
+                .trim();
+            let chain = chain_part.parse::<Chain>().map_err(|e| {
+                Error::InvalidParameters(format!("Invalid chain '{}': {}", chain_part, e))
+            })?;
+
+            let hash = match parts.next() {
+                Some(hash_part) => {
+                    let hash_part = hash_part.trim();
+                    if hash_part.is_empty() {
+                        return Err(Error::InvalidParameters(format!(
+                            "Invalid hash format for '{}'. Expected 'chain:hash'",
+                            chain_part
+                        )));
+                    }
+
+                    Some(hash_part.parse::<u64>().map_err(|e| {
+                        Error::InvalidParameters(format!("Invalid hash '{}': {}", hash_part, e))
+                    })?)
+                }
+                None => None,
+            };
+
+            selections.push((chain, hash));
+        }
+
+        Ok(selections)
+    }
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
 async fn checkpoint(
     Extension(state): Extension<Arc<AxumState>>,
     Query(query): Query<CheckpointQuery>,
-) -> Result<Json<HashMap<Chain, Checkpoint>>> {
+) -> Result<Cbor<HashMap<Chain, Checkpoint>>> {
     let start = Instant::now();
-    let chains_to_fetch: Vec<Chain> = match query.chains {
-        Some(chains_param) => {
-            let chain_strs = match chains_param {
-                ChainsParam::One(chain) => vec![chain],
-                ChainsParam::Many(chains) => chains,
-            };
-
-            let mut errs = Vec::with_capacity(chain_strs.len());
-            let mut chains = Vec::with_capacity(chain_strs.len());
-            for chain_str in chain_strs {
-                match chain_str.parse::<Chain>() {
-                    Ok(chain) => chains.push(chain),
-                    Err(err) => {
-                        errs.push(err);
-                        continue;
-                    }
-                }
-            }
-            if !errs.is_empty() {
-                return Err(Error::InvalidParameters(errs.join(", ")));
-            }
-
-            chains
-        }
-        None => vec![Chain::NEAR, Chain::Ethereum, Chain::Solana],
-    };
-
+    let selections = query.parse()?;
     let mut resp = HashMap::new();
-    for chain in chains_to_fetch {
-        let checkpoint = state.backlog.checkpoint(chain).await;
+    for (chain, hash) in selections {
+        let checkpoint = if let Some(hash) = hash {
+            state.backlog.find_checkpoint_by_hash(chain, hash).await
+        } else {
+            state.backlog.latest_checkpoint(chain).await
+        };
+
+        let Some(checkpoint) = checkpoint else {
+            tracing::warn!(?chain, ?hash, "unable to find checkpoint");
+            continue;
+        };
+
         resp.insert(chain, checkpoint);
     }
 
@@ -331,7 +365,7 @@ async fn checkpoint(
         .with_label_values(&["checkpoint", state.my_account_id.as_str()])
         .observe(start.elapsed().as_millis() as f64);
 
-    Ok(Json(resp))
+    Ok(Cbor(resp))
 }
 
 #[cfg(not(feature = "debug-page"))]

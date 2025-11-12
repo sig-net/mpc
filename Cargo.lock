@@ -6174,6 +6174,7 @@ dependencies = [
  "borsh 1.5.7",
  "bs58 0.5.1",
  "cait-sith",
+ "ciborium",
  "clap",
  "criterion",
  "deadpool-redis",

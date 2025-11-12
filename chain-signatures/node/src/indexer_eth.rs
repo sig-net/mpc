@@ -5,10 +5,12 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 use crate::backlog::Backlog;
+use crate::mesh::{wait_threshold_active, MeshState};
+use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::rpc::ContractStateWatcher;
 #[cfg(not(feature = "light_client"))]
 use crate::sign_bidirectional::BidirectionalTx;
-#[cfg(not(feature = "light_client"))]
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::sign_bidirectional::PendingRequestStatus;
 use crate::storage::app_data_storage::AppDataStorage;
@@ -25,13 +27,13 @@ use alloy::rpc::types::Log;
 use alloy::rpc::types::Transaction;
 #[cfg(not(feature = "light_client"))]
 use alloy::rpc::types::TransactionReceipt;
+use tokio::sync::watch;
 
 #[cfg(not(feature = "light_client"))]
 use crate::respond_bidirectional::{
     CompletedTx, RespondBidirectionalSerializedOutput, SerDeserFormat,
     OUTPUT_DESERIALIZATION_FORMAT, RESPOND_SERIALIZATION_FORMAT,
 };
-use crate::rpc::NearClient;
 #[cfg(not(feature = "light_client"))]
 use crate::sign_bidirectional::TransactionOutput;
 
@@ -490,14 +492,25 @@ pub async fn run(
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
     backlog: Backlog,
-    near_client: NearClient,
+    mut contract_watcher: ContractStateWatcher,
+    mesh_state: watch::Receiver<MeshState>,
+    node_client: NodeClient,
 ) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
         return;
     };
 
-    backlog.recover(&near_client, &[Chain::Ethereum]).await;
+    // Wait for threshold to be available
+
+    // Wait for threshold to be available
+    let threshold = contract_watcher.wait_threshold().await;
+    if threshold > 0 {
+        let mesh_state = mesh_state.borrow().clone();
+        backlog
+            .recover(&mesh_state, &node_client, threshold, &[Chain::Ethereum])
+            .await;
+    }
 
     let last_processed_block = app_data_storage
         .last_processed_block_eth()
@@ -1343,13 +1356,16 @@ impl SignatureRequestedEvent {
 }
 
 #[cfg(not(feature = "light_client"))]
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     eth: Option<EthConfig>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
     backlog: Backlog,
-    near_client: NearClient,
+    mut contract_watcher: ContractStateWatcher,
+    mut mesh_state: watch::Receiver<MeshState>,
+    node_client: NodeClient,
 ) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
@@ -1357,7 +1373,16 @@ pub async fn run(
     };
 
     // Recover backlog before doing anything.
-    backlog.recover(&near_client, &[Chain::Ethereum]).await;
+    // Wait for threshold to be available
+    let threshold = contract_watcher.wait_threshold().await;
+    if threshold > 0 {
+        wait_threshold_active(&mut mesh_state, threshold).await;
+
+        let mesh_state = mesh_state.borrow().clone();
+        backlog
+            .recover(&mesh_state, &node_client, threshold, &[Chain::Ethereum])
+            .await;
+    }
 
     let client = RpcEthereumClient::new(&eth.execution_rpc_http_url);
 
@@ -1418,7 +1443,6 @@ pub async fn run(
                 sign_tx.clone(),
                 total_timeout,
                 &backlog,
-                &near_client,
             )
             .await
             {
@@ -1457,7 +1481,6 @@ async fn process_block(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     total_timeout: Duration,
     backlog: &Backlog,
-    near_client: &crate::rpc::NearClient,
 ) -> anyhow::Result<()> {
     tracing::info!("Processing block number {}", block_number);
 
@@ -1497,7 +1520,7 @@ async fn process_block(
         sign_requests.extend(parse_filtered_logs(request_logs, total_timeout));
     }
 
-    let mut respond_requests = process_bidirectional_requests(
+    let respond_requests = process_bidirectional_requests(
         client,
         block_number,
         total_timeout,
@@ -1505,48 +1528,32 @@ async fn process_block(
         &node_near_account_id,
     )
     .await?;
+    sign_requests.extend(respond_requests);
 
-    sign_requests.append(&mut respond_requests);
+    if !sign_requests.is_empty() {
+        let timestamps = sign_requests
+            .iter()
+            .map(|r| r.unix_timestamp_indexed)
+            .collect::<Vec<_>>();
 
-    if sign_requests.is_empty() {
-        return Ok(());
+        send_indexed_requests(sign_requests, sign_tx.clone(), node_near_account_id.clone());
+
+        for request_timestamp in timestamps {
+            crate::metrics::INDEXER_DELAY
+                .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
+                .observe(
+                    crate::util::duration_between_unix(block_timestamp, request_timestamp).as_secs()
+                        as f64,
+                );
+        }
     }
 
-    send_indexed_requests(
-        sign_requests.clone(),
-        sign_tx.clone(),
-        node_near_account_id.clone(),
-    );
-
-    for request in &sign_requests {
-        crate::metrics::INDEXER_DELAY
-            .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
-            .observe(
-                crate::util::duration_between_unix(block_timestamp, request.unix_timestamp_indexed)
-                    .as_secs() as f64,
-            );
-    }
-
-    // Submit checkpoint if one was created at this block height
+    // Create checkpoint if one was created at this block height
     if let Some(checkpoint) = backlog
         .set_processed_block(Chain::Ethereum, block_number)
         .await
     {
-        tracing::info!(block_number, "submitting Ethereum checkpoint");
-        match near_client
-            .vote_checkpoint(Chain::Ethereum, checkpoint)
-            .await
-        {
-            Ok(true) => {
-                tracing::info!(block_number, "Ethereum checkpoint threshold reached");
-            }
-            Ok(false) => {
-                tracing::debug!(block_number, "Ethereum checkpoint vote recorded");
-            }
-            Err(e) => {
-                tracing::warn!(block_number, %e, "failed to vote for Ethereum checkpoint");
-            }
-        }
+        tracing::info!(block_number, ?checkpoint, "created Ethereum checkpoint");
     }
 
     Ok(())

@@ -1,12 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, PublicKey};
 
-use crate::primitives::{
-    Candidates, Chain, Checkpoint, CheckpointVotes, Participants, PkVotes, Votes,
-};
+use crate::primitives::{Candidates, Participants, PkVotes, Votes};
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 pub struct InitializingContractState {
@@ -24,9 +22,6 @@ pub struct RunningContractState {
     pub candidates: Candidates,
     pub join_votes: Votes,
     pub leave_votes: Votes,
-    pub checkpoint_votes: HashMap<Chain, CheckpointVotes>,
-    /// The latest agreed checkpoint per chain
-    pub latest_checkpoints: HashMap<Chain, Checkpoint>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]

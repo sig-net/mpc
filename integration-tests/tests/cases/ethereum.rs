@@ -8,9 +8,8 @@ use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey};
 use mpc_crypto::derive_key;
 use mpc_crypto::kdf::derive_epsilon_eth;
 use mpc_primitives::{Chain, Checkpoint, LATEST_MPC_KEY_VERSION};
-use near_workspaces::types::Finality;
 use test_log::test;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 
 #[test(tokio::test)]
 async fn test_signature_ethereum() -> Result<()> {
@@ -78,7 +77,7 @@ async fn test_signature_ethereum() -> Result<()> {
             matching_event = Some(event);
             break;
         }
-        sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     let event =
@@ -200,7 +199,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     tracing::info!(?expected_request_id, "submitted signature request");
 
     // Wait a bit for the request to be indexed and added to backlog
-    sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     // Check checkpoint - request should be in the pending transactions
     let checkpoints = cluster.fetch_checkpoints(node_idx).await?;
@@ -228,7 +227,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
             matching_event = Some(event);
             break;
         }
-        sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     let _event =
@@ -238,7 +237,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
 
     // Wait for indexer to process the response event and remove from backlog
     // The indexer polls every few seconds, so we give it time
-    sleep(Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     // Check checkpoint again - request should be removed
     let checkpoints = cluster.fetch_checkpoints(node_idx).await?;
@@ -274,7 +273,6 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     let mut cluster = cluster::spawn().disable_prestockpile().ethereum().await?;
     cluster.wait().signable().await?;
 
-    let contract = cluster.contract().clone();
     let ctx = cluster.nodes.ctx();
     let eth_ctx = ctx
         .ethereum
@@ -287,19 +285,25 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     )?;
     let eth_contract = eth::ChainSignaturesContract::new(eth_ctx.contract_address, eth_client);
 
-    // Produce a few sign requests up front so the contract stores an initial checkpoint
+    // Produce a few sign requests up front so nodes create initial checkpoints
     for i in 0..5 {
         submit_eth_sign_request(&eth_contract, i).await?;
     }
 
-    let initial_checkpoint =
-        wait_contract_checkpoint(&contract, Chain::Ethereum, 1, Duration::from_secs(10)).await?;
+    let active_idx = 1usize;
+    let initial_checkpoint = wait_node_checkpoint(
+        &cluster,
+        active_idx,
+        Chain::Ethereum,
+        1,
+        Duration::from_secs(10),
+    )
+    .await?;
 
     let target_account = cluster.account_id(0).clone();
     let offline_idx = 0usize;
-    let active_idx = 1usize;
 
-    tracing::info!(%target_account, "taking node offline for checkpoint recovery test");
+    tracing::info!(%target_account, ?initial_checkpoint, "taking node offline for checkpoint recovery test");
     let offline_config = cluster.kill_node(&target_account).await;
 
     // Keep the node offline while the remaining nodes continue operating and sign requests
@@ -310,61 +314,61 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     while elapsed < offline_duration {
         submit_eth_sign_request(&eth_contract, seed).await?;
         seed += 1;
-        sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
         elapsed += Duration::from_secs(2);
     }
 
-    let contract_checkpoint = wait_contract_checkpoint(
-        &contract,
+    // Wait for active node to create a new checkpoint beyond the initial one
+    let node_active_checkpoint = wait_node_checkpoint(
+        &cluster,
+        active_idx,
         Chain::Ethereum,
         initial_checkpoint.block_height + 1,
         Duration::from_secs(10),
     )
     .await?;
 
-    let node_active_checkpoint = wait_node_checkpoint(
-        &cluster,
-        active_idx,
-        Chain::Ethereum,
-        contract_checkpoint.block_height,
-        Duration::from_secs(10),
-    )
-    .await?;
-
-    assert_eq!(
-        contract_checkpoint, node_active_checkpoint,
-        "active node should match contract checkpoint while peer is offline"
+    tracing::info!(
+        block_height = node_active_checkpoint.block_height,
+        "active node created new checkpoint while peer is offline"
     );
 
     tracing::info!("bringing offline node back online");
     cluster.restart_node(offline_config).await?;
     cluster.wait().signable().await?;
 
+    // Verify the restarted node recovers to the same checkpoint via node consensus
     let node_recovered_checkpoint = wait_node_checkpoint(
         &cluster,
         offline_idx,
         Chain::Ethereum,
-        contract_checkpoint.block_height,
+        node_active_checkpoint.block_height,
         Duration::from_secs(10),
     )
     .await?;
 
+    tracing::info!(
+        ?node_active_checkpoint,
+        ?node_recovered_checkpoint,
+        "offline node has restarted and checkpoint recovery complete",
+    );
+
     assert_eq!(
-        contract_checkpoint, node_recovered_checkpoint,
-        "restarted node should recover to contract checkpoint"
+        node_active_checkpoint, node_recovered_checkpoint,
+        "restarted node should recover to same checkpoint as active node via consensus"
     );
 
     let active_checkpoint_after_restart = wait_node_checkpoint(
         &cluster,
         active_idx,
         Chain::Ethereum,
-        contract_checkpoint.block_height,
+        node_active_checkpoint.block_height,
         Duration::from_secs(10),
     )
     .await?;
 
     assert_eq!(
-        contract_checkpoint, active_checkpoint_after_restart,
+        node_active_checkpoint, active_checkpoint_after_restart,
         "active node checkpoint should remain aligned after peer recovery"
     );
 
@@ -394,35 +398,6 @@ async fn submit_eth_sign_request(
         .context("sign transaction failed")?;
 
     Ok(())
-}
-
-async fn wait_contract_checkpoint(
-    contract: &near_workspaces::Contract,
-    chain: Chain,
-    min_block_height: u64,
-    timeout: Duration,
-) -> anyhow::Result<Checkpoint> {
-    tokio::time::timeout(timeout, async {
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            interval.tick().await;
-
-            let latest: Option<Checkpoint> = contract
-                .view("latest_checkpoint")
-                .args_json(serde_json::json!({ "chain": chain }))
-                .finality(Finality::Final)
-                .await?
-                .json()?;
-
-            if let Some(checkpoint) = latest {
-                if checkpoint.block_height >= min_block_height {
-                    return Ok(checkpoint);
-                }
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timeout waiting for contract checkpoint >= {min_block_height}"))
 }
 
 async fn wait_node_checkpoint(

@@ -135,6 +135,32 @@ impl Chain {
             Chain::Solana => "Solana",
         }
     }
+
+    pub const fn iter() -> [Chain; 3] {
+        [Chain::NEAR, Chain::Ethereum, Chain::Solana]
+    }
+
+    // TODO: maybe need an interface for this in the future for more chains.
+    pub fn checkpoint_interval(&self) -> Option<u64> {
+        let (key, default) = match self {
+            Chain::NEAR => return None,
+            Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
+            Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
+        };
+
+        let interval = std::env::var(key)
+            .map(|param| param.parse::<u64>().unwrap_or(default))
+            .unwrap_or(default);
+
+        Some(interval)
+    }
+
+    pub fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("CHECKPOINT_INTERVAL_ETHEREUM", "2"),
+            ("CHECKPOINT_INTERVAL_SOLANA", "5"),
+        ]
+    }
 }
 
 impl fmt::Display for Chain {
@@ -162,7 +188,6 @@ impl FromStr for Chain {
     BorshSerialize,
     Serialize,
     Deserialize,
-    Debug,
     Clone,
     PartialEq,
     Eq,
@@ -175,6 +200,14 @@ pub struct PendingTx {
     pub sign_id: SignId,
     #[serde(with = "serde_bytes")]
     pub transaction: Vec<u8>,
+}
+
+impl fmt::Debug for PendingTx {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingTx")
+            .field("sign_id", &self.sign_id)
+            .finish()
+    }
 }
 
 /// A checkpoint represents the backlog state at a specific block height.

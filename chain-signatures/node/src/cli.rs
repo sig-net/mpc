@@ -299,7 +299,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let node_watcher = node.watch();
 
             let msg_channel = MessageChannel::spawn(
-                client,
+                client.clone(),
                 &account_id,
                 config_rx.clone(),
                 contract_watcher.clone(),
@@ -330,9 +330,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
             let protocol_handle = tokio::spawn(protocol.run(
                 node,
-                near_client.clone(),
+                near_client,
                 contract_watcher.clone(),
-                mesh_state,
+                mesh_state.clone(),
             ));
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
@@ -352,15 +352,18 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 app_data_storage.clone(),
                 account_id.clone(),
                 backlog.clone(),
-                near_client.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                client.clone(),
             ));
             tokio::spawn(indexer_sol::run(
                 sol,
                 sign_tx,
                 account_id,
                 backlog,
-                near_client,
                 contract_watcher,
+                mesh_state,
+                client,
             ));
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;

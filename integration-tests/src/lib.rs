@@ -246,12 +246,17 @@ impl Nodes {
     }
 
     pub async fn fetch_checkpoint(&self, id: usize, chain: Chain) -> anyhow::Result<Checkpoint> {
-        let url = format!("{}/checkpoint?chains={chain}", self.url(id));
+        let url = format!("{}/checkpoint?query={chain}", self.url(id));
         let response = reqwest::get(&url).await?;
         let status = response.status();
-        let body = response.text().await?;
-        tracing::info!(?status, raw_body = %body, "checkpoint response body");
-        let mut value: HashMap<Chain, Checkpoint> = serde_json::from_str(&body)?;
+        let body = response.bytes().await?;
+        let mut value: HashMap<Chain, Checkpoint> =
+            ciborium::from_reader(body.as_ref()).context("failed to decode checkpoint CBOR")?;
+        if let Ok(pretty) = serde_json::to_string(&value) {
+            tracing::info!(?status, raw_body = %pretty, "checkpoint response body");
+        } else {
+            tracing::info!(?status, raw_body = %hex::encode(&body), "checkpoint response body");
+        }
         value
             .remove(&chain)
             .context("checkpoint not found for chain")
@@ -261,9 +266,14 @@ impl Nodes {
         let url = format!("{}/checkpoint", self.url(id));
         let response = reqwest::get(&url).await?;
         let status = response.status();
-        let body = response.text().await?;
-        tracing::info!(?status, raw_body = %body, "checkpoint response body");
-        let value = serde_json::from_str(&body)?;
+        let body = response.bytes().await?;
+        let value: HashMap<Chain, Checkpoint> =
+            ciborium::from_reader(body.as_ref()).context("failed to decode checkpoint CBOR")?;
+        if let Ok(pretty) = serde_json::to_string(&value) {
+            tracing::info!(?status, raw_body = %pretty, "checkpoint response body");
+        } else {
+            tracing::info!(?status, raw_body = %hex::encode(&body), "checkpoint response body");
+        }
         Ok(value)
     }
 }
