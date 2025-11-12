@@ -715,71 +715,9 @@ impl VersionedMpcContract {
     #[init(ignore_state)]
     #[handle_result]
     pub fn migrate() -> Result<Self, Error> {
-        #[derive(BorshDeserialize)]
-        struct OldRunningContractState {
-            pub epoch: u64,
-            pub participants: Participants,
-            pub threshold: usize,
-            pub public_key: PublicKey,
-            pub candidates: Candidates,
-            pub join_votes: Votes,
-            pub leave_votes: Votes,
-        }
-
-        #[derive(BorshDeserialize)]
-        enum OldProtocolContractState {
-            NotInitialized,
-            Initializing(InitializingContractState),
-            Running(OldRunningContractState),
-            Resharing(ResharingContractState),
-        }
-
-        #[derive(BorshDeserialize)]
-        struct OldMpcContract {
-            protocol_state: OldProtocolContractState,
-            pending_requests: IterableMap<SignId, PendingRequest>,
-            proposed_updates: ProposedUpdates,
-            config: Config,
-        }
-
-        // Try to read as old state first (for migration)
-        if let Some(old_contract) = env::state_read::<OldMpcContract>() {
-            log!("Migrating from old contract state (adding checkpoint fields)");
-
-            // Convert old state to new state
-            let new_protocol_state = match old_contract.protocol_state {
-                OldProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
-                OldProtocolContractState::Initializing(state) => {
-                    ProtocolContractState::Initializing(state)
-                }
-                OldProtocolContractState::Running(old_running) => {
-                    ProtocolContractState::Running(RunningContractState {
-                        epoch: old_running.epoch,
-                        participants: old_running.participants,
-                        threshold: old_running.threshold,
-                        public_key: old_running.public_key,
-                        candidates: old_running.candidates,
-                        join_votes: old_running.join_votes,
-                        leave_votes: old_running.leave_votes,
-                    })
-                }
-                OldProtocolContractState::Resharing(state) => {
-                    ProtocolContractState::Resharing(state)
-                }
-            };
-
-            return Ok(VersionedMpcContract::V0(MpcContract {
-                protocol_state: new_protocol_state,
-                pending_requests: old_contract.pending_requests,
-                proposed_updates: old_contract.proposed_updates,
-                config: old_contract.config,
-            }));
-        }
-
         // If old state read failed, try reading as new state (no migration needed)
         let new_contract: MpcContract =
             env::state_read().ok_or(InvalidState::ContractStateIsMissing)?;
-        log!("Contract state is already up to date");
         Ok(VersionedMpcContract::V0(new_contract))
     }
 

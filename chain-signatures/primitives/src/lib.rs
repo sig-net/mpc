@@ -140,7 +140,6 @@ impl Chain {
         [Chain::NEAR, Chain::Ethereum, Chain::Solana]
     }
 
-    // TODO: maybe need an interface for this in the future for more chains.
     pub fn checkpoint_interval(&self) -> Option<u64> {
         let (key, default) = match self {
             Chain::NEAR => return None,

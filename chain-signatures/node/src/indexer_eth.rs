@@ -502,8 +502,6 @@ pub async fn run(
     };
 
     // Wait for threshold to be available
-
-    // Wait for threshold to be available
     let threshold = contract_watcher.wait_threshold().await;
     if threshold > 0 {
         let mesh_state = mesh_state.borrow().clone();

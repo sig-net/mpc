@@ -13,7 +13,9 @@ use cait_sith::protocol::Participant;
 use std::collections::HashMap;
 
 /// Queries all participants for their checkpoints and returns a consensus checkpoint
-/// for each chain based on the threshold-lowest block height.
+/// for each chain based on the threshold-lowest block height: select the checkpoint
+/// at position (total_count - threshold), which ensures at least threshold nodes
+/// have this checkpoint or a newer one
 ///
 /// # Algorithm
 /// 1. Query all active participants' /checkpoint endpoints
