@@ -210,6 +210,10 @@ impl Node {
 
 impl Drop for Node {
     fn drop(&mut self) {
+        // Give the process a brief moment to clean up connections gracefully
+        // before we forcefully kill it. This reduces flaky test failures
+        // during teardown when nodes are trying to write to Redis.
+        std::thread::sleep(std::time::Duration::from_millis(100));
         self.process.kill().unwrap();
     }
 }
