@@ -24,6 +24,7 @@ use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
 use mpc_node::indexer_eth::EthArgs;
+use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
 use near_account_id::AccountId;
@@ -369,11 +370,11 @@ impl Redis {
     }
 
     pub fn triple_storage(&self, id: &AccountId) -> mpc_node::storage::TripleStorage {
-        mpc_node::storage::triple_storage::init(&self.pool(), id)
+        TriplePair::storage(&self.pool(), id)
     }
 
     pub fn presignature_storage(&self, id: &AccountId) -> mpc_node::storage::PresignatureStorage {
-        mpc_node::storage::presignature_storage::init(&self.pool(), id)
+        Presignature::storage(&self.pool(), id)
     }
 
     pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants, mul: u32) {
@@ -389,7 +390,7 @@ impl Redis {
                             .get(account_id)
                             .unwrap(),
                     ),
-                    mpc_node::storage::triple_storage::init(&pool, account_id),
+                    TriplePair::storage(&pool, account_id),
                 )
             })
             .collect::<HashMap<_, _>>();

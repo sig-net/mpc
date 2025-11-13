@@ -22,7 +22,7 @@ use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
 use mpc_node::indexer_eth::EthConfig;
 use mpc_node::indexer_sol::SolConfig;
-use mpc_node::storage::triple_storage::TripleStorage;
+use mpc_node::storage::triple_storage::{TriplePair, TripleStorage};
 use mpc_node::{logs, mesh, node_client, storage};
 use mpc_primitives::{Chain, Checkpoint};
 use near_workspaces::network::Sandbox;
@@ -212,7 +212,7 @@ impl Nodes {
     }
 
     pub async fn triple_storage(&self, redis_pool: &Pool, account_id: &AccountId) -> TripleStorage {
-        storage::triple_storage::init(redis_pool, account_id)
+        TriplePair::storage(redis_pool, account_id)
     }
 
     pub async fn gcp_services(&self) -> anyhow::Result<Vec<GcpService>> {

@@ -19,14 +19,12 @@ use mpc_node::mesh::MeshState;
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, Votes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
+use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::state::NodeKeyInfo;
-use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
-use mpc_node::storage::{
-    presignature_storage, secret_storage, triple_storage, triple_storage::TriplePair, Options,
-};
+use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -516,27 +514,14 @@ impl MpcFixtureNodeBuilder {
         };
 
         let triple_storage =
-            triple_storage::init(&context.redis_pool, &self.participant_info.account_id);
+            TriplePair::storage(&context.redis_pool, &self.participant_info.account_id);
 
         if fixture_config.use_preshared_triples {
             // removing here because we can't clone a triple
             let my_shares = fixture_config.input.triples.remove(&self.me).unwrap();
             for (owner, triple_shares) in my_shares {
-                // Group triples into pairs
-                for pair in triple_shares.chunks_exact(2) {
-                    // Use the id from the fixture data as the pair ID
-                    let pair_id = pair[0].id;
-                    let pair = TriplePair {
-                        id: pair_id,
-                        triple0: Triple {
-                            share: pair[0].share.clone(),
-                            public: pair[0].public.clone(),
-                        },
-                        triple1: Triple {
-                            share: pair[1].share.clone(),
-                            public: pair[1].public.clone(),
-                        },
-                    };
+                for pair in triple_shares {
+                    let pair_id = pair.id;
                     let mut slot = triple_storage.reserve(pair_id).await.unwrap();
                     slot.insert(pair, owner).await;
                 }
@@ -544,7 +529,7 @@ impl MpcFixtureNodeBuilder {
         }
 
         let presignature_storage =
-            presignature_storage::init(&context.redis_pool, &self.participant_info.account_id);
+            Presignature::storage(&context.redis_pool, &self.participant_info.account_id);
 
         if fixture_config.presignature_stockpile {
             // removing here because we can't clone a presignature

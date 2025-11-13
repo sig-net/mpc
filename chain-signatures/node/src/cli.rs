@@ -4,11 +4,13 @@ use crate::gcp::GcpService;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
+use crate::protocol::presignature::Presignature;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
+use crate::storage::triple_storage::TriplePair;
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 
 use clap::Parser;
@@ -212,9 +214,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let redis_cfg = deadpool_redis::Config::from_url(redis_url);
             let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-            let triple_storage = storage::triple_storage::init(&redis_pool, &account_id);
-            let presignature_storage =
-                storage::presignature_storage::init(&redis_pool, &account_id);
+            let triple_storage = TriplePair::storage(&redis_pool, &account_id);
+            let presignature_storage = Presignature::storage(&redis_pool, &account_id);
             let app_data_storage = app_data_storage::init(&redis_pool, &account_id);
 
             let mut rpc_client = near_fetch::Client::new(&near_rpc);

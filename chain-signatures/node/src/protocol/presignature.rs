@@ -228,7 +228,7 @@ impl PresignatureGenerator {
                                 *to,
                                 PresignatureMessage {
                                     id: self.id,
-                                    pair_id: self.dropper.pair_id,
+                                    pair_id: self.dropper.id,
                                     epoch,
                                     from: me,
                                     data: data.clone(),
@@ -245,7 +245,7 @@ impl PresignatureGenerator {
                             to,
                             PresignatureMessage {
                                 id: self.id,
-                                pair_id: self.dropper.pair_id,
+                                pair_id: self.dropper.id,
                                 epoch,
                                 from: me,
                                 data,
@@ -473,9 +473,9 @@ impl PresignatureSpawner {
             return;
         };
 
-        let pair_id = triples.pair.id;
+        let pair_id = triples.artifact.id;
         // note: only one of the pair's participants is needed since they are the same.
-        let participants = intersect_vec(&[active, &triples.pair.triple0.public.participants]);
+        let participants = intersect_vec(&[active, &triples.artifact.triple0.public.participants]);
         if participants.len() < self.threshold {
             tracing::warn!(
                 pair_id,
@@ -487,11 +487,7 @@ impl PresignatureSpawner {
         }
 
         let id = FullPresignatureId::from_pair(pair_id);
-        tracing::info!(
-            ?id,
-            ?triples,
-            "proposing protocol to generate a new presignature"
-        );
+        tracing::info!(?id, "proposing protocol to generate a new presignature");
 
         self.posits.propose(id, triples, &participants);
         for &p in participants.iter() {
@@ -574,7 +570,7 @@ impl PresignatureSpawner {
         };
 
         let task = async move {
-            let Some(triples) = triples.fetch(me, owner, timeout).await else {
+            let Some(triples) = triples.fetch(owner, timeout).await else {
                 return;
             };
 
@@ -830,12 +826,7 @@ enum PendingTriples {
 }
 
 impl PendingTriples {
-    async fn fetch(
-        self,
-        me: Participant,
-        owner: Participant,
-        timeout: Duration,
-    ) -> Option<TriplesTaken> {
+    async fn fetch(self, owner: Participant, timeout: Duration) -> Option<TriplesTaken> {
         let (pair_id, storage) = match self {
             Self::InStorage(pair_id, storage) => (pair_id, storage),
             Self::Available(triples) => return Some(triples),
@@ -845,7 +836,7 @@ impl PendingTriples {
             let mut interval = tokio::time::interval(Duration::from_millis(200));
             loop {
                 interval.tick().await;
-                if let Some(triples) = storage.take(pair_id, owner, me).await {
+                if let Some(triples) = storage.take(pair_id, owner).await {
                     break triples;
                 };
             }

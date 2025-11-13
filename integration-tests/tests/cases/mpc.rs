@@ -1,11 +1,10 @@
 use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
-use integration_tests::mpc_fixture::input::FixtureTriple;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
+use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use test_log::test;
 
@@ -88,15 +87,11 @@ async fn test_basic_generate_triples() {
                 let triple_ids = node.triple_storage.fetch_owned(peer.me).await;
                 let mut peer_triples = Vec::with_capacity(triple_ids.len());
                 for triple_id in triple_ids {
-                    let t = conn
-                        .hget::<&str, u64, Triple>(node.triple_storage.triple_key(), triple_id)
+                    let pair = conn
+                        .hget::<&str, u64, TriplePair>(node.triple_storage.triple_key(), triple_id)
                         .await;
-                    if let Ok(t) = t {
-                        peer_triples.push(FixtureTriple {
-                            id: triple_id,
-                            share: t.share,
-                            public: t.public,
-                        });
+                    if let Ok(pair) = pair {
+                        peer_triples.push(pair);
                     } else {
                         tracing::error!("missing triple in redis {triple_id}");
                     }

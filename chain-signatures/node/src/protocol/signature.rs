@@ -245,7 +245,7 @@ impl SignOrganizer {
                 }
             };
 
-            let presignature_id = taken.presignature.id;
+            let presignature_id = taken.artifact.id;
             tracing::info!(?sign_id, presignature_id, "proposer got presignature");
 
             // broadcast to stable and let them reject if they don't have the presignature.
@@ -409,7 +409,7 @@ impl SignPositor {
 
         // Get the presignature participants - only these nodes participated in generating it
         let presignature_participants = if let Some(ref taken) = presignature {
-            taken.presignature.participants.clone()
+            taken.artifact.participants.clone()
         } else {
             // Deliberators don't have the presignature yet, will verify when they receive Propose
             Vec::new()
@@ -674,10 +674,7 @@ impl SignGenerator {
     ) -> Result<Self, InitializationError> {
         let presignature_id = presignature.id();
         let taken = presignature
-            .fetch(
-                ctx.me,
-                Duration::from_millis(ctx.cfg.signature.generation_timeout),
-            )
+            .fetch(Duration::from_millis(ctx.cfg.signature.generation_timeout))
             .await
             .ok_or_else(|| {
                 InitializationError::BadParameters(format!(
@@ -1019,7 +1016,7 @@ pub struct SignatureSpawner {
 impl SignatureSpawner {
     /// Creates a signature task for a new sign request
     /// The task will handle organizing, posit, and generation internally
-    async fn spawn_task(
+    fn spawn_task(
         &mut self,
         indexed: IndexedSignRequest,
         participants: BTreeSet<Participant>,
@@ -1031,7 +1028,6 @@ impl SignatureSpawner {
 
         // Subscribe to (or create) the posit inbox for this sign request
         let rx = self.inboxes.entry(sign_id).or_default().subscribe();
-
         let task = SignTask {
             me: self.me,
             participants,
@@ -1086,7 +1082,7 @@ impl SignatureSpawner {
         }
     }
 
-    async fn handle_request(
+    fn handle_request(
         &mut self,
         sign: Sign,
         cfg: &ProtocolConfig,
@@ -1113,8 +1109,7 @@ impl SignatureSpawner {
                     .with_label_values(&[indexed.chain.as_str(), self.my_account_id.as_str()])
                     .inc();
 
-                self.spawn_task(indexed, participants.clone(), contract.clone(), cfg.clone())
-                    .await;
+                self.spawn_task(indexed, participants.clone(), contract.clone(), cfg.clone());
             }
         }
 
@@ -1147,7 +1142,7 @@ impl SignatureSpawner {
                         tracing::warn!("signature spawner sign_rx closed, terminating");
                         break;
                     };
-                    self.handle_request(sign, &protocol, &all_participants, &contract).await;
+                    self.handle_request(sign, &protocol, &all_participants, &contract);
                 }
                 Some((sign_id, presignature_id, from, action)) = posits.recv() => {
                     self.handle_posit(sign_id, presignature_id, from, action).await;
@@ -1246,12 +1241,12 @@ enum PendingPresignature {
 impl PendingPresignature {
     pub fn id(&self) -> PresignatureId {
         match self {
-            PendingPresignature::Available(taken) => taken.presignature.id,
+            PendingPresignature::Available(taken) => taken.artifact.id,
             PendingPresignature::InStorage(id, _, _) => *id,
         }
     }
 
-    pub async fn fetch(self, me: Participant, timeout: Duration) -> Option<PresignatureTaken> {
+    pub async fn fetch(self, timeout: Duration) -> Option<PresignatureTaken> {
         let (id, storage, owner) = match self {
             PendingPresignature::Available(taken) => return Some(taken),
             PendingPresignature::InStorage(id, owner, storage) => (id, storage, owner),
@@ -1262,7 +1257,7 @@ impl PendingPresignature {
             let mut interval = tokio::time::interval(Duration::from_millis(250));
             loop {
                 interval.tick().await;
-                if let Some(presignature) = storage.take(id, owner, me).await {
+                if let Some(presignature) = storage.take(id, owner).await {
                     break presignature;
                 };
             }

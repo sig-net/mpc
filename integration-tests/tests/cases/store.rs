@@ -62,8 +62,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_potential().await, 2);
 
     // Take triple pairs and check that they are removed from the storage and added to used set
-    triple_storage.take(triple_id1, node1, node0).await.unwrap();
-    triple_storage.take(triple_id2, node1, node0).await.unwrap();
+    triple_storage.take(triple_id1, node1).await.unwrap();
+    triple_storage.take(triple_id2, node1).await.unwrap();
     assert!(!triple_spawner.contains(triple_id1).await);
     assert!(!triple_spawner.contains(triple_id2).await);
     assert!(!triple_spawner.contains_mine(triple_id1).await);
@@ -85,7 +85,9 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
 
     // check that reserve and unreserve works:
     let slot = triple_storage.reserve(id3).await.unwrap();
-    slot.unreserve().await;
+    if let Some(task) = slot.unreserve() {
+        task.await.unwrap();
+    }
 
     // Add mine triple and check that it is in the storage
     triple_storage
@@ -222,7 +224,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_potential().await, 1);
 
     // Take presignature and check that it is removed from the storage and added to used set
-    presignature_storage.take(id, node1, node0).await.unwrap();
+    presignature_storage.take(id, node1).await.unwrap();
     assert!(!presignature_storage.contains(id).await);
     assert!(!presignature_spawner.contains_mine(id).await);
     assert_eq!(presignature_storage.len_generated().await, 0);

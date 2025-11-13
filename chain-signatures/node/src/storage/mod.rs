@@ -1,5 +1,6 @@
 pub mod app_data_storage;
 pub mod presignature_storage;
+pub mod protocol_storage;
 pub mod secret_storage;
 pub mod triple_storage;
 
